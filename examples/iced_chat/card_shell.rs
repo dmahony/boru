@@ -129,6 +129,10 @@ pub struct CardShell<'a, Message> {
     footer: Option<Element<'a, Message>>,
     /// List rows rendered inside the bounded scrollable.
     children: Vec<Element<'a, Message>>,
+    /// When true the header wraps onto a second line at narrow widths:
+    /// title (and subtitle) on line one, badges and the action link on
+    /// line two. Keeps headers readable without squeezing the title.
+    compact_header: bool,
 }
 
 impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
@@ -153,6 +157,7 @@ impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
             body: None,
             footer: None,
             children,
+            compact_header: false,
         }
     }
 
@@ -244,6 +249,18 @@ impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
         self
     }
 
+    /// Switch the header to the two-line compact layout (UI-HOME-15).
+    ///
+    /// On narrow content the single header row (icon + title + badges +
+    /// action) can squeeze the title below a readable width. In compact
+    /// mode the header becomes two rows: line one carries the icon and the
+    /// title/subtitle column, line two carries the count/status badges and
+    /// the action link. The body is unaffected.
+    pub fn compact_header(mut self, enabled: bool) -> Self {
+        self.compact_header = enabled;
+        self
+    }
+
     /// Build the card shell element.
     pub fn build(self, theme: &Theme) -> Element<'a, Message> {
         // Header: title column (title + optional subtitle), then count
@@ -277,34 +294,31 @@ impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
             );
         }
 
-        let mut header = Row::new()
-            // Horizontal gap between header elements (icon, title, badges,
-            // action). UI-HOME-09: SPACE_8 is the shared-scale value.
+        // Badges + action link, shared by both the single-row and the
+        // compact two-line header. The trailing fill spacer pushes the
+        // action button to the right edge in both layouts.
+        let mut badges_and_action = Row::new()
             .spacing(design_tokens::SPACE_8)
             .align_y(Alignment::Center);
-
-        if let Some(icon) = self.header_icon {
-            header = header.push(icon);
-        }
-
-        header = header.push(title_col);
 
         if let Some(count) = self.count {
             let label = match self.count_total {
                 Some(total) => format!("{count}/{total}"),
                 None => count.to_string(),
             };
-            header = header.push(count_badge::<Message>(label));
+            badges_and_action = badges_and_action.push(count_badge::<Message>(label));
         }
 
         if let Some((label, kind)) = self.status_badge {
-            header = header.push(status_badge_element::<Message>(&label, kind, theme));
+            badges_and_action =
+                badges_and_action.push(status_badge_element::<Message>(&label, kind, theme));
         }
 
-        header = header.push(Space::new().width(Length::Fill).height(Length::Shrink));
+        badges_and_action =
+            badges_and_action.push(Space::new().width(Length::Fill).height(Length::Shrink));
 
         if let Some((label, msg)) = self.header_action {
-            header = header.push(
+            badges_and_action = badges_and_action.push(
                 button(crate::fonts::type_role_text(
                     crate::fonts::TypeRole::ButtonLabel,
                     label,
@@ -314,6 +328,44 @@ impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
                 .style(view_all_button_style),
             );
         }
+
+        // Compact header (UI-HOME-15): when the card's content width is
+        // small, split the single header row into two lines so the title
+        // never gets squeezed below a readable width. Line one = icon +
+        // title/subtitle column (Fill so it wraps); line two = badges +
+        // action link. The single-row layout keeps the approved Fig 3 look.
+        let header: Element<'a, Message> = if self.compact_header {
+            let mut line1 = Row::new()
+                .spacing(design_tokens::SPACE_8)
+                .align_y(Alignment::Center)
+                .width(Length::Fill);
+            if let Some(icon) = self.header_icon {
+                line1 = line1.push(icon);
+            }
+            line1 = line1.push(title_col.width(Length::Fill));
+
+            Column::new()
+                .push(line1)
+                .push(Space::new().height(Length::Fixed(design_tokens::SPACE_4)))
+                .push(badges_and_action.width(Length::Fill))
+                .spacing(0)
+                .width(Length::Fill)
+                .into()
+        } else {
+            let mut header = Row::new()
+                // Horizontal gap between header elements (icon, title,
+                // badges, action). UI-HOME-09: SPACE_8 shared-scale value.
+                .spacing(design_tokens::SPACE_8)
+                .align_y(Alignment::Center);
+
+            if let Some(icon) = self.header_icon {
+                header = header.push(icon);
+            }
+
+            header = header.push(title_col);
+            header = header.push(badges_and_action);
+            header.into()
+        };
 
         // Body: caller body element, else empty state (with UI-04
         // empty-state typography), else a bounded scrollable list. The
@@ -620,6 +672,32 @@ mod tests {
         assert!(shell.title_case, "uppercase title is the rail default");
         let shell = shell.title_case(false);
         assert!(!shell.title_case);
+    }
+
+    #[test]
+    fn card_shell_compact_header_defaults_off_and_builds() {
+        // UI-HOME-15: the compact two-line header must be opt-in (default
+        // keeps the approved single-row header) and must build without
+        // panicking with every optional header element present.
+        let shell: CardShell<'static, ()> = CardShell::new("Peers", vec![]);
+        assert!(!shell.compact_header, "single-row header is the default");
+        let theme = Theme::Light;
+        let element = CardShell::new("Peers", vec![])
+            .compact_header(true)
+            .count(3)
+            .count_total(12)
+            .status_badge("Healthy", StatusBadgeKind::Success)
+            .on_view_all(())
+            .body(text("body").into())
+            .build(&theme);
+        // Building produces a non-empty element tree; no panic is the main
+        // assertion (the two-line layout must not assume a header action).
+        let _ = element;
+        let minimal = CardShell::<()>::new("Empty", vec![])
+            .compact_header(true)
+            .body(text("body").into())
+            .build(&theme);
+        let _ = minimal;
     }
 
     #[test]

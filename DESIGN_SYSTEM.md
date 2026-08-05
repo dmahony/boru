@@ -1107,14 +1107,32 @@ One `Icon` enum maps every semantic action to a Lucide SVG asset; `IconSize` nam
 
 ### 19.5 Responsive breakpoints
 
-| Breakpoint | Window width | Behaviour |
-|---|---|---|
-| Compact | ≤ 1024 px | One/two-column grids, sidebar clamps to 288 px |
-| Reference | 1280 px | Sidebar 304 px; two-thirds content + one-third rail |
-| Medium | 1024–1280 px | Reflow between compact and reference |
-| Large | ≥ 1440 px | Sidebar 320 px, full four-column quick actions |
+The home dashboard's responsive tiers (UI-HOME-15) are driven by the
+available *content* width — the window width minus the sidebar (288–320 px),
+the 1 px divider, and both horizontal page paddings — computed by
+`design_tokens::home_content_width(window_width)`. This keeps the fixed
+sidebar from starving the grid on narrow windows.
 
-Quick-action grid columns are computed by `quick_actions::grid_columns_for(window_width)` (4 columns ≥1440 px, 2 columns 640–1439 px, 1 column <640 px).
+| Content width (px) | Home behaviour |
+|---|---|
+| ≥ 1000 | Wide: two dashboard columns, four-column quick actions, full-size hero illustration |
+| 720–999 | Medium: two dashboard columns, 2×2 quick actions, full-size hero illustration |
+| 560–719 | Narrow: one dashboard column (right rail below), 2×2 quick actions, scaled 0.8× hero illustration |
+| 520–559 | Minimum band: one dashboard column, 2×2 quick actions, compact two-line card headers, pill under greeting |
+| < 520 | Minimum: one dashboard column, one quick action per row, compact headers, hero illustration hidden |
+
+Mapping to the four evidence window widths: 1600×900 → content ~1231 (wide),
+1280×800 → ~919 (medium), 1024×720 → ~679 (narrow), 800×600 → ~455 (minimum).
+
+Quick-action grid columns are computed by
+`quick_actions::grid_columns_for(content_width)` (4 columns ≥ 1000 px,
+2 columns 520–999 px, 1 column < 520 px).
+
+Card headers (`CardShell::compact_header`) switch to a two-line layout below
+560 px content width so titles, badges and action links never squeeze; the
+page-header status pill stacks under the greeting in the same band. The hero
+mesh illustration renders full size above 720 px content, scaled 0.8× from
+520–719 px, and is hidden below 520 px.
 
 ### 19.6 Screenshot workflow
 

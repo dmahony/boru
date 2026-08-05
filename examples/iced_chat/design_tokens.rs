@@ -247,6 +247,51 @@ pub fn is_large(width: f32) -> bool {
     width >= VIEWPORT_LG_WIDTH
 }
 
+/// Available content width of the home dashboard (window width minus the
+/// sidebar, the 1 px divider, and both horizontal page paddings).
+///
+/// Home responsive breakpoints (UI-HOME-15) are expressed in this content
+/// width rather than the raw window width so the fixed 288–320 px sidebar
+/// never starves the dashboard: at 1280 window, sidebar 304 + divider 1 +
+/// padding 56 leaves 919 px of dashboard, not 1280.
+pub fn home_content_width(window_width: f32) -> f32 {
+    let sidebar = sidebar_width_for(window_width);
+    let h_padding = if is_large(window_width) { SPACE_32 } else { SPACE_28 };
+    (window_width - sidebar - 1.0 - 2.0 * h_padding).max(0.0)
+}
+
+// ── Home dashboard content-width breakpoints (UI-HOME-15) ─────────────
+// All values are in *content* width (see `home_content_width`), so they are
+// robust to the sidebar's responsive 288–320 px width.
+
+/// Below this content width the right rail stacks under the main column
+/// (narrow band). Above it the dashboard keeps two columns.
+pub const HOME_TWO_COL_CONTENT: f32 = 720.0;
+
+/// Below this content width quick actions collapse to one card per row
+/// (minimum supported width). Above it a two-by-two grid is used.
+pub const HOME_QUICK_ONE_COL_CONTENT: f32 = 520.0;
+
+/// Above this content width quick actions use four columns (wide band).
+pub const HOME_QUICK_FOUR_COL_CONTENT: f32 = 1000.0;
+
+/// Above this content width the hero mesh illustration renders at full
+/// size; between this and [`HOME_ILLUSTRATION_HIDE_CONTENT`] it is scaled
+/// down; below it is hidden entirely so the connection text keeps room.
+pub const HOME_ILLUSTRATION_FULL_CONTENT: f32 = 720.0;
+
+/// Below this content width the hero mesh illustration is hidden.
+///
+/// Aligned with [`HOME_QUICK_ONE_COL_CONTENT`]: below the minimum supported
+/// width (one quick action per row) the illustration would only crowd the
+/// connection text, so it is removed entirely.
+pub const HOME_ILLUSTRATION_HIDE_CONTENT: f32 = 520.0;
+
+/// Below this content width card headers switch to a two-line compact
+/// layout (title line, then badges/action line) and the page header stacks
+/// the status pill under the greeting instead of beside it.
+pub const HOME_COMPACT_HEADER_CONTENT: f32 = 560.0;
+
 // ── Shadow tokens ─────────────────────────────────────────────────────
 
 /// Subtle card shadow — rgba(0,0,0,0.05) offset(0,1) blur(2).
@@ -969,6 +1014,64 @@ mod tests {
         // Above max: clamped to 304 px.
         assert!((sidebar_width_for(VIEWPORT_LG_WIDTH) - SIDEBAR_WIDTH).abs() < 0.5);
         assert!((sidebar_width_for(VIEWPORT_XL_WIDTH) - SIDEBAR_WIDTH).abs() < 0.5);
+    }
+
+    #[test]
+    fn home_content_width_shrinks_with_the_sidebar() {
+        // UI-HOME-15: the dashboard's available width is the window width
+        // minus the sidebar, the 1 px divider and both horizontal paddings.
+        // At the reference window the sidebar is 304 px, so the content is
+        // ~919 px, never the full 1280.
+        let content = home_content_width(VIEWPORT_REF_WIDTH);
+        assert!(
+            (content - (VIEWPORT_REF_WIDTH - SIDEBAR_WIDTH - 1.0 - 2.0 * SPACE_28)).abs() < 0.5,
+            "content width at 1280 window must subtract sidebar + divider + padding, got {content}"
+        );
+        assert!(content < VIEWPORT_REF_WIDTH);
+        assert!(content > 0.0);
+        // A wide window gives more content width.
+        assert!(home_content_width(VIEWPORT_LG_WIDTH) > home_content_width(VIEWPORT_REF_WIDTH));
+        // A tiny window never goes negative.
+        assert_eq!(home_content_width(0.0), 0.0);
+        // No regression in the evidence widths: these are the actual content
+        // widths the four-width screenshot set must render at.
+        assert!((home_content_width(1600.0) - 1231.0).abs() < 2.0);
+        assert!((home_content_width(1280.0) - 919.0).abs() < 2.0);
+        assert!((home_content_width(1024.0) - 679.0).abs() < 2.0);
+        assert!((home_content_width(800.0) - 455.0).abs() < 2.0);
+    }
+
+    #[test]
+    fn home_content_breakpoints_are_ordered() {
+        // UI-HOME-15: the content-width tiers must be monotonic so every
+        // supported window maps to exactly one intentional layout. As width
+        // shrinks: four quick actions → two columns → scaled illustration →
+        // compact headers → one quick action per row + illustration hidden.
+        assert!(HOME_QUICK_FOUR_COL_CONTENT > HOME_TWO_COL_CONTENT);
+        assert!(HOME_TWO_COL_CONTENT >= HOME_ILLUSTRATION_FULL_CONTENT);
+        assert!(HOME_ILLUSTRATION_FULL_CONTENT > HOME_COMPACT_HEADER_CONTENT);
+        assert!(HOME_COMPACT_HEADER_CONTENT > HOME_QUICK_ONE_COL_CONTENT);
+        // The illustration hides exactly where quick actions collapse to one
+        // per row: below the minimum supported width there is no room for it.
+        assert!(HOME_QUICK_ONE_COL_CONTENT >= HOME_ILLUSTRATION_HIDE_CONTENT);
+        assert!(HOME_ILLUSTRATION_HIDE_CONTENT > 0.0);
+    }
+
+    #[test]
+    fn home_breakpoints_map_evidence_widths_to_intentional_tiers() {
+        // UI-HOME-15 acceptance: wide / medium / narrow / minimum must each
+        // land in a distinct, intentional tier at the four evidence widths.
+        let wide = home_content_width(1600.0);
+        assert!(wide >= HOME_QUICK_FOUR_COL_CONTENT, "1600 should be wide (4 quick actions)");
+        let medium = home_content_width(1280.0);
+        assert!(medium >= HOME_TWO_COL_CONTENT && medium < HOME_QUICK_FOUR_COL_CONTENT,
+            "1280 should be medium (two columns, 2x2 quick actions)");
+        let narrow = home_content_width(1024.0);
+        assert!(narrow < HOME_TWO_COL_CONTENT && narrow >= HOME_QUICK_ONE_COL_CONTENT,
+            "1024 should be narrow (one column, 2x2 quick actions)");
+        let minimum = home_content_width(800.0);
+        assert!(minimum < HOME_QUICK_ONE_COL_CONTENT,
+            "800 should be minimum (one quick action per row)");
     }
 
     // ── Shadow token invariants ────────────────────────────────────────

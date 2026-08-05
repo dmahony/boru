@@ -212,25 +212,29 @@ fn quick_action_card_style(theme: &Theme, status: button::Status) -> iced::widge
     }
 }
 
-/// Number of quick-action columns for a given window width (UI-HOME-06).
+/// Number of quick-action columns for a given *content* width (UI-HOME-15).
 ///
+/// Content width is the home dashboard's available width after the sidebar,
+/// divider and page padding are removed (`design_tokens::home_content_width`),
+/// so the grid never starves on narrow windows with a fixed 288 px sidebar.
 /// Breakpoints keep four columns only where cards are wide enough to stay
 /// readable; the grid drops to two-by-two before cards become too narrow,
 /// and to one column at the minimum supported width. This matches the
-/// design system's "Large ≥ 1440 px → full four-column quick actions".
-pub fn grid_columns_for(window_width: f32) -> usize {
-    if window_width < 640.0 {
-        1
-    } else if window_width < crate::design_tokens::VIEWPORT_LG_WIDTH {
+/// design system's "Large ≥ 1440 px → full four-column quick actions"
+/// (window 1440 → content ~1071 px ≥ HOME_QUICK_FOUR_COL_CONTENT).
+pub fn grid_columns_for(content_width: f32) -> usize {
+    if content_width >= crate::design_tokens::HOME_QUICK_FOUR_COL_CONTENT {
+        4
+    } else if content_width >= crate::design_tokens::HOME_QUICK_ONE_COL_CONTENT {
         2
     } else {
-        4
+        1
     }
 }
 
 /// Build the responsive quick-action grid used by the home screen.
-pub fn quick_action_grid<'a>(window_width: f32, theme: &Theme) -> Element<'a, AppMessage> {
-    let columns = grid_columns_for(window_width);
+pub fn quick_action_grid<'a>(content_width: f32, theme: &Theme) -> Element<'a, AppMessage> {
+    let columns = grid_columns_for(content_width);
 
     let mut rows: Vec<Element<'a, AppMessage>> = Vec::new();
     for actions in ACTIONS.chunks(columns) {
@@ -314,30 +318,41 @@ mod tests {
 
     #[test]
     fn grid_columns_follow_the_design_breakpoints() {
-        // UI-HOME-06: four columns only on wide layouts (≥ 1440, matching
+        // UI-HOME-15: columns are computed from the dashboard *content*
+        // width (window minus sidebar/divider/padding). Four columns only
+        // on wide layouts (window ≥ 1440 → content ≥ 1000, matching
         // DESIGN_SYSTEM.md "Large"), two-by-two before cards get too narrow
-        // (640–1439), one column at the minimum supported width (< 640).
-        assert_eq!(grid_columns_for(1920.0), 4);
-        assert_eq!(grid_columns_for(1600.0), 4);
-        assert_eq!(grid_columns_for(1440.0), 4);
-        // Medium: 640–1439 px (e.g. the 1280×800 reference viewport).
-        assert_eq!(grid_columns_for(1280.0), 2);
-        assert_eq!(grid_columns_for(1024.0), 2);
-        assert_eq!(grid_columns_for(800.0), 2);
-        assert_eq!(grid_columns_for(640.0), 2);
-        // Narrow: below 640 px collapses to a single column.
-        assert_eq!(grid_columns_for(639.0), 1);
-        assert_eq!(grid_columns_for(480.0), 1);
+        // (content 520–999), one column at the minimum supported width
+        // (content < 520, e.g. an 800×600 window).
+        use crate::design_tokens::home_content_width;
+        // Window 1920/1600/1440 → content ~1551/1231/1071 → 4 columns.
+        assert_eq!(grid_columns_for(home_content_width(1920.0)), 4);
+        assert_eq!(grid_columns_for(home_content_width(1600.0)), 4);
+        assert_eq!(grid_columns_for(home_content_width(1440.0)), 4);
+        // Medium: content 520–999 (e.g. 1280×800 and 1024×720 windows).
+        assert_eq!(grid_columns_for(home_content_width(1280.0)), 2);
+        assert_eq!(grid_columns_for(home_content_width(1024.0)), 2);
+        // Narrow: content < 520 → one quick action per row.
+        assert_eq!(grid_columns_for(home_content_width(800.0)), 1);
+        assert_eq!(grid_columns_for(home_content_width(640.0)), 1);
+        // Boundary checks on the content-width thresholds themselves.
+        assert_eq!(grid_columns_for(1000.0), 4);
+        assert_eq!(grid_columns_for(999.0), 2);
+        assert_eq!(grid_columns_for(520.0), 2);
+        assert_eq!(grid_columns_for(519.0), 1);
     }
 
     #[test]
     fn grid_columns_are_contiguous_without_gaps() {
-        // Every width maps to exactly one of the three supported counts.
-        for width in (320..=1920).step_by(16) {
-            let columns = grid_columns_for(width as f32);
+        // Every content width maps to exactly one of the three supported
+        // counts.
+        use crate::design_tokens::home_content_width;
+        for window in (320..=1920).step_by(16) {
+            let content = home_content_width(window as f32);
+            let columns = grid_columns_for(content);
             assert!(
                 columns == 1 || columns == 2 || columns == 4,
-                "width {width} produced unexpected column count {columns}"
+                "window {window} (content {content:.0}) produced unexpected column count {columns}"
             );
         }
     }

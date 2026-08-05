@@ -4661,6 +4661,8 @@ pub(crate) struct OnlinePeersCardData {
     pub(crate) total_friends: usize,
     /// Online/Away friend rows (Offline friends are filtered out).
     pub(crate) rows: Vec<OnlinePeerRow>,
+    /// UI-HOME-15: two-line compact header on narrow content widths.
+    pub(crate) compact_header: bool,
 }
 
 /// One Online Peers row: the peer key (for the open-chat action), the
@@ -4698,6 +4700,8 @@ pub(crate) struct RecentActivityCardData {
     pub(crate) total: usize,
     /// The newest activity rows actually rendered (capped at 15).
     pub(crate) rows: Vec<ActivityRow>,
+    /// UI-HOME-15: two-line compact header on narrow content widths.
+    pub(crate) compact_header: bool,
 }
 
 /// Empty-state copy for the Recent Activity rail card (basic empty state;
@@ -4727,6 +4731,8 @@ pub(crate) struct TunnelsCardData {
     pub(crate) dark_mode: bool,
     pub(crate) tick: u64,
     pub(crate) rows: Vec<TunnelRow>,
+    /// UI-HOME-15: two-line compact header on narrow content widths.
+    pub(crate) compact_header: bool,
 }
 
 /// One Tunnels row. `expired` is resolved against the wall clock at selector
@@ -24563,6 +24569,7 @@ impl IcedChat {
             dark_mode: self.dark_mode,
             total_friends,
             rows,
+            compact_header: self.home_compact_headers(),
         }
     }
 
@@ -24585,6 +24592,7 @@ impl IcedChat {
             tick: self.activity_tick,
             total: self.recent_activity.len(),
             rows,
+            compact_header: self.home_compact_headers(),
         }
     }
 
@@ -24627,7 +24635,15 @@ impl IcedChat {
             dark_mode: self.dark_mode,
             tick: self.activity_tick,
             rows,
+            compact_header: self.home_compact_headers(),
         }
+    }
+
+    /// True when the home content width is narrow enough that card headers
+    /// switch to the two-line compact layout (UI-HOME-15).
+    fn home_compact_headers(&self) -> bool {
+        crate::design_tokens::home_content_width(self.window_width)
+            < crate::design_tokens::HOME_COMPACT_HEADER_CONTENT
     }
 
     /// Build the Online Peers card subtree. Runs inside `iced::widget::lazy`,
@@ -24742,6 +24758,7 @@ impl IcedChat {
             .count(dep.rows.len())
             .count_total(dep.total_friends)
             .on_view_all(AppMessage::OpenFriendRequests)
+            .compact_header(dep.compact_header)
             .body(body)
             .build(&theme)
     }
@@ -24833,6 +24850,7 @@ impl IcedChat {
         CardShell::new("Recent Activity", activity_rows)
             .count(dep.total)
             .empty_message(RECENT_ACTIVITY_EMPTY_MESSAGE)
+            .compact_header(dep.compact_header)
             .max_height(180.0)
             .build(&theme)
     }
@@ -24927,6 +24945,7 @@ impl IcedChat {
             .count(dep.rows.len())
             .on_view_all(AppMessage::ShowCreateTunnelDialog)
             .empty_message(TUNNELS_EMPTY_MESSAGE)
+            .compact_header(dep.compact_header)
             .max_height(120.0)
             .build(&theme)
     }
@@ -24993,7 +25012,13 @@ impl IcedChat {
 
         let window_width = dep.window_width_bits as f32 / 100.0;
         let theme = Self::theme_from_dark(dep.dark_mode);
-        let narrow = window_width < 640.0;
+        // UI-HOME-15: all home breakpoints are based on the dashboard's
+        // available *content* width (window minus sidebar, divider and page
+        // padding), never the raw window width — the sidebar eats
+        // 288–320 px and would otherwise starve the grid on narrow windows.
+        let content_width = crate::design_tokens::home_content_width(window_width);
+        let compact_header =
+            content_width < crate::design_tokens::HOME_COMPACT_HEADER_CONTENT;
 
         // ── Connection state (single source of truth) ──
         let has_peer_connections = dep.has_peer_connections;
@@ -25217,14 +25242,26 @@ impl IcedChat {
 
         // Right illustration group: static low-contrast node-graph, scaled
         // proportionally (native 220×150 → 205×140), inset from the card
-        // edge by the card padding; hidden on compact windows (< 640 px).
-        let hero_illustration = if narrow {
+        // edge by the card padding. UI-HOME-15: the illustration is shown at
+        // full size on wide content, scaled down 0.8× in the medium band,
+        // and hidden below the minimum readable content width so the
+        // connection text never gets starved.
+        let hero_illustration = if content_width
+            < crate::design_tokens::HOME_ILLUSTRATION_HIDE_CONTENT
+        {
             None
         } else {
+            let (iw, ih) = if content_width
+                >= crate::design_tokens::HOME_ILLUSTRATION_FULL_CONTENT
+            {
+                (205.0, 140.0)
+            } else {
+                (164.0, 112.0) // 0.8× scale
+            };
             Some(
                 iced::widget::svg(iced::widget::svg::Handle::from_memory(NETWORK_MOTIF))
-                    .width(Length::Fixed(205.0))
-                    .height(Length::Fixed(140.0))
+                    .width(Length::Fixed(iw))
+                    .height(Length::Fixed(ih))
                     .style(|_t, _s| iced::widget::svg::Style { color: None }),
             )
         };
@@ -25583,11 +25620,12 @@ impl IcedChat {
             .subtitle("Current connection status")
             .status_badge(health_label, mesh_badge_kind)
             .header_action("View details", AppMessage::OpenConnectionDetails)
+            .compact_header(compact_header)
             .body(mesh_body.into())
             .build(&theme);
 
         // ── Quick actions: four equal, full-card targets (Figure 3) ──
-        let action_grid = crate::quick_actions::quick_action_grid(window_width, &theme);
+        let action_grid = crate::quick_actions::quick_action_grid(content_width, &theme);
 
         // ── Right rail: loading treatment decision (t_0441a1dc) ──
         // No skeleton/shimmer loading is used for the three rail cards, by
@@ -25638,27 +25676,58 @@ impl IcedChat {
             .width(Length::Fill);
 
         // ── Page header: greeting + welcome + status pill (Figure 3) ──
-        let page_header = row![
+        // UI-HOME-15: on narrow content the pill stacks under the greeting
+        // (left-aligned) instead of squeezing it; on wider content it keeps
+        // the approved top-right position.
+        let page_header: iced::Element<'static, AppMessage> = if compact_header {
             Column::new()
-                .push(greeting)
-                // Greeting → welcome gap. UI-HOME-09: shared-scale SPACE_4
-                // (was SPACE_2, off the scale).
-                .push(Space::new().height(Length::Fixed(SPACE_4)))
-                .push(welcome_line)
+                .push(
+                    Column::new()
+                        .push(greeting)
+                        // Greeting → welcome gap. UI-HOME-09: shared-scale
+                        // SPACE_4 (was SPACE_2, off the scale).
+                        .push(Space::new().height(Length::Fixed(SPACE_4)))
+                        .push(welcome_line)
+                        .spacing(0)
+                        .width(Length::Fill),
+                )
+                .push(Space::new().height(Length::Fixed(SPACE_12)))
+                .push(
+                    Row::new()
+                        .push(status_pill)
+                        .spacing(0)
+                        .align_y(Alignment::Center)
+                        .width(Length::Fill),
+                )
                 .spacing(0)
-                .width(Length::Fill),
-            status_pill,
-        ]
-        .spacing(SPACE_8)
-        .align_y(Alignment::Center);
+                .width(Length::Fill)
+                .into()
+        } else {
+            row![
+                Column::new()
+                    .push(greeting)
+                    // Greeting → welcome gap. UI-HOME-09: shared-scale SPACE_4
+                    // (was SPACE_2, off the scale).
+                    .push(Space::new().height(Length::Fixed(SPACE_4)))
+                    .push(welcome_line)
+                    .spacing(0)
+                    .width(Length::Fill),
+                status_pill,
+            ]
+            .spacing(SPACE_8)
+            .align_y(Alignment::Center)
+            .into()
+        };
 
         // ── Main content: hero + mesh + actions left, activity rail right ──
         // Two-thirds content + one-third activity rail (plan §4): main
         // ~66.7% / right ~33.3% with a 24 px column gap. Below the stack
         // breakpoint the rail collapses BELOW the left column instead of
-        // compressing its cards; the full responsive pass lands in UI-HOME-15.
-        const RAIL_STACK_BREAKPOINT: f32 = 1120.0;
-        let rail_stacked = window_width < RAIL_STACK_BREAKPOINT;
+        // compressing its cards. UI-HOME-15: the breakpoint is content-width
+        // based (window minus sidebar/divider/padding), so the fixed 288 px
+        // sidebar never forces an early stack.
+        let rail_stacked =
+            content_width < crate::design_tokens::HOME_TWO_COL_CONTENT;
         let card_gap = SPACE_20; // 20 px vertical card gap (plan: 20–24 px)
 
         let left_col = Column::new()
@@ -37681,6 +37750,85 @@ mod tests {
         assert!(
             requests_body.contains("TypeRole::Body"),
             "sidebar request labels must use TypeRole::Body"
+        );
+    }
+
+    #[test]
+    fn home_breakpoints_use_content_width_not_raw_window() {
+        // UI-HOME-15: the home screen must base its responsive behaviour on
+        // the dashboard's available content width (window minus sidebar,
+        // divider and page padding), never on the raw window width — the
+        // sidebar eats 288–320 px and would otherwise starve the grid.
+        let src = include_str!("app.rs");
+        let home = method_source(src, "fn view_chat_list_content(", "fn view_chat_panel(");
+        assert!(
+            home.contains("home_content_width(window_width)"),
+            "home layout must compute the dashboard content width"
+        );
+        assert!(
+            home.contains("content_width < crate::design_tokens::HOME_TWO_COL_CONTENT"),
+            "rail-stack decision must use the content-width breakpoint"
+        );
+        assert!(
+            !home.contains("RAIL_STACK_BREAKPOINT"),
+            "the old window-width rail-stack constant must be gone"
+        );
+        assert!(
+            home.contains("quick_action_grid(content_width"),
+            "quick-action grid must be sized from content width"
+        );
+    }
+
+    #[test]
+    fn home_hero_illustration_adapts_to_content_width() {
+        // UI-HOME-15: the mesh illustration must scale/reposition based on
+        // content width — full at wide, scaled at medium, hidden at minimum —
+        // so the hero text never gets starved.
+        let src = include_str!("app.rs");
+        let home = method_source(src, "fn view_chat_list_content(", "fn view_chat_panel(");
+        assert!(
+            home.contains("HOME_ILLUSTRATION_FULL_CONTENT"),
+            "hero illustration must use the full-size content-width tier"
+        );
+        assert!(
+            home.contains("HOME_ILLUSTRATION_HIDE_CONTENT"),
+            "hero illustration must use the hide content-width tier"
+        );
+        assert!(
+            !home.contains("let narrow = window_width"),
+            "the old window-width narrow flag must be gone"
+        );
+    }
+
+    #[test]
+    fn home_compact_headers_are_wired_to_content_width() {
+        // UI-HOME-15: the two-line compact header mode must be driven by the
+        // content width and reach every home card (mesh + the three rail
+        // cards), so narrow windows never squeeze card titles/badges/actions.
+        let src = include_str!("app.rs");
+        let home = method_source(src, "fn view_chat_list_content(", "fn view_chat_panel(");
+        assert!(
+            home.contains(".compact_header(compact_header)"),
+            "mesh card must use the compact header flag"
+        );
+        let peers = method_source(src, "fn view_online_peers_card(", "fn view_recent_activity_card(");
+        assert!(
+            peers.contains(".compact_header(dep.compact_header)"),
+            "Online Peers card must thread the compact header flag"
+        );
+        let activity = method_source(src, "fn view_recent_activity_card(", "fn view_tunnels_card(");
+        assert!(
+            activity.contains(".compact_header(dep.compact_header)"),
+            "Recent Activity card must thread the compact header flag"
+        );
+        let tunnels = method_source(src, "fn view_tunnels_card(", "fn view_main_empty_state(");
+        assert!(
+            tunnels.contains(".compact_header(dep.compact_header)"),
+            "Tunnels card must thread the compact header flag"
+        );
+        assert!(
+            src.contains("fn home_compact_headers"),
+            "compact-header helper must exist"
         );
     }
 
