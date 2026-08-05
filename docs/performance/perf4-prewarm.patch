@@ -1,0 +1,335 @@
+diff --git a/examples/iced_chat/app.rs b/examples/iced_chat/app.rs
+index 75eb6d2b..3dbbb1ca 100644
+--- a/examples/iced_chat/app.rs
++++ b/examples/iced_chat/app.rs
+@@ -2650,6 +2650,76 @@ struct GifResult {
+     preview_bytes: Vec<u8>,
+ }
+ 
++// ── Pre-warm (PERF-4) ────────────────────────────────────────────────
++
++/// Tracks the last user input so screen pre-warming only runs while the
++/// app is genuinely idle (no keyboard/mouse activity for 2+ seconds).
++struct IdleTimer {
++    last_input: std::time::Instant,
++}
++
++impl IdleTimer {
++    /// Seconds of inactivity after which the app is considered idle.
++    const IDLE_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(2);
++
++    fn new() -> Self {
++        // Start counting from construction so the pre-warm cycle can begin
++        // shortly after launch once the initial burst of startup events ends.
++        Self {
++            last_input: std::time::Instant::now(),
++        }
++    }
++
++    /// Record user activity (any keyboard/mouse event).
++    fn note_activity(&mut self) {
++        self.last_input = std::time::Instant::now();
++    }
++
++    /// True when no user input has arrived for the idle threshold.
++    fn is_idle(&self) -> bool {
++        self.last_input.elapsed() >= Self::IDLE_THRESHOLD
++    }
++}
++
++/// Responsive layout band. Pre-warmed screen trees are built for a specific
++/// band and are invalidated when the window crosses a breakpoint, because
++/// window width is not part of the `lazy()` cache keys.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++enum ResponsiveMode {
++    Compact,
++    Medium,
++    Reference,
++    Large,
++}
++
++impl ResponsiveMode {
++    fn of(width: f32) -> Self {
++        use crate::design_tokens::{VIEWPORT_LG_WIDTH, VIEWPORT_MIN_WIDTH, VIEWPORT_REF_WIDTH};
++        if width <= VIEWPORT_MIN_WIDTH {
++            ResponsiveMode::Compact
++        } else if width < VIEWPORT_REF_WIDTH {
++            ResponsiveMode::Medium
++        } else if width < VIEWPORT_LG_WIDTH {
++            ResponsiveMode::Reference
++        } else {
++            ResponsiveMode::Large
++        }
++    }
++}
++
++/// Screens pre-warmed into the `lazy()` cache during idle, in order of
++/// likelihood of use (heaviest / most-used first). PeerProfile,
++/// PeerCatalogue, FriendProfile and Chat are excluded — they carry per-peer
++/// or per-room payloads, so a pre-warmed tree would almost never match the
++/// requested payload and would only waste idle cycles.
++const PREWARM_ORDER: &[Screen] = &[
++    Screen::FileSharing,
++    Screen::Settings,
++    Screen::Discover,
++    Screen::Groups,
++    Screen::FriendRequests,
++];
++
+ // ── Application state ────────────────────────────────────────────
+ 
+ pub struct IcedChat {
+@@ -2686,6 +2756,17 @@ pub struct IcedChat {
+     /// Screen to return to when closing the settings page.
+     settings_return_to: Option<Screen>,
+ 
++    // ── Pre-warm (PERF-4) ──
++    /// Screens that have been pre-warmed into the lazy cache during idle.
++    prewarmed_screens: Vec<Screen>,
++    /// Whether a pre-warm build is in progress (guards re-entrancy).
++    prewarming: bool,
++    /// Tracks the last user input so pre-warming only runs while idle.
++    idle_timer: IdleTimer,
++    /// Responsive mode the pre-warm cache was built for; pre-warmed trees
++    /// are invalidated when the window crosses a breakpoint.
++    prewarm_window_mode: Option<ResponsiveMode>,
++
+     // ── Multi-conversation state ──
+     /// Per-conversation runtime state. Each direct chat or group room
+     /// keeps its own subscription, entries, and composer.
+@@ -5268,6 +5349,14 @@ pub enum AppMessage {
+     /// Open the embedded terminal tab (feature `terminal`).
+     #[cfg(feature = "terminal")]
+     OpenTerminal,
++
++    // ── Pre-warm (PERF-4) ──
++    /// Fired every 500 ms; the app pre-warms the next screen's `lazy()`
++    /// cache only when the user has been idle for 2+ seconds.
++    IdleTick,
++    /// Fired on any keyboard/mouse event; resets the idle timer so
++    /// pre-warming pauses while the user is active.
++    UserActivity,
+ }
+ 
+ /// Map semantic GUI navigation commands to the same application messages used
+@@ -6543,6 +6632,10 @@ impl IcedChat {
+             scroll_to_bottom_pending: false,
+             settings: app_settings.clone(),
+             settings_return_to: None,
++            prewarmed_screens: Vec::new(),
++            prewarming: false,
++            idle_timer: IdleTimer::new(),
++            prewarm_window_mode: None,
+             dark_mode: app_settings.dark_mode,
+             sound_enabled: app_settings.sound_enabled,
+             share_direct_addresses: app_settings.share_direct_addresses,
+@@ -8180,6 +8273,8 @@ impl IcedChat {
+             AppMessage::ConnMonitorTick => "ConnMonitorTick",
+             AppMessage::MeshWatchdogTick => "MeshWatchdogTick",
+             AppMessage::OutboxRetryTick => "OutboxRetryTick",
++            AppMessage::IdleTick => "IdleTick",
++            AppMessage::UserActivity => "UserActivity",
+ 
+             AppMessage::ToggleDark(_) => "ToggleDark",
+             AppMessage::SetNickname(_) => "SetNickname",
+@@ -11652,6 +11747,7 @@ impl IcedChat {
+             } => {
+                 // Request was sent — keep state as Pending
+                 // Future: when we hear back via whisper, update state to Accepted/Declined
++                self.invalidate_prewarm(&[Screen::FriendRequests]);
+                 iced::Task::none()
+             }
+ 
+@@ -11679,6 +11775,7 @@ impl IcedChat {
+                     _ => {}
+                 }
+                 self.rebuild_join_request_list();
++                self.invalidate_prewarm(&[Screen::FriendRequests]);
+                 iced::Task::none()
+             }
+ 
+@@ -11932,6 +12029,8 @@ impl IcedChat {
+                 // user can switch back to it without a slow re-subscribe.
+                 self.save_room_to_history();
+                 self.leave_current_room();
++                // The new group appears in the Groups screen's group list.
++                self.invalidate_prewarm(&[Screen::Groups]);
+ 
+                 // Apply the gossip sender for the new group room
+                 self.sender = Some(*sender);
+@@ -17943,6 +18042,7 @@ impl IcedChat {
+                 // a background subscription so discovery does not require a
+                 // manual ticket exchange.
+                 let mut discovered_room_tasks = Vec::new();
++                let mut directory_changed = false;
+                 {
+                     let mut dir_guard = self.directory_room_rx.try_lock();
+                     if let Ok(ref mut rx) = dir_guard {
+@@ -17952,6 +18052,7 @@ impl IcedChat {
+                                 .lock()
+                                 .unwrap()
+                                 .upsert(ad.clone(), from);
++                            directory_changed = true;
+ 
+                             // Parse the authenticated ticket and use its topic;
+                             // never subscribe to an untrusted raw advertisement
+@@ -17982,6 +18083,10 @@ impl IcedChat {
+                         }
+                     }
+                 }
++                if directory_changed {
++                    // The Discover screen's room list changed.
++                    self.invalidate_prewarm(&[Screen::Discover]);
++                }
+                 if !discovered_room_tasks.is_empty() {}
+                 tasks.extend(discovered_room_tasks);
+                 self.public_rooms_sidebar_revision =
+@@ -18265,6 +18370,9 @@ impl IcedChat {
+ 
+             AppMessage::ToggleDark(enabled) => {
+                 self.dark_mode = enabled;
++                // Dark mode is part of every screen's lazy dep key; forget
++                // the pre-warmed trees so the next idle cycle rebuilds them.
++                self.invalidate_prewarm(PREWARM_ORDER);
+                 if let Some(action_id) = self
+                     .gui_action_history
+                     .all_actions()
+@@ -18305,6 +18413,8 @@ impl IcedChat {
+ 
+             AppMessage::SetNickname(name) => {
+                 self.local_label = name;
++                // The local label feeds the Settings identity card.
++                self.invalidate_prewarm(&[Screen::Settings]);
+                 // Persist the display name so it survives restarts.
+                 let settings = AppSettings {
+                     dark_mode: self.dark_mode,
+@@ -18654,7 +18764,14 @@ impl IcedChat {
+                 iced::Task::none()
+             }
+             AppMessage::WindowResized(width) => {
++                let old_mode = ResponsiveMode::of(self.window_width);
+                 self.window_width = width;
++                // Window width is not part of the lazy cache keys, so a
++                // pre-warmed tree built at another responsive band is stale
++                // once the window crosses a breakpoint.
++                if ResponsiveMode::of(width) != old_mode {
++                    self.invalidate_prewarm(PREWARM_ORDER);
++                }
+                 iced::Task::none()
+             }
+ 
+@@ -18717,6 +18834,21 @@ impl IcedChat {
+                 iced::Task::none()
+             }
+ 
++            // ── Pre-warm (PERF-4) ───────────────────────────────────
++            AppMessage::UserActivity => {
++                // Any keyboard/mouse event pauses pre-warming until the
++                // user has been idle for 2+ seconds again.
++                self.idle_timer.note_activity();
++                iced::Task::none()
++            }
++
++            AppMessage::IdleTick => {
++                // Fired every 500 ms; builds at most one screen per tick so
++                // a single idle tick never causes a perceptible hitch.
++                self.pre_warm_next_screen();
++                iced::Task::none()
++            }
++
+             AppMessage::Noop => iced::Task::none(),
+ 
+             AppMessage::ToggleGallery => {
+@@ -29477,6 +29604,10 @@ impl IcedChat {
+                 .map(|_| AppMessage::MeshWatchdogTick),
+             iced::time::every(std::time::Duration::from_secs(30))
+                 .map(|_| AppMessage::OutboxRetryTick),
++            // PERF-4: pre-warm tick. Fires every 500 ms; the update handler
++            // only builds screens while the user has been idle for 2+ seconds.
++            iced::time::every(std::time::Duration::from_millis(500))
++                .map(|_| AppMessage::IdleTick),
+             iced::window::resize_events()
+                 .map(|(_id, size)| AppMessage::WindowResized(size.width as f32)),
+             // Window file drag/drop + IME composition state.  iced 0.14 maps
+@@ -29493,6 +29624,11 @@ impl IcedChat {
+                 iced::Event::Window(iced::window::Event::FileDropped(path)) => {
+                     Some(AppMessage::ComposerFileDropped(path))
+                 }
++                // PERF-4: any keyboard/mouse event counts as user activity and
++                // resets the idle timer so pre-warming pauses while active.
++                iced::Event::Keyboard(_) | iced::Event::Mouse(_) => {
++                    Some(AppMessage::UserActivity)
++                }
+                 iced::Event::InputMethod(ev) => match ev {
+                     // Only an active preedit (composition) must block sending.
+                     // `Opened` fires merely when a text field gains focus and
+@@ -29545,6 +29681,69 @@ impl IcedChat {
+         ));
+         iced::Subscription::batch(subs)
+     }
++
++    // ── Pre-warm (PERF-4) ─────────────────────────────────────────────
++
++    /// Build the next un-warmed screen's widget tree during idle so the
++    /// `lazy()` cache is populated before the user navigates. Called from
++    /// `AppMessage::IdleTick`; each call builds at most one screen so a
++    /// single idle tick never causes a perceptible frame hitch.
++    fn pre_warm_next_screen(&mut self) {
++        if self.prewarming {
++            return;
++        }
++        if !self.idle_timer.is_idle() {
++            return;
++        }
++        // Responsive mode is not part of the lazy cache keys, so pre-warmed
++        // trees built for another width band are stale — rebuild everything.
++        let mode = ResponsiveMode::of(self.window_width);
++        if self.prewarm_window_mode.is_some_and(|m| m != mode) {
++            self.prewarmed_screens.clear();
++        }
++        self.prewarm_window_mode = Some(mode);
++
++        let Some(screen) = PREWARM_ORDER
++            .iter()
++            .cloned()
++            .find(|s| !self.prewarmed_screens.contains(s))
++        else {
++            // All pre-warmable screens are already in the cache.
++            return;
++        };
++
++        // Building the Element (which internally calls `lazy(...)`) populates
++        // the cache; the tree itself is discarded.
++        self.prewarming = true;
++        let element = self.build_screen_element(screen.clone());
++        drop(element);
++        self.prewarmed_screens.push(screen);
++        self.prewarming = false;
++    }
++
++    /// Build the widget tree for a pre-warmable screen, mirroring the same
++    /// view functions the main `view()` dispatches to.
++    fn build_screen_element(&self, screen: Screen) -> iced::Element<'_, AppMessage> {
++        match screen {
++            Screen::FileSharing => self.view_file_sharing(),
++            Screen::Settings => self.view_settings_screen(),
++            Screen::Discover => self.view_discover(),
++            Screen::Groups => self.view_sidebar_groups(),
++            Screen::FriendRequests => self.view_friend_requests(),
++            // PREWARM_ORDER only ever contains the parameterless screens
++            // above; anything else would be a programming error.
++            _ => unreachable!("build_screen_element called for a non-prewarmable screen"),
++        }
++    }
++
++    /// Forget pre-warmed screens whose dependency would have changed, so the
++    /// next idle cycle rebuilds them with fresh state. `screens` is the set
++    /// of affected screens; pass `PREWARM_ORDER` to invalidate everything
++    /// (dark-mode toggle, responsive breakpoint crossing).
++    fn invalidate_prewarm(&mut self, screens: &[Screen]) {
++        self.prewarmed_screens.retain(|s| !screens.contains(s));
++    }
++
+     /// Rebuild the internal join-request list from `outgoing_request_states`
+     /// and the friend request store.
+     fn rebuild_join_request_list(&mut self) {
