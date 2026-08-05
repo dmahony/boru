@@ -27710,8 +27710,8 @@ impl IcedChat {
                                 .push(status_icon)
                                 .push(
                                     text(label_text)
-                                        .size(TYPO_SM)
-                                        .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
+                                        .size(crate::fonts::TypeRole::ChatSender.size_px())
+                                        .font(crate::fonts::TypeRole::ChatSender.font())
                                         .color(label_color),
                                 )
                                 .spacing(SPACE_4)
@@ -27723,8 +27723,8 @@ impl IcedChat {
                         .into()
                     } else {
                         text(label_text)
-                            .size(TYPO_SM)
-                            .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
+                            .size(crate::fonts::TypeRole::ChatSender.size_px())
+                            .font(crate::fonts::TypeRole::ChatSender.font())
                             .color(label_color)
                             .into()
                     }
@@ -27736,8 +27736,8 @@ impl IcedChat {
                         let event_id = entry.event_id;
                         button(
                             text(label_text)
-                                .size(TYPO_SM)
-                                .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
+                                .size(crate::fonts::TypeRole::ChatSender.size_px())
+                                .font(crate::fonts::TypeRole::ChatSender.font())
                                 .color(label_color),
                         )
                         .on_press(AppMessage::RetryOutgoingMessage(event_id))
@@ -27746,8 +27746,8 @@ impl IcedChat {
                         .into()
                     } else {
                         text(label_text)
-                            .size(TYPO_SM)
-                            .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
+                            .size(crate::fonts::TypeRole::ChatSender.size_px())
+                            .font(crate::fonts::TypeRole::ChatSender.font())
                             .color(label_color)
                             .into()
                     }
@@ -27764,6 +27764,8 @@ impl IcedChat {
                 // single words) so the bubble never overflows its width cap.
                 text(&entry.body)
                     .size(self.chat_text_size)
+                    .font(crate::fonts::TypeRole::ChatMessage.font())
+                    .line_height(iced::widget::text::LineHeight::Relative(1.45))
                     .wrapping(Wrapping::WordOrGlyph)
                     .color(body_color)
                     .into()
@@ -27776,6 +27778,8 @@ impl IcedChat {
                             row = row.push(
                                 text(t)
                                     .size(self.chat_text_size)
+                                    .font(crate::fonts::TypeRole::ChatMessage.font())
+                                    .line_height(iced::widget::text::LineHeight::Relative(1.45))
                                     .wrapping(Wrapping::WordOrGlyph)
                                     .color(body_color),
                             );
@@ -27787,6 +27791,8 @@ impl IcedChat {
                                 button(
                                     text(display)
                                         .size(self.chat_text_size)
+                                        .font(crate::fonts::TypeRole::ChatMessage.font())
+                                        .line_height(iced::widget::text::LineHeight::Relative(1.45))
                                         .wrapping(Wrapping::WordOrGlyph)
                                         .color(accent_primary(&theme)),
                                 )
@@ -27852,7 +27858,10 @@ impl IcedChat {
             } else {
                 ts_text.to_string()
             };
-            let ts_el = text(metadata).size(TYPO_XXS).color(text_muted(&theme));
+            let ts_el = text(metadata)
+                .size(crate::fonts::TypeRole::ChatMetadata.size_px())
+                .font(crate::fonts::TypeRole::ChatMetadata.font())
+                .color(text_muted(&theme));
 
             let mut bubble_col = Column::new()
                 .spacing(SPACE_2)
@@ -27880,6 +27889,7 @@ impl IcedChat {
                     preview_children.push(
                         text(title)
                             .size(TYPO_SM)
+                            .font(crate::fonts::TypeRole::ChatMessage.font())
                             .wrapping(Wrapping::WordOrGlyph)
                             .color(accent_primary(&theme))
                             .into(),
@@ -27889,6 +27899,7 @@ impl IcedChat {
                     preview_children.push(
                         text(desc)
                             .size(TYPO_XS)
+                            .font(crate::fonts::TypeRole::ChatMessage.font())
                             .wrapping(Wrapping::WordOrGlyph)
                             .color(text_muted(&theme))
                             .into(),
@@ -27908,6 +27919,7 @@ impl IcedChat {
                     preview_children.push(
                         text(display_url)
                             .size(TYPO_XXS)
+                            .font(crate::fonts::TypeRole::ChatMessage.font())
                             .wrapping(Wrapping::WordOrGlyph)
                             .color(text_muted(&theme))
                             .into(),
@@ -27921,6 +27933,7 @@ impl IcedChat {
                                 .push(
                                     text(link_preview::truncate_url(&preview.url, 60))
                                         .size(TYPO_XXS)
+                                        .font(crate::fonts::TypeRole::ChatMessage.font())
                                         .color(text_muted(&theme)),
                                 )
                                 .push(Column::with_children(preview_children).spacing(SPACE_2))
@@ -27941,6 +27954,7 @@ impl IcedChat {
                     let s = SP[self.splash_spinner_frame % SP.len()];
                     text(format!("{s} Loading preview…"))
                         .size(TYPO_XS)
+                        .font(crate::fonts::TypeRole::ChatMessage.font())
                         .color(text_muted(&theme))
                 });
             }
@@ -28026,6 +28040,7 @@ impl IcedChat {
                                 container(
                                     text(&entry.body)
                                         .size(TYPO_XS)
+                                        .font(crate::fonts::TypeRole::ChatMessage.font())
                                         .color(text_muted(&theme))
                                         .wrapping(Wrapping::WordOrGlyph),
                                 )
@@ -28160,6 +28175,7 @@ impl IcedChat {
                         text(reactions_text)
                             .color(text_muted(&theme))
                             .size(TYPO_SM)
+                            .font(crate::fonts::TypeRole::ChatMessage.font())
                             .wrapping(Wrapping::WordOrGlyph)
                             .width(Length::Fill),
                     )
@@ -28180,6 +28196,7 @@ impl IcedChat {
                         .push(
                             text(format!("Processing {filename}…"))
                                 .size(TYPO_SM)
+                                .font(crate::fonts::TypeRole::ChatMessage.font())
                                 .color(text_muted(&theme)),
                         )
                         .spacing(SPACE_8)
@@ -28215,6 +28232,7 @@ impl IcedChat {
                         .push(
                             text(format!("Uploading {filename} ({size_label})…"))
                                 .size(TYPO_SM)
+                                .font(crate::fonts::TypeRole::ChatMessage.font())
                                 .color(text_muted(&theme)),
                         )
                         .spacing(SPACE_8)
@@ -28293,6 +28311,7 @@ impl IcedChat {
             .on_input(AppMessage::InputChanged)
             .on_submit(AppMessage::SendPressed)
             .size(self.chat_text_size)
+            .font(crate::fonts::TypeRole::ComposerText.font())
             .width(Length::Fill)
             .padding(Padding::new(SPACE_8))
             .style(
@@ -36236,6 +36255,107 @@ mod tests {
             !code_before_tests.contains(fn_def_pattern),
             "recompute_connection_counts method definition must be removed"
         );
+    }
+
+    // ── UI-HOME-13: chat timeline / composer typography regression guards ──
+    //
+    // The chat screen must resolve its fonts through the central `TypeRole`
+    // roles (Figtree) rather than the legacy Source Sans default font or
+    // hard-coded Source Sans weights. These are source-level guards: they
+    // assert the *contract* the view code relies on, in the same style as
+    // the `.block_on(` guard above.
+
+    /// Extract the production (non-test) source of one method body.
+    fn method_source<'a>(src: &'a str, start_marker: &str, end_marker: &str) -> &'a str {
+        let start = src
+            .find(start_marker)
+            .unwrap_or_else(|| panic!("{start_marker} must exist"));
+        let tests_start = src.find("#[cfg(test)]").unwrap_or(src.len());
+        let end = src[start..tests_start]
+            .find(end_marker)
+            .map(|off| start + off)
+            .unwrap_or(tests_start);
+        &src[start..end]
+    }
+
+    #[test]
+    fn chat_timeline_uses_type_role_figtree_roles() {
+        // UI-HOME-13: message bubbles, sender names and timestamps must use
+        // the central Figtree roles (TypeRole), not the legacy Source Sans
+        // default font or hard-coded Source Sans SemiBold labels.
+        let src = include_str!("app.rs");
+        let timeline = method_source(src, "fn view_chat_log(", "fn view_composer(");
+        assert!(
+            timeline.contains("TypeRole::ChatMessage.font()"),
+            "chat message body must use TypeRole::ChatMessage.font()"
+        );
+        assert!(
+            timeline.contains("TypeRole::ChatSender.font()"),
+            "chat sender label must use TypeRole::ChatSender.font()"
+        );
+        assert!(
+            timeline.contains("TypeRole::ChatMetadata.font()"),
+            "chat metadata/timestamp must use TypeRole::ChatMetadata.font()"
+        );
+        // The message body should carry the plan's ~1.45-1.5 relative line
+        // height (Figtree's natural metrics are close, but the plan asks for
+        // the explicit value so multi-line bubbles stay readable).
+        assert!(
+            timeline.contains("LineHeight::Relative(1.45)"),
+            "chat message body must use ~1.45 relative line height"
+        );
+        // Sender labels must no longer be hard-coded to Source Sans SemiBold.
+        assert_eq!(
+            timeline.matches("source_sans(iced::font::Weight::Semibold)").count(),
+            0,
+            "chat timeline sender labels must not use Source Sans SemiBold directly"
+        );
+    }
+
+    #[test]
+    fn composer_uses_type_role_composer_text_font() {
+        // UI-HOME-13: the shared composer input and its placeholder must use
+        // TypeRole::ComposerText (Figtree Regular), keeping the user's
+        // configurable text size.
+        let src = include_str!("app.rs");
+        let composer = method_source(src, "fn view_composer(", "fn view_help(");
+        assert!(
+            composer.contains("TypeRole::ComposerText.font()"),
+            "composer input must use TypeRole::ComposerText.font()"
+        );
+        assert!(
+            composer.contains(".size(self.chat_text_size)"),
+            "composer must keep the user-configurable chat text size"
+        );
+    }
+
+    #[test]
+    fn chat_roles_map_to_figtree_at_plan_sizes() {
+        // UI-HOME-13 approved mapping (plan + UI-HOME-11 handoff):
+        //   chat_message  Figtree Regular 400 @ 15 px
+        //   chat_sender   Figtree SemiBold 600 @ 14 px
+        //   chat_metadata Figtree Regular 400 @ 12 px
+        //   composer_text Figtree Regular 400 @ 15 px
+        //   technical_value JetBrains Mono Regular 400 @ 12 px
+        use crate::fonts::TypeRole;
+        assert_eq!(TypeRole::ChatMessage.family_name(), crate::fonts::FIGTREE);
+        assert_eq!(TypeRole::ChatMessage.weight(), iced::font::Weight::Normal);
+        assert_eq!(TypeRole::ChatMessage.size_px(), 15.0);
+        assert_eq!(TypeRole::ChatSender.family_name(), crate::fonts::FIGTREE);
+        assert_eq!(TypeRole::ChatSender.weight(), iced::font::Weight::Semibold);
+        assert_eq!(TypeRole::ChatSender.size_px(), 14.0);
+        assert_eq!(TypeRole::ChatMetadata.family_name(), crate::fonts::FIGTREE);
+        assert_eq!(TypeRole::ChatMetadata.weight(), iced::font::Weight::Normal);
+        assert_eq!(TypeRole::ChatMetadata.size_px(), 12.0);
+        assert_eq!(TypeRole::ComposerText.family_name(), crate::fonts::FIGTREE);
+        assert_eq!(TypeRole::ComposerText.weight(), iced::font::Weight::Normal);
+        assert_eq!(TypeRole::ComposerText.size_px(), 15.0);
+        assert_eq!(
+            TypeRole::TechnicalValue.family_name(),
+            crate::fonts::JETBRAINS_MONO
+        );
+        assert_eq!(TypeRole::TechnicalValue.weight(), iced::font::Weight::Normal);
+        assert_eq!(TypeRole::TechnicalValue.size_px(), 12.0);
     }
 
     // ── Direct-chat request state tests ────────────────────────────────
