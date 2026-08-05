@@ -6162,7 +6162,7 @@ fn view_local_profile_block(
     profile_image_handle: Option<iced::widget::image::Handle>,
 ) -> iced::Element<'static, AppMessage> {
     let _timer = PerfTracker::timer("view_local_profile_block", "build");
-    use iced::widget::{container, Column, Row, Space};
+    use iced::widget::{container, Column, Row};
     use iced::{Alignment, Background, Border, Length};
 
     let theme = if dark_mode {
@@ -6217,11 +6217,14 @@ fn view_local_profile_block(
     };
 
     // ── Display name + status ──
+    // The name fills the remaining sidebar width and wraps naturally (glyph
+    // fallback for long peer-key labels) so a long display name stays inside
+    // the sidebar instead of overflowing it (UI-HOME-10).
     let name_col = Column::new()
         .push(
             crate::fonts::type_role_text(crate::fonts::TypeRole::Body, display_name)
-                .width(Length::Shrink)
-                .wrapping(iced::widget::text::Wrapping::None),
+                .width(Length::Fill)
+                .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
         )
         .push(
             crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, status_label)
@@ -6229,16 +6232,17 @@ fn view_local_profile_block(
                 .width(Length::Shrink),
         )
         .spacing(SPACE_2)
-        .align_x(Alignment::Start);
+        .align_x(Alignment::Start)
+        .width(Length::Fill);
 
     // ── Settings gear and add button are now in the sidebar header ──
 
     Row::new()
         .push(avatar)
         .push(name_col)
-        .push(Space::new().width(Length::Fill))
         .spacing(SPACE_8)
         .align_y(Alignment::Center)
+        .width(Length::Fill)
         .into()
 }
 
@@ -24657,7 +24661,8 @@ impl IcedChat {
                             row.name.clone(),
                         )
                         .color(text_system(&theme))
-                        .width(Length::Fill),
+                        .width(Length::Fill)
+                        .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
                     )
                     .push(
                         crate::fonts::type_role_text(
@@ -24670,6 +24675,10 @@ impl IcedChat {
                     .align_x(Alignment::Start)
                     .width(Length::Fill);
                 let row_el = Row::new()
+                    // Zero-width spacer enforces the 60 px two-line row
+                    // rhythm as a MINIMUM; a wrapped display name grows the
+                    // row instead of being clipped (UI-HOME-10).
+                    .push(Space::new().width(Length::Fixed(0.0)).height(Length::Fixed(crate::card_shell::PEER_ROW_HEIGHT)))
                     .push(avatar.build())
                     .push(Space::new().width(Length::Fixed(SPACE_8)))
                     .push(text_col)
@@ -24678,7 +24687,6 @@ impl IcedChat {
                 button(row_el)
                     .on_press(AppMessage::OpenConversation(row.pk))
                     .width(Length::Fill)
-                    .height(Length::Fixed(crate::card_shell::PEER_ROW_HEIGHT))
                     .padding([0.0, SPACE_8])
                     .style(|t, status| iced::widget::button::Style {
                         // Hover surface for the interactive row. Note: iced
@@ -24754,7 +24762,7 @@ impl IcedChat {
     fn view_recent_activity_card(
         dep: &RecentActivityCardData,
     ) -> iced::Element<'static, AppMessage> {
-        use iced::widget::{container, row};
+        use iced::widget::{container, row, Space};
         use iced::{Alignment, Length};
 
         let theme = Self::theme_from_dark(dep.dark_mode);
@@ -24778,50 +24786,47 @@ impl IcedChat {
                 // closure stays 'static (owned values only) — required for
                 // the lazy content builder's `Element<'static, _>` return.
                 let kind = event.kind;
+                // Min-height floor keeps the dense 32 px single-line rhythm;
+                // a wrapped description grows the row instead of being
+                // clipped (UI-HOME-10: no fixed row height, no clip, no
+                // 40-char truncation).
                 container(
-                    row![
-                        icon_svg(activity_icon, TYPO_SM).style(move |t, _| {
-                            iced::widget::svg::Style {
-                                color: Some(if kind == ActivityKind::Online {
-                                    accent_green(t)
-                                } else {
-                                    text_muted(t)
-                                }),
-                            }
-                        }),
-                        // Description takes the row's remaining width and is
-                        // clipped to it, so a long event can never overlap the
-                        // right-aligned timestamp (UI-HOME-08).
-                        container(
-                            crate::fonts::type_role_text(
-                                crate::fonts::TypeRole::Body,
-                                crate::presentation::truncate_with_ellipsis(
-                                    &event.description,
-                                    40,
-                                ),
-                            )
-                            .color(text_system(&theme))
-                            .width(Length::Fill)
-                            .wrapping(iced::widget::text::Wrapping::None),
-                        )
-                        .width(Length::Fill)
-                        .clip(true),
+                row![
+                    Space::new()
+                        .width(Length::Fixed(0.0))
+                        .height(Length::Fixed(ACTIVITY_ROW_HEIGHT)),
+                    icon_svg(activity_icon, TYPO_SM).style(move |t, _| {
+                        iced::widget::svg::Style {
+                            color: Some(if kind == ActivityKind::Online {
+                                accent_green(t)
+                            } else {
+                                text_muted(t)
+                            }),
+                        }
+                    }),
+                    container(
                         crate::fonts::type_role_text(
-                            crate::fonts::TypeRole::Metadata,
-                            ago,
+                            crate::fonts::TypeRole::Body,
+                            event.description.clone(),
                         )
-                        .color(text_muted(&theme)),
-                    ]
-                    .spacing(SPACE_6)
-                    .align_y(Alignment::Center),
-                )
-                .height(Length::Fixed(ACTIVITY_ROW_HEIGHT))
-                .width(Length::Fill)
-                // Same horizontal inset as the Online Peers rows so the rail
-                // reads with one consistent rhythm (UI-HOME-08).
-                .padding([0.0, SPACE_8])
-                .align_y(Alignment::Center)
-                .into()
+                        .color(text_system(&theme))
+                        .width(Length::Fill)
+                        .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+                    )
+                    .width(Length::Fill),
+                    crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::Metadata,
+                        ago,
+                    )
+                    .color(text_muted(&theme)),
+                ]
+                .spacing(SPACE_6)
+                .align_y(Alignment::Center),
+            )
+            .width(Length::Fill)
+            .padding([0.0, SPACE_8])
+            .align_y(Alignment::Center)
+            .into()
             })
             .collect();
 
@@ -24861,6 +24866,12 @@ impl IcedChat {
                 };
                 container(
                     row![
+                        // Min-height floor keeps the 48 px single-line rhythm;
+                        // a long tunnel name / endpoint wraps and grows the
+                        // row instead of being clipped (UI-HOME-10).
+                        Space::new()
+                            .width(Length::Fixed(0.0))
+                            .height(Length::Fixed(crate::card_shell::CARD_ROW_HEIGHT)),
                         icon_svg(ICON_LOCK, TYPO_SM).style(move |t, _| {
                             iced::widget::svg::Style {
                                 color: Some(status_color),
@@ -24872,7 +24883,8 @@ impl IcedChat {
                                     crate::fonts::TypeRole::Body,
                                     tunnel.name.clone(),
                                 )
-                                .color(text_system(&theme)),
+                                .color(text_system(&theme))
+                                .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
                             )
                             .push(
                                 // host:port — genuine technical value → JetBrains Mono.
@@ -24880,11 +24892,12 @@ impl IcedChat {
                                     crate::fonts::TypeRole::TechnicalValue,
                                     tunnel.endpoint.clone(),
                                 )
-                                .color(text_muted(&theme)),
+                                .color(text_muted(&theme))
+                                .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
                             )
                             .spacing(SPACE_2)
-                            .align_x(Alignment::Start),
-                        Space::new().width(Length::Fill),
+                            .align_x(Alignment::Start)
+                            .width(Length::Fill),
                         crate::fonts::type_role_text(
                             crate::fonts::TypeRole::Metadata,
                             status,
@@ -24904,7 +24917,6 @@ impl IcedChat {
                     .spacing(SPACE_6)
                     .align_y(Alignment::Center),
                 )
-                .height(Length::Fixed(crate::card_shell::CARD_ROW_HEIGHT))
                 .width(Length::Fill)
                 .align_y(Alignment::Center)
                 .into()
@@ -25060,7 +25072,10 @@ impl IcedChat {
             1.2,
         )
         .color(crate::design_tokens::text_primary(&theme))
-        .width(Length::Fill);
+        .width(Length::Fill)
+        // A long display name (e.g. a bare peer key) must wrap inside the
+        // header instead of overflowing it (UI-HOME-10).
+        .wrapping(iced::widget::text::Wrapping::WordOrGlyph);
         // Subtitle — Source Sans 3 Regular at the UI-HOME-02 size token
         // (16 px; the canonical `body` role is 15 px, plan band 15–17 px).
         let welcome_line = crate::fonts::type_role_text(
@@ -25150,11 +25165,15 @@ impl IcedChat {
         let mut hero_text = Column::new()
             .push(
                 // Connection heading — section_title (Source Sans 3 SemiBold 20).
+                // Fills the hero text column and glyph-wraps a long degraded /
+                // offline reason instead of overflowing the card (UI-HOME-10).
                 crate::fonts::type_role_text(
                     crate::fonts::TypeRole::SectionTitle,
                     headline.clone(),
                 )
-                .color(hero_color(&theme)),
+                .color(hero_color(&theme))
+                .width(Length::Fill)
+                .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
             )
             .push(Space::new().height(Length::Fixed(SPACE_4)))
             .push(
@@ -25351,15 +25370,20 @@ impl IcedChat {
                             crate::fonts::TypeRole::BodyEmphasised,
                             status_label.clone(),
                         )
-                        .color(status_color(&theme)),
+                        .color(status_color(&theme))
+                        .width(Length::Fill)
+                        .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
                     )
                     .push(
                         crate::fonts::type_role_text(
                             crate::fonts::TypeRole::SupportingText,
                             status_detail,
                         )
-                        .color(text_muted(&theme)),
-                    ),
+                        .color(text_muted(&theme))
+                        .width(Length::Fill)
+                        .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+                    )
+                    .width(Length::Fill),
             )
             .spacing(0)
             .align_y(Alignment::Center)
@@ -25446,7 +25470,9 @@ impl IcedChat {
                     crate::fonts::TypeRole::SupportingText,
                     lobby_parts.join("  ·  "),
                 )
-                .color(text_muted(&theme)),
+                .color(text_muted(&theme))
+                .width(Length::Fill)
+                .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
             )
             .spacing(0)
             .align_y(Alignment::Center)
@@ -25481,14 +25507,11 @@ impl IcedChat {
                         .push(
                             crate::fonts::type_role_text(
                                 crate::fonts::TypeRole::Body,
-                                crate::presentation::truncate_with_ellipsis(
-                                    &event.message,
-                                    40,
-                                ),
+                                event.message.clone(),
                             )
                             .color(text_system(&theme))
                             .width(Length::Fill)
-                            .wrapping(iced::widget::text::Wrapping::None),
+                            .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
                         )
                         .push(
                             crate::fonts::type_role_text(
@@ -37481,6 +37504,134 @@ mod tests {
         assert!(
             !home.contains(".padding([SPACE_10, SPACE_12])"),
             "status pill padding must not use off-scale SPACE_10"
+        );
+    }
+
+    // ── UI-HOME-10: overflow / clipping audit regression guards ──
+    // The home component tree must size rows to their content: no fixed
+    // row heights that clip wrapped names/endpoints, no hidden-overflow
+    // masks (truncate + clip + Wrapping::None), and long technical
+    // identifiers (peer keys, JetBrains Mono endpoints) must wrap at glyph
+    // level so nothing overflows horizontally.
+
+    #[test]
+    fn home_rail_rows_are_content_driven_not_fixed_height() {
+        // UI-HOME-10: rail-card rows must not use a fixed height that clips
+        // wrapped content. The approved rhythm (60 / 32 / 48 px) is kept as
+        // a MINIMUM via a zero-width spacer, never as a fixed row height.
+        let src = include_str!("app.rs");
+        let peers = method_source(src, "fn view_online_peers_card(", "fn view_recent_activity_card(");
+        assert!(
+            !peers.contains(".height(Length::Fixed(crate::card_shell::PEER_ROW_HEIGHT))\n"),
+            "online-peer rows must not force a fixed 60 px height (clips a wrapped display name)"
+        );
+        assert!(
+            peers.contains(".height(Length::Fixed(crate::card_shell::PEER_ROW_HEIGHT))"),
+            "online-peer rows must keep the 60 px rhythm via a zero-width min-height spacer"
+        );
+        let activity = method_source(src, "fn view_recent_activity_card(", "fn view_tunnels_card(");
+        assert!(
+            !activity.contains(".height(Length::Fixed(ACTIVITY_ROW_HEIGHT))\n"),
+            "recent-activity rows must not force a fixed 32 px height (clips a wrapped description)"
+        );
+        assert!(
+            activity.contains(".height(Length::Fixed(ACTIVITY_ROW_HEIGHT))"),
+            "recent-activity rows must keep the 32 px rhythm via a zero-width min-height spacer"
+        );
+        let tunnels = method_source(src, "fn view_tunnels_card(", "fn view_main_empty_state(");
+        assert!(
+            !tunnels.contains(".height(Length::Fixed(crate::card_shell::CARD_ROW_HEIGHT))\n"),
+            "tunnel rows must not force a fixed 48 px height (clips a wrapped endpoint)"
+        );
+        assert!(
+            tunnels.contains(".height(Length::Fixed(crate::card_shell::CARD_ROW_HEIGHT))"),
+            "tunnel rows must keep the 48 px rhythm via a zero-width min-height spacer"
+        );
+    }
+
+    #[test]
+    fn home_rail_descriptions_wrap_naturally_not_truncated_or_clipped() {
+        // UI-HOME-10: recent-activity and mesh-event descriptions must wrap
+        // (WordOrGlyph) instead of being truncated to 40 chars and clipped.
+        // Hidden overflow must not mask defects.
+        let src = include_str!("app.rs");
+        let activity = method_source(src, "fn view_recent_activity_card(", "fn view_tunnels_card(");
+        assert!(
+            !activity.contains("truncate_with_ellipsis"),
+            "recent-activity descriptions must not be truncated (hides content)"
+        );
+        assert!(
+            !activity.contains("Wrapping::None"),
+            "recent-activity descriptions must wrap, not force single-line"
+        );
+        assert!(
+            !activity.contains(".clip(true)"),
+            "recent-activity descriptions must not hide overflow with clipping"
+        );
+        assert!(
+            activity.contains("Wrapping::WordOrGlyph"),
+            "recent-activity descriptions must use glyph-fallback wrapping for long tokens"
+        );
+        let home = method_source(src, "fn view_chat_list_content(", "fn view_chat_panel(");
+        let events = home.split("Recent events").nth(1).unwrap_or("");
+        assert!(
+            !events.contains("truncate_with_ellipsis"),
+            "mesh-event messages must not be truncated (hides content)"
+        );
+        assert!(
+            !events.contains("Wrapping::None"),
+            "mesh-event messages must wrap, not force single-line"
+        );
+    }
+
+    #[test]
+    fn home_long_technical_text_wraps_at_glyph_level() {
+        // UI-HOME-10: long unbroken identifiers (peer keys, JetBrains Mono
+        // endpoints, status details) must wrap at word-or-glyph level inside
+        // their fill containers instead of overflowing their rows.
+        let src = include_str!("app.rs");
+        let peers = method_source(src, "fn view_online_peers_card(", "fn view_recent_activity_card(");
+        assert!(
+            peers.contains("Wrapping::WordOrGlyph"),
+            "peer display names must glyph-wrap so long peer keys stay inside the row"
+        );
+        let tunnels = method_source(src, "fn view_tunnels_card(", "fn view_main_empty_state(");
+        assert!(
+            tunnels.contains("Wrapping::WordOrGlyph"),
+            "tunnel names/endpoints must glyph-wrap so JetBrains Mono values stay inside the row"
+        );
+        let home = method_source(src, "fn view_chat_list_content(", "fn view_chat_panel(");
+        assert!(
+            home.contains("Wrapping::WordOrGlyph"),
+            "greeting / hero / mesh status / lobby text must glyph-wrap long values"
+        );
+        assert!(
+            home.contains("status_detail")
+                && home[home.find("status_detail").unwrap()..].contains(".width(Length::Fill)"),
+            "mesh status detail must be width-Fill so it wraps instead of overflowing the row"
+        );
+    }
+
+    #[test]
+    fn sidebar_identity_name_wraps_inside_sidebar() {
+        // UI-HOME-10: the pinned sidebar identity block must not use a
+        // non-wrapping shrink-width display name that overflows the sidebar;
+        // a long local label wraps inside the sidebar width.
+        let src = include_str!("app.rs");
+        let profile =
+            method_source(src, "fn view_local_profile_block(", "fn profile_identity_card(");
+        assert!(
+            !profile.contains("Wrapping::None"),
+            "identity display name must wrap, not overflow the sidebar"
+        );
+        assert!(
+            profile.contains("Wrapping::WordOrGlyph"),
+            "identity display name must glyph-wrap long peer-key labels"
+        );
+        assert!(
+            profile.contains("name_col")
+                && profile[profile.find("name_col").unwrap()..].contains(".width(Length::Fill)"),
+            "identity name column must be width-Fill so the name wraps inside the sidebar"
         );
     }
 

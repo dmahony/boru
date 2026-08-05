@@ -1,0 +1,8 @@
+geometry after  (OCR word boxes; long display name must wrap, not clip)
+----------------------------------------------
+ONLINE             left=969   top=225   w=58    h=12
+RECENT             left=358   top=651   w=38    h=8
+TUNNELS            left=969   top=747   w=72    h=12
+MESH               left=?     top=?     w=?     h=?
+a-very             left=570   top=36    w=504   h=31
+Boru               left=417   top=152   w=29    h=10
