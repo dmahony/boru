@@ -10,7 +10,7 @@
 //! surfaced through the loading / empty / error dialog states and are reported
 //! as unavailable in the support summary.
 use iced::font::Weight;
-use iced::widget::{button, container, scrollable, text, text_input, Column, Row, Space};
+use iced::widget::{button, container, text, text_input, Column, Row, Space};
 use iced::{Alignment, Length};
 
 use crate::app::{
@@ -526,7 +526,7 @@ where
             .into_iter()
             .fold(Column::new().spacing(SPACE_4), |col, row| col.push(row));
         content = content.push(
-            scrollable(rows)
+            crate::ui_components::gutter_scrollable(rows)
                 .height(Length::Fixed(DIALOG_MAX_HEIGHT - 150.0))
                 .width(Length::Fill),
         );

@@ -58,7 +58,7 @@
 //! ```
 
 use iced::widget::{
-    button, checkbox, combo_box, container, pick_list, scrollable, text, text_editor, toggler,
+    button, checkbox, combo_box, container, pick_list, text, text_editor, toggler,
     Column, Row, Space,
 };
 use iced::{Alignment, Background, Border, Color, Element, Length, Theme};
@@ -856,7 +856,7 @@ pub fn peer_list<'a>(
             None => Space::new().width(Length::Fill).height(Length::Shrink).into(),
         }
     } else {
-        scrollable(
+        crate::ui_components::gutter_scrollable(
             Column::with_children(rows)
                 .spacing(design_tokens::SPACE_4)
                 .width(Length::Fill),

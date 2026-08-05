@@ -3,7 +3,7 @@
 //! Shows every primitive from `ui_components` in every applicable state.
 //! Accessible only via `Screen::Gallery` (Ctrl+Shift+G in debug builds).
 
-use iced::widget::{container, scrollable, text, Column, Row, Space};
+use iced::widget::{container, text, Column, Row, Space};
 use iced::{Alignment, Element, Length, Theme};
 
 use crate::app::AppMessage;
@@ -96,7 +96,7 @@ pub fn view_gallery() -> Element<'static, AppMessage> {
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_32)))
         .spacing(0);
 
-    scrollable(
+    crate::ui_components::gutter_scrollable(
         container(content)
             .padding(design_tokens::SPACE_24)
             .width(Length::Fill),

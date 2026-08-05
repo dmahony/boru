@@ -19,7 +19,7 @@
 //! The shell is intentionally data-agnostic: it never constructs list rows
 //! and holds no sample data — the caller owns the children.
 
-use iced::widget::{button, container, scrollable, text, Column, Row, Space};
+use iced::widget::{button, container, text, Column, Row, Space};
 use iced::{Alignment, Background, Border, Element, Length, Theme};
 
 use crate::design_tokens;
@@ -181,7 +181,7 @@ impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
                     .into()
             }
         } else {
-            scrollable(
+            crate::ui_components::gutter_scrollable(
                 Column::with_children(self.children)
                     .spacing(self.row_spacing)
                     .width(Length::Fill),

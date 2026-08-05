@@ -1409,7 +1409,9 @@ impl<'a> SidebarSectionHeader<'a> {
 
         toggle_row = toggle_row.push(Space::new().width(Length::Fill).height(Length::Shrink));
 
-        let label_button = button(toggle_row)
+        let on_toggle = self.on_toggle;
+
+        let mut label_button = button(toggle_row)
             .width(Length::Fill)
             .padding([design_tokens::SPACE_6, design_tokens::SPACE_12])
             .style(move |t, status| {
@@ -1432,6 +1434,13 @@ impl<'a> SidebarSectionHeader<'a> {
                     ..Default::default()
                 }
             });
+
+        // The whole label row is the toggle control.  `on_toggle` was stored
+        // but never attached as `on_press`, so the header rendered as an
+        // inert button and sidebar sections could not be collapsed.
+        if let Some(msg) = on_toggle {
+            label_button = label_button.on_press(msg);
+        }
 
         let mut header_row = Row::new().push(label_button);
 
@@ -1471,6 +1480,28 @@ impl<'a> SidebarSectionHeader<'a> {
             .width(Length::Fill)
             .into()
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 17b. SCROLLABLE WITH EMBEDDED SCROLLBAR
+// ═══════════════════════════════════════════════════════════════════════
+
+/// A vertical `Scrollable` whose scrollbar is embedded in the layout instead
+/// of floating over the content.
+///
+/// Iced 0.14 draws the scrollbar over the content by default (`spacing:
+/// None`), which covers the right edge of bubbles, cards, and rows in chat
+/// and every other list.  Setting `spacing` embeds the scrollbar: it takes
+/// layout space of its own (10 px track + spacing), so content is never
+/// obscured, and the gutter collapses again when the content fits.
+pub fn gutter_scrollable<'a, Message>(
+    content: impl Into<Element<'a, Message>>,
+) -> iced::widget::Scrollable<'a, Message> {
+    use iced::widget::scrollable;
+
+    scrollable(content).direction(scrollable::Direction::Vertical(
+        scrollable::Scrollbar::default().spacing(design_tokens::SPACE_4),
+    ))
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -2754,6 +2785,20 @@ mod tests {
             Some((icon, _msg)) => assert_eq!(icon, Icon::Plus),
             None => panic!("expected an add action to be stored"),
         }
+    }
+
+    #[test]
+    fn sidebar_section_header_builds_with_toggle() {
+        // Regression: `on_toggle` was stored but never attached as
+        // `on_press`, so the header rendered as an inert button and sidebar
+        // sections could not be collapsed.  Building with a toggle must not
+        // panic and must produce an element (the button now carries a press
+        // handler).
+        let el: Element<'static, AppMessage> = SidebarSectionHeader::new("CHATS")
+            .collapsed(true)
+            .on_toggle(AppMessage::ToggleSidebarSectionCollapsed(0))
+            .build(&Theme::Light);
+        let _ = el;
     }
 
     #[test]

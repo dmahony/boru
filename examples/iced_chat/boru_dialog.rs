@@ -26,7 +26,7 @@
 //! iced::widget::stack![base, overlay].into()
 //! ```
 
-use iced::widget::{button, container, scrollable, text, Column, Row, Space};
+use iced::widget::{button, container, text, Column, Row, Space};
 use iced::{Alignment, Background, Element, Length, Theme};
 
 use crate::design_tokens;
@@ -212,7 +212,7 @@ impl<'a, Message: Clone + 'a> BoruDialog<'a, Message> {
             .spacing(design_tokens::SPACE_12)
             .width(Length::Fill);
         let body_el: Element<'a, Message> = match max_body_height {
-            Some(height) => scrollable(body_column)
+            Some(height) => crate::ui_components::gutter_scrollable(body_column)
                 .height(Length::Fixed(height))
                 .width(Length::Fill)
                 .into(),

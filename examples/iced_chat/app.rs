@@ -2750,22 +2750,47 @@ struct Prebuilt(
     std::rc::Rc<std::cell::RefCell<iced::Element<'static, AppMessage>>>,
 );
 
+/// Tree state for [`Prebuilt`]: remembers which cached element the child
+/// tree was built from so `diff` can reconcile it when the pre-warm cache
+/// serves a freshly rebuilt element.
+struct PrebuiltState(
+    std::rc::Rc<std::cell::RefCell<iced::Element<'static, AppMessage>>>,
+);
+
 impl iced::advanced::Widget<AppMessage, iced::Theme, iced::Renderer> for Prebuilt {
     fn tag(&self) -> iced::advanced::widget::tree::Tag {
-        self.0.borrow().as_widget().tag()
+        // Stable tag for the wrapper itself — deliberately NOT forwarded
+        // from the inner content. Forwarding made iced treat a Prebuilt
+        // wrapping e.g. a Container as the same widget as a plain live
+        // Container at that tree position; when the position was occupied
+        // by a live view (state `State::None`) and then served a
+        // pre-warmed element, `diff` downcast a stateless tree → panic
+        // ("Downcast on stateless state" on screen switch to Settings).
+        struct PrebuiltTag;
+        iced::advanced::widget::tree::Tag::of::<PrebuiltTag>()
     }
 
     fn state(&self) -> iced::advanced::widget::tree::State {
-        iced::advanced::widget::tree::State::None
+        iced::advanced::widget::tree::State::new(PrebuiltState(self.0.clone()))
     }
 
     fn children(&self) -> Vec<iced::advanced::widget::tree::Tree> {
         vec![iced::advanced::widget::tree::Tree::new(self.0.borrow().as_widget())]
     }
 
-    fn diff(&self, _tree: &mut iced::advanced::widget::tree::Tree) {
-        // The cached element is the same Rc every frame; leaving the child
-        // tree untouched preserves the widget state inside it.
+    fn diff(&self, tree: &mut iced::advanced::widget::tree::Tree) {
+        let state = tree.state.downcast_mut::<PrebuiltState>();
+        if !std::rc::Rc::ptr_eq(&state.0, &self.0) {
+            // The cached element was replaced (invalidate_prewarm +
+            // pre_warm_next_screen rebuilt it, possibly with a different
+            // structure). Reconcile the child tree against the new content
+            // so per-widget state (e.g. Text paragraphs) matches the new
+            // layout; otherwise iced downcasts stale state and panics.
+            state.0 = self.0.clone();
+            tree.diff_children(std::slice::from_ref(&self.0.borrow().as_widget()));
+        }
+        // Same Rc as last frame: the cached element is unchanged, so leave
+        // the child tree untouched to preserve widget state inside it.
     }
 
     fn size(&self) -> iced::Size<iced::Length> {
@@ -21797,10 +21822,6 @@ impl IcedChat {
         };
 
         let content = column![
-            // App icon — SVG speech bubble
-            icon_svg(ICON_CHAT, 72.0).style(|t, _| iced::widget::svg::Style {
-                color: Some(accent_primary(t)),
-            }),
             Space::new().height(Length::Fixed(20.0)),
             // App name — Raleway ExtraBold wordmark
             boru_logo(LogoSize::Large).color(text_color).into_element(),
@@ -22477,7 +22498,7 @@ impl IcedChat {
     /// scrollable collapsible sections in the middle;
     /// pinned utility row at the bottom.
     fn view_sidebar(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{container, rule, scrollable, text, Column, Row, Space};
+        use iced::widget::{container, rule, text, Column, Row, Space};
         use iced::{Alignment, Length};
 
         let theme = self.theme();
@@ -22654,7 +22675,7 @@ impl IcedChat {
             sections = sections.push(self.view_sidebar_requests());
         }
 
-        let sections_scroll = scrollable(sections)
+        let sections_scroll = crate::ui_components::gutter_scrollable(sections)
             .width(Length::Fill)
             .height(Length::Fill);
 
@@ -24662,7 +24683,7 @@ impl IcedChat {
     /// [`ChatListDependency`] so `iced::widget::lazy` can cache the whole
     /// screen while any of its rendered slices is unchanged.
     fn view_chat_list_content(dep: &ChatListDependency) -> iced::Element<'static, AppMessage> {
-        use iced::widget::{button, container, row, scrollable, text, Column, Row, Space};
+        use iced::widget::{button, container, row, text, Column, Row, Space};
         use iced::{Alignment, Length};
 
         let window_width = dep.window_width_bits as f32 / 100.0;
@@ -25154,7 +25175,7 @@ impl IcedChat {
             .spacing(0)
             .width(Length::Fill);
 
-        scrollable(
+        crate::ui_components::gutter_scrollable(
             container(col)
                 .padding(content_padding)
                 .width(Length::Fill)
@@ -25569,7 +25590,7 @@ impl IcedChat {
 
     /// Render the emoji picker panel with commonly used emojis.
     fn view_emoji_picker(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, column, container, row, text, Scrollable};
+        use iced::widget::{button, column, container, row, text};
 
         let theme = self.theme();
         const EMOJIS: &[&str] = &[
@@ -25606,7 +25627,7 @@ impl IcedChat {
             grid = grid.push(r);
         }
 
-        let scroll = Scrollable::new(grid).height(iced::Length::Fixed(160.0));
+        let scroll = crate::ui_components::gutter_scrollable(grid).height(iced::Length::Fixed(160.0));
 
         container(column![header, scroll].spacing(SPACE_4).padding(SPACE_8))
             .style(move |t| iced::widget::container::Style {
@@ -25624,7 +25645,7 @@ impl IcedChat {
 
     /// Render the GIF picker panel with common GIF URLs and search/custom input.
     fn view_gif_picker(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, column, container, row, text, text_input, Scrollable};
+        use iced::widget::{button, column, container, row, text, text_input};
 
         let theme = self.theme();
         let close_btn = iced::widget::tooltip::Tooltip::new(
@@ -25722,7 +25743,7 @@ impl IcedChat {
             }
         }
 
-        let scroll = Scrollable::new(results_col).height(iced::Length::Fixed(300.0));
+        let scroll = crate::ui_components::gutter_scrollable(results_col).height(iced::Length::Fixed(300.0));
 
         container(
             column![header, search_row, scroll]
@@ -26140,7 +26161,7 @@ impl IcedChat {
     /// In-conversation search panel — a compact popover listing messages that
     /// match the current query. Each result copies the full message text.
     fn view_chat_search_panel(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, column, container, row, scrollable, text, text_input};
+        use iced::widget::{button, column, container, row, text, text_input};
         use iced::{Alignment, Length};
 
         let theme = self.theme();
@@ -26228,7 +26249,7 @@ impl IcedChat {
             }
         }
 
-        let content = column![header, input, summary, scrollable(results)]
+        let content = column![header, input, summary, crate::ui_components::gutter_scrollable(results)]
             .spacing(SPACE_6)
             .padding(SPACE_10);
 
@@ -26254,7 +26275,7 @@ impl IcedChat {
 
     /// Render the group member list overlay — showing avatar, display name, role, and presence.
     fn view_group_member_list(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, column, container, row, scrollable, text, Space};
+        use iced::widget::{button, column, container, row, text, Space};
         use iced::{Alignment, Length};
 
         // Resolve the group via conversation store -> group_id -> storage -> list_group_members.
@@ -26396,7 +26417,7 @@ impl IcedChat {
                     })
                     .collect::<Vec<iced::Element<'_, AppMessage>>>();
 
-                scrollable(column(member_rows).spacing(SPACE_2))
+                crate::ui_components::gutter_scrollable(column(member_rows).spacing(SPACE_2))
                     .height(Length::Fill)
                     .into()
             }
@@ -26581,7 +26602,7 @@ impl IcedChat {
     /// For direct conversations: contact info, connection, security, tools.
     /// For groups: group info panel with name, description, members, actions.
     fn view_details_panel(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, column, container, row, scrollable, text, Space};
+        use iced::widget::{button, column, container, row, text, Space};
         use iced::{Alignment, Length};
 
         let theme = self.theme().clone();
@@ -26813,7 +26834,7 @@ impl IcedChat {
         ]
         .spacing(SPACE_4);
 
-        container(scrollable(panel_body))
+        container(crate::ui_components::gutter_scrollable(panel_body))
             .width(Length::Fill)
             .height(Length::Fill)
             .padding([SPACE_8, SPACE_8])
@@ -26823,7 +26844,7 @@ impl IcedChat {
 
     /// Direct-chat details panel — contact info, connection, security, tools.
     fn view_details_panel_direct(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, column, container, row, scrollable, text, Space};
+        use iced::widget::{button, column, container, row, text, Space};
         use iced::{Alignment, Length};
 
         let theme = self.theme();
@@ -27152,7 +27173,7 @@ impl IcedChat {
         ]
         .spacing(SPACE_4);
 
-        container(scrollable(panel_body))
+        container(crate::ui_components::gutter_scrollable(panel_body))
             .width(Length::Fill)
             .height(Length::Fill)
             .padding([SPACE_8, SPACE_8])
@@ -27162,7 +27183,7 @@ impl IcedChat {
 
     /// Right-side group info panel — shown when the active conversation is a group.
     fn view_group_info_panel(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, column, container, row, scrollable, text, Space};
+        use iced::widget::{button, column, container, row, text, Space};
         use iced::{Alignment, Length};
 
         let theme = self.theme();
@@ -27393,7 +27414,7 @@ impl IcedChat {
 
         full_panel = full_panel.push(Space::new().height(Length::Fill));
 
-        container(scrollable(full_panel))
+        container(crate::ui_components::gutter_scrollable(full_panel))
             .width(Length::Fill)
             .height(Length::Fill)
             .padding([SPACE_8, SPACE_8])
@@ -27461,7 +27482,7 @@ impl IcedChat {
                 total_image_bytes,
                 image_entry_count,
             });
-            return scrollable(col)
+            return crate::ui_components::gutter_scrollable(col)
                 .id(CHAT_LOG)
                 .anchor_bottom()
                 .width(iced::Length::Fill)
@@ -28219,7 +28240,7 @@ impl IcedChat {
         // the user has scrolled up, a top anchor keeps the reading position
         // fixed while live entries append below the viewport.  The empty-state
         // scrollable above keeps `anchor_bottom` because it has no content.
-        scrollable(col)
+        crate::ui_components::gutter_scrollable(col)
             .id(CHAT_LOG)
             .width(iced::Length::Fill)
             .height(iced::Length::Fill)
@@ -28397,7 +28418,7 @@ impl IcedChat {
     }
 
     fn view_help(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, container, scrollable, text, Column, Space};
+        use iced::widget::{button, container, text, Column, Space};
         use iced::{Alignment, Length};
 
         // ── Header: title + accessible close button ──
@@ -28472,7 +28493,7 @@ impl IcedChat {
             .width(Length::Fill);
 
         container(
-            scrollable(dialog_content)
+            crate::ui_components::gutter_scrollable(dialog_content)
                 .width(Length::Fill)
                 .height(Length::Fill),
         )
@@ -28639,7 +28660,7 @@ impl IcedChat {
         profile_image_handle: Option<iced::widget::image::Handle>,
     ) -> iced::Element<'static, AppMessage> {
         use iced::widget::{
-            button, column, container, lazy, row, scrollable, text, Column, Row, Space,
+            button, column, container, lazy, row, text, Column, Row, Space,
         };
         use iced::{Alignment, Length};
 
@@ -28908,7 +28929,7 @@ impl IcedChat {
         .width(Length::Fill)
         .max_width(680.0);
 
-        let scrollable = scrollable(container(body).width(Length::Fill).center_x(Length::Fill))
+        let scrollable = crate::ui_components::gutter_scrollable(container(body).width(Length::Fill).center_x(Length::Fill))
             .width(Length::Fill)
             .height(Length::Fill);
 
@@ -28919,7 +28940,7 @@ impl IcedChat {
     }
 
     fn view_settings_screen_cached(key: &SettingsCachedKey) -> iced::Element<'static, AppMessage> {
-        use iced::widget::{button, container, row, scrollable, text, Column, Row, Space};
+        use iced::widget::{button, container, row, text, Column, Row, Space};
         use iced::{Alignment, Color, Length};
 
         let appearance_theme = if key.dark_mode { "Dark" } else { "Light" };
@@ -29211,7 +29232,7 @@ impl IcedChat {
             .spacing(SPACE_6)
             .width(Length::Fill);
 
-        let scrollable = scrollable(
+        let scrollable = crate::ui_components::gutter_scrollable(
             container(content)
                 .width(Length::Fill)
                 .center_x(Length::Fill),
@@ -29287,7 +29308,7 @@ impl IcedChat {
     /// Static renderer for the Friend Requests screen. Reads only from the
     /// [`FriendRequestsDependency`] snapshot.
     fn view_friend_requests_content(dep: &FriendRequestsDependency) -> iced::Element<'static, AppMessage> {
-        use iced::widget::{button, container, row, scrollable, text, text_input, Column, Space};
+        use iced::widget::{button, container, row, text, text_input, Column, Space};
         use iced::{Alignment, Color, Length};
 
         let theme = Self::theme_from_dark(dep.dark_mode);
@@ -29511,7 +29532,7 @@ impl IcedChat {
             );
         }
 
-        scrollable(container(content).width(Length::Fill).padding(SPACE_16))
+        crate::ui_components::gutter_scrollable(container(content).width(Length::Fill).padding(SPACE_16))
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
@@ -30085,7 +30106,7 @@ impl IcedChat {
     fn view_peer_profile_content(
         dep: &PeerProfileDependency,
     ) -> iced::Element<'static, AppMessage> {
-        use iced::widget::{button, container, scrollable, text, Column, Row, Space};
+        use iced::widget::{button, container, text, Column, Row, Space};
         use iced::{Alignment, Length};
 
         let display_name = dep.display_name.clone();
@@ -30130,7 +30151,7 @@ impl IcedChat {
             .push(body)
             .push(Space::new().height(Length::Fill));
 
-        container(scrollable(content))
+        container(crate::ui_components::gutter_scrollable(content))
             .width(Length::Fill)
             .height(Length::Fill)
             .style(container_primary)
@@ -30394,7 +30415,7 @@ impl IcedChat {
             .push(file_rows)
             .push(Space::new().height(Length::Fill));
 
-        container(scrollable(content).on_scroll(|v: scrollable::Viewport| {
+        container(crate::ui_components::gutter_scrollable(content).on_scroll(|v: scrollable::Viewport| {
             AppMessage::CatalogueScrolled(v.absolute_offset().y, v.bounds().height)
         }))
         .width(Length::Fill)
@@ -30594,7 +30615,7 @@ impl IcedChat {
         use crate::dashboard_view_model::{
             project_validated_remote_shared_file, remote_item_status, RemoteItemStatus,
         };
-        use iced::widget::{button, container, scrollable, text, Column, Row, Space};
+        use iced::widget::{button, container, text, Column, Row, Space};
         use iced::{Alignment, Length};
 
         let theme = Self::theme_from_dark(self.dark_mode);
@@ -30852,7 +30873,7 @@ impl IcedChat {
                     .style(text_muted_style),
                 )
                 .push(Space::new().height(SPACE_8))
-                .push(scrollable(rows).height(Length::Fill))
+                .push(crate::ui_components::gutter_scrollable(rows).height(Length::Fill))
                 .spacing(SPACE_4),
         )
         .width(Length::Fill)
@@ -31270,7 +31291,7 @@ impl IcedChat {
     fn view_recent_download_activity_card(
         dep: &RecentActivityCardDependency,
     ) -> iced::Element<'static, AppMessage> {
-        use iced::widget::{button, container, scrollable, text, Column, Row, Space};
+        use iced::widget::{button, container, text, Column, Row, Space};
         use iced::{Alignment, Background, Border, Length};
 
         let theme = Self::theme_from_dark(dep.dark_mode);
@@ -31369,7 +31390,7 @@ impl IcedChat {
             .padding([SPACE_6, 0.0])
             .into()
         } else {
-            scrollable(
+            crate::ui_components::gutter_scrollable(
                 Column::with_children(activity_rows)
                     .spacing(SPACE_2)
                     .width(Length::Fill),
@@ -31960,14 +31981,14 @@ impl IcedChat {
     /// load flags, search query, or sort actually change.
     fn view_downloads_card(dep: &DownloadsCardDependency) -> iced::Element<'static, AppMessage> {
         use crate::dashboard_view_model::LocalFileState;
-        use iced::widget::{button, container, scrollable, text, Column, Row, Space};
+        use iced::widget::{button, container, text, Column, Row, Space};
         use iced::{Alignment, Background, Border, Length};
 
         let theme = Self::theme_from_dark(dep.dark_mode);
 
         // Loading skeleton on first open.
         if !dep.history_loaded && dep.history_error.is_none() {
-            return scrollable(
+            return crate::ui_components::gutter_scrollable(
                 Column::new()
                     .push(dashboard_card(
                         crate::ui_components::LoadingSkeleton::new(4)
@@ -31987,7 +32008,7 @@ impl IcedChat {
             let retry = crate::ui_components::InlineError::new(error)
                 .on_retry(AppMessage::DashboardDownloadedRefresh)
                 .build(&theme);
-            return scrollable(
+            return crate::ui_components::gutter_scrollable(
                 Column::new()
                     .push(dashboard_card(retry))
                     .spacing(SPACE_16)
@@ -32099,7 +32120,7 @@ impl IcedChat {
             .spacing(0)
             .width(Length::Fill);
 
-        scrollable(dashboard_card(body.into())).width(Length::Fill).height(Length::Fill).into()
+        crate::ui_components::gutter_scrollable(dashboard_card(body.into())).width(Length::Fill).height(Length::Fill).into()
     }
 
     /// One row of the Downloaded tab. Static (no `&self`) so it can run inside
@@ -32280,7 +32301,7 @@ impl IcedChat {
         use crate::downloading_view_model::{
             format_started, incoming_row, sort_incoming_rows, IncomingState,
         };
-        use iced::widget::{button, container, scrollable, text, Column, Row, Space};
+        use iced::widget::{button, container, text, Column, Row, Space};
         use iced::{Alignment, Background, Border, Length};
 
         let theme = Self::theme_from_dark(self.dark_mode);
@@ -32380,7 +32401,7 @@ impl IcedChat {
             .spacing(0)
             .width(Length::Fill);
 
-        scrollable(dashboard_card(body.into()))
+        crate::ui_components::gutter_scrollable(dashboard_card(body.into()))
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
@@ -32605,14 +32626,14 @@ impl IcedChat {
     fn view_activity_log(&self) -> iced::Element<'_, AppMessage> {
         use crate::activity_log_view_model::{filter_activity_log, paginate_activity_log};
         use crate::ui_components::{badge, badge_owned, BadgeKind, TableHeaderRow};
-        use iced::widget::{button, container, scrollable, text, Column, Row, Space};
+        use iced::widget::{button, container, text, Column, Row, Space};
         use iced::{Alignment, Background, Border, Length};
 
         let theme = Self::theme_from_dark(self.dark_mode);
 
         // Loading skeleton on first open.
         if !self.activity_log_loaded && self.activity_log_error.is_none() {
-            return scrollable(
+            return crate::ui_components::gutter_scrollable(
                 Column::new()
                     .push(dashboard_card(
                         crate::ui_components::LoadingSkeleton::new(5)
@@ -32632,7 +32653,7 @@ impl IcedChat {
             let retry = crate::ui_components::InlineError::new(error)
                 .on_retry(AppMessage::ActivityLogRefresh)
                 .build(&theme);
-            return scrollable(
+            return crate::ui_components::gutter_scrollable(
                 Column::new()
                     .push(dashboard_card(retry))
                     .spacing(SPACE_16)
@@ -32760,7 +32781,7 @@ impl IcedChat {
                 ))
                 .spacing(0)
                 .width(Length::Fill);
-            return scrollable(empty).width(Length::Fill).height(Length::Fill).into();
+            return crate::ui_components::gutter_scrollable(empty).width(Length::Fill).height(Length::Fill).into();
         }
 
         // Apply the shared search field (file or peer matching) on top of the
@@ -32790,7 +32811,7 @@ impl IcedChat {
                 ))
                 .spacing(0)
                 .width(Length::Fill);
-            return scrollable(empty).width(Length::Fill).height(Length::Fill).into();
+            return crate::ui_components::gutter_scrollable(empty).width(Length::Fill).height(Length::Fill).into();
         }
 
         // FS-18: sort control row (Activity: time / status).
@@ -32886,7 +32907,7 @@ impl IcedChat {
                 .width(Length::Fill);
         }
 
-        scrollable(dashboard_card(body.into())).width(Length::Fill).height(Length::Fill).into()
+        crate::ui_components::gutter_scrollable(dashboard_card(body.into())).width(Length::Fill).height(Length::Fill).into()
     }
 
     /// One row of the Activity Log table. Error rows expose a bounded
@@ -33179,7 +33200,7 @@ impl IcedChat {
 
     fn view_file_sharing(&self) -> iced::Element<'_, AppMessage> {
         use crate::dashboard_view_model::DashboardTab as Tab;
-        use iced::widget::scrollable;
+
         use iced::Length;
 
         // Owned-tab fast path: these tabs render their own full content area
@@ -33192,16 +33213,16 @@ impl IcedChat {
             Tab::Downloaded | Tab::ActivityLog | Tab::Downloading | Tab::SharedWithMe
         ) {
             return match self.dashboard_active_tab {
-                Tab::Downloaded => scrollable(self.view_downloaded())
+                Tab::Downloaded => crate::ui_components::gutter_scrollable(self.view_downloaded())
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .into(),
                 Tab::ActivityLog => self.view_activity_log(),
-                Tab::Downloading => scrollable(self.view_downloading())
+                Tab::Downloading => crate::ui_components::gutter_scrollable(self.view_downloading())
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .into(),
-                Tab::SharedWithMe => scrollable(self.view_shared_with_me())
+                Tab::SharedWithMe => crate::ui_components::gutter_scrollable(self.view_shared_with_me())
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .into(),
@@ -33521,7 +33542,7 @@ impl IcedChat {
                 .into()
         };
 
-        let scrollable_content = scrollable(content_area)
+        let scrollable_content = crate::ui_components::gutter_scrollable(content_area)
             .width(Length::Fill)
             .height(Length::Fill);
 
@@ -33570,7 +33591,7 @@ impl IcedChat {
 
     /// Static renderer for the Discover screen, driven by [`DiscoverDependency`].
     fn view_discover_content(dep: &DiscoverDependency) -> iced::Element<'static, AppMessage> {
-        use iced::widget::{button, container, scrollable, text, Column, Row, Space};
+        use iced::widget::{button, container, text, Column, Row, Space};
         use iced::{Alignment, Background, Length};
 
         let header = Row::new()
@@ -33678,7 +33699,7 @@ impl IcedChat {
         let body = Column::new()
             .push(header)
             .push(
-                scrollable(main_content)
+                crate::ui_components::gutter_scrollable(main_content)
                     .height(Length::Fill)
                     .width(Length::Fill),
             )
@@ -33940,7 +33961,7 @@ impl IcedChat {
         dep: &FriendProfileDependency,
         peer: PublicKey,
     ) -> iced::Element<'static, AppMessage> {
-        use iced::widget::{button, container, row, scrollable, text, text_input, Column, Space};
+        use iced::widget::{button, container, row, text, text_input, Column, Space};
         use iced::{Alignment, Length};
 
         let theme = Self::theme_from_dark(dep.dark_mode);
@@ -34378,7 +34399,7 @@ impl IcedChat {
         // ── Wrap in scrollable ──
         let content = Column::new().push(header).push(body).push(actions_section);
 
-        container(scrollable(content))
+        container(crate::ui_components::gutter_scrollable(content))
             .width(Length::Fill)
             .height(Length::Fill)
             .style(container_primary)

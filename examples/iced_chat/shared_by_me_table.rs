@@ -347,7 +347,7 @@ impl SharedByMeUiState {
 
 // ── View ────────────────────────────────────────────────────────────────
 
-use iced::widget::{button, container, scrollable, text, tooltip, Column, Row, Space};
+use iced::widget::{button, container, text, tooltip, Column, Row, Space};
 use iced::{Alignment, Background, Border, Color, Element, Length, Theme};
 
 use crate::app::{text_muted_style, AppMessage, BUTTON_PRIMARY_GREEN, TYPO_SM, TYPO_XS};
@@ -628,7 +628,7 @@ fn table_body(
     // The card body scrolls; the footer count is rendered below the list so
     // "Showing X of Y items" stays visible without needing the scrollbar.
     Column::new()
-        .push(scrollable(list).width(Length::Fill).height(Length::Shrink))
+        .push(crate::ui_components::gutter_scrollable(list).width(Length::Fill).height(Length::Shrink))
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
         .push(footer_count(rows.len(), theme))
         .spacing(0)

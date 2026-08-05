@@ -7,7 +7,7 @@ use std::{
 
 use iced::font::Weight;
 use iced::{
-    widget::{button, column, container, row, scrollable, text},
+    widget::{button, column, container, row, text},
     Element, Length,
 };
 use n0_error::{Result as NResult, StdResultExt};
@@ -78,7 +78,7 @@ impl LogViewer {
                 .font(crate::fonts::source_sans(Weight::Normal))
                 .size(TYPO_XS)
                 .style(text_muted_style),
-            scrollable(container(body).width(Length::Fill)).height(Length::Fill),
+            crate::ui_components::gutter_scrollable(container(body).width(Length::Fill)).height(Length::Fill),
         ]
         .spacing(SPACE_12)
         .padding(SPACE_12)
