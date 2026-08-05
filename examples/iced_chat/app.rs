@@ -4645,6 +4645,14 @@ pub(crate) struct RecentActivityCardData {
     pub(crate) rows: Vec<ActivityRow>,
 }
 
+/// Empty-state copy for the Recent Activity rail card (basic empty state;
+/// final polish is owned by UI-HOME-16).
+pub(crate) const RECENT_ACTIVITY_EMPTY_MESSAGE: &str = "No recent activity";
+
+/// Empty-state copy for the Tunnels rail card (UI-HOME-08 spec copy).
+pub(crate) const TUNNELS_EMPTY_MESSAGE: &str =
+    "No active tunnels. Create or join a tunnel to securely route traffic.";
+
 /// One Recent Activity row. `timestamp` is kept stable so an unchanged buffer
 /// compares equal across frames — only `tick` makes the card rebuild for
 /// fresh relative timestamps.
@@ -24677,7 +24685,7 @@ impl IcedChat {
     fn view_recent_activity_card(
         dep: &RecentActivityCardData,
     ) -> iced::Element<'static, AppMessage> {
-        use iced::widget::{container, row, Space};
+        use iced::widget::{container, row};
         use iced::{Alignment, Length};
 
         let theme = Self::theme_from_dark(dep.dark_mode);
@@ -24712,16 +24720,23 @@ impl IcedChat {
                                 }),
                             }
                         }),
-                        crate::fonts::type_role_text(
-                            crate::fonts::TypeRole::Body,
-                            crate::presentation::truncate_with_ellipsis(
-                                &event.description,
-                                40,
-                            ),
+                        // Description takes the row's remaining width and is
+                        // clipped to it, so a long event can never overlap the
+                        // right-aligned timestamp (UI-HOME-08).
+                        container(
+                            crate::fonts::type_role_text(
+                                crate::fonts::TypeRole::Body,
+                                crate::presentation::truncate_with_ellipsis(
+                                    &event.description,
+                                    40,
+                                ),
+                            )
+                            .color(text_system(&theme))
+                            .width(Length::Fill)
+                            .wrapping(iced::widget::text::Wrapping::None),
                         )
-                        .color(text_system(&theme))
-                        .wrapping(iced::widget::text::Wrapping::None),
-                        Space::new().width(Length::Fill),
+                        .width(Length::Fill)
+                        .clip(true),
                         crate::fonts::type_role_text(
                             crate::fonts::TypeRole::Metadata,
                             ago,
@@ -24733,6 +24748,9 @@ impl IcedChat {
                 )
                 .height(Length::Fixed(ACTIVITY_ROW_HEIGHT))
                 .width(Length::Fill)
+                // Same horizontal inset as the Online Peers rows so the rail
+                // reads with one consistent rhythm (UI-HOME-08).
+                .padding([0.0, SPACE_8])
                 .align_y(Alignment::Center)
                 .into()
             })
@@ -24740,7 +24758,7 @@ impl IcedChat {
 
         CardShell::new("Recent Activity", activity_rows)
             .count(dep.total)
-            .empty_message("No recent activity")
+            .empty_message(RECENT_ACTIVITY_EMPTY_MESSAGE)
             .max_height(180.0)
             .build(&theme)
     }
@@ -24827,7 +24845,7 @@ impl IcedChat {
         crate::card_shell::CardShell::new("Tunnels", tunnel_rows)
             .count(dep.rows.len())
             .on_view_all(AppMessage::ShowCreateTunnelDialog)
-            .empty_message("No active tunnels")
+            .empty_message(TUNNELS_EMPTY_MESSAGE)
             .max_height(120.0)
             .build(&theme)
     }
@@ -41746,6 +41764,82 @@ mod tests {
         assert_eq!(peers_a, peers_b);
         assert_eq!(activity_a, activity_b);
         assert_eq!(tunnels_a, tunnels_b);
+    }
+
+    // ── UI-HOME-08: Recent Activity + Tunnels rail cards ──
+
+    /// The Tunnels rail card must always carry the spec empty-state copy and
+    /// the Recent Activity card its basic empty state (final polish owned by
+    /// UI-HOME-16).
+    #[test]
+    fn home_rail_empty_state_copy_matches_ui_home_08_spec() {
+        assert_eq!(
+            TUNNELS_EMPTY_MESSAGE,
+            "No active tunnels. Create or join a tunnel to securely route traffic."
+        );
+        assert_eq!(RECENT_ACTIVITY_EMPTY_MESSAGE, "No recent activity");
+    }
+
+    /// A live (registered) tunnel projects into a Tunnels card row with the
+    /// real service name/endpoint/status, and the card + full home screen
+    /// render without panic. Proves "show active tunnels when available"
+    /// uses live TunnelService state, never sample data.
+    #[test]
+    fn tunnels_card_projects_live_tunnel_row_and_renders() {
+        let (_runtime, mut app, _local, peer) = build_join_request_test_app();
+        let owner = iroh::SecretKey::generate().public();
+        let id = boru_core::tunnel::TunnelId([7u8; 32]);
+        let target =
+            boru_core::tunnel::service::TunnelTarget::tcp("127.0.0.1".parse().unwrap(), 8080);
+        let now = now_ms().max(0) as u64;
+        app.tunnel_service
+            .create_tunnel(id, owner, target, peer, now, now + 60_000)
+            .expect("create tunnel");
+        app.shared_tunnels.insert(
+            id,
+            SharedTunnelState {
+                service_name: "Media Server".into(),
+                is_http: false,
+            },
+        );
+
+        let data = app.tunnels_card_data();
+        assert_eq!(data.rows.len(), 1, "one live tunnel row");
+        let row = &data.rows[0];
+        assert_eq!(row.name, "Media Server");
+        assert_eq!(row.endpoint, "localhost:8080");
+        assert_eq!(row.status, TunnelStatus::Active);
+        assert!(!row.expired, "freshly created tunnel is not expired");
+
+        let card = IcedChat::view_tunnels_card(&data);
+        let _ = card;
+        let _ = app.view_main_empty_state();
+    }
+
+    /// The Recent Activity card truncates long descriptions and renders rows
+    /// for every activity kind without panic; the row projection keeps the
+    /// full description so the view owns the truncation + clip.
+    #[test]
+    fn recent_activity_card_renders_long_description_rows() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let long = "a-very-long-display-name-for-truncation-test-peer-42 shared a large report archive across the mesh";
+        app.push_activity(long, ActivityKind::FileShared);
+        app.push_activity("Alice came online", ActivityKind::Online);
+        app.push_activity("Bob went offline", ActivityKind::Offline);
+        app.push_activity("hello", ActivityKind::Message);
+        app.push_activity("generic notice", ActivityKind::Generic);
+
+        let data = app.recent_activity_card_data();
+        assert_eq!(data.rows.len(), 5);
+        assert!(
+            data.rows.iter().any(|r| r.description.len() > 40),
+            "selector must pass the untruncated description; truncation happens in the view"
+        );
+        assert_eq!(data.total, 5);
+
+        let card = IcedChat::view_recent_activity_card(&data);
+        let _ = card;
+        let _ = app.view_main_empty_state();
     }
 
     // ── File Sharing card dependency isolation (PERF-2, t_f6dcbb3a) ──
