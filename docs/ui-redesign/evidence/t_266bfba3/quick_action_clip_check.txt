@@ -1,0 +1,234 @@
+UI-HOME-18 quick-action description completeness (HARD GATE)
+Method (UI-HOME-06 proven): main-panel crop, 4x upscale, OCR, significant-word
+(>=3 chars) containment. Every content word of each approved description must
+be present in at least one shot of the width (scrolled series covers the fold).
+
+[1600] 11 shot(s)
+  t_266bfba3_home_1600x900.png:
+  CHK  Open a public room for anyone to join (missing words: ['anyone', 'open'])
+  CHK  Start a private group conversation (missing words: ['conversation'])
+  CHK  Connect with a friend by public key (missing words: ['key'])
+  OK   Choose a file to share in a chat
+  t_266bfba3_home_1600x900_scrolled.png:
+  OK   Open a public room for anyone to join
+  OK   Start a private group conversation
+  OK   Connect with a friend by public key
+  OK   Choose a file to share in a chat
+  step1.png:
+  OK   Open a public room for anyone to join
+  OK   Start a private group conversation
+  OK   Connect with a friend by public key
+  OK   Choose a file to share in a chat
+  step2.png:
+  OK   Open a public room for anyone to join
+  OK   Start a private group conversation
+  OK   Connect with a friend by public key
+  OK   Choose a file to share in a chat
+  step3.png:
+  OK   Open a public room for anyone to join
+  OK   Start a private group conversation
+  OK   Connect with a friend by public key
+  OK   Choose a file to share in a chat
+  step4.png:
+  OK   Open a public room for anyone to join
+  OK   Start a private group conversation
+  OK   Connect with a friend by public key
+  OK   Choose a file to share in a chat
+  step5.png:
+  OK   Open a public room for anyone to join
+  OK   Start a private group conversation
+  OK   Connect with a friend by public key
+  OK   Choose a file to share in a chat
+  step6.png:
+  OK   Open a public room for anyone to join
+  OK   Start a private group conversation
+  OK   Connect with a friend by public key
+  OK   Choose a file to share in a chat
+  step7.png:
+  OK   Open a public room for anyone to join
+  OK   Start a private group conversation
+  OK   Connect with a friend by public key
+  OK   Choose a file to share in a chat
+  step8.png:
+  OK   Open a public room for anyone to join
+  OK   Start a private group conversation
+  OK   Connect with a friend by public key
+  OK   Choose a file to share in a chat
+  t_266bfba3_home_1600x_grid.png:
+  OK   Open a public room for anyone to join
+  OK   Start a private group conversation
+  OK   Connect with a friend by public key
+  OK   Choose a file to share in a chat
+
+[1280] 11 shot(s)
+  t_266bfba3_home_1280x800.png:
+  CHK  Open a public room for anyone to join (missing words: ['anyone', 'open', 'public', 'room'])
+  CHK  Start a private group conversation (missing words: ['conversation', 'group', 'start'])
+  CHK  Connect with a friend by public key (missing words: ['connect', 'friend', 'key', 'public', 'with'])
+  CHK  Choose a file to share in a chat (missing words: ['chat', 'choose', 'file', 'share'])
+  t_266bfba3_home_1280x800_scrolled.png:
+  OK   Open a public room for anyone to join
+  OK   Start a private group conversation
+  OK   Connect with a friend by public key
+  OK   Choose a file to share in a chat
+  step1.png:
+  OK   Open a public room for anyone to join
+  OK   Start a private group conversation
+  OK   Connect with a friend by public key
+  OK   Choose a file to share in a chat
+  step2.png:
+  OK   Open a public room for anyone to join
+  OK   Start a private group conversation
+  OK   Connect with a friend by public key
+  OK   Choose a file to share in a chat
+  step3.png:
+  OK   Open a public room for anyone to join
+  OK   Start a private group conversation
+  OK   Connect with a friend by public key
+  OK   Choose a file to share in a chat
+  step4.png:
+  OK   Open a public room for anyone to join
+  OK   Start a private group conversation
+  OK   Connect with a friend by public key
+  OK   Choose a file to share in a chat
+  step5.png:
+  OK   Open a public room for anyone to join
+  OK   Start a private group conversation
+  OK   Connect with a friend by public key
+  OK   Choose a file to share in a chat
+  step6.png:
+  OK   Open a public room for anyone to join
+  OK   Start a private group conversation
+  OK   Connect with a friend by public key
+  OK   Choose a file to share in a chat
+  step7.png:
+  OK   Open a public room for anyone to join
+  OK   Start a private group conversation
+  OK   Connect with a friend by public key
+  OK   Choose a file to share in a chat
+  step8.png:
+  OK   Open a public room for anyone to join
+  OK   Start a private group conversation
+  OK   Connect with a friend by public key
+  OK   Choose a file to share in a chat
+  t_266bfba3_home_1280x_grid.png:
+  OK   Open a public room for anyone to join
+  OK   Start a private group conversation
+  OK   Connect with a friend by public key
+  OK   Choose a file to share in a chat
+
+[1024] 11 shot(s)
+  t_266bfba3_home_1024x720.png:
+  CHK  Open a public room for anyone to join (missing words: ['anyone', 'open', 'public', 'room'])
+  CHK  Start a private group conversation (missing words: ['conversation', 'group', 'start'])
+  CHK  Connect with a friend by public key (missing words: ['connect', 'friend', 'key', 'public', 'with'])
+  CHK  Choose a file to share in a chat (missing words: ['chat', 'choose', 'file', 'share'])
+  t_266bfba3_home_1024x720_scrolled.png:
+  CHK  Open a public room for anyone to join (missing words: ['anyone', 'for', 'open', 'public', 'room'])
+  CHK  Start a private group conversation (missing words: ['conversation', 'group', 'private', 'start'])
+  CHK  Connect with a friend by public key (missing words: ['connect', 'friend', 'key', 'public', 'with'])
+  CHK  Choose a file to share in a chat (missing words: ['chat', 'choose', 'file', 'share'])
+  step1.png:
+  OK   Open a public room for anyone to join
+  OK   Start a private group conversation
+  OK   Connect with a friend by public key
+  OK   Choose a file to share in a chat
+  step2.png:
+  CHK  Open a public room for anyone to join (missing words: ['anyone', 'for', 'join', 'open', 'room'])
+  CHK  Start a private group conversation (missing words: ['conversation', 'group', 'private', 'start'])
+  OK   Connect with a friend by public key
+  OK   Choose a file to share in a chat
+  step3.png:
+  CHK  Open a public room for anyone to join (missing words: ['anyone', 'for', 'open', 'public', 'room'])
+  CHK  Start a private group conversation (missing words: ['conversation', 'group', 'private', 'start'])
+  CHK  Connect with a friend by public key (missing words: ['connect', 'friend', 'key', 'public', 'with'])
+  CHK  Choose a file to share in a chat (missing words: ['chat', 'choose', 'file', 'share'])
+  step4.png:
+  CHK  Open a public room for anyone to join (missing words: ['anyone', 'for', 'open', 'public', 'room'])
+  CHK  Start a private group conversation (missing words: ['conversation', 'group', 'private', 'start'])
+  CHK  Connect with a friend by public key (missing words: ['connect', 'friend', 'key', 'public', 'with'])
+  CHK  Choose a file to share in a chat (missing words: ['chat', 'choose', 'file', 'share'])
+  step5.png:
+  CHK  Open a public room for anyone to join (missing words: ['anyone', 'for', 'open', 'public', 'room'])
+  CHK  Start a private group conversation (missing words: ['conversation', 'group', 'private', 'start'])
+  CHK  Connect with a friend by public key (missing words: ['connect', 'friend', 'key', 'public', 'with'])
+  CHK  Choose a file to share in a chat (missing words: ['chat', 'choose', 'file', 'share'])
+  step6.png:
+  CHK  Open a public room for anyone to join (missing words: ['anyone', 'for', 'open', 'public', 'room'])
+  CHK  Start a private group conversation (missing words: ['conversation', 'group', 'private', 'start'])
+  CHK  Connect with a friend by public key (missing words: ['connect', 'friend', 'key', 'public', 'with'])
+  CHK  Choose a file to share in a chat (missing words: ['chat', 'choose', 'file', 'share'])
+  step7.png:
+  CHK  Open a public room for anyone to join (missing words: ['anyone', 'for', 'open', 'public', 'room'])
+  CHK  Start a private group conversation (missing words: ['conversation', 'group', 'private', 'start'])
+  CHK  Connect with a friend by public key (missing words: ['connect', 'friend', 'key', 'public', 'with'])
+  CHK  Choose a file to share in a chat (missing words: ['chat', 'choose', 'file', 'share'])
+  step8.png:
+  CHK  Open a public room for anyone to join (missing words: ['anyone', 'for', 'open', 'public', 'room'])
+  CHK  Start a private group conversation (missing words: ['conversation', 'group', 'private', 'start'])
+  CHK  Connect with a friend by public key (missing words: ['connect', 'friend', 'key', 'public', 'with'])
+  CHK  Choose a file to share in a chat (missing words: ['chat', 'choose', 'file', 'share'])
+  t_266bfba3_home_1024x_grid.png:
+  OK   Open a public room for anyone to join
+  OK   Start a private group conversation
+  OK   Connect with a friend by public key
+  OK   Choose a file to share in a chat
+
+[800] 11 shot(s)
+  t_266bfba3_home_800x600.png:
+  CHK  Open a public room for anyone to join (missing words: ['anyone', 'open', 'public', 'room'])
+  CHK  Start a private group conversation (missing words: ['conversation', 'group', 'start'])
+  CHK  Connect with a friend by public key (missing words: ['connect', 'friend', 'key', 'public', 'with'])
+  CHK  Choose a file to share in a chat (missing words: ['chat', 'choose', 'file', 'share'])
+  t_266bfba3_home_800x600_scrolled.png:
+  CHK  Open a public room for anyone to join (missing words: ['anyone', 'for', 'open', 'public', 'room'])
+  CHK  Start a private group conversation (missing words: ['conversation', 'group', 'private', 'start'])
+  CHK  Connect with a friend by public key (missing words: ['connect', 'friend', 'key', 'public', 'with'])
+  CHK  Choose a file to share in a chat (missing words: ['chat', 'choose', 'file', 'share'])
+  step1.png:
+  OK   Open a public room for anyone to join
+  CHK  Start a private group conversation (missing words: ['conversation', 'group', 'private', 'start'])
+  CHK  Connect with a friend by public key (missing words: ['connect', 'friend', 'key', 'with'])
+  CHK  Choose a file to share in a chat (missing words: ['choose', 'file', 'share'])
+  step2.png:
+  CHK  Open a public room for anyone to join (missing words: ['anyone', 'for', 'join', 'open', 'room'])
+  OK   Start a private group conversation
+  OK   Connect with a friend by public key
+  OK   Choose a file to share in a chat
+  step3.png:
+  CHK  Open a public room for anyone to join (missing words: ['anyone', 'for', 'join', 'open', 'public', 'room'])
+  CHK  Start a private group conversation (missing words: ['conversation', 'group', 'private', 'start'])
+  CHK  Connect with a friend by public key (missing words: ['connect', 'friend', 'key', 'public', 'with'])
+  CHK  Choose a file to share in a chat (missing words: ['chat', 'file'])
+  step4.png:
+  CHK  Open a public room for anyone to join (missing words: ['anyone', 'for', 'open', 'public', 'room'])
+  CHK  Start a private group conversation (missing words: ['conversation', 'group', 'private', 'start'])
+  CHK  Connect with a friend by public key (missing words: ['connect', 'friend', 'key', 'public', 'with'])
+  CHK  Choose a file to share in a chat (missing words: ['chat', 'choose', 'file', 'share'])
+  step5.png:
+  CHK  Open a public room for anyone to join (missing words: ['anyone', 'for', 'open', 'public', 'room'])
+  CHK  Start a private group conversation (missing words: ['conversation', 'group', 'private', 'start'])
+  CHK  Connect with a friend by public key (missing words: ['connect', 'friend', 'key', 'public', 'with'])
+  CHK  Choose a file to share in a chat (missing words: ['chat', 'choose', 'file', 'share'])
+  step6.png:
+  CHK  Open a public room for anyone to join (missing words: ['anyone', 'for', 'open', 'public', 'room'])
+  CHK  Start a private group conversation (missing words: ['conversation', 'group', 'private', 'start'])
+  CHK  Connect with a friend by public key (missing words: ['connect', 'friend', 'key', 'public', 'with'])
+  CHK  Choose a file to share in a chat (missing words: ['chat', 'choose', 'file', 'share'])
+  step7.png:
+  CHK  Open a public room for anyone to join (missing words: ['anyone', 'for', 'open', 'public', 'room'])
+  CHK  Start a private group conversation (missing words: ['conversation', 'group', 'private', 'start'])
+  CHK  Connect with a friend by public key (missing words: ['connect', 'friend', 'key', 'public', 'with'])
+  CHK  Choose a file to share in a chat (missing words: ['chat', 'choose', 'file', 'share'])
+  step8.png:
+  CHK  Open a public room for anyone to join (missing words: ['anyone', 'for', 'open', 'public', 'room'])
+  CHK  Start a private group conversation (missing words: ['conversation', 'group', 'private', 'start'])
+  CHK  Connect with a friend by public key (missing words: ['connect', 'friend', 'key', 'public', 'with'])
+  CHK  Choose a file to share in a chat (missing words: ['chat', 'choose', 'file', 'share'])
+  t_266bfba3_home_800x_grid.png:
+  OK   Open a public room for anyone to join
+  CHK  Start a private group conversation (missing words: ['conversation', 'group', 'private', 'start'])
+  CHK  Connect with a friend by public key (missing words: ['connect', 'friend', 'key', 'with'])
+  CHK  Choose a file to share in a chat (missing words: ['choose', 'file', 'share'])
+
+RESULT: all four descriptions fully visible at every width (in-view shots)

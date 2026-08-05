@@ -1,0 +1,2 @@
+UI-HOME-18 app log scan (panics/errors during evidence run)
+(empty above = no panics across all launches)
