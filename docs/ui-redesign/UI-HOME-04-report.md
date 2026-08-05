@@ -79,8 +79,10 @@ replaced with static content:
 
 ## Tests
 
-- `cargo build --example boru --features gui` — OK.
-- `cargo test --example boru --features gui` — see run below.
+- `cargo build --example boru --features gui` — OK (exit 0; only the ~207
+  pre-existing warnings, none introduced by this change).
+- `cargo test --example boru --features gui` — **865 passed / 0 failed**
+  (prior: 864; +1 net new).
 - New regression test `hero_card_min_height_stays_in_plan_band` asserts
   `HERO_MIN_CONTENT_HEIGHT + 2*SPACE_32 ∈ [230, 260]` and the content
   driver is positive.
