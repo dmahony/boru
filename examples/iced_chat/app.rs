@@ -535,7 +535,7 @@ pub(crate) const SPACE_2: f32 = 2.0;
 pub(crate) use crate::design_tokens::{AVATAR_MD, AVATAR_SM};
 pub(crate) use crate::design_tokens::{
     DETAILS_PANEL_WIDTH, RADIUS_SM, SIDEBAR_INSET, SIDEBAR_WIDTH, SPACE_12, SPACE_16, SPACE_18,
-    SPACE_20, SPACE_24, SPACE_32, SPACE_4, SPACE_8,
+    SPACE_20, SPACE_24, SPACE_28, SPACE_32, SPACE_4, SPACE_8,
 };
 pub(crate) use crate::icon_system::{Icon, IconSize};
 pub(crate) const SPACE_6: f32 = 6.0;
@@ -24764,16 +24764,18 @@ impl IcedChat {
             "Good {}, {display_name}",
             dep.time_of_day_greeting
         ))
-        .size(crate::fonts::PAGE_TITLE)
+        .size(crate::fonts::HOME_GREETING)
         .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
         .color(crate::design_tokens::text_primary(&theme))
         .width(Length::Fill);
         let welcome_line = text("Welcome to Boru")
-            .size(TYPO_SM)
+            .size(crate::fonts::HOME_SUBTITLE)
             .color(text_secondary(&theme))
             .width(Length::Fill);
 
         // ── Status pill (page header right, compact) ──
+        // ~36 px tall (10 px vertical padding + 16 px content) per the
+        // UI-HOME-02 mockup range (36–40 px).
         let status_pill = container(
             row![
                 icon_svg(hero_icon, TYPO_SM).style(move |t, _| iced::widget::svg::Style {
@@ -24785,7 +24787,7 @@ impl IcedChat {
             .spacing(0)
             .align_y(Alignment::Center),
         )
-        .padding([SPACE_6, SPACE_12])
+        .padding([SPACE_10, SPACE_12])
         .style(move |t| iced::widget::container::Style {
             background: Some(iced::Background::Color(bg_surface(t))),
             border: iced::Border {
@@ -25079,11 +25081,12 @@ impl IcedChat {
             iced::widget::lazy(dep.activity.clone(), Self::view_recent_activity_card);
         let tunnels_card = iced::widget::lazy(dep.tunnels.clone(), Self::view_tunnels_card);
 
+        // Right rail: 20 px vertical card gaps (UI-HOME-02: 20–24 px).
         let right_col = Column::new()
             .push(online_card)
-            .push(Space::new().height(Length::Fixed(SPACE_12)))
+            .push(Space::new().height(Length::Fixed(SPACE_20)))
             .push(activity_card)
-            .push(Space::new().height(Length::Fixed(SPACE_12)))
+            .push(Space::new().height(Length::Fixed(SPACE_20)))
             .push(tunnels_card)
             .spacing(0)
             .width(Length::Fill);
@@ -25101,36 +25104,38 @@ impl IcedChat {
         .spacing(SPACE_8)
         .align_y(Alignment::Center);
 
-        // ── Main content: hero left, activity rail right at wide sizes ──
-        // Two-thirds content + one-third activity rail (plan §4); the Online
-        // Peers panel reflows below the hero on narrower layouts.
-        let rail_stacked = window_width < 900.0;
+        // ── Main content: hero + mesh + actions left, activity rail right ──
+        // Two-thirds content + one-third activity rail (plan §4): main
+        // ~66.7% / right ~33.3% with a 24 px column gap. Below the stack
+        // breakpoint the rail collapses BELOW the left column instead of
+        // compressing its cards; the full responsive pass lands in UI-HOME-15.
+        const RAIL_STACK_BREAKPOINT: f32 = 1120.0;
+        let rail_stacked = window_width < RAIL_STACK_BREAKPOINT;
+        let card_gap = SPACE_20; // 20 px vertical card gap (plan: 20–24 px)
+
+        let left_col = Column::new()
+            .push(hero_card)
+            .push(Space::new().height(Length::Fixed(card_gap)))
+            .push(mesh_card)
+            .push(Space::new().height(Length::Fixed(card_gap)))
+            .push(action_grid)
+            .spacing(0)
+            .width(Length::Fill);
+
         let main_content: iced::Element<'_, AppMessage> = if rail_stacked {
-            // Narrow: hero first, then the activity rail reflows below it.
+            // Narrow: left-column cards first, then the activity rail below.
             Column::new()
-                .push(hero_card)
-                .push(Space::new().height(Length::Fixed(SPACE_16)))
+                .push(left_col)
+                .push(Space::new().height(Length::Fixed(card_gap)))
                 .push(right_col)
-                .push(Space::new().height(Length::Fixed(SPACE_16)))
-                .push(mesh_card)
-                .push(Space::new().height(Length::Fixed(SPACE_16)))
-                .push(action_grid)
                 .spacing(0)
                 .width(Length::Fill)
                 .into()
         } else {
-            // Wide: hero + mesh + actions on the left, rail on the right.
-            let left_col = Column::new()
-                .push(hero_card)
-                .push(Space::new().height(Length::Fixed(SPACE_16)))
-                .push(mesh_card)
-                .push(Space::new().height(Length::Fixed(SPACE_16)))
-                .push(action_grid)
-                .spacing(0)
-                .width(Length::Fill);
+            // Wide: two-column dashboard grid, both columns aligned top.
             Row::new()
                 .push(container(left_col).width(Length::FillPortion(2)))
-                .push(Space::new().width(Length::Fixed(SPACE_20)))
+                .push(Space::new().width(Length::Fixed(SPACE_24)))
                 .push(container(right_col).width(Length::FillPortion(1)))
                 .spacing(0)
                 .align_y(Alignment::Start)
@@ -25156,17 +25161,16 @@ impl IcedChat {
             encryption_label,
         );
 
-        // ── Assemble with responsive canvas padding (32 large / 24 medium / 16 compact) ──
-        let content_padding = if crate::design_tokens::is_large(window_width) {
+        // ── Assemble: centred dashboard canvas with responsive padding ──
+        // Horizontal 32 px at large widths, 28 px elsewhere; top 28 px below
+        // the application header; bottom at least 32 px (UI-HOME-02 plan).
+        let h_padding = if crate::design_tokens::is_large(window_width) {
             SPACE_32
-        } else if crate::design_tokens::is_compact(window_width) {
-            SPACE_16
         } else {
-            SPACE_24
+            SPACE_28
         };
 
         let col = Column::new()
-            .push(Space::new().height(Length::Fixed(SPACE_12)))
             .push(page_header)
             .push(Space::new().height(Length::Fixed(SPACE_20)))
             .push(main_content)
@@ -25175,15 +25179,25 @@ impl IcedChat {
             .spacing(0)
             .width(Length::Fill);
 
-        crate::ui_components::gutter_scrollable(
+        // Cap the dashboard width (~1480 px) and centre it in the available
+        // content region; vertical page scrolling stays on gutter_scrollable.
+        // The max-width only binds on very wide windows (e.g. 1920), where it
+        // keeps the grid from stretching edge-to-edge.
+        let canvas = container(
             container(col)
-                .padding(content_padding)
+                .padding(iced::Padding::from([SPACE_28, h_padding]).bottom(SPACE_32))
                 .width(Length::Fill)
+                .max_width(crate::design_tokens::DASHBOARD_MAX_WIDTH)
                 .height(Length::Fill),
         )
         .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+        .align_x(Alignment::Center)
+        .height(Length::Fill);
+
+        crate::ui_components::gutter_scrollable(canvas)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
     }
 
     // ── Chat panel (main panel when a conversation is selected) ──────────

@@ -155,6 +155,10 @@ mod sizes {
 
     /// Page title — 28 px.
     pub const PAGE_TITLE: f32 = 28.0;
+    /// Home greeting (UI-HOME-02) — 32 px (approved mockup range 30–34 px).
+    pub const HOME_GREETING: f32 = 32.0;
+    /// Home subtitle (UI-HOME-02) — 16 px (approved mockup range 15–17 px).
+    pub const HOME_SUBTITLE: f32 = 16.0;
     /// Conversation / section heading — 18 px.
     pub const CONVERSATION_TITLE: f32 = 18.0;
     /// Sidebar identity name — 16 px.

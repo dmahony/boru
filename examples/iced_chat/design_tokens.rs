@@ -135,6 +135,7 @@ pub const SPACE_16: f32 = 16.0;
 pub const SPACE_18: f32 = 18.0; // group-to-group gap between user message groups (plan §4)
 pub const SPACE_20: f32 = 20.0;
 pub const SPACE_24: f32 = 24.0;
+pub const SPACE_28: f32 = 28.0;
 pub const SPACE_32: f32 = 32.0;
 pub const SPACE_40: f32 = 40.0;
 
@@ -217,6 +218,10 @@ pub const VIEWPORT_XL_HEIGHT: f32 = 1080.0;
 
 /// Maximum content width for prose/chat panels before centering.
 pub const CONTENT_MAX_WIDTH: f32 = 720.0;
+
+/// Maximum content width for the home dashboard before centering
+/// (UI-HOME-02: plan asks for ~1440–1520 px).
+pub const DASHBOARD_MAX_WIDTH: f32 = 1480.0;
 
 /// Returns a sidebar width clamped to the allowed range for a given window width.
 /// At the reference viewport (1280 px) this returns the target 304 px.
@@ -919,6 +924,8 @@ mod tests {
         assert!(VIEWPORT_LG_HEIGHT > VIEWPORT_REF_HEIGHT);
         assert!(VIEWPORT_REF_HEIGHT > VIEWPORT_MIN_HEIGHT);
         assert!(CONTENT_MAX_WIDTH < VIEWPORT_REF_WIDTH);
+        // UI-HOME-02: dashboard max width sits in the plan's 1440–1520 px band.
+        assert!((1440.0..=1520.0).contains(&DASHBOARD_MAX_WIDTH));
     }
 
     #[test]
