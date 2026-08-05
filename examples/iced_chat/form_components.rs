@@ -65,7 +65,7 @@ use iced::{Alignment, Background, Border, Color, Element, Length, Theme};
 
 use crate::app::AppMessage;
 use crate::design_tokens;
-use crate::fonts::Typography;
+use crate::fonts::TypeRole;
 use crate::ui_components;
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -78,8 +78,8 @@ use crate::ui_components;
 /// secondary text colour so it reads as a label, not body copy.
 pub fn form_label(label: &str) -> Element<'static, AppMessage> {
     text(label.to_string())
-        .font(Typography::FormLabel.font())
-        .size(Typography::FormLabel.size_px())
+        .font(TypeRole::ButtonLabel.font())
+        .size(TypeRole::ButtonLabel.size_px())
         .style(|t| text::Style {
             color: Some(design_tokens::text_secondary(t)),
         })
@@ -89,8 +89,8 @@ pub fn form_label(label: &str) -> Element<'static, AppMessage> {
 /// A muted helper line rendered below a control to explain what goes there.
 pub fn helper_text(helper: &str) -> Element<'static, AppMessage> {
     text(helper.to_string())
-        .font(Typography::SecondaryText.font())
-        .size(Typography::SecondaryText.size_px())
+        .font(TypeRole::SupportingText.font())
+        .size(TypeRole::SupportingText.size_px())
         .style(|t| text::Style {
             color: Some(design_tokens::text_muted(t)),
         })
@@ -103,8 +103,8 @@ pub fn helper_text(helper: &str) -> Element<'static, AppMessage> {
 /// without shouting — matching the shared form-styling guidance.
 pub fn error_text(error: &str) -> Element<'static, AppMessage> {
     text(error.to_string())
-        .font(Typography::SecondaryText.font())
-        .size(Typography::SecondaryText.size_px())
+        .font(TypeRole::SupportingText.font())
+        .size(TypeRole::SupportingText.size_px())
         .style(|t| text::Style {
             color: Some(design_tokens::color_danger(t)),
         })
@@ -150,8 +150,8 @@ impl<'a> FormSection<'a> {
         let mut col = Column::new()
             .push(
                 text(self.title)
-                    .font(Typography::FormLabel.font())
-                    .size(Typography::FormLabel.size_px())
+                    .font(TypeRole::ButtonLabel.font())
+                    .size(TypeRole::ButtonLabel.size_px())
                     .style(|t| text::Style {
                         color: Some(design_tokens::text_primary(t)),
                     }),
@@ -496,7 +496,7 @@ where
             .placeholder(self.placeholder)
             .width(Length::Fill)
             .padding([design_tokens::SPACE_8, design_tokens::SPACE_12])
-            .text_size(Typography::Body.size_px())
+            .text_size(TypeRole::Body.size_px())
             .style(pick_list_style)
             .menu_style(select_menu_style);
 
@@ -648,7 +648,7 @@ pub fn checkbox_field<'a>(
     let cb = checkbox(is_checked)
         .label(label)
         .on_toggle(on_toggle)
-        .text_size(Typography::Body.size_px())
+        .text_size(TypeRole::Body.size_px())
         .style(checkbox_style);
 
     match helper {
@@ -779,8 +779,8 @@ impl<'a> SelectablePeerRow<'a> {
         let mut text_col = Column::new()
             .push(
                 text(self.label)
-                    .font(Typography::Body.font())
-                    .size(Typography::Body.size_px())
+                    .font(TypeRole::Body.font())
+                    .size(TypeRole::Body.size_px())
                     .style(|t| text::Style {
                         color: Some(design_tokens::text_primary(t)),
                     }),
@@ -791,8 +791,8 @@ impl<'a> SelectablePeerRow<'a> {
         if let Some(secondary) = self.secondary {
             text_col = text_col.push(
                 text(secondary)
-                    .font(Typography::SecondaryText.font())
-                    .size(Typography::SecondaryText.size_px())
+                    .font(TypeRole::SupportingText.font())
+                    .size(TypeRole::SupportingText.size_px())
                     .style(|t| text::Style {
                         color: Some(design_tokens::text_muted(t)),
                     }),
@@ -843,8 +843,8 @@ pub fn peer_list<'a>(
         match empty_text {
             Some(empty) => container(
                 text(empty.to_string())
-                    .font(Typography::SecondaryText.font())
-                    .size(Typography::SecondaryText.size_px())
+                    .font(TypeRole::SupportingText.font())
+                    .size(TypeRole::SupportingText.size_px())
                     .style(|t| text::Style {
                         color: Some(design_tokens::text_muted(t)),
                     }),
@@ -896,8 +896,8 @@ pub fn remove_chip(
     let mut chip = Row::new()
         .push(
             text(label.clone())
-                .font(Typography::SecondaryText.font())
-                .size(Typography::SecondaryText.size_px())
+                .font(TypeRole::Metadata.font())
+                .size(TypeRole::Metadata.size_px())
                 .style(|t| text::Style {
                     color: Some(design_tokens::text_primary(t)),
                 }),
@@ -1171,8 +1171,8 @@ pub fn destructive_button<'a>(
 ) -> Element<'a, AppMessage> {
     let btn = button(
         text(label)
-            .font(Typography::ButtonLabel.font())
-            .size(Typography::ButtonLabel.size_px()),
+            .font(TypeRole::ButtonLabel.font())
+            .size(TypeRole::ButtonLabel.size_px()),
     )
     .padding([design_tokens::SPACE_8, design_tokens::SPACE_16])
     .style(button_destructive_style);

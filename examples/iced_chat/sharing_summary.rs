@@ -124,7 +124,7 @@ use iced::widget::{container, text, Column, Row, Space};
 use iced::{Alignment, Length, Theme};
 
 use crate::design_tokens;
-use crate::fonts::Typography;
+use crate::fonts::TypeRole;
 
 /// Card title — matches the FS-02 mockup's summary region.
 const CARD_TITLE: &str = "Sharing Summary";
@@ -174,14 +174,14 @@ pub(crate) fn view_sharing_summary_card(
     let header = Column::new()
         .push(
             text(CARD_TITLE)
-                .size(Typography::SectionHeading.size_px())
-                .font(Typography::SectionHeading.font())
+                .size(TypeRole::CardTitle.size_px())
+                .font(TypeRole::CardTitle.font())
                 .color(design_tokens::text_primary(&theme)),
         )
         .push(
             text(SCOPE_LABEL)
-                .size(Typography::SecondaryText.size_px())
-                .font(Typography::SecondaryText.font())
+                .size(TypeRole::Metadata.size_px())
+                .font(TypeRole::Metadata.font())
                 .color(design_tokens::text_muted(&theme)),
         )
         .spacing(design_tokens::SPACE_2)
@@ -211,14 +211,14 @@ fn metric_cell<'a>(
     Column::new()
         .push(
             text(format_value(value))
-                .font(Typography::PageTitle.font())
-                .size(Typography::PageTitle.size_px())
+                .font(TypeRole::PageTitle.font())
+                .size(TypeRole::PageTitle.size_px())
                 .color(design_tokens::text_primary(theme)),
         )
         .push(
             text(label)
-                .size(Typography::SecondaryText.size_px())
-                .font(Typography::SecondaryText.font())
+                .size(TypeRole::Metadata.size_px())
+                .font(TypeRole::Metadata.font())
                 .color(design_tokens::text_muted(theme)),
         )
         .spacing(design_tokens::SPACE_2)

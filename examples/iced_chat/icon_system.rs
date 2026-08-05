@@ -35,7 +35,6 @@ use iced::widget::tooltip;
 use iced::{Color, Element};
 
 use crate::app::AppMessage;
-use crate::app::TYPO_XS;
 use crate::design_tokens;
 
 // ── Icon asset constants (Lucide SVG, embedded at compile time) ──────
@@ -380,7 +379,7 @@ pub fn icon_with_tooltip<'a>(
     let svg = icon.build().size(size).build();
     tooltip::Tooltip::new(
         svg,
-        iced::widget::text(label).size(TYPO_XS),
+        crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, label),
         tooltip::Position::Bottom,
     )
 }
@@ -392,7 +391,7 @@ pub fn tooltip_for<'a>(
 ) -> tooltip::Tooltip<'a, AppMessage, iced::Theme, iced::Renderer> {
     tooltip::Tooltip::new(
         svg,
-        iced::widget::text(label).size(TYPO_XS),
+        crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, label),
         tooltip::Position::Bottom,
     )
 }

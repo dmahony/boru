@@ -40,8 +40,8 @@ use iced::{Alignment, Background, Border, Color, Element, Length, Padding, Pixel
 
 use crate::app::AppMessage;
 use crate::design_tokens;
-use crate::fonts::Typography;
-use crate::icon_system::{self, Icon, IconSize};
+use crate::fonts::TypeRole;
+use crate::icon_system::{Icon, IconSize};
 use crate::presentation;
 
 /// Build the compact, persistent mesh connectivity strip used at the bottom
@@ -461,8 +461,8 @@ pub fn primary_button<'a>(
 ) -> Element<'a, AppMessage> {
     let btn = button(
         text(label)
-            .font(Typography::ButtonLabel.font())
-            .size(Typography::ButtonLabel.size_px()),
+            .font(TypeRole::ButtonLabel.font())
+            .size(TypeRole::ButtonLabel.size_px()),
     )
     .padding([design_tokens::SPACE_8, design_tokens::SPACE_16])
     .style(button_primary_style);
@@ -497,8 +497,8 @@ pub fn primary_button_icon<'a>(
         )
         .push(
             text(label)
-                .font(Typography::ButtonLabel.font())
-                .size(Typography::ButtonLabel.size_px())
+                .font(TypeRole::ButtonLabel.font())
+                .size(TypeRole::ButtonLabel.size_px())
                 .color(Color::WHITE),
         )
         .align_y(Alignment::Center);
@@ -528,8 +528,8 @@ pub fn secondary_button<'a>(
 ) -> Element<'a, AppMessage> {
     let btn = button(
         text(label)
-            .font(Typography::ButtonLabel.font())
-            .size(Typography::ButtonLabel.size_px()),
+            .font(TypeRole::ButtonLabel.font())
+            .size(TypeRole::ButtonLabel.size_px()),
     )
     .padding([design_tokens::SPACE_8, design_tokens::SPACE_16])
     .style(button_secondary_style);
@@ -579,8 +579,8 @@ pub fn ghost_icon_button<'a>(
         iced_tooltip::Tooltip::new(
             element,
             text(label)
-                .size(Typography::SecondaryText.size_px())
-                .font(Typography::SecondaryText.font()),
+                .size(TypeRole::Metadata.size_px())
+                .font(TypeRole::Metadata.font()),
             iced_tooltip::Position::Bottom,
         )
         .into()
@@ -664,8 +664,8 @@ pub fn text_input_field_opts<'a, 'b>(
     let mut input = text_input(placeholder, value)
         .on_input(on_input)
         .padding([design_tokens::SPACE_8, design_tokens::SPACE_12])
-        .size(Typography::Body.size_px())
-        .font(Typography::Body.font());
+        .size(TypeRole::Body.size_px())
+        .font(TypeRole::Body.font());
 
     if let Some(id) = id {
         input = input.id(id);
@@ -739,8 +739,8 @@ pub enum BadgeKind {
 pub fn badge<'a, Message: 'a>(label: &'a str, kind: BadgeKind) -> Element<'a, Message> {
     container(
         text(label)
-            .size(Typography::SecondaryText.size_px())
-            .font(Typography::SecondaryText.font()),
+            .size(TypeRole::Metadata.size_px())
+            .font(TypeRole::Metadata.font()),
     )
     .padding([2.0, design_tokens::SPACE_8])
     .style(move |t| container::Style {
@@ -770,8 +770,8 @@ pub fn badge<'a, Message: 'a>(label: &'a str, kind: BadgeKind) -> Element<'a, Me
 pub fn badge_owned<'a, Message: 'a>(label: String, kind: BadgeKind) -> Element<'a, Message> {
     container(
         text(label)
-            .size(Typography::SecondaryText.size_px())
-            .font(Typography::SecondaryText.font()),
+            .size(TypeRole::Metadata.size_px())
+            .font(TypeRole::Metadata.font()),
     )
     .padding([2.0, design_tokens::SPACE_8])
     .style(move |t| container::Style {
@@ -894,8 +894,8 @@ impl<'a, Message: Clone + 'a> ListRow<'a, Message> {
         let mut text_col = Column::new()
             .push(
                 text(self.primary_text)
-                    .font(Typography::Body.font())
-                    .size(Typography::Body.size_px())
+                    .font(TypeRole::Body.font())
+                    .size(TypeRole::Body.size_px())
                     .color(design_tokens::text_primary(theme)),
             )
             .spacing(2.0)
@@ -904,8 +904,8 @@ impl<'a, Message: Clone + 'a> ListRow<'a, Message> {
         if let Some(sec) = self.secondary_text {
             text_col = text_col.push(
                 text(sec)
-                    .font(Typography::SecondaryText.font())
-                    .size(Typography::SecondaryText.size_px())
+                    .font(TypeRole::SupportingText.font())
+                    .size(TypeRole::SupportingText.size_px())
                     .color(design_tokens::text_secondary(theme)),
             );
         }
@@ -1002,8 +1002,8 @@ pub fn empty_state<'a>(
         )
         .push(
             text(title)
-                .font(Typography::SectionHeading.font())
-                .size(Typography::SectionHeading.size_px())
+                .font(TypeRole::CardTitle.font())
+                .size(TypeRole::CardTitle.size_px())
                 .color(design_tokens::text_primary(&Theme::Light)),
         )
         .push(
@@ -1013,8 +1013,8 @@ pub fn empty_state<'a>(
         )
         .push(
             text(subtitle)
-                .font(Typography::Body.font())
-                .size(Typography::Body.size_px())
+                .font(TypeRole::SupportingText.font())
+                .size(TypeRole::SupportingText.size_px())
                 .color(design_tokens::text_secondary(&Theme::Light)),
         )
         .align_x(Alignment::Center)
@@ -1151,7 +1151,7 @@ impl<Message: 'static> Avatar<Message> {
             text(display_text)
                 .size(Pixels(font_size))
                 .color(Color::WHITE)
-                .font(Typography::SecondaryText.font())
+                .font(TypeRole::Metadata.font())
                 .into()
         } else if let Some(icon) = self.fallback_icon {
             icon.build()
@@ -1163,7 +1163,7 @@ impl<Message: 'static> Avatar<Message> {
             text("?")
                 .size(Pixels(font_size))
                 .color(Color::WHITE)
-                .font(Typography::SecondaryText.font())
+                .font(TypeRole::Metadata.font())
                 .into()
         };
 
@@ -1180,7 +1180,7 @@ impl<Message: 'static> Avatar<Message> {
                     text(count_text)
                         .size(10.0)
                         .color(Color::WHITE)
-                        .font(Typography::Timestamp.font()),
+                        .font(TypeRole::Metadata.font()),
                 )
                 .padding([1.0, 5.0])
                 .style(move |t| container::Style {
@@ -1198,8 +1198,8 @@ impl<Message: 'static> Avatar<Message> {
                 iced_tooltip::Tooltip::new(
                     status_dot::<Message>(StatusDotKind::Online, 12.0),
                     text("Online")
-                        .size(Typography::SecondaryText.size_px())
-                        .font(Typography::SecondaryText.font()),
+                        .size(TypeRole::Metadata.size_px())
+                        .font(TypeRole::Metadata.font()),
                     iced_tooltip::Position::Top,
                 )
                 .into()
@@ -1274,8 +1274,8 @@ pub fn section_header<'a>(
     let mut row = Row::new()
         .push(
             text(title)
-                .font(Typography::SidebarSectionLabel.font())
-                .size(Typography::SidebarSectionLabel.size_px())
+                .font(TypeRole::ButtonLabel.font())
+                .size(TypeRole::ButtonLabel.size_px())
                 .color(design_tokens::text_muted(&Theme::Light)),
         )
         .push(Space::new().width(Length::Fill).height(Length::Shrink));
@@ -1318,8 +1318,8 @@ pub fn card_header<'a>(
 
     row = row.push(
         text(title)
-            .font(Typography::SectionHeading.font())
-            .size(Typography::SectionHeading.size_px())
+            .font(TypeRole::CardTitle.font())
+            .size(TypeRole::CardTitle.size_px())
             .color(design_tokens::text_primary(&Theme::Light)),
     );
 
@@ -1413,8 +1413,8 @@ impl<'a> SidebarSectionHeader<'a> {
             )
             .push(
                 text(self.title)
-                    .font(Typography::SidebarSectionLabel.font())
-                    .size(Typography::SidebarSectionLabel.size_px())
+                    .font(TypeRole::ButtonLabel.font())
+                    .size(TypeRole::ButtonLabel.size_px())
                     .color(design_tokens::text_muted(theme))
                     .width(Length::Shrink),
             );
@@ -1428,8 +1428,8 @@ impl<'a> SidebarSectionHeader<'a> {
                 )
                 .push(
                     text(count.to_string())
-                        .font(Typography::Timestamp.font())
-                        .size(Typography::Timestamp.size_px())
+                        .font(TypeRole::Metadata.font())
+                        .size(TypeRole::Metadata.size_px())
                         .color(design_tokens::text_muted(theme)),
                 );
         }
@@ -1548,16 +1548,16 @@ pub fn sidebar_empty_state<'a>(
     let mut copy = Column::new()
         .push(
             text(title)
-                .font(Typography::Body.font())
-                .size(Typography::Body.size_px())
+                .font(TypeRole::Body.font())
+                .size(TypeRole::Body.size_px())
                 .style(move |t| text::Style {
                     color: Some(design_tokens::text_secondary(t)),
                 }),
         )
         .push(
             text(supporting)
-                .font(Typography::SecondaryText.font())
-                .size(Typography::SecondaryText.size_px())
+                .font(TypeRole::SupportingText.font())
+                .size(TypeRole::SupportingText.size_px())
                 .style(move |t| text::Style {
                     color: Some(design_tokens::text_muted(t)),
                 }),
@@ -1574,8 +1574,8 @@ pub fn sidebar_empty_state<'a>(
         copy = copy.push(
             button(
                 text(label)
-                    .font(Typography::ButtonLabel.font())
-                    .size(Typography::ButtonLabel.size_px()),
+                    .font(TypeRole::ButtonLabel.font())
+                    .size(TypeRole::ButtonLabel.size_px()),
             )
             .on_press(message)
             .padding([design_tokens::SPACE_4, design_tokens::SPACE_10])
@@ -1625,7 +1625,7 @@ pub fn date_separator<'a, Message: 'a>(
 ) -> Element<'a, Message> {
     container(
         text(label)
-            .size(Typography::Timestamp.size_px())
+            .size(TypeRole::Metadata.size_px())
             .color(design_tokens::text_muted(theme)),
     )
     .padding([design_tokens::SPACE_8, design_tokens::SPACE_12])
@@ -1652,13 +1652,13 @@ pub fn system_event_chip<'a, Message: 'a>(
                 Row::new()
                     .push(
                         text(label)
-                            .size(Typography::Timestamp.size_px())
+                            .size(TypeRole::Metadata.size_px())
                             .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
                             .color(accent),
                     )
                     .push(
                         text(body)
-                            .size(Typography::Timestamp.size_px())
+                            .size(TypeRole::Metadata.size_px())
                             .color(design_tokens::text_secondary(theme))
                             .wrapping(iced::widget::text::Wrapping::Word),
                     )
@@ -1728,11 +1728,11 @@ impl<'a, Message: Clone + 'a> TabStrip<Message> {
                 let btn = button(
                     text(label)
                         .font(if is_active {
-                            Typography::Body.font()
+                            TypeRole::ButtonLabel.font()
                         } else {
-                            Typography::Body.font()
+                            TypeRole::ButtonLabel.font()
                         })
-                        .size(Typography::Body.size_px()),
+                        .size(TypeRole::ButtonLabel.size_px()),
                 )
                 .on_press(msg)
                 .padding([design_tokens::SPACE_4, design_tokens::SPACE_12])
@@ -1958,8 +1958,8 @@ impl<'a, Message: 'a> ProgressBar<'a, Message> {
         if self.show_label && !self.indeterminate {
             let pct = (self.fraction * 100.0) as u32;
             let label = text(format!("{pct}%"))
-                .font(Typography::SecondaryText.font())
-                .size(Typography::SecondaryText.size_px())
+                .font(TypeRole::Metadata.font())
+                .size(TypeRole::Metadata.size_px())
                 .color(design_tokens::text_secondary(theme));
 
             Row::new()
@@ -2013,14 +2013,14 @@ impl<'a, Message: 'a> FileIdentityCell<'a, Message> {
             .build();
 
         let name_el = text(self.name)
-            .font(Typography::Body.font())
-            .size(Typography::Body.size_px())
+            .font(TypeRole::Body.font())
+            .size(TypeRole::Body.size_px())
             .color(design_tokens::text_primary(theme))
             .width(Length::Fill);
 
         let meta_el = text(self.metadata)
-            .font(Typography::SecondaryText.font())
-            .size(Typography::SecondaryText.size_px())
+            .font(TypeRole::SupportingText.font())
+            .size(TypeRole::SupportingText.size_px())
             .color(design_tokens::text_secondary(theme))
             .width(Length::Fill);
 
@@ -2108,8 +2108,8 @@ fn peer_chip<'a, Message: 'a>(name: &str) -> Element<'a, Message> {
     let name_owned = name.to_string();
     container(
         text(name_owned)
-            .font(Typography::SecondaryText.font())
-            .size(Typography::SecondaryText.size_px()),
+            .font(TypeRole::Metadata.font())
+            .size(TypeRole::Metadata.size_px()),
     )
     .padding([design_tokens::SPACE_2, design_tokens::SPACE_8])
     .height(Length::Fixed(design_tokens::CHIP_HEIGHT))
@@ -2163,14 +2163,14 @@ impl<'a, Message: 'a> MetricBlock<'a, Message> {
         Column::new()
             .push(
                 text(self.value)
-                    .font(Typography::SectionHeading.font())
-                    .size(Typography::SectionHeading.size_px())
+                    .font(TypeRole::CardTitle.font())
+                    .size(TypeRole::CardTitle.size_px())
                     .color(value_color(theme)),
             )
             .push(
                 text(self.label)
-                    .font(Typography::SecondaryText.font())
-                    .size(Typography::SecondaryText.size_px())
+                    .font(TypeRole::Metadata.font())
+                    .size(TypeRole::Metadata.size_px())
                     .color(design_tokens::text_secondary(theme)),
             )
             .spacing(design_tokens::SPACE_2)
@@ -2329,8 +2329,8 @@ impl InlineError {
             .build();
 
         let msg_text = text(self.message)
-            .font(Typography::SecondaryText.font())
-            .size(Typography::SecondaryText.size_px())
+            .font(TypeRole::SupportingText.font())
+            .size(TypeRole::SupportingText.size_px())
             .color(design_tokens::color_danger(theme));
 
         let mut row = Row::new()
@@ -2353,8 +2353,8 @@ impl InlineError {
             row = row.push(
                 button(
                     text("Retry")
-                        .font(Typography::ButtonLabel.font())
-                        .size(Typography::ButtonLabel.size_px()),
+                        .font(TypeRole::ButtonLabel.font())
+                        .size(TypeRole::ButtonLabel.size_px()),
                 )
                 .on_press(retry)
                 .padding([design_tokens::SPACE_4, design_tokens::SPACE_8])
@@ -2420,8 +2420,8 @@ impl<'a, Message: 'a> TableHeaderRow<'a, Message> {
 
         for (label, width) in self.columns {
             let label_el = text(label)
-                .font(Typography::SidebarSectionLabel.font())
-                .size(Typography::SidebarSectionLabel.size_px())
+                .font(TypeRole::Metadata.font())
+                .size(TypeRole::Metadata.size_px())
                 .color(design_tokens::text_muted(theme));
 
             let w = match width {
@@ -2583,8 +2583,8 @@ impl ConnectivityNotice {
             .build();
 
         let msg_text = text(self.message)
-            .font(Typography::SecondaryText.font())
-            .size(Typography::SecondaryText.size_px())
+            .font(TypeRole::SupportingText.font())
+            .size(TypeRole::SupportingText.size_px())
             .color(text_color);
 
         let mut row = Row::new()
@@ -2603,8 +2603,8 @@ impl ConnectivityNotice {
             row = row.push(
                 button(
                     text("\u{2715}")
-                        .font(Typography::ButtonLabel.font())
-                        .size(Typography::ButtonLabel.size_px()),
+                        .font(TypeRole::ButtonLabel.font())
+                        .size(TypeRole::ButtonLabel.size_px()),
                 )
                 .on_press(dismiss)
                 .padding([design_tokens::SPACE_2, design_tokens::SPACE_8])

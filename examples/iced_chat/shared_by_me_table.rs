@@ -32,7 +32,7 @@ use std::collections::HashMap;
 use boru_core::storage::{FileObject, SharedFilePermission, SharedFileRow};
 
 use crate::design_tokens;
-use crate::fonts::Typography;
+use crate::fonts::TypeRole;
 use crate::icon_system::{Icon, IconSize};
 
 // ── Projection types ────────────────────────────────────────────────────
@@ -350,7 +350,7 @@ impl SharedByMeUiState {
 use iced::widget::{button, container, text, tooltip, Column, Row, Space};
 use iced::{Alignment, Background, Border, Color, Element, Length, Theme};
 
-use crate::app::{text_muted_style, AppMessage, BUTTON_PRIMARY_GREEN, TYPO_SM, TYPO_XS};
+use crate::app::{text_muted_style, AppMessage, BUTTON_PRIMARY_GREEN};
 
 /// Fixed visual widths for the table columns (px). Kept as constants so the
 /// column header and every row share identical geometry.
@@ -402,7 +402,8 @@ pub(crate) fn view_shared_by_me_card(
                     Row::new()
                         .push(
                             text(status.clone())
-                                .size(TYPO_XS)
+                                .size(TypeRole::SupportingText.size_px())
+                                .font(TypeRole::SupportingText.font())
                                 .style(text_muted_style),
                         )
                         .spacing(design_tokens::SPACE_4)
@@ -442,7 +443,11 @@ fn share_menu(theme: &Theme) -> Element<'static, AppMessage> {
     let item = |label: &'static str, message: AppMessage| {
         button(
             Row::new()
-                .push(text(label).size(TYPO_SM))
+                .push(
+                    text(label)
+                        .size(TypeRole::ButtonLabel.size_px())
+                        .font(TypeRole::ButtonLabel.font()),
+                )
                 .spacing(design_tokens::SPACE_4)
                 .align_y(Alignment::Center),
         )
@@ -495,13 +500,14 @@ fn card_header(
     let title_block = Column::new()
         .push(
             text("Files I'm Sharing")
-                .size(Typography::SectionHeading.size_px())
-                .font(Typography::SectionHeading.font())
+                .size(TypeRole::CardTitle.size_px())
+                .font(TypeRole::CardTitle.font())
                 .color(design_tokens::text_primary(theme)),
         )
         .push(
             text("Local files and folders you've made available to peers.")
-                .size(TYPO_XS)
+                .size(TypeRole::SupportingText.size_px())
+                .font(TypeRole::SupportingText.font())
                 .style(text_muted_style),
         )
         .spacing(design_tokens::SPACE_4)
@@ -516,7 +522,11 @@ fn card_header(
                     .color_fn(|_| Color::WHITE)
                     .build(),
             )
-            .push(text("Share Files or Folder").size(TYPO_SM))
+            .push(
+                text("Share Files or Folder")
+                    .size(TypeRole::ButtonLabel.size_px())
+                    .font(TypeRole::ButtonLabel.font()),
+            )
             .spacing(design_tokens::SPACE_4)
             .align_y(Alignment::Center),
     )
@@ -535,8 +545,8 @@ fn card_header(
 
     let count_badge = container(
         text(count.to_string())
-            .size(TYPO_XS)
-            .font(Typography::SecondaryText.font())
+            .size(TypeRole::Metadata.size_px())
+            .font(TypeRole::Metadata.font())
             .color(design_tokens::text_secondary(theme)),
     )
     .padding([2.0, design_tokens::SPACE_8])
@@ -563,8 +573,8 @@ fn card_header(
 fn column_header(theme: &Theme) -> Element<'static, AppMessage> {
     let cell = |label: &'static str, width: Length| {
         text(label)
-            .size(TYPO_XS)
-            .font(Typography::SecondaryText.font())
+            .size(TypeRole::Metadata.size_px())
+            .font(TypeRole::Metadata.font())
             .color(design_tokens::text_muted(theme))
             .width(width)
     };
@@ -641,8 +651,8 @@ fn footer_count(count: usize, theme: &Theme) -> Element<'static, AppMessage> {
         "Showing {count} item{}",
         if count == 1 { "" } else { "s" }
     ))
-    .size(TYPO_XS)
-    .font(Typography::SecondaryText.font())
+    .size(TypeRole::Metadata.size_px())
+    .font(TypeRole::Metadata.font())
     .color(design_tokens::text_muted(theme))
     .into()
 }
@@ -659,13 +669,13 @@ fn view_row(
     let name_cell = name_cell(row, theme, thumbnails);
     let shared_with_cell = shared_with_cell(row, theme, dark_mode);
     let size_cell = text(format_size(row.size_bytes))
-        .size(TYPO_XS)
-        .font(Typography::SecondaryText.font())
+        .size(TypeRole::Metadata.size_px())
+        .font(TypeRole::Metadata.font())
         .color(design_tokens::text_secondary(theme))
         .width(Length::Fixed(COL_SIZE));
     let shared_on_cell = text(format_shared_on(row.shared_on_ms))
-        .size(TYPO_XS)
-        .font(Typography::SecondaryText.font())
+        .size(TypeRole::Metadata.size_px())
+        .font(TypeRole::Metadata.font())
         .color(design_tokens::text_secondary(theme))
         .width(Length::Fixed(COL_SHARED_ON));
     let downloads_cell = downloads_cell(row, theme);
@@ -745,8 +755,8 @@ fn name_cell(
     };
     let full_name = row.display_name.clone();
     let name_text = text(truncated_name(&row.display_name, 44))
-        .size(TYPO_SM)
-        .font(Typography::Body.font())
+        .size(TypeRole::Body.size_px())
+        .font(TypeRole::Body.font())
         .color(design_tokens::text_primary(theme));
 
     let kind = kind_label(row.mime_type.as_deref());
@@ -756,8 +766,8 @@ fn name_cell(
         format_size(row.size_bytes),
         relative_shared(row.shared_on_ms, now_ms_u64())
     ))
-    .size(TYPO_XS)
-    .font(Typography::SecondaryText.font())
+    .size(TypeRole::Metadata.size_px())
+    .font(TypeRole::Metadata.font())
     .color(design_tokens::text_muted(theme));
 
     let name_block = Column::new()
@@ -770,7 +780,7 @@ fn name_cell(
     let with_tooltip: Element<'static, AppMessage> = if row.display_name.chars().count() > 44 {
         tooltip::Tooltip::new(
             name_block,
-            text(full_name).size(TYPO_XS),
+            text(full_name).size(TypeRole::Metadata.size_px()),
             tooltip::Position::Bottom,
         )
         .into()
@@ -840,8 +850,8 @@ fn shared_with_cell(
     if active_count > MAX_VISIBLE_CHIPS {
         inner = inner.push(
             text(format!("+{}", active_count - MAX_VISIBLE_CHIPS))
-                .size(TYPO_XS)
-                .font(Typography::SecondaryText.font())
+                .size(TypeRole::Metadata.size_px())
+                .font(TypeRole::Metadata.font())
                 .color(design_tokens::text_muted(theme)),
         );
     }
@@ -853,8 +863,8 @@ fn shared_with_cell(
     if expired_count > 0 {
         inner = inner.push(
             text(format!("{} expired", expired_count))
-                .size(TYPO_XS)
-                .font(Typography::SecondaryText.font())
+                .size(TypeRole::Metadata.size_px())
+                .font(TypeRole::Metadata.font())
                 .color(design_tokens::text_muted(theme)),
         );
     }
@@ -899,8 +909,8 @@ fn recipient_chip(
     });
 
     let label = text(truncated_name(&recipient.label, CHIP_LABEL_MAX_CHARS))
-        .size(TYPO_XS)
-        .font(Typography::SecondaryText.font())
+        .size(TypeRole::Metadata.size_px())
+        .font(TypeRole::Metadata.font())
         .color(design_tokens::text_secondary(theme));
 
     container(
@@ -927,8 +937,8 @@ fn recipient_chip(
 fn all_friends_chip(theme: &Theme) -> Element<'static, AppMessage> {
     container(
         text("All friends")
-            .size(TYPO_XS)
-            .font(Typography::SecondaryText.font())
+            .size(TypeRole::Metadata.size_px())
+            .font(TypeRole::Metadata.font())
             .color(design_tokens::text_secondary(theme)),
     )
     .padding([2.0, design_tokens::SPACE_6])
@@ -952,8 +962,8 @@ fn downloads_cell(row: &SharedByMeRow, theme: &Theme) -> Element<'static, AppMes
         None => "—".to_string(),
     };
     text(value)
-        .size(TYPO_XS)
-        .font(Typography::SecondaryText.font())
+        .size(TypeRole::Metadata.size_px())
+        .font(TypeRole::Metadata.font())
         .color(design_tokens::text_muted(theme))
         .width(Length::Fixed(COL_DOWNLOADS))
         .into()
@@ -997,17 +1007,21 @@ fn actions_cell(
 fn action_menu(row: &SharedByMeRow, theme: &Theme) -> Element<'static, AppMessage> {
     let hash = row.content_hash.clone();
     let menu_item = |label: &'static str, message: AppMessage| {
-        button(text(label).size(TYPO_SM))
-            .on_press(message)
-            .padding([design_tokens::SPACE_4, design_tokens::SPACE_8])
-            .style(move |t, status| button::Style {
-                background: match status {
-                    button::Status::Hovered => {
-                        Some(Background::Color(design_tokens::surface_hover(t)))
-                    }
-                    _ => None,
-                },
-                text_color: design_tokens::text_primary(t),
+        button(
+            text(label)
+                .size(TypeRole::ButtonLabel.size_px())
+                .font(TypeRole::ButtonLabel.font()),
+        )
+        .on_press(message)
+        .padding([design_tokens::SPACE_4, design_tokens::SPACE_8])
+        .style(move |t, status| button::Style {
+            background: match status {
+                button::Status::Hovered => {
+                    Some(Background::Color(design_tokens::surface_hover(t)))
+                }
+                _ => None,
+            },
+            text_color: design_tokens::text_primary(t),
                 border: Border {
                     radius: design_tokens::RADIUS_SM.into(),
                     ..Default::default()
@@ -1061,8 +1075,8 @@ fn stop_sharing_confirmation(
     let prompt_block = Column::new()
         .push(
             text("Stop sharing this item?")
-                .size(TYPO_SM)
-                .font(Typography::Body.font())
+                .size(TypeRole::BodyEmphasised.size_px())
+                .font(TypeRole::BodyEmphasised.font())
                 .color(design_tokens::text_primary(theme)),
         )
         .push(
@@ -1070,16 +1084,20 @@ fn stop_sharing_confirmation(
                 "Peers with active downloads may lose access mid-transfer. \
                  The file is removed from your shared list; local copies are not deleted.",
             )
-            .size(TYPO_XS)
-            .font(Typography::SecondaryText.font())
+            .size(TypeRole::SupportingText.size_px())
+            .font(TypeRole::SupportingText.font())
             .color(design_tokens::text_secondary(theme)),
         )
         .spacing(design_tokens::SPACE_2)
         .width(Length::Fill)
         .align_x(Alignment::Start);
 
-    let cancel = button(text("Cancel").size(TYPO_SM))
-        .on_press(AppMessage::SharedByMeCancelStopSharing)
+    let cancel = button(
+        text("Cancel")
+            .size(TypeRole::ButtonLabel.size_px())
+            .font(TypeRole::ButtonLabel.font()),
+    )
+    .on_press(AppMessage::SharedByMeCancelStopSharing)
         .padding([design_tokens::SPACE_4, design_tokens::SPACE_10])
         .style(|t, status| button::Style {
             background: match status {
@@ -1094,8 +1112,12 @@ fn stop_sharing_confirmation(
             },
             ..Default::default()
         });
-    let confirm = button(text("Stop sharing").size(TYPO_SM))
-        .on_press(AppMessage::SharedByMeConfirmStopSharing(hash))
+    let confirm = button(
+        text("Stop sharing")
+            .size(TypeRole::ButtonLabel.size_px())
+            .font(TypeRole::ButtonLabel.font()),
+    )
+    .on_press(AppMessage::SharedByMeConfirmStopSharing(hash))
         .padding([design_tokens::SPACE_4, design_tokens::SPACE_10])
         .style(|t, _status| button::Style {
             background: Some(Background::Color(design_tokens::destructive(t))),
@@ -1146,15 +1168,15 @@ fn details_panel(
         Row::new()
             .push(
                 text(label)
-                    .size(TYPO_XS)
-                    .font(Typography::SecondaryText.font())
+                    .size(TypeRole::Metadata.size_px())
+                    .font(TypeRole::Metadata.font())
                     .color(design_tokens::text_muted(theme))
                     .width(Length::Fixed(96.0)),
             )
             .push(
                 text(value)
-                    .size(TYPO_XS)
-                    .font(Typography::SecondaryText.font())
+                    .size(TypeRole::Metadata.size_px())
+                    .font(TypeRole::Metadata.font())
                     .color(design_tokens::text_secondary(theme)),
             )
             .spacing(design_tokens::SPACE_8)
@@ -1194,15 +1216,15 @@ fn details_panel(
         .width(Length::Fill);
     access = access.push(
         text("Access")
-            .size(TYPO_XS)
-            .font(Typography::SecondaryText.font())
+            .size(TypeRole::Metadata.size_px())
+            .font(TypeRole::Metadata.font())
             .color(design_tokens::text_muted(theme)),
     );
     if !row.has_explicit_recipients && row.recipients.is_empty() {
         access = access.push(
             text("Visible to all friends (no explicit grants).")
-                .size(TYPO_XS)
-                .font(Typography::SecondaryText.font())
+                .size(TypeRole::SupportingText.size_px())
+                .font(TypeRole::SupportingText.font())
                 .color(design_tokens::text_secondary(theme)),
         );
     } else {
@@ -1244,23 +1266,27 @@ fn details_panel(
                 .push(Space::new().width(Length::Fixed(design_tokens::SPACE_6)))
                 .push(
                     text(truncated_name(&recipient.label, 28))
-                        .size(TYPO_XS)
-                        .font(Typography::SecondaryText.font())
+                        .size(TypeRole::Metadata.size_px())
+                        .font(TypeRole::Metadata.font())
                         .color(design_tokens::text_primary(theme))
                         .width(Length::Fill),
                 )
                 .push(
                     text(state_label)
-                        .size(TYPO_XS)
-                        .font(Typography::SecondaryText.font())
+                        .size(TypeRole::Metadata.size_px())
+                        .font(TypeRole::Metadata.font())
                         .color(state_color),
                 );
             if recipient.access == RecipientAccess::Allowed {
                 row_builder = row_builder
                     .push(Space::new().width(Length::Fixed(design_tokens::SPACE_8)))
                     .push(
-                        button(text("Revoke").size(TYPO_XS))
-                            .on_press(AppMessage::SharedByMeRevokeAccess(
+                        button(
+                            text("Revoke")
+                                .size(TypeRole::ButtonLabel.size_px())
+                                .font(TypeRole::ButtonLabel.font()),
+                        )
+                        .on_press(AppMessage::SharedByMeRevokeAccess(
                                 hash.clone(),
                                 recipient.id.clone(),
                             ))
@@ -1286,8 +1312,12 @@ fn details_panel(
         }
     }
 
-    let close = button(text("Close").size(TYPO_SM))
-        .on_press(AppMessage::SharedByMeCloseDetails)
+    let close = button(
+        text("Close")
+            .size(TypeRole::ButtonLabel.size_px())
+            .font(TypeRole::ButtonLabel.font()),
+    )
+    .on_press(AppMessage::SharedByMeCloseDetails)
         .padding([design_tokens::SPACE_4, design_tokens::SPACE_10])
         .style(|t, status| button::Style {
             background: match status {
@@ -1309,8 +1339,8 @@ fn details_panel(
                 Row::new()
                     .push(
                         text("Details")
-                            .size(TYPO_SM)
-                            .font(Typography::Body.font())
+                            .size(TypeRole::BodyEmphasised.size_px())
+                            .font(TypeRole::BodyEmphasised.font())
                             .color(design_tokens::text_primary(theme)),
                     )
                     .push(Space::new().width(Length::Fill))
@@ -1353,15 +1383,15 @@ fn empty_body(theme: &Theme) -> Element<'static, AppMessage> {
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_16)))
         .push(
             text("You haven't shared any files yet.")
-                .size(TYPO_SM)
-                .font(Typography::Body.font())
+                .size(TypeRole::Body.size_px())
+                .font(TypeRole::Body.font())
                 .color(design_tokens::text_secondary(theme)),
         )
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_4)))
         .push(
             text("Use the Share button in chat or your profile to make files available.")
-                .size(TYPO_XS)
-                .font(Typography::SecondaryText.font())
+                .size(TypeRole::SupportingText.size_px())
+                .font(TypeRole::SupportingText.font())
                 .color(design_tokens::text_muted(theme)),
         )
         .spacing(0)
@@ -1421,15 +1451,15 @@ fn error_body(theme: &Theme, message: String) -> Element<'static, AppMessage> {
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_16)))
         .push(
             text("File sharing storage is unavailable")
-                .size(TYPO_SM)
-                .font(Typography::Body.font())
+                .size(TypeRole::Body.size_px())
+                .font(TypeRole::Body.font())
                 .color(design_tokens::text_primary(theme)),
         )
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_4)))
         .push(
             text(message)
-                .size(TYPO_XS)
-                .font(Typography::SecondaryText.font())
+                .size(TypeRole::SupportingText.size_px())
+                .font(TypeRole::SupportingText.font())
                 .color(design_tokens::text_muted(theme)),
         )
         .spacing(0)

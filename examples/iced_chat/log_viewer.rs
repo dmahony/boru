@@ -5,15 +5,14 @@ use std::{
     time::Duration,
 };
 
-use iced::font::Weight;
 use iced::{
-    widget::{button, column, container, row, text},
+    widget::{button, column, container, row},
     Element, Length,
 };
 use n0_error::{Result as NResult, StdResultExt};
 
 use crate::app;
-use crate::app::{text_muted_style, TYPO_XXS};
+use crate::app::text_muted_style;
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -37,47 +36,43 @@ impl LogViewer {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        use crate::app::{SPACE_12, TYPO_LG, TYPO_SM, TYPO_XS};
+        use crate::app::SPACE_12;
 
         let header = row![
-            text("Boru logs")
-                .font(crate::fonts::source_sans(Weight::Bold))
-                .size(TYPO_LG),
-            text(format!(" {}", app::version_tag()))
-                .font(crate::fonts::source_sans(Weight::Normal))
-                .size(TYPO_XXS)
-                .style(text_muted_style)
+            crate::fonts::type_role_text(crate::fonts::TypeRole::SectionTitle, "Boru logs"),
+            crate::fonts::type_role_text(
+                crate::fonts::TypeRole::Metadata,
+                format!(" {}", app::version_tag()),
+            )
+            .style(text_muted_style)
         ]
         .spacing(SPACE_12)
         .push(
-            button(
-                text("Reload")
-                    .font(crate::fonts::source_sans(Weight::Medium))
-                    .size(TYPO_SM),
-            )
-            .on_press(Message::Refresh),
+            button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Reload"))
+                .on_press(Message::Refresh),
         );
 
         let body = if self.contents.is_empty() {
-            text(format!(
-                "No log output yet.\n\nThe log file is:\n{}",
-                self.log_path.display()
-            ))
-            .font(crate::fonts::source_sans(Weight::Normal))
-            .size(TYPO_SM)
+            crate::fonts::type_role_text(
+                crate::fonts::TypeRole::Body,
+                format!(
+                    "No log output yet.\n\nThe log file is:\n{}",
+                    self.log_path.display()
+                ),
+            )
         } else {
-            text(&self.contents)
-                .font(crate::fonts::jetbrains_mono(Weight::Normal))
-                .size(TYPO_SM)
+            crate::fonts::type_role_text(crate::fonts::TypeRole::TechnicalValue, &self.contents)
+                .size(14.0)
                 .width(Length::Fill)
         };
 
         column![
             header,
-            text(self.log_path.display().to_string())
-                .font(crate::fonts::source_sans(Weight::Normal))
-                .size(TYPO_XS)
-                .style(text_muted_style),
+            crate::fonts::type_role_text(
+                crate::fonts::TypeRole::Metadata,
+                self.log_path.display().to_string(),
+            )
+            .style(text_muted_style),
             crate::ui_components::gutter_scrollable(container(body).width(Length::Fill)).height(Length::Fill),
         ]
         .spacing(SPACE_12)

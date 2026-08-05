@@ -30,7 +30,7 @@ use iced::widget::{button, container, text, Column, Row, Space};
 use iced::{Alignment, Background, Element, Length, Theme};
 
 use crate::design_tokens;
-use crate::fonts::Typography;
+use crate::fonts::TypeRole;
 use crate::icon_system::{Icon, IconSize};
 use crate::ui_components::{button_primary_style, button_secondary_style};
 
@@ -182,8 +182,8 @@ impl<'a, Message: Clone + 'a> BoruDialog<'a, Message> {
         let mut title_col = Column::new().spacing(design_tokens::SPACE_2);
         title_col = title_col.push(
             text(title)
-                .font(Typography::SectionHeading.font())
-                .size(Typography::SectionHeading.size_px())
+                .font(TypeRole::SectionTitle.font())
+                .size(TypeRole::SectionTitle.size_px())
                 .style(move |t| iced::widget::text::Style {
                     color: Some(design_tokens::text_primary(t)),
                 }),
@@ -191,8 +191,8 @@ impl<'a, Message: Clone + 'a> BoruDialog<'a, Message> {
         if let Some(subtitle) = subtitle {
             title_col = title_col.push(
                 text(subtitle)
-                    .font(Typography::SecondaryText.font())
-                    .size(Typography::SecondaryText.size_px())
+                    .font(TypeRole::SupportingText.font())
+                    .size(TypeRole::SupportingText.size_px())
                     .style(move |t| iced::widget::text::Style {
                         color: Some(design_tokens::text_secondary(t)),
                     }),
@@ -295,8 +295,8 @@ fn footer_row<'a, Message: Clone + 'a>(
     if let Some((label, msg)) = secondary {
         let mut btn = button(
             text(label)
-                .font(Typography::ButtonLabel.font())
-                .size(Typography::ButtonLabel.size_px()),
+                .font(TypeRole::ButtonLabel.font())
+                .size(TypeRole::ButtonLabel.size_px()),
         )
         .padding([design_tokens::SPACE_8, design_tokens::SPACE_16])
         .style(button_secondary_style);
@@ -309,8 +309,8 @@ fn footer_row<'a, Message: Clone + 'a>(
     if let Some((label, msg)) = primary {
         let mut btn = button(
             text(label)
-                .font(Typography::ButtonLabel.font())
-                .size(Typography::ButtonLabel.size_px()),
+                .font(TypeRole::ButtonLabel.font())
+                .size(TypeRole::ButtonLabel.size_px()),
         )
         .padding([design_tokens::SPACE_8, design_tokens::SPACE_16])
         .style(button_primary_style);
