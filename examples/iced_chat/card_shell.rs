@@ -16,7 +16,8 @@
 //!   are supplied instead, a scrollable list with a fixed maximum height
 //!   (`max_height`, default [`DEFAULT_LIST_MAX_HEIGHT`]) so a long list
 //!   scrolls instead of growing the dashboard without bound. When both are
-//!   absent, the caller-provided `empty_message` is shown.
+//!   absent, the caller-provided `empty_message` is shown (optionally with
+//!   a small icon via [`Self::empty_icon`], UI-HOME-16).
 //! - **Footer** — optional element rendered below the body with a small top
 //!   gap (e.g. a summary line or action row).
 //!
@@ -116,6 +117,10 @@ pub struct CardShell<'a, Message> {
     header_action: Option<(String, Message)>,
     /// Message shown when `children` is empty and no `body` is set.
     empty_message: Option<String>,
+    /// Optional small icon rendered to the left of the empty-state message
+    /// (UI-HOME-16). The caller owns the element so the shell stays
+    /// data-agnostic; muted colouring is the caller's responsibility.
+    empty_icon: Option<Element<'a, Message>>,
     /// Fixed max height of the scrollable list body.
     max_height: f32,
     /// Vertical spacing between list rows.
@@ -151,6 +156,7 @@ impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
             status_badge: None,
             header_action: None,
             empty_message: None,
+            empty_icon: None,
             max_height: DEFAULT_LIST_MAX_HEIGHT,
             row_spacing: design_tokens::SPACE_2,
             title_case: true,
@@ -212,6 +218,17 @@ impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
     /// Message shown when `children` is empty and no `body` is set.
     pub fn empty_message(mut self, message: impl Into<String>) -> Self {
         self.empty_message = Some(message.into());
+        self
+    }
+
+    /// Show a small icon to the left of the empty-state message.
+    ///
+    /// UI-HOME-16: every list-oriented card renders its empty state as a
+    /// small muted icon + muted supporting text so the rail never looks
+    /// blank. The caller owns the element (e.g. an [`crate::app::icon_svg`]
+    /// glyph tinted with `text_muted`), so the shell stays data-agnostic.
+    pub fn empty_icon(mut self, element: Element<'a, Message>) -> Self {
+        self.empty_icon = Some(element);
         self
     }
 
@@ -376,17 +393,35 @@ impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
             body_el
         } else if self.children.is_empty() {
             if let Some(message) = self.empty_message {
-                container(
-                    // Empty state — supporting_text (Source Sans 3 Regular 13).
-                    crate::fonts::type_role_text(
-                        crate::fonts::TypeRole::SupportingText,
-                        message,
+                // Empty state (UI-HOME-16): a small muted icon (when the
+                // caller supplies one via `empty_icon`) beside muted
+                // supporting text. The text gets Fill width + word wrapping
+                // so two-sentence copy reflows at narrow rail widths instead
+                // of overflowing; vertical padding stays restrained
+                // (SPACE_8) so an empty card never grows excessively tall.
+                let mut empty_row = Row::new()
+                    .align_y(Alignment::Center)
+                    .width(Length::Fill)
+                    .spacing(design_tokens::SPACE_8);
+                if let Some(icon) = self.empty_icon {
+                    empty_row = empty_row.push(icon);
+                }
+                empty_row = empty_row.push(
+                    container(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::SupportingText,
+                            message,
+                        )
+                        .color(design_tokens::text_muted(theme))
+                        .width(Length::Fill)
+                        .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
                     )
-                    .color(design_tokens::text_muted(theme)),
-                )
-                .width(Length::Fill)
-                .padding([design_tokens::SPACE_8, 0.0])
-                .into()
+                    .width(Length::Fill),
+                );
+                container(empty_row)
+                    .width(Length::Fill)
+                    .padding([design_tokens::SPACE_8, 0.0])
+                    .into()
             } else {
                 Space::new()
                     .width(Length::Fill)
@@ -608,6 +643,37 @@ mod tests {
         assert_eq!(shell.empty_message.as_deref(), Some("No peers online"));
         let shell: CardShell<'static, ()> = CardShell::new("Peers", vec![]);
         assert_eq!(shell.empty_message, None, "no empty message by default");
+    }
+
+    #[test]
+    fn card_shell_stores_empty_icon() {
+        let shell: CardShell<'static, ()> =
+            CardShell::new("Peers", vec![]).empty_icon(text("icon").into());
+        assert!(
+            shell.empty_icon.is_some(),
+            "empty-state icon must be stored when provided"
+        );
+        let shell: CardShell<'static, ()> = CardShell::new("Peers", vec![]);
+        assert!(shell.empty_icon.is_none(), "no empty-state icon by default");
+    }
+
+    #[test]
+    fn card_shell_build_empty_state_with_icon_does_not_panic() {
+        let shell: CardShell<'static, ()> = CardShell::new("Peers", vec![])
+            .count(0)
+            .empty_icon(text("icon").into())
+            .empty_message("No peers are online right now. Connected peers will appear here.");
+        let el = shell.build(&Theme::Light);
+        let _ = el;
+    }
+
+    #[test]
+    fn card_shell_build_empty_state_without_icon_does_not_panic() {
+        let shell: CardShell<'static, ()> = CardShell::new("Peers", vec![])
+            .count(0)
+            .empty_message("No peers are online right now. Connected peers will appear here.");
+        let el = shell.build(&Theme::Light);
+        let _ = el;
     }
 
     #[test]

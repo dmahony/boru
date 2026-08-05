@@ -4704,13 +4704,21 @@ pub(crate) struct RecentActivityCardData {
     pub(crate) compact_header: bool,
 }
 
-/// Empty-state copy for the Recent Activity rail card (basic empty state;
-/// final polish is owned by UI-HOME-16).
-pub(crate) const RECENT_ACTIVITY_EMPTY_MESSAGE: &str = "No recent activity";
+/// Empty-state copy for the Online Peers rail card (UI-HOME-16 spec copy).
+pub(crate) const ONLINE_PEERS_EMPTY_MESSAGE: &str =
+    "No peers are online right now. Connected peers will appear here.";
+
+/// Empty-state copy for the Recent Activity rail card (UI-HOME-16 spec copy).
+pub(crate) const RECENT_ACTIVITY_EMPTY_MESSAGE: &str =
+    "No recent activity. Network events will appear here.";
 
 /// Empty-state copy for the Tunnels rail card (UI-HOME-08 spec copy).
 pub(crate) const TUNNELS_EMPTY_MESSAGE: &str =
     "No active tunnels. Create or join a tunnel to securely route traffic.";
+
+/// Empty-state copy for the Recent events section of the Mesh Health card
+/// (UI-HOME-16: retain the connection summary above, explain the empty feed).
+pub(crate) const MESH_EVENTS_EMPTY_MESSAGE: &str = "No recent mesh events";
 
 /// One Recent Activity row. `timestamp` is kept stable so an unchanged buffer
 /// compares equal across frames — only `tick` makes the card rebuild for
@@ -24730,12 +24738,31 @@ impl IcedChat {
         // a sensible ~220–280 px footprint instead of a tiny strip or a huge
         // blank panel.
         let body: iced::Element<'static, AppMessage> = if dep.rows.is_empty() {
+            // UI-HOME-16: intentional empty state — small muted icon beside
+            // the spec copy, vertically centred in the min-height body so the
+            // card stays balanced (never a tiny strip, never a huge blank
+            // panel). The text has Fill width + word wrapping so the
+            // two-sentence copy reflows at narrow rail widths.
             container(
-                crate::fonts::type_role_text(
-                    crate::fonts::TypeRole::SupportingText,
-                    "No peers online",
-                )
-                .color(text_muted(&theme)),
+                Row::new()
+                    .push(icon_svg(ICON_FRIEND, TYPO_SM).style(move |t, _| {
+                        iced::widget::svg::Style {
+                            color: Some(text_muted(t)),
+                        }
+                    }))
+                    .push(Space::new().width(Length::Fixed(SPACE_8)))
+                    .push(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::SupportingText,
+                            ONLINE_PEERS_EMPTY_MESSAGE,
+                        )
+                        .color(text_muted(&theme))
+                        .width(Length::Fill)
+                        .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+                    )
+                    .spacing(0)
+                    .align_y(Alignment::Center)
+                    .width(Length::Fill),
             )
             .width(Length::Fill)
             .height(Length::Fixed(PEERS_BODY_MIN))
@@ -24849,6 +24876,13 @@ impl IcedChat {
 
         CardShell::new("Recent Activity", activity_rows)
             .count(dep.total)
+            .empty_icon(
+                icon_svg(ICON_ACTIVITY, TYPO_SM).style(move |t, _| {
+                    iced::widget::svg::Style {
+                        color: Some(text_muted(t)),
+                    }
+                }).into(),
+            )
             .empty_message(RECENT_ACTIVITY_EMPTY_MESSAGE)
             .compact_header(dep.compact_header)
             .max_height(180.0)
@@ -24941,13 +24975,41 @@ impl IcedChat {
             })
             .collect();
 
+        // UI-HOME-16: when the list is empty the header action label becomes
+        // "Create tunnel" (the dialog the copy points at) instead of the
+        // misleading "View all"; the destination is unchanged.
+        let header_action_label = if dep.rows.is_empty() {
+            "Create tunnel"
+        } else {
+            "View all"
+        };
+
         crate::card_shell::CardShell::new("Tunnels", tunnel_rows)
             .count(dep.rows.len())
-            .on_view_all(AppMessage::ShowCreateTunnelDialog)
+            .header_action(header_action_label, AppMessage::ShowCreateTunnelDialog)
+            .empty_icon(
+                icon_svg(ICON_LOCK, TYPO_SM).style(move |t, _| {
+                    iced::widget::svg::Style {
+                        color: Some(text_muted(t)),
+                    }
+                }).into(),
+            )
             .empty_message(TUNNELS_EMPTY_MESSAGE)
             .compact_header(dep.compact_header)
             .max_height(120.0)
             .build(&theme)
+    }
+
+    /// Header-action label for the Tunnels card: "Create tunnel" when the
+    /// list is empty (the dialog the empty copy points at), "View all"
+    /// once live tunnels exist. The destination is the same in both cases
+    /// (`ShowCreateTunnelDialog`).
+    fn tunnels_header_action_label(rows: usize) -> &'static str {
+        if rows == 0 {
+            "Create tunnel"
+        } else {
+            "View all"
+        }
     }
 
     // ── Main panel (empty state — landing screen) ─────────────────────
@@ -25566,21 +25628,25 @@ impl IcedChat {
             })
             .collect();
         let events_body: iced::Element<'static, AppMessage> = if event_rows.is_empty() {
-            // Intentional no-events state: keep the connection summary and
-            // explain that there are no recent mesh events (UI-HOME-16 copy).
+            // Intentional no-events state (UI-HOME-16): keep the connection
+            // summary above and explain that there are no recent mesh events
+            // with the same small-icon + muted-text treatment the rail cards
+            // use. The text wraps at narrow content widths.
             Row::new()
                 .push(icon_svg(ICON_ACTIVITY, TYPO_SM).style(move |t, _| {
                     iced::widget::svg::Style {
                         color: Some(text_muted(t)),
                     }
                 }))
-                .push(Space::new().width(Length::Fixed(SPACE_6)))
+                .push(Space::new().width(Length::Fixed(SPACE_8)))
                 .push(
                     crate::fonts::type_role_text(
                         crate::fonts::TypeRole::SupportingText,
-                        "No recent mesh events",
+                        MESH_EVENTS_EMPTY_MESSAGE,
                     )
-                    .color(text_muted(&theme)),
+                    .color(text_muted(&theme))
+                    .width(Length::Fill)
+                    .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
                 )
                 .spacing(0)
                 .align_y(Alignment::Center)
@@ -42430,18 +42496,82 @@ mod tests {
         assert_eq!(tunnels_a, tunnels_b);
     }
 
-    // ── UI-HOME-08: Recent Activity + Tunnels rail cards ──
+    // ── UI-HOME-08/16: Recent Activity + Tunnels rail cards ──
 
-    /// The Tunnels rail card must always carry the spec empty-state copy and
-    /// the Recent Activity card its basic empty state (final polish owned by
-    /// UI-HOME-16).
+    /// The rail cards must carry the exact UI-HOME-16 empty-state copy:
+    /// Online Peers and Recent Activity use the spec sentences, Tunnels
+    /// keeps the UI-HOME-08 sentence, and the Mesh Health card explains the
+    /// empty recent-events feed.
     #[test]
-    fn home_rail_empty_state_copy_matches_ui_home_08_spec() {
+    fn home_rail_empty_state_copy_matches_ui_home_16_spec() {
+        assert_eq!(
+            ONLINE_PEERS_EMPTY_MESSAGE,
+            "No peers are online right now. Connected peers will appear here."
+        );
+        assert_eq!(
+            RECENT_ACTIVITY_EMPTY_MESSAGE,
+            "No recent activity. Network events will appear here."
+        );
         assert_eq!(
             TUNNELS_EMPTY_MESSAGE,
             "No active tunnels. Create or join a tunnel to securely route traffic."
         );
-        assert_eq!(RECENT_ACTIVITY_EMPTY_MESSAGE, "No recent activity");
+        assert_eq!(MESH_EVENTS_EMPTY_MESSAGE, "No recent mesh events");
+    }
+
+    /// The Recent Activity and Tunnels cards render their intentional empty
+    /// states (icon + muted spec copy) without panic, and the Online Peers
+    /// card keeps building its min-height empty body. This exercises the
+    /// UI-HOME-16 empty-state render paths directly.
+    #[test]
+    fn home_rail_empty_cards_build_with_ui_home_16_states() {
+        let (_runtime, app, _local, _peer) = build_join_request_test_app();
+
+        let peers = app.online_peers_card_data();
+        assert!(peers.rows.is_empty(), "fresh app has no online peers");
+        let peers_card = IcedChat::view_online_peers_card(&peers);
+        let _ = peers_card;
+
+        let activity = app.recent_activity_card_data();
+        assert!(activity.rows.is_empty(), "fresh app has no activity");
+        let activity_card = IcedChat::view_recent_activity_card(&activity);
+        let _ = activity_card;
+
+        let tunnels = app.tunnels_card_data();
+        assert!(tunnels.rows.is_empty(), "fresh app has no tunnels");
+        let tunnels_card = IcedChat::view_tunnels_card(&tunnels);
+        let _ = tunnels_card;
+
+        let _ = app.view_main_empty_state();
+    }
+
+    /// The Tunnels header action label is truthful per state: "Create
+    /// tunnel" when the list is empty (the dialog the copy points at),
+    /// "View all" once live tunnels exist — destination unchanged.
+    #[test]
+    fn tunnels_header_action_label_switches_to_create_tunnel_when_empty() {
+        let (_runtime, mut app, _local, peer) = build_join_request_test_app();
+
+        let empty = app.tunnels_card_data();
+        assert_eq!(
+            IcedChat::tunnels_header_action_label(empty.rows.len()),
+            "Create tunnel"
+        );
+
+        let owner = iroh::SecretKey::generate().public();
+        let id = boru_core::tunnel::TunnelId([9u8; 32]);
+        let target =
+            boru_core::tunnel::service::TunnelTarget::tcp("127.0.0.1".parse().unwrap(), 8081);
+        let now = now_ms().max(0) as u64;
+        app.tunnel_service
+            .create_tunnel(id, owner, target, peer, now, now + 60_000)
+            .expect("create tunnel");
+        let populated = app.tunnels_card_data();
+        assert_eq!(populated.rows.len(), 1);
+        assert_eq!(
+            IcedChat::tunnels_header_action_label(populated.rows.len()),
+            "View all"
+        );
     }
 
     /// A live (registered) tunnel projects into a Tunnels card row with the

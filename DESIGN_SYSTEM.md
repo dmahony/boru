@@ -349,7 +349,10 @@ buttons — share one style and one shell primitive:
 Shell primitive: `card_shell::CardShell` — builder with semantic areas
 `title` / `subtitle` / `count`+`count_total` badge / `status_badge`
 (`StatusBadgeKind`) / `header_action` / `body` (content-driven) / `footer`
-(bounded scrollable list or empty state when no body is set).
+(bounded scrollable list or empty state when no body is set). Empty states
+(UI-HOME-16) render as a small muted icon (`empty_icon`, caller-owned) +
+muted `SupportingText` with word wrapping, so every list-oriented card has
+an intentional, restrained empty state that reflows at narrow widths.
 Hero variant: same `card_style` with background overridden to
 `primary_soft` when the mesh is Ready.
 

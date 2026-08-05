@@ -1,0 +1,35 @@
+UI-HOME-16 OCR verification
+==========================
+
+[empty 1280x800 crops] exact empty-state copy
+  -- Online Peers card --
+  OK   No peers are online right now
+  OK   Connected peers will appear
+  -- Recent Activity card --
+  OK   No recent activity
+  OK   Network events will
+  -- Tunnels card --
+  OK   No active tunnels
+  OK   Create or join a tunnel
+
+[mesh 1280x800, cleared log] no-events state
+  OK   No recent mesh events
+  OK   RECENT EVENTS header retained
+
+[empty 1280x800] header actions remain available
+  OK   View all
+  OK   Create tunnel
+
+[empty 800x600 scrolled] rail copy present in the minimum band
+  OK   peers are online
+  OK   recent activity
+  OK   active tunnels
+
+[populated 1280x800] live transition out of empty
+  OK   activity rows present ("came online")
+
+[geometry] words_past_right_edge (must be 0)
+  t_4186e7f9_home_empty_1280x800.png: words_past_right_edge=0
+  t_4186e7f9_mesh_events_empty_1280x800.png: words_past_right_edge=0
+  t_4186e7f9_home_empty_800x600_scrolled.png: words_past_right_edge=0
+  t_4186e7f9_home_populated_1280x800.png: words_past_right_edge=0

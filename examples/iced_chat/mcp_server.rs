@@ -33,6 +33,7 @@
 //! | `boru_gui_toggle_dark_mode` | Toggle dark mode on/off (requires `--enable-gui-test-actions`) |
 //! | `boru_gui_close_dialog` | Close the currently open dialog or overlay (requires `--enable-gui-test-actions`) |
 //! | `boru_gui_set_peer_presence` | Simulate a peer's online/offline presence for header evidence (requires `--enable-gui-test-actions`) |
+//! | `boru_gui_clear_mesh_events` | Clear the live mesh event log so evidence harnesses can capture the Mesh Health no-events state (requires `--enable-gui-test-actions`) |
 //! | `boru_run_gui_message_test` | Verify the local GUI message pipeline without claiming remote delivery (requires `--enable-gui-test-actions`) |
 //! | `boru_browse_peer_catalogue` | Fetch and return a remote peer's signed file catalogue |
 //! | `boru_download_file` | Initiate a durable file download from a remote peer |
@@ -560,7 +561,8 @@ async fn handle_request(req: &JsonRpcRequest, state: &McpAppState) -> JsonRpcRes
         | "boru_gui_toggle_dark_mode"
         | "boru_gui_close_dialog"
         | "boru_gui_set_peer_presence"
-        | "boru_gui_test_share_file" => {
+        | "boru_gui_test_share_file"
+        | "boru_gui_clear_mesh_events" => {
             if !state.gui_test_actions_enabled || state.gui_action_tx.is_none() {
                 return jsonrpc_error(
                     req.id.clone(),
@@ -590,7 +592,8 @@ async fn handle_request(req: &JsonRpcRequest, state: &McpAppState) -> JsonRpcRes
                 | "boru_gui_toggle_dark_mode"
                 | "boru_gui_close_dialog"
                 | "boru_gui_set_peer_presence"
-                | "boru_gui_test_share_file" => {
+                | "boru_gui_test_share_file"
+                | "boru_gui_clear_mesh_events" => {
                     if let Err(e) = check_gui_action_rate_limit(&state.gui_action_rate_limiter) {
                         return jsonrpc_error(req.id.clone(), -32000, "Rate limit exceeded", &e);
                     }
@@ -607,6 +610,7 @@ async fn handle_request(req: &JsonRpcRequest, state: &McpAppState) -> JsonRpcRes
                         "boru_gui_close_dialog" => handle_gui_close_dialog(tx),
                         "boru_gui_set_peer_presence" => handle_gui_set_peer_presence(req, tx),
                         "boru_gui_test_share_file" => handle_gui_test_share_file(req, tx),
+                        "boru_gui_clear_mesh_events" => handle_gui_clear_mesh_events(tx),
                         _ => unreachable!(),
                     }
                 }
@@ -833,6 +837,7 @@ fn validate_gui_tool_params(method: &str, params: &Value) -> Result<(), String> 
         ("boru_gui_close_dialog", &[], &[]),
         ("boru_gui_set_peer_presence", &["peer_id", "online"], &[]),
         ("boru_gui_test_share_file", &["path"], &[]),
+        ("boru_gui_clear_mesh_events", &[], &[]),
         ("boru_gui_wait_for_state", &["condition"], &["timeout_ms"]),
         (
             "boru_run_gui_message_test",
@@ -1527,6 +1532,58 @@ fn handle_gui_close_dialog(tx: boru_core::diagnostics::GuiTestHandle) -> Result<
         "sent": true,
         "action_id": idempotency_key,
         "note": "CloseDialog action queued",
+    }))
+}
+
+/// `boru_gui_clear_mesh_events` — clear the live mesh event log so evidence
+/// harnesses can capture the Mesh Health card's intentional no-events state.
+///
+/// The command is test-only (gated on `--enable-gui-test-actions`); it never
+/// fabricates events, it only empties the bounded log the app already keeps.
+///
+/// # Returns
+///
+/// ```json
+/// {
+///     "sent": true,
+///     "action_id": "uuid-like-key",
+///     "note": "ClearMeshEventLog action queued"
+/// }
+/// ```
+///
+/// # Security
+///
+/// - No caller-supplied input is involved — the command has no parameters.
+/// - Rate-limited by the shared `GuiActionRateLimiter`.
+fn handle_gui_clear_mesh_events(tx: boru_core::diagnostics::GuiTestHandle) -> Result<Value, String> {
+    info!("boru_gui_clear_mesh_events: ClearMeshEventLog action queued");
+
+    let idempotency_key = crate::gui_test_actions::generate_action_key();
+
+    let command_json =
+        serde_json::to_string(&boru_core::diagnostics::GuiTestCommand::ClearMeshEventLog)
+            .map_err(|e| format!("Failed to serialize command: {e}"))?;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    let request = boru_core::diagnostics::GuiActionRequest {
+        action_id: boru_core::diagnostics::GuiActionId(idempotency_key.clone()),
+        requested_at_ms: now_ms,
+        command: command_json,
+    };
+
+    tx.enqueue(request).map_err(|e| match e.code {
+        boru_core::diagnostics::GuiActionErrorCode::ActionQueueFull => {
+            format!("GUI action queue is full (capacity: {})", tx.capacity())
+        }
+        _ => format!("GUI action channel error: {}", e.message),
+    })?;
+
+    Ok(serde_json::json!({
+        "sent": true,
+        "action_id": idempotency_key,
+        "note": "ClearMeshEventLog action queued",
     }))
 }
 
@@ -5467,6 +5524,7 @@ mod tests {
             "boru_gui_clear_composer",
             "boru_gui_focus_composer",
             "boru_gui_close_dialog",
+            "boru_gui_clear_mesh_events",
         ] {
             assert!(validate_gui_tool_params(method, &json!({})).is_ok());
             assert!(validate_gui_tool_params(method, &Value::Null).is_ok());
