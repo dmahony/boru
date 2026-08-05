@@ -329,6 +329,23 @@ Shell primitive: `card_shell::CardShell` — builder with semantic areas
 Hero variant: same `card_style` with background overridden to
 `primary_soft` when the mesh is Ready.
 
+##### Connection Overview (hero) card, UI-HOME-04
+
+| Property     | Value                          | File:Line |
+|-------------|--------------------------------|-----------|
+| Structure    | Left message group (state badge + headline + subtitle + actions) + right decorative mesh illustration group | `app.rs` `view_chat_list_content` |
+| Min height   | `HERO_MIN_CONTENT_HEIGHT` (180 px content) + `SPACE_32` padding → ~244 px card (plan band 230–260) | `app.rs` `HERO_MIN_CONTENT_HEIGHT` |
+| Padding      | `SPACE_32` (32 px, plan band 30–36)        | `app.rs` hero card |
+| Background   | `primary_soft` (light green tint) when Ready, else `surface` via `card_style` | `app.rs` hero card |
+| Border       | `border_muted` 1px (thin green-grey), `RADIUS_CARD` 16 px — both via `card_style` | `design_tokens.rs` |
+| Left group   | Circular 48×48 state badge (green `accent_green` + check when connected), `SectionTitle` headline, `Body` subtitle "Private communication, peer to peer." — vertically centred | `app.rs` hero card |
+| Illustration | `NETWORK_MOTIF` SVG scaled proportionally (205×140), low contrast, hidden below 640 px window width | `assets/icons/network-motif.svg` |
+| States       | Starting / Connecting / Degraded / Offline keep their existing amber/red icon + headline + Retry/Details actions (`home_connection_variant`) | `app.rs` `home_connection_variant` |
+
+The minimum height is enforced with a zero-width spacer inside the hero
+row, so the card never clips: a long degraded/offline reason that wraps
+simply grows the row past the minimum.
+
 #### Surface Card
 
 | Property     | Value                          | File:Line |

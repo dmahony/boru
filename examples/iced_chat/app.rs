@@ -787,6 +787,13 @@ pub(crate) const ICON_MESH: &[u8] = include_bytes!("../../assets/icons/lucide/sh
 /// Static peer-to-peer node-graph decoration for the home hero card.
 /// Deliberately static (no animation) so it consumes no CPU while idle.
 pub(crate) const NETWORK_MOTIF: &[u8] = include_bytes!("../../assets/icons/network-motif.svg");
+/// UI-HOME-04: minimum content height of the large connection overview
+/// card, before padding. With the card's SPACE_32 padding (32 top +
+/// 32 bottom) the total card height lands at ~244 px, inside the plan's
+/// 230–260 px band. Implemented as a zero-width spacer inside the hero
+/// row so the card grows with content (wrapped degraded/offline reasons)
+/// instead of clipping.
+pub(crate) const HERO_MIN_CONTENT_HEIGHT: f32 = 180.0;
 pub(crate) const ICON_PAPERCLIP: &[u8] = include_bytes!("../../assets/icons/lucide/paperclip.svg");
 pub(crate) const ICON_SEND: &[u8] = include_bytes!("../../assets/icons/lucide/send.svg");
 pub(crate) const ICON_EMOJI: &str = "😊";
@@ -24979,25 +24986,63 @@ impl IcedChat {
         }
         let hero_text = hero_text.spacing(0).width(Length::Fill);
 
-        let mut hero_row = Row::new()
+        // ── Large connection hero card (Figure 3 / UI-HOME-04) ──
+        // Left message group (state badge + headline + subtitle + actions)
+        // balanced against a right decorative mesh illustration group. The
+        // card keeps the approved large-green proportions: minimum height
+        // ~244 px (HERO_MIN_CONTENT_HEIGHT + SPACE_32 padding), ~32 px
+        // padding, light green-tinted surface when Ready, thin green-grey
+        // border and RADIUS_CARD through the shared card_style.
+        //
+        // The minimum height is content-driven, not a clip: a zero-width
+        // Space with the target content height sits inside the row, so the
+        // row is at least that tall but grows if a long degraded/offline
+        // reason wraps the headline. Nothing is clipped.
+
+        // Left message group: circular state icon + headline/subtitle,
+        // vertically centred against the card's minimum height.
+        let hero_left_group = Row::new()
             .push(hero_badge)
             .push(Space::new().width(Length::Fixed(SPACE_16)))
             .push(hero_text)
             .spacing(0)
             .align_y(Alignment::Center)
             .width(Length::Fill);
-        // Subtle static node-graph decoration on the right (wide layouts only).
-        if !narrow {
-            hero_row = hero_row.push(
+
+        // Right illustration group: static low-contrast node-graph, scaled
+        // proportionally (native 220×150 → 205×140), inset from the card
+        // edge by the card padding; hidden on compact windows (< 640 px).
+        let hero_illustration = if narrow {
+            None
+        } else {
+            Some(
                 iced::widget::svg(iced::widget::svg::Handle::from_memory(NETWORK_MOTIF))
-                    .width(Length::Fixed(200.0))
+                    .width(Length::Fixed(205.0))
                     .height(Length::Fixed(140.0))
                     .style(|_t, _s| iced::widget::svg::Style { color: None }),
-            );
+            )
+        };
+
+        let mut hero_row = Row::new()
+            // Zero-width spacer drives the card's minimum height; the row
+            // grows with content (no fixed height, no clipping).
+            .push(
+                Space::new()
+                    .width(Length::Fixed(0.0))
+                    .height(Length::Fixed(HERO_MIN_CONTENT_HEIGHT)),
+            )
+            .push(hero_left_group)
+            .spacing(0)
+            .align_y(Alignment::Center)
+            .width(Length::Fill);
+        if let Some(illustration) = hero_illustration {
+            hero_row = hero_row
+                .push(Space::new().width(Length::Fixed(SPACE_16)))
+                .push(illustration);
         }
 
         let hero_card = container(hero_row)
-            .padding(SPACE_24)
+            .padding(SPACE_32)
             .width(Length::Fill)
             // Hero variant of the shared dashboard-card surface: same
             // border/radius/shadow as every home card (card_style), with
@@ -35270,6 +35315,20 @@ mod tests {
             ),
             HomeConnectionVariant::Offline
         );
+    }
+
+    #[test]
+    fn hero_card_min_height_stays_in_plan_band() {
+        // UI-HOME-04: the connection overview card minimum total height
+        // (min content + SPACE_32 top/bottom padding) must stay in the
+        // plan's 230–260 px band, and the content driver must be positive
+        // so the card can grow with wrapped degraded/offline reasons.
+        let total = HERO_MIN_CONTENT_HEIGHT + 2.0 * SPACE_32;
+        assert!(
+            (230.0..=260.0).contains(&total),
+            "hero card total height {total} px outside the plan band 230–260"
+        );
+        assert!(HERO_MIN_CONTENT_HEIGHT > 0.0);
     }
 
     #[test]
