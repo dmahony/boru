@@ -1,8 +1,9 @@
 name: Release
 
+# Automatic releases disabled (2026-08-05): the `push: tags: ["v*"]` trigger
+# was removed so pushing a version tag no longer publishes a release. Releases
+# now happen only via manual workflow_dispatch.
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
     inputs:
       release_version:
