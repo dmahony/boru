@@ -4609,14 +4609,28 @@ pub(crate) struct OnlinePeersCardData {
 }
 
 /// One Online Peers row: the peer key (for the open-chat action), the
-/// resolved display name, and the avatar handle (keyed so image bytes do not
+/// resolved display name, the live presence state (drives the secondary
+/// status line), and the avatar handle (keyed so image bytes do not
 /// defeat equality checks).
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct OnlinePeerRow {
     pub(crate) pk: PublicKey,
     pub(crate) name: String,
+    /// Live presence derived from `peer_presence_map` (+ AWAY_THRESHOLD_MS).
+    pub(crate) presence: PeerPresence,
     pub(crate) avatar: SidebarAvatarHandle,
 }
+
+/// Minimum Online Peers body height (px). A single 60 px peer row is
+/// floored to this so the card keeps a sensible ~220–280 px footprint
+/// instead of collapsing into a strip; short lists never stretch it.
+const PEERS_BODY_MIN: f32 = 128.0;
+
+/// Maximum Online Peers body height (px): exactly five 60 px rows plus
+/// four SPACE_2 gaps. The 6th online peer scrolls (same overflow
+/// contract as the pre-UI-HOME-07 card).
+const PEERS_BODY_MAX: f32 =
+    5.0 * crate::card_shell::PEER_ROW_HEIGHT + 4.0 * crate::design_tokens::SPACE_2;
 
 /// Dependency for the Recent Activity card. `tick` is bumped once per second
 /// by `ActivityTick` so relative timestamps re-render while idle; `rows`
@@ -24448,12 +24462,14 @@ impl IcedChat {
             .iter()
             .filter_map(|(fid, _)| {
                 let pk = fid.parse_public_key().ok()?;
-                if self.peer_presence(&pk) == PeerPresence::Offline {
+                let presence = self.peer_presence(&pk);
+                if presence == PeerPresence::Offline {
                     return None;
                 }
                 Some(OnlinePeerRow {
                     pk,
                     name: self.resolve_name(&pk),
+                    presence,
                     avatar: Self::sidebar_avatar_handle(
                         self.friend_image_handles
                             .get(&pk)
@@ -24536,7 +24552,7 @@ impl IcedChat {
     /// Build the Online Peers card subtree. Runs inside `iced::widget::lazy`,
     /// so it is only re-invoked when `OnlinePeersCardData` actually changes.
     fn view_online_peers_card(dep: &OnlinePeersCardData) -> iced::Element<'static, AppMessage> {
-        use iced::widget::{button, Row, Space};
+        use iced::widget::{button, container, Column, Row, Space};
         use iced::{Alignment, Length};
 
         let theme = Self::theme_from_dark(dep.dark_mode);
@@ -24552,9 +24568,12 @@ impl IcedChat {
                 if let Some(handle) = row.avatar.handle.clone() {
                     avatar = avatar.image(handle);
                 }
-                let row_el = Row::new()
-                    .push(avatar.build())
-                    .push(Space::new().width(Length::Fixed(SPACE_8)))
+                // Structured row: avatar (with live online dot) + a two-line
+                // text column — display name on top, live presence secondary
+                // status below (Online / Away / Connecting…, coloured with
+                // the status palette).
+                let presence_color = row.presence.color(&theme);
+                let text_col = Column::new()
                     .push(
                         crate::fonts::type_role_text(
                             crate::fonts::TypeRole::Body,
@@ -24563,14 +24582,33 @@ impl IcedChat {
                         .color(text_system(&theme))
                         .width(Length::Fill),
                     )
+                    .push(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::SupportingText,
+                            row.presence.label(),
+                        )
+                        .color(presence_color),
+                    )
+                    .spacing(crate::design_tokens::SPACE_2)
+                    .align_x(Alignment::Start)
+                    .width(Length::Fill);
+                let row_el = Row::new()
+                    .push(avatar.build())
+                    .push(Space::new().width(Length::Fixed(SPACE_8)))
+                    .push(text_col)
                     .spacing(0)
                     .align_y(Alignment::Center);
                 button(row_el)
                     .on_press(AppMessage::OpenConversation(row.pk))
                     .width(Length::Fill)
-                    .height(Length::Fixed(crate::card_shell::CARD_ROW_HEIGHT))
+                    .height(Length::Fixed(crate::card_shell::PEER_ROW_HEIGHT))
                     .padding([0.0, SPACE_8])
                     .style(|t, status| iced::widget::button::Style {
+                        // Hover surface for the interactive row. Note: iced
+                        // 0.14 `button::Status` has no `Focused` variant
+                        // (Active/Hovered/Pressed/Disabled only) and buttons
+                        // are not keyboard-focusable in this version, so
+                        // hover is the interaction affordance here.
                         background: matches!(status, iced::widget::button::Status::Hovered).then(
                             || iced::Background::Color(crate::design_tokens::surface_hover(t)),
                         ),
@@ -24585,16 +24623,54 @@ impl IcedChat {
             })
             .collect();
 
-        crate::card_shell::CardShell::new("Online Peers", peer_rows)
+        // Content-driven body with a floor: the list grows with the number
+        // of online peers up to five visible rows (the 6th scrolls) and never
+        // collapses below PEERS_BODY_MIN, so a single peer keeps the card at
+        // a sensible ~220–280 px footprint instead of a tiny strip or a huge
+        // blank panel.
+        let body: iced::Element<'static, AppMessage> = if dep.rows.is_empty() {
+            container(
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::SupportingText,
+                    "No peers online",
+                )
+                .color(text_muted(&theme)),
+            )
+            .width(Length::Fill)
+            .height(Length::Fixed(PEERS_BODY_MIN))
+            .align_y(Alignment::Center)
+            .into()
+        } else {
+            crate::ui_components::gutter_scrollable(
+                Column::with_children(peer_rows)
+                    .spacing(SPACE_2)
+                    .width(Length::Fill),
+            )
+            .height(Length::Fixed(Self::online_peers_body_height(
+                dep.rows.len(),
+            )))
+            .width(Length::Fill)
+            .into()
+        };
+
+        crate::card_shell::CardShell::new("Online Peers", vec![])
             .count(dep.rows.len())
             .count_total(dep.total_friends)
             .on_view_all(AppMessage::OpenFriendRequests)
-            .empty_message("No peers online")
-            // Five 48 px rows + four SPACE_2 gaps: the 6th peer scrolls.
-            .max_height(
-                5.0 * crate::card_shell::CARD_ROW_HEIGHT + 4.0 * crate::design_tokens::SPACE_2,
-            )
+            .body(body)
             .build(&theme)
+    }
+
+    /// Content-driven height of the Online Peers body (px): the shorter of
+    /// the row content and the five-visible-rows cap, floored at
+    /// [`PEERS_BODY_MIN`] so a one-peer card stays intentional.
+    fn online_peers_body_height(rows: usize) -> f32 {
+        if rows == 0 {
+            return PEERS_BODY_MIN;
+        }
+        let content =
+            rows as f32 * crate::card_shell::PEER_ROW_HEIGHT + (rows as f32 - 1.0) * SPACE_2;
+        content.min(PEERS_BODY_MAX).max(PEERS_BODY_MIN)
     }
 
     /// Build the Recent Activity card subtree (memoized via lazy).
@@ -41389,7 +41465,7 @@ mod tests {
     }
 
     /// The Online Peers card renders the truthful empty state when no friend
-    /// has live presence (the CardShell empty message path).
+    /// has live presence (the caller-built body with the min-height floor).
     #[test]
     fn home_online_peers_card_empty_state_builds() {
         let (_runtime, app, _local, _peer) = build_join_request_test_app();
@@ -41398,8 +41474,9 @@ mod tests {
     }
 
     /// With more than five online friends the Online Peers card builds a
-    /// bounded row list (CardShell handles the overflow scrolling), each row
-    /// derived from real friend labels + presence, never sample data.
+    /// bounded row list (the body caps at five 60 px rows, so the 6th peer
+    /// scrolls), each row derived from real friend labels + presence, never
+    /// sample data.
     #[test]
     fn home_online_peers_card_populated_state_builds() {
         let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
@@ -41414,6 +41491,83 @@ mod tests {
         }
         let el = app.view_main_empty_state();
         let _ = el;
+    }
+
+    /// The body height follows the row count: one peer floors to the
+    /// minimum (so the card keeps a ~220–280 px footprint), three rows grow
+    /// to their content, and anything past five rows is capped (scrolls).
+    #[test]
+    fn online_peers_body_height_is_content_driven_with_min_and_cap() {
+        assert_eq!(IcedChat::online_peers_body_height(0), PEERS_BODY_MIN);
+        assert_eq!(IcedChat::online_peers_body_height(1), PEERS_BODY_MIN);
+        assert_eq!(
+            IcedChat::online_peers_body_height(2),
+            PEERS_BODY_MIN,
+            "two 60 px rows + one gap (122 px) is below the floor"
+        );
+        let three_rows = 3.0 * crate::card_shell::PEER_ROW_HEIGHT + 2.0 * SPACE_2;
+        assert_eq!(IcedChat::online_peers_body_height(3), three_rows);
+        assert_eq!(IcedChat::online_peers_body_height(5), PEERS_BODY_MAX);
+        assert_eq!(
+            IcedChat::online_peers_body_height(8),
+            PEERS_BODY_MAX,
+            "the 6th peer must scroll, not grow the card"
+        );
+        // The plan's sensible card minimum (~220–280 px) is met: header
+        // (~24) + header→body gap (24) + body floor (128) + card padding
+        // (48) ≈ 224 px.
+        assert!(
+            (220.0..=280.0).contains(&(24.0 + 24.0 + PEERS_BODY_MIN + 48.0)),
+            "one-peer card must land in the 220–280 px band"
+        );
+        assert!(
+            PEERS_BODY_MIN <= PEERS_BODY_MAX,
+            "floor must never exceed the visible-row cap"
+        );
+    }
+
+    /// Each row carries the live presence state so the secondary status line
+    /// is truthful: a fresh last-seen is Online, an aged one is Away, and an
+    /// offline friend is excluded from the card entirely.
+    #[test]
+    fn online_peer_rows_carry_live_presence() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let now = now_ms().max(0) as u64;
+
+        let online_pk = iroh::SecretKey::generate().public();
+        let online_fid = FriendId::from_public_key(online_pk);
+        app.friends.set_label(online_fid.clone(), "Fresh");
+        app.friends
+            .set_relationship(online_fid, FriendRelationship::Friends);
+        app.peer_presence_map.insert(online_pk, now);
+
+        let away_pk = iroh::SecretKey::generate().public();
+        let away_fid = FriendId::from_public_key(away_pk);
+        app.friends.set_label(away_fid.clone(), "Stale");
+        app.friends
+            .set_relationship(away_fid, FriendRelationship::Friends);
+        app.peer_presence_map
+            .insert(away_pk, now.saturating_sub(AWAY_THRESHOLD_MS + 1));
+
+        let offline_pk = iroh::SecretKey::generate().public();
+        let offline_fid = FriendId::from_public_key(offline_pk);
+        app.friends.set_label(offline_fid.clone(), "Gone");
+        app.friends
+            .set_relationship(offline_fid, FriendRelationship::Friends);
+        // No peer_presence_map entry -> Offline -> filtered out.
+
+        let rows = app.online_peers_card_data().rows;
+        assert_eq!(rows.len(), 2, "offline friends must be excluded");
+        let fresh = rows
+            .iter()
+            .find(|r| r.pk == online_pk)
+            .expect("fresh friend row present");
+        assert_eq!(fresh.presence, PeerPresence::Online);
+        let stale = rows
+            .iter()
+            .find(|r| r.pk == away_pk)
+            .expect("stale friend row present");
+        assert_eq!(stale.presence, PeerPresence::Away);
     }
 
     // ── Home-rail card dependency isolation (the lazy memoization harness) ──

@@ -24,8 +24,9 @@
 //! [`crate::design_tokens`] (`card_style`, `SPACE_*`, `RADIUS_CARD` and the
 //! status palette); typography comes from the central
 //! [`crate::fonts::TypeRole`] roles. Rows built by callers should target
-//! [`CARD_ROW_HEIGHT`] (48 px) so every card in the rail shares the same
-//! rhythm.
+//! [`CARD_ROW_HEIGHT`] (48 px) so single-line cards in the rail share the
+//! same rhythm; two-line rows (Online Peers name + presence) use
+//! [`PEER_ROW_HEIGHT`] (60 px) instead.
 //!
 //! The shell is intentionally data-agnostic: it never constructs list rows
 //! and holds no sample data — the caller owns the children/body/footer.
@@ -37,9 +38,18 @@ use crate::design_tokens;
 
 /// Consistent height for a single list row inside a card shell (48 px).
 ///
-/// Used by callers when building compact rows so Online Peers, Recent
-/// Activity, and Tunnels cards all share the same row rhythm.
+/// Used by callers when building compact rows so Recent Activity and
+/// Tunnels cards share the same row rhythm.
 pub const CARD_ROW_HEIGHT: f32 = 48.0;
+
+/// Consistent height for a two-line Online Peers row (60 px; plan band
+/// 58–68 px).
+///
+/// Online-peer rows carry a display name plus a presence secondary line,
+/// so they are taller than the single-line [`CARD_ROW_HEIGHT`] rows used
+/// by the other rail cards. The visible-row cap in the Online Peers card
+/// is computed from this token so the 6th peer scrolls.
+pub const PEER_ROW_HEIGHT: f32 = 60.0;
 
 /// Default fixed maximum height of the scrollable list body (px).
 ///
@@ -430,6 +440,20 @@ mod tests {
     fn row_height_token_is_48px() {
         // The shared rail row height must stay exactly 48 px per the plan.
         assert_eq!(CARD_ROW_HEIGHT, 48.0);
+    }
+
+    #[test]
+    fn peer_row_height_token_in_58_68_band() {
+        // UI-HOME-07: two-line Online Peers rows (name + presence) target
+        // the plan's 58–68 px band, not the 48 px single-line rhythm.
+        assert!(
+            (58.0..=68.0).contains(&PEER_ROW_HEIGHT),
+            "PEER_ROW_HEIGHT must stay in the 58–68 px band, got {PEER_ROW_HEIGHT}"
+        );
+        assert!(
+            PEER_ROW_HEIGHT > CARD_ROW_HEIGHT,
+            "two-line peer rows must be taller than single-line rail rows"
+        );
     }
 
     #[test]
