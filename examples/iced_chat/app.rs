@@ -25074,19 +25074,22 @@ impl IcedChat {
         // ── Status pill (page header right, compact) ──
         // ~36 px tall (10 px vertical padding + 16 px content) per the
         // UI-HOME-02 mockup range (36–40 px).
+        // UI-HOME-09: pill vertical padding on the shared scale (SPACE_12 →
+        // ~40 px tall, still within the UI-HOME-02 36–40 px band; was
+        // SPACE_10, off the scale).
         let status_pill = container(
             row![
                 icon_svg(hero_icon, TYPO_SM).style(move |t, _| iced::widget::svg::Style {
                     color: Some(hero_color(t)),
                 }),
-                Space::new().width(Length::Fixed(SPACE_6)),
+                Space::new().width(Length::Fixed(SPACE_8)),
                 crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, pill_label)
                     .color(hero_color(&theme)),
             ]
             .spacing(0)
             .align_y(Alignment::Center),
         )
-        .padding([SPACE_10, SPACE_12])
+        .padding([SPACE_12, SPACE_12])
         .style(move |t| iced::widget::container::Style {
             background: Some(iced::Background::Color(bg_surface(t))),
             border: iced::Border {
@@ -25098,18 +25101,23 @@ impl IcedChat {
         });
 
         // ── Large connection hero card (Figure 3) ──
+        // UI-HOME-09: icon-container standardised on tokens — AVATAR_MD for
+        // the 48 px circle (radius = half) and IconSize::Lg for the glyph
+        // (was a raw 48.0 / 24.0 / 22.0 literal set).
         let hero_badge =
             container(
-                icon_svg(hero_icon, 22.0).style(move |t, _| iced::widget::svg::Style {
-                    color: Some(iced::Color::WHITE),
+                icon_svg(hero_icon, IconSize::Lg.px()).style(move |t, _| {
+                    iced::widget::svg::Style {
+                        color: Some(iced::Color::WHITE),
+                    }
                 }),
             )
-            .width(Length::Fixed(48.0))
-            .height(Length::Fixed(48.0))
+            .width(Length::Fixed(crate::design_tokens::AVATAR_MD))
+            .height(Length::Fixed(crate::design_tokens::AVATAR_MD))
             .style(move |t| iced::widget::container::Style {
                 background: Some(iced::Background::Color(hero_color(t))),
                 border: iced::Border {
-                    radius: 24.0.into(),
+                    radius: (crate::design_tokens::AVATAR_MD / 2.0).into(),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -25397,9 +25405,11 @@ impl IcedChat {
         };
         let mesh_stats_row = Row::new()
             .push(mesh_stat_block("Neighbors", dep.neighbors_len))
-            .push(Space::new().width(Length::Fixed(SPACE_6)))
+            // UI-HOME-09: stat-tile gaps on the shared scale (SPACE_8; was
+            // SPACE_6, off the scale).
+            .push(Space::new().width(Length::Fixed(SPACE_8)))
             .push(mesh_stat_block("Direct", dep.direct_peers))
-            .push(Space::new().width(Length::Fixed(SPACE_6)))
+            .push(Space::new().width(Length::Fixed(SPACE_8)))
             .push(mesh_stat_block("Relayed", dep.relayed_peers))
             .spacing(0)
             .width(Length::Fill);
@@ -25525,11 +25535,13 @@ impl IcedChat {
 
         let mesh_body = Column::new()
             .push(mesh_status_row)
-            .push(Space::new().height(Length::Fixed(SPACE_10)))
+            // UI-HOME-09: structural body gaps on the shared scale (SPACE_12
+            // between blocks; was SPACE_10, off the scale).
+            .push(Space::new().height(Length::Fixed(SPACE_12)))
             .push(mesh_stats_row)
             .push(Space::new().height(Length::Fixed(SPACE_8)))
             .push(mesh_lobby_row)
-            .push(Space::new().height(Length::Fixed(SPACE_10)))
+            .push(Space::new().height(Length::Fixed(SPACE_12)))
             .push(crate::ui_components::divider())
             .push(Space::new().height(Length::Fixed(SPACE_8)))
             .push(events_header)
@@ -25606,7 +25618,9 @@ impl IcedChat {
         let page_header = row![
             Column::new()
                 .push(greeting)
-                .push(Space::new().height(Length::Fixed(SPACE_2)))
+                // Greeting → welcome gap. UI-HOME-09: shared-scale SPACE_4
+                // (was SPACE_2, off the scale).
+                .push(Space::new().height(Length::Fixed(SPACE_4)))
                 .push(welcome_line)
                 .spacing(0)
                 .width(Length::Fill),
@@ -25681,9 +25695,11 @@ impl IcedChat {
             SPACE_28
         };
 
+        // UI-HOME-09: page header → dashboard gap on the shared scale.
+        // Plan band 28–32 px; SPACE_28 (was SPACE_20, below the band).
         let col = Column::new()
             .push(page_header)
-            .push(Space::new().height(Length::Fixed(SPACE_20)))
+            .push(Space::new().height(Length::Fixed(SPACE_28)))
             .push(main_content)
             .push(Space::new().height(Length::Fixed(SPACE_16)))
             .push(footer)
@@ -37421,6 +37437,50 @@ mod tests {
         assert!(
             tunnels.contains("TypeRole::Metadata"),
             "tunnel status must use TypeRole::Metadata"
+        );
+    }
+
+    #[test]
+    fn home_screen_spacing_uses_the_shared_scale() {
+        // UI-HOME-09: the home dashboard's structural gaps must come from
+        // the plan's shared spacing scale (4, 8, 12, 16, 20, 24, 32).
+        // Page header → dashboard 28–32 px (SPACE_28), greeting → welcome
+        // 4–8 px (SPACE_4), and the pill internal gaps on-scale. Off-scale
+        // one-offs (SPACE_2 greeting gap, SPACE_6/SPACE_10 structural gaps,
+        // raw 48.0/24.0/22.0 hero-badge literals) are removed.
+        let src = include_str!("app.rs");
+        let home = method_source(src, "fn view_chat_list_content(", "fn view_chat_panel(");
+        assert!(
+            home.contains(".push(Space::new().height(Length::Fixed(SPACE_28)))"),
+            "page header → dashboard gap must use shared-scale SPACE_28 (28–32 px band)"
+        );
+        assert!(
+            home.contains(".push(Space::new().height(Length::Fixed(SPACE_4)))"),
+            "greeting → welcome gap must use shared-scale SPACE_4 (4–8 px band)"
+        );
+        assert!(
+            home.contains("IconSize::Lg.px()"),
+            "hero badge glyph must use a standard IconSize token"
+        );
+        assert!(
+            home.contains("crate::design_tokens::AVATAR_MD"),
+            "hero badge container must use the AVATAR_MD token, not a 48.0 literal"
+        );
+        assert!(
+            home.contains(".padding([SPACE_12, SPACE_12])"),
+            "status pill padding must be on the shared scale (SPACE_12)"
+        );
+        assert!(
+            !home.contains("icon_svg(hero_icon, 22.0)"),
+            "hero badge must not use the raw 22.0 icon literal"
+        );
+        assert!(
+            !home.contains("Length::Fixed(48.0)"),
+            "hero badge container must not use the raw 48.0 literal"
+        );
+        assert!(
+            !home.contains(".padding([SPACE_10, SPACE_12])"),
+            "status pill padding must not use off-scale SPACE_10"
         );
     }
 

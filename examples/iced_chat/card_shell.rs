@@ -262,7 +262,9 @@ impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
                 )
                 .color(design_tokens::text_muted(theme)),
             )
-            .spacing(design_tokens::SPACE_2)
+            // Card title → subtitle gap. UI-HOME-09: 4–8 px band (plan);
+            // SPACE_4 is the shared-scale value (was SPACE_2, off the scale).
+            .spacing(design_tokens::SPACE_4)
             .align_x(Alignment::Start);
         if let Some(subtitle) = self.subtitle {
             title_col = title_col.push(
@@ -276,7 +278,9 @@ impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
         }
 
         let mut header = Row::new()
-            .spacing(design_tokens::SPACE_6)
+            // Horizontal gap between header elements (icon, title, badges,
+            // action). UI-HOME-09: SPACE_8 is the shared-scale value.
+            .spacing(design_tokens::SPACE_8)
             .align_y(Alignment::Center);
 
         if let Some(icon) = self.header_icon {
@@ -329,7 +333,7 @@ impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
                     .color(design_tokens::text_muted(theme)),
                 )
                 .width(Length::Fill)
-                .padding([design_tokens::SPACE_6, 0.0])
+                .padding([design_tokens::SPACE_8, 0.0])
                 .into()
             } else {
                 Space::new()
@@ -350,14 +354,18 @@ impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
 
         let mut content_col = Column::new()
             .push(header)
-            .push(Space::new().height(Length::Fixed(design_tokens::SPACE_6)))
+            // Card header → content gap. UI-HOME-09: 16–20 px band (plan);
+            // SPACE_16 is the shared-scale value (was SPACE_6, off the scale).
+            .push(Space::new().height(Length::Fixed(design_tokens::SPACE_16)))
             .push(body)
             .spacing(0)
             .width(Length::Fill);
 
         if let Some(footer_el) = self.footer {
             content_col = content_col
-                .push(Space::new().height(Length::Fixed(design_tokens::SPACE_6)))
+                // Body → footer gap. UI-HOME-09: shared-scale SPACE_8 (was
+                // SPACE_6, off the scale).
+                .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
                 .push(footer_el);
         }
 
@@ -379,7 +387,8 @@ fn count_badge<'a, Message: 'a>(label: String) -> Element<'a, Message> {
         // colour comes from the container style below.
         crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, label),
     )
-    .padding([2.0, design_tokens::SPACE_8])
+    // UI-HOME-09: tokenise the vertical padding (was a raw 2.0 literal).
+    .padding([design_tokens::SPACE_2, design_tokens::SPACE_8])
     .style(move |t| container::Style {
         background: Some(Background::Color(design_tokens::primary_soft(t))),
         text_color: Some(design_tokens::primary(t)),
@@ -422,7 +431,8 @@ fn status_badge_element<'a, Message: 'a>(
         // Status pill — metadata (Source Sans 3 Regular 12).
         crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, label.to_string()),
     )
-    .padding([2.0, design_tokens::SPACE_8])
+    // UI-HOME-09: tokenise the vertical padding (was a raw 2.0 literal).
+    .padding([design_tokens::SPACE_2, design_tokens::SPACE_8])
     .style(move |_t| container::Style {
         background: Some(Background::Color(bg)),
         text_color: Some(fg),
@@ -717,6 +727,39 @@ mod tests {
         assert!(
             !prod.contains("Typography::"),
             "card shell must not use legacy Typography tokens"
+        );
+    }
+
+    #[test]
+    fn card_shell_spacing_uses_the_shared_scale() {
+        // UI-HOME-09: the shared dashboard-card shell must use the plan's
+        // shared spacing scale (4, 8, 12, 16, 20, 24, 32) for its structural
+        // gaps — card title → subtitle 4–8 px, card header → content
+        // 16–20 px, body → footer on-scale. Off-scale one-offs (SPACE_2 /
+        // SPACE_6 structural gaps and raw 2.0 padding literals) are removed.
+        let src = include_str!("card_shell.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            prod.contains(".spacing(design_tokens::SPACE_4)"),
+            "card title → subtitle gap must use shared-scale SPACE_4 (4–8 px band)"
+        );
+        assert!(
+            prod.contains("Length::Fixed(design_tokens::SPACE_16)"),
+            "card header → content gap must use shared-scale SPACE_16 (16–20 px band)"
+        );
+        assert!(
+            prod.contains("Length::Fixed(design_tokens::SPACE_8)"),
+            "body → footer gap must use shared-scale SPACE_8"
+        );
+        assert!(
+            !prod.contains(".padding([2.0,"),
+            "badge paddings must use the SPACE_2 token, not a raw 2.0 literal"
+        );
+        // The structural header→body gap is 16 px — no SPACE_6 divider
+        // between header and content.
+        assert!(
+            !prod.contains(".push(Space::new().height(Length::Fixed(design_tokens::SPACE_6)))"),
+            "card shell must not use off-scale SPACE_6 for a structural gap"
         );
     }
 }

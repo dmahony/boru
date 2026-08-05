@@ -1,0 +1,7 @@
+geometry after  (y = first text row top for each card header)
+----------------------------------------------
+HELLO\|GOOD        left=?     top=?     w=?     h=?
+ONLINE             left=969   top=148   w=58    h=12
+RECENT             left=358   top=574   w=39    h=8
+TUNNELS            left=969   top=523   w=72    h=12
+MESH               left=?     top=?     w=?     h=?

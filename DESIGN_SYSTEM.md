@@ -151,6 +151,30 @@ Base unit: **4px**. All spacing values are multiples or fractions of this base.
 | Chat panel (header + log + composer)| `SPACE_8` between sections        | `app.rs:11021`                 |
 | Chat header sub-row spacing       | `SPACE_4`                          | `app.rs:11126`                 |
 
+### Home Dashboard Rhythm (UI-HOME-09)
+
+The home dashboard uses the shared spacing scale for every structural gap.
+These bands are the standard for the Figure 3 dashboard cards and must be
+preserved by later visual work:
+
+| Context                                  | Value                 | Source |
+|------------------------------------------|-----------------------|--------|
+| Page header → dashboard                  | `SPACE_28` (28–32 px) | `app.rs` `view_chat_list_content` |
+| Between major cards (left column, rail)  | `SPACE_20` (20–24 px) | `app.rs` `view_chat_list_content` |
+| Card title → subtitle                    | `SPACE_4` (4–8 px)    | `card_shell.rs` `build()` |
+| Card header → content                    | `SPACE_16` (16–20 px) | `card_shell.rs` `build()` |
+| Body → footer                            | `SPACE_8`             | `card_shell.rs` `build()` |
+| Greeting → welcome line                  | `SPACE_4`             | `app.rs` `view_chat_list_content` |
+| Status pill vertical padding             | `SPACE_12` (~40 px pill, 36–40 px band) | `app.rs` `view_chat_list_content` |
+| Header element horizontal gap            | `SPACE_8`             | `card_shell.rs` `build()` |
+| Hero badge (icon-container)              | `AVATAR_MD` (48 px), glyph `IconSize::Lg` | `app.rs` `view_chat_list_content` |
+| Mesh body block gaps                     | `SPACE_12` / `SPACE_8` | `app.rs` `view_chat_list_content` |
+| Mesh stat-tile gaps                      | `SPACE_8`             | `app.rs` `view_chat_list_content` |
+
+Raw one-off margins (e.g. `2.0` badge padding, `48.0`/`24.0`/`22.0` hero-badge
+literals) are removed; badge paddings use `SPACE_2`/`SPACE_8`, the hero badge
+uses `AVATAR_MD` + `IconSize::Lg`. See `docs/ui-redesign/UI-HOME-09-report.md`.
+
 ---
 
 ## 3. Colour Palettes
