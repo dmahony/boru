@@ -10,16 +10,21 @@
 //! - Labels use the card-title role (Source Sans 3 SemiBold 18); descriptions
 //!   stay muted 13 px supporting text at the plan's 1.45 line height.
 //! - The card radius matches the rail `CardShell` cards (`RADIUS_CARD`) so
-//!   every home card shares the same corner rhythm instead of the generic
-//!   8 px `BUTTON_CARD`.
+//!   every home card shares the same corner rhythm.
+//! - Card structure (UI-HOME-06): 56 px light-green icon container, 24 px
+//!   horizontal padding, 16 px icon→title gap, 8 px title→description gap,
+//!   and a subtle bottom-right action indicator. Heights are content-driven:
+//!   the card grows with wrapped text instead of clipping it.
 
-use iced::widget::{button, Column, Space};
-use iced::{Alignment, Element, Length, Theme};
+use iced::widget::{button, container, Column, Row, Space};
+use iced::{Alignment, Background, Border, Color, Element, Length, Theme, Vector};
 
-use crate::app::{AppMessage, SPACE_12, SPACE_16, SPACE_4, SPACE_8};
+use crate::app::{AppMessage, SPACE_12, SPACE_16, SPACE_20, SPACE_24, SPACE_8};
 use crate::design_tokens;
 use crate::icon_system::{Icon, IconSize};
-use crate::ui_components::icon_tile;
+
+/// Diameter of the light-green quick-action icon container (task: 52–60 px).
+const QUICK_ACTION_ICON_SIZE: f32 = 56.0;
 
 pub(crate) struct QuickAction {
     icon: Icon,
@@ -32,28 +37,66 @@ const ACTIONS: &[QuickAction] = &[
     QuickAction {
         icon: Icon::Chat,
         label: "Create Public Room",
-        description: "Open a room for anyone to join",
+        description: "Open a public room for anyone to join.",
         message: AppMessage::CreateNewRoom,
     },
     QuickAction {
         icon: Icon::Users,
         label: "Create Group Chat",
-        description: "Start a private group conversation",
+        description: "Start a private group conversation.",
         message: AppMessage::ShowCreateGroupDialog,
     },
     QuickAction {
         icon: Icon::UserPlus,
         label: "Add Friend",
-        description: "Connect with a friend by public key",
+        description: "Connect with a friend by public key.",
         message: AppMessage::OpenFriendRequests,
     },
     QuickAction {
         icon: Icon::Upload,
         label: "Share Files",
-        description: "Choose a file to share in a chat",
+        description: "Choose a file to share in a chat.",
         message: AppMessage::AttachPressed,
     },
 ];
+
+/// Light-green circular icon tile (UI-HOME-06: 52–60 px container).
+///
+/// Mirrors the `icon_tile` look (soft brand-green background, centered
+/// icon) at the larger size the approved quick-action card calls for.
+fn quick_action_icon<'a>(icon: Icon) -> Element<'a, AppMessage> {
+    let tile = QUICK_ACTION_ICON_SIZE;
+    container(icon.build().size(IconSize::Lg).build())
+        .width(Length::Fixed(tile))
+        .height(Length::Fixed(tile))
+        .align_x(Alignment::Center)
+        .align_y(Alignment::Center)
+        .style(move |t| container::Style {
+            background: Some(Background::Color(design_tokens::primary_soft(t))),
+            border: Border {
+                radius: (tile / 2.0).into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .into()
+}
+
+/// Subtle bottom-right action indicator (chevron) hinting the card is a
+/// button without competing with the title or description.
+fn action_indicator<'a>() -> Element<'a, AppMessage> {
+    Row::new()
+        .push(Space::new().width(Length::Fill))
+        .push(
+            Icon::ChevronRight
+                .build()
+                .size(IconSize::Xs)
+                .color_fn(design_tokens::text_muted)
+                .build(),
+        )
+        .width(Length::Fill)
+        .into()
+}
 
 /// Build one complete quick-action card.
 ///
@@ -65,19 +108,21 @@ const ACTIONS: &[QuickAction] = &[
 /// `/` focus composer) which the app subscribes to globally.
 pub fn quick_action_card<'a>(action: &'a QuickAction, theme: &Theme) -> Element<'a, AppMessage> {
     let content = Column::new()
-        .push(icon_tile::<AppMessage>(action.icon, IconSize::Lg, None))
-        .push(Space::new().height(Length::Fixed(SPACE_8)))
+        .push(quick_action_icon(action.icon))
+        .push(Space::new().height(Length::Fixed(SPACE_16)))
         .push(
             // Quick-action title — card_title (Source Sans 3 SemiBold 18).
-            crate::fonts::type_role_text(
-                crate::fonts::TypeRole::CardTitle,
-                action.label,
-            ),
+            crate::fonts::type_role_text(crate::fonts::TypeRole::CardTitle, action.label)
+                .width(Length::Fill),
         )
-        .push(Space::new().height(Length::Fixed(SPACE_4)))
+        .push(Space::new().height(Length::Fixed(SPACE_8)))
         .push(
             // Supporting description — supporting_text (Source Sans 3
-            // Regular 13) at the plan's 1.45 body line height.
+            // Regular 13) at the plan's 1.45 body line height. Width is
+            // Fill so the text wraps within the card; the card height is
+            // content-driven so the full description is always visible
+            // (UI-HOME-01 audit §4 root cause: a fixed 132 px height
+            // clipped wrapped descriptions — that box is gone).
             crate::fonts::type_role_text_lh(
                 crate::fonts::TypeRole::SupportingText,
                 action.description,
@@ -86,16 +131,18 @@ pub fn quick_action_card<'a>(action: &'a QuickAction, theme: &Theme) -> Element<
             .color(design_tokens::text_muted(theme))
             .width(Length::Fill),
         )
+        .push(Space::new().height(Length::Fixed(SPACE_12)))
+        .push(action_indicator())
         .spacing(0)
         .align_x(Alignment::Center)
         .width(Length::Fill);
 
     button(content)
         .on_press(action.message.clone())
-        .padding([SPACE_12, SPACE_16])
-        // Content-driven height (UI-HOME-12): the old fixed 132 px box
-        // clipped the 18 px title + 13 px description once real font
-        // metrics were applied (see `quick_action_natural_height_exceeds_old_fixed_box`).
+        // 20 px vertical / 24 px horizontal padding (UI-HOME-06: 20–24 px).
+        .padding([SPACE_20, SPACE_24])
+        // Content-driven height: no fixed box, no hidden overflow — the
+        // card grows to contain icon + title + full description.
         .width(Length::Fill)
         .style(quick_action_card_style)
         .into()
@@ -103,9 +150,10 @@ pub fn quick_action_card<'a>(action: &'a QuickAction, theme: &Theme) -> Element<
 
 /// Card-style button for the quick actions.
 ///
-/// Mirrors `BUTTON_CARD` (surface bg, muted border, hover lift) but uses
-/// `RADIUS_CARD` so the action cards visually match the home rail cards and
-/// the Figure 3 mockup instead of the generic 8 px control radius.
+/// Mirrors `BUTTON_CARD` (surface bg, muted border) plus the shared card
+/// surface (RADIUS_CARD + low-opacity shadow) so the action cards match
+/// the home rail cards. Hover adds an accent border and a 1–2 px elevation
+/// shadow; the default state keeps the subtle card shadow.
 fn quick_action_card_style(theme: &Theme, status: button::Status) -> iced::widget::button::Style {
     let surface = design_tokens::surface(theme);
     let hover = design_tokens::surface_hover(theme);
@@ -132,6 +180,15 @@ fn quick_action_card_style(theme: &Theme, status: button::Status) -> iced::widge
         }
         _ => design_tokens::border_muted(theme),
     };
+    // 1–2 px hover elevation: subtle lift over the resting card shadow.
+    let shadow = match status {
+        button::Status::Hovered | button::Status::Pressed => iced::Shadow {
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.10),
+            offset: Vector::new(0.0, 2.0),
+            blur_radius: 8.0,
+        },
+        _ => design_tokens::shadow_card(theme),
+    };
     button::Style {
         background: Some(iced::Background::Color(background)),
         text_color: match status {
@@ -150,19 +207,21 @@ fn quick_action_card_style(theme: &Theme, status: button::Status) -> iced::widge
             width: 1.0,
             radius: design_tokens::RADIUS_CARD.into(),
         },
+        shadow,
         ..Default::default()
     }
 }
 
-/// Number of quick-action columns for a given window width (plan §4).
+/// Number of quick-action columns for a given window width (UI-HOME-06).
 ///
-/// Breakpoints match the reference sizes the home grid is verified at:
-/// four columns on wide layouts (≥ 1040 px), two columns on medium layouts
-/// (640–1039 px), and one column only when space is narrow (< 640 px).
+/// Breakpoints keep four columns only where cards are wide enough to stay
+/// readable; the grid drops to two-by-two before cards become too narrow,
+/// and to one column at the minimum supported width. This matches the
+/// design system's "Large ≥ 1440 px → full four-column quick actions".
 pub fn grid_columns_for(window_width: f32) -> usize {
     if window_width < 640.0 {
         1
-    } else if window_width < 1040.0 {
+    } else if window_width < crate::design_tokens::VIEWPORT_LG_WIDTH {
         2
     } else {
         4
@@ -179,7 +238,7 @@ pub fn quick_action_grid<'a>(window_width: f32, theme: &Theme) -> Element<'a, Ap
             .spacing(SPACE_8)
             // Top-align cards so a wrapped description in one card never
             // shifts its neighbours' icons/titles vertically (content-driven
-            // heights differ per card, UI-HOME-12).
+            // heights differ per card).
             .align_y(Alignment::Start)
             .width(Length::Fill);
         for action in actions {
@@ -225,13 +284,44 @@ mod tests {
     }
 
     #[test]
-    fn grid_columns_follow_the_plan_breakpoints() {
-        // Plan §4: four columns wide, two columns medium, one column narrow.
+    fn action_descriptions_match_approved_copy() {
+        // UI-HOME-06: these exact descriptions must never be truncated.
+        assert_eq!(
+            ACTIONS
+                .iter()
+                .map(|action| action.description)
+                .collect::<Vec<_>>(),
+            vec![
+                "Open a public room for anyone to join.",
+                "Start a private group conversation.",
+                "Connect with a friend by public key.",
+                "Choose a file to share in a chat.",
+            ]
+        );
+    }
+
+    #[test]
+    fn action_messages_dispatch_to_expected_flows() {
+        use crate::app::AppMessage;
+        assert!(matches!(ACTIONS[0].message, AppMessage::CreateNewRoom));
+        assert!(matches!(
+            ACTIONS[1].message,
+            AppMessage::ShowCreateGroupDialog
+        ));
+        assert!(matches!(ACTIONS[2].message, AppMessage::OpenFriendRequests));
+        assert!(matches!(ACTIONS[3].message, AppMessage::AttachPressed));
+    }
+
+    #[test]
+    fn grid_columns_follow_the_design_breakpoints() {
+        // UI-HOME-06: four columns only on wide layouts (≥ 1440, matching
+        // DESIGN_SYSTEM.md "Large"), two-by-two before cards get too narrow
+        // (640–1439), one column at the minimum supported width (< 640).
         assert_eq!(grid_columns_for(1920.0), 4);
+        assert_eq!(grid_columns_for(1600.0), 4);
         assert_eq!(grid_columns_for(1440.0), 4);
-        assert_eq!(grid_columns_for(1280.0), 4);
-        assert_eq!(grid_columns_for(1040.0), 4);
-        // Medium: 640–1039 px (e.g. the 1024×720 reference).
+        // Medium: 640–1439 px (e.g. the 1280×800 reference viewport).
+        assert_eq!(grid_columns_for(1280.0), 2);
         assert_eq!(grid_columns_for(1024.0), 2);
         assert_eq!(grid_columns_for(800.0), 2);
         assert_eq!(grid_columns_for(640.0), 2);
@@ -254,19 +344,29 @@ mod tests {
 
     #[test]
     fn quick_action_cards_are_content_driven_not_fixed_height() {
-        // UI-HOME-12: the old fixed 132 px card height clipped the 18 px
-        // card-title label + 13 px supporting description once real font
-        // metrics were applied. Cards must size to their content (no fixed
-        // 132 px height), rows must top-align so a wrapped description never
-        // pushes a taller neighbour out of line, and the label/description
-        // must resolve through the central TypeRole roles. Only the
-        // production part of this file is checked (the test's own messages
-        // mention the same identifiers).
+        // UI-HOME-06 (and UI-HOME-12 before it): the old fixed 132 px card
+        // height clipped wrapped descriptions (UI-HOME-01 audit §4). Cards
+        // must size to their content — no fixed height, no hidden overflow —
+        // and keep the approved structure: 52–60 px icon container, 20–24 px
+        // padding, 14–18 px icon→title gap, ~8 px title→description gap,
+        // light-green icon background, and TypeRole-based typography.
         let src = include_str!("quick_actions.rs");
         let prod = src.split("#[cfg(test)]").next().unwrap();
         assert!(
             !prod.contains("Length::Fixed(132.0)"),
             "quick-action cards must not force a fixed 132 px height"
+        );
+        assert!(
+            !prod.contains("clip("),
+            "quick-action cards must not hide overflow with clipping"
+        );
+        assert!(
+            prod.contains("QUICK_ACTION_ICON_SIZE: f32 = 56.0"),
+            "icon container must be 56 px (52–60 px band)"
+        );
+        assert!(
+            prod.contains(".padding([SPACE_20, SPACE_24])"),
+            "card padding must be 20 px vertical / 24 px horizontal"
         );
         assert!(
             prod.contains("TypeRole::CardTitle"),
@@ -285,24 +385,30 @@ mod tests {
     #[test]
     fn quick_action_natural_height_exceeds_old_fixed_box() {
         // Clipping-math regression (UI-HOME-01 audit root cause + UI-HOME-12):
-        // with real role metrics the tallest quick-action content — icon
-        // tile + 18 px title + a two-line 13 px description at 1.45 line
-        // height + vertical padding — needs more than the removed 132 px
-        // fixed height, which is why cards must be content-driven.
-        use crate::design_tokens::{SPACE_12, SPACE_16, SPACE_4, SPACE_8};
+        // with real role metrics the tallest quick-action content — 56 px
+        // icon tile + 16 px gap + 18 px title + 8 px gap + a two-line 13 px
+        // description at 1.45 line height + 20 px vertical padding + action
+        // indicator — needs more than the removed 132 px fixed height, which
+        // is why cards must be content-driven.
+        use crate::design_tokens::{SPACE_12, SPACE_16, SPACE_20, SPACE_8};
         use crate::fonts::TypeRole;
-        use crate::icon_system::IconSize;
 
-        let tile = IconSize::Lg.px() + SPACE_16; // icon_tile diameter
-        let title = TypeRole::CardTitle.size_px() * 1.2; // single-line heading
+        let tile = super::QUICK_ACTION_ICON_SIZE;
+        let title = TypeRole::CardTitle.size_px() * 1.3; // single-line heading
         let description_two_lines = TypeRole::SupportingText.size_px() * 1.45 * 2.0;
-        let vertical_padding = 2.0 * SPACE_12;
-        let gaps = SPACE_8 + SPACE_4;
-        let natural = tile + gaps + title + description_two_lines + vertical_padding;
+        let indicator = crate::icon_system::IconSize::Xs.px() + SPACE_12;
+        let vertical_padding = 2.0 * SPACE_20;
+        let gaps = SPACE_16 + SPACE_8;
+        let natural = tile + gaps + title + description_two_lines + indicator + vertical_padding;
         assert!(
             natural > 132.0,
             "content-driven quick-action card needs {natural:.1} px > old fixed 132 px; \
              a fixed-height card would clip the description"
+        );
+        assert!(
+            natural >= 200.0,
+            "quick-action card should be near the plan's 220–250 px band \
+             when text wraps (computed natural height {natural:.1} px)"
         );
     }
 }

@@ -1090,7 +1090,7 @@ One `Icon` enum maps every semantic action to a Lucide SVG asset; `IconSize` nam
 | Medium | 1024–1280 px | Reflow between compact and reference |
 | Large | ≥ 1440 px | Sidebar 320 px, full four-column quick actions |
 
-Quick-action grid columns are computed by `quick_actions::grid_columns_for(window_width)` (4 columns ≥1040 px, 2 columns 640–1039 px, 1 column <640 px).
+Quick-action grid columns are computed by `quick_actions::grid_columns_for(window_width)` (4 columns ≥1440 px, 2 columns 640–1439 px, 1 column <640 px).
 
 ### 19.6 Screenshot workflow
 
