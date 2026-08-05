@@ -1,0 +1,3 @@
+=== composite diff ===
+composite 2200x808, halves split at mid=1100
+mean abs RGB diff between halves (sampled): 13.42

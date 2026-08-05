@@ -1,0 +1,64 @@
+=== scrolled1280 main (330, 0, 980, 800) ===
+ced eee Degraded View details R
+Current connection status
+of Degraded — No peers in the mesh
+0 direct - 0 relayed - 0 neighbors '
+0 0 0
+Neighbors Direct Relayed
+« Lobby: connected
+RECENT EVENTS
+e@ Connected to lobby — waiting for peers... 37s ago
+A, Connecting to lobby... 38s ago
+A, Starting up... 38s ago
+T
+é
+O 2
+™
+Create Public Room Create Group Chat
+Open a public room for anyone to join. Start a private group conversation.
+> >
+°
+a t
+Add Friend Share Files
+Connect with a friend by public key. Choose a file to share in a chat.
+> >
+Cod Mesh Degraded - Qdirect - 0 relayed
+
+=== scrolled1280 rail (980, 0, 1280, 800) ===
+ECENT ACTIVITY 2
+>) Bob went offline just now
+> Ada went offline 37s ago
+UNNELS 0 Create tunnel
+No active tunnels. Create or join a tunnel
+' to securely route traffic.
+& dle - Oneighbors
+
+=== min800 top main (300, 0, 800, 600) ===
+Good morning, UI-HOME-18
+Evidence
+Welcome to Boru
+(— »
+| & Connecting
+XX y
+Connecting — waiting for peers...
+Private communication, peer to peer.
+Mesh Health
+“ .
+Current connection status
+Healthy View details
+-~ Connecting — waiting for peers...
+7 Waiting for peers to join the mesh
+0 0 0
+Neighbors Direct Relayed
+«8 Lobby: connected
+
+=== min800 scrolled main (300, 0, 800, 600) ===
+RECENT ACTIVITY
+2
+O Bob went offline 33s ago
+© Ada went offline 34s ago
+TUNNELS
+0 Create tunnel
+& Noactive tunnels. Create or join a tunnel to securely route traffic.
+Cod Mesh Degraded - Odirect - 0 relayed &) Idle - Oneighbors
+
