@@ -16,11 +16,37 @@ This document specifies every visual token, component, and behaviour in the Boru
 
 | Family | Weights loaded | Scope |
 |---|---|---|
-| **Source Sans 3** | 400 (Regular), 600 (SemiBold), 700 (Bold) | Primary app font — all UI text and chat |
+| **Source Sans 3** | 400 (Regular), 500 (Medium), 600 (SemiBold), 700 (Bold) | Primary app font — UI text, nav, forms, buttons, supporting text |
+| **Manrope** | 600 (SemiBold), 700 (Bold) | Display headings only |
+| **Figtree** | 400 (Regular), 500 (Medium), 600 (SemiBold) | Chat messages, sender names, message metadata, composer |
 | **Raleway** | 800 (ExtraBold) | BORU wordmark / branding only |
 | **JetBrains Mono** | 400 (Regular), 500 (Medium) | Technical/code values |
 
-Fonts are bundled at compile time via `include_bytes!` in `fonts.rs` and loaded at startup by `fonts::load_fonts()`. Inter and Manrope remain bundled for legacy compatibility but are not loaded by default.
+Fonts are bundled at compile time via `include_bytes!` in `fonts.rs` and loaded at startup by `fonts::load_fonts()` (UI-HOME-11: every required weight is a registered static instance — no synthetic bolding). Inter, the Manrope variable font, and the JetBrains Mono variable/italic fonts remain bundled for legacy compatibility but are not loaded by default. Licence and source records for every family live in `examples/iced_chat/fonts/` (`THIRD_PARTY_NOTICES.md` + per-family `*-OFL.txt`).
+
+### Canonical Semantic Roles (UI-HOME-11)
+
+`fonts::TypeRole` is the central typography system approved by the Boru plan. Each role knows its family, weight and default pixel size; screens migrate onto these roles in UI-HOME-12/13/14. The legacy `Typography` enum remains for existing call sites until migration completes.
+
+| Role | Family | Weight | px |
+|---|---|---|---|
+| `display_heading` | Manrope | Bold (700) | 32 |
+| `page_title` | Source Sans 3 | SemiBold (600) | 28 |
+| `section_title` | Source Sans 3 | SemiBold (600) | 20 |
+| `card_title` | Source Sans 3 | SemiBold (600) | 18 |
+| `body` | Source Sans 3 | Regular (400) | 15 |
+| `body_emphasised` | Source Sans 3 | SemiBold (600) | 15 |
+| `button_label` | Source Sans 3 | SemiBold (600) | 14 |
+| `supporting_text` | Source Sans 3 | Regular (400) | 13 |
+| `metadata` | Source Sans 3 | Regular (400) | 12 |
+| `chat_message` | Figtree | Regular (400) | 15 |
+| `chat_sender` | Figtree | SemiBold (600) | 14 |
+| `chat_metadata` | Figtree | Regular (400) | 12 |
+| `composer_text` | Figtree | Regular (400) | 15 |
+| `technical_value` | JetBrains Mono | Regular (400) | 12 |
+| `brand_wordmark` | Raleway | ExtraBold (800) | 28 |
+
+Fallbacks: every role degrades to Source Sans 3 at the same (or nearest registered) weight when its family is unavailable; `technical_value` degrades to the platform monospace family. No remote font service is used at runtime.
 
 ### Type Scale
 

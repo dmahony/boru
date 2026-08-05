@@ -3,14 +3,14 @@
 //! Shows every primitive from `ui_components` in every applicable state.
 //! Accessible only via `Screen::Gallery` (Ctrl+Shift+G in debug builds).
 
-use iced::widget::{container, text, Column, Row, Space};
+use iced::widget::{container, rule::horizontal, text, Column, Row, Space};
 use iced::{Alignment, Element, Length, Theme};
 
 use crate::app::AppMessage;
 use crate::boru_dialog::BoruDialog;
 use crate::card_shell::{CardShell, CARD_ROW_HEIGHT};
 use crate::design_tokens;
-use crate::fonts::Typography;
+use crate::fonts::{TypeRole, Typography};
 use crate::icon_system::{Icon, IconSize};
 use crate::ui_components::{
     self, badge, card_header, date_separator, divider, elevated_card, empty_state,
@@ -93,6 +93,9 @@ pub fn view_gallery() -> Element<'static, AppMessage> {
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
         .push(gallery_section("Form Primitives (UI-RESTYLE-03)"))
         .push(form_gallery())
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
+        .push(gallery_section("Typography (UI-HOME-11)"))
+        .push(typography_gallery())
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_32)))
         .spacing(0);
 
@@ -1519,5 +1522,177 @@ fn form_gallery() -> Element<'static, AppMessage> {
                 .align_y(Alignment::Start),
         )
         .spacing(0)
+        .into()
+}
+
+// ── Typography preview (UI-HOME-11) ───────────────────────────────────
+
+/// Sample copy rendered for every canonical semantic role, plus a
+/// registered-weight demo for each bundled family.
+fn typography_gallery() -> Element<'static, AppMessage> {
+    use crate::fonts::type_role_text;
+
+    let sample = |role: TypeRole| -> Element<'static, AppMessage> {
+        let sample_text: &'static str = match role {
+            TypeRole::DisplayHeading => "Good evening, Ada — welcome back",
+            TypeRole::PageTitle => "Boru Settings",
+            TypeRole::SectionTitle => "Connection Overview",
+            TypeRole::CardTitle => "Mesh Health",
+            TypeRole::Body => "Body copy and descriptions use Source Sans 3 at fifteen pixels.",
+            TypeRole::BodyEmphasised => {
+                "Emphasised body copy stands out without synthetic bolding."
+            }
+            TypeRole::ButtonLabel => "Create Room",
+            TypeRole::SupportingText => "Supporting text adds context at thirteen pixels.",
+            TypeRole::Metadata => "12 min ago · 3 peers",
+            TypeRole::ChatMessage => "Figtree carries the conversation.",
+            TypeRole::ChatSender => "Ada Lovelace",
+            TypeRole::ChatMetadata => "14:32 · Delivered",
+            TypeRole::ComposerText => "Type a message…",
+            TypeRole::TechnicalValue => "12D3KooW…c7f8 · 127.0.0.1:8765",
+            TypeRole::BrandWordmark => "BORU",
+        };
+        let family_weight = match role {
+            TypeRole::DisplayHeading => "Manrope Bold 700",
+            TypeRole::PageTitle => "Source Sans 3 SemiBold 600",
+            TypeRole::SectionTitle => "Source Sans 3 SemiBold 600",
+            TypeRole::CardTitle => "Source Sans 3 SemiBold 600",
+            TypeRole::Body => "Source Sans 3 Regular 400",
+            TypeRole::BodyEmphasised => "Source Sans 3 SemiBold 600",
+            TypeRole::ButtonLabel => "Source Sans 3 SemiBold 600",
+            TypeRole::SupportingText => "Source Sans 3 Regular 400",
+            TypeRole::Metadata => "Source Sans 3 Regular 400",
+            TypeRole::ChatMessage => "Figtree Regular 400",
+            TypeRole::ChatSender => "Figtree SemiBold 600",
+            TypeRole::ChatMetadata => "Figtree Regular 400",
+            TypeRole::ComposerText => "Figtree Regular 400",
+            TypeRole::TechnicalValue => "JetBrains Mono Regular 400",
+            TypeRole::BrandWordmark => "Raleway ExtraBold 800",
+        };
+        let caption = format!(
+            "{}  ·  {}  ·  {}px  ·  {}",
+            role.label(),
+            role.family_name(),
+            role.size_px() as u32,
+            family_weight
+        );
+        Column::new()
+            .push(
+                type_role_text(role, sample_text)
+                    .color(design_tokens::text_primary(&Theme::Light)),
+            )
+            .push(
+                text(caption)
+                    .size(Typography::SecondaryText.size_px())
+                    .color(design_tokens::text_muted(&Theme::Light)),
+            )
+            .spacing(design_tokens::SPACE_2)
+            .into()
+    };
+
+    let role_rows = TypeRole::ALL.iter().fold(
+        Column::new().spacing(design_tokens::SPACE_12),
+        |col, role| col.push(sample(*role)),
+    );
+
+    // Real-weight demo: every registered static weight per family, so the
+    // gallery visually proves there is no synthetic bolding.
+    let weight_sample = |family: &'static str,
+                         weight: iced::font::Weight,
+                         label: &'static str|
+     -> Element<'static, AppMessage> {
+        let font = iced::Font {
+            family: iced::font::Family::Name(family),
+            weight,
+            stretch: iced::font::Stretch::Normal,
+            style: iced::font::Style::Normal,
+        };
+        text(label)
+            .font(font)
+            .size(16.0)
+            .color(design_tokens::text_primary(&Theme::Light))
+            .into()
+    };
+    let family_row = |name: &'static str| -> Element<'static, AppMessage> {
+        text(name)
+            .size(Typography::SecondaryText.size_px())
+            .color(design_tokens::text_muted(&Theme::Light))
+            .into()
+    };
+    let weights_demo = Column::new()
+        .spacing(design_tokens::SPACE_8)
+        .push(family_row("Source Sans 3"))
+        .push(
+            Row::new()
+                .spacing(design_tokens::SPACE_12)
+                .push(weight_sample("Source Sans 3", iced::font::Weight::Normal, "400"))
+                .push(weight_sample("Source Sans 3", iced::font::Weight::Medium, "500"))
+                .push(weight_sample("Source Sans 3", iced::font::Weight::Semibold, "600"))
+                .push(weight_sample("Source Sans 3", iced::font::Weight::Bold, "700")),
+        )
+        .push(family_row("Manrope"))
+        .push(
+            Row::new()
+                .spacing(design_tokens::SPACE_12)
+                .push(weight_sample("Manrope", iced::font::Weight::Semibold, "600"))
+                .push(weight_sample("Manrope", iced::font::Weight::Bold, "700")),
+        )
+        .push(family_row("Figtree"))
+        .push(
+            Row::new()
+                .spacing(design_tokens::SPACE_12)
+                .push(weight_sample("Figtree", iced::font::Weight::Normal, "400"))
+                .push(weight_sample("Figtree", iced::font::Weight::Medium, "500"))
+                .push(weight_sample("Figtree", iced::font::Weight::Semibold, "600")),
+        )
+        .push(family_row("Raleway"))
+        .push(
+            Row::new()
+                .spacing(design_tokens::SPACE_12)
+                .push(weight_sample("Raleway", iced::font::Weight::ExtraBold, "800")),
+        )
+        .push(family_row("JetBrains Mono"))
+        .push(
+            Row::new()
+                .spacing(design_tokens::SPACE_12)
+                .push(weight_sample("JetBrains Mono", iced::font::Weight::Normal, "400"))
+                .push(weight_sample("JetBrains Mono", iced::font::Weight::Medium, "500")),
+        );
+
+    let fallback_note = text(format!(
+        "Fallbacks: {} → Source Sans 3 (same weight); {} → platform monospace.",
+        "all roles except technical_value", "technical_value"
+    ))
+    .size(Typography::SecondaryText.size_px())
+    .color(design_tokens::text_muted(&Theme::Light));
+
+    let fallback_sample = |role: TypeRole, label: &'static str| -> Element<'static, AppMessage> {
+        text(label)
+            .font(role.fallback_font())
+            .size(role.size_px())
+            .color(design_tokens::text_muted(&Theme::Light))
+            .into()
+    };
+    let fallback_demo = Row::new()
+        .spacing(design_tokens::SPACE_16)
+        .push(fallback_sample(
+            TypeRole::DisplayHeading,
+            "Fallback display_heading → Source Sans 3",
+        ))
+        .push(fallback_sample(
+            TypeRole::TechnicalValue,
+            "Fallback technical_value → monospace",
+        ));
+
+    Column::new()
+        .spacing(design_tokens::SPACE_12)
+        .push(role_rows)
+        .push(horizontal(1))
+        .push(state_label("Registered weights (no synthetic bolding)"))
+        .push(weights_demo)
+        .push(horizontal(1))
+        .push(state_label("Fallback demo"))
+        .push(fallback_demo)
+        .push(fallback_note)
         .into()
 }

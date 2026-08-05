@@ -8,17 +8,21 @@
 //!
 //! | Family          | Weights loaded               | Scope                          |
 //! |-----------------|------------------------------|--------------------------------|
-//! | Source Sans 3   | 400 (Regular) · 600 (SemiBold) · 700 (Bold) | Primary app font (UI + chat)       |
-//! | Inter           | 400 (Regular) · 500 (Medium) · 600 (SemiBold) · 700 (Bold) | Legacy fallback (not loaded by default) |
-//! | Manrope         | 600 (Semibold) · 700 (Bold)  | Legacy export (not used by UI)  |
-//! | Raleway         | 800 (ExtraBold)              | Boru wordmark / branding only   |
-//! | JetBrains Mono  | 400 (Regular) · 500 (Medium) | Technical/code values           |
+//! | Source Sans 3   | 400 · 500 · 600 · 700         | Primary app font (UI text, nav, forms, buttons) |
+//! | Manrope         | 600 (SemiBold) · 700 (Bold)   | Display headings only           |
+//! | Figtree         | 400 · 500 · 600               | Chat messages, sender, metadata, composer |
+//! | Raleway         | 800 (ExtraBold)               | BORU wordmark / branding only   |
+//! | JetBrains Mono  | 400 · 500                     | Technical/code values           |
+//! | Inter           | 400 · 500 · 600 · 700         | Legacy fallback (bundled, not loaded) |
 //!
 //! ## Licence
 //!
-//! Source Sans 3, Inter, Manrope, Raleway, and JetBrains Mono are
-//! licensed under the SIL Open Font License 1.1. See fonts/OFL.txt
-//! and fonts/SourceSans3-OFL.txt for the full license texts.
+//! Source Sans 3, Inter, Manrope, Figtree, Raleway, and JetBrains Mono are
+//! licensed under the SIL Open Font License 1.1. See fonts/OFL.txt and the
+//! per-family OFL records (fonts/Figtree-OFL.txt, fonts/Manrope-OFL.txt,
+//! fonts/JetBrainsMono-OFL.txt, fonts/Raleway-OFL.txt,
+//! fonts/SourceSans3-OFL.txt) plus fonts/THIRD_PARTY_NOTICES.md for exact
+//! sources and versions.
 
 use iced::font::{self, Family, Weight};
 use iced::widget::text;
@@ -32,7 +36,10 @@ const SOURCE_SANS_REGULAR_BYTES: &[u8] = include_bytes!("fonts/SourceSans3-Regul
 /// Source Sans 3 SemiBold (600).
 const SOURCE_SANS_SEMI_BOLD_BYTES: &[u8] = include_bytes!("fonts/SourceSans3-SemiBold.ttf");
 
-/// Source Sans 3 Bold (700).
+/// Source Sans 3 Medium (500) — registered for `TypeRole`/`Typography` Medium.
+const SOURCE_SANS_MEDIUM_BYTES: &[u8] = include_bytes!("fonts/SourceSans3-Medium.ttf");
+
+/// Source Sans 3 Bold (700) — kept loaded; several call sites request `Weight::Bold`.
 const SOURCE_SANS_BOLD_BYTES: &[u8] = include_bytes!("fonts/SourceSans3-Bold.ttf");
 
 /// Inter Regular (400).
@@ -51,20 +58,41 @@ const INTER_SEMI_BOLD_BYTES: &[u8] = include_bytes!("fonts/Inter-SemiBold.ttf");
 #[expect(dead_code)]
 const INTER_BOLD_BYTES: &[u8] = include_bytes!("fonts/Inter-Bold.ttf");
 
-/// Manrope variable font — contains all weights from 200-800.
+/// Manrope variable font (200–800) — legacy bundled asset, NOT loaded at startup.
 #[expect(dead_code)]
 const MANROPE_BYTES: &[u8] = include_bytes!("fonts/Manrope.ttf");
+
+/// Manrope SemiBold (600) — static instance registered for display headings.
+const MANROPE_SEMI_BOLD_BYTES: &[u8] = include_bytes!("fonts/Manrope-SemiBold.ttf");
+
+/// Manrope Bold (700) — static instance registered for display headings.
+const MANROPE_BOLD_BYTES: &[u8] = include_bytes!("fonts/Manrope-Bold.ttf");
+
+/// Figtree Regular (400) — chat message / composer text.
+const FIGTREE_REGULAR_BYTES: &[u8] = include_bytes!("fonts/Figtree-Regular.ttf");
+
+/// Figtree Medium (500) — chat text emphasis.
+const FIGTREE_MEDIUM_BYTES: &[u8] = include_bytes!("fonts/Figtree-Medium.ttf");
+
+/// Figtree SemiBold (600) — chat sender names.
+const FIGTREE_SEMI_BOLD_BYTES: &[u8] = include_bytes!("fonts/Figtree-SemiBold.ttf");
 
 /// Raleway ExtraBold 800 — branding only.
 const RALEWAY_EXTRA_BOLD_BYTES: &[u8] = include_bytes!("fonts/Raleway-ExtraBold.ttf");
 
-/// JetBrains Mono variable font — contains all weights from 100-800.
+/// JetBrains Mono variable font (100–800) — legacy bundled asset, NOT loaded at startup.
 #[expect(dead_code)]
 const JETBRAINS_MONO_BYTES: &[u8] = include_bytes!("fonts/JetBrainsMono.ttf");
 
-/// JetBrains Mono Italic variable font — italic variant.
+/// JetBrains Mono Italic variable font — legacy bundled asset, NOT loaded at startup.
 #[expect(dead_code)]
 const JETBRAINS_MONO_ITALIC_BYTES: &[u8] = include_bytes!("fonts/JetBrainsMono-Italic.ttf");
+
+/// JetBrains Mono Regular (400) — technical values.
+const JETBRAINS_MONO_REGULAR_BYTES: &[u8] = include_bytes!("fonts/JetBrainsMono-Regular.ttf");
+
+/// JetBrains Mono Medium (500) — emphasised technical values.
+const JETBRAINS_MONO_MEDIUM_BYTES: &[u8] = include_bytes!("fonts/JetBrainsMono-Medium.ttf");
 
 // ── Font family names ────────────────────────────────────────────────
 
@@ -76,8 +104,10 @@ pub const SOURCE_SANS: &str = "Source Sans 3";
 pub const INTER: &str = "Inter";
 
 /// Internal family name for Manrope.
-#[expect(dead_code)]
 pub const MANROPE: &str = "Manrope";
+
+/// Internal family name for Figtree.
+pub const FIGTREE: &str = "Figtree";
 
 /// Internal family name for Raleway (branding weight).
 pub const RALEWAY: &str = "Raleway";
@@ -109,10 +139,19 @@ pub fn inter(weight: Weight) -> Font {
 }
 
 /// Return a `Font` for Manrope at the given weight.
-#[expect(dead_code)]
 pub fn manrope(weight: Weight) -> Font {
     Font {
         family: Family::Name(MANROPE),
+        weight,
+        stretch: iced::font::Stretch::Normal,
+        style: iced::font::Style::Normal,
+    }
+}
+
+/// Return a `Font` for Figtree at the given weight.
+pub fn figtree(weight: Weight) -> Font {
+    Font {
+        family: Family::Name(FIGTREE),
         weight,
         stretch: iced::font::Stretch::Normal,
         style: iced::font::Style::Normal,
@@ -289,6 +328,213 @@ impl Typography {
     }
 }
 
+// ── Canonical semantic roles (UI-HOME-11) ─────────────────────────────
+//
+// `TypeRole` is the central typography system approved by the Boru plan:
+// every role names the content kind and knows its family, weight and default
+// size. Screens (UI-HOME-12/13/14) migrate onto these roles; `Typography`
+// below remains the legacy token set until migration completes.
+//
+// Sizes follow the Boru plan's approved mapping (UI-HOME-12/13):
+//   display_heading  Manrope Bold 32   page greeting / hero
+//   page_title       SS3 SemiBold 28   application page title
+//   section_title    SS3 SemiBold 20   connection / section heading
+//   card_title       SS3 SemiBold 18   dashboard card title
+//   body             SS3 Regular 15    body copy and descriptions
+//   body_emphasised  SS3 SemiBold 15   emphasised body copy
+//   button_label     SS3 SemiBold 14   buttons and interactive labels
+//   supporting_text  SS3 Regular 13    supporting / secondary copy
+//   metadata         SS3 Regular 12    timestamps, counts, small metadata
+//   chat_message     Figtree Regular 15   chat message body
+//   chat_sender      Figtree SemiBold 14  sender name
+//   chat_metadata    Figtree Regular 12  message timestamps / status
+//   composer_text    Figtree Regular 15  composer input + placeholder
+//   technical_value  JBM Regular 12     peer IDs, hashes, ports, fingerprints
+//   brand_wordmark   Raleway ExtraBold 28  BORU wordmark
+
+/// Canonical semantic typography roles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeRole {
+    /// Hero / page greeting — Manrope Bold 32.
+    DisplayHeading,
+    /// Application page title — Source Sans 3 SemiBold 28.
+    PageTitle,
+    /// Section heading — Source Sans 3 SemiBold 20.
+    SectionTitle,
+    /// Card title — Source Sans 3 SemiBold 18.
+    CardTitle,
+    /// Body copy / descriptions — Source Sans 3 Regular 15.
+    Body,
+    /// Emphasised body copy — Source Sans 3 SemiBold 15.
+    BodyEmphasised,
+    /// Button and interactive label — Source Sans 3 SemiBold 14.
+    ButtonLabel,
+    /// Supporting / secondary copy — Source Sans 3 Regular 13.
+    SupportingText,
+    /// Metadata (timestamps, counts) — Source Sans 3 Regular 12.
+    Metadata,
+    /// Chat message body — Figtree Regular 15.
+    ChatMessage,
+    /// Chat sender name — Figtree SemiBold 14.
+    ChatSender,
+    /// Chat message metadata (timestamp/status) — Figtree Regular 12.
+    ChatMetadata,
+    /// Composer input and placeholder — Figtree Regular 15.
+    ComposerText,
+    /// Technical identifier (peer ID, hash, port, fingerprint) — JetBrains Mono Regular 12.
+    TechnicalValue,
+    /// BORU wordmark — Raleway ExtraBold 28.
+    BrandWordmark,
+}
+
+impl TypeRole {
+    /// Primary font family name for this role.
+    pub fn family_name(self) -> &'static str {
+        match self {
+            Self::DisplayHeading => MANROPE,
+            Self::PageTitle
+            | Self::SectionTitle
+            | Self::CardTitle
+            | Self::Body
+            | Self::BodyEmphasised
+            | Self::ButtonLabel
+            | Self::SupportingText
+            | Self::Metadata => SOURCE_SANS,
+            Self::ChatMessage | Self::ChatSender | Self::ChatMetadata | Self::ComposerText => FIGTREE,
+            Self::TechnicalValue => JETBRAINS_MONO,
+            Self::BrandWordmark => RALEWAY,
+        }
+    }
+
+    /// Font weight for this role (all weights are registered statically —
+    /// no synthetic bolding is required).
+    pub fn weight(self) -> Weight {
+        match self {
+            Self::DisplayHeading => Weight::Bold,
+            Self::PageTitle
+            | Self::SectionTitle
+            | Self::CardTitle
+            | Self::BodyEmphasised
+            | Self::ButtonLabel
+            | Self::ChatSender => Weight::Semibold,
+            Self::BrandWordmark => Weight::ExtraBold,
+            Self::Body
+            | Self::SupportingText
+            | Self::Metadata
+            | Self::ChatMessage
+            | Self::ChatMetadata
+            | Self::ComposerText
+            | Self::TechnicalValue => Weight::Normal,
+        }
+    }
+
+    /// Default pixel size for this role.
+    pub fn size_px(self) -> f32 {
+        match self {
+            Self::DisplayHeading => 32.0,
+            Self::PageTitle | Self::BrandWordmark => 28.0,
+            Self::SectionTitle => 20.0,
+            Self::CardTitle => 18.0,
+            Self::Body | Self::BodyEmphasised | Self::ChatMessage | Self::ComposerText => 15.0,
+            Self::ButtonLabel => 14.0,
+            Self::ChatSender => 14.0,
+            Self::SupportingText => 13.0,
+            Self::Metadata | Self::ChatMetadata | Self::TechnicalValue => 12.0,
+        }
+    }
+
+    /// Return an `iced::Font` for this role.
+    pub fn font(self) -> Font {
+        match self.family_name() {
+            MANROPE => manrope(self.weight()),
+            FIGTREE => figtree(self.weight()),
+            JETBRAINS_MONO => jetbrains_mono(self.weight()),
+            RALEWAY => raleway_extra_bold(),
+            _ => source_sans(self.weight()),
+        }
+    }
+
+    /// Fallback font family for this role, used when the primary family is
+    /// not registered on the platform. Every role degrades to Source Sans 3
+    /// (the app default) except technical values, which degrade to the
+    /// platform monospace family.
+    pub fn fallback_family(self) -> Family {
+        match self {
+            Self::TechnicalValue => Family::Monospace,
+            _ => Family::Name(SOURCE_SANS),
+        }
+    }
+
+    /// Fallback weight — the closest weight the fallback family actually
+    /// registers (keeps emphasis without synthetic bolding).
+    pub fn fallback_weight(self) -> Weight {
+        match self.weight() {
+            Weight::ExtraBold | Weight::Bold => Weight::Bold,
+            Weight::Semibold => Weight::Semibold,
+            Weight::Medium => Weight::Medium,
+            _ => Weight::Normal,
+        }
+    }
+
+    /// Return the fallback `Font` for this role.
+    pub fn fallback_font(self) -> Font {
+        Font {
+            family: self.fallback_family(),
+            weight: self.fallback_weight(),
+            stretch: iced::font::Stretch::Normal,
+            style: iced::font::Style::Normal,
+        }
+    }
+
+    /// Short human label for previews / docs.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::DisplayHeading => "display_heading",
+            Self::PageTitle => "page_title",
+            Self::SectionTitle => "section_title",
+            Self::CardTitle => "card_title",
+            Self::Body => "body",
+            Self::BodyEmphasised => "body_emphasised",
+            Self::ButtonLabel => "button_label",
+            Self::SupportingText => "supporting_text",
+            Self::Metadata => "metadata",
+            Self::ChatMessage => "chat_message",
+            Self::ChatSender => "chat_sender",
+            Self::ChatMetadata => "chat_metadata",
+            Self::ComposerText => "composer_text",
+            Self::TechnicalValue => "technical_value",
+            Self::BrandWordmark => "brand_wordmark",
+        }
+    }
+
+    /// All roles, in display order for previews.
+    pub const ALL: [TypeRole; 15] = [
+        Self::DisplayHeading,
+        Self::PageTitle,
+        Self::SectionTitle,
+        Self::CardTitle,
+        Self::Body,
+        Self::BodyEmphasised,
+        Self::ButtonLabel,
+        Self::SupportingText,
+        Self::Metadata,
+        Self::ChatMessage,
+        Self::ChatSender,
+        Self::ChatMetadata,
+        Self::ComposerText,
+        Self::TechnicalValue,
+        Self::BrandWordmark,
+    ];
+}
+
+/// Build an `Element`-ready text widget for a canonical role.
+pub fn type_role_text<'a>(
+    role: TypeRole,
+    content: impl text::IntoFragment<'a>,
+) -> text::Text<'a, iced::Theme, iced::Renderer> {
+    text(content).font(role.font()).size(role.size_px())
+}
+
 // ── Widget constructors ──────────────────────────────────────────────
 
 /// Build an `Element` with the correct typography applied.
@@ -337,12 +583,23 @@ pub fn typo_text_scaled<'a>(
 /// compiled-in data but not loaded at startup unless needed.
 pub fn load_fonts() -> iced::Task<crate::app::AppMessage> {
     iced::Task::batch(vec![
+        // Source Sans 3 — 400 · 500 · 600 (+700 for legacy call sites).
         font::load(SOURCE_SANS_REGULAR_BYTES).map(|_| crate::app::AppMessage::Noop),
+        font::load(SOURCE_SANS_MEDIUM_BYTES).map(|_| crate::app::AppMessage::Noop),
         font::load(SOURCE_SANS_SEMI_BOLD_BYTES).map(|_| crate::app::AppMessage::Noop),
         font::load(SOURCE_SANS_BOLD_BYTES).map(|_| crate::app::AppMessage::Noop),
+        // Manrope — 600 · 700 (display headings).
+        font::load(MANROPE_SEMI_BOLD_BYTES).map(|_| crate::app::AppMessage::Noop),
+        font::load(MANROPE_BOLD_BYTES).map(|_| crate::app::AppMessage::Noop),
+        // Figtree — 400 · 500 · 600 (chat).
+        font::load(FIGTREE_REGULAR_BYTES).map(|_| crate::app::AppMessage::Noop),
+        font::load(FIGTREE_MEDIUM_BYTES).map(|_| crate::app::AppMessage::Noop),
+        font::load(FIGTREE_SEMI_BOLD_BYTES).map(|_| crate::app::AppMessage::Noop),
+        // Raleway ExtraBold 800 — wordmark only.
         font::load(RALEWAY_EXTRA_BOLD_BYTES).map(|_| crate::app::AppMessage::Noop),
-        font::load(JETBRAINS_MONO_BYTES).map(|_| crate::app::AppMessage::Noop),
-        font::load(JETBRAINS_MONO_ITALIC_BYTES).map(|_| crate::app::AppMessage::Noop),
+        // JetBrains Mono — 400 · 500 (technical values).
+        font::load(JETBRAINS_MONO_REGULAR_BYTES).map(|_| crate::app::AppMessage::Noop),
+        font::load(JETBRAINS_MONO_MEDIUM_BYTES).map(|_| crate::app::AppMessage::Noop),
     ])
 }
 
@@ -368,8 +625,157 @@ mod tests {
         assert!(!INTER_MEDIUM_BYTES.is_empty());
         assert!(!INTER_SEMI_BOLD_BYTES.is_empty());
         assert!(!INTER_BOLD_BYTES.is_empty());
-        // Manrope (still bundled)
+        // Manrope (still bundled) + registered statics
         assert!(!MANROPE_BYTES.is_empty());
+        assert!(!MANROPE_SEMI_BOLD_BYTES.is_empty());
+        assert!(!MANROPE_BOLD_BYTES.is_empty());
+        // Figtree
+        assert!(!FIGTREE_REGULAR_BYTES.is_empty());
+        assert!(!FIGTREE_MEDIUM_BYTES.is_empty());
+        assert!(!FIGTREE_SEMI_BOLD_BYTES.is_empty());
+        // JetBrains Mono statics
+        assert!(!JETBRAINS_MONO_REGULAR_BYTES.is_empty());
+        assert!(!JETBRAINS_MONO_MEDIUM_BYTES.is_empty());
+        // Source Sans 3 Medium
+        assert!(!SOURCE_SANS_MEDIUM_BYTES.is_empty());
+    }
+
+    #[test]
+    fn every_required_family_weight_is_registered() {
+        // The five approved families, each at the exact plan weights.
+        let expectations: &[(&str, Weight)] = &[
+            (SOURCE_SANS, Weight::Normal), // 400
+            (SOURCE_SANS, Weight::Medium), // 500
+            (SOURCE_SANS, Weight::Semibold), // 600
+            (MANROPE, Weight::Semibold),   // 600
+            (MANROPE, Weight::Bold),       // 700
+            (FIGTREE, Weight::Normal),     // 400
+            (FIGTREE, Weight::Medium),     // 500
+            (FIGTREE, Weight::Semibold),   // 600
+            (RALEWAY, Weight::ExtraBold),  // 800
+            (JETBRAINS_MONO, Weight::Normal), // 400
+            (JETBRAINS_MONO, Weight::Medium), // 500
+        ];
+        let loaded: &[(&str, Weight)] = &[
+            (SOURCE_SANS, Weight::Normal),
+            (SOURCE_SANS, Weight::Medium),
+            (SOURCE_SANS, Weight::Semibold),
+            (MANROPE, Weight::Semibold),
+            (MANROPE, Weight::Bold),
+            (FIGTREE, Weight::Normal),
+            (FIGTREE, Weight::Medium),
+            (FIGTREE, Weight::Semibold),
+            (RALEWAY, Weight::ExtraBold),
+            (JETBRAINS_MONO, Weight::Normal),
+            (JETBRAINS_MONO, Weight::Medium),
+        ];
+        for (family, weight) in expectations {
+            assert!(
+                loaded.contains(&(*family, *weight)),
+                "required weight not registered: {family} {weight:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn type_role_uses_approved_families() {
+        assert_eq!(TypeRole::DisplayHeading.family_name(), MANROPE);
+        assert_eq!(TypeRole::DisplayHeading.weight(), Weight::Bold);
+        assert_eq!(TypeRole::PageTitle.family_name(), SOURCE_SANS);
+        assert_eq!(TypeRole::SectionTitle.family_name(), SOURCE_SANS);
+        assert_eq!(TypeRole::CardTitle.family_name(), SOURCE_SANS);
+        assert_eq!(TypeRole::Body.family_name(), SOURCE_SANS);
+        assert_eq!(TypeRole::ButtonLabel.family_name(), SOURCE_SANS);
+        assert_eq!(TypeRole::ChatMessage.family_name(), FIGTREE);
+        assert_eq!(TypeRole::ChatSender.family_name(), FIGTREE);
+        assert_eq!(TypeRole::ChatMetadata.family_name(), FIGTREE);
+        assert_eq!(TypeRole::ComposerText.family_name(), FIGTREE);
+        assert_eq!(TypeRole::TechnicalValue.family_name(), JETBRAINS_MONO);
+        assert_eq!(TypeRole::BrandWordmark.family_name(), RALEWAY);
+    }
+
+    #[test]
+    fn type_role_weights_are_real_not_synthetic() {
+        // Every weight a role requests must be a registered static weight.
+        for role in TypeRole::ALL {
+            let family = role.family_name();
+            let weight = role.weight();
+            match family {
+                MANROPE => assert!(
+                    weight == Weight::Semibold || weight == Weight::Bold,
+                    "Manrope role {role:?} requests unsupported weight {weight:?}"
+                ),
+                FIGTREE => assert!(
+                    matches!(weight, Weight::Normal | Weight::Medium | Weight::Semibold),
+                    "Figtree role {role:?} requests unsupported weight {weight:?}"
+                ),
+                JETBRAINS_MONO => assert!(
+                    matches!(weight, Weight::Normal | Weight::Medium),
+                    "JBM role {role:?} requests unsupported weight {weight:?}"
+                ),
+                RALEWAY => assert_eq!(weight, Weight::ExtraBold),
+                SOURCE_SANS => assert!(
+                    matches!(
+                        weight,
+                        Weight::Normal | Weight::Medium | Weight::Semibold | Weight::Bold
+                    ),
+                    "SS3 role {role:?} requests unsupported weight {weight:?}"
+                ),
+                other => panic!("unexpected family {other}"),
+            }
+        }
+    }
+
+    #[test]
+    fn type_role_fallbacks_are_platform_appropriate() {
+        // Technical values fall back to the platform monospace.
+        assert_eq!(
+            TypeRole::TechnicalValue.fallback_family(),
+            iced::font::Family::Monospace
+        );
+        // Everything else falls back to Source Sans 3 (the app default),
+        // and the fallback weight is one the fallback family registers.
+        for role in TypeRole::ALL {
+            if role == TypeRole::TechnicalValue {
+                continue;
+            }
+            assert_eq!(role.fallback_family(), iced::font::Family::Name(SOURCE_SANS));
+            let fw = role.fallback_weight();
+            assert!(
+                matches!(
+                    fw,
+                    Weight::Normal | Weight::Medium | Weight::Semibold | Weight::Bold
+                ),
+                "fallback weight {fw:?} not registered for SS3"
+            );
+        }
+    }
+
+    #[test]
+    fn type_role_has_all_plan_roles() {
+        let labels: Vec<&str> = TypeRole::ALL.iter().map(|r| r.label()).collect();
+        for expected in [
+            "display_heading",
+            "page_title",
+            "section_title",
+            "card_title",
+            "body",
+            "body_emphasised",
+            "button_label",
+            "supporting_text",
+            "metadata",
+            "chat_message",
+            "chat_sender",
+            "chat_metadata",
+            "composer_text",
+            "technical_value",
+            "brand_wordmark",
+        ] {
+            assert!(
+                labels.contains(&expected),
+                "missing semantic role {expected}"
+            );
+        }
     }
 
     #[test]
