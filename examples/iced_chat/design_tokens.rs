@@ -146,8 +146,9 @@ pub const CONTROL_HEIGHT_COMPACT: f32 = 36.0;
 // ── Corner radii ──────────────────────────────────────────────────────
 pub const RADIUS_SM: f32 = 8.0; // small controls
 pub const RADIUS_MD: f32 = 10.0; // buttons, list selections
-pub const RADIUS_LG: f32 = 12.0; // cards, chat bubbles
+pub const RADIUS_LG: f32 = 12.0; // chat bubbles, dialogs
 pub const RADIUS_XL: f32 = 16.0; // hero cards, composer
+pub const RADIUS_CARD: f32 = 16.0; // card containers (plan: 14-18 px band; same value as RADIUS_XL today)
 
 // ── Borders ───────────────────────────────────────────────────────────
 pub const BORDER_WIDTH: f32 = 1.0; // standard 1 px border
@@ -446,6 +447,24 @@ pub fn destructive_soft(theme: &Theme) -> Color {
     Color::from_rgba(d.r, d.g, d.b, a)
 }
 
+/// Success soft background (8 % opacity on success green).
+/// Used for status badges and positive emphasis surfaces (mirrors
+/// `destructive_soft` so the card status palette stays symmetric).
+pub fn success_soft(theme: &Theme) -> Color {
+    let s = color_success(theme);
+    let a = if dark(theme) { 0.12 } else { 0.08 };
+    Color::from_rgba(s.r, s.g, s.b, a)
+}
+
+/// Warning soft background (8 % opacity on warning amber).
+/// Used for status badges and caution surfaces (mirrors
+/// `destructive_soft` so the card status palette stays symmetric).
+pub fn warning_soft(theme: &Theme) -> Color {
+    let w = color_warning(theme);
+    let a = if dark(theme) { 0.12 } else { 0.08 };
+    Color::from_rgba(w.r, w.g, w.b, a)
+}
+
 /// Keyboard focus ring color. Spec: #2B9B67.
 pub fn color_focus(theme: &Theme) -> Color {
     if dark(theme) {
@@ -660,14 +679,16 @@ pub fn surface_style(theme: &Theme) -> container::Style {
 }
 
 /// Card container style — surface bg, subtle border, rounded corners,
-/// light drop shadow.
+/// light drop shadow. This is the shared dashboard-card surface: every
+/// card on the home screen (hero, mesh, rail, quick actions) derives from
+/// it so surfaces, borders, radii and shadows stay consistent.
 pub fn card_style(theme: &Theme) -> container::Style {
     container::Style {
         background: Some(Background::Color(surface(theme))),
         border: iced::Border {
             color: border_muted(theme),
             width: BORDER_WIDTH,
-            radius: RADIUS_LG.into(),
+            radius: RADIUS_CARD.into(),
         },
         shadow: shadow_card(theme),
         ..Default::default()
@@ -1048,5 +1069,48 @@ mod tests {
         assert_ne!(color_canvas(&light), color_canvas(&dark));
         assert_ne!(text_primary(&light), text_primary(&dark));
         assert_ne!(surface(&light), surface(&dark));
+    }
+
+    // ── Card foundation tokens (UI-HOME-03) ──────────────────────────
+
+    #[test]
+    fn card_radius_token_is_within_the_plan_band() {
+        // Plan: dashboard cards use a 14-18 px corner radius.
+        assert!(
+            (14.0..=18.0).contains(&RADIUS_CARD),
+            "RADIUS_CARD must be in the 14-18 px plan band"
+        );
+    }
+
+    #[test]
+    fn card_style_uses_the_card_radius_token() {
+        let light = Theme::Light;
+        let style = card_style(&light);
+        assert_eq!(style.border.radius, RADIUS_CARD.into());
+        assert_eq!(style.border.width, BORDER_WIDTH);
+        assert_eq!(style.border.color, border_muted(&light));
+        assert_eq!(style.background, Some(Background::Color(surface(&light))));
+        assert!(
+            style.shadow.color.a > 0.0 && style.shadow.color.a < 1.0,
+            "card style must carry a low-opacity shadow"
+        );
+    }
+
+    #[test]
+    fn status_soft_colors_are_translucent_token_variants() {
+        let light = Theme::Light;
+        let dark = Theme::Dark;
+        for theme in [&light, &dark] {
+            for soft in [
+                success_soft(theme),
+                warning_soft(theme),
+                destructive_soft(theme),
+            ] {
+                assert!(
+                    soft.a > 0.0 && soft.a < 1.0,
+                    "status soft colors must be translucent tints"
+                );
+            }
+        }
     }
 }

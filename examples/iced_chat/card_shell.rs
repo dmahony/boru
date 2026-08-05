@@ -1,27 +1,37 @@
-//! Reusable card shell for the Boru home rail (Figure 3).
+//! Reusable card shell for the Boru home rail and dashboard cards
+//! (Figure 3).
 //!
-//! A `CardShell` renders a titled card with an optional count badge and an
-//! optional "View all" action, wrapping a bounded, scrollable list body:
+//! A `CardShell` renders a titled card with an optional subtitle, optional
+//! count badge, optional status pill ([`StatusBadgeKind`]), an optional
+//! header action, and an optional footer, wrapping a body that is either
+//! caller-provided content or a bounded, scrollable list:
 //!
-//! - **Header** — uppercase muted title, optional count badge, optional
-//!   trailing "View all" ghost button.
-//! - **Body** — when children are supplied, a scrollable list with a fixed
-//!   maximum height (`max_height`, default [`DEFAULT_LIST_MAX_HEIGHT`]), so a
-//!   long list scrolls instead of growing the dashboard without bound. When
-//!   children are empty, the caller-provided `empty_message` is shown with
-//!   UI-04 empty-state typography.
+//! - **Header** — uppercase muted title (or sentence case via
+//!   [`Self::title_case`]), optional muted subtitle below it, optional
+//!   count badge, optional status pill, and an optional trailing ghost
+//!   action button (default label "View all" via [`Self::on_view_all`],
+//!   or any label via [`Self::header_action`]).
+//! - **Body** — when [`Self::body`] is set, that element is rendered as-is
+//!   with content-driven height (e.g. a mesh status block). When children
+//!   are supplied instead, a scrollable list with a fixed maximum height
+//!   (`max_height`, default [`DEFAULT_LIST_MAX_HEIGHT`]) so a long list
+//!   scrolls instead of growing the dashboard without bound. When both are
+//!   absent, the caller-provided `empty_message` is shown.
+//! - **Footer** — optional element rendered below the body with a small top
+//!   gap (e.g. a summary line or action row).
 //!
 //! All spacing, radii, borders, shadows, and colours come from
-//! [`crate::design_tokens`]; typography comes from the central
+//! [`crate::design_tokens`] (`card_style`, `SPACE_*`, `RADIUS_CARD` and the
+//! status palette); typography comes from the central
 //! [`crate::fonts::TypeRole`] roles. Rows built by callers should target
 //! [`CARD_ROW_HEIGHT`] (48 px) so every card in the rail shares the same
 //! rhythm.
 //!
 //! The shell is intentionally data-agnostic: it never constructs list rows
-//! and holds no sample data — the caller owns the children.
+//! and holds no sample data — the caller owns the children/body/footer.
 
 use iced::widget::{button, container, Column, Row, Space};
-use iced::{Alignment, Background, Border, Element, Length, Theme};
+use iced::{Alignment, Background, Border, Color, Element, Length, Theme};
 
 use crate::design_tokens;
 
@@ -37,9 +47,26 @@ pub const CARD_ROW_HEIGHT: f32 = 48.0;
 /// scrollbar appears.
 pub const DEFAULT_LIST_MAX_HEIGHT: f32 = 180.0;
 
-/// Builder for a reusable card shell (Figure 3 right rail).
+/// Semantic status shown in a card's header pill.
 ///
-/// Example:
+/// Maps to the design-token status palette so every card that reports a
+/// state (Healthy / Degraded / Offline / …) uses the same colours.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StatusBadgeKind {
+    /// Neutral / informational — muted surface.
+    Neutral,
+    /// Success / healthy — green tint.
+    Success,
+    /// Warning / degraded — amber tint.
+    Warning,
+    /// Danger / offline / error — red tint.
+    Danger,
+}
+
+/// Builder for a reusable card shell (Figure 3 right rail / dashboard card
+/// foundation).
+///
+/// Example (list body):
 /// ```
 /// let shell = CardShell::new("Online Peers", rows)
 ///     .count(3)
@@ -48,22 +75,46 @@ pub const DEFAULT_LIST_MAX_HEIGHT: f32 = 180.0;
 ///     .max_height(140.0)
 ///     .build(&theme);
 /// ```
+///
+/// Example (arbitrary content body, subtitle, status badge and footer):
+/// ```
+/// let shell = CardShell::new("Mesh Activity", vec![])
+///     .title_case(false)
+///     .subtitle("Current connection status")
+///     .status_badge("Healthy", StatusBadgeKind::Success)
+///     .header_action("View details", AppMessage::Noop)
+///     .body(status_block)
+///     .footer(summary_line)
+///     .build(&theme);
+/// ```
 pub struct CardShell<'a, Message> {
-    /// Header title — rendered uppercase per the Fig 3 rail look.
-    title: &'a str,
+    /// Header title — rendered uppercase per the Fig 3 rail look unless
+    /// [`Self::title_case`] is disabled.
+    title: String,
+    /// Optional muted subtitle rendered below the title.
+    subtitle: Option<String>,
     /// Optional count badge shown next to the title.
     count: Option<usize>,
     /// Optional total paired with `count` — when set the badge renders
     /// "online/total" (e.g. "3/12") instead of a bare number.
     count_total: Option<usize>,
-    /// Optional "View all" header action.
-    on_view_all: Option<Message>,
-    /// Message shown when `children` is empty.
-    empty_message: Option<&'a str>,
+    /// Optional semantic status pill (label + kind).
+    status_badge: Option<(String, StatusBadgeKind)>,
+    /// Optional trailing header action (label + message).
+    header_action: Option<(String, Message)>,
+    /// Message shown when `children` is empty and no `body` is set.
+    empty_message: Option<String>,
     /// Fixed max height of the scrollable list body.
     max_height: f32,
     /// Vertical spacing between list rows.
     row_spacing: f32,
+    /// When true (default) the header title is uppercased.
+    title_case: bool,
+    /// Arbitrary content body; when set it replaces the children list and
+    /// the empty state, keeping the card's height content-driven.
+    body: Option<Element<'a, Message>>,
+    /// Optional element rendered below the body with a small top gap.
+    footer: Option<Element<'a, Message>>,
     /// List rows rendered inside the bounded scrollable.
     children: Vec<Element<'a, Message>>,
 }
@@ -72,18 +123,30 @@ impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
     /// Start a card shell with a title and its list rows.
     ///
     /// Pass an empty `children` vec together with
-    /// [`Self::empty_message`] to render the empty state.
-    pub fn new(title: &'a str, children: Vec<Element<'a, Message>>) -> Self {
+    /// [`Self::empty_message`] to render the empty state, or use
+    /// [`Self::body`] for a single arbitrary content block.
+    pub fn new(title: impl Into<String>, children: Vec<Element<'a, Message>>) -> Self {
         Self {
-            title,
+            title: title.into(),
+            subtitle: None,
             count: None,
             count_total: None,
-            on_view_all: None,
+            status_badge: None,
+            header_action: None,
             empty_message: None,
             max_height: DEFAULT_LIST_MAX_HEIGHT,
             row_spacing: design_tokens::SPACE_2,
+            title_case: true,
+            body: None,
+            footer: None,
             children,
         }
+    }
+
+    /// Show a muted subtitle under the header title.
+    pub fn subtitle(mut self, subtitle: impl Into<String>) -> Self {
+        self.subtitle = Some(subtitle.into());
+        self
     }
 
     /// Show a count badge in the header (e.g. online/total peers).
@@ -101,15 +164,27 @@ impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
         self
     }
 
-    /// Add a "View all" action button to the header.
-    pub fn on_view_all(mut self, msg: Message) -> Self {
-        self.on_view_all = Some(msg);
+    /// Show a semantic status pill in the header (e.g. Healthy / Degraded).
+    pub fn status_badge(mut self, label: impl Into<String>, kind: StatusBadgeKind) -> Self {
+        self.status_badge = Some((label.into(), kind));
         self
     }
 
-    /// Message shown when `children` is empty.
-    pub fn empty_message(mut self, message: &'a str) -> Self {
-        self.empty_message = Some(message);
+    /// Add a labelled action button to the header (e.g. "View details").
+    pub fn header_action(mut self, label: impl Into<String>, msg: Message) -> Self {
+        self.header_action = Some((label.into(), msg));
+        self
+    }
+
+    /// Add a "View all" action button to the header.
+    pub fn on_view_all(mut self, msg: Message) -> Self {
+        self.header_action = Some(("View all".to_string(), msg));
+        self
+    }
+
+    /// Message shown when `children` is empty and no `body` is set.
+    pub fn empty_message(mut self, message: impl Into<String>) -> Self {
+        self.empty_message = Some(message.into());
         self
     }
 
@@ -125,20 +200,63 @@ impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
         self
     }
 
+    /// Render an arbitrary content body instead of the children list.
+    ///
+    /// The element sizes to its content, so cards using this API grow
+    /// naturally instead of being clipped by a fixed list height.
+    pub fn body(mut self, element: Element<'a, Message>) -> Self {
+        self.body = Some(element);
+        self
+    }
+
+    /// Render an optional footer below the body (with a small top gap).
+    pub fn footer(mut self, element: Element<'a, Message>) -> Self {
+        self.footer = Some(element);
+        self
+    }
+
+    /// Toggle header-title uppercasing. Enabled by default (Fig 3 rail
+    /// look); disable for sentence-case titles such as "Mesh Activity".
+    pub fn title_case(mut self, enabled: bool) -> Self {
+        self.title_case = enabled;
+        self
+    }
+
     /// Build the card shell element.
     pub fn build(self, theme: &Theme) -> Element<'a, Message> {
-        let mut header = Row::new()
-            .spacing(design_tokens::SPACE_6)
-            .align_y(Alignment::Center)
+        // Header: title column (title + optional subtitle), then count
+        // badge, status badge, fill spacer and optional action button.
+        let mut title_col = Column::new()
             .push(
                 // Card title — card_title (Source Sans 3 SemiBold 18);
                 // uppercase + muted per the Fig 3 rail look.
                 crate::fonts::type_role_text(
                     crate::fonts::TypeRole::CardTitle,
-                    self.title.to_uppercase(),
+                    if self.title_case {
+                        self.title.to_uppercase()
+                    } else {
+                        self.title.clone()
+                    },
+                )
+                .color(design_tokens::text_muted(theme)),
+            )
+            .spacing(design_tokens::SPACE_2)
+            .align_x(Alignment::Start);
+        if let Some(subtitle) = self.subtitle {
+            title_col = title_col.push(
+                // Subtitle — supporting_text (Source Sans 3 Regular 13).
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::SupportingText,
+                    subtitle,
                 )
                 .color(design_tokens::text_muted(theme)),
             );
+        }
+
+        let mut header = Row::new()
+            .spacing(design_tokens::SPACE_6)
+            .align_y(Alignment::Center)
+            .push(title_col);
 
         if let Some(count) = self.count {
             let label = match self.count_total {
@@ -148,13 +266,17 @@ impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
             header = header.push(count_badge::<Message>(label));
         }
 
+        if let Some((label, kind)) = self.status_badge {
+            header = header.push(status_badge_element::<Message>(&label, kind, theme));
+        }
+
         header = header.push(Space::new().width(Length::Fill).height(Length::Shrink));
 
-        if let Some(msg) = self.on_view_all {
+        if let Some((label, msg)) = self.header_action {
             header = header.push(
                 button(crate::fonts::type_role_text(
                     crate::fonts::TypeRole::ButtonLabel,
-                    "View all",
+                    label,
                 ))
                 .on_press(msg)
                 .padding([design_tokens::SPACE_2, design_tokens::SPACE_6])
@@ -162,10 +284,14 @@ impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
             );
         }
 
-        // Body: empty state (with UI-04 empty-state typography) or a bounded
-        // scrollable list. The fixed height is what keeps many peers /
-        // activities from growing the dashboard without bound.
-        let body: Element<'a, Message> = if self.children.is_empty() {
+        // Body: caller body element, else empty state (with UI-04
+        // empty-state typography), else a bounded scrollable list. The
+        // fixed list height is what keeps many peers / activities from
+        // growing the dashboard without bound; the explicit body element
+        // stays content-driven.
+        let body: Element<'a, Message> = if let Some(body_el) = self.body {
+            body_el
+        } else if self.children.is_empty() {
             if let Some(message) = self.empty_message {
                 container(
                     // Empty state — supporting_text (Source Sans 3 Regular 13).
@@ -195,18 +321,25 @@ impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
             .into()
         };
 
-        container(
-            Column::new()
-                .push(header)
+        let mut content_col = Column::new()
+            .push(header)
+            .push(Space::new().height(Length::Fixed(design_tokens::SPACE_6)))
+            .push(body)
+            .spacing(0)
+            .width(Length::Fill);
+
+        if let Some(footer_el) = self.footer {
+            content_col = content_col
                 .push(Space::new().height(Length::Fixed(design_tokens::SPACE_6)))
-                .push(body)
-                .spacing(0)
-                .width(Length::Fill),
-        )
-        .padding([design_tokens::SPACE_12, design_tokens::SPACE_16])
-        .width(Length::Fill)
-        .style(|t| design_tokens::card_style(t))
-        .into()
+                .push(footer_el);
+        }
+
+        container(content_col)
+            // ~24 px internal padding on all sides (plan: 22–28 px band).
+            .padding([design_tokens::SPACE_24, design_tokens::SPACE_24])
+            .width(Length::Fill)
+            .style(|t| design_tokens::card_style(t))
+            .into()
     }
 }
 
@@ -223,6 +356,49 @@ fn count_badge<'a, Message: 'a>(label: String) -> Element<'a, Message> {
     .style(move |t| container::Style {
         background: Some(Background::Color(design_tokens::primary_soft(t))),
         text_color: Some(design_tokens::primary(t)),
+        border: Border {
+            radius: design_tokens::SPACE_12.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .into()
+}
+
+/// Semantic status pill for the header — soft status tint background with
+/// the strong status colour as text, so Healthy / Degraded / Offline use
+/// the same palette as status dots elsewhere in the app.
+fn status_badge_element<'a, Message: 'a>(
+    label: &str,
+    kind: StatusBadgeKind,
+    theme: &Theme,
+) -> Element<'a, Message> {
+    let (bg, fg): (Color, Color) = match kind {
+        StatusBadgeKind::Neutral => (
+            design_tokens::surface_hover(theme),
+            design_tokens::text_secondary(theme),
+        ),
+        StatusBadgeKind::Success => (
+            design_tokens::success_soft(theme),
+            design_tokens::color_success(theme),
+        ),
+        StatusBadgeKind::Warning => (
+            design_tokens::warning_soft(theme),
+            design_tokens::color_warning(theme),
+        ),
+        StatusBadgeKind::Danger => (
+            design_tokens::destructive_soft(theme),
+            design_tokens::color_danger(theme),
+        ),
+    };
+    container(
+        // Status pill — metadata (Source Sans 3 Regular 12).
+        crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, label.to_string()),
+    )
+    .padding([2.0, design_tokens::SPACE_8])
+    .style(move |_t| container::Style {
+        background: Some(Background::Color(bg)),
+        text_color: Some(fg),
         border: Border {
             radius: design_tokens::SPACE_12.into(),
             ..Default::default()
@@ -306,20 +482,71 @@ mod tests {
     fn card_shell_stores_view_all_action() {
         let shell = CardShell::new("Peers", vec![]).on_view_all(());
         assert!(
-            shell.on_view_all.is_some(),
+            shell.header_action.is_some(),
             "View all action must be stored"
         );
+        let (label, _) = shell.header_action.as_ref().unwrap();
+        assert_eq!(label, "View all");
         let shell: CardShell<'static, ()> = CardShell::new("Peers", vec![]);
-        assert!(shell.on_view_all.is_none(), "no action by default");
+        assert!(shell.header_action.is_none(), "no action by default");
+    }
+
+    #[test]
+    fn card_shell_stores_custom_header_action_label() {
+        let shell = CardShell::new("Mesh", vec![]).header_action("View details", ());
+        let (label, _) = shell.header_action.as_ref().expect("action stored");
+        assert_eq!(label, "View details");
     }
 
     #[test]
     fn card_shell_stores_empty_message() {
         let shell: CardShell<'static, ()> =
             CardShell::new("Peers", vec![]).empty_message("No peers online");
-        assert_eq!(shell.empty_message, Some("No peers online"));
+        assert_eq!(shell.empty_message.as_deref(), Some("No peers online"));
         let shell: CardShell<'static, ()> = CardShell::new("Peers", vec![]);
         assert_eq!(shell.empty_message, None, "no empty message by default");
+    }
+
+    #[test]
+    fn card_shell_stores_subtitle() {
+        let shell: CardShell<'static, ()> =
+            CardShell::new("Mesh Activity", vec![]).subtitle("Current connection status");
+        assert_eq!(shell.subtitle.as_deref(), Some("Current connection status"));
+        let shell: CardShell<'static, ()> = CardShell::new("Mesh Activity", vec![]);
+        assert_eq!(shell.subtitle, None, "no subtitle by default");
+    }
+
+    #[test]
+    fn card_shell_stores_status_badge() {
+        let shell: CardShell<'static, ()> =
+            CardShell::new("Mesh", vec![]).status_badge("Healthy", StatusBadgeKind::Success);
+        let (label, kind) = shell.status_badge.as_ref().expect("badge stored");
+        assert_eq!(label, "Healthy");
+        assert_eq!(*kind, StatusBadgeKind::Success);
+        let shell: CardShell<'static, ()> = CardShell::new("Mesh", vec![]);
+        assert_eq!(shell.status_badge, None, "no status badge by default");
+    }
+
+    #[test]
+    fn status_badge_kinds_cover_the_status_palette() {
+        assert_eq!(
+            [
+                StatusBadgeKind::Neutral,
+                StatusBadgeKind::Success,
+                StatusBadgeKind::Warning,
+                StatusBadgeKind::Danger,
+            ]
+            .len(),
+            4
+        );
+    }
+
+    #[test]
+    fn card_shell_title_case_defaults_to_uppercase() {
+        let shell: CardShell<'static, ()> = CardShell::new("Peers", vec![]);
+        assert!(shell.title_case, "uppercase title is the rail default");
+        let shell = shell.title_case(false);
+        assert!(!shell.title_case);
     }
 
     #[test]
@@ -327,6 +554,20 @@ mod tests {
         let children: Vec<Element<'static, ()>> = vec![text("a").into(), text("b").into()];
         let shell = CardShell::new("Peers", children);
         assert_eq!(shell.children.len(), 2);
+    }
+
+    #[test]
+    fn card_shell_stores_body_and_footer() {
+        let body_el: Element<'static, ()> = text("body").into();
+        let footer_el: Element<'static, ()> = text("footer").into();
+        let shell = CardShell::new("Peers", vec![])
+            .body(body_el)
+            .footer(footer_el);
+        assert!(shell.body.is_some(), "body must be stored");
+        assert!(shell.footer.is_some(), "footer must be stored");
+        let shell: CardShell<'static, ()> = CardShell::new("Peers", vec![]);
+        assert!(shell.body.is_none(), "no body by default");
+        assert!(shell.footer.is_none(), "no footer by default");
     }
 
     #[test]
@@ -346,6 +587,35 @@ mod tests {
             .count(12)
             .on_view_all(())
             .max_height(120.0);
+        let el = shell.build(&Theme::Light);
+        let _ = el;
+    }
+
+    #[test]
+    fn card_shell_build_full_semantic_areas_does_not_panic() {
+        // Title + subtitle + count + status badge + header action + body
+        // + footer: the complete dashboard-card foundation in one build.
+        let body_el: Element<'static, ()> = text("Status block").into();
+        let footer_el: Element<'static, ()> = text("Summary line").into();
+        let shell = CardShell::new("Mesh Activity", vec![])
+            .title_case(false)
+            .subtitle("Current connection status")
+            .count(4)
+            .count_total(12)
+            .status_badge("Degraded", StatusBadgeKind::Warning)
+            .header_action("View details", ())
+            .body(body_el)
+            .footer(footer_el);
+        let el = shell.build(&Theme::Light);
+        let _ = el;
+    }
+
+    #[test]
+    fn card_shell_build_with_body_ignores_empty_children() {
+        let body_el: Element<'static, ()> = text("Custom body").into();
+        let shell = CardShell::new("Peers", vec![])
+            .empty_message("Should not render")
+            .body(body_el);
         let el = shell.build(&Theme::Light);
         let _ = el;
     }
@@ -371,7 +641,7 @@ mod tests {
         );
         assert!(
             prod.contains("TypeRole::Metadata"),
-            "count badge must use TypeRole::Metadata (SS3 Regular 12)"
+            "count/status badges must use TypeRole::Metadata (SS3 Regular 12)"
         );
         assert!(
             prod.contains("TypeRole::ButtonLabel"),
@@ -379,7 +649,7 @@ mod tests {
         );
         assert!(
             prod.contains("TypeRole::SupportingText"),
-            "empty message must use TypeRole::SupportingText (SS3 Regular 13)"
+            "subtitle + empty message must use TypeRole::SupportingText (SS3 Regular 13)"
         );
         assert!(
             !prod.contains("Typography::"),

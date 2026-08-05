@@ -308,6 +308,27 @@ Used for "Cancel", "Remove" actions in download cards.
 
 ### 4.2 Cards / Containers
 
+#### Dashboard Card (shared foundation, UI-HOME-03)
+
+The home-screen card surface. All dashboard cards — hero, Mesh Activity,
+right-rail cards (Online Peers / Recent Activity / Tunnels) and quick-action
+buttons — share one style and one shell primitive:
+
+| Property     | Value                          | File:Line |
+|-------------|--------------------------------|-----------|
+| Background  | `surface`                      | `design_tokens::card_style` |
+| Border      | `border_muted` 1px             | same |
+| Border radius| `RADIUS_CARD` (16px)          | `design_tokens.rs` |
+| Shadow      | `shadow_card` (low opacity)    | same |
+| Padding     | `[SPACE_24, SPACE_24]` (~24px) | `card_shell.rs` `build()` |
+
+Shell primitive: `card_shell::CardShell` — builder with semantic areas
+`title` / `subtitle` / `count`+`count_total` badge / `status_badge`
+(`StatusBadgeKind`) / `header_action` / `body` (content-driven) / `footer`
+(bounded scrollable list or empty state when no body is set).
+Hero variant: same `card_style` with background overridden to
+`primary_soft` when the mesh is Ready.
+
 #### Surface Card
 
 | Property     | Value                          | File:Line |

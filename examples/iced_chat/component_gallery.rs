@@ -376,6 +376,48 @@ fn card_shell_gallery() -> Element<'static, AppMessage> {
         .row_spacing(design_tokens::SPACE_4)
         .build(&Theme::Light);
 
+    // Full foundation — every semantic area: sentence-case title, subtitle,
+    // count badge, status pill, header action, content-driven body and footer.
+    let body_block: Element<'static, AppMessage> = container(
+        Column::new()
+            .push(
+                text("Connected — 3 direct · 2 relayed · 5 neighbors")
+                    .font(Typography::Body.font())
+                    .size(Typography::Body.size_px())
+                    .color(design_tokens::text_primary(&Theme::Light)),
+            )
+            .push(
+                Space::new()
+                    .width(Length::Shrink)
+                    .height(Length::Fixed(design_tokens::SPACE_4)),
+            )
+            .push(
+                text("QUIC encrypted · connected 12m")
+                    .font(Typography::SecondaryText.font())
+                    .size(Typography::SecondaryText.size_px())
+                    .color(design_tokens::text_muted(&Theme::Light)),
+            )
+            .spacing(0)
+            .width(Length::Fill),
+    )
+    .width(Length::Fill)
+    .into();
+    let footer_line: Element<'static, AppMessage> = text("Mesh Healthy · 3 peers")
+        .font(Typography::SecondaryText.font())
+        .size(Typography::SecondaryText.size_px())
+        .color(design_tokens::text_muted(&Theme::Light))
+        .into();
+    let full_shell = CardShell::new("Mesh Activity", vec![])
+        .title_case(false)
+        .subtitle("Current connection status")
+        .count(3)
+        .count_total(12)
+        .status_badge("Healthy", crate::card_shell::StatusBadgeKind::Success)
+        .header_action("View details", AppMessage::OpenConnectionDetails)
+        .body(body_block)
+        .footer(footer_line)
+        .build(&Theme::Light);
+
     Row::new()
         .push(
             Column::new()
@@ -404,6 +446,24 @@ fn card_shell_gallery() -> Element<'static, AppMessage> {
                         .height(Length::Fixed(4.0)),
                 )
                 .push(populated_shell)
+                .width(Length::FillPortion(1)),
+        )
+        .push(
+            Space::new()
+                .width(Length::Fixed(design_tokens::SPACE_16))
+                .height(Length::Shrink),
+        )
+        .push(
+            Column::new()
+                .push(state_label(
+                    "Full foundation: title + subtitle + status pill + action + body + footer",
+                ))
+                .push(
+                    Space::new()
+                        .width(Length::Shrink)
+                        .height(Length::Fixed(4.0)),
+                )
+                .push(full_shell)
                 .width(Length::FillPortion(1)),
         )
         .spacing(0)

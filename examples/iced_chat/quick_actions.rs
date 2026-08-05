@@ -9,9 +9,9 @@
 //!   (group chat), person + plus (add friend), upload arrow (share files).
 //! - Labels use the card-title role (Source Sans 3 SemiBold 18); descriptions
 //!   stay muted 13 px supporting text at the plan's 1.45 line height.
-//! - The card radius matches the rail `CardShell` cards (`RADIUS_LG`) so every
-//!   home card shares the same corner rhythm instead of the generic 8 px
-//!   `BUTTON_CARD`.
+//! - The card radius matches the rail `CardShell` cards (`RADIUS_CARD`) so
+//!   every home card shares the same corner rhythm instead of the generic
+//!   8 px `BUTTON_CARD`.
 
 use iced::widget::{button, Column, Space};
 use iced::{Alignment, Element, Length, Theme};
@@ -104,8 +104,8 @@ pub fn quick_action_card<'a>(action: &'a QuickAction, theme: &Theme) -> Element<
 /// Card-style button for the quick actions.
 ///
 /// Mirrors `BUTTON_CARD` (surface bg, muted border, hover lift) but uses
-/// `RADIUS_LG` so the action cards visually match the home rail cards and the
-/// Figure 3 mockup instead of the generic 8 px control radius.
+/// `RADIUS_CARD` so the action cards visually match the home rail cards and
+/// the Figure 3 mockup instead of the generic 8 px control radius.
 fn quick_action_card_style(theme: &Theme, status: button::Status) -> iced::widget::button::Style {
     let surface = design_tokens::surface(theme);
     let hover = design_tokens::surface_hover(theme);
@@ -148,7 +148,7 @@ fn quick_action_card_style(theme: &Theme, status: button::Status) -> iced::widge
         border: iced::Border {
             color: border_color,
             width: 1.0,
-            radius: design_tokens::RADIUS_LG.into(),
+            radius: design_tokens::RADIUS_CARD.into(),
         },
         ..Default::default()
     }

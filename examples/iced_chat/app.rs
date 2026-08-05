@@ -19,7 +19,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::card_shell::{CardShell, CARD_ROW_HEIGHT};
+use crate::card_shell::{CardShell, CARD_ROW_HEIGHT, StatusBadgeKind};
 use crate::link_preview;
 use crate::notification::backend::NoopBackend;
 use crate::notification::event::{
@@ -24999,20 +24999,20 @@ impl IcedChat {
         let hero_card = container(hero_row)
             .padding(SPACE_24)
             .width(Length::Fill)
-            .style(move |t| iced::widget::container::Style {
-                background: Some(iced::Background::Color(
+            // Hero variant of the shared dashboard-card surface: same
+            // border/radius/shadow as every home card (card_style), with
+            // the background overridden to the primary soft tint when the
+            // mesh is Ready.
+            .style(move |t| {
+                let mut style = crate::design_tokens::card_style(t);
+                style.background = Some(iced::Background::Color(
                     if matches!(variant, HomeConnectionVariant::Ready) {
                         crate::design_tokens::primary_soft(t)
                     } else {
                         bg_surface(t)
                     },
-                )),
-                border: iced::Border {
-                    color: border_muted(t),
-                    width: 1.0,
-                    radius: crate::design_tokens::RADIUS_XL.into(),
-                },
-                ..Default::default()
+                ));
+                style
             });
 
         // ── Mesh Activity card ──
@@ -25093,86 +25093,49 @@ impl IcedChat {
             }
         };
 
-        let mesh_card = container(
-            Column::new()
-                .push(
-                    Row::new()
-                        .push(icon_svg(ICON_MESH, TYPO_MD).style(move |t, _| {
-                            iced::widget::svg::Style {
-                                color: Some(health_color(t)),
-                            }
-                        }))
-                        .push(Space::new().width(Length::Fixed(SPACE_8)))
-                        .push(
-                            Column::new()
-                                .push(
-                                    // Card title — card_title (Source Sans 3 SemiBold 18).
-                                    crate::fonts::type_role_text(
-                                        crate::fonts::TypeRole::CardTitle,
-                                        "Mesh Activity",
-                                    )
-                                    .color(text_system(&theme)),
-                                )
-                                .push(
-                                    crate::fonts::type_role_text(
-                                        crate::fonts::TypeRole::SupportingText,
-                                        "Current connection status",
-                                    )
-                                    .color(text_muted(&theme)),
-                                ),
+        // Status pill in the header reports the mesh health state using the
+        // same palette as the footer strip below the dashboard.
+        let mesh_badge_kind = match &mesh_health {
+            MeshHealth::Good => StatusBadgeKind::Success,
+            MeshHealth::Degraded(_) => StatusBadgeKind::Warning,
+            MeshHealth::Offline(_) => StatusBadgeKind::Danger,
+        };
+        // Body: status icon + label + detail (content-driven — grows with
+        // the status detail text instead of clipping).
+        let mesh_status_row = Row::new()
+            .push(icon_svg(status_icon, TYPO_MD).style(move |t, _| {
+                iced::widget::svg::Style {
+                    color: Some(status_color(t)),
+                }
+            }))
+            .push(Space::new().width(Length::Fixed(SPACE_8)))
+            .push(
+                Column::new()
+                    .push(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::BodyEmphasised,
+                            status_label.clone(),
                         )
-                        .push(Space::new().width(Length::Fill))
-                        .push(
-                            button(crate::fonts::type_role_text(
-                                crate::fonts::TypeRole::ButtonLabel,
-                                "View details",
-                            ))
-                            .on_press(AppMessage::OpenConnectionDetails)
-                            .padding([SPACE_2, SPACE_6])
-                            .style(BUTTON_GHOST),
+                        .color(status_color(&theme)),
+                    )
+                    .push(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::SupportingText,
+                            status_detail,
                         )
-                        .align_y(Alignment::Center)
-                        .width(Length::Fill),
-                )
-                .push(Space::new().height(Length::Fixed(SPACE_12)))
-                .push(
-                    Row::new()
-                        .push(icon_svg(status_icon, TYPO_MD).style(move |t, _| {
-                            iced::widget::svg::Style {
-                                color: Some(status_color(t)),
-                            }
-                        }))
-                        .push(Space::new().width(Length::Fixed(SPACE_8)))
-                        .push(
-                            Column::new()
-                                .push(
-                                    crate::fonts::type_role_text(
-                                        crate::fonts::TypeRole::BodyEmphasised,
-                                        status_label.clone(),
-                                    )
-                                    .color(status_color(&theme)),
-                                )
-                                .push(
-                                    crate::fonts::type_role_text(
-                                        crate::fonts::TypeRole::SupportingText,
-                                        status_detail,
-                                    )
-                                    .color(text_muted(&theme)),
-                                ),
-                        )
-                        .spacing(0)
-                        .align_y(Alignment::Center)
-                        .width(Length::Fill),
-                )
-                .spacing(0)
-                .width(Length::Fill),
-        )
-        .padding(SPACE_16)
-        .width(Length::Fill)
-        // Match the rail cards' corner rhythm and subtle shadow instead of
-        // the generic 8 px container_card, so every home card shares the
-        // same radius system (hero RADIUS_XL, body cards RADIUS_LG).
-        .style(crate::design_tokens::card_style);
+                        .color(text_muted(&theme)),
+                    ),
+            )
+            .spacing(0)
+            .align_y(Alignment::Center)
+            .width(Length::Fill);
+        let mesh_card = CardShell::new("Mesh Activity", vec![])
+            .title_case(false)
+            .subtitle("Current connection status")
+            .status_badge(health_label, mesh_badge_kind)
+            .header_action("View details", AppMessage::OpenConnectionDetails)
+            .body(mesh_status_row.into())
+            .build(&theme);
 
         // ── Quick actions: four equal, full-card targets (Figure 3) ──
         let action_grid = crate::quick_actions::quick_action_grid(window_width, &theme);
@@ -36930,8 +36893,13 @@ mod tests {
             "hero Retry/Details must use TypeRole::ButtonLabel"
         );
         assert!(
-            home.contains("TypeRole::CardTitle"),
-            "mesh card title must use TypeRole::CardTitle (SS3 SemiBold 18)"
+            home.contains("TypeRole::CardTitle")
+                || home.contains("CardShell::new(\"Mesh Activity\""),
+            "mesh card title must resolve through TypeRole::CardTitle — either inline or via the shared CardShell foundation (card_shell.rs renders the title with TypeRole::CardTitle)"
+        );
+        assert!(
+            home.contains("CardShell::new(\"Mesh Activity\""),
+            "mesh card must be built from the shared CardShell dashboard-card foundation"
         );
         assert!(
             home.contains("TypeRole::BodyEmphasised"),
