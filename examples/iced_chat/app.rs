@@ -2465,7 +2465,11 @@ impl ChatEntry {
 ///
 /// The sidebar (chat list, friends, requests) is always visible regardless
 /// of the active screen — only the right-hand main panel changes.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// `Hash` is required so [`IcedChat::prewarm_cache`] can key pre-built
+/// screen trees by screen (all payload types — `TopicId`, `PublicKey` — are
+/// Hash).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Screen {
     /// No chat selected — empty state shown in the main panel.
     ChatList,
@@ -2650,6 +2654,235 @@ struct GifResult {
     preview_bytes: Vec<u8>,
 }
 
+// ── Pre-warm (PERF-4R-B) ─────────────────────────────────────────────
+
+/// Tracks the last user input so screen pre-warming only runs while the
+/// app is genuinely idle (no keyboard/mouse activity for 2+ seconds).
+struct IdleTimer {
+    last_input: std::time::Instant,
+}
+
+impl IdleTimer {
+    /// Seconds of inactivity after which the app is considered idle.
+    const IDLE_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(2);
+
+    fn new() -> Self {
+        // Start counting from construction so the pre-warm cycle can begin
+        // shortly after launch once the initial burst of startup events ends.
+        Self {
+            last_input: std::time::Instant::now(),
+        }
+    }
+
+    /// Record user activity (any keyboard/mouse event).
+    fn note_activity(&mut self) {
+        self.last_input = std::time::Instant::now();
+    }
+
+    /// True when no user input has arrived for the idle threshold.
+    fn is_idle(&self) -> bool {
+        self.last_input.elapsed() >= Self::IDLE_THRESHOLD
+    }
+}
+
+/// Responsive layout band. Pre-warmed screen trees are built for a specific
+/// band and are invalidated when the window crosses a breakpoint, because
+/// window width is not part of the per-screen dependency snapshots (except
+/// FileSharing's own `FileSharingResponsiveMode`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResponsiveMode {
+    Compact,
+    Medium,
+    Reference,
+    Large,
+}
+
+impl ResponsiveMode {
+    fn of(width: f32) -> Self {
+        use crate::design_tokens::{VIEWPORT_LG_WIDTH, VIEWPORT_MIN_WIDTH, VIEWPORT_REF_WIDTH};
+        if width <= VIEWPORT_MIN_WIDTH {
+            ResponsiveMode::Compact
+        } else if width < VIEWPORT_REF_WIDTH {
+            ResponsiveMode::Medium
+        } else if width < VIEWPORT_LG_WIDTH {
+            ResponsiveMode::Reference
+        } else {
+            ResponsiveMode::Large
+        }
+    }
+}
+
+/// Screens pre-warmed into the app-state cache during idle, in order of
+/// likelihood of use (heaviest / most-used first). PeerProfile,
+/// PeerCatalogue, FriendProfile and Chat are excluded — they carry per-peer
+/// or per-room payloads, so a pre-warmed tree would almost never match the
+/// requested payload and would only waste idle cycles.
+const PREWARM_ORDER: &[Screen] = &[
+    Screen::FileSharing,
+    Screen::Settings,
+    Screen::Discover,
+    Screen::Groups,
+    Screen::FriendRequests,
+];
+
+/// FxHash a dependency snapshot so the pre-warm cache key tracks exactly what
+/// the tree was built from. Uses the same hasher as `iced_widget::lazy` so the
+/// two caches agree on what counts as "unchanged".
+fn fxhash_of<T: std::hash::Hash>(value: &T) -> u64 {
+    use std::hash::Hasher;
+    let mut hasher = rustc_hash::FxHasher::default();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// A tiny delegating widget that hands out a pre-built [`iced::Element`] tree
+/// each frame without rebuilding it. `view()` serves pre-warmed screens by
+/// wrapping the cached element (shared via `Rc`) in this widget; the widget
+/// forwards `layout`/`draw`/`update`/`operate`/`mouse_interaction`/`children`
+/// to the inner element, following the exact pattern `iced_widget::lazy` uses
+/// for its cached element (`Rc<RefCell<Element>>`).
+///
+/// `tag()` forwards to the inner content's tag: stable across frames for the
+/// same screen (so iced keeps the cached subtree's widget state — scroll
+/// offsets, text cursors) and distinct between screens (so switching screens
+/// rebuilds instead of reusing the wrong tree).
+struct Prebuilt(
+    std::rc::Rc<std::cell::RefCell<iced::Element<'static, AppMessage>>>,
+);
+
+impl iced::advanced::Widget<AppMessage, iced::Theme, iced::Renderer> for Prebuilt {
+    fn tag(&self) -> iced::advanced::widget::tree::Tag {
+        self.0.borrow().as_widget().tag()
+    }
+
+    fn state(&self) -> iced::advanced::widget::tree::State {
+        iced::advanced::widget::tree::State::None
+    }
+
+    fn children(&self) -> Vec<iced::advanced::widget::tree::Tree> {
+        vec![iced::advanced::widget::tree::Tree::new(self.0.borrow().as_widget())]
+    }
+
+    fn diff(&self, _tree: &mut iced::advanced::widget::tree::Tree) {
+        // The cached element is the same Rc every frame; leaving the child
+        // tree untouched preserves the widget state inside it.
+    }
+
+    fn size(&self) -> iced::Size<iced::Length> {
+        self.0.borrow().as_widget().size()
+    }
+
+    fn size_hint(&self) -> iced::Size<iced::Length> {
+        self.0.borrow().as_widget().size_hint()
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut iced::advanced::widget::tree::Tree,
+        renderer: &iced::Renderer,
+        limits: &iced::advanced::layout::Limits,
+    ) -> iced::advanced::layout::Node {
+        self.0
+            .borrow_mut()
+            .as_widget_mut()
+            .layout(&mut tree.children[0], renderer, limits)
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut iced::advanced::widget::tree::Tree,
+        layout: iced::advanced::Layout<'_>,
+        renderer: &iced::Renderer,
+        operation: &mut dyn iced::advanced::widget::Operation,
+    ) {
+        self.0
+            .borrow_mut()
+            .as_widget_mut()
+            .operate(&mut tree.children[0], layout, renderer, operation);
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut iced::advanced::widget::tree::Tree,
+        event: &iced::Event,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::advanced::mouse::Cursor,
+        renderer: &iced::Renderer,
+        clipboard: &mut dyn iced::advanced::Clipboard,
+        shell: &mut iced::advanced::Shell<'_, AppMessage>,
+        viewport: &iced::Rectangle,
+    ) {
+        self.0.borrow_mut().as_widget_mut().update(
+            &mut tree.children[0],
+            event,
+            layout,
+            cursor,
+            renderer,
+            clipboard,
+            shell,
+            viewport,
+        );
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &iced::advanced::widget::tree::Tree,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::advanced::mouse::Cursor,
+        viewport: &iced::Rectangle,
+        renderer: &iced::Renderer,
+    ) -> iced::advanced::mouse::Interaction {
+        self.0.borrow().as_widget().mouse_interaction(
+            &tree.children[0],
+            layout,
+            cursor,
+            viewport,
+            renderer,
+        )
+    }
+
+    fn draw(
+        &self,
+        tree: &iced::advanced::widget::tree::Tree,
+        renderer: &mut iced::Renderer,
+        theme: &iced::Theme,
+        style: &iced::advanced::renderer::Style,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::advanced::mouse::Cursor,
+        viewport: &iced::Rectangle,
+    ) {
+        self.0.borrow().as_widget().draw(
+            &tree.children[0],
+            renderer,
+            theme,
+            style,
+            layout,
+            cursor,
+            viewport,
+        );
+    }
+
+    // No overlay forwarding: the pre-warmable content functions contain no
+    // overlay-producing widgets (verified: no tooltip/modal/popup in the five
+    // static content fns), and the app's overlays (create-group dialog,
+    // lightbox, help, connection details) compose at the top-level `view()`
+    // layer, never inside the cached trees. Forwarding an overlay would
+    // require the self-referential borrow `iced_widget::lazy` solves with
+    // ouroboros; returning `None` is correct for the cached content.
+    fn overlay<'b>(
+        &'b mut self,
+        _tree: &'b mut iced::advanced::widget::tree::Tree,
+        _layout: iced::advanced::Layout<'b>,
+        _renderer: &iced::Renderer,
+        _viewport: &iced::Rectangle,
+        _translation: iced::Vector,
+    ) -> Option<
+        iced::advanced::overlay::Element<'b, AppMessage, iced::Theme, iced::Renderer>,
+    > {
+        None
+    }
+}
+
 // ── Application state ────────────────────────────────────────────
 
 pub struct IcedChat {
@@ -2685,6 +2918,27 @@ pub struct IcedChat {
     conversation_generation: u64,
     /// Screen to return to when closing the settings page.
     settings_return_to: Option<Screen>,
+
+    // ── Pre-warm (PERF-4R-B) ──
+    /// Pre-built screen trees keyed by screen; the `u64` is the FxHash of the
+    /// screen's dependency snapshot the tree was built from. The element is
+    /// stored behind `Rc<RefCell<..>>` (same shape as `iced_widget::lazy`'s
+    /// cached element) so the delegating [`Prebuilt`] widget can forward the
+    /// `&mut self` widget methods into the cached tree each frame.
+    prewarm_cache: std::collections::HashMap<
+        Screen,
+        (
+            u64,
+            std::rc::Rc<std::cell::RefCell<iced::Element<'static, AppMessage>>>,
+        ),
+    >,
+    /// Whether a pre-warm build is in progress (guards re-entrancy).
+    prewarming: bool,
+    /// Tracks the last user input so pre-warming only runs while idle.
+    idle_timer: IdleTimer,
+    /// Responsive mode the pre-warm cache was built for; pre-warmed trees
+    /// are invalidated when the window crosses a breakpoint.
+    prewarm_window_mode: Option<ResponsiveMode>,
 
     // ── Multi-conversation state ──
     /// Per-conversation runtime state. Each direct chat or group room
@@ -3730,22 +3984,94 @@ pub(crate) struct ChatListDependency {
     pub(crate) tunnels: TunnelsCardData,
 }
 
-/// Dependency for the File Sharing dashboard screen. Reserved for PERF-2
-/// (t_f6dcbb3a), which decomposes `view_file_sharing` into per-card lazy
-/// components; the screen-level key is kept so the builder shape is
-/// documented and the revision counter contract is stable.
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-#[expect(dead_code)]
+/// Dependency for the File Sharing dashboard screen (default Files tab).
+/// PERF-4R-A (t_668423a9): the screen-level key snapshots everything the
+/// shell + header/search/tab bar + default Files tab grid render — including
+/// the four PERF-2 card dependencies — so `iced::widget::lazy` (and the
+/// PERF-4R-B pre-warm cache) can serve a fully materialized `Element<'static>`
+/// tree while any rendered slice is unchanged. `DashboardTab` is not `Hash`,
+/// so `Hash` is implemented manually below.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FileSharingDependency {
     pub(crate) dark_mode: bool,
-    pub(crate) dashboard_active_tab: u8,
+    /// Responsive band derived from the window width (FS-21 breakpoints), so
+    /// the cached tree only rebuilds when the layout tier changes, not on
+    /// every pixel of resize.
+    pub(crate) responsive_mode: FileSharingResponsiveMode,
     pub(crate) dashboard_search_input: String,
-    pub(crate) window_width_bits: u32,
-    /// Bumped by every dashboard data / UI state mutation so the screen
-    /// rebuilds when its rendered rows or interactive state change.
-    pub(crate) dashboard_revision: u64,
-    pub(crate) shared_by_me_loading: bool,
-    pub(crate) shared_by_me_error: Option<String>,
+    pub(crate) dashboard_active_tab: crate::dashboard_view_model::DashboardTab,
+    /// The FS-19 connectivity notice renders only on the default Files tab,
+    /// so its two inputs are part of the snapshot.
+    pub(crate) dashboard_connectivity_dismissed: bool,
+    pub(crate) mesh_health: MeshHealthSnapshot,
+    /// PERF-2 card dependencies, reused as-is.
+    pub(crate) shared_by_me: SharedByMeCardDependency,
+    pub(crate) peers: PeersCardDependency,
+    pub(crate) sharing_summary: SharingSummaryCardDependency,
+    pub(crate) recent_activity: RecentActivityCardDependency,
+}
+
+impl std::hash::Hash for FileSharingDependency {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.dark_mode.hash(state);
+        self.responsive_mode.hash(state);
+        self.dashboard_search_input.hash(state);
+        // DashboardTab is Copy/Eq but not Hash; hash a stable tag so the
+        // cache key tracks the active tab (owned tabs miss → live path).
+        match self.dashboard_active_tab {
+            crate::dashboard_view_model::DashboardTab::SharedByMe => 0u8.hash(state),
+            crate::dashboard_view_model::DashboardTab::Downloading => 1u8.hash(state),
+            crate::dashboard_view_model::DashboardTab::Downloaded => 2u8.hash(state),
+            crate::dashboard_view_model::DashboardTab::SharedWithMe => 3u8.hash(state),
+            crate::dashboard_view_model::DashboardTab::ActivityLog => 4u8.hash(state),
+        }
+        self.dashboard_connectivity_dismissed.hash(state);
+        self.mesh_health.hash(state);
+        self.shared_by_me.hash(state);
+        self.peers.hash(state);
+        self.sharing_summary.hash(state);
+        self.recent_activity.hash(state);
+    }
+}
+
+/// Responsive band for the File Sharing shell (FS-21 breakpoints:
+/// `VIEWPORT_MIN_WIDTH` / `VIEWPORT_REF_WIDTH` / `VIEWPORT_LG_WIDTH`).
+/// Banding the raw width means a resize within a tier keeps the cached tree
+/// valid; only a breakpoint flip invalidates the FileSharing cache entry.
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+pub(crate) enum FileSharingResponsiveMode {
+    /// `width <= VIEWPORT_MIN_WIDTH` — single-column content, scrollable tabs.
+    Compact,
+    /// `VIEWPORT_MIN_WIDTH < width < VIEWPORT_REF_WIDTH` — two columns,
+    /// reduced search width.
+    Medium,
+    /// `VIEWPORT_REF_WIDTH <= width < VIEWPORT_LG_WIDTH` — reference layout.
+    Reference,
+    /// `width >= VIEWPORT_LG_WIDTH` — large layout.
+    Large,
+}
+
+impl FileSharingResponsiveMode {
+    fn from_width(width: f32) -> Self {
+        use crate::design_tokens::{VIEWPORT_LG_WIDTH, VIEWPORT_MIN_WIDTH, VIEWPORT_REF_WIDTH};
+        if width <= VIEWPORT_MIN_WIDTH {
+            Self::Compact
+        } else if width < VIEWPORT_REF_WIDTH {
+            Self::Medium
+        } else if width < VIEWPORT_LG_WIDTH {
+            Self::Reference
+        } else {
+            Self::Large
+        }
+    }
+
+    fn is_compact(self) -> bool {
+        matches!(self, Self::Compact)
+    }
+
+    fn is_medium(self) -> bool {
+        matches!(self, Self::Medium)
+    }
 }
 
 // ── PERF-2 (t_f6dcbb3a): per-card lazy dependencies for the File Sharing
@@ -5268,6 +5594,14 @@ pub enum AppMessage {
     /// Open the embedded terminal tab (feature `terminal`).
     #[cfg(feature = "terminal")]
     OpenTerminal,
+
+    // ── Pre-warm (PERF-4R-B) ──
+    /// Fired every 500 ms; the app pre-warms the next screen's widget tree
+    /// only when the user has been idle for 2+ seconds.
+    IdleTick,
+    /// Fired on any keyboard/mouse event; resets the idle timer so
+    /// pre-warming pauses while the user is active.
+    UserActivity,
 }
 
 /// Map semantic GUI navigation commands to the same application messages used
@@ -6075,15 +6409,19 @@ fn dashboard_sort_chip<'a>(
 /// FS-19: returns a dismissible connectivity notice when mesh health is
 /// unhealthy or the user is offline. None when everything is healthy.
 /// The notice never blocks interaction with unaffected regions.
+/// Takes the two snapshot inputs (dismissed flag + mesh health) so the
+/// static FileSharing renderer can build it from `FileSharingDependency`
+/// without borrowing app state.
 fn dashboard_connectivity_notice(
-    app: &IcedChat,
+    dismissed: bool,
+    mesh_health: &MeshHealth,
     theme: &iced::Theme,
 ) -> Option<iced::Element<'static, AppMessage>> {
     use crate::ui_components::{ConnectivityNotice, NoticeSeverity};
-    if app.dashboard_connectivity_dismissed {
+    if dismissed {
         return None;
     }
-    match app.mesh_health {
+    match mesh_health {
         MeshHealth::Good => None,
         MeshHealth::Degraded(_) => Some(
             ConnectivityNotice::new(
@@ -6543,6 +6881,10 @@ impl IcedChat {
             scroll_to_bottom_pending: false,
             settings: app_settings.clone(),
             settings_return_to: None,
+            prewarm_cache: std::collections::HashMap::new(),
+            prewarming: false,
+            idle_timer: IdleTimer::new(),
+            prewarm_window_mode: None,
             dark_mode: app_settings.dark_mode,
             sound_enabled: app_settings.sound_enabled,
             share_direct_addresses: app_settings.share_direct_addresses,
@@ -8180,6 +8522,8 @@ impl IcedChat {
             AppMessage::ConnMonitorTick => "ConnMonitorTick",
             AppMessage::MeshWatchdogTick => "MeshWatchdogTick",
             AppMessage::OutboxRetryTick => "OutboxRetryTick",
+            AppMessage::IdleTick => "IdleTick",
+            AppMessage::UserActivity => "UserActivity",
 
             AppMessage::ToggleDark(_) => "ToggleDark",
             AppMessage::SetNickname(_) => "SetNickname",
@@ -11652,6 +11996,9 @@ impl IcedChat {
             } => {
                 // Request was sent — keep state as Pending
                 // Future: when we hear back via whisper, update state to Accepted/Declined
+                // The pending request appears in the Friend Requests screen's
+                // outgoing list; drop the pre-warmed tree so it is rebuilt.
+                self.invalidate_prewarm(&[Screen::FriendRequests]);
                 iced::Task::none()
             }
 
@@ -11679,6 +12026,8 @@ impl IcedChat {
                     _ => {}
                 }
                 self.rebuild_join_request_list();
+                // The incoming/outgoing request lists changed.
+                self.invalidate_prewarm(&[Screen::FriendRequests]);
                 iced::Task::none()
             }
 
@@ -11932,6 +12281,8 @@ impl IcedChat {
                 // user can switch back to it without a slow re-subscribe.
                 self.save_room_to_history();
                 self.leave_current_room();
+                // The new group appears in the Groups screen's group list.
+                self.invalidate_prewarm(&[Screen::Groups]);
 
                 // Apply the gossip sender for the new group room
                 self.sender = Some(*sender);
@@ -17943,6 +18294,7 @@ impl IcedChat {
                 // a background subscription so discovery does not require a
                 // manual ticket exchange.
                 let mut discovered_room_tasks = Vec::new();
+                let mut directory_changed = false;
                 {
                     let mut dir_guard = self.directory_room_rx.try_lock();
                     if let Ok(ref mut rx) = dir_guard {
@@ -17952,6 +18304,7 @@ impl IcedChat {
                                 .lock()
                                 .unwrap()
                                 .upsert(ad.clone(), from);
+                            directory_changed = true;
 
                             // Parse the authenticated ticket and use its topic;
                             // never subscribe to an untrusted raw advertisement
@@ -17984,6 +18337,10 @@ impl IcedChat {
                 }
                 if !discovered_room_tasks.is_empty() {}
                 tasks.extend(discovered_room_tasks);
+                if directory_changed {
+                    // The Discover screen's room list changed.
+                    self.invalidate_prewarm(&[Screen::Discover]);
+                }
                 self.public_rooms_sidebar_revision =
                     self.public_rooms_sidebar_revision.wrapping_add(1);
 
@@ -18265,6 +18622,10 @@ impl IcedChat {
 
             AppMessage::ToggleDark(enabled) => {
                 self.dark_mode = enabled;
+                // Dark mode is part of every screen's dependency snapshot;
+                // forget the pre-warmed trees so the next idle cycle rebuilds
+                // them with the new theme.
+                self.invalidate_prewarm(PREWARM_ORDER);
                 if let Some(action_id) = self
                     .gui_action_history
                     .all_actions()
@@ -18305,6 +18666,8 @@ impl IcedChat {
 
             AppMessage::SetNickname(name) => {
                 self.local_label = name;
+                // The local label feeds the Settings identity card.
+                self.invalidate_prewarm(&[Screen::Settings]);
                 // Persist the display name so it survives restarts.
                 let settings = AppSettings {
                     dark_mode: self.dark_mode,
@@ -18654,7 +19017,15 @@ impl IcedChat {
                 iced::Task::none()
             }
             AppMessage::WindowResized(width) => {
+                let old_mode = ResponsiveMode::of(self.window_width);
                 self.window_width = width;
+                // Window width is not part of the dependency snapshots (except
+                // FileSharing's own band), so a pre-warmed tree built at
+                // another responsive band is stale once the window crosses a
+                // breakpoint.
+                if ResponsiveMode::of(width) != old_mode {
+                    self.invalidate_prewarm(PREWARM_ORDER);
+                }
                 iced::Task::none()
             }
 
@@ -18714,6 +19085,21 @@ impl IcedChat {
                 }
                 entry.bump_gen();
                 self.link_preview_fetch_index = None;
+                iced::Task::none()
+            }
+
+            // ── Pre-warm (PERF-4R-B) ───────────────────────────────────
+            AppMessage::UserActivity => {
+                // Any keyboard/mouse event pauses pre-warming until the
+                // user has been idle for 2+ seconds again.
+                self.idle_timer.note_activity();
+                iced::Task::none()
+            }
+
+            AppMessage::IdleTick => {
+                // Fired every 500 ms; builds at most one screen per tick so
+                // a single idle tick never causes a perceptible frame hitch.
+                self.pre_warm_next_screen();
                 iced::Task::none()
             }
 
@@ -21471,15 +21857,22 @@ impl IcedChat {
         // Main panel depends on the active screen.
         let main_panel: iced::Element<'_, AppMessage> = match &self.screen {
             Screen::ChatList => self.view_main_empty_state(),
-            Screen::FileSharing => self.view_file_sharing(),
+            // PERF-4R-B: pre-warmable screens are served from the app-state
+            // cache when the cached tree's dependency hash still matches the
+            // current state; otherwise the live view runs (and lazily caches).
+            Screen::FileSharing => {
+                self.serve_prewarmed(Screen::FileSharing, || self.view_file_sharing())
+            }
             Screen::Chat { .. } => self.view_chat_panel(),
-            Screen::FriendRequests => self.view_friend_requests(),
-            Screen::Settings => self.view_settings_screen(),
+            Screen::FriendRequests => {
+                self.serve_prewarmed(Screen::FriendRequests, || self.view_friend_requests())
+            }
+            Screen::Settings => self.serve_prewarmed(Screen::Settings, || self.view_settings_screen()),
             Screen::PeerProfile(peer) => self.view_peer_profile(*peer),
             Screen::PeerCatalogue(peer) => self.view_peer_catalogue(*peer),
             Screen::FriendProfile(peer) => self.view_friend_profile(*peer),
-            Screen::Discover => self.view_discover(),
-            Screen::Groups => self.view_sidebar_groups(),
+            Screen::Discover => self.serve_prewarmed(Screen::Discover, || self.view_discover()),
+            Screen::Groups => self.serve_prewarmed(Screen::Groups, || self.view_sidebar_groups()),
             #[cfg(feature = "terminal")]
             Screen::Terminal => self.terminal.view().map(AppMessage::TerminalEvent),
             Screen::Gallery => crate::component_gallery::view_gallery(),
@@ -22596,7 +22989,10 @@ impl IcedChat {
         section.into()
     }
 
-    fn view_sidebar_groups(&self) -> iced::Element<'_, AppMessage> {
+    /// Build the Groups screen's dependency snapshot (theme + group list).
+    /// Shared by the live lazy view and the pre-warm cache so both hash the
+    /// same state.
+    fn groups_dependency(&self) -> GroupsDependency {
         let dark_mode = self.dark_mode;
 
         // Collect group data into owned tuples so we can return an Element
@@ -22609,13 +23005,17 @@ impl IcedChat {
             .map(|e| (e.topic, e.display_name().to_string()))
             .collect();
 
+        GroupsDependency {
+            dark_mode,
+            groups: group_data,
+        }
+    }
+
+    fn view_sidebar_groups(&self) -> iced::Element<'_, AppMessage> {
         // Groups screen + sidebar section are cached with `lazy` so switching
         // away and back to the Groups screen reuses the built widget tree
         // (zero diff / layout / render) unless the group list actually changed.
-        let dep = GroupsDependency {
-            dark_mode,
-            groups: group_data,
-        };
+        let dep = self.groups_dependency();
         iced::widget::lazy(dep, Self::view_groups_section_content).into()
     }
 
@@ -29411,6 +29811,10 @@ impl IcedChat {
                 .map(|_| AppMessage::MeshWatchdogTick),
             iced::time::every(std::time::Duration::from_secs(30))
                 .map(|_| AppMessage::OutboxRetryTick),
+            // PERF-4R-B: pre-warm tick. Fires every 500 ms; the update handler
+            // only builds screens while the user has been idle for 2+ seconds.
+            iced::time::every(std::time::Duration::from_millis(500))
+                .map(|_| AppMessage::IdleTick),
             iced::window::resize_events()
                 .map(|(_id, size)| AppMessage::WindowResized(size.width as f32)),
             // Window file drag/drop + IME composition state.  iced 0.14 maps
@@ -29426,6 +29830,11 @@ impl IcedChat {
                 }
                 iced::Event::Window(iced::window::Event::FileDropped(path)) => {
                     Some(AppMessage::ComposerFileDropped(path))
+                }
+                // PERF-4R-B: any keyboard/mouse event counts as user activity and
+                // resets the idle timer so pre-warming pauses while active.
+                iced::Event::Keyboard(_) | iced::Event::Mouse(_) => {
+                    Some(AppMessage::UserActivity)
                 }
                 iced::Event::InputMethod(ev) => match ev {
                     // Only an active preedit (composition) must block sending.
@@ -29479,6 +29888,137 @@ impl IcedChat {
         ));
         iced::Subscription::batch(subs)
     }
+
+    // ── Pre-warm (PERF-4R-B) ─────────────────────────────────────────────
+
+    /// Build the next un-warmed screen's fully-materialized widget tree during
+    /// idle and store it in `prewarm_cache`, so the first `view()` frame after
+    /// navigation can serve it without rebuilding. Called from
+    /// `AppMessage::IdleTick`; each call builds at most one screen so a single
+    /// idle tick never causes a perceptible frame hitch.
+    fn pre_warm_next_screen(&mut self) {
+        if self.prewarming {
+            return;
+        }
+        if !self.idle_timer.is_idle() {
+            return;
+        }
+        // Responsive mode is not part of the per-screen dependency snapshots
+        // (except FileSharing's own band), so pre-warmed trees built for
+        // another width band are stale — rebuild everything on a band flip.
+        let mode = ResponsiveMode::of(self.window_width);
+        if self.prewarm_window_mode.is_some_and(|m| m != mode) {
+            self.prewarm_cache.clear();
+        }
+        self.prewarm_window_mode = Some(mode);
+
+        let Some(screen) = PREWARM_ORDER
+            .iter()
+            .cloned()
+            .find(|s| !self.prewarm_cache.contains_key(s))
+        else {
+            // All pre-warmable screens are already in the cache.
+            return;
+        };
+
+        // FileSharing is only pre-warmed while the default Files tab is
+        // active; owned tabs render entirely different trees (live path).
+        if screen == Screen::FileSharing
+            && self.dashboard_active_tab
+                != crate::dashboard_view_model::DashboardTab::SharedByMe
+        {
+            return;
+        }
+
+        self.prewarming = true;
+        let (hash, element) = self.build_prewarm_entry(screen.clone());
+        self.prewarm_cache
+            .insert(screen, (hash, std::rc::Rc::new(std::cell::RefCell::new(element))));
+        self.prewarming = false;
+    }
+
+    /// Build the dependency snapshot for one pre-warmable screen and return it
+    /// with its FxHash, calling the STATIC content function directly (never
+    /// through `iced::widget::lazy`, whose closure only runs during
+    /// `state()`/`diff()` — building an element in `update()` and dropping it
+    /// would populate no cache).
+    fn build_prewarm_entry(&self, screen: Screen) -> (u64, iced::Element<'static, AppMessage>) {
+        match screen {
+            Screen::Settings => {
+                let dep = self.settings_dependency();
+                let hash = fxhash_of(&dep);
+                let element =
+                    Self::view_settings_screen_content(&dep, self.profile_image_handle.clone());
+                (hash, element)
+            }
+            Screen::Discover => {
+                let dep = self.discover_dependency();
+                let hash = fxhash_of(&dep);
+                let element = Self::view_discover_content(&dep);
+                (hash, element)
+            }
+            Screen::Groups => {
+                let dep = self.groups_dependency();
+                let hash = fxhash_of(&dep);
+                let element = Self::view_groups_section_content(&dep);
+                (hash, element)
+            }
+            Screen::FriendRequests => {
+                let dep = self.friend_requests_dependency();
+                let hash = fxhash_of(&dep);
+                let element = Self::view_friend_requests_content(&dep);
+                (hash, element)
+            }
+            Screen::FileSharing => {
+                let dep = self.file_sharing_dependency();
+                let hash = fxhash_of(&dep);
+                let element = Self::view_file_sharing_content(&dep);
+                (hash, element)
+            }
+            // PREWARM_ORDER only ever contains the parameterless screens
+            // above; anything else would be a programming error.
+            _ => unreachable!("build_prewarm_entry called for a non-prewarmable screen"),
+        }
+    }
+
+    /// Serve a pre-warmed screen tree from `prewarm_cache` when its stored
+    /// dependency hash matches the CURRENT state; otherwise fall back to the
+    /// live view (which keeps its own `iced::widget::lazy` caching). The
+    /// cached element is handed out each frame wrapped in [`Prebuilt`], so the
+    /// expensive widget construction never runs again while the hash matches.
+    fn serve_prewarmed<'a>(
+        &'a self,
+        screen: Screen,
+        live: impl FnOnce() -> iced::Element<'a, AppMessage>,
+    ) -> iced::Element<'a, AppMessage> {
+        let Some((cached_hash, element)) = self.prewarm_cache.get(&screen) else {
+            return live();
+        };
+        let current_hash = match screen {
+            Screen::Settings => fxhash_of(&self.settings_dependency()),
+            Screen::Discover => fxhash_of(&self.discover_dependency()),
+            Screen::Groups => fxhash_of(&self.groups_dependency()),
+            Screen::FriendRequests => fxhash_of(&self.friend_requests_dependency()),
+            Screen::FileSharing => fxhash_of(&self.file_sharing_dependency()),
+            _ => return live(),
+        };
+        if *cached_hash == current_hash {
+            iced::Element::new(Prebuilt(element.clone()))
+        } else {
+            live()
+        }
+    }
+
+    /// Forget pre-warmed screens whose dependency would have changed, so the
+    /// next idle cycle rebuilds them with fresh state. `screens` is the set of
+    /// affected screens; pass `PREWARM_ORDER` to invalidate everything
+    /// (dark-mode toggle, responsive breakpoint crossing).
+    fn invalidate_prewarm(&mut self, screens: &[Screen]) {
+        for screen in screens {
+            self.prewarm_cache.remove(screen);
+        }
+    }
+
     /// Rebuild the internal join-request list from `outgoing_request_states`
     /// and the friend request store.
     fn rebuild_join_request_list(&mut self) {
@@ -32639,12 +33179,78 @@ impl IcedChat {
 
     fn view_file_sharing(&self) -> iced::Element<'_, AppMessage> {
         use crate::dashboard_view_model::DashboardTab as Tab;
+        use iced::widget::scrollable;
+        use iced::Length;
+
+        // Owned-tab fast path: these tabs render their own full content area
+        // (no dashboard header/tab bar), so they stay on the live instance
+        // views. PERF-4R-B: the pre-warm cache only holds a FileSharing entry
+        // when the active tab is the default Files tab; switching to an owned
+        // tab changes the dep hash → cache miss → live path.
+        if matches!(
+            self.dashboard_active_tab,
+            Tab::Downloaded | Tab::ActivityLog | Tab::Downloading | Tab::SharedWithMe
+        ) {
+            return match self.dashboard_active_tab {
+                Tab::Downloaded => scrollable(self.view_downloaded())
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .into(),
+                Tab::ActivityLog => self.view_activity_log(),
+                Tab::Downloading => scrollable(self.view_downloading())
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .into(),
+                Tab::SharedWithMe => scrollable(self.view_shared_with_me())
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .into(),
+                Tab::SharedByMe => unreachable!("guarded by the matches! above"),
+            };
+        }
+
+        // Default Files tab: route through the dependency so the pre-warm
+        // cache (PERF-4R-B) can serve a fully materialized tree from `view()`
+        // directly. The lazy wrapper keeps today's within-session caching
+        // identical; the pre-warm cache bypasses it by serving the stored
+        // element from `view()`.
+        let dep = self.file_sharing_dependency();
+        iced::widget::lazy(dep, Self::view_file_sharing_content).into()
+    }
+
+    /// Builds the File Sharing default Files tab's renderable snapshot.
+    /// Everything the shell + header/search/tab bar + card grid renders is
+    /// captured here, so the tree can be materialized by the pre-warm cache
+    /// (PERF-4R-B) during idle and served from `view()` without rebuilding.
+    fn file_sharing_dependency(&self) -> FileSharingDependency {
+        FileSharingDependency {
+            dark_mode: self.dark_mode,
+            responsive_mode: FileSharingResponsiveMode::from_width(self.window_width),
+            dashboard_search_input: self.dashboard_search_input.clone(),
+            dashboard_active_tab: self.dashboard_active_tab,
+            dashboard_connectivity_dismissed: self.dashboard_connectivity_dismissed,
+            mesh_health: MeshHealthSnapshot::from(&self.mesh_health),
+            shared_by_me: self.shared_by_me_card_dependency(),
+            peers: self.peers_card_dependency(),
+            sharing_summary: self.sharing_summary_card_dependency(),
+            recent_activity: self.recent_activity_card_dependency(),
+        }
+    }
+
+    /// Static renderer for the File Sharing default Files tab, driven by
+    /// [`FileSharingDependency`]. CRITICAL: the four cards are built by
+    /// calling their static content functions DIRECTLY — never wrapped in
+    /// `iced::widget::lazy` — so a pre-warmed tree is fully materialized.
+    fn view_file_sharing_content(
+        dep: &FileSharingDependency,
+    ) -> iced::Element<'static, AppMessage> {
+        use crate::dashboard_view_model::DashboardTab as Tab;
         use iced::widget::{button, container, scrollable, text, text_input, Column, Row, Space};
         use iced::{Alignment, Background, Border, Length};
 
         // ── FS-21: Responsive breakpoints ──────────────────────────────
-        let is_compact = crate::design_tokens::is_compact(self.window_width);
-        let is_medium = crate::design_tokens::is_medium(self.window_width);
+        let is_compact = dep.responsive_mode.is_compact();
+        let is_medium = dep.responsive_mode.is_medium();
 
         // Search width adapts: 320 px wide, 240 px medium, Fill compact.
         let search_width: Length = if is_compact {
@@ -32655,7 +33261,7 @@ impl IcedChat {
             Length::Fixed(320.0)
         };
 
-        let theme = Self::theme_from_dark(self.dark_mode);
+        let theme = Self::theme_from_dark(dep.dark_mode);
 
         // ── Header region: title + subtitle (left), search + action (right) ──
         let page_title = Row::new()
@@ -32676,7 +33282,7 @@ impl IcedChat {
             )
             .width(Length::Fill);
 
-        let search_input = text_input("Search files or peers...", &self.dashboard_search_input)
+        let search_input = text_input("Search files or peers...", &dep.dashboard_search_input)
             .on_input(|s| AppMessage::DashboardSearchChanged(s))
             .padding([SPACE_6, SPACE_12])
             .size(TYPO_SM)
@@ -32692,7 +33298,7 @@ impl IcedChat {
         // it is a real button (Tab focusable) and Escape in the field does the
         // same thing (see Shortcut(Escape) handling). Only rendered while the
         // field has text, so it never crowds the header otherwise.
-        let clear_search_button: iced::Element<'_, AppMessage> = if self
+        let clear_search_button: iced::Element<'static, AppMessage> = if dep
             .dashboard_search_input
             .is_empty()
         {
@@ -32768,7 +33374,7 @@ impl IcedChat {
             .spacing(SPACE_16);
 
         // ── Tab bar ──
-        let active_tab = self.dashboard_active_tab;
+        let active_tab = dep.dashboard_active_tab;
         // Build all tab widgets first, then construct the row from the full
         // children list (avoids the incremental `.push()` chain allocating a
         // fresh Row per tab — PERF-3).
@@ -32857,64 +33463,27 @@ impl IcedChat {
         //   medium  (1024-1279): two columns, reduced padding
         //   large   (≥1280): full two-column layout
 
-        // The Downloaded tab owns its full content area (FS-15); its content
-        // is itself lazy-wrapped (see `view_downloaded` / `view_downloads_card`).
-        if active_tab == crate::dashboard_view_model::DashboardTab::Downloaded {
-            return scrollable(self.view_downloaded())
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .into();
-        }
+        // Owned-tab branches (Downloading/Downloaded/ActivityLog/SharedWithMe)
+        // are handled by the live `view_file_sharing` wrapper; this static
+        // renderer only ever runs for the default Files tab.
 
-        // The Activity Log tab owns its full content area (FS-17): filter
-        // chips, searchable table, pagination, details, and clear history.
-        if active_tab == crate::dashboard_view_model::DashboardTab::ActivityLog {
-            return self.view_activity_log();
-        }
-
-        // The Downloading tab owns its full content area (FS-14): live
-        // inbound transfers from the FS-05 projection.
-        if active_tab == crate::dashboard_view_model::DashboardTab::Downloading {
-            return scrollable(self.view_downloading())
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .into();
-        }
-
-        // The Shared with Me tab owns its full content area (FS-16): validated
-        // peer catalogues with safe download actions.
-        if active_tab == crate::dashboard_view_model::DashboardTab::SharedWithMe {
-            return scrollable(self.view_shared_with_me())
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .into();
-        }
-
-        // PERF-2: each dashboard card is built by a fine-grained selector (see
-        // the `*_card_dependency` methods) and wrapped in `iced::widget::lazy`.
-        // The lazy widget compares the fresh selector value — a PartialEq
-        // snapshot of exactly that card's state slice — with the previous
-        // frame and reuses the already-built subtree when nothing in the slice
-        // changed. Typing in the header search therefore rebuilds only the
-        // Shared by Me card (whose dependency carries the query); the Peers,
-        // Sharing Summary, and Recent Activity cards keep their cached
-        // subtrees unless their own data changes.
-        let shared_by_me_card =
-            iced::widget::lazy(self.shared_by_me_card_dependency(), Self::view_shared_by_me_card);
-        let peers_card = iced::widget::lazy(self.peers_card_dependency(), Self::view_peers_card);
-        let sharing_summary_card = iced::widget::lazy(
-            self.sharing_summary_card_dependency(),
-            Self::view_sharing_summary_card,
-        );
-        let recent_activity_card = iced::widget::lazy(
-            self.recent_activity_card_dependency(),
-            Self::view_recent_download_activity_card,
-        );
+        // PERF-4R-A: each card is built DIRECTLY from its static content
+        // function — no `iced::widget::lazy` inside this renderer — so a
+        // pre-warmed tree is fully materialized. The per-card selectors
+        // (`*_card_dependency`) still feed those functions via the snapshot.
+        let shared_by_me_card = Self::view_shared_by_me_card(&dep.shared_by_me);
+        let peers_card = Self::view_peers_card(&dep.peers);
+        let sharing_summary_card = Self::view_sharing_summary_card(&dep.sharing_summary);
+        let recent_activity_card = Self::view_recent_download_activity_card(&dep.recent_activity);
 
         // ── FS-19: connectivity notice at the top of the dashboard when the
         // mesh is unhealthy or the user is offline. Dismissible — does not
         // block interaction with unaffected regions.
-        let connectivity_notice = dashboard_connectivity_notice(self, &theme);
+        let connectivity_notice = dashboard_connectivity_notice(
+            dep.dashboard_connectivity_dismissed,
+            &dep.mesh_health.as_mesh_health(),
+            &theme,
+        );
 
         let content_area: iced::Element<'_, AppMessage> = if !is_compact {
             // Two-column: 2/3 left + 1/3 right.
@@ -36983,6 +37552,266 @@ mod tests {
         );
 
         (runtime, app, local_public, peer_public)
+    }
+
+    /// Build a minimal-but-real app for the PERF-4R-B pre-warm unit test
+    /// (same loopback, relay-disabled construction as
+    /// `build_join_request_test_app`).
+    fn build_prewarm_test_app() -> (tokio::runtime::Runtime, IcedChat) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build test runtime");
+
+        let mut data_dir = std::env::temp_dir();
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        data_dir.push(format!("boru-iced-chat-prewarm-{suffix}"));
+        std::fs::create_dir_all(&data_dir).expect("create temp data dir");
+
+        let local_sk = SecretKey::generate();
+        let local_public = local_sk.public();
+
+        let (
+            secret_key,
+            gossip,
+            router,
+            blob_store,
+            endpoint,
+            memory_lookup,
+            local_label,
+            friends,
+            friend_mgr,
+            friend_events_rx,
+            whisper_events_rx,
+            inbox_events_rx,
+            whisper_handle,
+            backfill_handle,
+            chat_history,
+            net_rx,
+            net_tx,
+            room_history,
+        ) = runtime.block_on(async {
+            let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
+                .secret_key(local_sk.clone())
+                .address_lookup(iroh::address_lookup::memory::MemoryLookup::new())
+                .relay_mode(iroh::RelayMode::Disabled)
+                .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
+                .expect("set bind addr")
+                .bind()
+                .await
+                .expect("bind endpoint");
+            // NOTE: deliberately do NOT await `endpoint.online()` here — with
+            // `RelayMode::Disabled` there is no home relay, so `online()`
+            // never resolves (it waits for a relay status). Binding the
+            // loopback endpoint is enough for the pre-warm unit test.
+
+            let gossip = boru_core::net::Gossip::builder()
+                .max_message_size(16 * 1024)
+                .spawn(endpoint.clone());
+            let router = iroh::protocol::Router::builder(endpoint.clone())
+                .accept(boru_core::net::GOSSIP_ALPN, gossip.clone())
+                .spawn();
+            let blob_store = iroh_blobs::store::fs::FsStore::load(data_dir.join("blobs"))
+                .await
+                .expect("create fs blob store");
+            let memory_lookup = iroh::address_lookup::memory::MemoryLookup::new();
+            let friends = boru_core::friends::FriendsStore::empty_at(&data_dir);
+            let room_history = boru_core::room_history::RoomHistoryStore::empty_at(&data_dir);
+            let chat_history = std::sync::Arc::new(std::sync::Mutex::new(
+                boru_core::chat_history::ChatHistoryStore::empty_at(&data_dir),
+            ));
+            let backfill_handle = boru_core::backfill::BackfillHandle::spawn(endpoint.clone());
+            let whisper_builder =
+                boru_core::whisper::WhisperBuilder::new(endpoint.clone(), local_sk.clone());
+            let _whisper_protocol = whisper_builder.protocol_handler();
+            let (whisper_handle, whisper_events_rx_tmp) = whisper_builder.spawn();
+            let whisper_events_rx =
+                std::sync::Arc::new(tokio::sync::Mutex::new(whisper_events_rx_tmp));
+            let (inbox_handle, inbox_events_rx_tmp) = boru_core::inbox::InboxHandle::new();
+            let _inbox_protocol = boru_core::inbox::InboxProtocol::new(inbox_handle.inner());
+            let inbox_events_rx = std::sync::Arc::new(tokio::sync::Mutex::new(inbox_events_rx_tmp));
+            let (friend_mgr, friend_events_rx_tmp) =
+                boru_core::chat_core::friend_ping::FriendPingManager::spawn(
+                    endpoint.clone(),
+                    boru_core::chat_core::friend_ping::DEFAULT_PING_INTERVAL,
+                    boru_core::chat_core::friend_ping::DEFAULT_CONNECT_TIMEOUT,
+                );
+            let friend_events_rx =
+                std::sync::Arc::new(tokio::sync::Mutex::new(friend_events_rx_tmp));
+            let (net_tx, net_rx) = tokio::sync::mpsc::channel(256);
+            let net_rx = std::sync::Arc::new(tokio::sync::Mutex::new(net_rx));
+
+            (
+                local_sk.clone(),
+                gossip,
+                router,
+                blob_store,
+                endpoint,
+                memory_lookup,
+                "PreWarm Tester".to_string(),
+                friends,
+                friend_mgr,
+                friend_events_rx,
+                whisper_events_rx,
+                inbox_events_rx,
+                whisper_handle,
+                backfill_handle,
+                chat_history,
+                net_rx,
+                net_tx,
+                room_history,
+            )
+        });
+
+        let (dummy_discovered_tx, dummy_discovered_rx) =
+            tokio::sync::mpsc::channel::<DiscoveredPeersUpdate>(1);
+        let (_, dummy_directory_rx) = tokio::sync::mpsc::channel::<DirectoryRoomUpdate>(1);
+        let dummy_directory_rx = Arc::new(Mutex::new(dummy_directory_rx));
+        let (persist_tx, _persist_rx) = std::sync::mpsc::channel();
+
+        let app = IcedChat::new(
+            secret_key,
+            gossip,
+            router,
+            blob_store,
+            endpoint,
+            memory_lookup,
+            local_label,
+            local_public,
+            iroh::RelayMode::Disabled,
+            data_dir,
+            persist_tx,
+            runtime.handle().clone(),
+            net_rx,
+            net_tx,
+            room_history,
+            friends,
+            friend_mgr,
+            friend_events_rx,
+            whisper_events_rx,
+            inbox_events_rx,
+            whisper_handle,
+            None,
+            "prewarm test".to_string(),
+            chat_history,
+            backfill_handle,
+            false,
+            None,
+            Arc::new(Mutex::new(dummy_discovered_rx)),
+            dummy_directory_rx,
+            None, // dht (private-room discovery disabled by default in tests)
+            false,
+            boru_core::diagnostics::IcedMessageJournal::default(),
+            None,
+            tokio::sync::watch::channel(boru_core::diagnostics::IcedStateSnapshot {
+                node_id: String::new(),
+                version: String::new(),
+                active_screen: String::new(),
+                active_room: None,
+                conversation_count: 0,
+                neighbor_count: 0,
+                direct_peer_count: 0,
+                relayed_peer_count: 0,
+                mesh_health: String::new(),
+                online_friend_count: 0,
+                friend_count: 0,
+                total_entry_count: 0,
+                dark_mode: false,
+                composer_text: String::new(),
+                dialog_open: false,
+                unread_count: 0,
+                dashboard: None,
+                timestamp: chrono::Utc::now(),
+            })
+            .0,
+            GuiActionHistory::default(),
+            None, // storage
+            Arc::new(boru_core::tunnel::service::TunnelService::new()),
+            std::sync::Arc::new(
+                boru_core::transfer_state_projection::TransferStateStore::new(8),
+            ),
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        );
+
+        (runtime, app)
+    }
+
+    #[test]
+    fn prewarm_idle_tick_builds_cache_and_view_serves_it() {
+        let _ = tracing_subscriber::fmt::try_init();
+        let (_runtime, mut app) = build_prewarm_test_app();
+        // IdleTimer starts "now"; force the idle state so the first IdleTick
+        // is allowed to build without sleeping 2s in the test.
+        app.idle_timer.last_input =
+            std::time::Instant::now() - std::time::Duration::from_secs(3);
+
+        assert!(app.prewarm_cache.is_empty(), "cache starts empty");
+
+        // While the user is ACTIVE an IdleTick must not build anything.
+        app.idle_timer.note_activity();
+        let _ = app.update(AppMessage::IdleTick);
+        assert!(app.prewarm_cache.is_empty(), "no pre-warm build while active");
+
+        // Back to idle: one tick warms exactly the first PREWARM_ORDER screen
+        // (FileSharing, since the default dashboard tab is the Files tab).
+        app.idle_timer.last_input =
+            std::time::Instant::now() - std::time::Duration::from_secs(3);
+        let _ = app.update(AppMessage::IdleTick);
+        assert_eq!(
+            app.prewarm_cache.len(),
+            1,
+            "one screen is warmed per idle tick"
+        );
+        let (cached_hash, element) = app
+            .prewarm_cache
+            .get(&Screen::FileSharing)
+            .expect("FileSharing should be the first warmed screen");
+        let fresh_hash = fxhash_of(&app.file_sharing_dependency());
+        assert_eq!(
+            *cached_hash,
+            fresh_hash,
+            "stored hash matches the freshly computed dependency hash"
+        );
+
+        // Serving path: navigating to FileSharing returns the CACHED element —
+        // its widget tag equals the cached tree's tag, which differs from the
+        // live `lazy()` wrapper's tag, so an equal tag proves the cache served.
+        app.screen = Screen::FileSharing;
+        let served = app.view();
+        assert_eq!(
+            served.as_widget().tag(),
+            element.borrow().as_widget().tag(),
+            "view() should serve the cached tree, not the live lazy view"
+        );
+        drop(served); // release the &self borrow before mutating app
+
+        // Invalidation clears exactly the matching entries.
+        app.invalidate_prewarm(&[Screen::FileSharing]);
+        assert!(
+            !app.prewarm_cache.contains_key(&Screen::FileSharing),
+            "invalidate_prewarm removes the matching entry"
+        );
+
+        // The next idle ticks warm the remaining screens in PREWARM_ORDER.
+        app.idle_timer.last_input =
+            std::time::Instant::now() - std::time::Duration::from_secs(3);
+        let _ = app.update(AppMessage::IdleTick);
+        let _ = app.update(AppMessage::IdleTick);
+        let (settings_hash, _) = app
+            .prewarm_cache
+            .get(&Screen::Settings)
+            .expect("Settings should be warmed by the second idle tick");
+        assert_eq!(*settings_hash, fxhash_of(&app.settings_dependency()));
+
+        app.invalidate_prewarm(PREWARM_ORDER);
+        assert!(
+            app.prewarm_cache.is_empty(),
+            "invalidate_prewarm(PREWARM_ORDER) clears every screen"
+        );
     }
 
     #[test]
