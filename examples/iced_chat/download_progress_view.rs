@@ -6,7 +6,10 @@
 //! - State badge (text + colour) indicating the current download status
 //! - Filename and human-readable total size in the header row
 //! - Source peer label and optional transfer speed
-//! - Progress bar with percentage (for active/paused/verifying states)
+//! - Modern progress bar (thin rounded track, green fill) with percentage
+//!   for active/paused states, plus a bytes-of-total / percentage / speed
+//!   detail line for active downloads (real transfer data only — no
+//!   invented estimates)
 //! - Context-sensitive action buttons (pause/resume/cancel/retry/open)
 //! - Prominent failure reason in the Failed state
 //!
@@ -29,6 +32,16 @@ use super::app::{
     accent_green, accent_primary, bg_surface, border_muted, color_error, text_muted, text_system,
     SPACE_10, SPACE_12, SPACE_16, SPACE_2, SPACE_4, SPACE_6, SPACE_8, TYPO_SM, TYPO_XS,
 };
+
+// ── Progress bar geometry (VIDCARD-14) ────────────────────────────────
+
+/// Height (px) of the thin modern progress-bar track.
+const PROGRESS_BAR_GIRTH: f32 = 6.0;
+
+/// Fixed width (px) of the percentage label next to the bar.  Holding the
+/// label width constant means the bar itself never re-measures as the value
+/// climbs 0% → 100% (no rapid layout changes).
+const PROGRESS_PCT_LABEL_WIDTH: f32 = 44.0;
 
 // ── Theme dispatch (light/dark) ──────────────────────────────────────────
 
@@ -427,7 +440,7 @@ fn view_download_progress_inner<'a>(
         .align_y(Alignment::Center)
         .spacing(SPACE_8);
 
-    // ── Row 2: Source peer + speed ──────────────────────────────────────
+    // ── Row 2: Source peer (speed lives in the progress detail row) ────
     let source_row = {
         let source_label = if attachment.source_peer.is_empty() {
             String::new()
@@ -435,33 +448,13 @@ fn view_download_progress_inner<'a>(
             format!("From: {}", attachment.source_peer)
         };
 
-        let speed_label = match &state {
-            DownloadState::Active { .. } => attachment
-                .speed_bytes_per_sec
-                .map(human_speed)
-                .unwrap_or_default(),
-            _ => String::new(),
-        };
-
-        if source_label.is_empty() && speed_label.is_empty() {
+        if source_label.is_empty() {
             None
         } else {
             Some(
-                Row::new()
-                    .push(
-                        crate::fonts::type_role_text(
-                            crate::fonts::TypeRole::Metadata,
-                            source_label,
-                        )
-                        .color(muted)
-                        .width(Length::Fill),
-                    )
-                    .push(
-                        crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, speed_label)
-                            .color(tone),
-                    )
-                    .align_y(Alignment::Center)
-                    .spacing(SPACE_8),
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, source_label)
+                    .color(muted)
+                    .width(Length::Fill),
             )
         }
     };
@@ -469,24 +462,14 @@ fn view_download_progress_inner<'a>(
     // ── Row 3: Progress bar + percentage ────────────────────────────────
     let progress_row = progress_section(state, dark_mode);
 
-    // ── Row 3b: Speed + bytes detail (always visible when active) ─────
-    let speed_detail_row = match state {
-        DownloadState::Active { bytes, .. } => {
-            let detail = format!("{} received", human_size(*bytes));
-            let speed = attachment
-                .speed_bytes_per_sec
-                .map(|s| format!(" • {}/s", human_size(s)))
-                .unwrap_or_default();
-            Some(
-                crate::fonts::type_role_text(
-                    crate::fonts::TypeRole::Metadata,
-                    format!("{detail}{speed}"),
-                )
-                .color(accent_primary(&theme)),
-            )
-        }
-        _ => None,
-    };
+    // ── Row 3b: Bytes / total / percentage / speed detail line ─────────
+    // Real transfer data only: bytes of total, percentage and transfer
+    // speed are included only when the transfer layer provides them; no
+    // invented estimates (VIDCARD-14).
+    let progress_detail_row = active_download_detail(attachment).map(|detail| {
+        crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, detail)
+            .color(accent_green(&theme))
+    });
 
     // ── Row 4: Action buttons ───────────────────────────────────────────
     let action_row = action_buttons(entry_index, attachment.kind, state, &name_str);
@@ -562,8 +545,8 @@ fn view_download_progress_inner<'a>(
     if let Some(prog) = progress_row {
         body = body.push(prog);
     }
-    if let Some(speed_detail) = speed_detail_row {
-        body = body.push(speed_detail);
+    if let Some(progress_detail) = progress_detail_row {
+        body = body.push(progress_detail);
     }
     body = body.push(action_row);
     if let Some(playback_actions) = playback_action_row {
@@ -615,7 +598,47 @@ pub(crate) fn human_speed(bytes_per_sec: u64) -> String {
     format!("{}/s", human_size(bytes_per_sec))
 }
 
+/// Detail line for an in-flight download, e.g. `"18.2 MiB of 42.6 MiB •
+/// 43% • 2.1 MiB/s"` (VIDCARD-14 spec: `"18.2 MB of 42.6 MB • 43% •
+/// 2.1 MB/s"`).
+///
+/// Only real transfer-layer data is shown: bytes received always; total
+/// size, percentage and transfer speed only when the transfer layer
+/// actually provides them.  No estimated-time or other invented values.
+/// Returns `None` for states that are not downloading.
+pub(crate) fn active_download_detail(attachment: &DownloadAttachment) -> Option<String> {
+    match &attachment.state {
+        DownloadState::Active { bytes, total } | DownloadState::Paused { bytes, total } => {
+            let mut parts = Vec::with_capacity(3);
+            match total {
+                Some(total) if *total > 0 => {
+                    parts.push(format!(
+                        "{} of {}",
+                        human_size(*bytes),
+                        human_size(*total)
+                    ));
+                    let pct = ((*bytes as f32 / *total as f32) * 100.0).round() as u8;
+                    parts.push(format!("{pct}%"));
+                }
+                _ => parts.push(format!("{} received", human_size(*bytes))),
+            }
+            if let Some(speed) = attachment.speed_bytes_per_sec {
+                parts.push(human_speed(speed));
+            }
+            Some(parts.join(" • "))
+        }
+        _ => None,
+    }
+}
+
 /// Build the progress bar section: bar + percentage label.
+///
+/// VIDCARD-14: thin rounded track (pill), green fill in both light and
+/// dark themes, smooth value updates from the real transfer state, and a
+/// fixed-width percentage label so the bar row never re-measures while the
+/// value climbs 0% → 100%.  The percentage is rendered as real text so the
+/// progress value is accessible even though iced 0.14 exposes no widget
+/// aria API.
 pub(crate) fn progress_section<'a>(
     state: &DownloadState,
     dark_mode: bool,
@@ -649,13 +672,16 @@ pub(crate) fn progress_section<'a>(
         let pct = (fraction * 100.0).round() as u8;
         let bar = iced::widget::progress_bar(0.0..=1.0, fraction)
             .length(Length::Fill)
-            .girth(Length::Fixed(6.0))
+            .girth(Length::Fixed(PROGRESS_BAR_GIRTH))
             .style(move |t| {
                 let (active, back) = if dimmed {
                     let c = border_muted(t);
                     (c, Color::from_rgba(c.r, c.g, c.b, 0.3))
                 } else {
-                    (accent_primary(t), {
+                    // Green fill in both themes (accent_primary turns blue
+                    // in dark mode, so the spec's green bar uses the
+                    // success green instead).
+                    (accent_green(t), {
                         let c = border_muted(t);
                         Color::from_rgba(c.r, c.g, c.b, 0.4)
                     })
@@ -663,7 +689,13 @@ pub(crate) fn progress_section<'a>(
                 widget::progress_bar::Style {
                     background: back.into(),
                     bar: active.into(),
-                    border: iced::Border::default(),
+                    // Rounded track: the fill quad inherits this radius
+                    // (with a transparent border), so a half-girth radius
+                    // produces a modern thin pill in both track and fill.
+                    border: iced::Border {
+                        radius: (PROGRESS_BAR_GIRTH / 2.0).into(),
+                        ..Default::default()
+                    },
                 }
             });
 
@@ -672,8 +704,12 @@ pub(crate) fn progress_section<'a>(
                 .color(if dimmed {
                     border_muted(&theme)
                 } else {
-                    accent_primary(&theme)
-                });
+                    accent_green(&theme)
+                })
+                // Fixed width keeps the row's layout stable as the value
+                // climbs from 0% to 100% (no rapid layout changes).
+                .width(Length::Fixed(PROGRESS_PCT_LABEL_WIDTH))
+                .align_x(Alignment::End);
 
         Some(
             Row::new()
@@ -693,7 +729,7 @@ pub(crate) fn progress_section<'a>(
                             crate::fonts::TypeRole::Metadata,
                             format!("{} received — detecting size…", human_size(*bytes)),
                         )
-                        .color(accent_primary(&theme)),
+                        .color(accent_green(&theme)),
                     )
                     .align_y(Alignment::Center)
                     .into(),
@@ -814,4 +850,79 @@ pub(crate) fn action_buttons<'a>(
     };
 
     Row::with_children(buttons).spacing(SPACE_8).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{DownloadAttachment, DownloadState, TransferKind};
+
+    fn attachment() -> DownloadAttachment {
+        DownloadAttachment::new(TransferKind::Video, "clip.mp4", "ticket", "Duke", None)
+    }
+
+    #[test]
+    fn active_detail_lists_bytes_total_percent_and_speed() {
+        let mut att = attachment();
+        att.state = DownloadState::Active {
+            bytes: 19_000_000,
+            total: Some(44_000_000),
+        };
+        att.speed_bytes_per_sec = Some(2_200_000);
+        let detail = active_download_detail(&att).expect("active download has detail");
+        // "18.1 MiB of 42.0 MiB • 43% • 2.1 MiB/s" — bytes of total, real
+        // percentage, and the transfer-layer speed, in the spec's shape.
+        assert!(detail.contains("of"), "expected 'of', got: {detail}");
+        assert!(detail.contains("43%"), "expected 43%, got: {detail}");
+        assert!(detail.contains("/s"), "expected speed, got: {detail}");
+    }
+
+    #[test]
+    fn active_detail_omits_percent_when_total_unknown() {
+        let mut att = attachment();
+        att.state = DownloadState::Active {
+            bytes: 5_000_000,
+            total: None,
+        };
+        let detail = active_download_detail(&att).expect("active download has detail");
+        assert!(detail.contains("received"), "got: {detail}");
+        assert!(!detail.contains('%'), "percent must not be invented: {detail}");
+    }
+
+    #[test]
+    fn active_detail_omits_speed_when_layer_does_not_provide_it() {
+        let mut att = attachment();
+        att.state = DownloadState::Active {
+            bytes: 5_000_000,
+            total: Some(10_000_000),
+        };
+        att.speed_bytes_per_sec = None;
+        let detail = active_download_detail(&att).expect("active download has detail");
+        assert!(detail.contains("50%"), "got: {detail}");
+        assert!(!detail.contains('/'), "speed must not be invented: {detail}");
+    }
+
+    #[test]
+    fn paused_snapshot_still_shows_real_progress_data() {
+        let mut att = attachment();
+        att.state = DownloadState::Paused {
+            bytes: 10_000_000,
+            total: Some(20_000_000),
+        };
+        let detail = active_download_detail(&att).expect("paused download has detail");
+        assert!(detail.contains("50%"), "got: {detail}");
+    }
+
+    #[test]
+    fn non_downloading_states_have_no_detail_line() {
+        let att = attachment(); // Ready
+        assert_eq!(active_download_detail(&att), None);
+        let mut att = attachment();
+        att.state = DownloadState::Completed {
+            saved_name: "clip.mp4".into(),
+            saved_path: None,
+            total_size: Some(100),
+        };
+        assert_eq!(active_download_detail(&att), None);
+    }
 }

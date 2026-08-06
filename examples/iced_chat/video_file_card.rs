@@ -37,13 +37,13 @@ use iced::{Alignment, Color, Length};
 use iced_video_player::{Video, VideoPlayer};
 
 use super::app::{
-    accent_primary, bg_surface, border_muted, color_error, text_system, SPACE_10, SPACE_12,
-    SPACE_2, SPACE_20, SPACE_24, SPACE_4, SPACE_6, SPACE_8, TYPO_SM, TYPO_XS, TYPO_XXS,
+    accent_green, bg_surface, border_muted, color_error, text_system, SPACE_10, SPACE_12, SPACE_2,
+    SPACE_20, SPACE_24, SPACE_4, SPACE_6, SPACE_8, TYPO_SM, TYPO_XS, TYPO_XXS,
 };
 use super::app::{AppMessage, DownloadAttachment, DownloadState};
 use super::download_progress_view::{
-    action_button, action_buttons, human_size, human_speed, progress_section, resolve_theme,
-    secondary_button, state_badge, state_badge_color,
+    action_button, action_buttons, active_download_detail, human_size, progress_section,
+    resolve_theme, secondary_button, state_badge, state_badge_color,
 };
 use crate::design_tokens;
 use crate::icon_system::{Icon, IconSize};
@@ -853,34 +853,62 @@ impl<'a> BoruVideoFileCard<'a> {
 
         // ── State line ────────────────────────────────────────────────
         // Prominent, real presentation state (e.g. "Ready to play").
+        // VIDCARD-14: active downloads name the real source peer in the
+        // status line ("Downloading from Duke") and paused downloads say
+        // "Paused" instead of the generic downloading text.
         let status = if self.preparing {
             "Preparing video…".to_string()
         } else if let Some(player_status) = self.playback_status() {
             player_status
         } else {
-            match presentation {
-                VideoPresentationState::Ready => "Ready to play".to_string(),
-                VideoPresentationState::Downloading => "Downloading video…".to_string(),
-                VideoPresentationState::Verifying => "Verifying video…".to_string(),
-                VideoPresentationState::Failed => "Download failed".to_string(),
-                VideoPresentationState::Missing => {
-                    "Local file missing · download again".to_string()
+            match state {
+                DownloadState::Active { .. } if !attachment.source_peer.is_empty() => {
+                    format!("Downloading from {}", attachment.source_peer)
                 }
-                VideoPresentationState::Remote => "Static preview · download to play".to_string(),
+                DownloadState::Active { .. } => "Downloading video…".to_string(),
+                DownloadState::Paused { .. } if !attachment.source_peer.is_empty() => {
+                    format!("Paused — from {}", attachment.source_peer)
+                }
+                DownloadState::Paused { .. } => "Paused".to_string(),
+                _ => match presentation {
+                    VideoPresentationState::Ready => "Ready to play".to_string(),
+                    VideoPresentationState::Downloading => "Downloading video…".to_string(),
+                    VideoPresentationState::Verifying => "Verifying video…".to_string(),
+                    VideoPresentationState::Failed => "Download failed".to_string(),
+                    VideoPresentationState::Missing => {
+                        "Local file missing · download again".to_string()
+                    }
+                    VideoPresentationState::Remote => "Static preview · download to play".to_string(),
+                },
             }
+        };
+        // The active/paused status line is part of the green progress
+        // treatment; paused snaps to the muted tone so colour is never the
+        // only cue.  Other states keep the badge colour.
+        let status_color = match state {
+            DownloadState::Active { .. } => accent_green(theme),
+            DownloadState::Paused { .. } => text_system(theme),
+            _ => tone,
         };
         let mut column = Column::new().push(
             crate::fonts::type_role_text(
                 crate::fonts::TypeRole::BodyEmphasised,
                 format!("●  {status}"),
             )
-            .color(tone),
+            .color(status_color),
         );
 
         // ── Metadata groups (real values only; hidden when unavailable) ─
         // One wrapping muted line so the groups stack gracefully at narrow
-        // widths, separated by quiet dividers.
-        let source_label = if attachment.source_peer.is_empty() {
+        // widths, separated by quiet dividers.  While actively downloading
+        // (or paused) with a known source, the peer is already named in the
+        // status line, so the separate "From:" group is skipped to avoid
+        // duplication.
+        let status_carries_peer = matches!(
+            state,
+            DownloadState::Active { .. } | DownloadState::Paused { .. }
+        ) && !attachment.source_peer.is_empty();
+        let source_label = if status_carries_peer || attachment.source_peer.is_empty() {
             String::new()
         } else {
             format!("From: {}", attachment.source_peer)
@@ -946,18 +974,18 @@ impl<'a> BoruVideoFileCard<'a> {
         if let Some(prog) = progress_section(state, self.dark_mode) {
             column = column.push(prog);
         }
-        if let DownloadState::Active { bytes, .. } = state {
-            let detail = format!("{} received", human_size(*bytes));
-            let speed = attachment
-                .speed_bytes_per_sec
-                .map(|s| format!(" • {}/s", human_size(s)))
-                .unwrap_or_default();
+        // VIDCARD-14: bytes of total, percentage and transfer speed — only
+        // where the transfer layer provides them (no invented estimates).
+        // Active uses the green progress accent; paused uses the muted tone.
+        if let Some(detail) = active_download_detail(attachment) {
+            let detail_color = if matches!(state, DownloadState::Paused { .. }) {
+                muted
+            } else {
+                accent_green(theme)
+            };
             column = column.push(
-                crate::fonts::type_role_text(
-                    crate::fonts::TypeRole::Metadata,
-                    format!("{detail}{speed}"),
-                )
-                .color(accent_primary(theme)),
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, detail)
+                    .color(detail_color),
             );
         }
 
