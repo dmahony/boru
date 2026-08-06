@@ -240,6 +240,8 @@ pub struct AppSettings {
     pub chat_text_size: f32,
     pub share_direct_addresses: bool,
     pub display_name: Option<String>,
+    /// Absolute path to the home-screen background image (None = default).
+    pub home_background_image: Option<String>,
 }
 
 impl Default for AppSettings {
@@ -250,6 +252,7 @@ impl Default for AppSettings {
             chat_text_size: TYPO_SM,
             share_direct_addresses: false,
             display_name: None,
+            home_background_image: None,
         }
     }
 }
@@ -273,6 +276,18 @@ impl AppSettings {
             let _ = std::fs::write(&path, json);
         }
     }
+}
+
+/// Decode a home-screen background image handle from an on-disk path.
+/// Returns `None` when the path is missing, empty, or unreadable so a stale
+/// `settings.json` entry (e.g. the file was moved) degrades gracefully.
+fn load_home_background_handle(path: Option<&str>) -> Option<iced::widget::image::Handle> {
+    let path = path?;
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    Some(iced::widget::image::Handle::from_bytes(bytes))
 }
 
 fn invitation_endpoint_addr(
@@ -3311,6 +3326,11 @@ pub struct IcedChat {
     pub whisper_events_rx: Arc<Mutex<Receiver<WhisperEvent>>>,
     /// Locally selected profile image, persisted below the application data directory.
     profile_image_handle: Option<iced::widget::image::Handle>,
+    /// Home-screen background image (persisted path + decoded handle).
+    /// The path comes from `AppSettings::home_background_image`; the handle is
+    /// decoded once at startup and whenever the user picks a new image.
+    home_background_path: Option<String>,
+    home_background_handle: Option<iced::widget::image::Handle>,
     /// Ticket for the locally selected profile image, for broadcasting to peers.
     profile_image_ticket: Option<String>,
     /// ImageStore identifier for the locally selected profile image.
@@ -5468,6 +5488,16 @@ pub enum AppMessage {
     PickProfileImage,
     /// Result of reading the selected profile image.
     ProfileImagePicked(Result<Vec<u8>, String>),
+    /// Open the native picker for a home-screen background image.
+    PickHomeBackgroundImage,
+    /// Result of picking a home-screen background image: the on-disk path.
+    /// The bytes are read and decoded into the UI handle by the handler.
+    HomeBackgroundImagePicked(Result<String, String>),
+    /// The background image file was read and settings persisted; carries the
+    /// path and raw bytes so the handler can build the UI handle.
+    HomeBackgroundImageReady { path: String, image_bytes: Vec<u8> },
+    /// Remove the currently configured home-screen background image.
+    RemoveHomeBackgroundImage,
     /// The profile image was uploaded to the local blob store; carries the
     /// BlobTicket string peers use to download it.
     ProfileImageUploaded(String),
@@ -6156,6 +6186,8 @@ struct SettingsCachedKey {
     history_clear_feedback: Option<String>,
     history_clear_feedback_is_error: bool,
     local_public_key: String,
+    /// Path of the configured home-screen background image, if any.
+    home_background_image: Option<String>,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -7069,6 +7101,10 @@ impl IcedChat {
             inbox_events_rx,
             whisper_events_rx,
             profile_image_handle,
+            home_background_path: app_settings.home_background_image.clone(),
+            home_background_handle: load_home_background_handle(
+                app_settings.home_background_image.as_deref(),
+            ),
             profile_image_ticket,
             profile_image_identifier,
             local_mailbox_key,
@@ -7345,8 +7381,35 @@ impl IcedChat {
             share_direct_addresses: self.share_direct_addresses,
             chat_text_size: self.chat_text_size,
             display_name: Some(self.local_label.clone()),
+            home_background_image: self.home_background_path.clone(),
         };
         settings.save(&self.data_dir);
+    }
+
+    /// Build an `AppSettings` snapshot that preserves the home-screen
+    /// background path and persist it off the UI thread.
+    fn persist_home_background(
+        data_dir: &std::path::Path,
+        dark_mode: bool,
+        sound_enabled: bool,
+        share_direct_addresses: bool,
+        chat_text_size: f32,
+        display_name: String,
+        home_background_image: Option<String>,
+    ) -> iced::Task<AppMessage> {
+        let settings = AppSettings {
+            dark_mode,
+            sound_enabled,
+            share_direct_addresses,
+            chat_text_size,
+            display_name: Some(display_name),
+            home_background_image,
+        };
+        let data_dir = data_dir.to_path_buf();
+        iced::Task::perform(
+            tokio::task::spawn_blocking(move || settings.save(&data_dir)),
+            |_| AppMessage::Noop,
+        )
     }
 
     /// Persist the current public-room directory snapshot to SQLite.
@@ -7429,6 +7492,7 @@ impl IcedChat {
             share_direct_addresses: self.share_direct_addresses,
             chat_text_size: self.chat_text_size,
             display_name: Some(self.local_label.clone()),
+            home_background_image: self.home_background_path.clone(),
         };
         settings.save(&self.data_dir);
     }
@@ -8714,6 +8778,10 @@ impl IcedChat {
             AppMessage::SetChatTextSize(_) => "SetChatTextSize",
             AppMessage::PickProfileImage => "PickProfileImage",
             AppMessage::ProfileImagePicked(_) => "ProfileImagePicked",
+            AppMessage::PickHomeBackgroundImage => "PickHomeBackgroundImage",
+            AppMessage::HomeBackgroundImagePicked(_) => "HomeBackgroundImagePicked",
+            AppMessage::HomeBackgroundImageReady { .. } => "HomeBackgroundImageReady",
+            AppMessage::RemoveHomeBackgroundImage => "RemoveHomeBackgroundImage",
             AppMessage::ProfileImageUploaded(_) => "ProfileImageUploaded",
             AppMessage::RemoveProfileImage => "RemoveProfileImage",
             AppMessage::ProfileImageDownloaded(..) => "ProfileImageDownloaded",
@@ -18846,6 +18914,7 @@ impl IcedChat {
                     share_direct_addresses: self.share_direct_addresses,
                     chat_text_size: self.chat_text_size,
                     display_name: Some(self.local_label.clone()),
+                    home_background_image: self.home_background_path.clone(),
                 };
                 let data_dir = self.data_dir.clone();
                 let _progress_queue = self.download_progress_queue.clone();
@@ -18868,6 +18937,7 @@ impl IcedChat {
                     share_direct_addresses: self.share_direct_addresses,
                     chat_text_size: self.chat_text_size,
                     display_name: Some(self.local_label.clone()),
+                    home_background_image: self.home_background_path.clone(),
                 };
                 let data_dir = self.data_dir.clone();
                 iced::Task::perform(
@@ -18887,6 +18957,7 @@ impl IcedChat {
                     share_direct_addresses: self.share_direct_addresses,
                     chat_text_size: self.chat_text_size,
                     display_name: Some(self.local_label.clone()),
+                    home_background_image: self.home_background_path.clone(),
                 };
                 let data_dir = self.data_dir.clone();
                 let _progress_queue = self.download_progress_queue.clone();
@@ -19822,6 +19893,7 @@ impl IcedChat {
                     share_direct_addresses: self.share_direct_addresses,
                     chat_text_size: self.chat_text_size,
                     display_name: Some(self.local_label.clone()),
+                    home_background_image: self.home_background_path.clone(),
                 };
                 let data_dir = self.data_dir.clone();
                 let _progress_queue = self.download_progress_queue.clone();
@@ -19841,6 +19913,7 @@ impl IcedChat {
                     share_direct_addresses: self.share_direct_addresses,
                     chat_text_size: self.chat_text_size,
                     display_name: Some(self.local_label.clone()),
+                    home_background_image: self.home_background_path.clone(),
                 };
                 let data_dir = self.data_dir.clone();
                 iced::Task::perform(
@@ -19930,6 +20003,98 @@ impl IcedChat {
                     }
                     Err(_) => iced::Task::none(),
                 }
+            }
+
+            AppMessage::PickHomeBackgroundImage => iced::Task::perform(
+                async {
+                    let file = rfd::AsyncFileDialog::new()
+                        .set_title("Choose home screen background image")
+                        .pick_file()
+                        .await;
+                    match file {
+                        Some(file) => Ok(file.path().to_string_lossy().to_string()),
+                        None => Err("No background image selected.".to_string()),
+                    }
+                },
+                AppMessage::HomeBackgroundImagePicked,
+            ),
+
+            AppMessage::HomeBackgroundImagePicked(result) => {
+                match result {
+                    Ok(path) => {
+                        if path.is_empty() {
+                            return iced::Task::none();
+                        }
+                        // Read the image bytes and persist the settings entry
+                        // on a background thread so a large image file never
+                        // blocks the UI thread.
+                        let path_for_task = path.clone();
+                        let data_dir = self.data_dir.clone();
+                        let settings = AppSettings {
+                            dark_mode: self.dark_mode,
+                            sound_enabled: self.sound_enabled,
+                            share_direct_addresses: self.share_direct_addresses,
+                            chat_text_size: self.chat_text_size,
+                            display_name: Some(self.local_label.clone()),
+                            home_background_image: Some(path.clone()),
+                        };
+                        iced::Task::perform(
+                            async move {
+                                tokio::task::spawn_blocking(move || {
+                                    settings.save(&data_dir);
+                                    std::fs::read(&path_for_task)
+                                        .map_err(|e| format!("Failed to read image: {e}"))
+                                        .and_then(|bytes| {
+                                            if bytes.is_empty() {
+                                                Err("Selected image is empty.".to_string())
+                                            } else {
+                                                Ok(bytes)
+                                            }
+                                        })
+                                })
+                                .await
+                                .unwrap_or_else(|e| Err(format!("Task join error: {e}")))
+                            },
+                            move |read_result: Result<Vec<u8>, String>| match read_result {
+                                Ok(image_bytes) => AppMessage::HomeBackgroundImageReady {
+                                    path,
+                                    image_bytes,
+                                },
+                                Err(e) => AppMessage::SystemMsg(e),
+                            },
+                        )
+                    }
+                    Err(e) if e != "No background image selected." => {
+                        self.push_system(e);
+                        iced::Task::none()
+                    }
+                    Err(_) => iced::Task::none(),
+                }
+            }
+
+            AppMessage::HomeBackgroundImageReady { path, image_bytes } => {
+                self.home_background_path = Some(path);
+                self.home_background_handle =
+                    Some(iced::widget::image::Handle::from_bytes(image_bytes));
+                self.invalidate_prewarm(&[Screen::Settings]);
+                self.push_system("Home screen background updated.");
+                iced::Task::none()
+            }
+
+            AppMessage::RemoveHomeBackgroundImage => {
+                self.home_background_path = None;
+                self.home_background_handle = None;
+                self.invalidate_prewarm(&[Screen::Settings]);
+                self.push_system("Home screen background removed.");
+                Self::persist_home_background(
+                    &self.data_dir,
+                    self.dark_mode,
+                    self.sound_enabled,
+                    self.share_direct_addresses,
+                    self.chat_text_size,
+                    self.local_label.clone(),
+                    None,
+                )
             }
 
             AppMessage::ProfileImagePersisted {
@@ -22040,7 +22205,23 @@ impl IcedChat {
 
         // Main panel depends on the active screen.
         let main_panel: iced::Element<'_, AppMessage> = match &self.screen {
-            Screen::ChatList => self.view_main_empty_state(),
+            Screen::ChatList => {
+                if let Some(handle) = &self.home_background_handle {
+                    // Home-screen background image: draw it as the bottom
+                    // layer behind the empty-state dashboard so all cards,
+                    // text and controls stay on top of the image.
+                    let bg = iced::widget::image(handle.clone())
+                        .content_fit(iced::ContentFit::Cover)
+                        .width(Length::Fill)
+                        .height(Length::Fill);
+                    iced::widget::Stack::new()
+                        .push(bg)
+                        .push(self.view_main_empty_state())
+                        .into()
+                } else {
+                    self.view_main_empty_state()
+                }
+            }
             // PERF-4R-B: pre-warmable screens are served from the app-state
             // cache when the cached tree's dependency hash still matches the
             // current state; otherwise the live view runs (and lazily caches).
@@ -29411,6 +29592,7 @@ impl IcedChat {
             history_clear_feedback: self.history_clear_feedback.clone(),
             history_clear_feedback_is_error: self.history_clear_feedback_is_error,
             local_public_key: self.local_public.to_string(),
+            home_background_image: self.home_background_path.clone(),
         }
     }
 
@@ -29980,12 +30162,70 @@ impl IcedChat {
             .align_y(Alignment::Center)
             .spacing(SPACE_8);
 
+        // ── Home screen background ──
+        // Choose/remove the image rendered behind the home (ChatList) screen.
+        let home_background_label = key
+            .home_background_image
+            .as_deref()
+            .and_then(|path| {
+                std::path::Path::new(path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+            })
+            .unwrap_or("None")
+            .to_string();
+        let mut home_background_actions = Row::new()
+            .push(
+                button(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::ButtonLabel,
+                    "Choose image…",
+                ))
+                .on_press(AppMessage::PickHomeBackgroundImage)
+                .style(BUTTON_OUTLINE)
+                .padding([SPACE_6, SPACE_12]),
+            )
+            .spacing(SPACE_8);
+        if key.home_background_image.is_some() {
+            home_background_actions = home_background_actions.push(
+                button(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::ButtonLabel,
+                    "Remove",
+                ))
+                .on_press(AppMessage::RemoveHomeBackgroundImage)
+                .style(BUTTON_OUTLINE)
+                .padding([SPACE_6, SPACE_12]),
+            );
+        }
+        let home_background_row = Row::new()
+            .push(
+                Column::new()
+                    .push(crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::Body,
+                        format!("Home background: {home_background_label}"),
+                    ))
+                    .push(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::SupportingText,
+                            "Show an image behind the home screen content.",
+                        )
+                        .style(text_muted_style),
+                    )
+                    .spacing(SPACE_2)
+                    .width(Length::Fill)
+                    .align_x(Alignment::Start),
+            )
+            .push(home_background_actions)
+            .spacing(SPACE_12)
+            .align_y(Alignment::Center);
+
         let appearance_card = section_card(
             "APPEARANCE",
             vec![
                 appearance_row.into(),
                 Space::new().height(Length::Fixed(SPACE_8)).into(),
                 text_size_row.into(),
+                Space::new().height(Length::Fixed(SPACE_8)).into(),
+                home_background_row.into(),
             ],
         );
 
@@ -36676,6 +36916,7 @@ mod tests {
             chat_text_size: 17.0,
             share_direct_addresses: false,
             display_name: None,
+            home_background_image: None,
         };
         let toggled = AppSettings {
             dark_mode: true,
@@ -36683,6 +36924,7 @@ mod tests {
             chat_text_size: original.chat_text_size,
             share_direct_addresses: original.share_direct_addresses,
             display_name: None,
+            home_background_image: None,
         };
         toggled.save(&data_dir);
         let loaded = AppSettings::load(&data_dir);
