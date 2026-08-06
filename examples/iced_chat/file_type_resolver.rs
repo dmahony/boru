@@ -271,6 +271,11 @@ const EXTENSION_ICONS: &[(&str, &str, FileCategory)] = &[
         FileCategory::Spreadsheet,
     ),
     ("csv", "text-csv", FileCategory::Spreadsheet),
+    (
+        "tsv",
+        "text-tab-separated-values",
+        FileCategory::Spreadsheet,
+    ),
     // Presentations
     (
         "ppt",
@@ -305,6 +310,23 @@ const EXTENSION_ICONS: &[(&str, &str, FileCategory)] = &[
     ("yml", "application-yaml", FileCategory::SourceCode),
     ("toml", "application-toml", FileCategory::SourceCode),
     ("sh", "text-x-shellscript", FileCategory::SourceCode),
+    ("bash", "text-x-shellscript", FileCategory::SourceCode),
+    ("zsh", "text-x-shellscript", FileCategory::SourceCode),
+    ("fish", "text-x-shellscript", FileCategory::SourceCode),
+    ("ps1", "text-x-script", FileCategory::SourceCode),
+    ("psm1", "text-x-script", FileCategory::SourceCode),
+    ("psd1", "text-x-script", FileCategory::SourceCode),
+    ("java", "text-x-java", FileCategory::SourceCode),
+    ("kt", "text-x-kotlin", FileCategory::SourceCode),
+    ("kts", "text-x-kotlin", FileCategory::SourceCode),
+    ("c", "text-x-csrc", FileCategory::SourceCode),
+    ("h", "text-x-chdr", FileCategory::SourceCode),
+    ("cpp", "text-x-c++src", FileCategory::SourceCode),
+    ("cc", "text-x-c++src", FileCategory::SourceCode),
+    ("cxx", "text-x-c++src", FileCategory::SourceCode),
+    ("hpp", "text-x-chdr", FileCategory::SourceCode),
+    ("cs", "text-x-csharp", FileCategory::SourceCode),
+    ("go", "text-x-go", FileCategory::SourceCode),
     ("sql", "application-sql", FileCategory::SourceCode),
     // Images
     ("png", "image-png", FileCategory::Image),
@@ -315,6 +337,16 @@ const EXTENSION_ICONS: &[(&str, &str, FileCategory)] = &[
     ("svg", "image-svg+xml", FileCategory::Image),
     ("tiff", "image-tiff", FileCategory::Image),
     ("tif", "image-tiff", FileCategory::Image),
+    // WEBP / HEIC / HEIF / RAW (no dedicated Papirus icons in the pinned
+    // bundle; closest existing asset per the fallback chain).
+    ("webp", "image", FileCategory::Image),
+    ("heic", "image", FileCategory::Image),
+    ("heif", "image", FileCategory::Image),
+    ("dng", "image-x-adobe-dng", FileCategory::Image),
+    ("cr2", "image-x-adobe-dng", FileCategory::Image),
+    ("nef", "image-x-adobe-dng", FileCategory::Image),
+    ("arw", "image-x-adobe-dng", FileCategory::Image),
+    ("raw", "image-x-adobe-dng", FileCategory::Image),
     // Video
     ("mp4", "video-mp4", FileCategory::Video),
     ("webm", "video-webm", FileCategory::Video),
@@ -322,6 +354,10 @@ const EXTENSION_ICONS: &[(&str, &str, FileCategory)] = &[
     ("avi", "video-x-msvideo", FileCategory::Video),
     ("ogv", "video-x-theora+ogg", FileCategory::Video),
     ("m4v", "video-mp4", FileCategory::Video),
+    // MOV / MPEG (no dedicated icons in the pinned bundle; generic video).
+    ("mov", "video", FileCategory::Video),
+    ("mpeg", "video", FileCategory::Video),
+    ("mpg", "video", FileCategory::Video),
     // Audio
     ("mp3", "audio-mp3", FileCategory::Audio),
     ("flac", "audio-flac", FileCategory::Audio),
@@ -329,6 +365,9 @@ const EXTENSION_ICONS: &[(&str, &str, FileCategory)] = &[
     ("ogg", "audio-x-vorbis+ogg", FileCategory::Audio),
     ("m4a", "audio-x-m4a", FileCategory::Audio),
     ("wma", "audio-x-ms-wma", FileCategory::Audio),
+    // OPUS / AAC (no dedicated icons in the pinned bundle; generic audio).
+    ("opus", "audio-x-generic", FileCategory::Audio),
+    ("aac", "audio-x-generic", FileCategory::Audio),
     // Archives
     ("zip", "application-zip", FileCategory::Archive),
     ("7z", "application-x-7z-compressed", FileCategory::Archive),
@@ -370,23 +409,78 @@ const EXTENSION_ICONS: &[(&str, &str, FileCategory)] = &[
         "application-x-apple-diskimage",
         FileCategory::DiskImage,
     ),
+    // Additional virtual/cloud disk images (closest existing asset).
+    ("vhd", "application-x-cd-image", FileCategory::DiskImage),
+    ("vmdk", "application-x-cd-image", FileCategory::DiskImage),
+    ("vdi", "application-x-cd-image", FileCategory::DiskImage),
+    ("qcow2", "application-x-cd-image", FileCategory::DiskImage),
+    // Executables / shared libraries / batch scripts.
+    ("elf", "application-x-executable", FileCategory::Executable),
+    ("so", "application-x-executable", FileCategory::Executable),
+    ("dll", "application-x-executable", FileCategory::Executable),
+    (
+        "dylib",
+        "application-x-executable",
+        FileCategory::Executable,
+    ),
+    (
+        "bat",
+        "application-x-ms-dos-executable",
+        FileCategory::Executable,
+    ),
+    (
+        "cmd",
+        "application-x-ms-dos-executable",
+        FileCategory::Executable,
+    ),
+    // Installers / packages.
+    ("msi", "package-x-generic", FileCategory::Installer),
+    ("pkg", "package-x-generic", FileCategory::Installer),
+    (
+        "appimage",
+        "application-x-iso9660-appimage",
+        FileCategory::Installer,
+    ),
+    ("flatpak", "package-x-generic", FileCategory::Installer),
+    ("snap", "package-x-generic", FileCategory::Installer),
     // Databases / fonts / certificates / keys
     ("sqlite", "application-x-sqlite3", FileCategory::Database),
     ("sqlite3", "application-x-sqlite3", FileCategory::Database),
     ("db", "application-x-sqlite3", FileCategory::Database),
+    ("dbf", "application-x-sqlite3", FileCategory::Database),
     ("ttf", "application-x-font-ttf", FileCategory::Font),
     ("otf", "application-x-font-otf", FileCategory::Font),
+    ("ttc", "application-x-font-ttf", FileCategory::Font),
+    ("woff", "font-x-generic", FileCategory::Font),
+    ("woff2", "font-x-generic", FileCategory::Font),
     ("crt", "application-certificate", FileCategory::Certificate),
     ("cer", "application-certificate", FileCategory::Certificate),
+    ("der", "application-pkix-cert", FileCategory::Certificate),
+    ("p12", "application-pkix-cert", FileCategory::Certificate),
+    ("pfx", "application-pkix-cert", FileCategory::Certificate),
     ("pem", "application-x-pem-key", FileCategory::Key),
     ("key", "application-pgp-keys", FileCategory::Key),
+    ("pub", "application-pgp-keys", FileCategory::Key),
+    ("asc", "application-pgp-keys", FileCategory::Key),
+    ("gpg", "application-pgp-keys", FileCategory::Key),
+    ("ppk", "application-pgp-keys", FileCategory::Key),
     // Ebooks / torrents / CAD / 3D
     ("epub", "application-epub+zip", FileCategory::Ebook),
     ("mobi", "application-epub+zip", FileCategory::Ebook),
     ("torrent", "application-x-bittorrent", FileCategory::Torrent),
     ("step", "application-x-step", FileCategory::Cad),
     ("stp", "application-x-step", FileCategory::Cad),
+    ("dwg", "application-x-step", FileCategory::Cad),
+    ("dxf", "application-x-step", FileCategory::Cad),
     ("stl", "model-stl", FileCategory::ThreeDimensional),
+    ("obj", "model-stl", FileCategory::ThreeDimensional),
+    ("fbx", "model-stl", FileCategory::ThreeDimensional),
+    ("glb", "model-stl", FileCategory::ThreeDimensional),
+    ("gltf", "model-stl", FileCategory::ThreeDimensional),
+    ("blend", "model-stl", FileCategory::ThreeDimensional),
+    ("3ds", "model-stl", FileCategory::ThreeDimensional),
+    // Unknown binary (closest existing asset: generic octet-stream).
+    ("bin", "application-octet-stream", FileCategory::Unknown),
 ];
 
 /// Compound extensions checked before ordinary extensions.
@@ -775,6 +869,84 @@ const MIME_ICONS: &[(&str, &str, FileCategory)] = &[
         "application-x-zerosize",
         FileCategory::Unknown,
     ),
+    // ── PAPIRUS-09: Task 9 coverage completion ────────────────────
+    // Common MIME aliases for the required Task 9 classes; every icon
+    // verified against the pinned manifest.
+    (
+        "text/x-typescript",
+        "text-javascript",
+        FileCategory::SourceCode,
+    ),
+    ("text/x-markdown", "text-markdown", FileCategory::Markdown),
+    (
+        "application/x-msdownload",
+        "application-x-ms-dos-executable",
+        FileCategory::Executable,
+    ),
+    (
+        "application/x-msi",
+        "package-x-generic",
+        FileCategory::Installer,
+    ),
+    (
+        "application/x-powershell",
+        "text-x-script",
+        FileCategory::SourceCode,
+    ),
+    (
+        "application/x-gzip",
+        "application-x-gzip",
+        FileCategory::Archive,
+    ),
+    (
+        "application/x-rar",
+        "application-x-rar",
+        FileCategory::Archive,
+    ),
+    (
+        "application/x-font-woff",
+        "font-x-generic",
+        FileCategory::Font,
+    ),
+    ("font/woff", "font-x-generic", FileCategory::Font),
+    ("font/woff2", "font-x-generic", FileCategory::Font),
+    (
+        "application/x-pkcs12",
+        "application-pkix-cert",
+        FileCategory::Certificate,
+    ),
+    (
+        "application/pgp-signature",
+        "application-pgp-keys",
+        FileCategory::Key,
+    ),
+    (
+        "image/x-canon-cr2",
+        "image-x-adobe-dng",
+        FileCategory::Image,
+    ),
+    (
+        "image/x-nikon-nef",
+        "image-x-adobe-dng",
+        FileCategory::Image,
+    ),
+    ("image/x-sony-arw", "image-x-adobe-dng", FileCategory::Image),
+    (
+        "application/x-vhd",
+        "application-x-cd-image",
+        FileCategory::DiskImage,
+    ),
+    (
+        "application/x-vmdk",
+        "application-x-cd-image",
+        FileCategory::DiskImage,
+    ),
+    (
+        "application/x-dbf",
+        "application-x-sqlite3",
+        FileCategory::Database,
+    ),
+    ("model/step", "application-x-step", FileCategory::Cad),
 ];
 
 /// Broad-category fallback icon per category (priority 7).
@@ -1769,5 +1941,565 @@ mod tests {
         assert_eq!(icon.icon_id, "application-pdf");
         let icon = resolve_file_icon("doc", Some(" application/pdf "), None, false);
         assert_eq!(icon.icon_id, "application-pdf");
+    }
+
+    // ── PAPIRUS-09: Task 9 required file-type coverage ─────────────
+
+    /// Spec-mandated examples (Task 19 "Required examples") must resolve
+    /// to the exact icon/category, and the icon must exist in the pinned
+    /// bundle with a real asset path.
+    #[test]
+    fn task9_required_examples_resolve_to_real_icons() {
+        let catalog = PapirusCatalog::global();
+        let cases: &[(&str, &str, FileCategory)] = &[
+            ("report.pdf", "application-pdf", FileCategory::Pdf),
+            (
+                "document.docx",
+                "application-vnd.openxmlformats-officedocument.wordprocessingml.document",
+                FileCategory::Document,
+            ),
+            (
+                "budget.xlsx",
+                "application-vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                FileCategory::Spreadsheet,
+            ),
+            (
+                "slides.pptx",
+                "application-vnd.openxmlformats-officedocument.presentationml.presentation",
+                FileCategory::Presentation,
+            ),
+            ("readme.md", "text-markdown", FileCategory::Markdown),
+            ("main.rs", "text-rust", FileCategory::SourceCode),
+            ("photo.png", "image-png", FileCategory::Image),
+            ("animation.gif", "image-gif", FileCategory::Image),
+            ("video.mp4", "video-mp4", FileCategory::Video),
+            ("movie.mkv", "video-x-matroska", FileCategory::Video),
+            ("music.flac", "audio-flac", FileCategory::Audio),
+            ("archive.tar.gz", "application-x-tar", FileCategory::Archive),
+            (
+                "package.7z",
+                "application-x-7z-compressed",
+                FileCategory::Archive,
+            ),
+            (
+                "database.sqlite",
+                "application-x-sqlite3",
+                FileCategory::Database,
+            ),
+            ("font.ttf", "application-x-font-ttf", FileCategory::Font),
+            (
+                "certificate.pem",
+                "application-x-pem-key",
+                FileCategory::Key,
+            ),
+            ("unknownfile", UNKNOWN_ICON, FileCategory::Unknown),
+        ];
+        for (name, icon_id, category) in cases {
+            let icon = resolve(name);
+            assert_eq!(&icon.icon_id, icon_id, "for {name:?}");
+            assert_eq!(icon.file_category, *category, "for {name:?}");
+            assert!(
+                catalog.has_icon(&icon.icon_id),
+                "resolved icon {} for {name:?} must exist in manifest",
+                icon.icon_id
+            );
+            assert!(
+                icon.asset_path.starts_with(PAPIRUS_ASSET_ROOT),
+                "asset path must be repo-relative: {}",
+                icon.asset_path
+            );
+            assert!(
+                icon.asset_path.ends_with(".svg"),
+                "asset path must point at an SVG: {}",
+                icon.asset_path
+            );
+        }
+
+        // shared-folder is an explicit directory → folder icon, never a
+        // filename-derived fallback.
+        let folder = resolve_file_icon("shared-folder", None, None, true);
+        assert_eq!(folder.icon_id, DIRECTORY_ICON);
+        assert_eq!(folder.file_category, FileCategory::Folder);
+        assert_eq!(folder.source, ResolutionSource::Directory);
+        assert!(catalog.has_icon(&folder.icon_id));
+    }
+
+    /// Full Task 9 coverage table (extension → category).  Every required
+    /// type must resolve by extension alone to the correct category with an
+    /// icon that exists in the pinned bundle.
+    #[test]
+    fn task9_full_extension_coverage_table() {
+        let catalog = PapirusCatalog::global();
+        let cases: &[(&str, FileCategory)] = &[
+            // Documents
+            ("pdf", FileCategory::Pdf),
+            ("doc", FileCategory::Document),
+            ("docx", FileCategory::Document),
+            ("odt", FileCategory::Document),
+            ("rtf", FileCategory::Document),
+            ("epub", FileCategory::Ebook),
+            ("txt", FileCategory::Text),
+            ("md", FileCategory::Markdown),
+            ("markdown", FileCategory::Markdown),
+            ("log", FileCategory::Text),
+            // Spreadsheets
+            ("xls", FileCategory::Spreadsheet),
+            ("xlsx", FileCategory::Spreadsheet),
+            ("ods", FileCategory::Spreadsheet),
+            ("csv", FileCategory::Spreadsheet),
+            ("tsv", FileCategory::Spreadsheet),
+            // Presentations
+            ("ppt", FileCategory::Presentation),
+            ("pptx", FileCategory::Presentation),
+            ("odp", FileCategory::Presentation),
+            // Images
+            ("jpg", FileCategory::Image),
+            ("jpeg", FileCategory::Image),
+            ("png", FileCategory::Image),
+            ("gif", FileCategory::Image),
+            ("webp", FileCategory::Image),
+            ("svg", FileCategory::Image),
+            ("bmp", FileCategory::Image),
+            ("tiff", FileCategory::Image),
+            ("tif", FileCategory::Image),
+            ("heic", FileCategory::Image),
+            ("heif", FileCategory::Image),
+            ("dng", FileCategory::Image),
+            ("cr2", FileCategory::Image),
+            ("nef", FileCategory::Image),
+            ("arw", FileCategory::Image),
+            ("raw", FileCategory::Image),
+            // Video
+            ("mp4", FileCategory::Video),
+            ("mkv", FileCategory::Video),
+            ("webm", FileCategory::Video),
+            ("mov", FileCategory::Video),
+            ("avi", FileCategory::Video),
+            ("mpeg", FileCategory::Video),
+            ("mpg", FileCategory::Video),
+            ("m4v", FileCategory::Video),
+            ("ogv", FileCategory::Video),
+            // Audio
+            ("mp3", FileCategory::Audio),
+            ("flac", FileCategory::Audio),
+            ("wav", FileCategory::Audio),
+            ("ogg", FileCategory::Audio),
+            ("opus", FileCategory::Audio),
+            ("m4a", FileCategory::Audio),
+            ("aac", FileCategory::Audio),
+            ("wma", FileCategory::Audio),
+            // Archives
+            ("zip", FileCategory::Archive),
+            ("7z", FileCategory::Archive),
+            ("rar", FileCategory::Archive),
+            ("tar", FileCategory::Archive),
+            ("gz", FileCategory::Archive),
+            ("bz2", FileCategory::Archive),
+            ("xz", FileCategory::Archive),
+            ("zst", FileCategory::Archive),
+            // Source code
+            ("rs", FileCategory::SourceCode),
+            ("js", FileCategory::SourceCode),
+            ("ts", FileCategory::SourceCode),
+            ("py", FileCategory::SourceCode),
+            ("java", FileCategory::SourceCode),
+            ("kt", FileCategory::SourceCode),
+            ("kts", FileCategory::SourceCode),
+            ("c", FileCategory::SourceCode),
+            ("h", FileCategory::SourceCode),
+            ("cpp", FileCategory::SourceCode),
+            ("cc", FileCategory::SourceCode),
+            ("cxx", FileCategory::SourceCode),
+            ("hpp", FileCategory::SourceCode),
+            ("cs", FileCategory::SourceCode),
+            ("go", FileCategory::SourceCode),
+            ("html", FileCategory::SourceCode),
+            ("css", FileCategory::SourceCode),
+            ("json", FileCategory::SourceCode),
+            ("xml", FileCategory::SourceCode),
+            ("yaml", FileCategory::SourceCode),
+            ("yml", FileCategory::SourceCode),
+            ("toml", FileCategory::SourceCode),
+            ("sh", FileCategory::SourceCode),
+            ("bash", FileCategory::SourceCode),
+            ("zsh", FileCategory::SourceCode),
+            ("fish", FileCategory::SourceCode),
+            ("ps1", FileCategory::SourceCode),
+            ("sql", FileCategory::SourceCode),
+            // Executables
+            ("exe", FileCategory::Executable),
+            ("elf", FileCategory::Executable),
+            ("so", FileCategory::Executable),
+            ("dll", FileCategory::Executable),
+            ("dylib", FileCategory::Executable),
+            ("bat", FileCategory::Executable),
+            ("cmd", FileCategory::Executable),
+            // Installers / packages
+            ("deb", FileCategory::Installer),
+            ("rpm", FileCategory::Installer),
+            ("apk", FileCategory::Installer),
+            ("msi", FileCategory::Installer),
+            ("pkg", FileCategory::Installer),
+            ("appimage", FileCategory::Installer),
+            ("flatpak", FileCategory::Installer),
+            ("snap", FileCategory::Installer),
+            // Disk images
+            ("iso", FileCategory::DiskImage),
+            ("img", FileCategory::DiskImage),
+            ("dmg", FileCategory::DiskImage),
+            ("vhd", FileCategory::DiskImage),
+            ("vmdk", FileCategory::DiskImage),
+            ("vdi", FileCategory::DiskImage),
+            ("qcow2", FileCategory::DiskImage),
+            // Databases
+            ("sqlite", FileCategory::Database),
+            ("sqlite3", FileCategory::Database),
+            ("db", FileCategory::Database),
+            ("dbf", FileCategory::Database),
+            // Fonts
+            ("ttf", FileCategory::Font),
+            ("otf", FileCategory::Font),
+            ("ttc", FileCategory::Font),
+            ("woff", FileCategory::Font),
+            ("woff2", FileCategory::Font),
+            // Certificates
+            ("crt", FileCategory::Certificate),
+            ("cer", FileCategory::Certificate),
+            ("der", FileCategory::Certificate),
+            ("p12", FileCategory::Certificate),
+            ("pfx", FileCategory::Certificate),
+            // Keys
+            ("pem", FileCategory::Key),
+            ("key", FileCategory::Key),
+            ("pub", FileCategory::Key),
+            ("asc", FileCategory::Key),
+            ("gpg", FileCategory::Key),
+            ("ppk", FileCategory::Key),
+            // Ebooks / torrents / CAD / 3D
+            ("mobi", FileCategory::Ebook),
+            ("torrent", FileCategory::Torrent),
+            ("step", FileCategory::Cad),
+            ("stp", FileCategory::Cad),
+            ("dwg", FileCategory::Cad),
+            ("dxf", FileCategory::Cad),
+            ("stl", FileCategory::ThreeDimensional),
+            ("obj", FileCategory::ThreeDimensional),
+            ("fbx", FileCategory::ThreeDimensional),
+            ("glb", FileCategory::ThreeDimensional),
+            ("gltf", FileCategory::ThreeDimensional),
+            ("blend", FileCategory::ThreeDimensional),
+            ("3ds", FileCategory::ThreeDimensional),
+            // Unknown binary
+            ("bin", FileCategory::Unknown),
+        ];
+        for (ext, category) in cases {
+            let filename = format!("file.{ext}");
+            let icon = resolve(&filename);
+            assert_eq!(
+                icon.file_category, *category,
+                "extension {ext:?} resolved to wrong category (icon {})",
+                icon.icon_id
+            );
+            assert!(
+                catalog.has_icon(&icon.icon_id),
+                "extension {ext:?} resolved to missing icon {}",
+                icon.icon_id
+            );
+            assert!(
+                icon.asset_path.starts_with(PAPIRUS_ASSET_ROOT),
+                "extension {ext:?} asset path must be repo-relative: {}",
+                icon.asset_path
+            );
+        }
+    }
+
+    /// The compound archive extensions added for Task 9 remain archive
+    /// types and never fall through to the generic unknown icon.
+    #[test]
+    fn task9_compound_archives_resolve() {
+        for name in [
+            "backup.tar.gz",
+            "backup.tar.bz2",
+            "backup.tar.xz",
+            "backup.tar.zst",
+        ] {
+            let icon = resolve(name);
+            assert_eq!(icon.file_category, FileCategory::Archive, "for {name:?}");
+            assert!(
+                PapirusCatalog::global().has_icon(&icon.icon_id),
+                "for {name:?}"
+            );
+            assert_ne!(
+                icon.source,
+                ResolutionSource::UnknownFallback,
+                "for {name:?}"
+            );
+        }
+    }
+
+    /// Task 9 MIME coverage completion: the common MIME aliases added in
+    /// PAPIRUS-09 resolve to the closest existing icon.
+    #[test]
+    fn task9_mime_aliases_resolve() {
+        let cases: &[(&str, &str, FileCategory)] = &[
+            (
+                "text/x-typescript",
+                "text-javascript",
+                FileCategory::SourceCode,
+            ),
+            ("text/x-markdown", "text-markdown", FileCategory::Markdown),
+            (
+                "application/x-msdownload",
+                "application-x-ms-dos-executable",
+                FileCategory::Executable,
+            ),
+            (
+                "application/x-msi",
+                "package-x-generic",
+                FileCategory::Installer,
+            ),
+            (
+                "application/x-powershell",
+                "text-x-script",
+                FileCategory::SourceCode,
+            ),
+            (
+                "application/x-gzip",
+                "application-x-gzip",
+                FileCategory::Archive,
+            ),
+            (
+                "application/x-rar",
+                "application-x-rar",
+                FileCategory::Archive,
+            ),
+            (
+                "application/x-font-woff",
+                "font-x-generic",
+                FileCategory::Font,
+            ),
+            ("font/woff", "font-x-generic", FileCategory::Font),
+            ("font/woff2", "font-x-generic", FileCategory::Font),
+            (
+                "application/x-pkcs12",
+                "application-pkix-cert",
+                FileCategory::Certificate,
+            ),
+            (
+                "application/pgp-signature",
+                "application-pgp-keys",
+                FileCategory::Key,
+            ),
+            (
+                "image/x-canon-cr2",
+                "image-x-adobe-dng",
+                FileCategory::Image,
+            ),
+            (
+                "image/x-nikon-nef",
+                "image-x-adobe-dng",
+                FileCategory::Image,
+            ),
+            ("image/x-sony-arw", "image-x-adobe-dng", FileCategory::Image),
+            (
+                "application/x-vhd",
+                "application-x-cd-image",
+                FileCategory::DiskImage,
+            ),
+            (
+                "application/x-vmdk",
+                "application-x-cd-image",
+                FileCategory::DiskImage,
+            ),
+            (
+                "application/x-dbf",
+                "application-x-sqlite3",
+                FileCategory::Database,
+            ),
+            ("model/step", "application-x-step", FileCategory::Cad),
+        ];
+        for (mime, icon_id, category) in cases {
+            let icon = resolve_file_icon("download", Some(mime), None, false);
+            assert_eq!(&icon.icon_id, icon_id, "for MIME {mime}");
+            assert_eq!(icon.file_category, *category, "for MIME {mime}");
+            assert_eq!(
+                icon.source,
+                ResolutionSource::AdvertisedMime,
+                "for MIME {mime}"
+            );
+            assert!(
+                PapirusCatalog::global().has_icon(&icon.icon_id),
+                "icon {} must exist for MIME {mime}",
+                icon.icon_id
+            );
+        }
+    }
+
+    /// Every required Task 9 type must also resolve when the MIME type is
+    /// provided (exact MIME icon or closest fallback) — never a missing
+    /// asset, never an unknown generic for a known class.
+    #[test]
+    fn task9_mime_class_coverage_never_missing() {
+        let catalog = PapirusCatalog::global();
+        let mimes: &[(&str, FileCategory)] = &[
+            ("application/pdf", FileCategory::Pdf),
+            ("application/msword", FileCategory::Document),
+            (
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                FileCategory::Document,
+            ),
+            (
+                "application/vnd.oasis.opendocument.text",
+                FileCategory::Document,
+            ),
+            ("application/rtf", FileCategory::Document),
+            ("application/epub+zip", FileCategory::Ebook),
+            ("text/plain", FileCategory::Text),
+            ("text/markdown", FileCategory::Markdown),
+            ("text/x-log", FileCategory::Text),
+            ("application/vnd.ms-excel", FileCategory::Spreadsheet),
+            (
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                FileCategory::Spreadsheet,
+            ),
+            (
+                "application/vnd.oasis.opendocument.spreadsheet",
+                FileCategory::Spreadsheet,
+            ),
+            ("text/csv", FileCategory::Spreadsheet),
+            ("text/tab-separated-values", FileCategory::Spreadsheet),
+            ("application/vnd.ms-powerpoint", FileCategory::Presentation),
+            (
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                FileCategory::Presentation,
+            ),
+            (
+                "application/vnd.oasis.opendocument.presentation",
+                FileCategory::Presentation,
+            ),
+            ("image/jpeg", FileCategory::Image),
+            ("image/png", FileCategory::Image),
+            ("image/gif", FileCategory::Image),
+            ("image/webp", FileCategory::Image),
+            ("image/svg+xml", FileCategory::Image),
+            ("image/bmp", FileCategory::Image),
+            ("image/tiff", FileCategory::Image),
+            ("image/heic", FileCategory::Image),
+            ("image/heif", FileCategory::Image),
+            ("image/x-adobe-dng", FileCategory::Image),
+            ("video/mp4", FileCategory::Video),
+            ("video/x-matroska", FileCategory::Video),
+            ("video/webm", FileCategory::Video),
+            ("video/quicktime", FileCategory::Video),
+            ("video/x-msvideo", FileCategory::Video),
+            ("video/mpeg", FileCategory::Video),
+            ("video/x-m4v", FileCategory::Video),
+            ("video/ogg", FileCategory::Video),
+            ("audio/mpeg", FileCategory::Audio),
+            ("audio/mp3", FileCategory::Audio),
+            ("audio/flac", FileCategory::Audio),
+            ("audio/x-wav", FileCategory::Audio),
+            ("audio/ogg", FileCategory::Audio),
+            ("audio/opus", FileCategory::Audio),
+            ("audio/x-m4a", FileCategory::Audio),
+            ("audio/aac", FileCategory::Audio),
+            ("audio/x-ms-wma", FileCategory::Audio),
+            ("application/zip", FileCategory::Archive),
+            ("application/x-7z-compressed", FileCategory::Archive),
+            ("application/vnd.rar", FileCategory::Archive),
+            ("application/x-tar", FileCategory::Archive),
+            ("application/gzip", FileCategory::Archive),
+            ("application/x-bzip2", FileCategory::Archive),
+            ("application/x-xz-compressed-tar", FileCategory::Archive),
+            ("application/zstd", FileCategory::Archive),
+            ("text/x-rust", FileCategory::SourceCode),
+            ("application/javascript", FileCategory::SourceCode),
+            ("text/javascript", FileCategory::SourceCode),
+            ("text/typescript", FileCategory::SourceCode),
+            ("text/x-python", FileCategory::SourceCode),
+            ("text/x-java", FileCategory::SourceCode),
+            ("text/x-kotlin", FileCategory::SourceCode),
+            ("text/x-c", FileCategory::SourceCode),
+            ("text/x-c++", FileCategory::SourceCode),
+            ("text/x-csharp", FileCategory::SourceCode),
+            ("text/x-go", FileCategory::SourceCode),
+            ("text/html", FileCategory::SourceCode),
+            ("text/css", FileCategory::SourceCode),
+            ("application/json", FileCategory::SourceCode),
+            ("application/xml", FileCategory::SourceCode),
+            ("application/yaml", FileCategory::SourceCode),
+            ("application/toml", FileCategory::SourceCode),
+            ("text/x-shellscript", FileCategory::SourceCode),
+            ("text/x-powershell", FileCategory::SourceCode),
+            ("application/sql", FileCategory::SourceCode),
+            ("application/x-ms-dos-executable", FileCategory::Executable),
+            ("application/x-executable", FileCategory::Executable),
+            (
+                "application/vnd.debian.binary-package",
+                FileCategory::Installer,
+            ),
+            ("application/x-rpm", FileCategory::Installer),
+            (
+                "application/vnd.android.package-archive",
+                FileCategory::Installer,
+            ),
+            ("application/x-cd-image", FileCategory::DiskImage),
+            ("application/x-raw-disk-image", FileCategory::DiskImage),
+            ("application/x-apple-diskimage", FileCategory::DiskImage),
+            ("application/x-sqlite3", FileCategory::Database),
+            ("application/vnd.sqlite3", FileCategory::Database),
+            ("application/x-font-ttf", FileCategory::Font),
+            ("application/x-font-otf", FileCategory::Font),
+            ("application/x-x509-ca-cert", FileCategory::Certificate),
+            ("application/pkix-cert", FileCategory::Certificate),
+            ("application/x-pem-key", FileCategory::Key),
+            ("application/pgp-keys", FileCategory::Key),
+            ("application/x-bittorrent", FileCategory::Torrent),
+            ("application/x-step", FileCategory::Cad),
+            ("model/stl", FileCategory::ThreeDimensional),
+            ("model/obj", FileCategory::ThreeDimensional),
+            ("model/gltf", FileCategory::ThreeDimensional),
+        ];
+        for (mime, category) in mimes {
+            let icon = resolve_file_icon("download", Some(mime), None, false);
+            assert_eq!(
+                icon.file_category, *category,
+                "MIME {mime} resolved to wrong category (icon {})",
+                icon.icon_id
+            );
+            assert!(
+                catalog.has_icon(&icon.icon_id),
+                "MIME {mime} resolved to missing icon {}",
+                icon.icon_id
+            );
+            assert!(
+                icon.asset_path.starts_with(PAPIRUS_ASSET_ROOT),
+                "MIME {mime} asset path must be repo-relative: {}",
+                icon.asset_path
+            );
+        }
+    }
+
+    /// Extensionless files and hidden files stay on the unknown generic
+    /// path, and unknown binary extensions map to the unknown category —
+    /// the resolver never returns a missing asset for them.
+    #[test]
+    fn task9_unknown_and_extensionless_never_missing() {
+        let catalog = PapirusCatalog::global();
+        for name in ["README", "Makefile", ".env", "noextension"] {
+            let icon = resolve(name);
+            assert_eq!(icon.file_category, FileCategory::Unknown, "for {name:?}");
+            assert_eq!(
+                icon.source,
+                ResolutionSource::UnknownFallback,
+                "for {name:?}"
+            );
+            assert!(catalog.has_icon(&icon.icon_id), "for {name:?}");
+        }
+        // .bin resolves as an unknown binary via the extension path.
+        let icon = resolve("firmware.bin");
+        assert_eq!(icon.file_category, FileCategory::Unknown);
+        assert_eq!(icon.source, ResolutionSource::Extension);
+        assert!(catalog.has_icon(&icon.icon_id));
     }
 }
