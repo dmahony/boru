@@ -4,7 +4,7 @@
 Reproducible import process for `assets/third_party/papirus/`.
 
 Usage:
-    python3 scripts/vendor_papirus_icons.py --source /path/to/papirus-icon-theme [--commit <sha>] [--out <dir>]
+    python3 scripts/vendor_papirus_icons.py --source /path/to/papirus-icon-theme [--commit <sha>] [--out <dir>] [--import-date YYYY-MM-DD]
     python3 scripts/vendor_papirus_icons.py --check [--out <dir>]
 
 What it does:
@@ -41,6 +41,12 @@ Examples:
     python3 scripts/vendor_papirus_icons.py --source /tmp/papirus-icon-theme
     python3 scripts/vendor_papirus_icons.py --source /tmp/papirus-src/papirus-icon-theme-<sha>
     python3 scripts/vendor_papirus_icons.py --check
+
+Reproducibility:
+    manifest.json records an `import_date` and UPSTREAM.md records `Import date`.
+    These are the ONLY nondeterministic fields (they default to today's date).
+    Pass `--import-date YYYY-MM-DD` to pin them; with a pinned date the script
+    regenerates the entire bundle byte-identically from the same source.
 """
 
 from __future__ import annotations
@@ -218,7 +224,15 @@ def main() -> None:
     ap.add_argument("--out", default=str(DEFAULT_OUT), help="Output directory (default: assets/third_party/papirus)")
     ap.add_argument("--selection", default=str(DEFAULT_SELECTION), help="Selection JSON (default: selected-icons.json)")
     ap.add_argument("--check", action="store_true", help="Verify an existing bundle without importing")
+    ap.add_argument("--import-date", default=None,
+                    help="Import date YYYY-MM-DD for manifest/UPSTREAM (default: today; pin it to reproduce byte-identical output)")
     args = ap.parse_args()
+
+    import_date = args.import_date or datetime.date.today().isoformat()
+    try:
+        datetime.date.fromisoformat(import_date)
+    except ValueError:
+        die(f"--import-date must be YYYY-MM-DD, got: {import_date}")
 
     source = Path(args.source) if args.source else None
     out = Path(args.out)
@@ -315,7 +329,7 @@ def main() -> None:
         "commit": commit,
         "license": selection.get("license", "GPL-3.0"),
         "generated_by": "scripts/vendor_papirus_icons.py",
-        "import_date": datetime.date.today().isoformat(),
+        "import_date": import_date,
         "sizes": sizes,
         "required_fallbacks": sorted(required_fallbacks),
         "icons": icon_paths,
@@ -342,7 +356,7 @@ def main() -> None:
     print(f"Wrote manifest.json ({len(icon_paths)} icons).")
 
     # UPSTREAM.md.
-    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+    now = import_date
     imported_paths = "\n".join(
         f"- {size}/ ({len([p for p in icon_paths.values() if size in p])} icons)" for size in sizes
     )
