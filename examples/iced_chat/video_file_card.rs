@@ -42,10 +42,11 @@ use super::app::{
 };
 use super::app::{AppMessage, DownloadAttachment, DownloadState};
 use super::download_progress_view::{
-    action_button, action_buttons, active_download_detail, human_size, progress_section,
-    resolve_theme, secondary_button, state_badge, state_badge_color,
+    action_button, action_buttons, active_download_detail, file_type_icon_element, human_size,
+    progress_section, resolve_theme, secondary_button, state_badge, state_badge_color,
 };
 use crate::design_tokens;
+use crate::file_type_icon::FileTypeIconSize;
 use crate::icon_system::{Icon, IconSize};
 use crate::ui_components::OverflowMenu;
 
@@ -241,23 +242,24 @@ fn media_frame_style(_theme: &iced::Theme) -> widget::container::Style {
 
 /// Compact loading indicator shown while the poster or the inline player
 /// prepares (VIDCARD-11). Rendered as a small translucent dark chip with
-/// an activity glyph and a short label; there is no spinner widget in
+/// the Papirus video icon and a short label; there is no spinner widget in
 /// iced 0.14, so this is a static-but-unmistakable loading affordance.
-fn loading_indicator<'a>() -> iced::Element<'a, AppMessage> {
+/// PAPIRUS-10: loading/thumbnail-failure states use the Papirus video icon
+/// (the same central component the card header uses).
+fn loading_indicator<'a>(
+    attachment: &DownloadAttachment,
+    dark_mode: bool,
+) -> iced::Element<'a, AppMessage> {
     container(
         Column::new()
-            .push(
-                Icon::Activity
-                    .build()
-                    .size(IconSize::Lg)
-                    .color_fn(|_| Color::WHITE)
-                    .build(),
-            )
-            .push(
-                text("Preparing…")
-                    .size(TYPO_XS)
-                    .color(ON_MEDIA_TEXT),
-            )
+            .push(file_type_icon_element(
+                &attachment.name,
+                None,
+                None,
+                FileTypeIconSize::List,
+                &resolve_theme(dark_mode),
+            ))
+            .push(text("Preparing…").size(TYPO_XS).color(ON_MEDIA_TEXT))
             .spacing(SPACE_4)
             .align_x(Alignment::Center),
     )
@@ -670,11 +672,11 @@ impl<'a> BoruVideoFileCard<'a> {
 
         let badge = header_badge_pill(&badge_label, badge_bg, badge_fg);
 
-        let video_icon = Icon::Video
-            .build()
-            .size(IconSize::Sm)
-            .color_fn(design_tokens::text_secondary)
-            .build();
+        // PAPIRUS-10: the card header carries the central Papirus video icon
+        // (Card, 32px) beside the filename — same component for every chat
+        // surface, no per-screen extension maps.
+        let video_icon =
+            file_type_icon_element(&attachment.name, None, None, FileTypeIconSize::Card, theme);
 
         // Filename: single line, width-capped + clipped so a long name can
         // never widen the card. The tooltip exposes the full name and the
@@ -837,7 +839,7 @@ impl<'a> BoruVideoFileCard<'a> {
                 presentation,
                 VideoPresentationState::Downloading | VideoPresentationState::Verifying
             ) {
-                container(loading_indicator())
+                container(loading_indicator(attachment, self.dark_mode))
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .center_x(Length::Fill)
@@ -850,17 +852,18 @@ impl<'a> BoruVideoFileCard<'a> {
                 // exist after the download completes. On-media text uses the
                 // light `ON_MEDIA_TEXT` neutral because the media frame is a
                 // fixed dark surface in both themes (VIDCARD-08).
+                // PAPIRUS-10: the placeholder's main visual is the Papirus
+                // video icon (Large, 48px), not the play glyph + "VIDEO" text.
                 let subtitle = media_placeholder_text(attachment);
                 container(
                     Column::new()
-                        .push(
-                            Icon::Play
-                                .build()
-                                .size(IconSize::Lg)
-                                .color_fn(|_t| ON_MEDIA_TEXT)
-                                .build(),
-                        )
-                        .push(text("VIDEO").size(TYPO_SM).color(ON_MEDIA_TEXT))
+                        .push(file_type_icon_element(
+                            &attachment.name,
+                            None,
+                            None,
+                            FileTypeIconSize::Large,
+                            &resolve_theme(self.dark_mode),
+                        ))
                         .push(text(subtitle).size(TYPO_XS).color(ON_MEDIA_TEXT))
                         .spacing(SPACE_4)
                         .align_x(Alignment::Center),
@@ -938,7 +941,7 @@ impl<'a> BoruVideoFileCard<'a> {
                     if self.preparing {
                         // The inline player is still being prepared: show the
                         // loading indicator instead of the play overlay.
-                        container(loading_indicator())
+                        container(loading_indicator(attachment, self.dark_mode))
                             .center_x(Length::Fill)
                             .center_y(Length::Fill)
                     } else if presentation == VideoPresentationState::Ready {

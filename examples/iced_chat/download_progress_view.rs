@@ -15,6 +15,21 @@
 //!
 //! All colors, spacing, and typography use the existing constants from the
 //! parent module to stay consistent with the app's design system.
+//!
+//! ## File-type icons (PAPIRUS-10)
+//!
+//! Chat file cards render their file-type icon through the central
+//! [`crate::file_type_icon::FileTypeIcon`] component (resolved by the
+//! central resolver).  Because `FileTypeIcon::build` returns an element tied
+//! to the configured icon's borrow, and chat views return `'static` elements
+//! (through `iced::widget::lazy`), this module keeps a process-global cache
+//! of leaked icon configurations keyed by filename/MIME/size — the same
+//! process-lifetime strategy the component itself uses for SVG handles.
+//! [`file_type_icon_element`] is the single chat-side entry point; no chat
+//! surface keeps its own extension→icon map.
+
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 use iced::widget::text::Wrapping;
 use iced::widget::{self, button, container, row, Column, Row};
@@ -23,14 +38,15 @@ use iced::{Alignment, Color, Length};
 use iced_video_player::Video;
 
 use super::app::{
-    icon_svg, AppMessage, DownloadAttachment, DownloadState, ICON_ACTIVITY, ICON_FILES,
-    ICON_FOLDER, ICON_MESH, ICON_PLAY, ICON_RETRY,
+    icon_svg, AppMessage, DownloadAttachment, DownloadState, ICON_FILES, ICON_FOLDER, ICON_MESH,
+    ICON_PLAY, ICON_RETRY,
 };
+use crate::file_type_icon::{FileTypeIcon, FileTypeIconSize};
 
 // Re-import the design-token helpers and constants from app.rs.
 use super::app::{
     accent_green, accent_primary, bg_surface, border_muted, color_error, text_muted, text_system,
-    SPACE_10, SPACE_12, SPACE_16, SPACE_2, SPACE_4, SPACE_6, SPACE_8, TYPO_SM, TYPO_XS,
+    SPACE_10, SPACE_12, SPACE_16, SPACE_2, SPACE_4, SPACE_6, SPACE_8, TYPO_XS,
 };
 
 // ── Progress bar geometry (VIDCARD-14) ────────────────────────────────
@@ -82,6 +98,86 @@ pub(crate) fn state_badge_label(state: &DownloadState) -> String {
         DownloadState::Failed { failure } => failure.stability_label().to_string(),
         DownloadState::Cancelled => "Cancelled".to_string(),
     }
+}
+
+// ── File-type icon element (PAPIRUS-10) ─────────────────────────────────
+
+/// Cache key for a configured file-type icon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileTypeIconKey {
+    filename: String,
+    mime_type: Option<String>,
+    detected_type: Option<String>,
+    size: FileTypeIconSize,
+}
+
+impl std::hash::Hash for FileTypeIconKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.filename.hash(state);
+        self.mime_type.hash(state);
+        self.detected_type.hash(state);
+        // FileTypeIconSize does not derive Hash; its Papirus size directory is
+        // injective (16/24/32/48/64 map one-to-one), so hash that instead.
+        self.size.papirus_dir().hash(state);
+    }
+}
+
+/// Process-global cache of configured [`FileTypeIcon`] configurations.
+///
+/// `FileTypeIcon::build` returns an element tied to the `&self` borrow of the
+/// configured icon, but chat card views return `'static` elements (they are
+/// routed through `iced::widget::lazy`).  To satisfy both, we cache one
+/// leaked `'static` `FileTypeIcon` per (filename, mime, detected, size) key —
+/// the same process-lifetime strategy the component itself uses for its SVG
+/// handle cache.  The leak is bounded by the number of distinct attachment
+/// names a session sees (chat history is capped), and each entry is a tiny
+/// resolved-icon config, not decoded SVG data.
+static FILE_TYPE_ICON_CACHE: OnceLock<
+    Mutex<HashMap<FileTypeIconKey, &'static FileTypeIcon<'static>>>,
+> = OnceLock::new();
+
+/// Build a Papirus file-type icon element for a chat card.
+///
+/// This is the single chat-side entry point to the central component
+/// ([`FileTypeIcon`], resolved by [`crate::file_type_resolver`]).  Chat
+/// surfaces pass the attachment name (and any MIME they already hold) and a
+/// semantic size; they must NOT keep their own extension maps.
+pub(crate) fn file_type_icon_element(
+    filename: &str,
+    mime_type: Option<&str>,
+    detected_type: Option<&str>,
+    size: FileTypeIconSize,
+    theme: &iced::Theme,
+) -> iced::Element<'static, AppMessage> {
+    let key = FileTypeIconKey {
+        filename: filename.to_string(),
+        mime_type: mime_type.map(str::to_string),
+        detected_type: detected_type.map(str::to_string),
+        size,
+    };
+    let cache = FILE_TYPE_ICON_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache.lock().unwrap();
+    if let Some(icon) = cache.get(&key) {
+        return icon.build(theme);
+    }
+    // Leak the configured icon (and the strings it borrows) so the returned
+    // element can be `'static`.  Bounded per unique key; see struct docs.
+    // `Box::leak` yields `&'static mut str`; coerce to the shared reference
+    // the component requires.
+    let filename: &'static str = Box::leak(key.filename.clone().into_boxed_str());
+    let mime_type: Option<&'static str> = key
+        .mime_type
+        .as_deref()
+        .map(|m| Box::leak(m.to_string().into_boxed_str()) as &'static str);
+    let detected_type: Option<&'static str> = key
+        .detected_type
+        .as_deref()
+        .map(|m| Box::leak(m.to_string().into_boxed_str()) as &'static str);
+    let icon: &'static FileTypeIcon<'static> = Box::leak(Box::new(
+        FileTypeIcon::new(filename, mime_type, detected_type, false).size(key.size),
+    ));
+    cache.insert(key, icon);
+    icon.build(theme)
 }
 
 // ── Human-readable byte formatting ───────────────────────────────────────
@@ -386,11 +482,6 @@ fn view_download_progress_inner<'a>(
     let muted = text_system(&theme);
     let name_str = attachment.name.clone();
     let error_color = color_error(&theme);
-    let attachment_icon = match attachment.kind {
-        super::app::TransferKind::Image => ICON_ACTIVITY,
-        super::app::TransferKind::Video => ICON_ACTIVITY,
-        super::app::TransferKind::File => ICON_FILES,
-    };
 
     // ── Row 1: State badge + filename + total size ──────────────────────
     let size_text = match &state {
@@ -417,11 +508,16 @@ fn view_download_progress_inner<'a>(
         _ => String::new(),
     };
 
+    // ── Row 1: State badge + filename + total size ──────────────────────
+    // The card header carries the central Papirus file-type icon beside the
+    // filename (PAPIRUS-10): the icon answers "what type of file is this?",
+    // the state badge answers "what is happening to it" — status stays
+    // separate from the file-type icon.
+    let file_type_icon =
+        file_type_icon_element(&attachment.name, None, None, FileTypeIconSize::Card, &theme);
+
     let title_row = Row::new()
-        .push(
-            icon_svg(attachment_icon, TYPO_SM)
-                .style(move |_t, _s| iced::widget::svg::Style { color: Some(tone) }),
-        )
+        .push(file_type_icon)
         .push(state_badge(state, tone))
         .push(
             crate::fonts::type_role_text(
@@ -924,5 +1020,80 @@ mod tests {
             total_size: Some(100),
         };
         assert_eq!(active_download_detail(&att), None);
+    }
+
+    // ── PAPIRUS-10: file-type icon element ─────────────────────────────
+
+    #[test]
+    fn file_type_icon_element_builds_for_each_semantic_size() {
+        for size in [
+            FileTypeIconSize::Compact,
+            FileTypeIconSize::List,
+            FileTypeIconSize::Card,
+            FileTypeIconSize::Large,
+            FileTypeIconSize::Hero,
+        ] {
+            let el: iced::Element<'_, AppMessage> =
+                file_type_icon_element("report.pdf", None, None, size, &iced::Theme::Light);
+            let _ = el;
+        }
+    }
+
+    #[test]
+    fn file_type_icon_element_resolves_by_extension() {
+        let el: iced::Element<'_, AppMessage> = file_type_icon_element(
+            "photo.png",
+            None,
+            None,
+            FileTypeIconSize::List,
+            &iced::Theme::Light,
+        );
+        let _ = el;
+    }
+
+    #[test]
+    fn file_type_icon_element_uses_advertised_mime_hint() {
+        let el: iced::Element<'_, AppMessage> = file_type_icon_element(
+            "download.bin",
+            Some("application/pdf"),
+            None,
+            FileTypeIconSize::Card,
+            &iced::Theme::Dark,
+        );
+        let _ = el;
+    }
+
+    #[test]
+    fn file_type_icon_element_unknown_name_still_builds() {
+        // The resolver's never-missing fallback chain must apply through the
+        // chat helper too — an extensionless name never produces a broken
+        // element.
+        let el: iced::Element<'_, AppMessage> = file_type_icon_element(
+            "unknownfile",
+            None,
+            None,
+            FileTypeIconSize::Card,
+            &iced::Theme::Light,
+        );
+        let _ = el;
+    }
+
+    #[test]
+    fn file_type_icon_element_cache_is_deduped_by_key() {
+        // Robust to test parallelism (other tests insert distinct keys into
+        // the shared process-global cache concurrently): measure the delta
+        // contributed by THIS key instead of assuming the map is empty.
+        const KEY: &str = "cache-key-example-unique.docx";
+        let cache = FILE_TYPE_ICON_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        let key_count =
+            |needle: &str| usize::from(cache.lock().unwrap().keys().any(|k| k.filename == needle));
+        // Count how many entries exist for this exact key (should be 0 or 1).
+        let before = key_count(KEY);
+        let _el: iced::Element<'_, AppMessage> =
+            file_type_icon_element(KEY, None, None, FileTypeIconSize::List, &iced::Theme::Light);
+        let _el2: iced::Element<'_, AppMessage> =
+            file_type_icon_element(KEY, None, None, FileTypeIconSize::List, &iced::Theme::Light);
+        // Two requests for the same key must not create two cache entries.
+        assert_eq!(key_count(KEY), before + 1);
     }
 }

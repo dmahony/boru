@@ -21109,8 +21109,11 @@ impl IcedChat {
         let sender_name = self.resolve_name(from);
         let body_text = match message {
             crate::Message::Message { text } => text.clone(),
-            crate::Message::FileShare { name, .. } => format!("📎 {}", name),
-            crate::Message::ImageShare { .. } => "🖼️ Image".to_string(),
+            // PAPIRUS-10: no emoji as file-type icons in notifications —
+            // the OS notification backend renders plain text, so a text
+            // label carries the file type instead of an emoji glyph.
+            crate::Message::FileShare { name, .. } => format!("File: {name}"),
+            crate::Message::ImageShare { .. } => "Image".to_string(),
             _ => "New message".to_string(),
         };
         // Limit preview length for notification bodies
@@ -29429,6 +29432,49 @@ impl IcedChat {
                 },
             ));
 
+            // ── Image card header (PAPIRUS-10) ────────────────────────────
+            // Image messages carry the central Papirus image-type icon beside
+            // the filename in the card header; the preview itself stays the
+            // main visual.  Live entries drop the original filename from the
+            // protocol (body is empty), so the header shows a generic "Image"
+            // label; history replay restores the stored filename into `body`.
+            let is_image_entry = entry.image_bytes.is_some()
+                || entry.image_identifier.is_some()
+                || entry.image_error.is_some()
+                || entry.gif_frames.is_some();
+            if is_image_entry {
+                let icon_name = if !entry.body.is_empty() {
+                    entry.body.clone()
+                } else if let Some(id) = entry.image_identifier.as_deref() {
+                    id.rsplit('/').next().unwrap_or("image").to_string()
+                } else {
+                    "image".to_string()
+                };
+                let header_label = if entry.body.is_empty() {
+                    "Image".to_string()
+                } else {
+                    entry.body.clone()
+                };
+                let image_header = Row::new()
+                    .push(crate::download_progress_view::file_type_icon_element(
+                        &icon_name,
+                        None,
+                        None,
+                        crate::file_type_icon::FileTypeIconSize::List,
+                        &theme,
+                    ))
+                    .push(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::Metadata,
+                            header_label,
+                        )
+                        .color(text_muted(&theme)),
+                    )
+                    .spacing(SPACE_6)
+                    .align_y(Alignment::Center);
+                col = col.push(image_header);
+            }
+
             // ── Image / animated GIF (decoded once at construction) ──
             // Compute display size from original image dimensions.
             // If the image fits within the max width, use its original size.
@@ -29503,9 +29549,26 @@ impl IcedChat {
                     .image_error
                     .as_deref()
                     .unwrap_or("Image preview unavailable");
+                // PAPIRUS-10: the image-unavailable placeholder uses the
+                // central Papirus image icon (Large) as its main visual —
+                // no emoji as a file-type icon.
+                let icon_name = if !entry.body.is_empty() {
+                    entry.body.clone()
+                } else if let Some(id) = entry.image_identifier.as_deref() {
+                    id.rsplit('/').next().unwrap_or("image").to_string()
+                } else {
+                    "image".to_string()
+                };
                 let placeholder = Column::new()
+                    .push(crate::download_progress_view::file_type_icon_element(
+                        &icon_name,
+                        None,
+                        None,
+                        crate::file_type_icon::FileTypeIconSize::Large,
+                        &theme,
+                    ))
                     .push(
-                        text("🖼 Image unavailable")
+                        text("Image unavailable")
                             .size(TYPO_SM)
                             .color(text_system(&theme)),
                     )
