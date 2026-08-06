@@ -3,7 +3,7 @@
 **Epic:** Boru Home Screen Refinement and Typography
 **Epic card:** t_fdf744bb (parent: t_61a56729 — UI-HOME-19 release gate)
 **Report date:** 2026-08-06
-**Repo / branch:** iroh-gossip-chat @ `origin/main` (HEAD 7bc0b5c5 at close-out)
+**Repo / branch:** iroh-gossip-chat @ `origin/main` (close-out commits 1a0bc8b3 report, 85f040a7 restore-revert; parent chain 7b012e81 → 7bc0b5c5)
 **Report author:** orchestrator profile (epic close-out task t_fdf744bb)
 
 ---
@@ -328,9 +328,24 @@ verified evidence chain above.
    no blocked/review/verification states in the epic chain.
 2. `git fetch origin` + `git log origin/main --oneline -30` — UI-HOME-01…19
    commits (bc5a949e…874ec264) plus the t_d849e063 follow-up (7bc0b5c5) all
-   present on origin/main; nothing missing, nothing pushed by this close-out.
-3. `git status` clean — no leftover UI-HOME changes in the working tree.
-4. Fresh verification at close-out HEAD 7bc0b5c5: build exit 0,
-   GUI tests 896/896 pass (87.7 s).
-5. Font licence records and TypeRole registration re-verified from the
+   present on origin/main; nothing was missing, so the close-out did not need
+   to push any missed UI-HOME code.
+3. Working tree check: at session start `git status` was clean. During the
+   close-out, three UI-HOME *follow-up* tasks (t_b2ac1e1a, t_80938852,
+   t_8834836b) were concurrently running in the same shared directory
+   workspace, so the tree at completion contained their in-flight edits
+   (connection_details.rs, download_progress_view.rs, DESIGN_SYSTEM.md,
+   two docs, one evidence file, one untracked follow-up report). None are
+   UI-HOME-01..19 epic leftovers and none were touched by this close-out.
+4. Git-trail incident (transparent record): the report commit 1a0bc8b3
+   initially swept in three pre-staged deletions of orphaned modules
+   (dashboard.rs / file_library.rs / invitation_qr.rs) that belonged to the
+   concurrently running t_8834836b task. The close-out caught this
+   immediately and restored the files byte-identical in 85f040a7
+   ("Revert accidental deletion of orphaned modules…"); the modules remain
+   tracked on origin/main for t_8834836b to remove with its own commit.
+   The close-out therefore clobbered no other worker's work.
+5. Fresh verification at close-out HEAD (7bc0b5c5 tree + follow-up parent
+   7b012e81): build exit 0, GUI tests 896/896 pass (87.7 s).
+6. Font licence records and TypeRole registration re-verified from the
    source (`fonts.rs`, `THIRD_PARTY_NOTICES.md`).
