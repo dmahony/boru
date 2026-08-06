@@ -2303,7 +2303,10 @@ mod tests {
         // preserve that on top of VIDCARD-15's responsive sizing: both the
         // poster frame and the player frame are driven by the same concrete
         // MediaFrameSizing (sizing) and share the same media-frame surface
-        // style and boundary clip.
+        // style and boundary clip. The player replaces the poster INSIDE
+        // that same frame — the frame is not duplicated, the card is not
+        // rebuilt, and the controls overlay the frame bottom rather than
+        // adding a new row below it.
         let src = include_str!("video_file_card.rs");
         let prod = src.split("#[cfg(test)]").next().unwrap();
         let media_frame_fns = prod
@@ -2311,25 +2314,67 @@ mod tests {
             .nth(1)
             .expect("media_frame must exist");
 
-        // Both the poster preview and the player use the shared
-        // MediaFrameSizing system (poster: sizing; player: the same sizing —
-        // VIDCARD-15 removed the separate player_sizing variant).
+        // One shared sizing instance sizes BOTH frames: the poster stack
+        // (`container(widget::stack![poster, ...])`) and the player stack
+        // (`container(widget::stack![video_element, ...])`) both call
+        // `.width(sizing.width()).height(sizing.height())`.
         assert!(
             media_frame_fns.contains("MediaFrameSizing::new("),
             "poster frame must be sized by the shared MediaFrameSizing"
         );
         assert!(
-            media_frame_fns.contains(".width(sizing.width())")
-                && media_frame_fns.contains(".height(sizing.height())"),
-            "poster and player frames must both be sized by the shared sizing"
+            media_frame_fns.matches(".width(sizing.width())").count() >= 2,
+            "poster and player frames must both be sized by the same width"
+        );
+        assert!(
+            media_frame_fns.matches(".height(sizing.height())").count() >= 2,
+            "poster and player frames must both be sized by the same height"
         );
         assert!(
             media_frame_fns.matches(".style(media_frame_style)").count() >= 2,
-            "poster and player frames must use the same shared surface style"
+            "poster and player frames must use the same shared surface style (radius + background + border)"
         );
         assert!(
             media_frame_fns.matches(".clip(true)").count() >= 2,
             "poster and player frames must both clip overflow at the frame boundary"
+        );
+        assert!(
+            media_frame_fns.matches("widget::stack![").count() >= 2,
+            "both the poster and the player render as a layered stack inside the single media frame"
+        );
+
+        // The player replaces the poster inside the same frame: the
+        // VideoPlayer element is present, uses Contain (never stretched or
+        // cropped), and its controls bar overlays the frame's bottom edge
+        // (`align_y(Alignment::End)`) instead of being pushed below the
+        // frame as a new card row.
+        assert!(
+            media_frame_fns.contains("VideoPlayer::new(&video)"),
+            "player must render through VideoPlayer inside the media frame"
+        );
+        assert!(
+            media_frame_fns
+                .matches("content_fit(iced::ContentFit::Contain)")
+                .count()
+                >= 2,
+            "poster image and player video must both use Contain inside the shared frame"
+        );
+        assert!(
+            media_frame_fns.contains("container(controls_bar)")
+                && media_frame_fns.contains(".align_y(Alignment::End)"),
+            "playback controls must overlay the frame bottom, inside the frame"
+        );
+
+        // The card body always renders exactly one media element — the
+        // shared `media` element returned by media_frame — regardless of
+        // playback state. The poster→player swap happens inside media_frame,
+        // never by appending a second section to the card, so the surrounding
+        // chat cannot jump when Play is pressed.
+        let view_fns = prod.split("fn view(").nth(1).expect("view must exist");
+        assert_eq!(
+            view_fns.matches("container(media)").count(),
+            1,
+            "card body must render exactly one media element (poster OR player), never both"
         );
     }
 
