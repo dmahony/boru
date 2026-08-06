@@ -82,23 +82,63 @@ pub(crate) fn video_presentation_state(attachment: &DownloadAttachment) -> Video
     }
 }
 
-// ── Bounded media sizing ───────────────────────────────────────────────
+// ── Aspect-ratio-aware media sizing ──────────────────────────────────
 
-/// Keep inline video previews bounded while retaining their known aspect ratio.
-fn inline_video_preview_height(dimensions: Option<(u32, u32)>) -> f32 {
+/// Layout class chosen from the media's intrinsic aspect ratio.
+///
+/// The ranges are deliberately tolerant (VIDCARD-05 spec): the class only
+/// selects a bounded on-card footprint. The exact intrinsic ratio is always
+/// preserved when the poster or player is rendered inside that frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MediaAspectClass {
+    Portrait,
+    Square,
+    Landscape,
+}
+
+/// Classify a width/height ratio using the spec's tolerant ranges.
+fn aspect_ratio_class(ratio: f32) -> MediaAspectClass {
+    if ratio < 0.85 {
+        MediaAspectClass::Portrait
+    } else if ratio <= 1.15 {
+        MediaAspectClass::Square
+    } else {
+        MediaAspectClass::Landscape
+    }
+}
+
+/// Compute the bounded media-frame size for the given intrinsic dimensions.
+///
+/// Unknown dimensions fall back to a 16:9 widescreen default (the spec's safe
+/// default while metadata loads). The returned `(width, height)` always
+/// preserves the exact intrinsic aspect ratio; the class bounds only pick a
+/// sensible on-card footprint so portrait videos do not dominate the chat and
+/// landscape videos do not exceed the chat column width. There is no fixed
+/// 16:9 crop — the frame is ratio-exact in every normal case and `contain`
+/// letterboxes only when an extreme ratio collides with both caps.
+fn media_frame_size(dimensions: Option<(u32, u32)>) -> (f32, f32) {
     let (width, height) = dimensions
         .filter(|(width, height)| *width > 0 && *height > 0)
         .map(|(width, height)| (width as f32, height as f32))
         .unwrap_or((16.0, 9.0));
-    (360.0 / (width / height)).clamp(120.0, 280.0)
-}
+    let ratio = width / height;
+    let (max_width, max_height) = match aspect_ratio_class(ratio) {
+        MediaAspectClass::Landscape => (520.0, 420.0),
+        MediaAspectClass::Square => (480.0, 520.0),
+        MediaAspectClass::Portrait => (380.0, 520.0),
+    };
 
-/// Compute the preview width from known poster dimensions, clamped sensibly.
-fn inline_video_preview_width(dimensions: Option<(u32, u32)>) -> f32 {
-    dimensions
-        .filter(|(w, h)| *w > 0 && *h > 0)
-        .map(|(w, _)| (w as f32).clamp(160.0, 640.0))
-        .unwrap_or(360.0)
+    // Start from the class's preferred width and derive the height that
+    // preserves the exact ratio; if that exceeds the height cap, derive the
+    // width from the cap instead. The result is always ratio-exact.
+    let mut frame_width = max_width;
+    let mut frame_height = frame_width / ratio;
+    if frame_height > max_height {
+        frame_height = max_height;
+        frame_width = frame_height * ratio;
+    }
+
+    (frame_width, frame_height)
 }
 
 #[cfg(feature = "video-playback")]
@@ -184,7 +224,11 @@ impl<'a> BoruVideoFileCard<'a> {
 
         let mut body = Column::new()
             .push(header)
-            .push(media)
+            .push(
+                // Centre the media frame within the card so a portrait or
+                // square preview never hugs the left edge (VIDCARD-05).
+                container(media).width(Length::Fill).center_x(Length::Fill),
+            )
             .push(status)
             .push(actions)
             .spacing(SPACE_12);
@@ -305,12 +349,13 @@ impl<'a> BoruVideoFileCard<'a> {
         error_color: Color,
     ) -> iced::Element<'a, AppMessage> {
         let presentation = video_presentation_state(attachment);
-        let preview_height = inline_video_preview_height(attachment.poster_dimensions);
-        let preview_width = inline_video_preview_width(attachment.poster_dimensions);
+        let (preview_width, preview_height) = media_frame_size(attachment.poster_dimensions);
         let poster: iced::Element<'static, AppMessage> =
             if let Some(ref handle) = attachment.thumbnail_handle {
                 iced::widget::image(handle.clone())
-                    .content_fit(iced::ContentFit::Cover)
+                    // Contain: preserve the poster's exact intrinsic ratio,
+                    // centred inside the frame — never stretch or crop.
+                    .content_fit(iced::ContentFit::Contain)
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .into()
@@ -454,27 +499,51 @@ impl<'a> BoruVideoFileCard<'a> {
                         .spacing(SPACE_6)
                         .align_y(Alignment::Center),
                 );
-            container(
-                Column::new()
-                    .push(
-                        VideoPlayer::new(&video)
-                            .content_fit(iced::ContentFit::Contain)
-                            .on_end_of_stream(AppMessage::CloseInlineVideo)
-                            .on_error(|_error| AppMessage::CloseInlineVideo),
-                    )
-                    .push(
-                        container(controls)
-                            .padding([SPACE_6, SPACE_8])
-                            .style(|_theme| widget::container::Style {
-                                background: Some(iced::Background::Color(Color::from_rgba(
-                                    0.0, 0.0, 0.0, 0.76,
-                                ))),
-                                ..Default::default()
-                            }),
-                    ),
+            // Task 10: the playing element occupies the exact same fixed
+            // media box as the poster — no layout jump when Play is pressed.
+            // The video is contained (never stretched or cropped) and the
+            // controls overlay the frame's bottom edge on the existing
+            // translucent dark surface, so poster and player share width,
+            // height, aspect ratio, border radius and position.
+            let video_element = container(
+                VideoPlayer::new(&video)
+                    .content_fit(iced::ContentFit::Contain)
+                    .on_end_of_stream(AppMessage::CloseInlineVideo)
+                    .on_error(|_error| AppMessage::CloseInlineVideo),
             )
-            .width(Length::Shrink)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill);
+
+            let controls_bar = container(controls)
+                .padding([SPACE_6, SPACE_8])
+                .style(|_theme| widget::container::Style {
+                    background: Some(iced::Background::Color(Color::from_rgba(
+                        0.0, 0.0, 0.0, 0.76,
+                    ))),
+                    ..Default::default()
+                });
+
+            container(widget::stack![
+                video_element,
+                container(controls_bar)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .align_y(Alignment::End),
+            ])
+            .width(Length::Fixed(preview_width))
+            .height(Length::Fixed(preview_height))
             .clip(true)
+            .style(|t| widget::container::Style {
+                background: Some(iced::Background::Color(bg_surface(t))),
+                border: iced::Border {
+                    color: border_muted(t),
+                    width: 1.0,
+                    radius: SPACE_10.into(),
+                },
+                ..Default::default()
+            })
             .into()
         } else {
             preview
@@ -702,22 +771,64 @@ impl<'a> BoruVideoFileCard<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        file_format_label, inline_video_preview_height, video_presentation_state,
-        VideoPresentationState,
+        aspect_ratio_class, file_format_label, media_frame_size, video_presentation_state,
+        MediaAspectClass, VideoPresentationState,
     };
     use crate::app::{DownloadAttachment, DownloadFailure, DownloadState, TransferKind};
     use std::path::PathBuf;
 
     #[test]
-    fn unknown_aspect_ratio_uses_bounded_widescreen_default() {
-        assert_eq!(inline_video_preview_height(None), 202.5);
+    fn aspect_ratio_class_uses_tolerant_spec_ranges() {
+        use MediaAspectClass::*;
+        assert_eq!(aspect_ratio_class(0.84), Portrait);
+        assert_eq!(aspect_ratio_class(0.85), Square);
+        assert_eq!(aspect_ratio_class(1.0), Square);
+        assert_eq!(aspect_ratio_class(1.15), Square);
+        assert_eq!(aspect_ratio_class(1.16), Landscape);
     }
 
     #[test]
-    fn portrait_and_landscape_previews_are_bounded() {
-        assert_eq!(inline_video_preview_height(Some((100, 1000))), 280.0);
-        assert_eq!(inline_video_preview_height(Some((3840, 2160))), 202.5);
-        assert_eq!(inline_video_preview_height(Some((1000, 100))), 120.0);
+    fn unknown_dimensions_fall_back_to_bounded_widescreen_default() {
+        let (width, height) = media_frame_size(None);
+        assert_eq!(width, 520.0);
+        assert!((height - 292.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn landscape_frame_preserves_exact_intrinsic_ratio() {
+        // 16:9 fills the landscape width bound; the height derives from the
+        // exact ratio (no fixed 16:9 crop, no stretch/squash).
+        let (width, height) = media_frame_size(Some((3840, 2160)));
+        assert_eq!(width, 520.0);
+        assert!((height - 292.5).abs() < 0.01);
+        assert!((width / height - 3840.0 / 2160.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn square_frame_uses_bounded_square_footprint() {
+        let (width, height) = media_frame_size(Some((1080, 1080)));
+        assert_eq!(width, 480.0);
+        assert_eq!(height, 480.0);
+        assert!((width / height - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn portrait_frame_caps_height_and_preserves_ratio() {
+        // 9:16 is height-capped; the width derives to preserve 0.5625 exactly.
+        let (width, height) = media_frame_size(Some((720, 1280)));
+        assert_eq!(height, 520.0);
+        assert!((width - 292.5).abs() < 0.01);
+        assert!((width / height - 720.0 / 1280.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn ultrawide_frame_stays_bounded_and_ratio_exact() {
+        // 21:9 uses the full landscape width; the height follows the exact
+        // ratio instead of forcing a 16:9 box.
+        let (width, height) = media_frame_size(Some((6720, 2880)));
+        assert_eq!(width, 520.0);
+        assert!((height - 222.857).abs() < 0.01);
+        assert!((width / height - 6720.0 / 2880.0).abs() < 1e-6);
     }
 
     #[test]
