@@ -7458,6 +7458,21 @@ impl IcedChat {
         }
     }
 
+    /// Emit the queued `snap_to_end` task for the chat log, consuming the
+    /// pending flag exactly once.  Used both by the shared update tail and by
+    /// the `OpenRoom` fast path, which returns early and would otherwise skip
+    /// the tail: deferring the snap to a later update lets a stale
+    /// `Scrolled` event (carrying the previous conversation's offset) cancel
+    /// the flag and strand the viewport away from the bottom.
+    fn with_pending_snap(&mut self, task: iced::Task<AppMessage>) -> iced::Task<AppMessage> {
+        if self.scroll_to_bottom_pending {
+            self.scroll_to_bottom_pending = false;
+            iced::Task::batch([task, iced::widget::operation::snap_to_end(CHAT_LOG)])
+        } else {
+            task
+        }
+    }
+
     fn entry_storage_user(&self, entry: &ChatEntry) -> Option<String> {
         match entry.kind {
             ChatKind::System => None,
@@ -9166,17 +9181,23 @@ impl IcedChat {
             self.download_entry_index = conversation.download_entry_index.take();
             self.active_download_transfer_id = conversation.active_download_transfer_id.take();
             self.transfer_id_to_index = std::mem::take(&mut conversation.transfer_id_to_index);
-            self.follow_latest = conversation.follow_latest;
-            self.scroll_offset = conversation.scroll_offset;
+            // Returning to a conversation always shows the latest messages
+            // (standard messenger behaviour): force follow-latest so the
+            // timeline snaps to the bottom regardless of where the user was
+            // reading when they last left.  The per-conversation reading
+            // position is intentionally not preserved across switches.
+            self.follow_latest = true;
+            self.scroll_offset = f32::MAX;
             self.viewport_height = conversation.viewport_height;
-            // Recompute the snap intent from the restored follow-latest
-            // state.  `scroll_to_bottom_pending` is a transient global, not
+            // Recompute the snap intent from the forced follow-latest state.
+            // `scroll_to_bottom_pending` is a transient global, not
             // per-conversation state: a snap armed by the PREVIOUS
             // conversation (e.g. switching away from a follow-latest room)
             // must be cleared when the restored conversation is scrolled up,
             // otherwise the queued snap fires at the end of this update and
-            // steals the reading position of the newly opened room.
-            self.scroll_to_bottom_pending = self.follow_latest;
+            // steals the reading position of the newly opened room.  Here the
+            // open always follows latest, so the snap is always re-armed.
+            self.scroll_to_bottom_pending = true;
 
             self.layout_cache.borrow_mut().invalidate_all();
 
@@ -10833,6 +10854,17 @@ impl IcedChat {
                     }
                 };
 
+                // Opening/returning to a conversation always lands at the
+                // latest message (standard messenger behaviour).  Force
+                // follow-latest and arm the snap so EVERY open path lands at
+                // the bottom of the timeline: the already-active re-select,
+                // the cached fast path, and the fresh slow path (whose
+                // history replay only arms a snap while follow-latest — a
+                // previous room left scrolled-up would otherwise leak
+                // `follow_latest=false` into the new room's replay).
+                self.follow_latest = true;
+                self.scroll_to_bottom_pending = true;
+
                 // If the topic is already active and subscribed, just reveal the chat screen
                 // without tearing down the subscription.
                 // An MCP OpenRoom request is already satisfied when the
@@ -10847,7 +10879,10 @@ impl IcedChat {
                 if topic == self.topic && (self.sender.is_some() || pending_selected_room_action) {
                     self.screen = Screen::Chat { topic };
                     complete_open_room_action(self);
-                    return self.replay_pending_events_batch(topic);
+                    // Re-selecting the visible chat (e.g. returning from the
+                    // chat list) also lands at the latest message.
+                    let replay = self.replay_pending_events_batch(topic);
+                    return self.with_pending_snap(replay);
                 }
 
                 // Fast path: re-select an already-subscribed conversation from
@@ -10855,13 +10890,21 @@ impl IcedChat {
                 // draft text, and all other per-conversation state.
                 if self.switch_to_conversation(topic) {
                     complete_open_room_action(self);
-                    if !self.pending_image.is_empty() {
-                        return iced::Task::batch([
+                    let task = if !self.pending_image.is_empty() {
+                        iced::Task::batch([
                             self.replay_pending_events_batch(topic),
                             self.start_next_pending_image_download(),
-                        ]);
-                    }
-                    return self.replay_pending_events_batch(topic);
+                        ])
+                    } else {
+                        self.replay_pending_events_batch(topic)
+                    };
+                    // `switch_to_conversation` armed the snap for THIS update.
+                    // The fast path returns early, so the shared update tail
+                    // never runs — emit the snap here instead.  Deferring it
+                    // to a later update lets a stale Scrolled event (carrying
+                    // the previous conversation's offset) cancel the flag and
+                    // strand the viewport away from the bottom.
+                    return self.with_pending_snap(task);
                 }
 
                 // Slow path: first-time subscription to this topic.
@@ -20295,17 +20338,12 @@ impl IcedChat {
             }
         };
         // Consume a pending scroll-to-bottom snap request. The flag is armed
-        // when a fresh conversation opens in follow-latest mode or when a live
+        // when a conversation opens in follow-latest mode or when a live
         // entry is appended while the user is at the bottom. The windowed chat
         // log is top-anchored, so content growth alone cannot move the Iced
         // scrollable's viewport; the snap task actually drives the scrollable
         // to the latest entry so the newest message stays visible.
-        let task = if self.scroll_to_bottom_pending {
-            self.scroll_to_bottom_pending = false;
-            iced::Task::batch([task, iced::widget::operation::snap_to_end(CHAT_LOG)])
-        } else {
-            task
-        };
+        let task = self.with_pending_snap(task);
         // Publish after applying the message so diagnostics observe the
         // resulting state (not the state that existed before the update).
         self.publish_gui_state();
@@ -43126,7 +43164,7 @@ mod tests {
     }
 
     #[test]
-    fn conversation_switch_preserves_scrolled_up_reading_position() {
+    fn conversation_switch_always_snaps_to_bottom() {
         let (_runtime, mut app, _local, peer) = build_join_request_test_app();
         let topic_a = direct_topic(&app.local_public, &peer);
         let topic_b = TopicId::from_bytes([9u8; 32]);
@@ -43139,33 +43177,62 @@ mod tests {
         app.viewport_height = 200.0;
         app.scroll_to_bottom_pending = false;
 
-        // B exists in the runtime map (background-subscribed).
-        app.conversations
-            .insert(topic_b, ConversationLive::new(topic_b));
+        // B exists in the runtime map and was ALSO left scrolled up (this is
+        // the case that used to strand the viewport mid-history on return).
+        let mut conv_b = ConversationLive::new(topic_b);
+        conv_b.follow_latest = false;
+        conv_b.scroll_offset = 320.0;
+        conv_b.viewport_height = 200.0;
+        app.conversations.insert(topic_b, conv_b);
 
-        // Switch to B, then back to A.
+        // Returning to B always lands at the latest message, regardless of
+        // where the user was reading when they last left.
         assert!(app.switch_to_conversation(topic_b), "switch to B succeeds");
+        assert_eq!(app.topic, topic_b);
         assert!(
-            app.switch_to_conversation(topic_a),
-            "switch back to A succeeds"
-        );
-
-        assert_eq!(app.topic, topic_a);
-        assert!(
-            !app.follow_latest,
-            "scrolled-up conversation stays scrolled-up across switches"
+            app.follow_latest,
+            "returning to a chat forces follow-latest (auto-scroll to bottom)"
         );
         assert_eq!(
-            app.scroll_offset, 500.0,
-            "reading offset is preserved per conversation"
+            app.scroll_offset, f32::MAX,
+            "bottom sentinel armed so the windowed renderer shows the newest messages"
+        );
+        assert!(
+            app.scroll_to_bottom_pending,
+            "snap-to-bottom queued for the conversation open"
         );
         assert_eq!(
             app.viewport_height, 200.0,
-            "viewport height is preserved per conversation"
+            "viewport height is still restored per conversation"
         );
+    }
+
+    #[test]
+    fn open_room_fast_path_consumes_snap_in_same_update() {
+        let (_runtime, mut app, _local, peer) = build_join_request_test_app();
+        let topic = direct_topic(&app.local_public, &peer);
+
+        // The topic is already subscribed in the runtime map, so OpenRoom
+        // takes the fast path (switch_to_conversation).  The conversation
+        // was left scrolled up; returning must still arm AND consume the
+        // snap in the same update.  Previously the fast path returned early
+        // and skipped the update-tail snap consumption, leaving the flag
+        // pending for a later Scrolled event (carrying the previous
+        // conversation's stale offset) to cancel — stranding the viewport
+        // away from the bottom.
+        let mut conv = ConversationLive::new(topic);
+        conv.follow_latest = false;
+        conv.scroll_offset = 120.0;
+        app.conversations.insert(topic, conv);
+
+        let _task = app.update(AppMessage::OpenRoom(topic));
+
+        assert_eq!(app.topic, topic);
+        assert!(app.follow_latest, "fast-path open forces follow-latest");
+        assert_eq!(app.scroll_offset, f32::MAX, "bottom sentinel armed");
         assert!(
             !app.scroll_to_bottom_pending,
-            "no stale snap steals the reading position on return"
+            "fast-path open consumed the snap in the same update (no stale flag to cancel)"
         );
     }
 

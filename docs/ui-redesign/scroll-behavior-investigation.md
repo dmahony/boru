@@ -305,7 +305,7 @@ In `examples/iced_chat/app.rs` (example suite, now **615 tests**; was 610):
 | Test | Behaviour covered |
 |---|---|
 | `conversation_switch_at_bottom_rearms_snap` | Manual scroll-to-bottom trigger: opening a follow-latest conversation re-arms `snap_to_end` so the newest message shows immediately |
-| `conversation_switch_preserves_scrolled_up_reading_position` | Scroll position preservation **across conversation switches**: reading at offset 500 in room A, switch to B and back → offset/viewport restored, no stale snap |
+| `conversation_switch_always_snaps_to_bottom` | Returning to a conversation **always** lands at the latest message: even a chat left scrolled-up re-enters in follow-latest mode with the bottom sentinel armed (replaces the old per-conversation reading-position preservation) |
 | `inactive_room_message_increments_unread_badge` | The only unread mechanism that exists (sidebar badge): user-visible message to a hidden room bumps `unread` and queues the event |
 | `inactive_room_gossip_events_do_not_increment_unread` | NeighborUp/Presence noise never bumps the badge |
 | `opening_conversation_clears_unread_badge_but_keeps_backlog` | Viewing clears the badge while the pending backlog is retained for incremental replay |
@@ -362,5 +362,48 @@ to the newest entry.
   (pre-existing; includes file-watcher/network tests) and the backfill edit is a
   self-contained test addition with no production-code change.
 - `scripts/scroll_probe.sh`: **5/5 PASS twice**, now with automated OCR assertions.
+
+
+---
+
+## 11. Returning to a chat auto-scrolls to the bottom (post-t_727c1d5e fix)
+
+Reported by the user: "when returning to a chat in boru it does not auto scroll to
+bottom of chat screen." Two distinct problems were fixed in `examples/iced_chat/app.rs`:
+
+### 11.1 Fast-path open never emitted the snap (real bug)
+
+`AppMessage::OpenRoom` fast path (`switch_to_conversation`) armed
+`scroll_to_bottom_pending` but **returned early**, skipping the update-tail snap
+consumption. The snap was deferred to a later update, where a stale `Scrolled`
+event — carrying the *previous* conversation's scrollable offset — ran the
+`Scrolled` handler, computed `follow_latest = false`, and **cancelled the pending
+snap**. Net effect: returning to a chat landed at the previous conversation's
+arbitrary offset (typically the top/middle of history) instead of the bottom.
+
+Fix: new `with_pending_snap(task)` helper consumes the flag into
+`snap_to_end(CHAT_LOG)` in the same update; used by the OpenRoom fast path, the
+already-active-topic re-select path, and the shared update tail.
+
+### 11.2 Per-conversation reading-position preservation removed (behaviour change)
+
+`switch_to_conversation` used to restore the target conversation's saved
+`follow_latest`/`scroll_offset`, so a chat left scrolled-up re-opened scrolled-up.
+Standard messenger behaviour is to open a chat at the latest message; the user
+explicitly asked for that. `switch_to_conversation` now forces
+`follow_latest = true`, `scroll_offset = f32::MAX` (bottom sentinel), and re-arms
+the snap on every open. Live-appends-while-scrolled-up behaviour inside a session
+is unchanged (`keep_latest_visible` still only snaps while `follow_latest`).
+
+The old `conversation_switch_preserves_scrolled_up_reading_position` test was
+replaced by `conversation_switch_always_snaps_to_bottom`; a new
+`open_room_fast_path_consumes_snap_in_same_update` test pins the §11.1 regression
+(the fast path must consume the flag in the same update — no stale flag left for a
+later `Scrolled` to cancel).
+
+### 11.3 Verification
+
+- `cargo test --example boru --features gui`: **897 passed / 0 failed** (all 12
+  scroll state-machine tests green, including the 2 new/updated ones).
 
 
