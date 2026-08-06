@@ -1895,6 +1895,29 @@ impl DownloadState {
     }
 }
 
+/// Whether the user-initiated Download/Retry action may (re)start a transfer
+/// for this download state (VIDCARD-20 functional matrix: "Retry works where
+/// supported", "Deleted local files show a useful state").
+///
+/// A download may be (re)started from:
+/// - `Ready` (fresh download),
+/// - `Cancelled` (Retry after a user cancel),
+/// - `Failed` with a retryable failure (Retry),
+/// - `Failed` with `FileRemoved`, or `Completed` whose local file no longer
+///   exists (the "Download" action re-fetches it).
+///
+/// Active / Paused / Shared / Completed-with-live-file / terminal
+/// non-retryable failures are handled by their own actions and must not
+/// restart a transfer from here.
+fn download_restartable(state: &DownloadState) -> bool {
+    matches!(state, DownloadState::Ready { .. })
+        || matches!(state, DownloadState::Cancelled)
+        || matches!(state, DownloadState::Failed { failure }
+            if failure.retry_available()
+                || matches!(failure, DownloadFailure::FileRemoved))
+        || matches!(state, DownloadState::Completed { saved_path: Some(path), .. } if !path.exists())
+}
+
 /// Download state tracked per file in the peer catalogue view.
 #[derive(Clone, Debug)]
 pub(crate) enum CatalogueDownloadState {
@@ -15128,7 +15151,9 @@ impl IcedChat {
                 let Some(dl) = entry.download.clone() else {
                     return iced::Task::done(AppMessage::ErrorMsg("No download attached.".into()));
                 };
-                if !matches!(dl.state, DownloadState::Ready { .. }) {
+                // A download may be (re)started from a state where the user
+                // explicitly asked for it; see `download_restartable`.
+                if !download_restartable(&dl.state) {
                     return iced::Task::none();
                 }
                 if let Err(error) = validate_attachment_filename(&dl.name) {
@@ -15138,10 +15163,12 @@ impl IcedChat {
                 }
                 if let Some(e) = self.entries.get_mut(entry_index) {
                     if let Some(ref mut d) = e.download {
-                        // Carry forward the total from Ready so the progress
-                        // bar appears immediately when the user clicks Download.
+                        // Carry forward the total from Ready or a re-download
+                        // so the progress bar appears immediately when the
+                        // user clicks Download / Retry.
                         let total = match &d.state {
                             DownloadState::Ready { total } => *total,
+                            DownloadState::Completed { total_size, .. } => *total_size,
                             _ => None,
                         };
                         d.state = DownloadState::Active { bytes: 0, total };
@@ -15235,9 +15262,7 @@ impl IcedChat {
             }
             AppMessage::CancelDownloadAt(entry_index) => {
                 self.video_card_menu_open = None;
-                self.push_system(String::from(
-                    "Pause requested — transfer suspension not yet implemented.",
-                ));
+                self.push_system(String::from("Cancel requested."));
                 if let Some(entry) = self.entries.get_mut(entry_index) {
                     if let Some(download) = entry.download.as_mut() {
                         if !matches!(download.state, DownloadState::Completed { .. }) {
@@ -15316,6 +15341,20 @@ impl IcedChat {
                                 "DownloadDone: before setting Completed"
                             );
                             is_video = download.kind == TransferKind::Video;
+                            // VIDCARD-20: a user-initiated Cancel (or another
+                            // terminal state) must not be overwritten by the
+                            // late completion of the transfer that was still
+                            // running in the background — the card would
+                            // otherwise snap back to "Ready to play" after
+                            // the user cancelled it.
+                            if download.state.is_terminal() {
+                                tracing::info!(
+                                    idx,
+                                    state=?download.state,
+                                    "DownloadDone: ignoring completion for terminal state"
+                                );
+                                return iced::Task::none();
+                            }
                             let total_size = match &download.state {
                                 DownloadState::Active { total, .. } => *total,
                                 _ => None,
@@ -15402,6 +15441,18 @@ impl IcedChat {
                     if let Some(entry) = self.entries.get_mut(idx) {
                         if let Some(download) = entry.download.as_mut() {
                             is_video = download.kind == TransferKind::Video;
+                            // VIDCARD-20: same terminal-state guard as
+                            // DownloadDone — a user-initiated cancel must not
+                            // be flipped back to Completed by a late peer-file
+                            // completion.
+                            if download.state.is_terminal() {
+                                tracing::info!(
+                                    idx,
+                                    state=?download.state,
+                                    "DownloadDonePeerFile: ignoring completion for terminal state"
+                                );
+                                return iced::Task::none();
+                            }
                             let total_size = match &download.state {
                                 DownloadState::Active { total, .. } => *total,
                                 _ => None,
@@ -40643,6 +40694,59 @@ mod tests {
         assert_eq!(e.download.as_ref().unwrap().action_label(), "Retry");
         assert_eq!(e.download.as_ref().unwrap().status_label(), "Cancelled");
         assert!(mgr.active_download_transfer_id.is_none());
+    }
+
+    /// VIDCARD-20: the Download/Retry action may (re)start a transfer from
+    /// the states the action buttons expose it for (Ready, Cancelled,
+    /// retryable Failed, FileRemoved / missing local file) — the previous
+    /// guard silently dropped Retry for Failed/Cancelled.
+    #[test]
+    fn download_restartable_accepts_user_retry_states() {
+        assert!(download_restartable(&DownloadState::Ready { total: Some(10) }));
+        assert!(download_restartable(&DownloadState::Cancelled));
+        assert!(download_restartable(&DownloadState::Failed {
+            failure: DownloadFailure::PeerOffline { detail: None },
+        }));
+        assert!(download_restartable(&DownloadState::Failed {
+            failure: DownloadFailure::FileRemoved,
+        }));
+        // Completed whose local file no longer exists → re-download.
+        assert!(download_restartable(&DownloadState::Completed {
+            saved_name: "clip.mp4".into(),
+            saved_path: Some(std::path::PathBuf::from("/definitely/missing/clip.mp4")),
+            total_size: Some(100),
+        }));
+    }
+
+    #[test]
+    fn download_restartable_rejects_states_owned_by_other_actions() {
+        assert!(!download_restartable(&DownloadState::Active {
+            bytes: 10,
+            total: Some(100),
+        }));
+        assert!(!download_restartable(&DownloadState::Paused {
+            bytes: 10,
+            total: Some(100),
+        }));
+        // Completed with a live local file → Play/Open, not Download.
+        // Use a path that provably exists (the source file itself).
+        let live_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/iced_chat/app.rs");
+        assert!(live_path.exists(), "test fixture path must exist");
+        assert!(!download_restartable(&DownloadState::Completed {
+            saved_name: "clip.mp4".into(),
+            saved_path: Some(live_path),
+            total_size: Some(100),
+        }));
+        assert!(!download_restartable(&DownloadState::Shared {
+            name: "clip.mp4".into(),
+            path: std::path::PathBuf::from("/tmp/clip.mp4"),
+            size: Some(100),
+        }));
+        // Terminal non-retryable failure → Remove only.
+        assert!(!download_restartable(&DownloadState::Failed {
+            failure: DownloadFailure::PermissionDenied,
+        }));
     }
 
     /// Stale progress after a terminal state (Completed) must be ignored.
