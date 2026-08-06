@@ -117,7 +117,7 @@ fn aspect_ratio_class(ratio: f32) -> MediaAspectClass {
 /// default while metadata loads). The returned `(width, height)` always
 /// preserves the exact intrinsic aspect ratio; the class bounds only pick a
 /// sensible on-card footprint so portrait videos do not dominate the chat and
-/// landscape videos do not exceed the chat column width. There is no fixed
+/// landscape videos may use most or all of the card width. There is no fixed
 /// 16:9 crop — the frame is ratio-exact in every normal case and `contain`
 /// letterboxes only when an extreme ratio collides with both caps.
 fn media_frame_size(dimensions: Option<(u32, u32)>) -> (f32, f32) {
@@ -127,7 +127,13 @@ fn media_frame_size(dimensions: Option<(u32, u32)>) -> (f32, f32) {
         .unwrap_or((16.0, 9.0));
     let ratio = width / height;
     let (max_width, max_height) = match aspect_ratio_class(ratio) {
-        MediaAspectClass::Landscape => (520.0, 420.0),
+        // VIDCARD-06 landscape: the frame may use most or all of the card
+        // width — the spec's typical 16:9 preview is 720×405 px — with a
+        // ~500 px height cap so near-square or unusual landscape files
+        // cannot dominate the chat. Very wide videos follow the width bound
+        // and their exact ratio, producing a short, wide frame instead of an
+        // excessive height; the media is contained (never cropped) inside it.
+        MediaAspectClass::Landscape => (720.0, 500.0),
         MediaAspectClass::Square => (480.0, 520.0),
         MediaAspectClass::Portrait => (380.0, 520.0),
     };
@@ -1089,9 +1095,10 @@ mod tests {
 
     #[test]
     fn unknown_dimensions_fall_back_to_bounded_widescreen_default() {
+        // No dimensions yet: safe 16:9 default at the landscape width bound.
         let (width, height) = media_frame_size(None);
-        assert_eq!(width, 520.0);
-        assert!((height - 292.5).abs() < 0.01);
+        assert_eq!(width, 720.0);
+        assert!((height - 405.0).abs() < 0.01);
     }
 
     #[test]
@@ -1099,9 +1106,30 @@ mod tests {
         // 16:9 fills the landscape width bound; the height derives from the
         // exact ratio (no fixed 16:9 crop, no stretch/squash).
         let (width, height) = media_frame_size(Some((3840, 2160)));
-        assert_eq!(width, 520.0);
-        assert!((height - 292.5).abs() < 0.01);
+        assert_eq!(width, 720.0);
+        assert!((height - 405.0).abs() < 0.01);
         assert!((width / height - 3840.0 / 2160.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn landscape_typical_hd_preview_matches_spec() {
+        // VIDCARD-06 spec: a typical 16:9 preview is approximately
+        // 720×405 px where space allows. 1280×720 derives exactly that.
+        let (width, height) = media_frame_size(Some((1280, 720)));
+        assert_eq!(width, 720.0);
+        assert!((height - 405.0).abs() < 0.01);
+        assert!((width / height - 1280.0 / 720.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn landscape_frame_caps_height_for_near_square_ratios() {
+        // 4:3 landscape would exceed the ~500 px height cap at the full
+        // landscape width, so the width derives down from the cap — the
+        // result stays ratio-exact and never dominates the chat.
+        let (width, height) = media_frame_size(Some((640, 480)));
+        assert_eq!(height, 500.0);
+        assert!((width - 666.6667).abs() < 0.01);
+        assert!((width / height - 640.0 / 480.0).abs() < 1e-6);
     }
 
     #[test]
@@ -1124,11 +1152,22 @@ mod tests {
     #[test]
     fn ultrawide_frame_stays_bounded_and_ratio_exact() {
         // 21:9 uses the full landscape width; the height follows the exact
-        // ratio instead of forcing a 16:9 box.
+        // ratio instead of forcing a 16:9 box — a short, wide frame with no
+        // excessive vertical height and nothing cropped.
         let (width, height) = media_frame_size(Some((6720, 2880)));
-        assert_eq!(width, 520.0);
-        assert!((height - 222.857).abs() < 0.01);
+        assert_eq!(width, 720.0);
+        assert!((height - 308.571).abs() < 0.01);
         assert!((width / height - 6720.0 / 2880.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn ultrawide_panorama_stays_short_and_ratio_exact() {
+        // 32:9 panorama: still the full landscape width, very short frame —
+        // the contain rule keeps every pixel visible (no side cropping).
+        let (width, height) = media_frame_size(Some((7680, 2160)));
+        assert_eq!(width, 720.0);
+        assert!((height - 202.5).abs() < 0.01);
+        assert!((width / height - 7680.0 / 2160.0).abs() < 1e-6);
     }
 
     #[test]
