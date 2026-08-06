@@ -845,41 +845,71 @@ fn mime_category_hint(mime: &str) -> Option<FileCategory> {
     }
 }
 
-/// Ordinary extension lookup (case-insensitive, trimmed).
+/// Ordinary extension lookup (case-insensitive, trimmed, multi-dot safe).
+///
+/// Candidates are evaluated longest-first, so an inner dot-segment like
+/// `final.pdf` never shadows the real `pdf` suffix; only a known
+/// `EXTENSION_ICONS` entry matches.
 fn extension_lookup(filename: &str) -> Option<(&'static str, FileCategory)> {
-    let ext = normalise_extension(filename)?;
-    EXTENSION_ICONS
-        .iter()
-        .find(|(e, _, _)| *e == ext)
-        .map(|(_, icon, category)| (*icon, *category))
+    normalised_extensions(filename).iter().find_map(|ext| {
+        EXTENSION_ICONS
+            .iter()
+            .find(|(e, _, _)| *e == ext)
+            .map(|(_, icon, category)| (*icon, *category))
+    })
 }
 
 /// Compound extension lookup, checked before ordinary extensions.
+///
+/// `archive.tar.gz` resolves to the tar archive icon (`application-x-tar`)
+/// rather than the generic gzip icon because the `tar.gz` candidate is
+/// checked first; a bare `file.gz` still resolves to `application-gzip`.
 fn compound_extension_lookup(filename: &str) -> Option<(&'static str, FileCategory)> {
-    let lower = filename.trim().to_ascii_lowercase();
-    COMPOUND_EXTENSIONS
-        .iter()
-        .find(|(suffix, _, _)| lower.ends_with(&format!(".{suffix}")))
-        .map(|(_, icon, category)| (*icon, *category))
+    normalised_extensions(filename).iter().find_map(|ext| {
+        COMPOUND_EXTENSIONS
+            .iter()
+            .find(|(suffix, _, _)| *suffix == ext)
+            .map(|(_, icon, category)| (*icon, *category))
+    })
 }
 
-/// Extract and normalise the ordinary extension: lowercase, trimmed,
-/// handles leading-dot filenames safely.
-fn normalise_extension(filename: &str) -> Option<String> {
+/// Normalise a filename into candidate extension suffixes, longest
+/// (compound) first.
+///
+/// Normalisation rules (PAPIRUS-06):
+/// - surrounding whitespace is trimmed,
+/// - directory components are stripped,
+/// - leading dots (hidden files) do not start an extension,
+/// - trailing dots are ignored,
+/// - comparison is case-insensitive (candidates are lowercased).
+///
+/// Examples:
+/// - `"report.pdf"` → `["pdf"]`
+/// - `"archive.tar.gz"` → `["tar.gz", "gz"]`
+/// - `"report.final.PDF"` → `["final.pdf", "pdf"]`
+/// - `".gitignore"` → `[]`
+/// - `"README"` → `[]`
+fn normalised_extensions(filename: &str) -> Vec<String> {
     let name = filename.trim();
     if name.is_empty() || name == "." || name == ".." {
-        return None;
+        return Vec::new();
     }
     // Strip any directory components.
     let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
-    // Hidden files with no further extension have no extension.
-    let base = base.strip_prefix('.').unwrap_or(base);
-    let dot = base.rfind('.')?;
-    let ext = &base[dot + 1..];
-    if ext.is_empty() {
-        return None;
+    // Hidden files: a leading dot (or dots) does not start an extension.
+    let base = base.trim_start_matches('.');
+    // Trailing dots are not part of an extension.
+    let base = base.trim_end_matches('.');
+    if base.is_empty() {
+        return Vec::new();
     }
-    Some(ext.to_ascii_lowercase())
+    let mut candidates = Vec::new();
+    for (idx, ch) in base.char_indices() {
+        if ch == '.' && idx + 1 < base.len() {
+            candidates.push(base[idx + 1..].to_ascii_lowercase());
+        }
+    }
+    candidates
 }
 
 /// Broad category fallback icon for a category.
@@ -950,9 +980,9 @@ fn build_with_fallback(
             mismatch,
         );
     }
-    // Related extension-specific icon.
+    // Related extension-specific icon (compound first, then ordinary).
     if let Some((icon, _)) =
-        extension_lookup(filename).or_else(|| compound_extension_lookup(filename))
+        compound_extension_lookup(filename).or_else(|| extension_lookup(filename))
     {
         if catalog.has_icon(icon) {
             return build_icon(catalog, icon, category, confidence, source, mismatch);
@@ -1143,6 +1173,213 @@ mod tests {
         let icon = resolve("README");
         assert_eq!(icon.source, ResolutionSource::UnknownFallback);
         assert_eq!(icon.file_category, FileCategory::Unknown);
+    }
+
+    // ── PAPIRUS-06: compound + case-insensitive extensions ────────
+
+    #[test]
+    fn uppercase_and_lowercase_extensions_resolve_identically() {
+        let lower = resolve("report.pdf");
+        let upper = resolve("REPORT.PDF");
+        let mixed = resolve("Report.PdF");
+        for other in [&upper, &mixed] {
+            assert_eq!(other.icon_id, lower.icon_id);
+            assert_eq!(other.asset_path, lower.asset_path);
+            assert_eq!(other.file_category, lower.file_category);
+            assert_eq!(other.source, lower.source);
+            assert_eq!(other.confidence, lower.confidence);
+            assert_eq!(other.display_label, lower.display_label);
+        }
+        assert_eq!(upper.icon_id, "application-pdf");
+        assert_eq!(upper.source, ResolutionSource::Extension);
+    }
+
+    #[test]
+    fn uppercase_compound_extensions_resolve_identically() {
+        let lower = resolve("archive.tar.gz");
+        let upper = resolve("ARCHIVE.TAR.GZ");
+        let mixed = resolve("Archive.Tar.Gz");
+        for other in [&upper, &mixed] {
+            assert_eq!(other.icon_id, lower.icon_id);
+            assert_eq!(other.source, lower.source);
+            assert_eq!(other.confidence, lower.confidence);
+        }
+        assert_eq!(upper.icon_id, "application-x-tar");
+        assert_eq!(upper.source, ResolutionSource::CompoundExtension);
+    }
+
+    #[test]
+    fn leading_and_trailing_whitespace_does_not_affect_lookup() {
+        let plain = resolve("report.pdf");
+        for name in [
+            "  report.pdf",
+            "report.pdf  ",
+            "  report.pdf  ",
+            "\treport.pdf\n",
+        ] {
+            let icon = resolve(name);
+            assert_eq!(icon.icon_id, plain.icon_id, "for {name:?}");
+            assert_eq!(icon.source, plain.source, "for {name:?}");
+        }
+
+        let compound = resolve("archive.tar.gz");
+        for name in ["  archive.tar.gz", "archive.tar.gz  ", "  archive.tar.gz  "] {
+            let icon = resolve(name);
+            assert_eq!(icon.icon_id, compound.icon_id, "for {name:?}");
+            assert_eq!(icon.source, compound.source, "for {name:?}");
+        }
+    }
+
+    #[test]
+    fn whitespace_only_filename_falls_back() {
+        let icon = resolve("   ");
+        assert_eq!(icon.source, ResolutionSource::UnknownFallback);
+        assert_eq!(icon.file_category, FileCategory::Unknown);
+    }
+
+    #[test]
+    fn hidden_files_are_handled_safely() {
+        // A hidden file with no further extension has no extension.
+        let icon = resolve(".gitignore");
+        assert_eq!(icon.source, ResolutionSource::UnknownFallback);
+        assert_eq!(icon.file_category, FileCategory::Unknown);
+
+        // A hidden file with a real extension still resolves.
+        let icon = resolve(".profile.pdf");
+        assert_eq!(icon.icon_id, "application-pdf");
+        assert_eq!(icon.source, ResolutionSource::Extension);
+
+        // A hidden multi-dot file whose extension is unknown falls back.
+        let icon = resolve(".env.local");
+        assert_eq!(icon.source, ResolutionSource::UnknownFallback);
+        assert_eq!(icon.file_category, FileCategory::Unknown);
+
+        // Bare "." / ".." never panic and fall back.
+        for name in [".", ".."] {
+            let icon = resolve(name);
+            assert_eq!(
+                icon.source,
+                ResolutionSource::UnknownFallback,
+                "for {name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn multi_dot_filenames_do_not_break_resolution() {
+        // Ordinary extension uses the final dot segment.
+        let icon = resolve("report.final.pdf");
+        assert_eq!(icon.icon_id, "application-pdf");
+        assert_eq!(icon.source, ResolutionSource::Extension);
+
+        // Compound extension still wins over the trailing single segment.
+        let icon = resolve("backup.2026.tar.gz");
+        assert_eq!(icon.icon_id, "application-x-tar");
+        assert_eq!(icon.source, ResolutionSource::CompoundExtension);
+
+        // Unknown multi-dot names still fall back safely.
+        let icon = resolve("a.b.c.zzz");
+        assert_eq!(icon.source, ResolutionSource::UnknownFallback);
+    }
+
+    #[test]
+    fn compound_extensions_resolve_before_ordinary() {
+        // tar.gz must resolve as a tar archive, NOT a generic .gz.
+        let icon = resolve("archive.tar.gz");
+        assert_eq!(icon.icon_id, "application-x-tar");
+        assert_eq!(icon.file_category, FileCategory::Archive);
+        assert_eq!(icon.source, ResolutionSource::CompoundExtension);
+        assert_eq!(icon.confidence, IconConfidence::Strong);
+        assert_ne!(icon.icon_id, "application-gzip");
+
+        // A bare .gz still resolves as gzip via the ordinary path.
+        let icon = resolve("file.gz");
+        assert_eq!(icon.icon_id, "application-gzip");
+        assert_eq!(icon.source, ResolutionSource::Extension);
+    }
+
+    #[test]
+    fn all_supported_compound_extensions_resolve() {
+        let cases = [
+            ("archive.tar.gz", "application-x-tar", FileCategory::Archive),
+            (
+                "archive.tar.bz2",
+                "application-x-tar",
+                FileCategory::Archive,
+            ),
+            (
+                "archive.tar.xz",
+                "application-x-xz-compressed-tar",
+                FileCategory::Archive,
+            ),
+            ("archive.tar.zst", "application-zstd", FileCategory::Archive),
+            (
+                "userscript.user.js",
+                "application-javascript",
+                FileCategory::SourceCode,
+            ),
+            (
+                "definitions.d.ts",
+                "text-javascript",
+                FileCategory::SourceCode,
+            ),
+            (
+                "bundle.min.js",
+                "application-javascript",
+                FileCategory::SourceCode,
+            ),
+            ("site.min.css", "text-css", FileCategory::SourceCode),
+        ];
+        for (name, icon_id, category) in cases {
+            let icon = resolve(name);
+            assert_eq!(icon.icon_id, icon_id, "for {name:?}");
+            assert_eq!(icon.file_category, category, "for {name:?}");
+            assert_eq!(
+                icon.source,
+                ResolutionSource::CompoundExtension,
+                "for {name:?}"
+            );
+            assert_eq!(icon.confidence, IconConfidence::Strong, "for {name:?}");
+        }
+    }
+
+    #[test]
+    fn archive_extensions_resolve_to_specific_icons() {
+        let cases = [
+            ("file.zip", "application-zip", FileCategory::Archive),
+            (
+                "file.7z",
+                "application-x-7z-compressed",
+                FileCategory::Archive,
+            ),
+            ("file.rar", "application-vnd.rar", FileCategory::Archive),
+            ("file.tar", "application-x-tar", FileCategory::Archive),
+            ("file.gz", "application-gzip", FileCategory::Archive),
+            ("file.bz2", "application-x-bzip2", FileCategory::Archive),
+            (
+                "file.xz",
+                "application-x-xz-compressed-tar",
+                FileCategory::Archive,
+            ),
+            ("file.zst", "application-zstd", FileCategory::Archive),
+        ];
+        for (name, icon_id, category) in cases {
+            let icon = resolve(name);
+            assert_eq!(icon.icon_id, icon_id, "for {name:?}");
+            assert_eq!(icon.file_category, category, "for {name:?}");
+            assert_eq!(icon.source, ResolutionSource::Extension, "for {name:?}");
+        }
+    }
+
+    #[test]
+    fn directory_components_do_not_affect_extension_lookup() {
+        let icon = resolve("downloads/archive.tar.gz");
+        assert_eq!(icon.icon_id, "application-x-tar");
+        assert_eq!(icon.source, ResolutionSource::CompoundExtension);
+
+        let icon = resolve("path/to/file.pdf");
+        assert_eq!(icon.icon_id, "application-pdf");
+        assert_eq!(icon.source, ResolutionSource::Extension);
     }
 
     // ── Category fallback (priority 7) ─────────────────────────────
