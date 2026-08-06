@@ -1141,6 +1141,92 @@ mod tests {
     }
 
     #[test]
+    fn near_square_preserves_exact_ratio_instead_of_forcing_perfect_square() {
+        // 1080x1200 (ratio 0.9) is near-square but slightly tall: the frame
+        // must stay ratio-exact (0.9), NOT be forced to a perfect square.
+        // The height cap (520) wins, so the width derives from the cap to
+        // preserve 0.9 exactly.
+        let (width, height) = media_frame_size(Some((1080, 1200)));
+        assert_eq!(height, 520.0);
+        assert!(
+            (width - 468.0).abs() < 0.01,
+            "width {width} should derive to preserve ratio"
+        );
+        assert!((width / height - 1080.0 / 1200.0).abs() < 1e-6);
+
+        // 1200x1080 (ratio 1.111) is near-square but slightly wide: the
+        // preferred width cap (480) wins and the height derives to keep the
+        // exact ratio — again no forced perfect square.
+        let (width2, height2) = media_frame_size(Some((1200, 1080)));
+        assert_eq!(width2, 480.0);
+        assert!((width2 / height2 - 1200.0 / 1080.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn square_frame_preferred_width_stays_in_spec_band() {
+        // VIDCARD-07 spec: preferred width 420-560 px for square videos.
+        // A perfect 1:1 uses the class preferred width directly.
+        let (width, _height) = media_frame_size(Some((1080, 1080)));
+        assert!(
+            (420.0..=560.0).contains(&width),
+            "square preferred width {width} must stay in the 420-560 px band"
+        );
+    }
+
+    #[test]
+    fn square_frame_max_height_is_bounded() {
+        // VIDCARD-07 spec: maximum height ~520 px. Near-square frames that
+        // hit the height cap must still keep the exact ratio.
+        let (width, height) = media_frame_size(Some((1080, 1200)));
+        assert!(height <= 520.0 + 1e-6);
+        assert!((width / height - 0.9).abs() < 1e-6);
+    }
+
+    #[test]
+    fn square_media_frame_is_centred_and_width_capped_not_stretched() {
+        // VIDCARD-07: the square preview must feel intentionally centred,
+        // not like a landscape frame containing a small square on the left.
+        // The media element is wrapped in a Fill-width container that centres
+        // it (`center_x(Fill)`), and the frame itself is width-capped with a
+        // Fixed preview width — it never stretches to the full card width.
+        let src = include_str!("video_file_card.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+
+        // The body column wraps the media in a centring container.
+        let body = prod
+            .split("let mut body = Column::new()")
+            .nth(1)
+            .and_then(|s| s.split(".width(Length::Shrink)").next())
+            .expect("card body column block must exist");
+        assert!(
+            body.contains("container(media).width(Length::Fill).center_x(Length::Fill)"),
+            "square media frame must be centred via a Fill wrapper + center_x(Fill)"
+        );
+
+        // The media frame itself is Fixed-size (width-capped), never Fill.
+        let media_frame = prod
+            .split("let preview: iced::Element<'a, AppMessage> = container(widget::stack![")
+            .nth(1)
+            .and_then(|s| s.split(".into();").next())
+            .expect("media frame container block must exist");
+        assert!(
+            media_frame.contains(".width(Length::Fixed(preview_width))"),
+            "media frame must use a Fixed (width-capped) preview width"
+        );
+        assert!(
+            !media_frame.contains(".width(Length::Fill)"),
+            "media frame itself must not stretch to the full card width"
+        );
+
+        // Metadata and actions stay as full-width siblings of the media
+        // wrapper in the body column, not inside the capped frame.
+        assert!(
+            body.contains(".push(status)") && body.contains(".push(actions)"),
+            "status and actions must remain full-width card sections outside the media frame"
+        );
+    }
+
+    #[test]
     fn portrait_frame_caps_height_and_preserves_ratio() {
         // 9:16 is height-capped; the width derives to preserve 0.5625 exactly.
         let (width, height) = media_frame_size(Some((720, 1280)));
