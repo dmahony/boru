@@ -545,30 +545,40 @@ fn truncate_filename(name: &str, max_chars: usize) -> String {
 }
 
 /// One row of the header overflow menu: a left-aligned ghost button.
-fn overflow_menu_item<'a>(label: &'a str, msg: AppMessage) -> iced::widget::Button<'a, AppMessage> {
-    button(crate::fonts::type_role_text(
-        crate::fonts::TypeRole::ButtonLabel,
-        label,
-    ))
-    .on_press(msg)
-    .padding([SPACE_4, SPACE_8])
-    .width(Length::Fill)
-    .style(|t, status| {
-        let background = match status {
-            widget::button::Status::Hovered => design_tokens::surface_hover(t),
-            widget::button::Status::Pressed => design_tokens::surface_selected(t),
-            _ => Color::TRANSPARENT,
-        };
-        widget::button::Style {
-            background: Some(iced::Background::Color(background)),
-            text_color: design_tokens::text_primary(t),
-            border: iced::Border {
-                radius: SPACE_6.into(),
+/// Each item reuses an existing app action; no new behaviour.
+///
+/// Keyboard-focusable (VIDCARD-17): the menu item is wrapped in
+/// [`crate::focusable_button::FocusableButton`] so Tab reaches it and
+/// Enter/Space activates it.
+fn overflow_menu_item<'a>(label: &'a str, msg: AppMessage) -> iced::Element<'a, AppMessage> {
+    crate::focusable_button::focusable_button(
+        button(crate::fonts::type_role_text(
+            crate::fonts::TypeRole::ButtonLabel,
+            label,
+        ))
+        .on_press(msg.clone())
+        .padding([SPACE_4, SPACE_8])
+        .width(Length::Fill)
+        .style(|t, status| {
+            let background = match status {
+                widget::button::Status::Hovered => design_tokens::surface_hover(t),
+                widget::button::Status::Pressed => design_tokens::surface_selected(t),
+                _ => Color::TRANSPARENT,
+            };
+            widget::button::Style {
+                background: Some(iced::Background::Color(background)),
+                text_color: design_tokens::text_primary(t),
+                border: iced::Border {
+                    radius: SPACE_6.into(),
+                    ..Default::default()
+                },
                 ..Default::default()
-            },
-            ..Default::default()
-        }
-    })
+            }
+        }),
+        Some(msg),
+    )
+    .ring_radius(SPACE_6)
+    .build()
 }
 
 /// Stable placeholder copy for the bounded media frame (VIDCARD-09).
@@ -807,11 +817,19 @@ impl<'a> BoruVideoFileCard<'a> {
 
         title_row = title_row.push(
             tooltip::Tooltip::new(
-                OverflowMenu::build(
-                    AppMessage::ToggleVideoCardMenu(self.entry_index),
-                    false,
-                    theme,
-                ),
+                // VIDCARD-17: the kebab is an icon-only button, so it is
+                // wrapped in FocusableButton for Tab traversal + Enter/Space
+                // activation, and it carries the "More actions" tooltip as
+                // its accessible name.
+                crate::focusable_button::focusable_button(
+                    OverflowMenu::build(
+                        AppMessage::ToggleVideoCardMenu(self.entry_index),
+                        false,
+                        theme,
+                    ),
+                    Some(AppMessage::ToggleVideoCardMenu(self.entry_index)),
+                )
+                .ring_radius(crate::design_tokens::RADIUS_SM),
                 crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, "More actions"),
                 tooltip::Position::Bottom,
             )
@@ -981,31 +999,40 @@ impl<'a> BoruVideoFileCard<'a> {
         };
         // VIDCARD-11 play overlay: large but restrained circular button with
         // strong contrast (white play glyph on a semi-transparent dark
-        // circle), keyboard accessible (iced buttons focus and activate with
-        // Enter/Space) and labelled "Play video" via the project's
-        // icon-button Tooltip convention.
+        // circle), labelled "Play video" via the project's icon-button
+        // Tooltip convention.
+        //
+        // VIDCARD-17 accessibility: iced 0.14 buttons have no
+        // `operation::Focusable` impl and no keyboard handling, so the play
+        // overlay is wrapped in [`crate::focusable_button::FocusableButton`].
+        // That wrapper joins the app's Tab traversal, activates on
+        // Enter/Space while focused, and draws a visible focus ring with the
+        // same circular radius as the button. The inner button keeps its
+        // mouse on_press for pointer users.
+        let play_enabled = presentation == VideoPresentationState::Ready && !self.preparing;
         let play = tooltip::Tooltip::new(
-            button(
-                Icon::Play
-                    .build()
-                    .size(IconSize::Xl)
-                    .color_fn(|_| Color::WHITE)
-                    .interactive(true)
-                    .build(),
-            )
-            .on_press_maybe(
-                (presentation == VideoPresentationState::Ready && !self.preparing)
-                    .then_some(play_message),
-            )
-            .padding([(PLAY_OVERLAY_SIZE - IconSize::Xl.px()) / 2.0; 2])
-            .style(|_theme, _status| widget::button::Style {
-                background: Some(iced::Background::Color(MEDIA_FRAME_OVERLAY_BG)),
-                border: iced::Border {
-                    radius: (PLAY_OVERLAY_SIZE / 2.0).into(),
+            crate::focusable_button::focusable_button(
+                button(
+                    Icon::Play
+                        .build()
+                        .size(IconSize::Xl)
+                        .color_fn(|_| Color::WHITE)
+                        .interactive(true)
+                        .build(),
+                )
+                .on_press_maybe(play_enabled.then_some(play_message.clone()))
+                .padding([(PLAY_OVERLAY_SIZE - IconSize::Xl.px()) / 2.0; 2])
+                .style(|_theme, _status| widget::button::Style {
+                    background: Some(iced::Background::Color(MEDIA_FRAME_OVERLAY_BG)),
+                    border: iced::Border {
+                        radius: (PLAY_OVERLAY_SIZE / 2.0).into(),
+                        ..Default::default()
+                    },
                     ..Default::default()
-                },
-                ..Default::default()
-            }),
+                }),
+                play_enabled.then_some(play_message),
+            )
+            .ring_radius(PLAY_OVERLAY_SIZE / 2.0),
             crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, "Play video"),
             tooltip::Position::Top,
         )
@@ -2267,6 +2294,12 @@ mod tests {
         // semi-transparent dark button with a strong-contrast glyph, a
         // keyboard-accessible button widget, and an accessible label such
         // as "Play video".
+        //
+        // VIDCARD-17: iced 0.14 buttons have no `operation::Focusable` impl
+        // and no keyboard handling, so keyboard accessibility is delivered
+        // by wrapping the overlay in
+        // `crate::focusable_button::focusable_button`, which joins the Tab
+        // traversal, activates on Enter/Space and draws a visible focus ring.
         let src = include_str!("video_file_card.rs");
         let prod = src.split("#[cfg(test)]").next().unwrap();
         let media_frame_fns = prod
@@ -2292,7 +2325,15 @@ mod tests {
         );
         assert!(
             media_frame_fns.contains("button("),
-            "play overlay must be a real button (keyboard accessible)"
+            "play overlay must be a real button"
+        );
+        assert!(
+            media_frame_fns.contains("focusable_button::focusable_button("),
+            "play overlay must be wrapped in the focusable button for keyboard access"
+        );
+        assert!(
+            media_frame_fns.contains(".ring_radius(PLAY_OVERLAY_SIZE / 2.0)"),
+            "play overlay focus ring must follow the circular button radius"
         );
         assert!(
             media_frame_fns.contains("container(play)")
@@ -2480,6 +2521,299 @@ mod tests {
         assert!(
             prod.contains("Row::with_children(buttons).spacing(SPACE_8).wrap()"),
             "action buttons must use a wrapping row so they wrap/stack at narrow widths"
+        );
+    }
+
+    // ── VIDCARD-17: Accessibility (spec Task 17) ───────────────────────
+
+    #[test]
+    fn every_action_button_is_keyboard_focusable() {
+        // Task 17: buttons must be keyboard accessible. iced 0.14's stock
+        // Button has no `operation::Focusable` impl and no keyboard event
+        // handling, so every shared action-button helper wraps its button in
+        // `focusable_button` (Tab traversal + Enter/Space activation).
+        let src = include_str!("download_progress_view.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        for helper in [
+            "fn action_button",
+            "fn text_button",
+            "fn primary_button",
+            "fn secondary_button",
+            "fn disabled_button",
+        ] {
+            let body = prod
+                .split(helper)
+                .nth(1)
+                .unwrap_or_else(|| panic!("{helper} must exist"));
+            let body = body.split("fn ").next().unwrap();
+            assert!(
+                body.contains("focusable_button::focusable_button("),
+                "{helper} must wrap its button in the focusable button wrapper"
+            );
+        }
+    }
+
+    #[test]
+    fn disabled_button_does_not_join_focus_order() {
+        // A disabled/loading button has no action, so it must pass
+        // `None` to the focusable wrapper and stay out of the Tab order
+        // (the wrapper only registers `operation.focusable` when on_press
+        // is present).
+        let src = include_str!("download_progress_view.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let body = prod
+            .split("fn disabled_button")
+            .nth(1)
+            .expect("disabled_button must exist");
+        let body = body.split("fn ").next().unwrap();
+        assert!(
+            body.contains("None,"),
+            "disabled_button must not register an activation message"
+        );
+    }
+
+    #[test]
+    fn icon_only_buttons_carry_accessible_names() {
+        // Task 17: "All icon-only buttons have accessible names." iced 0.14
+        // exposes no aria API, so the project's icon-button convention is a
+        // tooltip label: the play overlay says "Play video" and the header
+        // overflow kebab says "More actions".
+        let src = include_str!("video_file_card.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            prod.contains("\"Play video\""),
+            "play overlay must carry an accessible name"
+        );
+        assert!(
+            prod.contains("\"More actions\""),
+            "overflow kebab must carry an accessible name"
+        );
+    }
+
+    #[test]
+    fn progress_value_is_real_text() {
+        // Task 17: "Download progress has an accessible value." iced 0.14
+        // has no progress-bar aria API, so the value must be real text: the
+        // pct label and the bytes/total detail line.
+        let src = include_str!("download_progress_view.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let progress = prod
+            .split("pub(crate) fn progress_section")
+            .nth(1)
+            .expect("progress_section must exist");
+        assert!(
+            progress.contains("format!(\"{pct}%\")"),
+            "progress section must render the percentage as real text"
+        );
+        assert!(
+            progress.contains("type_role_text"),
+            "progress percentage must be a real text element"
+        );
+        let detail = prod
+            .split("pub(crate) fn active_download_detail")
+            .nth(1)
+            .expect("active_download_detail must exist");
+        assert!(
+            detail.contains("human_size") && detail.contains("{pct}%"),
+            "detail line must render bytes/total/percent as real text"
+        );
+    }
+
+    #[test]
+    fn filename_full_name_is_exposed_to_assistive_technology() {
+        // Task 17: "Filename truncation still exposes the full name to
+        // assistive technology." The header truncates visually but the full
+        // name travels in the tooltip and in the Copy filename action.
+        let src = include_str!("video_file_card.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let header = prod
+            .split("fn header(")
+            .nth(1)
+            .expect("header must exist");
+        assert!(
+            header.contains("attachment.name.clone()"),
+            "filename tooltip must carry the full untruncated name"
+        );
+        assert!(
+            header.contains("truncate_filename("),
+            "the visible filename is still visually truncated"
+        );
+        assert!(
+            prod.contains("CopyToClipboard(name.clone())"),
+            "copy action must expose the full name to the clipboard"
+        );
+    }
+
+    #[test]
+    fn status_is_not_conveyed_by_colour_alone() {
+        // Task 17: "Status is not conveyed by colour alone." Every state has
+        // a real status word ("Downloading from Duke", "Paused",
+        // "Ready to play", ...) rendered as text; colour is an extra cue.
+        let src = include_str!("video_file_card.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let status = prod
+            .split("fn status_metadata")
+            .nth(1)
+            .expect("status_metadata must exist");
+        assert!(
+            status.contains("format!(\"●  {status}\")"),
+            "status line must render the state word as real text"
+        );
+        assert!(
+            status.contains("\"Downloading from {}\"")
+                && status.contains("\"Paused\"")
+                && status.contains("\"Ready to play\""),
+            "active/paused/ready states must all carry a textual label"
+        );
+    }
+
+    #[test]
+    fn error_states_provide_text_not_only_icons() {
+        // Task 17: "Error states provide text, not only icons." Both the
+        // transfer-failure section and the playback-error panel render the
+        // real failure title/message/recovery text.
+        let src = include_str!("video_file_card.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let err = prod
+            .split("fn error_section")
+            .nth(1)
+            .expect("error_section must exist");
+        assert!(
+            err.contains("failure.title()")
+                && err.contains("failure.message()")
+                && err.contains("failure.recovery_action()"),
+            "transfer failure must render title/message/recovery as text"
+        );
+        let media = prod
+            .split("fn media_frame(")
+            .nth(1)
+            .expect("media_frame must exist");
+        assert!(
+            media.contains("error.title()") && media.contains("error.message()"),
+            "playback error panel must render title and message as text"
+        );
+    }
+
+    #[test]
+    fn player_control_buttons_have_text_labels_and_are_focusable() {
+        // Task 17: "Video controls remain accessible." The inline player's
+        // control buttons (Play/Pause, Mute/Unmute, Collapse/Expand) are
+        // text-labelled action_buttons — and action_button now wraps in the
+        // focusable wrapper, so they are Tab-reachable and Enter/Space
+        // activatable.
+        let src = include_str!("video_file_card.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let media = prod
+            .split("fn media_frame(")
+            .nth(1)
+            .expect("media_frame must exist");
+        assert!(
+            media.contains("\"Play\"") && media.contains("\"Pause\""),
+            "play/pause control must carry a text label"
+        );
+        assert!(
+            media.contains("\"Mute\"") && media.contains("\"Unmute\""),
+            "mute control must carry a text label"
+        );
+        assert!(
+            media.contains("\"Collapse\"") && media.contains("\"Expand\""),
+            "expand control must carry a text label"
+        );
+        assert!(
+            media.contains("action_button("),
+            "player controls must go through the focusable action_button helper"
+        );
+    }
+
+    #[test]
+    fn focus_ring_uses_visible_design_token_colors() {
+        // Task 17: "Focus indicators are visible." The focusable-button
+        // wrapper draws a 2 px ring using the design token focus colour on
+        // both light and dark themes (contrast-tested in design_tokens).
+        let src = include_str!("focusable_button.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            prod.contains("color_focus(theme)"),
+            "focus ring must use the design-token focus colour"
+        );
+        assert!(
+            prod.contains("design_tokens::FOCUS_WIDTH"),
+            "focus ring must use the design-token ring width"
+        );
+        assert!(
+            prod.contains("state.is_focused"),
+            "focus ring must only draw while the button is focused"
+        );
+    }
+
+    #[test]
+    fn action_button_order_is_logical() {
+        // Task 17: "Button order is logical." The action row must present
+        // the primary action first, supporting actions second, and the
+        // destructive action last (Cancel/Remove are text buttons at the
+        // tail of every state's row).
+        let src = include_str!("download_progress_view.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let action_buttons = prod
+            .split("pub(crate) fn action_buttons")
+            .nth(1)
+            .expect("action_buttons must exist");
+        // In every state the destructive text_button appears after the
+        // primary/secondary entries in the vec.
+        let completed = action_buttons
+            .split("(Video, DownloadState::Completed { saved_path: Some(path), .. }) if path.exists()")
+            .nth(1)
+            .expect("completed video arm must exist");
+        assert!(
+            completed.contains("primary_button") && completed.contains("secondary_button"),
+            "completed state must lead with primary then secondary actions"
+        );
+        let active = action_buttons
+            .split("(_, DownloadState::Active { .. })")
+            .nth(1)
+            .expect("active arm must exist");
+        assert!(
+            active.find("text_button").unwrap_or(usize::MAX)
+                > active.find("secondary_button").unwrap_or(usize::MAX),
+            "destructive Cancel must come after the secondary Pause button"
+        );
+        let failed = action_buttons
+            .split("(_, DownloadState::Failed { failure }) if failure.retry_available()")
+            .nth(1)
+            .expect("failed arm must exist");
+        assert!(
+            failed.find("text_button").unwrap_or(usize::MAX)
+                > failed.find("primary_button").unwrap_or(usize::MAX),
+            "destructive Remove must come after the primary Retry button"
+        );
+    }
+
+    #[test]
+    fn video_card_has_no_animation_to_reduce() {
+        // Task 17: "Reduced-motion preferences are respected for progress
+        // and hover animation where supported." The card renders no animated
+        // progress and no hover motion: the progress bar is a static fill
+        // and the loading indicator is a static icon + label. The app's
+        // reduced_motion flag gates the animated spinners elsewhere.
+        let card_src = include_str!("video_file_card.rs");
+        let card_prod = card_src.split("#[cfg(test)]").next().unwrap();
+        let dpv_src = include_str!("download_progress_view.rs");
+        let dpv_prod = dpv_src.split("#[cfg(test)]").next().unwrap();
+        let progress = dpv_prod
+            .split("pub(crate) fn progress_section")
+            .nth(1)
+            .expect("progress_section must exist");
+        assert!(
+            !progress.contains("animation") && !progress.contains("Animation"),
+            "progress bar must be a static fill (no animation)"
+        );
+        let loading = card_prod
+            .split("fn loading_indicator")
+            .nth(1)
+            .expect("loading_indicator must exist");
+        assert!(
+            !loading.contains("animation") && !loading.contains("Animation"),
+            "loading indicator must be a static icon + label (no animation)"
         );
     }
 }

@@ -15,6 +15,7 @@ mod dashboard_filters;
 mod design_tokens;
 mod download_progress_view;
 mod video_file_card;
+mod focusable_button;
 mod downloaded_view_model;
 mod downloading_view_model;
 mod file_category;

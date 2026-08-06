@@ -272,61 +272,78 @@ pub(crate) fn state_badge(state: &DownloadState, tone: Color) -> iced::widget::C
 // ── Action buttons ───────────────────────────────────────────────────────
 
 /// A small ghost-style button with a compact outline.
-pub(crate) fn action_button<'a>(label: &'a str, msg: AppMessage) -> iced::widget::Button<'a, AppMessage> {
+///
+/// Returns a keyboard-focusable button (spec Task 17): iced 0.14 buttons
+/// have no `operation::Focusable` impl and cannot be Tab-reached or
+/// activated with Enter/Space on their own, so every action button is
+/// wrapped in [`crate::focusable_button::FocusableButton`], which joins the
+/// app's focus traversal, activates on Enter/Space and draws a visible
+/// focus ring.
+pub(crate) fn action_button<'a>(label: &'a str, msg: AppMessage) -> iced::Element<'a, AppMessage> {
     let lbl = crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, label);
-    button(lbl)
-        .on_press(msg)
-        .padding([SPACE_4, SPACE_10])
-        .style(|theme, status| {
-            let base = match status {
-                widget::button::Status::Hovered => accent_primary(theme),
-                widget::button::Status::Pressed => {
-                    let mut c = accent_primary(theme);
-                    c.r *= 0.85;
-                    c.g *= 0.85;
-                    c.b *= 0.85;
-                    c
+    crate::focusable_button::focusable_button(
+        button(lbl)
+            .on_press(msg.clone())
+            .padding([SPACE_4, SPACE_10])
+            .style(|theme, status| {
+                let base = match status {
+                    widget::button::Status::Hovered => accent_primary(theme),
+                    widget::button::Status::Pressed => {
+                        let mut c = accent_primary(theme);
+                        c.r *= 0.85;
+                        c.g *= 0.85;
+                        c.b *= 0.85;
+                        c
+                    }
+                    _ => Color::from_rgb(0.5, 0.5, 0.5),
+                };
+                widget::button::Style {
+                    text_color: base,
+                    background: None,
+                    border: iced::Border {
+                        color: border_muted(theme),
+                        width: 1.0,
+                        radius: SPACE_6.into(),
+                    },
+                    ..Default::default()
                 }
-                _ => Color::from_rgb(0.5, 0.5, 0.5),
-            };
-            widget::button::Style {
-                text_color: base,
-                background: None,
-                border: iced::Border {
-                    color: border_muted(theme),
-                    width: 1.0,
-                    radius: SPACE_6.into(),
-                },
-                ..Default::default()
-            }
-        })
+            }),
+        Some(msg),
+    )
+    .ring_radius(SPACE_6)
+    .build()
 }
 
 /// A subtle text-only button (borderless, uses muted/destructive colour).
-pub(crate) fn text_button<'a>(label: &'a str, msg: AppMessage) -> iced::widget::Button<'a, AppMessage> {
+pub(crate) fn text_button<'a>(label: &'a str, msg: AppMessage) -> iced::Element<'a, AppMessage> {
     let lbl = crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, label);
-    button(lbl)
-        .on_press(msg)
-        .padding([SPACE_4, SPACE_8])
-        .style(|theme, status| {
-            let base = match status {
-                widget::button::Status::Hovered => {
-                    let mut c = color_error(theme);
-                    c.a = 0.8;
-                    c
-                }
-                widget::button::Status::Pressed => color_error(theme),
-                _ => Color::from_rgb(0.45, 0.45, 0.45),
-            };
-            widget::button::Style {
-                text_color: base,
-                background: None,
-                border: iced::Border {
+    crate::focusable_button::focusable_button(
+        button(lbl)
+            .on_press(msg.clone())
+            .padding([SPACE_4, SPACE_8])
+            .style(|theme, status| {
+                let base = match status {
+                    widget::button::Status::Hovered => {
+                        let mut c = color_error(theme);
+                        c.a = 0.8;
+                        c
+                    }
+                    widget::button::Status::Pressed => color_error(theme),
+                    _ => Color::from_rgb(0.45, 0.45, 0.45),
+                };
+                widget::button::Style {
+                    text_color: base,
+                    background: None,
+                    border: iced::Border {
+                        ..Default::default()
+                    },
                     ..Default::default()
-                },
-                ..Default::default()
-            }
-        })
+                }
+            }),
+        Some(msg),
+    )
+    .ring_radius(SPACE_6)
+    .build()
 }
 
 /// Build the inner content of an action button: an optional leading icon
@@ -353,40 +370,76 @@ fn action_content<'a>(
 }
 
 /// Green filled primary action button (the single main action per state).
+///
+/// Keyboard-focusable: wrapped in [`crate::focusable_button::FocusableButton`]
+/// so Tab traversal reaches it and Enter/Space activates it (spec Task 17).
 pub(crate) fn primary_button<'a>(
     icon: Option<&'static [u8]>,
     label: &'a str,
     msg: AppMessage,
-) -> iced::widget::Button<'a, AppMessage> {
-    button(action_content(icon, label, |_t| Color::WHITE))
-        .on_press(msg)
-        .padding([SPACE_6, SPACE_12])
-        .style(super::app::BUTTON_PRIMARY_GREEN)
+) -> iced::Element<'a, AppMessage> {
+    crate::focusable_button::focusable_button(
+        button(action_content(icon, label, |_t| Color::WHITE))
+            .on_press(msg.clone())
+            .padding([SPACE_6, SPACE_12])
+            .style(super::app::BUTTON_PRIMARY_GREEN),
+        Some(msg),
+    )
+    .ring_radius(crate::design_tokens::RADIUS_SM)
+    .build()
 }
 
 /// Light bordered secondary action button (supporting actions per state).
+///
+/// Keyboard-focusable: wrapped in [`crate::focusable_button::FocusableButton`]
+/// so Tab traversal reaches it and Enter/Space activates it (spec Task 17).
 pub(crate) fn secondary_button<'a>(
     icon: Option<&'static [u8]>,
     label: &'a str,
     msg: AppMessage,
-) -> iced::widget::Button<'a, AppMessage> {
-    button(action_content(icon, label, text_system))
-        .on_press(msg)
-        .padding([SPACE_6, SPACE_12])
-        .style(|theme, status| {
-            let base = match status {
-                widget::button::Status::Hovered => accent_primary(theme),
-                widget::button::Status::Pressed => {
-                    let mut c = accent_primary(theme);
-                    c.r *= 0.85;
-                    c.g *= 0.85;
-                    c.b *= 0.85;
-                    c
+) -> iced::Element<'a, AppMessage> {
+    crate::focusable_button::focusable_button(
+        button(action_content(icon, label, text_system))
+            .on_press(msg.clone())
+            .padding([SPACE_6, SPACE_12])
+            .style(|theme, status| {
+                let base = match status {
+                    widget::button::Status::Hovered => accent_primary(theme),
+                    widget::button::Status::Pressed => {
+                        let mut c = accent_primary(theme);
+                        c.r *= 0.85;
+                        c.g *= 0.85;
+                        c.b *= 0.85;
+                        c
+                    }
+                    _ => text_system(theme),
+                };
+                widget::button::Style {
+                    text_color: base,
+                    background: None,
+                    border: iced::Border {
+                        color: border_muted(theme),
+                        width: 1.0,
+                        radius: SPACE_6.into(),
+                    },
+                    ..Default::default()
                 }
-                _ => text_system(theme),
-            };
-            widget::button::Style {
-                text_color: base,
+            }),
+        Some(msg),
+    )
+    .ring_radius(SPACE_6)
+    .build()
+}
+
+/// Disabled / loading button — no press handler, muted styling, and NOT
+/// part of the keyboard focus order (no action to activate).
+pub(crate) fn disabled_button<'a>(label: &'a str) -> iced::Element<'a, AppMessage> {
+    let lbl = crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, label);
+    crate::focusable_button::focusable_button(
+        button(lbl)
+            .padding([SPACE_6, SPACE_12])
+            .style(|theme, _status| widget::button::Style {
+                text_color: text_muted(theme),
                 background: None,
                 border: iced::Border {
                     color: border_muted(theme),
@@ -394,25 +447,11 @@ pub(crate) fn secondary_button<'a>(
                     radius: SPACE_6.into(),
                 },
                 ..Default::default()
-            }
-        })
-}
-
-/// Disabled / loading button — no press handler, muted styling.
-pub(crate) fn disabled_button<'a>(label: &'a str) -> iced::widget::Button<'a, AppMessage> {
-    let lbl = crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, label);
-    button(lbl)
-        .padding([SPACE_6, SPACE_12])
-        .style(|theme, _status| widget::button::Style {
-            text_color: text_muted(theme),
-            background: None,
-            border: iced::Border {
-                color: border_muted(theme),
-                width: 1.0,
-                radius: SPACE_6.into(),
-            },
-            ..Default::default()
-        })
+            }),
+        None,
+    )
+    .ring_radius(SPACE_6)
+    .build()
 }
 
 // ── Primary entry point ──────────────────────────────────────────────────
