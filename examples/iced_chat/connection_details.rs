@@ -9,13 +9,12 @@
 //! Fields that are not available from the current frontend state should be
 //! surfaced through the loading / empty / error dialog states and are reported
 //! as unavailable in the support summary.
-use iced::font::Weight;
-use iced::widget::{button, container, text, text_input, Column, Row, Space};
+use iced::widget::{button, container, text_input, Column, Row, Space};
 use iced::{Alignment, Length};
 
 use crate::app::{
     accent_primary, bg_surface, border_muted, color_error, text_muted_style, BUTTON_OUTLINE,
-    SPACE_12, SPACE_16, SPACE_2, SPACE_24, SPACE_4, SPACE_6, SPACE_8, TYPO_SM, TYPO_XL, TYPO_XS,
+    SPACE_12, SPACE_16, SPACE_2, SPACE_4, SPACE_6, SPACE_8,
 };
 
 const DIALOG_WIDTH: f32 = 680.0;
@@ -317,34 +316,37 @@ where
         ConnectionDetailsDialogState::Loading { message } => dialog_body(
             state,
             announcement,
-            vec![text(message.as_str())
-                .font(crate::fonts::source_sans(Weight::Normal))
-                .size(TYPO_SM)
-                .into()],
+            vec![crate::fonts::type_role_text(
+                crate::fonts::TypeRole::SupportingText,
+                message.as_str(),
+            )
+            .into()],
             on_action,
             on_value_edit,
         ),
         ConnectionDetailsDialogState::Empty { message } => dialog_body(
             state,
             announcement,
-            vec![text(message.as_str())
-                .font(crate::fonts::source_sans(Weight::Normal))
-                .size(TYPO_SM)
-                .style(text_muted_style)
-                .into()],
+            vec![crate::fonts::type_role_text(
+                crate::fonts::TypeRole::SupportingText,
+                message.as_str(),
+            )
+            .style(text_muted_style)
+            .into()],
             on_action,
             on_value_edit,
         ),
         ConnectionDetailsDialogState::Error { message } => dialog_body(
             state,
             announcement,
-            vec![text(message.as_str())
-                .font(crate::fonts::source_sans(Weight::Normal))
-                .size(TYPO_SM)
-                .style(|theme| iced::widget::text::Style {
-                    color: Some(color_error(theme)),
-                })
-                .into()],
+            vec![crate::fonts::type_role_text(
+                crate::fonts::TypeRole::SupportingText,
+                message.as_str(),
+            )
+            .style(|theme| iced::widget::text::Style {
+                color: Some(color_error(theme)),
+            })
+            .into()],
             on_action,
             on_value_edit,
         ),
@@ -436,9 +438,7 @@ fn connection_detail_row<'a, Message>(
 where
     Message: 'a + Clone,
 {
-    let label_widget = text(label)
-        .font(crate::fonts::source_sans(Weight::Semibold))
-        .size(TYPO_SM)
+    let label_widget = crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, label)
         .width(Length::Fill)
         .style(|theme| iced::widget::text::Style {
             color: Some(accent_primary(theme)),
@@ -446,14 +446,14 @@ where
 
     let value_input = if focus_target {
         text_input("", value)
-            .font(crate::fonts::jetbrains_mono(Weight::Normal))
+            .font(crate::fonts::TypeRole::TechnicalValue.font())
             .id(FIRST_VALUE_INPUT_ID)
             .on_input(on_value_edit)
             .padding([SPACE_6, SPACE_8])
             .width(Length::Fill)
     } else {
         text_input("", value)
-            .font(crate::fonts::jetbrains_mono(Weight::Normal))
+            .font(crate::fonts::TypeRole::TechnicalValue.font())
             .on_input(on_value_edit)
             .padding([SPACE_6, SPACE_8])
             .width(Length::Fill)
@@ -473,11 +473,10 @@ where
 
     if let Some(copy_text) = copy_text {
         line = line.push(
-            button(
-                text("Copy")
-                    .font(crate::fonts::source_sans(Weight::Medium))
-                    .size(TYPO_SM),
-            )
+            button(crate::fonts::type_role_text(
+                crate::fonts::TypeRole::ButtonLabel,
+                "Copy",
+            ))
             .on_press(on_action(ConnectionDetailsDialogAction::CopyValue {
                 label,
                 value: copy_text.to_string(),
@@ -503,17 +502,13 @@ fn dialog_body<'a, Message>(
 where
     Message: 'a + Clone,
 {
-    let title = text(state.title())
-        .font(crate::fonts::source_sans(Weight::Bold))
-        .size(TYPO_XL)
+    let title = crate::fonts::type_role_text(crate::fonts::TypeRole::PageTitle, state.title())
         .width(Length::Fill);
 
     let mut header = Column::new().push(title).spacing(SPACE_4);
     if let Some(message) = announcement {
         header = header.push(
-            text(message)
-                .font(crate::fonts::source_sans(Weight::Normal))
-                .size(TYPO_XS)
+            crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, message)
                 .style(text_muted_style)
                 .width(Length::Fill),
         );
@@ -535,22 +530,20 @@ where
     let mut footer = Row::new().spacing(SPACE_8).align_y(Alignment::Center);
     if state.can_copy_details() {
         footer = footer.push(
-            button(
-                text("Copy details")
-                    .font(crate::fonts::source_sans(Weight::Medium))
-                    .size(TYPO_SM),
-            )
+            button(crate::fonts::type_role_text(
+                crate::fonts::TypeRole::ButtonLabel,
+                "Copy details",
+            ))
             .on_press(on_action(ConnectionDetailsDialogAction::CopyDetails))
             .style(BUTTON_OUTLINE)
             .padding([SPACE_6, SPACE_12]),
         );
     }
     footer = footer.push(
-        button(
-            text("Close")
-                .font(crate::fonts::source_sans(Weight::Medium))
-                .size(TYPO_SM),
-        )
+        button(crate::fonts::type_role_text(
+            crate::fonts::TypeRole::ButtonLabel,
+            "Close",
+        ))
         .on_press(on_action(ConnectionDetailsDialogAction::Close))
         .style(BUTTON_OUTLINE)
         .padding([SPACE_6, SPACE_12]),

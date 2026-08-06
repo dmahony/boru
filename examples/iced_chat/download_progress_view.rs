@@ -13,7 +13,6 @@
 //! All colors, spacing, and typography use the existing constants from the
 //! parent module to stay consistent with the app's design system.
 
-use iced::font::Weight;
 use iced::widget::text::Wrapping;
 use iced::widget::{self, button, container, row, text, Column, Row};
 use iced::{Alignment, Color, Length};
@@ -151,9 +150,7 @@ fn video_presentation_state(attachment: &DownloadAttachment) -> VideoPresentatio
 
 fn state_badge(state: &DownloadState, tone: Color) -> iced::widget::Container<'static, AppMessage> {
     container(
-        text(state_badge_label(state))
-            .font(crate::fonts::source_sans(Weight::Semibold))
-            .size(TYPO_XXS)
+        crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, state_badge_label(state))
             .color(
                 // Use a perceptually balanced off-white against the badge color
                 Color::from_rgb(0.95, 0.95, 0.95),
@@ -174,9 +171,7 @@ fn state_badge(state: &DownloadState, tone: Color) -> iced::widget::Container<'s
 
 /// A small ghost-style button with a compact outline.
 fn action_button<'a>(label: &'a str, msg: AppMessage) -> iced::widget::Button<'a, AppMessage> {
-    let lbl = text(label)
-        .font(crate::fonts::source_sans(Weight::Medium))
-        .size(TYPO_XS);
+    let lbl = crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, label);
     button(lbl)
         .on_press(msg)
         .padding([SPACE_4, SPACE_10])
@@ -207,9 +202,7 @@ fn action_button<'a>(label: &'a str, msg: AppMessage) -> iced::widget::Button<'a
 
 /// A subtle text-only button (borderless, uses muted/destructive colour).
 fn text_button<'a>(label: &'a str, msg: AppMessage) -> iced::widget::Button<'a, AppMessage> {
-    let lbl = text(label)
-        .font(crate::fonts::source_sans(Weight::Normal))
-        .size(TYPO_XS);
+    let lbl = crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, label);
     button(lbl)
         .on_press(msg)
         .padding([SPACE_4, SPACE_8])
@@ -331,17 +324,16 @@ fn view_download_progress_inner<'a>(
         )
         .push(state_badge(state, tone))
         .push(
-            text(attachment.name.clone())
-                .font(crate::fonts::source_sans(Weight::Semibold))
-                .size(TYPO_SM)
-                .color(tone)
-                .wrapping(Wrapping::Word)
-                .width(Length::Fill),
+            crate::fonts::type_role_text(
+                crate::fonts::TypeRole::ButtonLabel,
+                attachment.name.clone(),
+            )
+            .color(tone)
+            .wrapping(Wrapping::Word)
+            .width(Length::Fill),
         )
         .push(
-            text(size_text)
-                .font(crate::fonts::source_sans(Weight::Normal))
-                .size(TYPO_XXS)
+            crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, size_text)
                 .color(muted)
                 .width(Length::Shrink),
         )
@@ -370,16 +362,15 @@ fn view_download_progress_inner<'a>(
             Some(
                 Row::new()
                     .push(
-                        text(source_label)
-                            .font(crate::fonts::source_sans(Weight::Normal))
-                            .size(TYPO_XS)
-                            .color(muted)
-                            .width(Length::Fill),
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::Metadata,
+                            source_label,
+                        )
+                        .color(muted)
+                        .width(Length::Fill),
                     )
                     .push(
-                        text(speed_label)
-                            .font(crate::fonts::source_sans(Weight::Normal))
-                            .size(TYPO_XS)
+                        crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, speed_label)
                             .color(tone),
                     )
                     .align_y(Alignment::Center)
@@ -400,10 +391,11 @@ fn view_download_progress_inner<'a>(
                 .map(|s| format!(" • {}/s", human_size(s)))
                 .unwrap_or_default();
             Some(
-                text(format!("{detail}{speed}"))
-                    .font(crate::fonts::source_sans(Weight::Normal))
-                    .size(TYPO_XS)
-                    .color(accent_primary(&theme)),
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::Metadata,
+                    format!("{detail}{speed}"),
+                )
+                .color(accent_primary(&theme)),
             )
         }
         _ => None,
@@ -424,41 +416,46 @@ fn view_download_progress_inner<'a>(
             let mut column = Column::new()
                 .push(
                     row![
-                        text(failure.title())
-                            .font(crate::fonts::source_sans(Weight::Medium))
-                            .size(TYPO_XS)
-                            .color(error_color),
-                        text(failure.stability_label())
-                            .font(crate::fonts::source_sans(Weight::Normal))
-                            .size(TYPO_XXS)
-                            .color(tone),
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::BodyEmphasised,
+                            failure.title(),
+                        )
+                        .color(error_color),
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::Metadata,
+                            failure.stability_label(),
+                        )
+                        .color(tone),
                     ]
                     .spacing(SPACE_8)
                     .align_y(Alignment::Center),
                 )
                 .push(
-                    text(failure.message())
-                        .font(crate::fonts::source_sans(Weight::Normal))
-                        .size(TYPO_XS)
-                        .color(muted)
-                        .width(Length::Fill),
+                    crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::Metadata,
+                        failure.message(),
+                    )
+                    .color(muted)
+                    .width(Length::Fill),
                 )
                 .push(
-                    text(format!("Recovery: {}", failure.recovery_action()))
-                        .font(crate::fonts::source_sans(Weight::Normal))
-                        .size(TYPO_XS)
-                        .color(tone)
-                        .width(Length::Fill),
+                    crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::Metadata,
+                        format!("Recovery: {}", failure.recovery_action()),
+                    )
+                    .color(tone)
+                    .width(Length::Fill),
                 );
 
             if let Some(detail) = failure.diagnostics() {
                 if !detail.is_empty() {
                     column = column.push(
-                        text(detail)
-                            .font(crate::fonts::jetbrains_mono(Weight::Normal))
-                            .size(TYPO_XXS)
-                            .color(muted)
-                            .width(Length::Fill),
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::TechnicalValue,
+                            detail,
+                        )
+                        .color(muted)
+                        .width(Length::Fill),
                     );
                 }
             }
@@ -696,11 +693,10 @@ fn view_download_progress_inner<'a>(
     }
     // "Open folder" link — always visible below the action buttons
     body = body.push(
-        button(
-            text("Open downloads folder")
-                .font(crate::fonts::source_sans(Weight::Medium))
-                .size(TYPO_XS),
-        )
+        button(crate::fonts::type_role_text(
+            crate::fonts::TypeRole::ButtonLabel,
+            "Open downloads folder",
+        ))
         .on_press(AppMessage::OpenDownloadsFolder)
         .padding([SPACE_2, SPACE_4]),
     );
@@ -799,14 +795,13 @@ fn progress_section<'a>(
                 }
             });
 
-        let pct_label = text(format!("{pct}%"))
-            .font(crate::fonts::source_sans(Weight::Bold))
-            .size(TYPO_XXS)
-            .color(if dimmed {
-                border_muted(&theme)
-            } else {
-                accent_primary(&theme)
-            });
+        let pct_label =
+            crate::fonts::type_role_text(crate::fonts::TypeRole::BodyEmphasised, format!("{pct}%"))
+                .color(if dimmed {
+                    border_muted(&theme)
+                } else {
+                    accent_primary(&theme)
+                });
 
         Some(
             Row::new()
@@ -822,10 +817,11 @@ fn progress_section<'a>(
             Some(
                 Row::new()
                     .push(
-                        text(format!("{} received — detecting size…", human_size(*bytes)))
-                            .font(crate::fonts::source_sans(Weight::Normal))
-                            .size(TYPO_XS)
-                            .color(accent_primary(&theme)),
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::Metadata,
+                            format!("{} received — detecting size…", human_size(*bytes)),
+                        )
+                        .color(accent_primary(&theme)),
                     )
                     .align_y(Alignment::Center)
                     .into(),
