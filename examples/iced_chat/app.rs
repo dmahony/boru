@@ -32184,7 +32184,7 @@ impl IcedChat {
         _dark_mode: bool,
         peer: PublicKey,
     ) -> iced::Element<'static, AppMessage> {
-        use iced::widget::{button, container, Column, Row};
+        use iced::widget::{button, container, Column, Row, Space};
         use iced::{Alignment, Length};
 
         let size_str = format_file_size(row.size_bytes);
@@ -32208,6 +32208,18 @@ impl IcedChat {
                 .style(text_muted_style),
             )
             .spacing(SPACE_2);
+
+        // PAPIRUS-11: every catalogue row leads with the same central
+        // FileTypeIcon component/resolver used by chat cards and the other
+        // dashboard rows — the icon answers "what type of file is this?",
+        // the action button answers "what is happening to it".
+        let type_icon = crate::download_progress_view::file_type_icon_element(
+            &row.display_name,
+            Some(row.mime_type.as_str()),
+            None,
+            crate::file_type_icon::FileTypeIconSize::List,
+            &Self::theme_from_dark(_dark_mode),
+        );
 
         // ── Action button based on download state ──
         let action: iced::Element<'static, AppMessage> = match row.dl {
@@ -32338,6 +32350,8 @@ impl IcedChat {
         };
 
         let file_row = Row::new()
+            .push(type_icon)
+            .push(Space::new().width(Length::Fixed(SPACE_8)))
             .push(info_col.width(Length::Fill))
             .push(action)
             .spacing(SPACE_8)
@@ -32584,30 +32598,23 @@ impl IcedChat {
                 .padding([SPACE_6, SPACE_12])
                 .style(BUTTON_GHOST_BG)
             };
-            // UI-30: uniform-size media thumbnail for image/video rows. Remote
-            // files have no local bytes (until downloaded), so the thumbnail
-            // box shows the type icon at the same fixed size used by the
-            // Shared by Me table — every media row stays visually uniform.
-            let mime = file.mime_type.as_str();
-            let is_image = mime.starts_with("image/");
-            let is_video = mime.starts_with("video/");
-            let media_thumb: iced::Element<'_, AppMessage> = if is_image || is_video {
-                crate::ui_components::file_thumbnail(
-                    None,
-                    if is_image { Icon::Image } else { Icon::Play },
-                    &theme,
-                )
-                .into()
-            } else {
-                Space::new()
-                    .width(Length::Fixed(crate::ui_components::FILE_THUMBNAIL_EDGE))
-                    .height(Length::Fixed(crate::ui_components::FILE_THUMBNAIL_EDGE))
-                    .into()
-            };
+            // PAPIRUS-11: every Shared with Me row uses the same central
+            // FileTypeIcon component/resolver as the chat cards and the
+            // Shared by Me table. Remote files have no local bytes (until
+            // downloaded), so there is no thumbnail to preserve — the
+            // resolved Papirus icon answers "what type of file is this?",
+            // while the status button answers "what is happening to it".
+            let type_icon = crate::download_progress_view::file_type_icon_element(
+                &item.display_name,
+                Some(file.mime_type.as_str()),
+                None,
+                crate::file_type_icon::FileTypeIconSize::List,
+                &theme,
+            );
             rows = rows.push(
                 container(
                     Row::new()
-                        .push(media_thumb)
+                        .push(type_icon)
                         .push(Space::new().width(Length::Fixed(SPACE_12)))
                         .push(
                             Column::new()
@@ -33290,6 +33297,18 @@ impl IcedChat {
                     .size(crate::icon_system::IconSize::Xs)
                     .color_fn(color_fn)
                     .build(),
+                // PAPIRUS-11: the file-type icon (same central component /
+                // resolver as chat cards and the other dashboard rows)
+                // answers "what type of file is this?"; the status icon +
+                // status label answer "what is happening to it" — status
+                // stays separate from the file-type icon (Task 13).
+                crate::download_progress_view::file_type_icon_element(
+                    &event.file_label,
+                    None,
+                    None,
+                    crate::file_type_icon::FileTypeIconSize::Compact,
+                    theme,
+                ),
                 Column::new()
                     .push(
                         crate::fonts::type_role_text(
@@ -33703,14 +33722,20 @@ impl IcedChat {
             )
             .align_y(Alignment::Center);
 
+        // PAPIRUS-11: the transferred file leads with the same central
+        // FileTypeIcon component/resolver as chat cards — the icon answers
+        // "what type of file is this?", the state label + progress answer
+        // "what is happening to it".
+        let type_icon = crate::download_progress_view::file_type_icon_element(
+            &row.display_name,
+            None,
+            None,
+            crate::file_type_icon::FileTypeIconSize::Compact,
+            theme,
+        );
+
         let file_line = Row::new()
-            .push(
-                crate::icon_system::Icon::Files
-                    .build()
-                    .size(crate::icon_system::IconSize::Xs)
-                    .color_fn(crate::design_tokens::text_muted)
-                    .build(),
-            )
+            .push(type_icon)
             .push(
                 crate::fonts::type_role_text(
                     crate::fonts::TypeRole::Metadata,
@@ -34030,17 +34055,23 @@ impl IcedChat {
         let status_badge = crate::ui_components::badge(status_label, kind);
 
         let metadata_label = format!("{type_label} · {size_label}");
+        // PAPIRUS-11: the Downloaded row's identity cell leads with the same
+        // central FileTypeIcon component/resolver as chat cards. The recorded
+        // MIME hint (and the filename extension) select the Papirus icon; the
+        // local integrity state answers "what is happening to the file" as a
+        // separate badge, never by recolouring the type icon.
+        let type_icon = crate::download_progress_view::file_type_icon_element(
+            &item.display_name,
+            item.mime_type.as_deref(),
+            None,
+            crate::file_type_icon::FileTypeIconSize::List,
+            theme,
+        );
         // Build the identity cell inline with owned strings: `FileIdentityCell`
         // borrows `&str` that must outlive the returned element, which a
         // stack-local formatted label cannot satisfy.
         let name_cell = Row::new()
-            .push(
-                crate::icon_system::Icon::Files
-                    .build()
-                    .size(crate::icon_system::IconSize::Md)
-                    .color_fn(crate::design_tokens::text_secondary)
-                    .build(),
-            )
+            .push(type_icon)
             .push(Space::new().width(Length::Fixed(SPACE_12)))
             .push(
                 Column::new()
@@ -34327,14 +34358,20 @@ impl IcedChat {
             ),
         };
 
+        // PAPIRUS-11: the Downloading row leads with the same central
+        // FileTypeIcon component/resolver as chat cards — the icon answers
+        // "what type of file is this?", the state label + progress answer
+        // "what is happening to it".
+        let type_icon = crate::download_progress_view::file_type_icon_element(
+            &row.display_name,
+            None,
+            None,
+            crate::file_type_icon::FileTypeIconSize::List,
+            theme,
+        );
+
         let mut name_line = Row::new()
-            .push(
-                Icon::Files
-                    .build()
-                    .size(crate::icon_system::IconSize::Xs)
-                    .color_fn(crate::design_tokens::text_muted)
-                    .build(),
-            )
+            .push(type_icon)
             .push(
                 crate::fonts::type_role_text(crate::fonts::TypeRole::BodyEmphasised, row.display_name)
                     .color(crate::design_tokens::text_primary(theme))
@@ -34887,10 +34924,27 @@ impl IcedChat {
                     .wrapping(iced::widget::text::Wrapping::None),
             )
             .push(
-                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, item_label)
-                    .color(crate::design_tokens::text_primary(theme))
-                    .width(Length::FillPortion(5))
-                    .wrapping(iced::widget::text::Wrapping::None),
+                Row::new()
+                    .push(crate::download_progress_view::file_type_icon_element(
+                        &row.file_label,
+                        None,
+                        None,
+                        crate::file_type_icon::FileTypeIconSize::Compact,
+                        theme,
+                    ))
+                    .push(Space::new().width(Length::Fixed(SPACE_4)))
+                    .push(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::Metadata,
+                            item_label,
+                        )
+                        .color(crate::design_tokens::text_primary(theme))
+                        .width(Length::Fill)
+                        .wrapping(iced::widget::text::Wrapping::None),
+                    )
+                    .spacing(0)
+                    .align_y(Alignment::Center)
+                    .width(Length::FillPortion(5)),
             )
             .push(
                 crate::fonts::type_role_text(

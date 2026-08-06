@@ -737,21 +737,37 @@ fn name_cell(
     theme: &Theme,
     thumbnails: &HashMap<String, Option<iced::widget::image::Handle>>,
 ) -> Element<'static, AppMessage> {
-    // Image/video rows get a uniform-size thumbnail preview when a handle is
-    // available (generated off the UI thread by the application layer);
-    // otherwise the standard file icon keeps the row readable.
+    // PAPIRUS-11: every row's icon is the central FileTypeIcon component
+    // (same resolver/component as the chat cards, PAPIRUS-10) so the same
+    // file shows the same icon everywhere. Image/video rows keep their
+    // uniform-size thumbnail preview when a handle is available (generated
+    // off the UI thread by the application layer); when the preview is
+    // missing (still loading / unsupported / non-media) the resolved
+    // Papirus icon answers "what type of file is this?".
     let icon = match row.mime_type.as_deref().unwrap_or("") {
-        value if value.starts_with("image/") => crate::ui_components::file_thumbnail(
-            thumbnails.get(&row.content_hash).and_then(|h| h.as_ref()),
-            Icon::Image,
+        value if value.starts_with("image/") || value.starts_with("video/") => {
+            match thumbnails.get(&row.content_hash).and_then(|h| h.as_ref()) {
+                // A real preview exists: keep it (previews preserved).
+                Some(handle) => {
+                    crate::ui_components::file_thumbnail(Some(handle), Icon::Files, theme)
+                }
+                // No preview: central Papirus file-type icon, same as chat.
+                None => crate::download_progress_view::file_type_icon_element(
+                    &row.display_name,
+                    row.mime_type.as_deref(),
+                    None,
+                    crate::file_type_icon::FileTypeIconSize::List,
+                    theme,
+                ),
+            }
+        }
+        _ => crate::download_progress_view::file_type_icon_element(
+            &row.display_name,
+            row.mime_type.as_deref(),
+            None,
+            crate::file_type_icon::FileTypeIconSize::List,
             theme,
         ),
-        value if value.starts_with("video/") => crate::ui_components::file_thumbnail(
-            thumbnails.get(&row.content_hash).and_then(|h| h.as_ref()),
-            Icon::Play,
-            theme,
-        ),
-        _ => file_icon(row),
     };
     let full_name = row.display_name.clone();
     let name_text = text(truncated_name(&row.display_name, 44))
@@ -795,22 +811,6 @@ fn name_cell(
         .spacing(0)
         .align_y(Alignment::Center)
         .width(Length::Fill)
-        .into()
-}
-
-fn file_icon(row: &SharedByMeRow) -> Element<'static, AppMessage> {
-    let icon = match row.mime_type.as_deref().unwrap_or("") {
-        value if value.starts_with("image/") => Icon::Image,
-        value if value.starts_with("video/") || value.starts_with("audio/") => Icon::Play,
-        value if value.contains("zip") || value.contains("tar") || value.contains("gzip") => {
-            Icon::Files
-        }
-        _ => Icon::Files,
-    };
-    icon.build()
-        .size(IconSize::Md)
-        .color_fn(design_tokens::text_secondary)
-        .build()
         .into()
 }
 

@@ -459,22 +459,33 @@ mod tests {
     #[test]
     fn handle_cache_returns_cloned_handles_for_same_path() {
         let path = "assets/third_party/papirus/32/application-pdf.svg";
-        // Robust to test parallelism: measure the cache delta instead of
-        // assuming the map is empty.
+        // Count entries for THIS path rather than the whole-map delta: other
+        // tests run in parallel and may legitimately insert distinct paths
+        // into the process-global cache between our reads, which would make a
+        // delta assertion flaky. Two requests for the same path must still
+        // create exactly one entry.
+        let count_for = |cache: &std::sync::Mutex<HashMap<String, svg::Handle>>, path: &str| {
+            cache
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(key, _)| key.as_str() == path)
+                .count()
+        };
         let before = SVG_HANDLE_CACHE
             .get()
-            .map(|c| c.lock().unwrap().len())
+            .map(|c| count_for(c, path))
             .unwrap_or(0);
         let _ = cached_svg_handle(path);
         let _ = cached_svg_handle(path);
         let after = SVG_HANDLE_CACHE
             .get()
-            .expect("cache initialised")
-            .lock()
-            .unwrap()
-            .len();
-        // Two requests for the same path must not create two entries.
+            .map(|c| count_for(c, path))
+            .unwrap_or(0);
+        // First request inserts the entry; the second reuses it — the path
+        // must appear exactly once in the cache.
         assert_eq!(after, before + 1);
+        assert_eq!(after, 1);
     }
 
     #[test]
