@@ -1942,6 +1942,20 @@ pub(crate) struct DownloadAttachment {
     /// Poster dimensions preserve a known aspect ratio without probing video
     /// data from the view function.
     pub(crate) poster_dimensions: Option<(u32, u32)>,
+    /// True while an async metadata probe is in flight for this attachment.
+    ///
+    /// The card renders a stable bounded placeholder while this is set and
+    /// swaps to the ratio-exact frame once the probe resolves (VIDCARD-09).
+    pub(crate) metadata_loading: bool,
+    /// True when the metadata probe could not read usable dimensions.
+    ///
+    /// The card then keeps the bounded generic `contain` media frame and the
+    /// problem is logged through the existing diagnostics system; Open File /
+    /// Open Folder actions remain available.
+    pub(crate) metadata_failed: bool,
+    /// Video duration in milliseconds, from the async metadata probe when the
+    /// container exposes it. Never fabricated: `None` when unknown.
+    pub(crate) duration_ms: Option<u64>,
     pub(crate) playback_error: Option<InlinePlaybackError>,
     /// Content identity extracted from the blob ticket; never inferred from
     /// the peer-controlled filename or MIME metadata.
@@ -1960,6 +1974,9 @@ impl std::hash::Hash for DownloadAttachment {
         self.thumbnail.hash(state);
         // thumbnail_handle is a cached rendering artifact — not part of logical identity
         self.poster_dimensions.hash(state);
+        self.metadata_loading.hash(state);
+        self.metadata_failed.hash(state);
+        self.duration_ms.hash(state);
         self.playback_error.hash(state);
         self.expected_content_hash.hash(state);
     }
@@ -1998,6 +2015,9 @@ impl DownloadAttachment {
                 .map(|bytes| iced::widget::image::Handle::from_bytes(bytes.to_vec())),
             thumbnail_hash: None,
             poster_dimensions,
+            metadata_loading: false,
+            metadata_failed: false,
+            duration_ms: None,
             playback_error: None,
             expected_content_hash,
         }
@@ -5192,6 +5212,14 @@ pub enum AppMessage {
     PosterGenerated {
         name: String,
         poster: Result<(Vec<u8>, Option<(u32, u32)>), String>,
+    },
+    /// Result of the async intrinsic-metadata probe (width/height/duration)
+    /// for a verified local video. Success carries real measurements only;
+    /// the card falls back to a bounded generic frame when dimensions are
+    /// unavailable and the problem is logged through diagnostics (VIDCARD-09).
+    VideoMetadataProbed {
+        name: String,
+        metadata: Result<boru_core::video_playback::MediaMetadata, String>,
     },
     DownloadFailed(String),
     /// Open a downloaded file with the platform default application.
@@ -8759,6 +8787,7 @@ impl IcedChat {
             AppMessage::DownloadDone(..) => "DownloadDone",
             AppMessage::DownloadDonePeerFile(..) => "DownloadDonePeerFile",
             AppMessage::PosterGenerated { .. } => "PosterGenerated",
+            AppMessage::VideoMetadataProbed { .. } => "VideoMetadataProbed",
             AppMessage::DownloadFailed(_) => "DownloadFailed",
             AppMessage::OpenDownloadedFile(_) => "OpenDownloadedFile",
             AppMessage::PlayInlineVideo(_) => "PlayInlineVideo",
@@ -15302,8 +15331,21 @@ impl IcedChat {
                 }
                 self.pending_file = None;
                 if is_video {
+                    // Mark the async metadata load as in-flight so the card
+                    // renders a stable loading placeholder at the bounded
+                    // default frame (VIDCARD-09).
+                    if let Some(idx) = completed_idx {
+                        if let Some(entry) = self.entries.get_mut(idx) {
+                            if let Some(download) = entry.download.as_mut() {
+                                download.metadata_loading = true;
+                            }
+                        }
+                    }
                     let cache_dir = self.data_dir.join("cache").join("video-posters");
-                    return iced::Task::perform(
+                    let poster_name = name.clone();
+                    let metadata_name = name.clone();
+                    let probe_path = poster_path.clone();
+                    let poster_task = iced::Task::perform(
                         async move {
                             match tokio::task::spawn_blocking(move || {
                                 video_poster::generate(&poster_path, &cache_dir)
@@ -15315,8 +15357,28 @@ impl IcedChat {
                                 Err(error) => Err(format!("poster worker failed: {error}")),
                             }
                         },
-                        move |poster| AppMessage::PosterGenerated { name, poster },
+                        move |poster| AppMessage::PosterGenerated {
+                            name: poster_name,
+                            poster,
+                        },
                     );
+                    let metadata_task = iced::Task::perform(
+                        async move {
+                            match tokio::task::spawn_blocking(move || {
+                                boru_core::video_playback::probe_local_video_metadata(&probe_path)
+                            })
+                            .await
+                            {
+                                Ok(result) => result,
+                                Err(error) => Err(format!("metadata worker failed: {error}")),
+                            }
+                        },
+                        move |metadata| AppMessage::VideoMetadataProbed {
+                            name: metadata_name,
+                            metadata,
+                        },
+                    );
+                    return iced::Task::batch(vec![poster_task, metadata_task]);
                 }
                 iced::Task::none()
             }
@@ -15354,8 +15416,21 @@ impl IcedChat {
                     }
                 }
                 if is_video {
+                    // Mark the async metadata load as in-flight so the card
+                    // renders a stable loading placeholder at the bounded
+                    // default frame (VIDCARD-09).
+                    if let Some(idx) = self.download_entry_index {
+                        if let Some(entry) = self.entries.get_mut(idx) {
+                            if let Some(download) = entry.download.as_mut() {
+                                download.metadata_loading = true;
+                            }
+                        }
+                    }
                     let cache_dir = self.data_dir.join("cache").join("video-posters");
-                    return iced::Task::perform(
+                    let poster_name = name.clone();
+                    let metadata_name = name.clone();
+                    let probe_path = poster_path.clone();
+                    let poster_task = iced::Task::perform(
                         async move {
                             match tokio::task::spawn_blocking(move || {
                                 video_poster::generate(&poster_path, &cache_dir)
@@ -15367,8 +15442,28 @@ impl IcedChat {
                                 Err(error) => Err(format!("poster worker failed: {error}")),
                             }
                         },
-                        move |poster| AppMessage::PosterGenerated { name, poster },
+                        move |poster| AppMessage::PosterGenerated {
+                            name: poster_name,
+                            poster,
+                        },
                     );
+                    let metadata_task = iced::Task::perform(
+                        async move {
+                            match tokio::task::spawn_blocking(move || {
+                                boru_core::video_playback::probe_local_video_metadata(&probe_path)
+                            })
+                            .await
+                            {
+                                Ok(result) => result,
+                                Err(error) => Err(format!("metadata worker failed: {error}")),
+                            }
+                        },
+                        move |metadata| AppMessage::VideoMetadataProbed {
+                            name: metadata_name,
+                            metadata,
+                        },
+                    );
+                    return iced::Task::batch(vec![poster_task, metadata_task]);
                 }
                 iced::Task::none()
             }
@@ -15395,6 +15490,65 @@ impl IcedChat {
                     }
                     Err(error) => {
                         tracing::warn!(file = %name, %error, "video poster generation failed; keeping video playable");
+                    }
+                }
+                iced::Task::none()
+            }
+            AppMessage::VideoMetadataProbed { name, metadata } => {
+                // VIDCARD-09: apply real intrinsic dimensions/duration once the
+                // async probe resolves. Success carries measurements only; a
+                // failed probe keeps the bounded generic contain frame and the
+                // problem is logged through the existing diagnostics system.
+                // Open File / Open Folder actions remain available.
+                match metadata {
+                    Ok(meta) => {
+                        if let Some(entry) = self.entries.iter_mut().find(|entry| {
+                            entry.download.as_ref().is_some_and(|download| {
+                                download.name == name && download.kind == TransferKind::Video
+                            })
+                        }) {
+                            if let Some(download) = entry.download.as_mut() {
+                                download.metadata_loading = false;
+                                download.metadata_failed = false;
+                                download.duration_ms = meta.duration_ms;
+                                // Prefer the real intrinsic dimensions when the
+                                // poster path did not already provide them.
+                                if download.poster_dimensions.is_none() {
+                                    if let (Some(width), Some(height)) = (meta.width, meta.height)
+                                    {
+                                        download.poster_dimensions = Some((width, height));
+                                    }
+                                }
+                                self.layout_cache.borrow_mut().clear();
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            file = %name,
+                            %error,
+                            "video metadata probe failed; keeping bounded generic media frame"
+                        );
+                        if let Some(entry) = self.entries.iter_mut().find(|entry| {
+                            entry.download.as_ref().is_some_and(|download| {
+                                download.name == name && download.kind == TransferKind::Video
+                            })
+                        }) {
+                            if let Some(download) = entry.download.as_mut() {
+                                download.metadata_loading = false;
+                                download.metadata_failed = true;
+                                self.layout_cache.borrow_mut().clear();
+                            }
+                        }
+                        // Log the metadata problem through the existing
+                        // diagnostics system (shared singleton, surfaced on the
+                        // dashboard/activity log like other UI-detectable issues).
+                        boru_core::chat_core::DIAGNOSTICS.record(
+                            None,
+                            boru_core::diagnostics::DiagnosticEventKind::Error(format!(
+                                "video metadata probe failed for {name}: {error}"
+                            )),
+                        );
                     }
                 }
                 iced::Task::none()

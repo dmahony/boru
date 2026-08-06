@@ -426,18 +426,25 @@ fn overflow_menu_item<'a>(label: &'a str, msg: AppMessage) -> iced::widget::Butt
     })
 }
 
-/// Subtitle shown inside the media frame while no poster handle is ready.
+/// Stable placeholder copy for the bounded media frame (VIDCARD-09).
 ///
-/// A video with a thumbnail hash is still fetching the sender's poster blob,
-/// so the placeholder should say so instead of claiming the poster only
-/// appears after a download that may already have happened.
-fn pending_preview_label(attachment: &DownloadAttachment) -> &'static str {
-    if attachment.thumbnail_hash.is_some() {
+/// While the async metadata probe is in flight — or while the sender's poster
+/// blob is still being fetched (a thumbnail hash is present but no handle has
+/// arrived) — the card shows a loading message at the safe default ratio. Once
+/// the probe resolves (or fails) the text switches without changing the frame
+/// geometry: the frame is always bounded via [`media_frame_size`], so
+/// replacing the placeholder never causes a large layout jump or an
+/// unrestricted-height frame.
+fn media_placeholder_text(attachment: &DownloadAttachment) -> &'static str {
+    if attachment.metadata_failed {
+        "Preview unavailable"
+    } else if attachment.metadata_loading || attachment.thumbnail_hash.is_some() {
         "Loading preview…"
     } else {
         "Preview available after download"
     }
 }
+
 // ── Reusable component ─────────────────────────────────────────────────
 
 /// A reusable, stateless video-file card.
@@ -740,7 +747,7 @@ impl<'a> BoruVideoFileCard<'a> {
                 // exist after the download completes. On-media text uses the
                 // light `ON_MEDIA_TEXT` neutral because the media frame is a
                 // fixed dark surface in both themes (VIDCARD-08).
-                let subtitle = pending_preview_label(attachment);
+                let subtitle = media_placeholder_text(attachment);
                 container(
                     Column::new()
                         .push(
@@ -1214,9 +1221,9 @@ impl<'a> BoruVideoFileCard<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        aspect_ratio_class, file_format_label, format_relative_time, header_badge,
-        media_frame_size, pending_preview_label, truncate_filename, video_presentation_state,
-        MediaAspectClass, MediaFrameSizing, VideoPresentationState, HEADER_FILENAME_MAX_CHARS,
+        aspect_ratio_class, file_format_label, format_relative_time, header_badge, media_frame_size,
+        media_placeholder_text, truncate_filename, video_presentation_state, MediaAspectClass,
+        MediaFrameSizing, VideoPresentationState, HEADER_FILENAME_MAX_CHARS,
     };
     use iced::Length;
     use crate::app::{DownloadAttachment, DownloadFailure, DownloadState, TransferKind};
@@ -1609,23 +1616,69 @@ mod tests {
     }
 
     #[test]
-    fn pending_preview_label_reflects_thumbnail_fetch_state() {
+    fn placeholder_shows_loading_while_metadata_or_thumbnail_is_pending() {
         let mut attachment =
-            DownloadAttachment::new(TransferKind::Video, "clip.mp4", "ticket", "", None);
-        // No sender thumbnail hash → poster expected only after download.
+            DownloadAttachment::new(TransferKind::Video, "clip.mp4", "ticket", "peer", None);
+        // Remote/not-yet-downloaded videos keep the stable default copy.
         assert_eq!(
-            pending_preview_label(&attachment),
+            media_placeholder_text(&attachment),
             "Preview available after download"
         );
+        attachment.metadata_loading = true;
+        assert_eq!(media_placeholder_text(&attachment), "Loading preview…");
         // Sender published a poster blob → the fetch is pending.
+        attachment.metadata_loading = false;
         attachment.thumbnail_hash = Some([0xab; 32]);
-        assert_eq!(pending_preview_label(&attachment), "Loading preview…");
+        assert_eq!(media_placeholder_text(&attachment), "Loading preview…");
         // Once the handle arrives the placeholder is no longer used.
         attachment.thumbnail_hash = None;
         attachment.thumbnail_handle = Some(iced::widget::image::Handle::from_bytes(vec![1, 2, 3]));
         assert_eq!(
-            pending_preview_label(&attachment),
+            media_placeholder_text(&attachment),
             "Preview available after download"
+        );
+    }
+
+    #[test]
+    fn placeholder_falls_back_to_bounded_generic_frame_on_probe_failure() {
+        let mut attachment =
+            DownloadAttachment::new(TransferKind::Video, "clip.mp4", "ticket", "peer", None);
+        attachment.metadata_loading = true;
+        attachment.metadata_failed = true;
+        // A failed probe never leaves the user with a growing placeholder:
+        // the frame stays bounded (16:9 default) and the copy is explicit.
+        assert_eq!(media_placeholder_text(&attachment), "Preview unavailable");
+        let (width, height) = media_frame_size(None);
+        assert_eq!(width, 720.0);
+        assert!((height - 405.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn card_source_wires_loading_placeholder_into_media_frame() {
+        // VIDCARD-09 acceptance: the media frame must render a stable loading
+        // placeholder while metadata loads, then swap to the ratio-exact frame
+        // without a large layout jump (the frame is always bounded).
+        let src = include_str!("video_file_card.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            prod.contains("media_placeholder_text(attachment)"),
+            "media frame must use the loading/unavailable placeholder helper"
+        );
+        assert!(
+            prod.contains("metadata_loading"),
+            "card must track the async metadata-load state"
+        );
+        // The placeholder and the final media share the same bounded frame
+        // sizing helper (`MediaFrameSizing` derives its fixed nominal box from
+        // `media_frame_size`, VIDCARD-08), so replacing the placeholder never
+        // causes a large layout jump.
+        assert!(
+            prod.contains("MediaFrameSizing::new(\n            attachment.poster_dimensions"),
+            "media frame must derive sizing from the attachment's dimensions"
+        );
+        assert!(
+            prod.contains("fn media_frame_size"),
+            "bounded frame sizing helper must exist"
         );
     }
 

@@ -88,6 +88,100 @@ pub fn verify_local_attachment(
     Ok(canonical)
 }
 
+/// Maximum local file size admitted to the metadata probe.
+///
+/// Mirrors the poster-probe bound; the probe itself is a header-only read so
+/// this guards against pathological inputs rather than actual memory use.
+pub const MAX_METADATA_PROBE_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Probe a verified local video for intrinsic width, height, and duration.
+///
+/// Runs `ffprobe` (the same media toolchain used by the poster probe) with a
+/// hard `-timelimit` and a bounded input size. The result never fabricates
+/// measurements: width/height/duration that the container does not expose
+/// remain `None`, and the caller is expected to fall back to a bounded
+/// generic media frame. This function is intentionally blocking; callers must
+/// run it in a `spawn_blocking` task so media probing never runs in the Iced
+/// update loop.
+pub fn probe_local_video_metadata(path: &Path) -> Result<MediaMetadata, String> {
+    let input_size = std::fs::metadata(path)
+        .map_err(|e| format!("inspect video: {e}"))?
+        .len();
+    if input_size == 0 || input_size > MAX_METADATA_PROBE_BYTES {
+        return Err("video is outside the metadata probe size limit".to_string());
+    }
+    let output = std::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            "-timelimit",
+            "10",
+        ])
+        .arg(path)
+        .output()
+        .map_err(|e| format!("start ffprobe: {e}"))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("ffprobe metadata probe failed: {}", detail.trim()));
+    }
+    Ok(parse_metadata_output(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
+}
+
+/// Parse the plain-text `ffprobe` output (`width\nheight\nduration`).
+///
+/// Handles the observed variants: video stream → `w\nh\ndur`; audio-only or
+/// missing video stream → `dur`; missing duration → `w\nh`. Unknown values
+/// stay `None` so callers can fall back to a bounded generic frame.
+fn parse_metadata_output(output: &str) -> MediaMetadata {
+    let values: Vec<&str> = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && *line != "N/A")
+        .collect();
+    let (width, height, duration_ms) = match values.as_slice() {
+        [w, h, d, ..] => (
+            w.parse::<u32>().ok().filter(|v| *v > 0),
+            h.parse::<u32>().ok().filter(|v| *v > 0),
+            d.parse::<f64>()
+                .ok()
+                .filter(|v| *v > 0.0)
+                .map(|seconds| (seconds * 1000.0) as u64),
+        ),
+        [w, h] => (
+            w.parse::<u32>().ok().filter(|v| *v > 0),
+            h.parse::<u32>().ok().filter(|v| *v > 0),
+            None,
+        ),
+        [d, ..] => (
+            None,
+            None,
+            d.parse::<f64>()
+                .ok()
+                .filter(|v| *v > 0.0)
+                .map(|seconds| (seconds * 1000.0) as u64),
+        ),
+        _ => (None, None, None),
+    };
+    MediaMetadata {
+        duration_ms,
+        width,
+        height,
+        media_type: MediaType::Video,
+        probe_status: ProbeStatus::Ready,
+        ..Default::default()
+    }
+}
+
 /// Media classification recorded with an attachment when it is known.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MediaType {
@@ -838,5 +932,58 @@ mod tests {
             None
         )
         .is_err());
+    }
+
+    #[test]
+    fn parse_metadata_output_reads_dimensions_and_duration() {
+        let metadata = parse_metadata_output("320\n240\n2.000000\n");
+        assert_eq!(metadata.width, Some(320));
+        assert_eq!(metadata.height, Some(240));
+        assert_eq!(metadata.duration_ms, Some(2_000));
+        assert_eq!(metadata.probe_status, ProbeStatus::Ready);
+        assert_eq!(metadata.media_type, MediaType::Video);
+    }
+
+    #[test]
+    fn parse_metadata_output_handles_duration_only_input() {
+        // Audio-only or a container without a video stream prints only the
+        // format duration; width/height stay None so the caller falls back
+        // to the bounded generic media frame.
+        let metadata = parse_metadata_output("2.500000\n");
+        assert_eq!(metadata.width, None);
+        assert_eq!(metadata.height, None);
+        assert_eq!(metadata.duration_ms, Some(2_500));
+    }
+
+    #[test]
+    fn parse_metadata_output_handles_missing_duration() {
+        // A stream that exposes dimensions but no format duration keeps the
+        // dimensions and reports no duration.
+        let metadata = parse_metadata_output("1280\n720\nN/A\n");
+        assert_eq!(metadata.width, Some(1280));
+        assert_eq!(metadata.height, Some(720));
+        assert_eq!(metadata.duration_ms, None);
+    }
+
+    #[test]
+    fn parse_metadata_output_rejects_unknown_values() {
+        let metadata = parse_metadata_output("");
+        assert_eq!(metadata.width, None);
+        assert_eq!(metadata.height, None);
+        assert_eq!(metadata.duration_ms, None);
+        let metadata = parse_metadata_output("   \nN/A\n");
+        assert_eq!(metadata.width, None);
+        assert_eq!(metadata.duration_ms, None);
+    }
+
+    #[test]
+    fn metadata_probe_rejects_missing_and_oversized_files() {
+        assert!(probe_local_video_metadata(Path::new("/definitely/missing.mp4")).is_err());
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("huge.mp4");
+        // Sparse file larger than the probe bound is rejected before ffprobe.
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_METADATA_PROBE_BYTES + 1).unwrap();
+        assert!(probe_local_video_metadata(&path).is_err());
     }
 }
