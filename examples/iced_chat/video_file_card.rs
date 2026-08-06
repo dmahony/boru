@@ -1896,7 +1896,7 @@ mod tests {
         // A failed probe never leaves the user with a growing placeholder:
         // the frame stays bounded (16:9 default) and the copy is explicit.
         assert_eq!(media_placeholder_text(&attachment), "Preview unavailable");
-        let (width, height) = media_frame_size(None);
+        let (width, height) = media_frame_size(None, CardBand::Wide);
         assert_eq!(width, 720.0);
         assert!((height - 405.0).abs() < 0.01);
     }
