@@ -3125,6 +3125,250 @@ mod tests {
         assert!(folder.ends_with("32/folder-open.svg"));
     }
 
+    // ── PAPIRUS-19: Task 19 required resolver scenarios ────────────
+
+    /// Task 19: a Unicode filename must not confuse extension resolution —
+    /// the extension is ASCII-safe regardless of the base name's script.
+    /// The icon/category is chosen from the extension alone.
+    #[test]
+    fn task19_unicode_filename_resolves_by_extension() {
+        let cases: &[(&str, &str, FileCategory)] = &[
+            ("résumé.pdf", "application-pdf", FileCategory::Pdf),
+            ("фотография.png", "image-png", FileCategory::Image),
+            ("音乐.flac", "audio-flac", FileCategory::Audio),
+            ("视频.mp4", "video-mp4", FileCategory::Video),
+            (
+                "دليل.docx",
+                "application-vnd.openxmlformats-officedocument.wordprocessingml.document",
+                FileCategory::Document,
+            ),
+            (
+                "資料.xlsx",
+                "application-vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                FileCategory::Spreadsheet,
+            ),
+            (
+                "報告.pptx",
+                "application-vnd.openxmlformats-officedocument.presentationml.presentation",
+                FileCategory::Presentation,
+            ),
+            ("README.md", "text-markdown", FileCategory::Markdown),
+            ("main.rs", "text-rust", FileCategory::SourceCode),
+            ("backup.tar.gz", "application-x-tar", FileCategory::Archive),
+        ];
+        for (name, icon_id, category) in cases {
+            let icon = resolve(name);
+            assert_eq!(&icon.icon_id, icon_id, "for {name:?}");
+            assert_eq!(icon.file_category, *category, "for {name:?}");
+            assert!(
+                PapirusCatalog::global().has_icon(&icon.icon_id),
+                "for {name:?}: resolved icon {} must exist",
+                icon.icon_id
+            );
+        }
+
+        // A Unicode filename with NO extension still falls back safely.
+        let icon = resolve("файлбезрасширения");
+        assert_eq!(icon.source, ResolutionSource::UnknownFallback);
+        assert!(PapirusCatalog::global().has_icon(&icon.icon_id));
+    }
+
+    /// Task 19: a very long filename (e.g. a 1 MiB path-like string) must
+    /// never panic, must still resolve by its final extension, and must
+    /// never produce a missing asset.  This pins the resolver against
+    /// pathological input from peers / filesystems.
+    #[test]
+    fn task19_very_long_filename_resolves_safely() {
+        let catalog = PapirusCatalog::global();
+
+        // A 256 KiB filename with a real extension at the end.
+        let mut long = "a".repeat(256 * 1024);
+        long.push_str(".pdf");
+        let icon = resolve(&long);
+        assert_eq!(icon.icon_id, "application-pdf");
+        assert!(catalog.has_icon(&icon.icon_id));
+        assert!(icon.asset_path.ends_with(".svg"));
+
+        // A 64 KiB name with a compound archive extension.
+        let mut long_tar = "备份".repeat(16 * 1024);
+        long_tar.push_str(".tar.gz");
+        let icon = resolve(&long_tar);
+        assert_eq!(icon.icon_id, "application-x-tar");
+        assert_eq!(icon.file_category, FileCategory::Archive);
+        assert!(catalog.has_icon(&icon.icon_id));
+
+        // A 64 KiB name with NO extension → unknown fallback, never a
+        // missing asset, never a panic.
+        let mut long_noext = "x".repeat(64 * 1024);
+        long_noext.push_str("─");
+        let icon = resolve(&long_noext);
+        assert_eq!(icon.source, ResolutionSource::UnknownFallback);
+        assert_eq!(icon.file_category, FileCategory::Unknown);
+        assert!(catalog.has_icon(&icon.icon_id));
+    }
+
+    /// Task 19: the full required resolver scenario matrix.  Each listed
+    /// scenario resolves to the correct icon/category and — critically —
+    /// every result is grounded in an existing bundled asset, so no
+    /// broken-image symbol can ever appear.
+    #[test]
+    fn task19_required_scenarios_all_resolve_to_existing_assets() {
+        let catalog = PapirusCatalog::global();
+        let mut check = |name: &str,
+                         mime: Option<&str>,
+                         local: Option<&str>,
+                         is_dir: bool,
+                         expected_category: FileCategory| {
+            let icon = resolve_file_icon(name, mime, local, is_dir);
+            assert_eq!(
+                icon.file_category, expected_category,
+                "scenario {name:?} mime={mime:?} local={local:?} is_dir={is_dir}"
+            );
+            assert!(
+                catalog.has_icon(&icon.icon_id),
+                "scenario {name:?} resolved to missing icon {}",
+                icon.icon_id
+            );
+            assert!(
+                icon.asset_path.starts_with(PAPIRUS_ASSET_ROOT)
+                    && icon.asset_path.ends_with(".svg"),
+                "scenario {name:?} produced non-bundle path {}",
+                icon.asset_path
+            );
+        };
+
+        // 1. MIME type only (no extension signal).
+        check(
+            "download",
+            Some("application/pdf"),
+            None,
+            false,
+            FileCategory::Pdf,
+        );
+        // 2. Extension only.
+        check("report.pdf", None, None, false, FileCategory::Pdf);
+        // 3. MIME + extension agreement.
+        check(
+            "photo.png",
+            Some("image/png"),
+            None,
+            false,
+            FileCategory::Image,
+        );
+        // 4. MIME + extension conflict → locally detected wins (also tested in depth above).
+        check(
+            "photo.png",
+            Some("image/png"),
+            Some("video/mp4"),
+            false,
+            FileCategory::Video,
+        );
+        // 5. Uppercase extension.
+        check("REPORT.PDF", None, None, false, FileCategory::Pdf);
+        // 6. Compound extension.
+        check("archive.tar.gz", None, None, false, FileCategory::Archive);
+        // 7. Missing extension.
+        check("README", None, None, false, FileCategory::Unknown);
+        // 8. Hidden file.
+        check(".gitignore", None, None, false, FileCategory::Unknown);
+        // 9. Folder (explicit state).
+        check("shared-folder", None, None, true, FileCategory::Folder);
+        // 10. Unknown type.
+        check("mystery.zzz", None, None, false, FileCategory::Unknown);
+        // 11. Malformed MIME string.
+        check(
+            "blob.bin",
+            Some("not-a-mime"),
+            None,
+            false,
+            FileCategory::Unknown,
+        );
+        // 12. Path-like malicious filename.
+        check("../../etc/passwd", None, None, false, FileCategory::Unknown);
+        // 13. Unicode filename.
+        check("résumé.pdf", None, None, false, FileCategory::Pdf);
+        // 14. Very long filename.
+        check(
+            &format!("{}.pdf", "x".repeat(100_000)),
+            None,
+            None,
+            false,
+            FileCategory::Pdf,
+        );
+    }
+
+    /// Task 19 fallback: when the exact icon for a known class is missing
+    /// from the bundle, the resolver must fall back to the broad category
+    /// icon (priority 7) — never a missing asset, never a broken image.
+    /// Simulated by removing the exact icon from a copy of the catalog.
+    #[test]
+    fn task19_fallback_exact_icon_missing_uses_category_icon() {
+        // Build a catalog copy without the exact `video-mp4` icon.
+        let base = PapirusCatalog::global();
+        let mut icons = base.icons.clone();
+        icons.remove("video-mp4");
+        let catalog: &'static PapirusCatalog = Box::leak(Box::new(PapirusCatalog {
+            icons,
+            required_fallbacks: base.required_fallbacks.clone(),
+            canonical_paths: base.canonical_paths.clone(),
+        }));
+
+        let icon = build_with_fallback(
+            catalog,
+            "clip.mp4",
+            "video-mp4",
+            FileCategory::Video,
+            IconConfidence::Medium,
+            ResolutionSource::Extension,
+            None,
+        );
+        assert_eq!(
+            icon.icon_id, "video-x-generic",
+            "exact video-mp4 missing → broad video category icon"
+        );
+        assert_eq!(icon.file_category, FileCategory::Video);
+        assert!(catalog.has_icon(&icon.icon_id));
+        assert!(icon.asset_path.ends_with(".svg"));
+
+        // The category fallback icon itself must exist in the REAL bundle.
+        assert!(base.has_icon("video-x-generic"));
+    }
+
+    /// Task 19 fallback: when BOTH the exact icon and the broad category
+    /// icon are missing, the resolver must end on the generic unknown icon
+    /// (priority 8) — the terminal fallback is always available.
+    #[test]
+    fn task19_fallback_category_icon_missing_uses_unknown() {
+        let base = PapirusCatalog::global();
+        let mut icons = base.icons.clone();
+        icons.remove("video-mp4");
+        icons.remove("video-x-generic");
+        let catalog: &'static PapirusCatalog = Box::leak(Box::new(PapirusCatalog {
+            icons,
+            required_fallbacks: base.required_fallbacks.clone(),
+            canonical_paths: base.canonical_paths.clone(),
+        }));
+
+        let icon = build_with_fallback(
+            catalog,
+            "clip.mp4",
+            "video-mp4",
+            FileCategory::Video,
+            IconConfidence::Medium,
+            ResolutionSource::Extension,
+            None,
+        );
+        assert_eq!(
+            icon.icon_id, UNKNOWN_ICON,
+            "exact + category missing → generic unknown icon"
+        );
+        assert_eq!(icon.file_category, FileCategory::Unknown);
+        assert_eq!(icon.source, ResolutionSource::UnknownFallback);
+        assert!(catalog.has_icon(&icon.icon_id));
+        // The terminal unknown icon is a required fallback in the real bundle.
+        assert!(base.has_icon(UNKNOWN_ICON));
+    }
+
     /// Every duplicate-group member maps to a canonical path that exists in
     /// the manifest — no alias can point outside the bundle.
     #[test]

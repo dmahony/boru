@@ -1479,4 +1479,193 @@ mod tests {
             crate::file_category::FileCategory::Pdf
         );
     }
+
+    // ── PAPIRUS-19: UI integration — same file, same icon, everywhere ──
+
+    /// Task 19 UI integration (shared-component level): every listed Boru
+    /// file surface — Chat, Shared by Me, Shared with Me, Downloading,
+    /// Downloaded, Peers Downloading from Me, Activity Log, Re-share dialog,
+    /// Transfer notification — renders its file-type icon through the SAME
+    /// central component/resolver.  Full GUI automation is impractical in the
+    /// remote-build harness, so this test drives the exact entry point each
+    /// surface calls (`file_type_icon_element`, `decorative_*`,
+    /// `file_type_icon_element_with_tooltip`, `directory_icon_element`) with
+    /// the same file and asserts every surface resolves to the SAME icon id
+    /// and category.  Because all four entry points share one
+    /// `FILE_TYPE_ICON_CACHE` and one resolver, an identical result across
+    /// the surface signatures is the strongest shared-component guarantee.
+    #[test]
+    fn task19_same_file_shows_same_icon_across_all_surfaces() {
+        const FILE: &str = "report.pdf";
+        const MIME: &str = "application/pdf";
+        let theme = &iced::Theme::Light;
+
+        // Drive each surface's exact call signature.
+        // - Chat file-card header (download_progress_view.rs:705) and
+        //   video cards (video_file_card.rs:773) use the tooltip variant.
+        let _chat_card: iced::Element<'_, AppMessage> = file_type_icon_element_with_tooltip(
+            FILE,
+            None,
+            None,
+            FileTypeIconSize::Card,
+            theme,
+        );
+        // - Chat image-header / generic attachment placeholder uses the
+        //   tooltip variant at List/Large sizes (app.rs:29473/29577).
+        let _chat_list: iced::Element<'_, AppMessage> = file_type_icon_element_with_tooltip(
+            FILE,
+            None,
+            None,
+            FileTypeIconSize::List,
+            theme,
+        );
+        // - Shared by Me rows (shared_by_me_table.rs:758/768/777) and
+        //   Shared with Me rows (app.rs:32612) pass the known MIME and use
+        //   the decorative variant (filename is already printed).
+        let _shared_by_me: iced::Element<'_, AppMessage> = decorative_file_type_icon_element(
+            FILE,
+            Some(MIME),
+            None,
+            FileTypeIconSize::List,
+            theme,
+        );
+        let _shared_with_me: iced::Element<'_, AppMessage> = decorative_file_type_icon_element(
+            FILE,
+            Some(MIME),
+            None,
+            FileTypeIconSize::List,
+            theme,
+        );
+        // - Downloading rows (app.rs:34372) and Peers Downloading from Me
+        //   (app.rs:33734) use the informative variant, extension-only.
+        let _downloading: iced::Element<'_, AppMessage> =
+            file_type_icon_element(FILE, None, None, FileTypeIconSize::List, theme);
+        let _peers_downloading: iced::Element<'_, AppMessage> =
+            file_type_icon_element(FILE, None, None, FileTypeIconSize::Compact, theme);
+        // - Downloaded rows (app.rs:34070) use the decorative variant with
+        //   the recorded MIME hint.
+        let _downloaded: iced::Element<'_, AppMessage> = decorative_file_type_icon_element(
+            FILE,
+            Some(MIME),
+            None,
+            FileTypeIconSize::List,
+            theme,
+        );
+        // - Activity Log rows (app.rs:33310) and the transfer history /
+        //   re-share surfaces (app.rs:34935, video_file_card.rs:984) use the
+        //   informative compact variant.
+        let _activity: iced::Element<'_, AppMessage> =
+            file_type_icon_element(FILE, None, None, FileTypeIconSize::Compact, theme);
+
+        // Every surface signature above must have populated the shared cache
+        // with an entry whose resolved icon is the SAME PDF icon.
+        let cache = FILE_TYPE_ICON_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        let cache = cache.lock().unwrap();
+        let mut seen: Vec<String> = Vec::new();
+        for (key, icon) in cache.iter() {
+            if key.filename == FILE && !key.is_directory {
+                seen.push(icon.resolved().icon_id.clone());
+                assert_eq!(
+                    icon.resolved().icon_id, "application-pdf",
+                    "surface key {key:?} must resolve to the PDF icon"
+                );
+                assert_eq!(
+                    icon.resolved().file_category,
+                    crate::file_category::FileCategory::Pdf,
+                    "surface key {key:?} must keep the PDF category"
+                );
+                assert!(
+                    icon.resolved().asset_path.ends_with("32/application-pdf.svg"),
+                    "surface key {key:?} must point at the bundled PDF SVG"
+                );
+            }
+        }
+        assert!(
+            !seen.is_empty(),
+            "no surface populated the shared icon cache for {FILE}"
+        );
+    }
+
+    /// Task 19 UI integration: the same file shown as a FOLDER and as a FILE
+    /// never collide, and a folder named like a document still renders the
+    /// folder icon on every folder surface (Shared folders, re-share
+    /// summaries, transfer rows).
+    #[test]
+    fn task19_same_folder_name_shows_folder_icon_on_folder_surfaces() {
+        const NAME: &str = "report.pdf"; // adversarial: folder named like a PDF
+        let theme = &iced::Theme::Light;
+
+        // Folder surfaces all route through `directory_icon_element`
+        // (download_progress_view.rs:258) — the PAPIRUS-12 entry point that
+        // shared-folder rows, folder transfer summaries, and folder
+        // re-share summaries use.
+        let _shared_folder: iced::Element<'_, AppMessage> =
+            directory_icon_element(NAME, FileTypeIconSize::List, theme);
+        let _folder_transfer: iced::Element<'_, AppMessage> =
+            directory_icon_element(NAME, FileTypeIconSize::Card, theme);
+
+        // The file surface (same name, different file) stays a PDF.
+        let _file_row: iced::Element<'_, AppMessage> =
+            file_type_icon_element(NAME, None, None, FileTypeIconSize::List, theme);
+
+        let cache = FILE_TYPE_ICON_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        let cache = cache.lock().unwrap();
+        let folder = cache
+            .iter()
+            .find(|(key, _)| key.filename == NAME && key.is_directory)
+            .map(|(_, icon)| icon)
+            .expect("folder surface must populate the cache");
+        assert_eq!(folder.resolved().icon_id, "folder-open");
+        assert_eq!(
+            folder.resolved().file_category,
+            crate::file_category::FileCategory::Folder
+        );
+        let file = cache
+            .iter()
+            .find(|(key, _)| key.filename == NAME && !key.is_directory)
+            .map(|(_, icon)| icon)
+            .expect("file surface must populate the cache");
+        assert_eq!(file.resolved().icon_id, "application-pdf");
+    }
+
+    /// Task 19 UI integration: a second required example (spreadsheet)
+    /// shows the same spreadsheet icon on every surface signature, proving
+    /// the consistency is per-type, not a single-file coincidence.
+    #[test]
+    fn task19_spreadsheet_same_icon_across_surfaces() {
+        const FILE: &str = "budget.xlsx";
+        const MIME: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+        let theme = &iced::Theme::Light;
+
+        let _chat: iced::Element<'_, AppMessage> =
+            file_type_icon_element_with_tooltip(FILE, None, None, FileTypeIconSize::Card, theme);
+        let _dashboard: iced::Element<'_, AppMessage> = decorative_file_type_icon_element(
+            FILE,
+            Some(MIME),
+            None,
+            FileTypeIconSize::List,
+            theme,
+        );
+        let _transfer: iced::Element<'_, AppMessage> =
+            file_type_icon_element(FILE, None, None, FileTypeIconSize::Compact, theme);
+
+        let cache = FILE_TYPE_ICON_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        let cache = cache.lock().unwrap();
+        let mut matches = 0;
+        for (key, icon) in cache.iter() {
+            if key.filename == FILE && !key.is_directory {
+                matches += 1;
+                assert_eq!(
+                    icon.resolved().icon_id,
+                    "application-vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    "surface key {key:?} must resolve to the spreadsheet icon"
+                );
+                assert_eq!(
+                    icon.resolved().file_category,
+                    crate::file_category::FileCategory::Spreadsheet
+                );
+            }
+        }
+        assert!(matches >= 3, "expected at least 3 surfaces, got {matches}");
+    }
 }

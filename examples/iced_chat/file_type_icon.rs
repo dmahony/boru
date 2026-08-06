@@ -1128,6 +1128,93 @@ mod tests {
         let _ = ok;
     }
 
+    // ── PAPIRUS-19: fallback — no broken-image symbol ─────────────────
+
+    /// Task 19 fallback: a bundle file that is MISSING at runtime (packaging
+    /// edge case) must render the embedded unknown-generic icon — never a
+    /// broken-image symbol.  The path passes the allow-list shape but does
+    /// not exist in the bundle, so the loader's read fails and the embedded
+    /// fallback bytes are used.
+    #[test]
+    fn task19_missing_bundle_file_renders_embedded_generic_not_broken() {
+        // A path that passes the allow-list shape but does NOT exist in the
+        // bundle: the loader must fall back to the embedded unknown icon.
+        let missing = "assets/third_party/papirus/32/task19-missing-icon.svg";
+        assert!(
+            crate::file_type_resolver::is_bundled_asset_path(missing),
+            "test fixture must pass the allow-list shape"
+        );
+
+        // Prove the fixture does not exist in the real bundle (the read then
+        // fails and the embedded fallback is used).
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(crate::file_type_resolver::PAPIRUS_ASSET_ROOT);
+        assert!(
+            !root.join("32/task19-missing-icon.svg").exists(),
+            "test fixture must not exist in the bundle"
+        );
+
+        let handle = cached_svg_handle(missing);
+        // The handle must carry the SAME embedded bytes as the fallback
+        // handle (never a path pointing at a missing file).  Comparing
+        // `data()` (iced's `svg::Data: PartialEq`) against the embedded
+        // fallback proves the loader fell back instead of producing a
+        // broken path handle.
+        assert_eq!(
+            handle.data(),
+            fallback_handle().data(),
+            "missing bundle file must render the embedded generic icon, \
+             never a path handle or broken-image symbol"
+        );
+    }
+
+    /// Task 19 fallback: the rendered icon for every required example stays
+    /// on an existing bundled SVG path — the component never builds a broken
+    /// image even when the requested semantic size differs from the
+    /// resolver's default 32px.
+    #[test]
+    fn task19_required_examples_render_real_svg_handles_at_every_size() {
+        let examples = [
+            "report.pdf",
+            "document.docx",
+            "budget.xlsx",
+            "slides.pptx",
+            "readme.md",
+            "main.rs",
+            "photo.png",
+            "animation.gif",
+            "video.mp4",
+            "movie.mkv",
+            "music.flac",
+            "archive.tar.gz",
+            "package.7z",
+            "database.sqlite",
+            "font.ttf",
+            "certificate.pem",
+            "unknownfile",
+        ];
+        for name in examples {
+            for size in all_sizes() {
+                let icon = FileTypeIcon::new(name, None, None, false).size(size);
+                let resolved = icon.resolved();
+                assert!(
+                    papirus_asset_path(&resolved.icon_id, size.papirus_dir()).is_some(),
+                    "{name} @ {size:?}: resolved icon {} must exist at size dir {}",
+                    resolved.icon_id,
+                    size.papirus_dir()
+                );
+                let el: Element<'_, AppMessage> = icon.build(&Theme::Light);
+                let _ = el;
+            }
+        }
+        // The shared folder is an explicit directory → folder icon, always.
+        for size in all_sizes() {
+            let folder = FileTypeIcon::directory("shared-folder").size(size);
+            let el: Element<'_, AppMessage> = folder.build(&Theme::Light);
+            let _ = el;
+        }
+    }
+
     /// Task 16: a peer-supplied filename that looks like an SVG path is a
     /// NAME, not a path.  It resolves to a bundled Papirus icon id and the
     /// rendered asset stays inside the pinned bundle — a user/peer can
