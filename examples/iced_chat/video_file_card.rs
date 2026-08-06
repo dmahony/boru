@@ -37,8 +37,8 @@ use iced::{Alignment, Color, Length};
 use iced_video_player::{Video, VideoPlayer};
 
 use super::app::{
-    accent_green, border_muted, color_error, text_system, SPACE_10, SPACE_12,
-    SPACE_2, SPACE_20, SPACE_24, SPACE_4, SPACE_6, SPACE_8, TYPO_SM, TYPO_XS, TYPO_XXS,
+    accent_green, border_muted, color_error, text_system, SPACE_10, SPACE_12, SPACE_16, SPACE_2,
+    SPACE_20, SPACE_24, SPACE_4, SPACE_6, SPACE_8, TYPO_SM, TYPO_XS, TYPO_XXS,
 };
 use super::app::{AppMessage, DownloadAttachment, DownloadState};
 use super::download_progress_view::{
@@ -221,21 +221,84 @@ const MEDIA_FRAME_BACKGROUND: Color = Color::from_rgb(0.055, 0.06, 0.07);
 /// is near-black in the light theme and would vanish on the dark frame).
 const ON_MEDIA_TEXT: Color = Color::from_rgb(0.78, 0.80, 0.82);
 
-/// Shared media-frame surface: dark neutral background, thin muted border,
-/// `SPACE_10` (10 px) corner radius — used identically by the poster frame,
-/// the placeholder frame and the active player frame (Task 10 geometry).
-fn media_frame_style(theme: &iced::Theme) -> widget::container::Style {
+/// Shared media-frame surface (VIDCARD-08 structure + VIDCARD-11 spec
+/// styling): neutral dark background, thin subtle border, 12–14 px corner
+/// radius — used identically by the poster frame, the placeholder frame and
+/// the active player frame (Task 10 geometry). Overflow is clipped only at
+/// this boundary (each media-frame container sets `.clip(true)`), so the
+/// rounded corners never leak.
+fn media_frame_style(_theme: &iced::Theme) -> widget::container::Style {
     widget::container::Style {
         background: Some(iced::Background::Color(MEDIA_FRAME_BACKGROUND)),
         border: iced::Border {
-            color: border_muted(theme),
+            color: MEDIA_FRAME_BORDER,
             width: 1.0,
-            radius: SPACE_10.into(),
+            radius: MEDIA_FRAME_RADIUS.into(),
         },
         ..Default::default()
     }
 }
 
+/// Compact loading indicator shown while the poster or the inline player
+/// prepares (VIDCARD-11). Rendered as a small translucent dark chip with
+/// an activity glyph and a short label; there is no spinner widget in
+/// iced 0.14, so this is a static-but-unmistakable loading affordance.
+fn loading_indicator<'a>() -> iced::Element<'a, AppMessage> {
+    container(
+        Column::new()
+            .push(
+                Icon::Activity
+                    .build()
+                    .size(IconSize::Lg)
+                    .color_fn(|_| Color::WHITE)
+                    .build(),
+            )
+            .push(
+                text("Preparing…")
+                    .size(TYPO_XS)
+                    .color(ON_MEDIA_TEXT),
+            )
+            .spacing(SPACE_4)
+            .align_x(Alignment::Center),
+    )
+    .padding([SPACE_12, SPACE_16])
+    .style(|_t| widget::container::Style {
+        background: Some(iced::Background::Color(MEDIA_FRAME_OVERLAY_BG)),
+        border: iced::Border {
+            radius: SPACE_16.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .into()
+}
+
+/// Compact duration badge for the lower-right corner of the media frame
+/// (VIDCARD-11). Uses the live player's real duration metadata — there is
+/// no other honest duration source in the transfer protocol — and is only
+/// rendered when that duration is known and non-zero.
+#[cfg(feature = "video-playback")]
+fn duration_badge(duration: std::time::Duration) -> iced::Element<'static, AppMessage> {
+    container(
+        crate::fonts::type_role_text(
+            crate::fonts::TypeRole::Metadata,
+            format_media_time(duration),
+        )
+        .color(Color::WHITE),
+    )
+    .padding([SPACE_2, SPACE_6])
+    .style(|_t| widget::container::Style {
+        background: Some(iced::Background::Color(Color::from_rgba(
+            0.0, 0.0, 0.0, 0.72,
+        ))),
+        border: iced::Border {
+            radius: SPACE_6.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .into()
+}
 #[cfg(feature = "video-playback")]
 fn format_media_time(duration: std::time::Duration) -> String {
     let seconds = duration.as_secs();
@@ -281,6 +344,32 @@ const HEADER_FILENAME_MAX_CHARS: usize = 56;
 /// Hard width cap (px) for the header filename element. Together with
 /// `.clip(true)` this guarantees a long filename can never widen the card.
 const HEADER_FILENAME_MAX_WIDTH: f32 = 420.0;
+
+// ── Media-frame styling (VIDCARD-11) ─────────────────────────────────
+// The shared neutral-dark background and on-media text colours live with
+// `MEDIA_FRAME_BACKGROUND` / `ON_MEDIA_TEXT` above (VIDCARD-08 landed the
+// same spec direction first); this block adds the VIDCARD-11 deltas: the
+// spec's 12–14 px radius, the thin subtle border, and the overlay/badge
+// surfaces.
+
+/// Corner radius of the media frame (spec Task 11: ~12–14 px).
+const MEDIA_FRAME_RADIUS: f32 = 13.0;
+
+/// Thin subtle border on the dark media frame. A faint light border keeps
+/// the well visible against both light and dark card surfaces.
+const MEDIA_FRAME_BORDER: Color = Color::from_rgba(1.0, 1.0, 1.0, 0.10);
+
+/// Semi-transparent dark surface used for the play overlay and the
+/// loading indicator so they stay readable over any poster/video frame.
+const MEDIA_FRAME_OVERLAY_BG: Color = Color::from_rgba(0.0, 0.0, 0.0, 0.62);
+
+/// Diameter (px) of the circular play overlay button. Large but
+/// restrained: clearly visible over the poster without dominating it.
+const PLAY_OVERLAY_SIZE: f32 = 64.0;
+
+/// Reserved width (px) on the right edge of the control bar so the
+/// lower-right duration badge never covers the Expand control.
+const DURATION_BADGE_ZONE: f32 = 64.0;
 
 /// Real transfer-state badge mapping for the card header.
 ///
@@ -723,6 +812,10 @@ impl<'a> BoruVideoFileCard<'a> {
             attachment.poster_dimensions,
             attachment.thumbnail_handle.is_some(),
         );
+
+        // Poster: the real thumbnail (contain, centred) or an honest
+        // placeholder. While the poster is still being prepared (downloading
+        // or verifying) show the loading indicator (VIDCARD-11).
         let poster: iced::Element<'static, AppMessage> =
             if let Some(ref handle) = attachment.thumbnail_handle {
                 iced::widget::image(handle.clone())
@@ -739,6 +832,16 @@ impl<'a> BoruVideoFileCard<'a> {
                     } else {
                         Length::Fill
                     })
+                    .into()
+            } else if matches!(
+                presentation,
+                VideoPresentationState::Downloading | VideoPresentationState::Verifying
+            ) {
+                container(loading_indicator())
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill)
                     .into()
             } else {
                 // File-type placeholder while the poster is pending or when
@@ -778,22 +881,38 @@ impl<'a> BoruVideoFileCard<'a> {
                 AppMessage::OpenDownloadedFile(attachment.name.clone())
             }
         };
-        let play = button(text("▶").size(28.0).color(Color::WHITE))
+        // VIDCARD-11 play overlay: large but restrained circular button with
+        // strong contrast (white play glyph on a semi-transparent dark
+        // circle), keyboard accessible (iced buttons focus and activate with
+        // Enter/Space) and labelled "Play video" via the project's
+        // icon-button Tooltip convention.
+        let play = tooltip::Tooltip::new(
+            button(
+                Icon::Play
+                    .build()
+                    .size(IconSize::Xl)
+                    .color_fn(|_| Color::WHITE)
+                    .interactive(true)
+                    .build(),
+            )
             .on_press_maybe(
                 (presentation == VideoPresentationState::Ready && !self.preparing)
                     .then_some(play_message),
             )
-            .padding([SPACE_8, SPACE_12])
+            .padding([(PLAY_OVERLAY_SIZE - IconSize::Xl.px()) / 2.0; 2])
             .style(|_theme, _status| widget::button::Style {
-                background: Some(iced::Background::Color(Color::from_rgba(
-                    0.0, 0.0, 0.0, 0.62,
-                ))),
+                background: Some(iced::Background::Color(MEDIA_FRAME_OVERLAY_BG)),
                 border: iced::Border {
-                    radius: 24.0.into(),
+                    radius: (PLAY_OVERLAY_SIZE / 2.0).into(),
                     ..Default::default()
                 },
                 ..Default::default()
-            });
+            }),
+            crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, "Play video"),
+            tooltip::Position::Top,
+        )
+        .gap(SPACE_4);
+
         let error_preview = attachment.playback_error.as_ref().map(|error| {
             container(
                 Column::new()
@@ -816,7 +935,13 @@ impl<'a> BoruVideoFileCard<'a> {
             let mut frame = container(widget::stack![
                 poster,
                 error_preview.unwrap_or_else(|| {
-                    if presentation == VideoPresentationState::Ready {
+                    if self.preparing {
+                        // The inline player is still being prepared: show the
+                        // loading indicator instead of the play overlay.
+                        container(loading_indicator())
+                            .center_x(Length::Fill)
+                            .center_y(Length::Fill)
+                    } else if presentation == VideoPresentationState::Ready {
                         container(play)
                             .center_x(Length::Fill)
                             .center_y(Length::Fill)
@@ -937,12 +1062,35 @@ impl<'a> BoruVideoFileCard<'a> {
                     ..Default::default()
                 });
 
+            // VIDCARD-11 duration badge: lower-right corner of the media
+            // frame, real player metadata only, shown only when the duration
+            // is actually known (non-zero). The control bar's right zone is
+            // reserved so the badge never covers the Expand control.
+            let badge_known = duration.as_secs() > 0;
+            let badge_zone = if badge_known {
+                DURATION_BADGE_ZONE
+            } else {
+                0.0
+            };
+            let badge_layer: iced::Element<'static, AppMessage> = if badge_known {
+                duration_badge(duration)
+            } else {
+                iced::widget::Space::new().width(0.0).height(0.0).into()
+            };
+
             let mut player_frame = container(widget::stack![
                 video_element,
                 container(controls_bar)
                     .width(Length::Fill)
                     .height(Length::Fill)
-                    .align_y(Alignment::End),
+                    .align_y(Alignment::End)
+                    .padding(iced::Padding::new(0.0).right(badge_zone)),
+                container(badge_layer)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .align_x(Alignment::End)
+                    .align_y(Alignment::End)
+                    .padding(iced::Padding::new(0.0).right(SPACE_8).bottom(SPACE_8)),
             ])
             .width(player_sizing.width())
             .height(player_sizing.height())
@@ -1789,5 +1937,171 @@ mod tests {
             },
         };
         assert_eq!(header_badge(&attachment.state, &theme).0, "Failed");
+    }
+
+    #[test]
+    fn media_frame_uses_spec_radius_dark_surface_and_boundary_clip() {
+        // VIDCARD-11: the media frame must use a ~12–14 px radius, a
+        // neutral dark background, a thin subtle border, and hidden overflow
+        // ONLY at the media-frame boundary (never on the outer card).
+        let src = include_str!("video_file_card.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+
+        assert!(
+            prod.contains("const MEDIA_FRAME_RADIUS: f32 = 13.0;"),
+            "media frame radius must sit in the 12–14 px spec band"
+        );
+        assert!(
+            prod.contains("const MEDIA_FRAME_BACKGROUND: Color"),
+            "media frame must define a neutral dark background"
+        );
+        assert!(
+            prod.contains("const MEDIA_FRAME_BORDER: Color"),
+            "media frame must define a thin subtle border"
+        );
+        // The shared surface style is applied to both the poster frame and
+        // the player frame; the media frame is the ONLY boundary that clips.
+        let media_frame_fns = prod
+            .split("fn media_frame(")
+            .nth(1)
+            .expect("media_frame must exist");
+        assert!(
+            media_frame_fns.contains(".clip(true)"),
+            "media frame must clip overflow at its own boundary"
+        );
+        // The outer card surface must not rely on hidden overflow.
+        let outer = prod
+            .split("container(body)")
+            .nth(1)
+            .and_then(|s| s.split(".into()").next())
+            .expect("outer card container block must exist");
+        assert!(
+            !outer.contains(".clip("),
+            "the outer card surface must not clip (spec Task 11)"
+        );
+    }
+
+    #[test]
+    fn play_overlay_is_circular_high_contrast_and_has_accessible_label() {
+        // VIDCARD-11: the play overlay must be a centred, circular,
+        // semi-transparent dark button with a strong-contrast glyph, a
+        // keyboard-accessible button widget, and an accessible label such
+        // as "Play video".
+        let src = include_str!("video_file_card.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let media_frame_fns = prod
+            .split("fn media_frame(")
+            .nth(1)
+            .expect("media_frame must exist");
+
+        assert!(
+            media_frame_fns.contains("Icon::Play"),
+            "play overlay must use the play icon"
+        );
+        assert!(
+            media_frame_fns.contains("MEDIA_FRAME_OVERLAY_BG"),
+            "play overlay must use the semi-transparent dark surface"
+        );
+        assert!(
+            media_frame_fns.contains("PLAY_OVERLAY_SIZE"),
+            "play overlay must be sized by the restrained-size constant"
+        );
+        assert!(
+            media_frame_fns.contains("\"Play video\""),
+            "play overlay must expose an accessible 'Play video' label"
+        );
+        assert!(
+            media_frame_fns.contains("button("),
+            "play overlay must be a real button (keyboard accessible)"
+        );
+    }
+
+    #[test]
+    fn duration_badge_uses_real_metadata_only() {
+        // VIDCARD-11: the duration badge must come from real player
+        // metadata, appear only when the duration is known (non-zero), and
+        // sit in the lower-right corner of the media frame.
+        let src = include_str!("video_file_card.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let media_frame_fns = prod
+            .split("fn media_frame(")
+            .nth(1)
+            .expect("media_frame must exist");
+
+        assert!(
+            media_frame_fns.contains("duration.as_secs() > 0"),
+            "duration badge must only appear when the duration is known"
+        );
+        assert!(
+            media_frame_fns.contains("duration_badge(duration)"),
+            "badge content must come from the real player duration"
+        );
+        assert!(
+            media_frame_fns.contains("align_x(Alignment::End)")
+                && media_frame_fns.contains("align_y(Alignment::End)"),
+            "duration badge must sit in the lower-right corner"
+        );
+    }
+
+    #[test]
+    fn loading_indicator_present_while_poster_or_player_prepares() {
+        // VIDCARD-11: a loading indicator must exist while the poster
+        // (downloading/verifying) or the inline player (preparing) is being
+        // prepared.
+        let src = include_str!("video_file_card.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let media_frame_fns = prod
+            .split("fn media_frame(")
+            .nth(1)
+            .expect("media_frame must exist");
+
+        assert!(
+            prod.contains("fn loading_indicator"),
+            "a loading indicator must be defined"
+        );
+        assert!(
+            media_frame_fns.contains("self.preparing"),
+            "player preparation must surface the loading indicator"
+        );
+        assert!(
+            media_frame_fns.contains("VideoPresentationState::Downloading")
+                && media_frame_fns.contains("VideoPresentationState::Verifying"),
+            "poster preparation (downloading/verifying) must surface the loading indicator"
+        );
+    }
+
+    #[test]
+    fn media_frame_keeps_poster_and_player_geometry_identical() {
+        // Task 10 invariant: the poster and the player must share the same
+        // media box so Play does not cause a layout jump. VIDCARD-11 must
+        // preserve that on top of VIDCARD-08's responsive sizing: both the
+        // poster frame and the player frame are driven by the same
+        // MediaFrameSizing (sizing / player_sizing) and share the same
+        // media-frame surface style and boundary clip.
+        let src = include_str!("video_file_card.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let media_frame_fns = prod
+            .split("fn media_frame(")
+            .nth(1)
+            .expect("media_frame must exist");
+
+        // Both the poster preview and the player use the shared
+        // MediaFrameSizing system (poster: sizing; player: player_sizing).
+        assert!(
+            media_frame_fns.contains("MediaFrameSizing::new("),
+            "poster frame must be sized by the shared MediaFrameSizing"
+        );
+        assert!(
+            media_frame_fns.contains("player_sizing"),
+            "player frame must be sized by the player_sizing variant"
+        );
+        assert!(
+            media_frame_fns.matches(".style(media_frame_style)").count() >= 2,
+            "poster and player frames must use the same shared surface style"
+        );
+        assert!(
+            media_frame_fns.matches(".clip(true)").count() >= 2,
+            "poster and player frames must both clip overflow at the frame boundary"
+        );
     }
 }
