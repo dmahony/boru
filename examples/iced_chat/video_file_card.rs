@@ -341,6 +341,18 @@ fn overflow_menu_item<'a>(label: &'a str, msg: AppMessage) -> iced::widget::Butt
     })
 }
 
+/// Subtitle shown inside the media frame while no poster handle is ready.
+///
+/// A video with a thumbnail hash is still fetching the sender's poster blob,
+/// so the placeholder should say so instead of claiming the poster only
+/// appears after a download that may already have happened.
+fn pending_preview_label(attachment: &DownloadAttachment) -> &'static str {
+    if attachment.thumbnail_hash.is_some() {
+        "Loading preview…"
+    } else {
+        "Preview available after download"
+    }
+}
 // ── Reusable component ─────────────────────────────────────────────────
 
 /// A reusable, stateless video-file card.
@@ -627,14 +639,22 @@ impl<'a> BoruVideoFileCard<'a> {
                     .height(Length::Fill)
                     .into()
             } else {
+                // File-type placeholder while the poster is pending or when
+                // extraction is not possible. A video with a thumbnail hash
+                // is still being fetched; otherwise the poster will only
+                // exist after the download completes.
+                let subtitle = pending_preview_label(attachment);
                 container(
                     Column::new()
-                        .push(text("VIDEO").size(TYPO_SM).color(muted))
                         .push(
-                            text("Preview available after download")
-                                .size(TYPO_XS)
-                                .color(muted),
+                            Icon::Play
+                                .build()
+                                .size(IconSize::Lg)
+                                .color_fn(crate::design_tokens::text_muted)
+                                .build(),
                         )
+                        .push(text("VIDEO").size(TYPO_SM).color(muted))
+                        .push(text(subtitle).size(TYPO_XS).color(muted))
                         .spacing(SPACE_4)
                         .align_x(Alignment::Center),
                 )
@@ -1054,8 +1074,8 @@ impl<'a> BoruVideoFileCard<'a> {
 mod tests {
     use super::{
         aspect_ratio_class, file_format_label, format_relative_time, header_badge,
-        media_frame_size, truncate_filename, video_presentation_state, MediaAspectClass,
-        VideoPresentationState, HEADER_FILENAME_MAX_CHARS,
+        media_frame_size, pending_preview_label, truncate_filename, video_presentation_state,
+        MediaAspectClass, VideoPresentationState, HEADER_FILENAME_MAX_CHARS,
     };
     use crate::app::{DownloadAttachment, DownloadFailure, DownloadState, TransferKind};
     use std::path::PathBuf;
@@ -1313,6 +1333,27 @@ mod tests {
             Some("MOV".to_string())
         );
         assert_eq!(file_format_label("no_extension"), None);
+    }
+
+    #[test]
+    fn pending_preview_label_reflects_thumbnail_fetch_state() {
+        let mut attachment =
+            DownloadAttachment::new(TransferKind::Video, "clip.mp4", "ticket", "", None);
+        // No sender thumbnail hash → poster expected only after download.
+        assert_eq!(
+            pending_preview_label(&attachment),
+            "Preview available after download"
+        );
+        // Sender published a poster blob → the fetch is pending.
+        attachment.thumbnail_hash = Some([0xab; 32]);
+        assert_eq!(pending_preview_label(&attachment), "Loading preview…");
+        // Once the handle arrives the placeholder is no longer used.
+        attachment.thumbnail_hash = None;
+        attachment.thumbnail_handle = Some(iced::widget::image::Handle::from_bytes(vec![1, 2, 3]));
+        assert_eq!(
+            pending_preview_label(&attachment),
+            "Preview available after download"
+        );
     }
 
     #[test]

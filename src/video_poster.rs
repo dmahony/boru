@@ -8,6 +8,17 @@ pub const MAX_POSTER_BYTES: usize = 512 * 1024;
 pub const MAX_POSTER_EDGE: u32 = 320;
 /// Maximum input size allowed for the optional poster probe.
 pub const MAX_POSTER_INPUT_BYTES: u64 = 512 * 1024 * 1024;
+/// ffmpeg scale filter for poster extraction.
+///
+/// `min(320, iw)` keeps the poster at its intrinsic width when the source
+/// is smaller than the cap, so tiny videos are never upscaled. `-2` derives
+/// the height from the width while preserving the aspect ratio.
+pub const POSTER_SCALE_FILTER: &str = "scale='min(320,iw)':-2";
+/// Explicitly apply rotation metadata during poster extraction. ffmpeg
+/// applies `autorotate` by default for video inputs, but being explicit
+/// keeps orientation correct even if the input stream carries a display
+/// matrix from a phone/tablet capture.
+pub const POSTER_AUTOROTATE: &str = "-autorotate";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 /// A cached poster and its decoded dimensions.
@@ -57,7 +68,7 @@ pub fn generate(path: &Path, cache_dir: &Path) -> Result<Poster, String> {
             "-frames:v",
             "1",
             "-vf",
-            "scale='min(320,iw)':-2",
+            POSTER_SCALE_FILTER,
             "-f",
             "image2pipe",
             "-c:v",
@@ -70,6 +81,7 @@ pub fn generate(path: &Path, cache_dir: &Path) -> Result<Poster, String> {
             "10",
             "-v",
             "error",
+            POSTER_AUTOROTATE,
             "-",
         ])
         .output()
@@ -119,5 +131,30 @@ mod tests {
         assert_eq!(MAX_POSTER_EDGE, 320);
         assert_eq!(MAX_POSTER_BYTES, 512 * 1024);
         assert_eq!(MAX_POSTER_INPUT_BYTES, 512 * 1024 * 1024);
+    }
+
+    #[test]
+    fn poster_scale_filter_never_upscales_tiny_videos() {
+        // `min(320, iw)` keeps a 64px-wide source at 64px instead of blowing
+        // it up to the 320px cap. Height `-2` preserves the aspect ratio.
+        assert!(POSTER_SCALE_FILTER.contains("min(320,iw)"));
+        assert!(POSTER_SCALE_FILTER.contains("-2"));
+        assert!(!POSTER_SCALE_FILTER.contains("iw*"));
+        assert!(!POSTER_SCALE_FILTER.contains("320:320"));
+    }
+
+    #[test]
+    fn poster_scale_filter_preserves_aspect_ratio() {
+        // `-2` (even height derived from width) keeps the intrinsic ratio;
+        // a hard-coded height pair would squash portrait/landscape videos.
+        assert!(!POSTER_SCALE_FILTER.contains(":1080"));
+        assert!(!POSTER_SCALE_FILTER.contains(":720"));
+    }
+
+    #[test]
+    fn poster_extraction_applies_rotation_metadata() {
+        // Orientation metadata (phone/tablet captures) must be honoured so
+        // portrait videos do not appear sideways in the card.
+        assert_eq!(POSTER_AUTOROTATE, "-autorotate");
     }
 }

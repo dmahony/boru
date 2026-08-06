@@ -3069,6 +3069,11 @@ pub struct IcedChat {
     pending_file: Option<(String, String)>,
     /// Pending image download: (filename, blob_hash, sender_pk).
     pending_image: VecDeque<(String, MessageHash, PublicKey)>,
+    /// Pending video thumbnail blob fetch: (entry_index, thumbnail_hash, ticket).
+    /// The sender publishes a small poster blob and includes its hash in the
+    /// FileShare message; receivers fetch it off the UI thread so the card can
+    /// show a poster before the full video download finishes.
+    pending_thumbnail_fetch: VecDeque<(usize, MessageHash, String)>,
     /// Image selected by the user and currently being processed.
     pending_image_upload: Option<String>,
     /// Animation frame for the inline image-processing spinner.
@@ -6965,6 +6970,7 @@ impl IcedChat {
             pending_file: None,
             pending_offline_ids: HashMap::new(),
             pending_image: VecDeque::new(),
+            pending_thumbnail_fetch: VecDeque::new(),
             pending_image_upload: None,
             image_upload_spinner_frame: 0,
             pending_file_upload: None,
@@ -7678,6 +7684,81 @@ impl IcedChat {
                 Err(e) => AppMessage::ErrorMsg(e),
             },
         )
+    }
+
+    /// Start fetching the next queued video thumbnail blob (the sender's
+    /// bounded poster). Runs off the UI thread via `Task::perform`; a
+    /// failure only leaves the placeholder in place — it never fails the
+    /// download card or the video itself.
+    fn start_next_pending_thumbnail_fetch(&mut self) -> iced::Task<AppMessage> {
+        let Some((entry_index, thumbnail_hash, ticket_str)) =
+            self.pending_thumbnail_fetch.pop_front()
+        else {
+            return iced::Task::none();
+        };
+        let blob_store = self.blob_store.clone();
+        let endpoint = self.endpoint.clone();
+        let neighbors = self.neighbors.clone();
+        let safety = self.public_room_safety.clone();
+        iced::Task::perform(
+            async move {
+                use boru_core::chat_callbacks::TransferKind;
+                let ticket: iroh_blobs::ticket::BlobTicket = ticket_str
+                    .parse()
+                    .map_err(|e| format!("Invalid thumbnail ticket: {e}"))?;
+                let (addr, _hash, _format) = ticket.into_parts();
+                let node_id = addr.id;
+                let candidates = download_candidates(node_id, &neighbors);
+                let blob_hash: iroh_blobs::Hash = thumbnail_hash.into();
+                let bytes = download_blob_with_safety(
+                    &blob_store,
+                    &endpoint,
+                    blob_hash,
+                    candidates,
+                    "video-thumbnail".to_string(),
+                    TransferKind::Video,
+                    |_| {},
+                    safety.as_deref(),
+                    node_id,
+                )
+                .await
+                .map_err(|e| format!("thumbnail fetch failed: {e}"))?;
+                // The sender's poster is bounded (≤ MAX_POSTER_BYTES). Reject
+                // anything larger so a misbehaving sender cannot force a huge
+                // download through the poster path.
+                if bytes.is_empty() || bytes.len() > boru_core::video_poster::MAX_POSTER_BYTES {
+                    return Err("thumbnail blob outside poster size bounds".to_string());
+                }
+                Ok((entry_index, bytes))
+            },
+            move |result| match result {
+                Ok((entry_index, thumbnail_bytes)) => AppMessage::ThumbnailFetched {
+                    entry_index,
+                    thumbnail_bytes,
+                },
+                Err(error) => {
+                    tracing::warn!(%error, "video thumbnail fetch failed; keeping placeholder");
+                    AppMessage::Noop
+                }
+            },
+        )
+    }
+
+    /// Start the next pending image download (if any) and the next pending
+    /// video thumbnail blob fetch (if any) in one batched task.
+    fn drain_pending_transfers(&mut self) -> iced::Task<AppMessage> {
+        let mut tasks: Vec<iced::Task<AppMessage>> = Vec::new();
+        if !self.pending_image.is_empty() {
+            tasks.push(self.start_next_pending_image_download());
+        }
+        if !self.pending_thumbnail_fetch.is_empty() {
+            tasks.push(self.start_next_pending_thumbnail_fetch());
+        }
+        if tasks.is_empty() {
+            iced::Task::none()
+        } else {
+            iced::Task::batch(tasks)
+        }
     }
 
     fn current_download_entry_index(&self, transfer_id: Option<TransferId>) -> Option<usize> {
@@ -11000,10 +11081,11 @@ impl IcedChat {
                 // draft text, and all other per-conversation state.
                 if self.switch_to_conversation(topic) {
                     complete_open_room_action(self);
-                    let task = if !self.pending_image.is_empty() {
+                    let task = if !self.pending_image.is_empty() || !self.pending_thumbnail_fetch.is_empty()
+                    {
                         iced::Task::batch([
                             self.replay_pending_events_batch(topic),
-                            self.start_next_pending_image_download(),
+                            self.drain_pending_transfers(),
                         ])
                     } else {
                         self.replay_pending_events_batch(topic)
@@ -13915,8 +13997,8 @@ impl IcedChat {
                 if let Some(read_receipt_task) = self.process_net_event_sync(&topic, &event) {
                     tasks.push(read_receipt_task);
                 }
-                if !self.pending_image.is_empty() {
-                    tasks.push(self.start_next_pending_image_download());
+                if !self.pending_image.is_empty() || !self.pending_thumbnail_fetch.is_empty() {
+                    tasks.push(self.drain_pending_transfers());
                 }
                 // Check if a profile image ticket arrived from a remote peer
                 if let Some((peer, ticket_str)) = self.pending_profile_image_tickets.pop_front() {
@@ -15300,6 +15382,12 @@ impl IcedChat {
                         }) {
                             if let Some(download) = entry.download.as_mut() {
                                 download.poster_dimensions = dimensions;
+                                // Recreate the handle so the freshly generated
+                                // poster actually renders (the media frame
+                                // reads thumbnail_handle, not thumbnail bytes).
+                                download.thumbnail_handle = Some(
+                                    iced::widget::image::Handle::from_bytes(bytes.clone()),
+                                );
                                 download.thumbnail = Some(bytes);
                                 self.layout_cache.borrow_mut().clear();
                             }
@@ -15876,7 +15964,7 @@ impl IcedChat {
                     self.profile_store.add_shared_file(profile_file);
                 }
                 if self.has_message(&message_hash) {
-                    return self.start_next_pending_image_download();
+                    return self.drain_pending_transfers();
                 }
                 let sender_name = if sender == self.local_public {
                     self.local_label.clone()
@@ -15928,7 +16016,7 @@ impl IcedChat {
                     }
                     store.push_with_id(hist_entry);
                 }
-                self.start_next_pending_image_download()
+                self.drain_pending_transfers()
             }
             AppMessage::ProfileImageDownloaded(peer, image_bytes) => {
                 let size = image_bytes.len();
@@ -16068,7 +16156,7 @@ impl IcedChat {
             }
             AppMessage::ErrorMsg(msg) => {
                 self.push_system(msg);
-                self.start_next_pending_image_download()
+                self.drain_pending_transfers()
             }
 
             AppMessage::SystemMsg(msg) => {
@@ -21714,7 +21802,7 @@ impl ChatCallbacks for IcedChat {
             format!("File received: {name}"),
             xfer_kind,
             name,
-            ticket,
+            ticket.clone(),
             sender_label.unwrap_or_default(),
             None, // thumbnail fetched asynchronously via blob
         );
@@ -21723,7 +21811,15 @@ impl ChatCallbacks for IcedChat {
             dl.state = DownloadState::Ready { total: Some(size) };
             dl.thumbnail_hash = thumbnail_hash;
         }
+        let entry_index = self.download_entry_index.unwrap_or(self.entries.len());
         self.entries_push(entry);
+        // Queue the sender's poster blob for an off-thread fetch. The card
+        // shows the file-type placeholder while it is pending; on success
+        // ThumbnailFetched populates the handle + dimensions.
+        if let Some(hash) = thumbnail_hash {
+            self.pending_thumbnail_fetch
+                .push_back((entry_index, hash, ticket.clone()));
+        }
     }
 
     fn set_pending_image(&mut self, name: String, hash: MessageHash, from: PublicKey) {
