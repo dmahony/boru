@@ -237,7 +237,12 @@ mod tests {
         assert_eq!(report.chat_entries_removed, 2);
         assert_eq!(report.outbox_entries_removed, 2);
         assert_eq!(report.friend_records_updated, 2);
-        assert!(report.room_file_removed);
+        // RoomStore::save is deprecated (SQLite authoritative), so no legacy
+        // room.json exists to remove; the legacy history file IS removed.
+        assert!(
+            !report.room_file_removed,
+            "no legacy room file should exist since save() is deprecated"
+        );
         assert!(report.legacy_room_history_file_removed);
 
         assert!(room_history.find(&target).is_none());
@@ -279,7 +284,7 @@ mod tests {
             .get(&FriendId::new("friend-1"))
             .unwrap()
             .direct_conversation()
-            .is_none());
+            .is_some_and(|dc| dc.state == DirectConversationState::Archived));
         assert!(!friends
             .get(&FriendId::new("friend-2"))
             .unwrap()

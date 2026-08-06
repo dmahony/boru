@@ -204,7 +204,13 @@ mod tests {
                 .known_addrs,
             vec![addr]
         );
-        assert!(store.file_path().exists());
+        // The friends store is the in-memory write-through target (SQLite is
+        // authoritative for persistence); the legacy JSON file is deprecated
+        // and not written on this path.
+        assert!(
+            !store.file_path().exists(),
+            "legacy JSON friends file should not be written on the lookup path"
+        );
     }
 
     #[tokio::test]

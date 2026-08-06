@@ -163,14 +163,27 @@ impl OrderingState {
 
     /// Returns true if the message with `id` has been, or is about to be,
     /// processed.  A message is considered "processed" if it is in the
-    /// ready queue, or if it has been fully consumed and cleaned up.
+    /// ready queue, is the welcome message (applied directly by the
+    /// receive welcome branch, never via the ready queue), or if it has
+    /// been fully consumed and cleaned up.
     fn is_processed(&self, id: &OpId) -> bool {
+        if self.is_ready(id) {
+            return true;
+        }
+        // The welcome message is processed directly by `process_ready`
+        // when the group is established — `next_ready_message` skips it,
+        // so it never enters the normal "consumed" cleanup path but must
+        // still satisfy dependencies for later remote messages.
+        if let Some(welcome) = &self.welcome_message {
+            if welcome.id() == *id {
+                return true;
+            }
+        }
         // A dependency is satisfied if it's in the ready queue or has
         // already been processed (no longer in deps_of or dependents).
-        self.is_ready(id)
-            || (!self.deps_of.contains_key(id)
-                && !self.dependents.contains_key(id)
-                && !self.messages.contains_key(id))
+        !self.deps_of.contains_key(id)
+            && !self.dependents.contains_key(id)
+            && !self.messages.contains_key(id)
     }
 }
 
@@ -279,12 +292,17 @@ impl std::error::Error for OrderingError {}
 /// In this lamport-clock based implementation, messages depend on all
 /// previously-seen messages (including our own) except the message being
 /// queued itself.
+///
+/// Own messages are excluded: they were applied locally at creation time
+/// via `process_local`/`Dcgka::process_local`, so remote messages never
+/// need to wait on them (mirrors p2panda's reference orderer, which
+/// filters `previous` to drop messages from `my_id`).
 fn extract_dependencies(state: &OrderingState, exclude_id: &OpId) -> Vec<OpId> {
     state
         .messages
-        .keys()
-        .filter(|id| *id != exclude_id)
-        .copied()
+        .iter()
+        .filter(|(id, msg)| *id != exclude_id && msg.sender() != state.my_id)
+        .map(|(id, _)| *id)
         .collect()
 }
 
@@ -309,9 +327,12 @@ impl ForwardSecureOrdering for LamportOrderer {
             direct_messages.to_vec(),
         );
 
-        // Store and mark as immediately ready (own messages are always ready).
+        // Store for dependency tracking, but do NOT mark as ready: own
+        // messages are applied locally by the caller (via Dcgka
+        // `process_local`) and broadcast to peers — the `receive` loop
+        // must never re-process them as remote messages (p2panda asserts
+        // `sender != my_id` in `process_remote`).
         y.messages.insert(envelope.id(), envelope.clone());
-        y.ready.push_back(envelope.id());
 
         Ok((y, envelope))
     }
@@ -328,9 +349,8 @@ impl ForwardSecureOrdering for LamportOrderer {
         let envelope =
             EncryptedGroupEnvelope::new_application(y.my_id, ciphertext, generation, vec![]);
 
-        // Store and mark as immediately ready.
+        // Store for dependency tracking only (see next_control_message).
         y.messages.insert(envelope.id(), envelope.clone());
-        y.ready.push_back(envelope.id());
 
         Ok((y, envelope))
     }
@@ -608,11 +628,15 @@ mod tests {
         .expect("next_control_message");
 
         assert_eq!(msg.sender(), my_id, "sender should be our peer");
+        // Own messages are stored for dependency tracking but never enter
+        // the ready queue — they are applied locally by the caller and
+        // broadcast to peers, so `next_ready_message` must not yield them.
         assert_eq!(
             state.ready_count(),
-            1,
-            "message should be immediately ready"
+            0,
+            "own control message must not be in the ready queue"
         );
+        assert_eq!(state.messages.len(), 1, "own message stored for deps");
         assert_eq!(state.clock(), LamportClock::new(2), "clock should advance");
     }
 
@@ -629,16 +653,24 @@ mod tests {
         .expect("next_application_message");
 
         assert_eq!(msg.sender(), my_id, "sender should be our peer");
-        assert!(
-            state.ready_count() >= 1,
-            "message should be immediately ready"
+        assert_eq!(
+            state.ready_count(),
+            0,
+            "own application message must not be in the ready queue"
+        );
+        assert_eq!(
+            state.messages.len(),
+            1,
+            "own application message stored for deps"
         );
     }
 
     #[test]
-    fn test_own_messages_come_out_in_order_with_welcome() {
-        // When we publish our own messages after setting welcome, they come
-        // out in FIFO order (welcome is skipped).
+    fn test_own_messages_do_not_enter_ready_queue() {
+        // When we publish our own messages, they are stored for dependency
+        // tracking but never yielded by `next_ready_message` — the receive
+        // loop only processes remote messages (p2panda asserts
+        // `sender != my_id` in `process_remote`).
         let my_id = make_peer();
         let state = OrderingState::new(my_id);
 
@@ -660,23 +692,22 @@ mod tests {
         )
         .expect("msg2");
 
-        let (s, popped) =
-            <LamportOrderer as ForwardSecureOrdering>::next_ready_message(state).expect("pop");
-        // Welcome is skipped, so the first pop returns msg2.
-        assert_eq!(popped, Some(msg2), "first non-welcome message");
+        assert_eq!(state.ready_count(), 0, "own messages never queued");
 
-        let (_, popped2) =
-            <LamportOrderer as ForwardSecureOrdering>::next_ready_message(s).expect("pop2");
-        assert!(popped2.is_none(), "no more messages");
+        let (_, popped) =
+            <LamportOrderer as ForwardSecureOrdering>::next_ready_message(state).expect("pop");
+        assert!(popped.is_none(), "no remote messages to process");
+        let _ = msg2;
     }
 
     #[test]
-    fn test_out_of_order_messages_held_until_causal_dependency_arrives() {
+    fn test_remote_messages_after_welcome_are_yielded() {
+        // A remote (queued) message whose dependencies are met is yielded
+        // by `next_ready_message`; own messages are not.
         let alice = make_peer();
         let bob = make_peer();
         let state = OrderingState::new(alice);
 
-        // Alice sends a Create message — this is our welcome message.
         let (state, create) = <LamportOrderer as ForwardSecureOrdering>::next_control_message(
             state,
             &ControlMessage::Create {
@@ -688,13 +719,13 @@ mod tests {
         let state = <LamportOrderer as ForwardSecureOrdering>::set_welcome(state, &create)
             .expect("set_welcome");
 
-        // Bob sends a message.  Its dependency (the Create) is in the
-        // ready queue, so Bob's message becomes ready immediately.
+        // Bob sends a message (remote) — it depends on the Create, which is
+        // the welcome and therefore satisfied.
         let bob_msg = make_control(bob);
         let state = <LamportOrderer as ForwardSecureOrdering>::queue(state, &bob_msg)
             .expect("queue bob_msg");
 
-        // Alice sends a second message.
+        // Alice sends a second message (own) — stored, not queued.
         let (state, alice_msg) = <LamportOrderer as ForwardSecureOrdering>::next_control_message(
             state,
             &ControlMessage::Update,
@@ -702,21 +733,17 @@ mod tests {
         )
         .expect("alice_msg");
 
-        // Ready queue: [Create (welcome), bob_msg, alice_msg]
+        // Ready queue: [Create (welcome), bob_msg]
         // Pop 1: skip welcome, return bob_msg
         let (state, popped) =
             <LamportOrderer as ForwardSecureOrdering>::next_ready_message(state).expect("pop");
         assert_eq!(popped, Some(bob_msg), "Bob's message ready first");
 
-        // Pop 2: return alice_msg
-        let (_, popped_alice) =
-            <LamportOrderer as ForwardSecureOrdering>::next_ready_message(state)
-                .expect("pop alice");
-        assert_eq!(
-            popped_alice,
-            Some(alice_msg),
-            "Alice's message ready second"
-        );
+        // Pop 2: own message is NOT queued — nothing left.
+        let (_, popped2) =
+            <LamportOrderer as ForwardSecureOrdering>::next_ready_message(state).expect("pop2");
+        assert!(popped2.is_none(), "own message is not yielded");
+        let _ = alice_msg;
     }
 
     #[test]
@@ -738,12 +765,14 @@ mod tests {
             .expect("set_welcome");
 
         assert!(state.is_welcomed(), "should be welcomed");
-        assert_eq!(state.ready_count(), 1, "welcome in ready queue");
+        // The welcome (own create) is stored for deps but not queued.
+        assert_eq!(state.ready_count(), 0, "own welcome not in ready queue");
 
-        // Pop the welcome message — it should be skipped.
+        // Nothing remote to process — the welcome was applied directly by
+        // the receive welcome branch, not via the ready queue.
         let (state, popped) =
             <LamportOrderer as ForwardSecureOrdering>::next_ready_message(state).expect("pop");
-        assert!(popped.is_none(), "welcome was skipped");
+        assert!(popped.is_none(), "no remote messages after welcome");
 
         let (_, popped2) =
             <LamportOrderer as ForwardSecureOrdering>::next_ready_message(state).expect("pop2");
@@ -767,12 +796,13 @@ mod tests {
         let state = <LamportOrderer as ForwardSecureOrdering>::set_welcome(state, &create)
             .expect("set_welcome");
 
-        // Bob sends a message (depends on Create, which is ready).
+        // Bob sends a message (depends on nothing remote — own create is
+        // excluded from deps, so Bob's message is ready immediately).
         let bob_msg = make_control(bob);
         let state =
             <LamportOrderer as ForwardSecureOrdering>::queue(state, &bob_msg).expect("queue");
 
-        // Alice sends another message.
+        // Alice sends another message (own — stored, not queued).
         let (state, alice_msg) = <LamportOrderer as ForwardSecureOrdering>::next_control_message(
             state,
             &ControlMessage::Update,
@@ -780,17 +810,18 @@ mod tests {
         )
         .expect("alice_msg");
 
-        // Ready queue: [Create (welcome), bob_msg, alice_msg]
-        // Pop 1: skip welcome, return bob_msg
+        // Ready queue: [bob_msg] (create is own/welcome, not queued)
+        // Pop 1: return bob_msg
         let (state, popped_bob) =
             <LamportOrderer as ForwardSecureOrdering>::next_ready_message(state).expect("pop bob");
         assert_eq!(popped_bob, Some(bob_msg), "Bob's message first");
 
-        // Pop 2: return alice_msg
+        // Pop 2: own message is not queued — nothing left.
         let (_, popped_alice) =
             <LamportOrderer as ForwardSecureOrdering>::next_ready_message(state)
                 .expect("pop alice");
-        assert_eq!(popped_alice, Some(alice_msg), "Alice's message next");
+        assert!(popped_alice.is_none(), "own message is not yielded");
+        let _ = alice_msg;
     }
 
     #[test]
@@ -811,7 +842,8 @@ mod tests {
         let state = <LamportOrderer as ForwardSecureOrdering>::set_welcome(state, &create)
             .expect("set_welcome");
 
-        // Bob and Charlie both send messages (both deps on Create which is ready).
+        // Bob and Charlie both send messages (both depend on nothing remote
+        // — the create is own/welcome, excluded from deps).
         let bob_msg = make_control(bob);
         let charlie_msg = make_control(charlie);
 
@@ -820,7 +852,7 @@ mod tests {
         let state =
             <LamportOrderer as ForwardSecureOrdering>::queue(state, &bob_msg).expect("queue bob");
 
-        // Alice sends update.
+        // Alice sends update (own — stored, not queued).
         let (state, alice_update) =
             <LamportOrderer as ForwardSecureOrdering>::next_control_message(
                 state,
@@ -829,8 +861,8 @@ mod tests {
             )
             .expect("alice_update");
 
-        // Ready queue: [Create (welcome), charlie_msg, bob_msg, alice_update]
-        // Pop 1: skip welcome → charlie_msg (queued first)
+        // Ready queue: [charlie_msg, bob_msg]
+        // Pop 1: charlie_msg (queued first)
         let (state, popped_c) =
             <LamportOrderer as ForwardSecureOrdering>::next_ready_message(state)
                 .expect("pop charlie");
@@ -841,10 +873,11 @@ mod tests {
             <LamportOrderer as ForwardSecureOrdering>::next_ready_message(state).expect("pop bob");
         assert_eq!(popped_b, Some(bob_msg), "Bob second");
 
-        // Pop 3: alice_update
+        // Pop 3: own update is NOT queued — nothing left.
         let (_, popped_a) = <LamportOrderer as ForwardSecureOrdering>::next_ready_message(state)
             .expect("pop alice");
-        assert_eq!(popped_a, Some(alice_update), "Alice third");
+        assert!(popped_a.is_none(), "own update is not yielded");
+        let _ = alice_update;
     }
 
     #[test]
@@ -899,9 +932,11 @@ mod tests {
         )
         .expect("create");
 
-        // Try to queue our own message.
+        // Try to queue our own message — it must be a no-op (own messages
+        // never enter the ready queue; they are stored by next_control_message).
         let state = <LamportOrderer as ForwardSecureOrdering>::queue(state, &create)
             .expect("queue own msg");
-        assert_eq!(state.ready_count(), 1, "own message not re-enqueued");
+        assert_eq!(state.ready_count(), 0, "own message never queued");
+        assert_eq!(state.messages.len(), 1, "own message stored exactly once");
     }
 }

@@ -979,13 +979,23 @@ mod tests {
         let pk = iroh::SecretKey::generate().public();
         let entry = ConversationEntry::new(topic, pk.to_string(), "");
         let name = entry.display_name();
-        // Should be a friendly name, not a raw hex trunction
-        assert!(!name.is_empty(), "friendly name should not be empty");
-        assert!(name != "Unknown", "friendly name should not be 'Unknown'");
-        // The name should have exactly two words (adjective + noun)
-        assert!(
-            name.contains(' '),
-            "friendly name '{}' should be '<Adjective> <Noun>' format",
+        // Should be the compact peer-ID fallback (last 5 hex chars), not
+        // 'Unknown' and not an empty string.
+        assert!(!name.is_empty(), "fallback name should not be empty");
+        assert!(name != "Unknown", "fallback name should not be 'Unknown'");
+        let expected: String = pk
+            .to_string()
+            .chars()
+            .rev()
+            .take(5)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        assert_eq!(
+            name,
+            expected,
+            "fallback '{}' should be the last 5 hex chars of the peer ID",
             name
         );
         // Same peer should produce the same name deterministically

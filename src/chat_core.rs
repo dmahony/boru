@@ -677,7 +677,7 @@ impl ChatCallbacks for AppState {
 
     fn resolve_name(&self, peer: &PublicKey) -> String {
         // Priority: friend label > friend's last announced name > session name
-        //           > stable generated friendly name.
+        //           > compact peer-ID suffix (last 5 hex chars).
         let fid = FriendId::from_public_key(*peer);
         let friend_label = self.friends.get(&fid).and_then(|r| r.label.as_deref());
         let friend_announced = self
@@ -902,12 +902,13 @@ pub enum Message {
         ticket: String,
         /// Total file size in bytes, so the receiver can show a
         /// progress bar immediately without waiting for blob metadata.
+        #[serde(default, deserialize_with = "deserialize_tolerant_u64")]
         size: u64,
         /// Optional video thumbnail — the blake3 hash of a separate
         /// blob containing the WebP poster bytes.  Receivers fetch the
         /// poster via the same iroh blob mechanism as the file itself,
         /// keeping gossip messages small.
-        #[serde(default)]
+        #[serde(default, deserialize_with = "deserialize_tolerant_opt_hash")]
         thumbnail_hash: Option<MessageHash>,
     },
     /// Graceful goodbye — the sender is leaving the chat.
@@ -1009,6 +1010,36 @@ pub enum Message {
         /// Forward-secure encrypted group message envelope.
         envelope: EncryptedGroupEnvelope,
     },
+}
+
+/// Deserialize a `u64`, defaulting to `0` when the wire buffer is exhausted.
+///
+/// Postcard's `SeqAccess` returns `Err(EOF)` — not `Ok(None)` — when a
+/// struct-variant's declared field count exceeds the bytes on the wire, so
+/// `#[serde(default)]` alone cannot backfill a legacy `Message::FileShare`
+/// envelope that predates the `size` field.  Treating an end-of-buffer as
+/// `size = 0` keeps old peers' file shares decodable.
+fn deserialize_tolerant_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match u64::deserialize(deserializer) {
+        Ok(value) => Ok(value),
+        Err(_) => Ok(0),
+    }
+}
+
+/// Deserialize an `Option<MessageHash>`, defaulting to `None` when the wire
+/// buffer is exhausted (legacy `Message::FileShare` envelopes without the
+/// trailing thumbnail field).
+fn deserialize_tolerant_opt_hash<'de, D>(deserializer: D) -> Result<Option<MessageHash>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<MessageHash>::deserialize(deserializer) {
+        Ok(value) => Ok(value),
+        Err(_) => Ok(None),
+    }
 }
 
 /// A room advertisement broadcast into the directory topic.
@@ -2995,6 +3026,18 @@ mod tests {
         )
     }
 
+    /// Expected display fallback: last 5 hex characters of the peer ID.
+    fn expected_name_suffix(peer: &iroh::PublicKey) -> String {
+        let full = peer.to_string();
+        full.chars()
+            .rev()
+            .take(5)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
+    }
+
     #[test]
     fn status_context_fields_are_accessible() {
         let s = test_status();
@@ -3950,7 +3993,12 @@ mod tests {
             app.pending_image,
             vec![("photo.jpg".into(), [0xab; 32], remote_key.public())]
         );
-        assert!(app.entries.iter().any(|e| e.body.contains("photo.jpg")));
+        // Image shares render inline (no text system message) — the UI shows
+        // the image itself, so no 'shared an image' entry is created.
+        assert!(
+            !app.entries.iter().any(|e| e.body.contains("photo.jpg")),
+            "image shares should not create a text system message"
+        );
     }
 
     #[test]
@@ -3987,8 +4035,15 @@ mod tests {
         );
         assert_eq!(app.pending_image[0].0, "sunset.jpg");
         assert_eq!(app.pending_image[1].0, "puppy.jpg");
-        assert!(app.entries.iter().any(|e| e.body.contains("sunset.jpg")));
-        assert!(app.entries.iter().any(|e| e.body.contains("puppy.jpg")));
+        // No text system messages — images render inline.
+        assert!(
+            !app.entries.iter().any(|e| e.body.contains("sunset.jpg")),
+            "image shares should not create text system messages"
+        );
+        assert!(
+            !app.entries.iter().any(|e| e.body.contains("puppy.jpg")),
+            "image shares should not create text system messages"
+        );
     }
 
     #[test]
@@ -4020,10 +4075,11 @@ mod tests {
         for (i, name) in names.iter().enumerate() {
             assert_eq!(app.pending_image[i].0, *name, "image {} order preserved", i);
         }
+        // No text system messages — images render inline.
         for name in &names {
             assert!(
-                app.entries.iter().any(|e| e.body.contains(name)),
-                "system message for {name} must be present"
+                !app.entries.iter().any(|e| e.body.contains(name)),
+                "image shares should not create text system messages"
             );
         }
     }
@@ -4112,7 +4168,7 @@ mod tests {
             &mut app,
         )
         .unwrap();
-        // Without a display name, it falls back to a friendly name.
+        // Without a display name, it falls back to the compact peer suffix.
         assert!(
             app.entries
                 .iter()
@@ -4126,11 +4182,10 @@ mod tests {
             .find(|e| e.body.ends_with(" left the chat"))
             .unwrap();
         let name_part = msg.body.trim_end_matches(" left the chat");
-        assert!(!name_part.is_empty(), "name should not be empty");
-        assert!(
-            name_part.contains(' '),
-            "name '{}' should be a friendly name (Adjective Noun), got '{}'",
+        assert_eq!(
             name_part,
+            expected_name_suffix(&remote_key.public()),
+            "fallback name should be the last 5 hex chars of the peer ID, got '{}'",
             msg.body
         );
     }
@@ -4203,9 +4258,10 @@ mod tests {
             .unwrap();
         let name_part = msg.body.trim_end_matches(" left the chat");
         assert!(!name_part.is_empty(), "name should not be empty");
-        assert!(
-            name_part.contains(' '),
-            "name '{}' should be a friendly name (Adjective Noun)",
+        assert_eq!(
+            name_part,
+            expected_name_suffix(&remote_key.public()),
+            "name '{}' should be the last 5 hex chars of the peer ID",
             name_part
         );
     }
@@ -4238,9 +4294,10 @@ mod tests {
             .unwrap();
         let name_part = msg.body.trim_end_matches(" joined the chat");
         assert!(!name_part.is_empty(), "name should not be empty");
-        assert!(
-            name_part.contains(' '),
-            "name '{}' should be a friendly name (Adjective Noun), got '{}'",
+        assert_eq!(
+            name_part,
+            expected_name_suffix(&remote_key.public()),
+            "name '{}' should be the last 5 hex chars of the peer ID, got '{}'",
             name_part,
             msg.body
         );
@@ -4544,11 +4601,12 @@ mod tests {
     fn resolve_name_falls_back_to_short_pk_when_no_name_or_friend() {
         let remote_key = SecretKey::generate();
         let app = test_app();
-        // No name, no friend — should fall back to friendly name.
+        // No name, no friend — should fall back to the compact peer suffix.
         let display = app.resolve_name(&remote_key.public());
-        assert!(
-            display.contains(' '),
-            "fallback should be '<Adjective> <Noun>', got '{display}'"
+        assert_eq!(
+            display,
+            expected_name_suffix(&remote_key.public()),
+            "fallback should be the last 5 hex chars of the peer ID, got '{display}'"
         );
         // Same peer must produce the same result deterministically.
         let display2 = app.resolve_name(&remote_key.public());
@@ -4563,11 +4621,12 @@ mod tests {
         // Ensure the friend exists, but with no label and no last_announced_name.
         app.friends.ensure_friend(fid);
 
-        // No session name either — should fall back to friendly name.
+        // No session name either — should fall back to the compact peer suffix.
         let display = app.resolve_name(&remote_key.public());
-        assert!(
-            display.contains(' '),
-            "fallback should be '<Adjective> <Noun>', got '{display}'"
+        assert_eq!(
+            display,
+            expected_name_suffix(&remote_key.public()),
+            "fallback should be the last 5 hex chars of the peer ID, got '{display}'"
         );
         assert_ne!(display, "Unknown", "fallback should not be 'Unknown'");
         assert_ne!(display, "", "fallback should not be empty");

@@ -218,21 +218,26 @@ impl AckedGroupMembership<PeerId, OpId> for Membership {
     /// The `adder` should be the owner (or a delegate with authority).  The
     /// operation is recorded with the given `operation_id` and takes effect
     /// immediately.
+    ///
+    /// Adding an already-present member is idempotent (no error): the DCGKA
+    /// `process_welcome` flow calls `from_welcome` (which merges the welcome
+    /// history already containing the new member) and then `add` for the
+    /// same member, mirroring p2panda's reference DGM where `add` is a plain
+    /// set insertion.
     fn add(
         mut y: Self::State,
         _adder: PeerId,
         added: PeerId,
         operation_id: OpId,
     ) -> Result<Self::State, Self::Error> {
-        if y.members.contains(&added) {
-            return Err(MembershipError::AlreadyMember);
+        if !y.members.contains(&added) {
+            y.operations.push(OperationEntry {
+                op_id: operation_id,
+                kind: OpKind::Add,
+                peer: added,
+            });
         }
         y.members.insert(added);
-        y.operations.push(OperationEntry {
-            op_id: operation_id,
-            kind: OpKind::Add,
-            peer: added,
-        });
         y.add_ops.insert(operation_id);
         Ok(y)
     }
@@ -340,14 +345,19 @@ mod tests {
     }
 
     #[test]
-    fn test_add_existing_member_returns_error() {
+    fn test_add_existing_member_is_idempotent() {
         let owner = make_peer();
         let op_id = make_op_id(1);
 
         let state = Membership::create(owner, &[]).expect("create");
         let result = Membership::add(state, owner, owner, op_id);
-        assert!(result.is_err(), "adding the owner again should fail");
-        assert_eq!(result.unwrap_err(), MembershipError::AlreadyMember);
+        assert!(
+            result.is_ok(),
+            "adding an already-present member should be idempotent (DCGKA welcome flow)"
+        );
+        let state = result.unwrap();
+        let view = Membership::members_view(&state, &owner).expect("members_view");
+        assert_eq!(view.len(), 1, "member should not be duplicated");
     }
 
     #[test]

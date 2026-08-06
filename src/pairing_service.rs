@@ -1734,13 +1734,14 @@ mod tests {
     }
 
     #[test]
-    fn test_first_conversation_persists_across_restart() {
-        // Create a conversation, reload stores from disk, verify it survived.
+    fn test_first_conversation_preserves_in_memory_state() {
+        // Legacy JSON store writes are deprecated (Phase 22): persistence is
+        // handled by SQLite. This verifies the in-memory state after
+        // open_or_create_first_conversation, matching the Phase-22 pattern.
         let our_sk = SecretKey::generate();
         let their_sk = SecretKey::generate();
-        let dir = temp_dir("first-conv-restart");
+        let dir = temp_dir("first-conv-state");
 
-        // ── First session ────────────────────────────────────────────────
         let mut friends = FriendsStore::empty_at(&dir);
         let mut conversations = ConversationStore::empty_at(&dir);
         let fid = FriendId::from_public_key(their_sk.public());
@@ -1759,31 +1760,27 @@ mod tests {
             other => panic!("expected Ready, got {other:?}"),
         };
 
-        // Stores were saved by the function
-        assert!(
-            conversations.file_path().exists(),
-            "conversations file should exist"
-        );
-
-        // ── After restart: reload from disk ────────────────────────────
-        let reloaded_friends = FriendsStore::load(&dir).expect("reload friends");
-        let reloaded_convos = ConversationStore::load(&dir).expect("reload conversations");
-
-        // Friend record preserved
-        let record = reloaded_friends
+        // In-memory friend record carries the direct conversation.
+        let record = friends
             .get(&fid)
-            .expect("friend record should survive restart");
+            .expect("friend record should be updated in memory");
         let dc = record
             .direct_conversation
             .as_ref()
-            .expect("direct conversation should survive restart");
+            .expect("direct conversation should be set in memory");
         assert_eq!(dc.topic, topic);
         assert_eq!(dc.state, DirectConversationState::Active);
 
-        // Conversation entry preserved
-        let entry = reloaded_convos
+        // Conversation entry is present in memory.
+        let entry = conversations
             .find(&topic)
-            .expect("conversation entry should survive restart");
+            .expect("conversation entry should be created in memory");
         assert_eq!(entry.peer_id, their_sk.public().to_string());
+
+        // Legacy JSON files are not written on this path (SQLite authoritative).
+        assert!(
+            !conversations.file_path().exists(),
+            "legacy JSON conversations file should not be written on this path"
+        );
     }
 }

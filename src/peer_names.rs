@@ -10,11 +10,12 @@
 //! 1. User‑assigned nickname (friend label)
 //! 2. Remote profile display name (from `ProfileUpdate` gossip)
 //! 3. Advertised device / session name
-//! 4. [`generate_friendly_name`] — stable fallback
-//! 5. [`fmt_short`] — truncated peer ID as secondary text only
+//! 4. [`resolve_peer_name`] fallback — last 5 hex characters of the peer ID
+//!    (compact, deterministic)
 //!
 //! The callers (`app.rs::resolve_name` etc.) enforce this priority; this
-//! module only provides the building blocks for steps 4‑5.
+//! module also provides [`generate_friendly_name`] as an optional richer
+//! label for contexts that want a two-word "Adjective Noun" name.
 
 use iroh::PublicKey;
 
@@ -148,7 +149,7 @@ pub fn format_with_short(primary: &str, secondary: &str) -> String {
 /// 2. `profile_display_name` ─ remote profile display name (from `ProfileUpdate` gossip)
 /// 3. `friend_announced_name` ─ last name the peer announced about themselves
 /// 4. `session_name` ─ advertised device / session name
-/// 5. [`generate_friendly_name`] ─ stable deterministic fallback
+/// 5. last 5 hex characters of the peer ID (compact, deterministic fallback)
 ///
 /// All callers (GUI, headless chat, tests) should route through this function
 /// so the priority order is applied consistently everywhere.
@@ -499,6 +500,18 @@ mod tests {
 
     // ── resolve_peer_name priority tests ──────────────────────────────
 
+    /// Expected fallback: last 5 hex characters of the peer ID.
+    fn expected_suffix(peer: &PublicKey) -> String {
+        let full = peer.to_string();
+        full.chars()
+            .rev()
+            .take(5)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
+    }
+
     #[test]
     fn test_resolve_peer_name_uses_friend_label() {
         let peer = SecretKey::generate().public();
@@ -544,10 +557,11 @@ mod tests {
     fn test_resolve_peer_name_falls_back_to_friendly() {
         let peer = SecretKey::generate().public();
         let name = resolve_peer_name(&peer, None, None, None, None);
-        // Must be a valid adjective+noun pair
-        assert!(
-            name.contains(' '),
-            "fallback must be '<Adjective> <Noun>', got '{name}'"
+        // Must be the compact fallback: last 5 hex chars of the peer ID.
+        assert_eq!(
+            name,
+            expected_suffix(&peer),
+            "fallback should be the last 5 hex chars of the peer ID, got '{name}'"
         );
         // Same peer must produce the same fallback
         let name2 = resolve_peer_name(&peer, None, None, None, None);
@@ -557,18 +571,19 @@ mod tests {
     #[test]
     fn test_resolve_peer_name_ignores_empty_strings() {
         let peer = SecretKey::generate().public();
-        // All empty strings — should fall back to friendly name
+        // All empty strings — should fall back to the compact peer suffix
         let name = resolve_peer_name(&peer, Some(""), Some(""), Some(""), Some(""));
-        assert!(
-            name.contains(' '),
-            "empty inputs should fall through to friendly name, got '{name}'"
+        assert_eq!(
+            name,
+            expected_suffix(&peer),
+            "empty inputs should fall through to the peer-ID suffix, got '{name}'"
         );
     }
 
     #[test]
     fn test_resolve_peer_name_ignores_whitespace_metadata() {
         let peer = SecretKey::generate().public();
-        let fallback = generate_friendly_name(&peer);
+        let fallback = expected_suffix(&peer);
         assert_eq!(
             resolve_peer_name(&peer, Some("  \t"), Some("  \n"), None, None),
             fallback
