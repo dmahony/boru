@@ -1044,8 +1044,12 @@ mod tests {
             FileTypeIconSize::Large,
             FileTypeIconSize::Hero,
         ] {
+            // NOTE: choose a filename that resolves to an SVG asset path
+            // distinct from the component's own handle-cache test path
+            // (application-pdf.svg), so the two tests do not race on the
+            // shared process-global SVG handle cache.
             let el: iced::Element<'_, AppMessage> =
-                file_type_icon_element("report.pdf", None, None, size, &iced::Theme::Light);
+                file_type_icon_element("report.docx", None, None, size, &iced::Theme::Light);
             let _ = el;
         }
     }
@@ -1064,9 +1068,11 @@ mod tests {
 
     #[test]
     fn file_type_icon_element_uses_advertised_mime_hint() {
+        // application/zip resolves to an archive icon, distinct from the
+        // component's own handle-cache test path (application-pdf.svg).
         let el: iced::Element<'_, AppMessage> = file_type_icon_element(
             "download.bin",
-            Some("application/pdf"),
+            Some("application/zip"),
             None,
             FileTypeIconSize::Card,
             &iced::Theme::Dark,
