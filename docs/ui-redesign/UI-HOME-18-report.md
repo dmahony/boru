@@ -168,7 +168,8 @@ Explicit, complete list of every remaining difference found:
 2. **Primary button label contrast** (follow-up filed): white 14px
    semibold on #188C50 = 4.28:1 — passes 3:1 large-text AA, misses 4.5:1
    normal-text AA.
-3. **iced 0.14 button focus** (follow-up filed): buttons cannot take
+3. **iced 0.14 button focus** (follow-up t_d849e063 → resolved as accepted
+   limitation, see `UI-HOME-followup-button-focus.md`): buttons cannot take
    keyboard focus (no `button::Status::Focused`). Pre-existing framework
    limitation — affects keyboard operability of quick actions/rows.
 4. **Dark theme** not part of this QA scope (light theme is default);
