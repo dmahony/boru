@@ -16,6 +16,7 @@ mod design_tokens;
 mod download_progress_view;
 mod downloaded_view_model;
 mod downloading_view_model;
+mod file_category;
 mod peers_downloading_view_model;
 mod activity_log_view_model;
 mod fonts;
