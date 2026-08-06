@@ -42,6 +42,24 @@
 //! the mismatch on [`ResolvedFileIcon::mime_mismatch`] so the UI can show a
 //! warning state.
 //!
+//! ## Security (Task 16)
+//!
+//! The icon pipeline treats **all** input as untrusted:
+//!
+//! * A peer-advertised MIME type is a hint (priority 4), never truth; a
+//!   locally detected type wins for the icon and the mismatch is recorded.
+//! * MIME and filename strings are **names**, never filesystem paths: they
+//!   are matched against the static tables below and the pinned manifest,
+//!   and no path is ever built from them.  `resolve_file_icon` performs no
+//!   file I/O at all — it cannot inspect or decode file contents, and it
+//!   never opens or executes anything.
+//! * Every repo-relative asset path returned to callers is validated by
+//!   [`is_bundled_asset_path`] against the pinned asset root: absolute
+//!   paths, `..` components, control bytes, and Windows drive prefixes are
+//!   rejected, so a traversal string such as `../../icon.svg` can never
+//!   escape the bundled Papirus set.  The `FileTypeIcon` component applies
+//!   the same guard before reading SVG bytes from disk.
+//!
 //! ## Scope of this module
 //!
 //! The mapping tables below are the initial seed set.  PAPIRUS-08 extends
@@ -218,9 +236,21 @@ impl PapirusCatalog {
 
     /// Repo-relative path for `icon_id` at `size`, e.g.
     /// `"assets/third_party/papirus/32/application-pdf.svg"`.
+    ///
+    /// The manifest is bundled at build time and therefore trusted, but
+    /// the returned path is still passed through [`is_bundled_asset_path`]
+    /// (Task 16 defense in depth): even a corrupted manifest entry that
+    /// escaped the bundle would be rejected here instead of reaching a
+    /// filesystem read.
     pub fn asset_path(&self, icon_id: &str, size: u16) -> Option<String> {
-        self.manifest_path(icon_id, size)
-            .map(|p| format!("{PAPIRUS_ASSET_ROOT}/{p}"))
+        let repo_relative = format!(
+            "{PAPIRUS_ASSET_ROOT}/{}",
+            self.manifest_path(icon_id, size)?
+        );
+        if !is_bundled_asset_path(&repo_relative) {
+            return None;
+        }
+        Some(repo_relative)
     }
 }
 
@@ -235,6 +265,46 @@ impl PapirusCatalog {
 /// must fall back to the unknown-generic icon — never a missing asset.
 pub fn papirus_asset_path(icon_id: &str, size: u16) -> Option<String> {
     PapirusCatalog::global().asset_path(icon_id, size)
+}
+
+/// Whether `path` is a safe **repo-relative** asset path inside the pinned
+/// Papirus asset root (Task 16 path-traversal guard).
+///
+/// Only paths produced by the manifest (or code that independently
+/// reconstructs a manifest path) may be passed to a filesystem read.  This
+/// validator enforces the asset allow-list shape:
+///
+/// * non-empty,
+/// * no control bytes (NUL, newline, ...),
+/// * relative — never `/`-absolute and never a Windows drive prefix
+///   (`C:`), and no leading `\` separator,
+/// * no `..` component (checked on both `/` and `\` separators),
+/// * starts with the pinned [`PAPIRUS_ASSET_ROOT`].
+///
+/// A `..`-free path that starts with the root cannot escape the bundle:
+/// `join`-ing it onto `CARGO_MANIFEST_DIR` stays inside
+/// `<repo>/assets/third_party/papirus/`.
+pub fn is_bundled_asset_path(path: &str) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    // Reject control bytes (NUL, newline, carriage return, tab, ...).
+    if path.bytes().any(|b| b < 0x20) {
+        return false;
+    }
+    // Reject absolute POSIX paths and backslash-absolute paths.
+    if path.starts_with('/') || path.starts_with('\\') {
+        return false;
+    }
+    // Reject Windows drive prefixes (`C:\...`, `C:/...`).
+    if path.len() >= 2 && path.as_bytes()[1] == b':' {
+        return false;
+    }
+    // Reject any `..` component, regardless of separator style.
+    if path.split(['/', '\\']).any(|component| component == "..") {
+        return false;
+    }
+    path.starts_with(PAPIRUS_ASSET_ROOT)
 }
 
 // ── Seed mapping tables (PAPIRUS-08/09 extend) ───────────────────────
@@ -2501,5 +2571,251 @@ mod tests {
         assert_eq!(icon.file_category, FileCategory::Unknown);
         assert_eq!(icon.source, ResolutionSource::Extension);
         assert!(catalog.has_icon(&icon.icon_id));
+    }
+
+    // ── PAPIRUS-16: Security requirements ──────────────────────────
+
+    /// Task 16: a filename such as `../../icon.svg` is a **name**, never a
+    /// filesystem path.  Resolution must keep the rendered asset inside the
+    /// pinned bundle: repo-relative, no `..` component, no absolute prefix,
+    /// and the icon id must exist in the manifest.
+    #[test]
+    fn path_traversal_filenames_never_escape_the_bundle() {
+        let catalog = PapirusCatalog::global();
+        let malicious: &[&str] = &[
+            "../../icon.svg",
+            "..\\..\\icon.svg",
+            "../../../etc/passwd",
+            "a/../../evil.svg",
+            "folder/..\\..\\..\\icon.svg",
+            "..",
+            "%2e%2e/icon.svg", // percent-encoding is NOT decoded: literal name
+            "...",             // multiple dots are ordinary name chars
+        ];
+        for name in malicious {
+            let icon = resolve(name);
+            assert!(
+                icon.asset_path.starts_with(PAPIRUS_ASSET_ROOT),
+                "{name:?} escaped the bundle: {}",
+                icon.asset_path
+            );
+            assert!(
+                !icon.asset_path.contains(".."),
+                "{name:?} produced a traversal path: {}",
+                icon.asset_path
+            );
+            assert!(
+                !icon.asset_path.starts_with('/') && !icon.asset_path.starts_with('\\'),
+                "{name:?} produced an absolute path: {}",
+                icon.asset_path
+            );
+            assert!(
+                icon.asset_path.ends_with(".svg"),
+                "{name:?} produced a non-SVG path: {}",
+                icon.asset_path
+            );
+            assert!(
+                catalog.has_icon(&icon.icon_id),
+                "{name:?} resolved to missing icon {}",
+                icon.icon_id
+            );
+        }
+    }
+
+    /// Task 16: a path-like filename must never influence which filesystem
+    /// path is read.  Only the last path segment is used for extension
+    /// lookup, and the asset path always comes from the manifest.
+    #[test]
+    fn path_like_filenames_are_sanitised_not_joined() {
+        for name in [
+            "downloads/report.pdf",
+            "downloads/../../report.pdf",
+            "..\\downloads\\report.pdf",
+            "/tmp/report.pdf",
+            "C:\\Users\\attacker\\report.pdf",
+        ] {
+            let icon = resolve(name);
+            assert_eq!(icon.icon_id, "application-pdf", "for {name:?}");
+            assert!(
+                icon.asset_path.starts_with(PAPIRUS_ASSET_ROOT),
+                "for {name:?}: {}",
+                icon.asset_path
+            );
+            assert!(
+                !icon.asset_path.contains(".."),
+                "for {name:?}: {}",
+                icon.asset_path
+            );
+        }
+    }
+
+    /// Task 16: a peer-supplied MIME string is a hint matched against the
+    /// static table only.  Even a MIME carrying traversal fragments can
+    /// never influence the asset path, which always comes from the pinned
+    /// manifest.
+    #[test]
+    fn malicious_mime_never_constructs_a_filesystem_path() {
+        let catalog = PapirusCatalog::global();
+        let malicious: &[&str] = &[
+            "../../icon.svg",
+            "application/pdf;../../icon.svg",
+            "image/svg+xml\n../../x",
+            "text/plain; charset=utf-8;../../../../etc/passwd",
+            "application//pdf",
+            "application/pdf ../../icon.svg",
+            "..%2F..%2Ficon.svg",
+            "image/svg+xml\0",
+        ];
+        for mime in malicious {
+            let icon = resolve_file_icon("blob.bin", Some(mime), None, false);
+            assert!(
+                icon.asset_path.starts_with(PAPIRUS_ASSET_ROOT),
+                "MIME {mime:?} escaped the bundle: {}",
+                icon.asset_path
+            );
+            assert!(
+                !icon.asset_path.contains("..") && !icon.asset_path.contains('\0'),
+                "MIME {mime:?} produced a traversal/control path: {}",
+                icon.asset_path
+            );
+            assert!(
+                !icon.asset_path.starts_with('/'),
+                "MIME {mime:?} produced an absolute path: {}",
+                icon.asset_path
+            );
+            assert!(
+                catalog.has_icon(&icon.icon_id),
+                "MIME {mime:?} resolved to missing icon {}",
+                icon.icon_id
+            );
+        }
+    }
+
+    /// Task 16: an executable renamed to `.pdf` must not receive additional
+    /// trust from the PDF icon.  The PDF icon alone is only a
+    /// Medium-confidence hint; a trusted local detection of an executable
+    /// wins for the icon and the mismatch is recorded — the file is
+    /// presented as an executable, never granted PDF trust.
+    #[test]
+    fn executable_renamed_to_pdf_gets_no_pdf_trust() {
+        // Extension-only (no local detection): the PDF icon is chosen, but
+        // only as a hint — never Exact, and the resolved structure carries
+        // no open/execute action (it is purely presentational).
+        let hint_only = resolve_file_icon("evil.pdf", None, None, false);
+        assert_eq!(hint_only.icon_id, "application-pdf");
+        assert_eq!(hint_only.source, ResolutionSource::Extension);
+        assert_eq!(hint_only.confidence, IconConfidence::Medium);
+        assert!(hint_only.mime_mismatch.is_none());
+
+        // An advertised PDF MIME alone is likewise only a hint.
+        let advertised = resolve_file_icon("evil.pdf", Some("application/pdf"), None, false);
+        assert_eq!(advertised.source, ResolutionSource::AdvertisedMime);
+        assert_eq!(advertised.confidence, IconConfidence::Medium);
+        assert_eq!(advertised.icon_id, "application-pdf");
+
+        // With local detection (e.g. an ELF binary), the trusted local type
+        // wins for the icon: the file is presented as an executable, and
+        // the conflict with the PDF hint is recorded for a warning state.
+        let detected = resolve_file_icon(
+            "evil.pdf",
+            Some("application/pdf"),
+            Some("application/x-executable"),
+            false,
+        );
+        assert_eq!(detected.icon_id, "application-x-executable");
+        assert_eq!(detected.file_category, FileCategory::Executable);
+        assert_eq!(detected.confidence, IconConfidence::Exact);
+        let mismatch = detected.mime_mismatch.expect("mismatch must be recorded");
+        assert_eq!(mismatch.advertised_category, FileCategory::Pdf);
+        assert_eq!(mismatch.locally_detected_category, FileCategory::Executable);
+
+        // A locally detected PDF, by contrast, is Exact — the confidence
+        // ladder is what distinguishes trustworthy local data from hints.
+        let real_pdf = resolve_file_icon(
+            "evil.pdf",
+            Some("application/pdf"),
+            Some("application/pdf"),
+            false,
+        );
+        assert_eq!(real_pdf.confidence, IconConfidence::Exact);
+        assert_eq!(real_pdf.source, ResolutionSource::LocalMime);
+        assert!(real_pdf.mime_mismatch.is_none());
+    }
+
+    /// The asset allow-list validator itself: reject absolute paths,
+    /// drive prefixes, `..` components (both separators), control bytes,
+    /// and manifest-relative fragments; accept real repo-relative paths.
+    #[test]
+    fn bundled_asset_path_validator_rejects_traversal() {
+        let rejected: &[&str] = &[
+            "",
+            "../icon.svg",
+            "..\\icon.svg",
+            "assets/third_party/papirus/../../../../etc/passwd",
+            "assets/third_party/papirus/32/..\\..\\icon.svg",
+            "assets/third_party/papirus/32/icon.svg\0",
+            "assets/third_party/papirus/32/icon.svg\n",
+            "/etc/passwd",
+            "\\etc\\passwd",
+            "C:\\Windows\\system32\\icon.svg",
+            "C:/Windows/system32/icon.svg",
+            "32/application-pdf.svg", // manifest-relative, not repo-relative
+        ];
+        for path in rejected {
+            assert!(
+                !is_bundled_asset_path(path),
+                "validator must reject {path:?}"
+            );
+        }
+
+        let accepted: &[&str] = &[
+            "assets/third_party/papirus/32/application-pdf.svg",
+            "assets/third_party/papirus/64/folder-open.svg",
+            "assets/third_party/papirus/16/image-svg+xml.svg",
+        ];
+        for path in accepted {
+            assert!(
+                is_bundled_asset_path(path),
+                "validator must accept {path:?}"
+            );
+        }
+    }
+
+    /// Defense in depth: even a malicious/typo icon id must never yield a
+    /// path outside the bundle root — the manifest is the allow-list and
+    /// the path validator is the second gate.
+    #[test]
+    fn manifest_asset_paths_are_always_in_bundle() {
+        for bad_id in [
+            "../../icon",
+            "/etc/passwd",
+            "..\\..\\icon",
+            "assets/third_party/papirus/32/application-pdf.svg",
+        ] {
+            assert!(
+                papirus_asset_path(bad_id, 32).is_none(),
+                "non-manifest id {bad_id:?} must not resolve"
+            );
+        }
+        let path = papirus_asset_path("application-pdf", 32).expect("pdf icon at 32");
+        assert!(path.starts_with(PAPIRUS_ASSET_ROOT));
+        assert!(is_bundled_asset_path(&path));
+    }
+
+    /// Task 16: choosing an icon never inspects or decodes file contents on
+    /// the UI thread — `resolve_file_icon` is pure and performs no file I/O.
+    /// This test pins that contract: the resolver's only output is a
+    /// manifest-grounded path, and every resolution below runs with no
+    /// filesystem access (the test module never opens files).
+    #[test]
+    fn resolution_performs_no_file_io() {
+        // If the resolver ever opened the filename as a path, these would
+        // fail or read the wrong files.  They resolve from names only.
+        let icon = resolve("/nonexistent/dir/report.pdf");
+        assert_eq!(icon.icon_id, "application-pdf");
+        let icon = resolve_file_icon("blob", Some("image/svg+xml;../../etc/passwd"), None, false);
+        assert!(icon.asset_path.starts_with(PAPIRUS_ASSET_ROOT));
+        let folder = resolve_file_icon("../../..", None, None, true);
+        assert_eq!(folder.icon_id, DIRECTORY_ICON);
     }
 }

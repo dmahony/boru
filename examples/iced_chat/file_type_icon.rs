@@ -524,7 +524,20 @@ static SVG_HANDLE_CACHE: OnceLock<Mutex<HashMap<String, svg::Handle>>> = OnceLoc
 ///
 /// Paths are resolved against `CARGO_MANIFEST_DIR` (compile-time absolute)
 /// so rendering does not depend on the process working directory.
+///
+/// ## Security (Task 16)
+///
+/// The path is validated by [`is_bundled_asset_path`] **before** any
+/// filesystem access: an absolute path, a `..` traversal such as
+/// `../../icon.svg`, a Windows drive prefix, or a path outside the pinned
+/// Papirus asset root is never read from disk — the component renders the
+/// embedded unknown-generic icon instead.  This is the final gate in the
+/// icon pipeline: even if a future call site passed an untrusted string
+/// here, it cannot escape the bundled asset set.
 fn cached_svg_handle(asset_path: &str) -> svg::Handle {
+    if !crate::file_type_resolver::is_bundled_asset_path(asset_path) {
+        return fallback_handle();
+    }
     let cache = SVG_HANDLE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(handle) = cache.lock().unwrap().get(asset_path) {
         return handle.clone();
@@ -996,6 +1009,93 @@ mod tests {
             let folder = FileTypeIcon::directory("shared").size(size);
             assert_eq!(folder.source_size_dir(&Theme::Dark), dir);
         }
+    }
+
+    // ── PAPIRUS-16 security requirements ─────────────────────────────
+
+    /// Task 16: the component must never turn an untrusted string into a
+    /// filesystem read.  Every path outside the pinned bundle is rejected
+    /// by the allow-list validator before `cached_svg_handle` touches the
+    /// disk; the rendered icon falls back to the embedded generic icon.
+    #[test]
+    fn malicious_asset_paths_are_rejected_before_disk_read() {
+        let rejected: &[&str] = &[
+            "../icon.svg",
+            "..\\..\\icon.svg",
+            "../../../../etc/passwd",
+            "assets/third_party/papirus/../../../../etc/passwd",
+            "assets/third_party/papirus/32/..\\..\\..\\etc/passwd",
+            "/etc/passwd",
+            "\\etc\\passwd",
+            "C:\\Windows\\system32\\icon.svg",
+            "assets/third_party/papirus/32/application-pdf.svg\0",
+        ];
+        for bad in rejected {
+            assert!(
+                !crate::file_type_resolver::is_bundled_asset_path(bad),
+                "validator must reject {bad:?}"
+            );
+            // The handle request must not panic and must never read `bad`.
+            let handle = cached_svg_handle(bad);
+            let _ = handle;
+        }
+        // Legitimate bundle paths still load through the cache.
+        let ok = cached_svg_handle("assets/third_party/papirus/32/application-pdf.svg");
+        let _ = ok;
+    }
+
+    /// Task 16: a peer-supplied filename that looks like an SVG path is a
+    /// NAME, not a path.  It resolves to a bundled Papirus icon id and the
+    /// rendered asset stays inside the pinned bundle — a user/peer can
+    /// never supply SVG bytes or an SVG path to the component.
+    #[test]
+    fn user_supplied_svg_is_never_rendered_as_icon() {
+        let icon = FileTypeIcon::new("../../icon.svg", None, None, false);
+        let r = icon.resolved();
+        // `icon.svg` is a plain filename → the bundled SVG-type icon, never
+        // the file the attacker pointed at.
+        assert_eq!(r.icon_id, "image-svg+xml");
+        assert!(r.asset_path.ends_with("32/image-svg+xml.svg"));
+        assert!(crate::file_type_resolver::is_bundled_asset_path(
+            &r.asset_path
+        ));
+        assert!(!r.asset_path.contains(".."));
+
+        // Same for a Windows-style path and an absolute path.
+        for name in [
+            "C:\\Users\\attacker\\icon.svg",
+            "/tmp/icon.svg",
+            "downloads/../../icon.svg",
+        ] {
+            let icon = FileTypeIcon::new(name, None, None, false);
+            let r = icon.resolved();
+            assert_eq!(r.icon_id, "image-svg+xml", "for {name:?}");
+            assert!(
+                crate::file_type_resolver::is_bundled_asset_path(&r.asset_path),
+                "for {name:?}: {}",
+                r.asset_path
+            );
+        }
+
+        // The widget builds without panic and the traversal string never
+        // becomes a filesystem lookup.
+        let el: Element<'_, AppMessage> = icon.build(&Theme::Light);
+        let _ = el;
+    }
+
+    /// Task 16: the resolved icon is purely presentational.  The component
+    /// exposes no open/execute/trust action, and a file whose icon renders
+    /// as a safe PDF never auto-opens anything — there is no open path in
+    /// the component at all.  (Structural: `FileTypeIcon` only builds a
+    /// widget; it cannot open a file.)
+    #[test]
+    fn icon_rendering_never_auto_opens_files() {
+        let icon = FileTypeIcon::new("evil.pdf", None, None, false).with_tooltip();
+        let el: Element<'_, AppMessage> = icon.build(&Theme::Light);
+        let _ = el;
+        // No panic, no side effect: building an icon never touches the
+        // filesystem beyond reading a bundled SVG.
+        assert_eq!(icon.resolved().icon_id, "application-pdf");
     }
 
     // ── PAPIRUS-14 readability audit (code-level check) ───────────────
