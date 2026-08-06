@@ -35,7 +35,7 @@ use iced_video_player::{Video, VideoPlayer};
 
 use super::app::{
     accent_primary, bg_surface, border_muted, color_error, text_system, SPACE_10, SPACE_12,
-    SPACE_16, SPACE_2, SPACE_4, SPACE_6, SPACE_8, TYPO_SM, TYPO_XS, TYPO_XXS,
+    SPACE_2, SPACE_20, SPACE_24, SPACE_4, SPACE_6, SPACE_8, TYPO_SM, TYPO_XS, TYPO_XXS,
 };
 use super::app::{
     icon_svg, AppMessage, DownloadAttachment, DownloadState, ICON_ACTIVITY, ICON_FILES,
@@ -187,7 +187,7 @@ impl<'a> BoruVideoFileCard<'a> {
             .push(media)
             .push(status)
             .push(actions)
-            .spacing(SPACE_6);
+            .spacing(SPACE_12);
         if let Some(err) = error_section {
             body = body.push(
                 container(err)
@@ -205,20 +205,20 @@ impl<'a> BoruVideoFileCard<'a> {
                     }),
             );
         }
-        body = body.spacing(SPACE_6);
+        body = body.spacing(SPACE_12);
 
+        // VIDCARD-03 card surface: reuse the shared Boru card style —
+        // soft white (theme-aware) background, thin neutral green-grey
+        // border, RADIUS_CARD (16 px), very subtle shadow — with 20-24 px
+        // internal padding. Width stays `Shrink` (content-driven; capped
+        // by the readable chat column), so a portrait video with a bounded
+        // media frame never forces the card to span the whole chat width.
+        // No hidden overflow here: `.clip(true)` is only used at the
+        // media-frame boundary to respect its rounded corners.
         container(body)
             .width(Length::Shrink)
-            .padding([SPACE_12, SPACE_16])
-            .style(move |t| widget::container::Style {
-                background: Some(iced::Background::Color(bg_surface(t))),
-                border: iced::Border {
-                    color: tone,
-                    width: 1.0,
-                    radius: SPACE_10.into(),
-                },
-                ..Default::default()
-            })
+            .padding([SPACE_20, SPACE_24])
+            .style(|t| crate::design_tokens::card_style(t))
             .into()
     }
 
@@ -777,5 +777,48 @@ mod tests {
             Some("MOV".to_string())
         );
         assert_eq!(file_format_label("no_extension"), None);
+    }
+
+    #[test]
+    fn card_surface_uses_the_modern_boru_card_style() {
+        // VIDCARD-03: the card surface must reuse the shared design-system
+        // card style (soft white theme-aware surface, thin green-grey
+        // border, RADIUS_CARD 16 px, very subtle shadow) with 20-24 px
+        // internal padding and shared-scale section spacing. The outer
+        // card must never hide layout defects with clipping — `.clip(true)`
+        // is only allowed at the media-frame boundary (spec Task 11).
+        let src = include_str!("video_file_card.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+
+        // Inspect only the outer card container block (between the body
+        // column and its terminating `.into()`).
+        let outer = prod
+            .split("container(body)")
+            .nth(1)
+            .and_then(|s| s.split(".into()").next())
+            .expect("outer card container block must exist");
+        assert!(
+            outer.contains("crate::design_tokens::card_style"),
+            "card surface must reuse design_tokens::card_style"
+        );
+        assert!(
+            outer.contains(".padding([SPACE_20, SPACE_24])"),
+            "card padding must use the 20-24 px token band"
+        );
+        assert!(
+            outer.contains(".width(Length::Shrink)"),
+            "card width must be content-driven (Shrink), not forced full width"
+        );
+        assert!(
+            !outer.contains(".clip("),
+            "the outer card surface must not rely on hidden overflow"
+        );
+
+        // Consistent shared-scale spacing between the card sections.
+        let section_gap_count = prod.matches(".spacing(SPACE_12)").count();
+        assert!(
+            section_gap_count >= 2,
+            "card section gaps must use shared-scale SPACE_12, got {section_gap_count}"
+        );
     }
 }
