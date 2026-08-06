@@ -1985,16 +1985,25 @@ impl<'a, Message: 'a> ProgressBar<'a, Message> {
 
 /// A compact identity cell for a file or folder: a file-type icon, a primary
 /// name (truncated), and a secondary metadata line.
+///
+/// PAPIRUS-13: the leading icon is a caller-supplied [`Element`]. File
+/// surfaces MUST pass the central Papirus file-type icon (see
+/// [`crate::download_progress_view::file_type_icon_element`] /
+/// `directory_icon_element`), never a Lucide `Icon` — the icon answers "what
+/// type of file is this?", and status is shown separately by the caller.
 pub struct FileIdentityCell<'a, Message> {
-    icon: Icon,
+    icon: Element<'a, Message>,
     name: &'a str,
     metadata: &'a str,
     _phantom: std::marker::PhantomData<Message>,
 }
 
 impl<'a, Message: 'a> FileIdentityCell<'a, Message> {
-    /// Start a file identity cell.
-    pub fn new(icon: Icon, name: &'a str, metadata: &'a str) -> Self {
+    /// Start a file identity cell with a pre-built icon element.
+    ///
+    /// The icon must come from the central Papirus file-type component so
+    /// every surface shows the same full-colour icon for the same file.
+    pub fn new(icon: Element<'a, Message>, name: &'a str, metadata: &'a str) -> Self {
         Self {
             icon,
             name,
@@ -2005,12 +2014,7 @@ impl<'a, Message: 'a> FileIdentityCell<'a, Message> {
 
     /// Build the cell element.
     pub fn build(self, theme: &Theme) -> Element<'a, Message> {
-        let icon_el = self
-            .icon
-            .build()
-            .size(IconSize::Md)
-            .color_fn(design_tokens::text_secondary)
-            .build();
+        let icon_el = self.icon;
 
         let name_el = text(self.name)
             .font(TypeRole::Body.font())
@@ -2652,11 +2656,16 @@ pub(crate) const FILE_THUMBNAIL_EDGE: f32 = 40.0;
 /// When `handle` is present the image is drawn with `ContentFit::Cover` so
 /// the preview fills the fixed box regardless of the source aspect ratio.
 /// When the handle is absent (still loading, unsupported, or non-media) the
-/// fallback icon is centred inside the same box, keeping every row the same
-/// height.
+/// caller-supplied fallback element is centred inside the same box, keeping
+/// every row the same height.
+///
+/// PAPIRUS-13: the fallback must be the central Papirus file-type icon
+/// (see [`crate::download_progress_view::file_type_icon_element`]) — never a
+/// Lucide `Icon` — so a missing preview still answers "what type of file is
+/// this?" with the same full-colour icon every other surface uses.
 pub(crate) fn file_thumbnail(
     handle: Option<&iced::widget::image::Handle>,
-    fallback_icon: Icon,
+    fallback: Element<'static, AppMessage>,
     _theme: &Theme,
 ) -> Element<'static, AppMessage> {
     let content: Element<'static, AppMessage> = match handle {
@@ -2665,26 +2674,20 @@ pub(crate) fn file_thumbnail(
             .height(Length::Fixed(FILE_THUMBNAIL_EDGE))
             .content_fit(iced::ContentFit::Cover)
             .into(),
-        None => container(
-            fallback_icon
-                .build()
-                .size(IconSize::Md)
-                .color_fn(design_tokens::text_secondary)
-                .build(),
-        )
-        .width(Length::Fixed(FILE_THUMBNAIL_EDGE))
-        .height(Length::Fixed(FILE_THUMBNAIL_EDGE))
-        .center_x(Length::Fill)
-        .center_y(Length::Fill)
-        .style(move |t| container::Style {
-            background: Some(Background::Color(design_tokens::surface_hover(t))),
-            border: Border {
-                radius: design_tokens::RADIUS_SM.into(),
+        None => container(fallback)
+            .width(Length::Fixed(FILE_THUMBNAIL_EDGE))
+            .height(Length::Fixed(FILE_THUMBNAIL_EDGE))
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .style(move |t| container::Style {
+                background: Some(Background::Color(design_tokens::surface_hover(t))),
+                border: Border {
+                    radius: design_tokens::RADIUS_SM.into(),
+                    ..Default::default()
+                },
                 ..Default::default()
-            },
-            ..Default::default()
-        })
-        .into(),
+            })
+            .into(),
     };
 
     container(content)
@@ -2966,26 +2969,40 @@ mod tests {
     #[test]
     fn file_identity_cell_builds() {
         let theme = Theme::Light;
-        let el: Element<'static, AppMessage> =
-            FileIdentityCell::<AppMessage>::new(
-                Icon::Files,
+        // PAPIRUS-13: the identity cell's icon must come from the central
+        // Papirus component (never a Lucide Icon) so the file surface shows
+        // the same full-colour type icon as every other surface.
+        let icon: Element<'static, AppMessage> =
+            crate::download_progress_view::file_type_icon_element(
                 "report.pdf",
-                "application/pdf · 2.4 MB",
-            )
-            .build(&theme);
+                Some("application/pdf"),
+                None,
+                crate::file_type_icon::FileTypeIconSize::List,
+                &theme,
+            );
+        let el: Element<'static, AppMessage> =
+            FileIdentityCell::<AppMessage>::new(icon, "report.pdf", "application/pdf · 2.4 MB")
+                .build(&theme);
         let _ = el;
     }
 
     #[test]
     fn file_identity_cell_long_name() {
         let theme = Theme::Light;
-        let el: Element<'static, AppMessage> =
-            FileIdentityCell::<AppMessage>::new(
-                Icon::Image,
+        let icon: Element<'static, AppMessage> =
+            crate::download_progress_view::file_type_icon_element(
                 "AVeryLongFileNameThatCouldExceedTheAvailableSpaceInTheTableRow.jpg",
-                "image/jpeg · 15 MB",
-            )
-            .build(&theme);
+                Some("image/jpeg"),
+                None,
+                crate::file_type_icon::FileTypeIconSize::List,
+                &theme,
+            );
+        let el: Element<'static, AppMessage> = FileIdentityCell::<AppMessage>::new(
+            icon,
+            "AVeryLongFileNameThatCouldExceedTheAvailableSpaceInTheTableRow.jpg",
+            "image/jpeg · 15 MB",
+        )
+        .build(&theme);
         let _ = el;
     }
 
@@ -3087,14 +3104,32 @@ mod tests {
 
     #[test]
     fn file_thumbnail_without_handle_builds_uniform_box() {
-        let el: Element<'static, AppMessage> = file_thumbnail(None, Icon::Image, &Theme::Light);
+        // PAPIRUS-13: the fallback must be the central Papirus file-type
+        // icon, never a Lucide Icon.
+        let fallback: Element<'static, AppMessage> =
+            crate::download_progress_view::file_type_icon_element(
+                "photo.png",
+                Some("image/png"),
+                None,
+                crate::file_type_icon::FileTypeIconSize::List,
+                &Theme::Light,
+            );
+        let el: Element<'static, AppMessage> = file_thumbnail(None, fallback, &Theme::Light);
         let _ = el;
     }
 
     #[test]
     fn file_thumbnail_with_handle_builds_uniform_box() {
         let handle = iced::widget::image::Handle::from_bytes(vec![0xFF, 0xD8]);
-        let el = file_thumbnail(Some(&handle), Icon::Image, &Theme::Light);
+        let fallback: Element<'static, AppMessage> =
+            crate::download_progress_view::file_type_icon_element(
+                "photo.png",
+                Some("image/png"),
+                None,
+                crate::file_type_icon::FileTypeIconSize::List,
+                &Theme::Light,
+            );
+        let el = file_thumbnail(Some(&handle), fallback, &Theme::Light);
         let _ = el;
     }
 }

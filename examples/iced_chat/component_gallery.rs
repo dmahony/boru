@@ -1191,11 +1191,37 @@ fn progress_bar_gallery() -> Element<'static, AppMessage> {
 fn file_identity_gallery() -> Element<'static, AppMessage> {
     let theme = Theme::Light;
 
+    // PAPIRUS-13: file identity cells must lead with the central Papirus
+    // file-type component (same icon the chat cards and dashboard rows use),
+    // never a Lucide Icon — the icon answers "what type of file is this?",
+    // and status is conveyed separately by the caller.
+    let pdf_icon = crate::download_progress_view::file_type_icon_element(
+        "QuarterlyReport.pdf",
+        Some("application/pdf"),
+        None,
+        crate::file_type_icon::FileTypeIconSize::List,
+        &theme,
+    );
+    let image_icon = crate::download_progress_view::file_type_icon_element(
+        "vacation-photo-2024.jpg",
+        Some("image/jpeg"),
+        None,
+        crate::file_type_icon::FileTypeIconSize::List,
+        &theme,
+    );
+    let zip_icon = crate::download_progress_view::file_type_icon_element(
+        "VeryLongFileNameThatMightGetClippedByTheContainerOrTruncatedWithEllipsis.zip",
+        Some("application/zip"),
+        None,
+        crate::file_type_icon::FileTypeIconSize::List,
+        &theme,
+    );
+
     Column::new()
         .push(state_label("PDF document"))
         .push(
             FileIdentityCell::<AppMessage>::new(
-                Icon::Files,
+                pdf_icon,
                 "QuarterlyReport.pdf",
                 "application/pdf · 2.4 MB · shared 3h ago",
             )
@@ -1205,7 +1231,7 @@ fn file_identity_gallery() -> Element<'static, AppMessage> {
         .push(state_label("Image file"))
         .push(
             FileIdentityCell::<AppMessage>::new(
-                Icon::Image,
+                image_icon,
                 "vacation-photo-2024.jpg",
                 "image/jpeg · 5.1 MB · downloaded yesterday",
             )
@@ -1215,7 +1241,7 @@ fn file_identity_gallery() -> Element<'static, AppMessage> {
         .push(state_label("Long name (truncated)"))
         .push(
             FileIdentityCell::<AppMessage>::new(
-                Icon::Files,
+                zip_icon,
                 "VeryLongFileNameThatMightGetClippedByTheContainerOrTruncatedWithEllipsis.zip",
                 "application/zip · 128 MB",
             )

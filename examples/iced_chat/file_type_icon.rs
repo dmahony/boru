@@ -483,8 +483,15 @@ mod tests {
             .map(|c| count_for(c, path))
             .unwrap_or(0);
         // First request inserts the entry; the second reuses it — the path
-        // must appear exactly once in the cache.
-        assert_eq!(after, before + 1);
+        // must appear exactly once in the cache. The cache is keyed by path
+        // (HashMap insert overwrites), so the count is 0 or 1 regardless of
+        // how many requests were made; a concurrent test may already have
+        // inserted the same path before our `before` read (e.g. the
+        // all-semantic-sizes view test builds report.pdf at Card size, which
+        // resolves to this exact 32px path). Assert the invariant that is
+        // actually meaningful: the path is present exactly once after our two
+        // requests, never duplicated.
+        assert!(before <= 1, "path should never have duplicate entries");
         assert_eq!(after, 1);
     }
 

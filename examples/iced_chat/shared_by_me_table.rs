@@ -749,7 +749,17 @@ fn name_cell(
             match thumbnails.get(&row.content_hash).and_then(|h| h.as_ref()) {
                 // A real preview exists: keep it (previews preserved).
                 Some(handle) => {
-                    crate::ui_components::file_thumbnail(Some(handle), Icon::Files, theme)
+                    // PAPIRUS-13: the fallback element (only rendered when a
+                    // preview is absent) is the central Papirus file-type
+                    // icon, never a Lucide Icon.
+                    let fallback = crate::download_progress_view::file_type_icon_element(
+                        &row.display_name,
+                        row.mime_type.as_deref(),
+                        None,
+                        crate::file_type_icon::FileTypeIconSize::List,
+                        theme,
+                    );
+                    crate::ui_components::file_thumbnail(Some(handle), fallback, theme)
                 }
                 // No preview: central Papirus file-type icon, same as chat.
                 None => crate::download_progress_view::file_type_icon_element(
