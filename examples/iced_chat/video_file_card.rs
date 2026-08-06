@@ -37,8 +37,8 @@ use iced::{Alignment, Color, Length};
 use iced_video_player::{Video, VideoPlayer};
 
 use super::app::{
-    accent_green, bg_surface, border_muted, color_error, text_system, SPACE_10, SPACE_12, SPACE_2,
-    SPACE_20, SPACE_24, SPACE_4, SPACE_6, SPACE_8, TYPO_SM, TYPO_XS, TYPO_XXS,
+    accent_green, border_muted, color_error, text_system, SPACE_10, SPACE_12,
+    SPACE_2, SPACE_20, SPACE_24, SPACE_4, SPACE_6, SPACE_8, TYPO_SM, TYPO_XS, TYPO_XXS,
 };
 use super::app::{AppMessage, DownloadAttachment, DownloadState};
 use super::download_progress_view::{
@@ -149,6 +149,91 @@ fn media_frame_size(dimensions: Option<(u32, u32)>) -> (f32, f32) {
     }
 
     (frame_width, frame_height)
+}
+
+/// Bounded, ratio-exact media-frame sizing strategy (VIDCARD-08 / spec Task 8).
+///
+/// When the intrinsic dimensions are known *and* a poster thumbnail exists,
+/// the frame is **responsive**: its width is `min(available, nominal_width)`
+/// and the poster/player derive the height from the actual rendered width
+/// (see the `height(Shrink)` + `ContentFit::Contain` widgets in
+/// `media_frame`), so the exact source ratio is preserved and both
+/// dimensions shrink proportionally at narrow window sizes — never
+/// stretching, squashing or cropping, and never overflowing the chat column.
+///
+/// When dimensions are unknown (the spec's safe 16:9 default while metadata
+/// loads) or no thumbnail exists yet, the frame stays **fixed** at the
+/// nominal size so the bounded placeholder never collapses or inflates.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct MediaFrameSizing {
+    nominal_width: f32,
+    nominal_height: f32,
+    responsive: bool,
+}
+
+impl MediaFrameSizing {
+    fn new(dimensions: Option<(u32, u32)>, has_thumbnail: bool) -> Self {
+        let (nominal_width, nominal_height) = media_frame_size(dimensions);
+        Self {
+            nominal_width,
+            nominal_height,
+            responsive: dimensions.is_some() && has_thumbnail,
+        }
+    }
+
+    /// Horizontal strategy: fill the available card width (capped by
+    /// [`Self::max_width`]) when responsive, otherwise the fixed nominal box.
+    fn width(&self) -> Length {
+        if self.responsive {
+            Length::Fill
+        } else {
+            Length::Fixed(self.nominal_width)
+        }
+    }
+
+    /// Vertical strategy: derive the height from the actual rendered width
+    /// (ratio-preserving) when responsive, otherwise the fixed nominal box.
+    fn height(&self) -> Length {
+        if self.responsive {
+            Length::Shrink
+        } else {
+            Length::Fixed(self.nominal_height)
+        }
+    }
+
+    /// `min(100%, nominal_width)` cap applied when responsive so a portrait
+    /// frame never spans the full card width or the full chat column.
+    fn max_width(&self) -> Option<f32> {
+        self.responsive.then_some(self.nominal_width)
+    }
+}
+
+/// Neutral dark media background (VIDCARD-08 / spec Tasks 8 & 11).
+///
+/// Video previews are framed on a fixed near-black neutral in BOTH themes so
+/// letterboxed portrait/square content reads as a deliberate, polished media
+/// surface rather than empty card space — the classic video-player
+/// convention, and the same family as the play overlay / controls surfaces.
+const MEDIA_FRAME_BACKGROUND: Color = Color::from_rgb(0.055, 0.06, 0.07);
+
+/// Light neutral for on-media placeholder/error text — readable on
+/// [`MEDIA_FRAME_BACKGROUND`] in both themes (the theme-aware `muted` token
+/// is near-black in the light theme and would vanish on the dark frame).
+const ON_MEDIA_TEXT: Color = Color::from_rgb(0.78, 0.80, 0.82);
+
+/// Shared media-frame surface: dark neutral background, thin muted border,
+/// `SPACE_10` (10 px) corner radius — used identically by the poster frame,
+/// the placeholder frame and the active player frame (Task 10 geometry).
+fn media_frame_style(theme: &iced::Theme) -> widget::container::Style {
+    widget::container::Style {
+        background: Some(iced::Background::Color(MEDIA_FRAME_BACKGROUND)),
+        border: iced::Border {
+            color: border_muted(theme),
+            width: 1.0,
+            radius: SPACE_10.into(),
+        },
+        ..Default::default()
+    }
 }
 
 #[cfg(feature = "video-playback")]
@@ -427,7 +512,7 @@ impl<'a> BoruVideoFileCard<'a> {
         let error_color = color_error(&theme);
 
         let header = self.header(attachment, &theme);
-        let media = self.media_frame(attachment, muted, error_color);
+        let media = self.media_frame(attachment, error_color);
         let status = self.status_metadata(attachment, &theme, tone, muted);
         let actions = self.actions(attachment);
         let error_section = self.error_section(attachment, tone, muted, error_color);
@@ -624,25 +709,37 @@ impl<'a> BoruVideoFileCard<'a> {
     fn media_frame(
         &self,
         attachment: &DownloadAttachment,
-        muted: Color,
         error_color: Color,
     ) -> iced::Element<'a, AppMessage> {
         let presentation = video_presentation_state(attachment);
-        let (preview_width, preview_height) = media_frame_size(attachment.poster_dimensions);
+        let sizing = MediaFrameSizing::new(
+            attachment.poster_dimensions,
+            attachment.thumbnail_handle.is_some(),
+        );
         let poster: iced::Element<'static, AppMessage> =
             if let Some(ref handle) = attachment.thumbnail_handle {
                 iced::widget::image(handle.clone())
                     // Contain: preserve the poster's exact intrinsic ratio,
-                    // centred inside the frame — never stretch or crop.
+                    // centred inside the frame — never stretch or crop. When
+                    // the frame is responsive the image derives its height
+                    // from the actual rendered width (Fill + Shrink), so the
+                    // whole preview shrinks proportionally at narrow window
+                    // sizes instead of overflowing (VIDCARD-08 Task 8).
                     .content_fit(iced::ContentFit::Contain)
                     .width(Length::Fill)
-                    .height(Length::Fill)
+                    .height(if sizing.responsive {
+                        Length::Shrink
+                    } else {
+                        Length::Fill
+                    })
                     .into()
             } else {
                 // File-type placeholder while the poster is pending or when
                 // extraction is not possible. A video with a thumbnail hash
                 // is still being fetched; otherwise the poster will only
-                // exist after the download completes.
+                // exist after the download completes. On-media text uses the
+                // light `ON_MEDIA_TEXT` neutral because the media frame is a
+                // fixed dark surface in both themes (VIDCARD-08).
                 let subtitle = pending_preview_label(attachment);
                 container(
                     Column::new()
@@ -650,11 +747,11 @@ impl<'a> BoruVideoFileCard<'a> {
                             Icon::Play
                                 .build()
                                 .size(IconSize::Lg)
-                                .color_fn(crate::design_tokens::text_muted)
+                                .color_fn(|_t| ON_MEDIA_TEXT)
                                 .build(),
                         )
-                        .push(text("VIDEO").size(TYPO_SM).color(muted))
-                        .push(text(subtitle).size(TYPO_XS).color(muted))
+                        .push(text("VIDEO").size(TYPO_SM).color(ON_MEDIA_TEXT))
+                        .push(text(subtitle).size(TYPO_XS).color(ON_MEDIA_TEXT))
                         .spacing(SPACE_4)
                         .align_x(Alignment::Center),
                 )
@@ -694,11 +791,11 @@ impl<'a> BoruVideoFileCard<'a> {
             container(
                 Column::new()
                     .push(text(error.title()).size(TYPO_SM).color(error_color))
-                    .push(text(error.message()).size(TYPO_XS).color(muted))
+                    .push(text(error.message()).size(TYPO_XS).color(ON_MEDIA_TEXT))
                     .push(
                         text("The original attachment is still available below.")
                             .size(TYPO_XXS)
-                            .color(muted),
+                            .color(ON_MEDIA_TEXT),
                     )
                     .spacing(SPACE_4)
                     .align_x(Alignment::Center),
@@ -708,31 +805,28 @@ impl<'a> BoruVideoFileCard<'a> {
             .center_x(Length::Fill)
             .center_y(Length::Fill)
         });
-        let preview: iced::Element<'a, AppMessage> = container(widget::stack![
-            poster,
-            error_preview.unwrap_or_else(|| {
-                if presentation == VideoPresentationState::Ready {
-                    container(play)
-                        .center_x(Length::Fill)
-                        .center_y(Length::Fill)
-                } else {
-                    container(iced::widget::Space::new().width(0.0).height(0.0))
-                }
-            })
-        ])
-        .width(Length::Fixed(preview_width))
-        .height(Length::Fixed(preview_height))
-        .clip(true)
-        .style(|t| widget::container::Style {
-            background: Some(iced::Background::Color(bg_surface(t))),
-            border: iced::Border {
-                color: border_muted(t),
-                width: 1.0,
-                radius: SPACE_10.into(),
-            },
-            ..Default::default()
-        })
-        .into();
+        let preview: iced::Element<'a, AppMessage> = {
+            let mut frame = container(widget::stack![
+                poster,
+                error_preview.unwrap_or_else(|| {
+                    if presentation == VideoPresentationState::Ready {
+                        container(play)
+                            .center_x(Length::Fill)
+                            .center_y(Length::Fill)
+                    } else {
+                        container(iced::widget::Space::new().width(0.0).height(0.0))
+                    }
+                })
+            ])
+            .width(sizing.width())
+            .height(sizing.height())
+            .clip(true)
+            .style(media_frame_style);
+            if let Some(max_width) = sizing.max_width() {
+                frame = frame.max_width(max_width);
+            }
+            frame.into()
+        };
 
         #[cfg(feature = "video-playback")]
         let preview = if attachment.playback_error.is_some() {
@@ -786,22 +880,46 @@ impl<'a> BoruVideoFileCard<'a> {
                         .spacing(SPACE_6)
                         .align_y(Alignment::Center),
                 );
-            // Task 10: the playing element occupies the exact same fixed
-            // media box as the poster — no layout jump when Play is pressed.
-            // The video is contained (never stretched or cropped) and the
-            // controls overlay the frame's bottom edge on the existing
-            // translucent dark surface, so poster and player share width,
-            // height, aspect ratio, border radius and position.
-            let video_element = container(
+            // Task 10: the playing element occupies the exact same media box
+            // as the poster — no layout jump when Play is pressed. The video
+            // is contained (never stretched or cropped) and the controls
+            // overlay the frame's bottom edge on the existing translucent
+            // dark surface, so poster and player share width, height, aspect
+            // ratio, border radius and position. When the frame is
+            // responsive the player derives its height from the actual
+            // rendered width just like the poster; the zero-size guard keeps
+            // the fixed nominal frame until the video reports real dims.
+            let (video_w, video_h) = video.size();
+            let player_sizing = if video_w > 0 && video_h > 0 {
+                sizing
+            } else {
+                MediaFrameSizing {
+                    nominal_width: sizing.nominal_width,
+                    nominal_height: sizing.nominal_height,
+                    responsive: false,
+                }
+            };
+            let video_element: iced::Element<'a, AppMessage> = if player_sizing.responsive {
                 VideoPlayer::new(&video)
                     .content_fit(iced::ContentFit::Contain)
                     .on_end_of_stream(AppMessage::CloseInlineVideo)
-                    .on_error(|_error| AppMessage::CloseInlineVideo),
-            )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x(Length::Fill)
-            .center_y(Length::Fill);
+                    .on_error(|_error| AppMessage::CloseInlineVideo)
+                    .width(Length::Fill)
+                    .height(Length::Shrink)
+                    .into()
+            } else {
+                container(
+                    VideoPlayer::new(&video)
+                        .content_fit(iced::ContentFit::Contain)
+                        .on_end_of_stream(AppMessage::CloseInlineVideo)
+                        .on_error(|_error| AppMessage::CloseInlineVideo),
+                )
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .into()
+            };
 
             let controls_bar = container(controls)
                 .padding([SPACE_6, SPACE_8])
@@ -812,26 +930,21 @@ impl<'a> BoruVideoFileCard<'a> {
                     ..Default::default()
                 });
 
-            container(widget::stack![
+            let mut player_frame = container(widget::stack![
                 video_element,
                 container(controls_bar)
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .align_y(Alignment::End),
             ])
-            .width(Length::Fixed(preview_width))
-            .height(Length::Fixed(preview_height))
+            .width(player_sizing.width())
+            .height(player_sizing.height())
             .clip(true)
-            .style(|t| widget::container::Style {
-                background: Some(iced::Background::Color(bg_surface(t))),
-                border: iced::Border {
-                    color: border_muted(t),
-                    width: 1.0,
-                    radius: SPACE_10.into(),
-                },
-                ..Default::default()
-            })
-            .into()
+            .style(media_frame_style);
+            if let Some(max_width) = player_sizing.max_width() {
+                player_frame = player_frame.max_width(max_width);
+            }
+            player_frame.into()
         } else {
             preview
         };
@@ -1103,8 +1216,9 @@ mod tests {
     use super::{
         aspect_ratio_class, file_format_label, format_relative_time, header_badge,
         media_frame_size, pending_preview_label, truncate_filename, video_presentation_state,
-        MediaAspectClass, VideoPresentationState, HEADER_FILENAME_MAX_CHARS,
+        MediaAspectClass, MediaFrameSizing, VideoPresentationState, HEADER_FILENAME_MAX_CHARS,
     };
+    use iced::Length;
     use crate::app::{DownloadAttachment, DownloadFailure, DownloadState, TransferKind};
     use std::path::PathBuf;
 
@@ -1251,19 +1365,28 @@ mod tests {
             "square media frame must be centred via a Fill wrapper + center_x(Fill)"
         );
 
-        // The media frame itself is Fixed-size (width-capped), never Fill.
+        // The media frame itself is width-capped (never plain Fill): the
+        // shared responsive sizing strategy (VIDCARD-08) derives the frame
+        // width from `MediaFrameSizing` — `Fill` bounded by `max_width` =
+        // the nominal width — so a square preview stays centred at its
+        // capped size and never stretches to the full card width, while
+        // still shrinking proportionally at very narrow windows (Task 8).
         let media_frame = prod
-            .split("let preview: iced::Element<'a, AppMessage> = container(widget::stack![")
+            .split("let preview: iced::Element<'a, AppMessage> = {")
             .nth(1)
-            .and_then(|s| s.split(".into();").next())
+            .and_then(|s| s.split("fn status_metadata").next())
             .expect("media frame container block must exist");
         assert!(
-            media_frame.contains(".width(Length::Fixed(preview_width))"),
-            "media frame must use a Fixed (width-capped) preview width"
+            media_frame.contains("sizing.width()"),
+            "media frame width must come from the bounded sizing strategy"
         );
         assert!(
-            !media_frame.contains(".width(Length::Fill)"),
-            "media frame itself must not stretch to the full card width"
+            media_frame.contains("sizing.max_width()"),
+            "media frame must be width-capped via max_width (never stretch to full card width)"
+        );
+        assert!(
+            media_frame.contains(".height(sizing.height())"),
+            "media frame height must come from the bounded sizing strategy"
         );
 
         // Metadata and actions stay as full-width siblings of the media
@@ -1281,6 +1404,128 @@ mod tests {
         assert_eq!(height, 520.0);
         assert!((width - 292.5).abs() < 0.01);
         assert!((width / height - 720.0 / 1280.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn portrait_frame_satisfies_task8_bounds() {
+        // VIDCARD-08 Task 8: portrait frames must be narrow (preferred
+        // 280-380px, never wider than min(100%, 420px)), height-capped
+        // (~520-600px), and always preserve the exact source ratio.
+        for (width, height) in [(720u32, 1280u32), (1080, 1920), (576, 1024), (480, 640)] {
+            let ratio = width as f32 / height as f32;
+            assert!(ratio < 0.85, "fixture must be portrait");
+            let (frame_w, frame_h) = media_frame_size(Some((width, height)));
+            assert!(
+                frame_w <= 420.0,
+                "portrait width must never exceed min(100%, 420px), got {frame_w}"
+            );
+            assert!(
+                frame_h <= 600.0,
+                "portrait height must stay within the ~520-600px cap, got {frame_h}"
+            );
+            assert!(
+                (frame_w / frame_h - ratio).abs() < 1e-4,
+                "frame must preserve the exact source ratio"
+            );
+        }
+        // 9:16 lands in the preferred 280-380px band with the height cap
+        // applied, and the responsive max width is exactly the nominal width.
+        let (frame_w, frame_h) = media_frame_size(Some((720, 1280)));
+        assert!(
+            (280.0..=380.0).contains(&frame_w),
+            "9:16 width {frame_w} outside the preferred 280-380px band"
+        );
+        assert!(
+            (520.0..=600.0).contains(&frame_h),
+            "9:16 height {frame_h} outside the ~520-600px height cap band"
+        );
+    }
+
+    #[test]
+    fn media_frame_sizing_is_responsive_with_known_dims_and_thumbnail() {
+        // Known intrinsic dimensions + a poster thumbnail → the frame fills
+        // the available width (capped at the nominal width) and derives its
+        // height from the actual rendered width, so it shrinks
+        // proportionally at narrow window sizes instead of overflowing.
+        let sizing = MediaFrameSizing::new(Some((720, 1280)), true);
+        assert!(sizing.responsive);
+        assert_eq!(sizing.width(), Length::Fill);
+        assert_eq!(sizing.height(), Length::Shrink);
+        assert_eq!(sizing.max_width(), Some(292.5));
+    }
+
+    #[test]
+    fn media_frame_sizing_stays_fixed_without_thumbnail_or_dims() {
+        // Unknown dimensions (spec's safe 16:9 default while metadata loads)
+        // → fixed bounded frame, never a frame with no size driver. The
+        // fallback tracks the landscape width bound (VIDCARD-06: 720×405).
+        let unknown = MediaFrameSizing::new(None, true);
+        assert!(!unknown.responsive);
+        assert_eq!(unknown.max_width(), None);
+        assert_eq!(unknown.width(), Length::Fixed(720.0));
+        assert_eq!(unknown.height(), Length::Fixed(405.0));
+
+        // Known dimensions but no thumbnail yet (poster still generating) →
+        // fixed nominal frame so the placeholder cannot collapse or inflate.
+        let no_thumb = MediaFrameSizing::new(Some((720, 1280)), false);
+        assert!(!no_thumb.responsive);
+        assert_eq!(no_thumb.width(), Length::Fixed(292.5));
+        assert_eq!(no_thumb.height(), Length::Fixed(520.0));
+    }
+
+    #[test]
+    fn media_frame_sizing_nominal_matches_media_frame_size() {
+        let sizing = MediaFrameSizing::new(Some((3840, 2160)), true);
+        let (width, height) = media_frame_size(Some((3840, 2160)));
+        assert_eq!(sizing.nominal_width, width);
+        assert_eq!(sizing.nominal_height, height);
+    }
+
+    #[test]
+    fn media_frame_uses_neutral_dark_background_and_responsive_shrink() {
+        // VIDCARD-08 Task 8: portrait previews sit on a fixed neutral dark
+        // media background (letterboxing reads as deliberate) and the frame
+        // caps its width at the nominal size while the poster derives its
+        // height from the actual rendered width — no full-card stretch, no
+        // top/bottom crop, no horizontal overflow at narrow window sizes.
+        let src = include_str!("video_file_card.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let frame = prod
+            .split("fn media_frame(")
+            .nth(1)
+            .and_then(|s| s.split("fn status_metadata").next())
+            .expect("media_frame body must exist");
+        assert!(
+            frame.contains("media_frame_style"),
+            "media frame must use the shared media-frame style with the neutral-dark background"
+        );
+        // The shared media-frame style itself must paint the fixed dark
+        // neutral (not the theme-aware card surface color).
+        let style_fn = prod
+            .split("fn media_frame_style(")
+            .nth(1)
+            .and_then(|s| s.split("#[cfg(feature = \"video-playback\")]").next())
+            .expect("media_frame_style body must exist");
+        assert!(
+            style_fn.contains("MEDIA_FRAME_BACKGROUND"),
+            "media_frame_style must use the fixed neutral-dark background"
+        );
+        assert!(
+            !frame.contains("bg_surface("),
+            "media frame must not reuse the card surface color (light in light theme)"
+        );
+        assert!(
+            frame.contains("sizing.max_width()"),
+            "responsive frame must cap width via max_width (min(100%, nominal))"
+        );
+        assert!(
+            frame.contains("ContentFit::Contain"),
+            "poster/player must render contain-style (never stretch or crop)"
+        );
+        assert!(
+            frame.contains("Length::Shrink"),
+            "poster/player must derive height from the actual rendered width when responsive"
+        );
     }
 
     #[test]
