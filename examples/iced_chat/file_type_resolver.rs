@@ -626,6 +626,155 @@ const MIME_ICONS: &[(&str, &str, FileCategory)] = &[
         FileCategory::Cad,
     ),
     ("model/stl", "model-stl", FileCategory::ThreeDimensional),
+    // ── PAPIRUS-08: Task 9 MIME-class coverage ─────────────────────
+    // Every icon below was verified against the pinned manifest
+    // (assets/third_party/papirus/manifest.json).  MIME types whose exact
+    // Papirus icon is absent from the bundle map to the closest existing
+    // icon per the fallback chain (e.g. image/webp → generic `image`,
+    // video/quicktime → generic `video`).
+    //
+    // Spreadsheets: TSV
+    (
+        "text/tab-separated-values",
+        "text-tab-separated-values",
+        FileCategory::Spreadsheet,
+    ),
+    // Images: WEBP / HEIC / HEIF / RAW / PSD / TGA
+    ("image/webp", "image", FileCategory::Image),
+    ("image/heic", "image", FileCategory::Image),
+    ("image/heif", "image", FileCategory::Image),
+    (
+        "image/x-adobe-dng",
+        "image-x-adobe-dng",
+        FileCategory::Image,
+    ),
+    ("image/x-ms-bmp", "image-bmp", FileCategory::Image),
+    (
+        "image/vnd.adobe.photoshop",
+        "image-vnd.adobe.photoshop",
+        FileCategory::Image,
+    ),
+    ("image/x-tga", "image-x-tga", FileCategory::Image),
+    // Video: MOV / MPEG / M4V / OGV / MPEG-TS
+    ("video/quicktime", "video", FileCategory::Video),
+    ("video/mpeg", "video", FileCategory::Video),
+    ("video/x-m4v", "video-mp4", FileCategory::Video),
+    ("video/ogg", "video-x-theora+ogg", FileCategory::Video),
+    (
+        "video/x-theora+ogg",
+        "video-x-theora+ogg",
+        FileCategory::Video,
+    ),
+    ("video/mp2t", "video-mp2t", FileCategory::Video),
+    // Audio: WAV / M4A / AAC / OPUS / WMA
+    ("audio/wav", "audio-x-wav", FileCategory::Audio),
+    ("audio/mp4", "audio-x-m4a", FileCategory::Audio),
+    ("audio/aac", "audio-x-generic", FileCategory::Audio),
+    ("audio/opus", "audio-x-generic", FileCategory::Audio),
+    ("audio/x-ms-wma", "audio-x-ms-wma", FileCategory::Audio),
+    // Source code: Rust / JS / TS / Python / Java / Kotlin / C / C++ /
+    // C# / Go / shell / PowerShell / SQL / XML
+    ("text/x-rust", "text-x-rust", FileCategory::SourceCode),
+    (
+        "application/javascript",
+        "application-javascript",
+        FileCategory::SourceCode,
+    ),
+    (
+        "text/javascript",
+        "text-javascript",
+        FileCategory::SourceCode,
+    ),
+    (
+        "text/typescript",
+        "text-javascript",
+        FileCategory::SourceCode,
+    ),
+    ("text/x-python", "text-x-python", FileCategory::SourceCode),
+    ("text/x-java", "text-x-java", FileCategory::SourceCode),
+    ("text/x-kotlin", "text-x-kotlin", FileCategory::SourceCode),
+    ("text/x-c", "text-x-csrc", FileCategory::SourceCode),
+    ("text/x-c++", "text-x-c++src", FileCategory::SourceCode),
+    ("text/x-csharp", "text-x-csharp", FileCategory::SourceCode),
+    ("text/x-go", "text-x-go", FileCategory::SourceCode),
+    (
+        "text/x-shellscript",
+        "text-x-shellscript",
+        FileCategory::SourceCode,
+    ),
+    (
+        "text/x-powershell",
+        "text-x-script",
+        FileCategory::SourceCode,
+    ),
+    ("text/x-sql", "text-x-sql", FileCategory::SourceCode),
+    ("text/xml", "text-xml", FileCategory::SourceCode),
+    // Executables / installers / disk images / archives / fonts /
+    // certificates / keys / ebooks / 3D / unknown binaries
+    (
+        "application/x-executable",
+        "application-x-executable",
+        FileCategory::Executable,
+    ),
+    (
+        "application/x-sharedlib",
+        "application-x-executable",
+        FileCategory::Executable,
+    ),
+    (
+        "application/x-iso9660-appimage",
+        "application-x-iso9660-appimage",
+        FileCategory::Installer,
+    ),
+    (
+        "application/x-iso9660-image",
+        "application-x-cd-image",
+        FileCategory::DiskImage,
+    ),
+    (
+        "application/vnd.efi.iso",
+        "application-vnd.efi.iso",
+        FileCategory::DiskImage,
+    ),
+    (
+        "application/x-archive",
+        "application-x-archive",
+        FileCategory::Archive,
+    ),
+    ("font/ttf", "application-x-font-ttf", FileCategory::Font),
+    ("font/otf", "application-x-font-otf", FileCategory::Font),
+    (
+        "application/x-x509-ca-cert",
+        "application-pkix-cert",
+        FileCategory::Certificate,
+    ),
+    (
+        "application/pkix-cert",
+        "application-pkix-cert",
+        FileCategory::Certificate,
+    ),
+    (
+        "application/x-pem-file",
+        "application-x-pem-key",
+        FileCategory::Key,
+    ),
+    (
+        "application/x-mobipocket-ebook",
+        "application-epub+zip",
+        FileCategory::Ebook,
+    ),
+    ("model/obj", "model-stl", FileCategory::ThreeDimensional),
+    ("model/gltf", "model-stl", FileCategory::ThreeDimensional),
+    (
+        "application/octet-stream",
+        "application-octet-stream",
+        FileCategory::Unknown,
+    ),
+    (
+        "application/x-zerosize",
+        "application-x-zerosize",
+        FileCategory::Unknown,
+    ),
 ];
 
 /// Broad-category fallback icon per category (priority 7).
@@ -816,9 +965,25 @@ pub fn resolve_file_icon(
 
 // ── Lookups ──────────────────────────────────────────────────────────
 
-/// Exact MIME → icon lookup (seed mapping).
+/// Normalise a MIME string for lookup: strip any `;`-delimited parameters
+/// (e.g. `text/plain; charset=utf-8` → `text/plain`), trim surrounding
+/// whitespace, and lowercase.
+///
+/// This is the MIME-side equivalent of the PAPIRUS-06 extension
+/// normalisation: a peer-advertised type may carry parameters or stray
+/// case/space, and lookup must not fail on those (spec Task 16: normalise
+/// MIME input before resolving).
+fn normalise_mime(mime: &str) -> String {
+    mime.split(';')
+        .next()
+        .unwrap_or(mime)
+        .trim()
+        .to_ascii_lowercase()
+}
+
+/// Exact MIME → icon lookup (PAPIRUS-08 full mapping).
 fn mime_lookup(mime: &str) -> Option<(&'static str, FileCategory)> {
-    let mime = mime.trim().to_ascii_lowercase();
+    let mime = normalise_mime(mime);
     MIME_ICONS
         .iter()
         .find(|(m, _, _)| *m == mime)
@@ -828,7 +993,7 @@ fn mime_lookup(mime: &str) -> Option<(&'static str, FileCategory)> {
 /// Derive a broad category from a MIME top-level type even when no exact
 /// icon is mapped (`video/*` → `Video`, `image/*` → `Image`, ...).
 fn mime_category_hint(mime: &str) -> Option<FileCategory> {
-    let mime = mime.trim().to_ascii_lowercase();
+    let mime = normalise_mime(mime);
     // Exact mapping wins if present.
     if let Some((_, category)) = mime_lookup(&mime) {
         return Some(category);
@@ -1476,5 +1641,133 @@ mod tests {
             icon.source,
             ResolutionSource::UnknownFallback | ResolutionSource::CategoryFallback
         ));
+    }
+
+    // ── PAPIRUS-08: MIME → Papirus icon mapping ────────────────────
+
+    #[test]
+    fn known_mime_resolves_exact_icon() {
+        let cases: &[(&str, &str, FileCategory)] = &[
+            ("application/pdf", "application-pdf", FileCategory::Pdf),
+            ("video/mp4", "video-mp4", FileCategory::Video),
+            ("image/png", "image-png", FileCategory::Image),
+            ("audio/mpeg", "audio-mpeg", FileCategory::Audio),
+            ("text/plain", "text-plain", FileCategory::Text),
+            (
+                "text/tab-separated-values",
+                "text-tab-separated-values",
+                FileCategory::Spreadsheet,
+            ),
+            ("text/x-rust", "text-x-rust", FileCategory::SourceCode),
+            (
+                "application/octet-stream",
+                "application-octet-stream",
+                FileCategory::Unknown,
+            ),
+        ];
+        for (mime, icon_id, category) in cases {
+            let icon = resolve_file_icon("download.bin", Some(mime), None, false);
+            assert_eq!(&icon.icon_id, icon_id, "for MIME {mime}");
+            assert_eq!(icon.file_category, *category, "for MIME {mime}");
+            assert_eq!(
+                icon.source,
+                ResolutionSource::AdvertisedMime,
+                "for MIME {mime}"
+            );
+            assert_eq!(icon.confidence, IconConfidence::Medium, "for MIME {mime}");
+            assert!(
+                PapirusCatalog::global().has_icon(&icon.icon_id),
+                "icon {} must exist for MIME {mime}",
+                icon.icon_id
+            );
+        }
+    }
+
+    #[test]
+    fn mime_without_exact_icon_falls_back_to_existing_generic() {
+        // image/webp has no image-webp.svg in the pinned bundle; the exact
+        // MIME icon is absent so the resolver maps to the generic `image`
+        // icon that does exist (spec Task 8 fallback chain).
+        let icon = resolve_file_icon("photo.webp", Some("image/webp"), None, false);
+        assert_eq!(icon.icon_id, "image");
+        assert_eq!(icon.file_category, FileCategory::Image);
+        assert!(PapirusCatalog::global().has_icon(&icon.icon_id));
+
+        // video/quicktime has no exact icon; fall back to generic `video`.
+        let icon = resolve_file_icon("movie.mov", Some("video/quicktime"), None, false);
+        assert_eq!(icon.icon_id, "video");
+        assert_eq!(icon.file_category, FileCategory::Video);
+        assert!(PapirusCatalog::global().has_icon(&icon.icon_id));
+
+        // audio/aac has no exact icon; fall back to generic audio.
+        let icon = resolve_file_icon("track.aac", Some("audio/aac"), None, false);
+        assert_eq!(icon.icon_id, "audio-x-generic");
+        assert_eq!(icon.file_category, FileCategory::Audio);
+        assert!(PapirusCatalog::global().has_icon(&icon.icon_id));
+    }
+
+    #[test]
+    fn mime_with_fallback_to_related_extension_icon() {
+        // video/x-m4v has no dedicated Papirus icon; the mapping prefers the
+        // related video-mp4 icon (M4V is an MP4-family container).
+        let icon = resolve_file_icon("clip.m4v", Some("video/x-m4v"), None, false);
+        assert_eq!(icon.icon_id, "video-mp4");
+        assert_eq!(icon.file_category, FileCategory::Video);
+
+        // audio/mp4 (M4A container) uses the existing audio-x-m4a icon.
+        let icon = resolve_file_icon("song.m4a", Some("audio/mp4"), None, false);
+        assert_eq!(icon.icon_id, "audio-x-m4a");
+        assert_eq!(icon.file_category, FileCategory::Audio);
+    }
+
+    #[test]
+    fn unknown_mime_falls_back_to_unknown_generic() {
+        let icon = resolve_file_icon("blob", Some("application/x-totally-unknown"), None, false);
+        assert_eq!(icon.file_category, FileCategory::Unknown);
+        assert!(matches!(
+            icon.source,
+            ResolutionSource::UnknownFallback | ResolutionSource::CategoryFallback
+        ));
+        assert!(PapirusCatalog::global().has_icon(&icon.icon_id));
+
+        // A MIME with no slash at all is not a valid MIME and must fall
+        // through to the unknown generic without panicking.
+        let icon = resolve_file_icon("blob", Some("not-a-mime"), None, false);
+        assert_eq!(icon.file_category, FileCategory::Unknown);
+        assert!(PapirusCatalog::global().has_icon(&icon.icon_id));
+    }
+
+    #[test]
+    fn malformed_mime_strings_fall_through_safely() {
+        let malformed: &[&str] = &[
+            "",
+            "   ",
+            "/",
+            "video/",
+            "application/",
+            "text/plain; charset=utf-8", // parameter suffix (valid but must not break lookup)
+            "APPLICATION/PDF",           // uppercase
+            " application/pdf ",         // surrounding whitespace
+        ];
+        for mime in malformed {
+            // Must never panic and must always resolve to an existing asset.
+            let icon = resolve_file_icon("blob.bin", Some(mime), None, false);
+            assert!(
+                PapirusCatalog::global().has_icon(&icon.icon_id),
+                "malformed MIME {mime:?} resolved to missing icon {}",
+                icon.icon_id
+            );
+        }
+
+        // MIME parameters are stripped before lookup (Task 16: normalise
+        // MIME input): text/plain; charset=utf-8 matches text-plain.
+        let icon = resolve_file_icon("readme", Some("text/plain; charset=utf-8"), None, false);
+        assert_eq!(icon.icon_id, "text-plain");
+
+        // Uppercase and whitespace MIME strings match case-insensitively.
+        let icon = resolve_file_icon("doc", Some("APPLICATION/PDF"), None, false);
+        assert_eq!(icon.icon_id, "application-pdf");
+        let icon = resolve_file_icon("doc", Some(" application/pdf "), None, false);
+        assert_eq!(icon.icon_id, "application-pdf");
     }
 }
