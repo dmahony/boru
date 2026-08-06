@@ -1195,21 +1195,24 @@ fn file_identity_gallery() -> Element<'static, AppMessage> {
     // file-type component (same icon the chat cards and dashboard rows use),
     // never a Lucide Icon — the icon answers "what type of file is this?",
     // and status is conveyed separately by the caller.
-    let pdf_icon = crate::download_progress_view::file_type_icon_element(
+    // PAPIRUS-15: the gallery cells already print the MIME type in the
+    // metadata line, so the icons are decorative (hidden from assistive
+    // technology; no redundant type tooltip).
+    let pdf_icon = crate::download_progress_view::decorative_file_type_icon_element(
         "QuarterlyReport.pdf",
         Some("application/pdf"),
         None,
         crate::file_type_icon::FileTypeIconSize::List,
         &theme,
     );
-    let image_icon = crate::download_progress_view::file_type_icon_element(
+    let image_icon = crate::download_progress_view::decorative_file_type_icon_element(
         "vacation-photo-2024.jpg",
         Some("image/jpeg"),
         None,
         crate::file_type_icon::FileTypeIconSize::List,
         &theme,
     );
-    let zip_icon = crate::download_progress_view::file_type_icon_element(
+    let zip_icon = crate::download_progress_view::decorative_file_type_icon_element(
         "VeryLongFileNameThatMightGetClippedByTheContainerOrTruncatedWithEllipsis.zip",
         Some("application/zip"),
         None,

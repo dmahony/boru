@@ -113,6 +113,12 @@ struct FileTypeIconKey {
     /// a directory named "report.pdf" must not collide with a file of the
     /// same name, so the flag is part of the key.
     is_directory: bool,
+    /// Purely decorative icon (PAPIRUS-15): hidden from assistive
+    /// technology.  Part of the key so an informative and a decorative
+    /// rendering of the same file never share a cached configuration.
+    decorative: bool,
+    /// Whether the icon opts into a hover tooltip with the friendly type.
+    show_tooltip: bool,
 }
 
 impl std::hash::Hash for FileTypeIconKey {
@@ -124,6 +130,8 @@ impl std::hash::Hash for FileTypeIconKey {
         // injective (16/24/32/48/64 map one-to-one), so hash that instead.
         self.size.papirus_dir().hash(state);
         self.is_directory.hash(state);
+        self.decorative.hash(state);
+        self.show_tooltip.hash(state);
     }
 }
 
@@ -151,6 +159,13 @@ static FILE_TYPE_ICON_CACHE: OnceLock<
 /// File displays call this function.  Folder displays call
 /// [`directory_icon_element`] — the explicit-directory counterpart — so a
 /// folder can never be mistaken for a file of the same name (PAPIRUS-12).
+///
+/// The returned icon is **informative** (PAPIRUS-15): it carries the
+/// friendly accessible description derived from the resolved type.  Use
+/// [`decorative_file_type_icon_element`] when the icon is purely
+/// decorative next to a filename/type label already in the row, and
+/// [`file_type_icon_element_with_tooltip`] to also surface the friendly
+/// type in a hover tooltip.
 pub(crate) fn file_type_icon_element(
     filename: &str,
     mime_type: Option<&str>,
@@ -158,7 +173,69 @@ pub(crate) fn file_type_icon_element(
     size: FileTypeIconSize,
     theme: &iced::Theme,
 ) -> iced::Element<'static, AppMessage> {
-    file_type_icon_element_impl(filename, mime_type, detected_type, false, size, theme)
+    file_type_icon_element_impl(
+        filename,
+        mime_type,
+        detected_type,
+        false,
+        size,
+        theme,
+        false,
+        false,
+    )
+}
+
+/// Build a Papirus file-type icon element for a chat card, marked
+/// **decorative** (PAPIRUS-15).
+///
+/// Use when the icon sits next to text that already carries the primary
+/// content label (the filename) and the type is also stated (e.g. a
+/// dashboard row whose metadata line prints the MIME/type label).  A
+/// decorative icon is hidden from assistive technology: it contributes no
+/// accessible name and never renders a type tooltip.
+pub(crate) fn decorative_file_type_icon_element(
+    filename: &str,
+    mime_type: Option<&str>,
+    detected_type: Option<&str>,
+    size: FileTypeIconSize,
+    theme: &iced::Theme,
+) -> iced::Element<'static, AppMessage> {
+    file_type_icon_element_impl(
+        filename,
+        mime_type,
+        detected_type,
+        false,
+        size,
+        theme,
+        true,
+        false,
+    )
+}
+
+/// Build a Papirus file-type icon element for a chat card, **informative**
+/// and with a hover tooltip showing the friendly type (PAPIRUS-15 point 7).
+///
+/// Use for icons that are the primary type signal in a card/header (the
+/// filename stays the primary content label; the tooltip is supporting
+/// information, never colour-alone).  Decorative callers must use
+/// [`decorative_file_type_icon_element`] instead.
+pub(crate) fn file_type_icon_element_with_tooltip(
+    filename: &str,
+    mime_type: Option<&str>,
+    detected_type: Option<&str>,
+    size: FileTypeIconSize,
+    theme: &iced::Theme,
+) -> iced::Element<'static, AppMessage> {
+    file_type_icon_element_impl(
+        filename,
+        mime_type,
+        detected_type,
+        false,
+        size,
+        theme,
+        false,
+        true,
+    )
 }
 
 /// Build a Papirus **folder** icon element (PAPIRUS-12).
@@ -183,13 +260,16 @@ pub(crate) fn directory_icon_element(
     size: FileTypeIconSize,
     theme: &iced::Theme,
 ) -> iced::Element<'static, AppMessage> {
-    file_type_icon_element_impl(name, None, None, true, size, theme)
+    file_type_icon_element_impl(name, None, None, true, size, theme, false, false)
 }
 
 /// Shared implementation behind [`file_type_icon_element`] and
 /// [`directory_icon_element`].  `is_directory` is explicit state from the
 /// application model and is part of the cache key, so a folder named
 /// `report.pdf` and a file named `report.pdf` never share an entry.
+/// `decorative` and `show_tooltip` (PAPIRUS-15) are also part of the key
+/// so an informative and a decorative rendering of the same file never
+/// share a cached configuration.
 fn file_type_icon_element_impl(
     filename: &str,
     mime_type: Option<&str>,
@@ -197,6 +277,8 @@ fn file_type_icon_element_impl(
     is_directory: bool,
     size: FileTypeIconSize,
     theme: &iced::Theme,
+    decorative: bool,
+    show_tooltip: bool,
 ) -> iced::Element<'static, AppMessage> {
     let key = FileTypeIconKey {
         filename: filename.to_string(),
@@ -204,6 +286,8 @@ fn file_type_icon_element_impl(
         detected_type: detected_type.map(str::to_string),
         size,
         is_directory,
+        decorative,
+        show_tooltip,
     };
     let cache = FILE_TYPE_ICON_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache.lock().unwrap();
@@ -223,9 +307,15 @@ fn file_type_icon_element_impl(
         .detected_type
         .as_deref()
         .map(|m| Box::leak(m.to_string().into_boxed_str()) as &'static str);
-    let icon: &'static FileTypeIcon<'static> = Box::leak(Box::new(
-        FileTypeIcon::new(filename, mime_type, detected_type, is_directory).size(key.size),
-    ));
+    let mut icon_cfg =
+        FileTypeIcon::new(filename, mime_type, detected_type, is_directory).size(key.size);
+    if decorative {
+        icon_cfg = icon_cfg.decorative();
+    }
+    if show_tooltip {
+        icon_cfg = icon_cfg.with_tooltip();
+    }
+    let icon: &'static FileTypeIcon<'static> = Box::leak(Box::new(icon_cfg));
     cache.insert(key, icon);
     icon.build(theme)
 }
@@ -609,9 +699,16 @@ fn view_download_progress_inner<'a>(
     // The card header carries the central Papirus file-type icon beside the
     // filename (PAPIRUS-10): the icon answers "what type of file is this?",
     // the state badge answers "what is happening to it" — status stays
-    // separate from the file-type icon.
-    let file_type_icon =
-        file_type_icon_element(&attachment.name, None, None, FileTypeIconSize::Card, &theme);
+    // separate from the file-type icon.  The icon is informative and shows
+    // the friendly type in a hover tooltip (PAPIRUS-15 point 7); the
+    // filename remains the primary content label.
+    let file_type_icon = file_type_icon_element_with_tooltip(
+        &attachment.name,
+        None,
+        None,
+        FileTypeIconSize::Card,
+        &theme,
+    );
 
     let title_row = Row::new()
         .push(file_type_icon)
@@ -1201,6 +1298,77 @@ mod tests {
             file_type_icon_element(KEY, None, None, FileTypeIconSize::List, &iced::Theme::Light);
         // Two requests for the same key must not create two cache entries.
         assert_eq!(key_count(KEY), before + 1);
+    }
+
+    // ── PAPIRUS-15: accessibility entry points ─────────────────────────
+
+    #[test]
+    fn decorative_and_informative_icons_are_distinct_cache_entries() {
+        // The decorative flag is part of the cache key: an informative and
+        // a decorative rendering of the same file must not share a cached
+        // configuration, otherwise a decorative caller could receive an
+        // informative icon (with an accessible name) or vice versa.
+        const KEY: &str = "decorative-cache-distinct-example.pdf";
+        let cache = FILE_TYPE_ICON_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        let entry_for = |decorative: bool| {
+            cache
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(key, _)| key.filename == KEY && key.decorative == decorative)
+                .map(|(_, icon)| icon)
+                .copied()
+        };
+        let _info: iced::Element<'_, AppMessage> =
+            file_type_icon_element(KEY, None, None, FileTypeIconSize::List, &iced::Theme::Light);
+        let _deco: iced::Element<'_, AppMessage> = decorative_file_type_icon_element(
+            KEY,
+            None,
+            None,
+            FileTypeIconSize::List,
+            &iced::Theme::Light,
+        );
+        let informative = entry_for(false).expect("informative entry must exist");
+        let decorative = entry_for(true).expect("decorative entry must exist");
+        assert!(!informative.is_decorative());
+        assert!(decorative.is_decorative());
+        assert!(informative.effective_accessibility_label().is_some());
+        assert_eq!(decorative.effective_accessibility_label(), None);
+    }
+
+    #[test]
+    fn tooltip_and_plain_icons_are_distinct_cache_entries() {
+        // The show_tooltip flag is part of the cache key for the same
+        // reason as decorative: a caller that opts into a tooltip must not
+        // receive the plain (no tooltip) cached configuration.
+        const KEY: &str = "tooltip-cache-distinct-example.mp4";
+        let cache = FILE_TYPE_ICON_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        let entry_for = |show_tooltip: bool| {
+            cache
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(key, _)| key.filename == KEY && key.show_tooltip == show_tooltip)
+                .map(|(_, icon)| icon)
+                .copied()
+        };
+        let _plain: iced::Element<'_, AppMessage> =
+            file_type_icon_element(KEY, None, None, FileTypeIconSize::List, &iced::Theme::Light);
+        let _tooltip: iced::Element<'_, AppMessage> = file_type_icon_element_with_tooltip(
+            KEY,
+            None,
+            None,
+            FileTypeIconSize::List,
+            &iced::Theme::Light,
+        );
+        let plain = entry_for(false).expect("plain entry must exist");
+        let tooltip = entry_for(true).expect("tooltip entry must exist");
+        assert!(!plain.is_decorative());
+        assert!(!tooltip.is_decorative());
+        // Both are informative; the accessible description is present either
+        // way (the tooltip is an additional hover affordance).
+        assert!(plain.effective_accessibility_label().is_some());
+        assert!(tooltip.effective_accessibility_label().is_some());
     }
 
     // ── PAPIRUS-12: folder icons ─────────────────────────────────────────

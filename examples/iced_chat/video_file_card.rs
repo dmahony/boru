@@ -42,8 +42,9 @@ use super::app::{
 };
 use super::app::{AppMessage, DownloadAttachment, DownloadState};
 use super::download_progress_view::{
-    action_button, action_buttons, active_download_detail, file_type_icon_element, human_size,
-    progress_section, resolve_theme, secondary_button, state_badge, state_badge_color,
+    action_button, action_buttons, active_download_detail, file_type_icon_element,
+    file_type_icon_element_with_tooltip, human_size, progress_section, resolve_theme,
+    secondary_button, state_badge, state_badge_color,
 };
 use crate::design_tokens;
 use crate::file_type_icon::FileTypeIconSize;
@@ -766,9 +767,16 @@ impl<'a> BoruVideoFileCard<'a> {
 
         // PAPIRUS-10: the card header carries the central Papirus video icon
         // (Card, 32px) beside the filename — same component for every chat
-        // surface, no per-screen extension maps.
-        let video_icon =
-            file_type_icon_element(&attachment.name, None, None, FileTypeIconSize::Card, theme);
+        // surface, no per-screen extension maps.  The icon is informative
+        // and surfaces the friendly type ("Video file") in a hover tooltip
+        // (PAPIRUS-15 point 7); the filename remains the primary label.
+        let video_icon = file_type_icon_element_with_tooltip(
+            &attachment.name,
+            None,
+            None,
+            FileTypeIconSize::Card,
+            theme,
+        );
 
         // Filename: single line, width-capped + clipped so a long name can
         // never widen the card. The tooltip exposes the full name and the
@@ -967,10 +975,13 @@ impl<'a> BoruVideoFileCard<'a> {
                 // fixed dark surface in both themes (VIDCARD-08).
                 // PAPIRUS-10: the placeholder's main visual is the Papirus
                 // video icon (Large, 48px), not the play glyph + "VIDEO" text.
+                // Informative icon with a friendly-type hover tooltip
+                // (PAPIRUS-15 point 7); the on-media subtitle stays the
+                // primary content label.
                 let subtitle = media_placeholder_text(attachment);
                 container(
                     Column::new()
-                        .push(file_type_icon_element(
+                        .push(file_type_icon_element_with_tooltip(
                             &attachment.name,
                             None,
                             None,

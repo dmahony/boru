@@ -43,19 +43,36 @@
 //! safety net: even if a bundle path is missing at runtime, the component
 //! never renders a broken/missing icon.
 //!
-//! ## Accessibility
+//! ## Accessibility (PAPIRUS-15)
 //!
-//! The component accepts an explicit `accessibility_label` and falls back
-//! to the resolver's friendly `display_label` (e.g. "PDF document",
-//! "MP4 video").  iced 0.14 exposes no aria slot on `container`/`svg`
-//! widgets, so PAPIRUS-15 wires the label into the accessibility tree;
-//! this component already carries the text.
+//! Every icon carries an accessible description **derived from the
+//! resolved type** — the resolver's `FileCategory::accessible_description`
+//! (e.g. "Video file", "Portable Document Format (PDF) document",
+//! "Shared folder", "Unknown file type").  The raw asset filename
+//! (icon id, `.svg` path) is never used as an accessible name.
+//!
+//! iced 0.14 exposes no aria slot on `container`/`svg` widgets, so the
+//! accessible contract lives on the component and is enforced by tests:
+//!
+//! * [`FileTypeIcon::accessible_description`] — friendly type description.
+//! * [`FileTypeIcon::effective_accessibility_label`] — the label that
+//!   would be announced; `None` for **decorative** icons (hidden from
+//!   assistive technology).
+//! * [`FileTypeIcon::decorative`] — mark an icon purely decorative
+//!   (filename is already the adjacent primary label); decorative icons
+//!   contribute no accessible name and never render a tooltip.
+//! * [`FileTypeIcon::with_tooltip`] — opt into a hover tooltip showing
+//!   the friendly type (the "file type is supporting information" rule:
+//!   the filename stays the primary content label).
+//!
+//! Unknown files always resolve to "Unknown file type" — never left
+//! unlabeled.
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
-use iced::widget::{container, svg};
+use iced::widget::{container, svg, tooltip};
 use iced::{alignment, Border, ContentFit, Element, Length, Theme};
 
 use crate::design_tokens;
@@ -154,6 +171,15 @@ pub struct FileTypeIcon<'a> {
     show_container: bool,
     container_padding: f32,
     container_radius: f32,
+    /// Purely decorative icon (PAPIRUS-15): hidden from assistive
+    /// technology — contributes no accessible name and never shows a
+    /// type tooltip.  Use when the adjacent filename is already the
+    /// primary content label and the icon adds no type information the
+    /// text does not carry.
+    decorative: bool,
+    /// Opt into a hover tooltip showing the friendly type description.
+    /// Ignored for decorative icons.
+    show_tooltip: bool,
 }
 
 impl<'a> FileTypeIcon<'a> {
@@ -182,6 +208,8 @@ impl<'a> FileTypeIcon<'a> {
             show_container: true,
             container_padding: FILE_TYPE_ICON_PADDING,
             container_radius: FILE_TYPE_ICON_RADIUS,
+            decorative: false,
+            show_tooltip: false,
         }
     }
 
@@ -203,9 +231,31 @@ impl<'a> FileTypeIcon<'a> {
     }
 
     /// Provide an explicit accessible name.  Falls back to the resolver's
-    /// friendly `display_label` (e.g. "PDF document") when unset.
+    /// friendly description of the resolved type (e.g. "Video file") when
+    /// unset.  The raw asset filename is never used as an accessible name.
     pub fn accessibility_label(mut self, label: &'a str) -> Self {
         self.accessibility_label = Some(label);
+        self
+    }
+
+    /// Mark this icon as **purely decorative** (PAPIRUS-15).
+    ///
+    /// Decorative icons are hidden from assistive technology: they
+    /// contribute no accessible name ([`FileTypeIcon::effective_accessibility_label`]
+    /// returns `None`) and never render a type tooltip.  Use this when the
+    /// adjacent filename is already the primary content label and the icon
+    /// adds no type information the text does not carry (e.g. a dashboard
+    /// row that already prints the MIME/type label next to the icon).
+    pub fn decorative(mut self) -> Self {
+        self.decorative = true;
+        self
+    }
+
+    /// Opt into a hover tooltip showing the friendly type description
+    /// (PAPIRUS-15 point 7: *"Icon tooltips may show the friendly type
+    /// where appropriate"*).  Ignored for decorative icons.
+    pub fn with_tooltip(mut self) -> Self {
+        self.show_tooltip = true;
         self
     }
 
@@ -240,11 +290,48 @@ impl<'a> FileTypeIcon<'a> {
     }
 
     /// The accessible name for this icon: the explicit label if provided,
-    /// otherwise the resolver's friendly description.
+    /// otherwise the resolved type's friendly accessible description
+    /// (e.g. "Video file", "Shared folder", "Unknown file type").
+    ///
+    /// This never contains the raw asset filename (icon id, `.svg` path).
+    /// Note this method returns a description even for decorative icons;
+    /// use [`FileTypeIcon::effective_accessibility_label`] when you need
+    /// the AT-visible label (decorative → `None`).
     pub fn accessibility_label_or_default(&self) -> String {
         self.accessibility_label
             .map(str::to_string)
-            .unwrap_or_else(|| self.resolved.display_label.clone())
+            .unwrap_or_else(|| {
+                self.resolved
+                    .file_category
+                    .accessible_description()
+                    .to_string()
+            })
+    }
+
+    /// The friendly accessible description **derived from the resolved
+    /// type** (PAPIRUS-15): e.g. "Video file", "Shared folder",
+    /// "Unknown file type".  Never the raw asset filename.
+    pub fn accessible_description(&self) -> &'static str {
+        self.resolved.file_category.accessible_description()
+    }
+
+    /// Whether this icon is purely decorative (hidden from assistive
+    /// technology).  See [`FileTypeIcon::decorative`].
+    pub fn is_decorative(&self) -> bool {
+        self.decorative
+    }
+
+    /// The label that should be exposed to assistive technology.
+    ///
+    /// Returns `None` for **decorative** icons (hidden — the adjacent
+    /// filename is already the primary content label), otherwise the
+    /// explicit label or the resolved type's accessible description.
+    pub fn effective_accessibility_label(&self) -> Option<String> {
+        if self.decorative {
+            None
+        } else {
+            Some(self.accessibility_label_or_default())
+        }
     }
 
     /// Choose the bundled Papirus variant directory for the active theme.
@@ -304,6 +391,11 @@ impl<'a> FileTypeIcon<'a> {
     /// The `theme` is only used by the variant hook and the small-size dark
     /// rule (PAPIRUS-14) and the container tint; the Papirus artwork itself
     /// is never recoloured.
+    ///
+    /// When [`FileTypeIcon::with_tooltip`] is set and the icon is not
+    /// decorative, the icon is wrapped in a hover tooltip showing the
+    /// friendly type description (PAPIRUS-15 point 7) — the type is then
+    /// conveyed by text, never by colour alone.
     pub fn build<'b, Message>(&'b self, theme: &Theme) -> Element<'b, Message>
     where
         Message: 'b,
@@ -332,32 +424,49 @@ impl<'a> FileTypeIcon<'a> {
             .height(Length::Fixed(px))
             .content_fit(ContentFit::Contain);
 
-        if !self.show_container {
-            return icon.into();
-        }
+        let base: Element<'b, Message> = if !self.show_container {
+            icon.into()
+        } else {
+            let padding = self.container_padding;
+            let radius = self.container_radius;
+            container(icon)
+                // Stable icon box: the icon sits centred inside a fixed
+                // square whose edge is the artwork plus consistent padding.
+                .width(Length::Fixed(px + 2.0 * padding))
+                .height(Length::Fixed(px + 2.0 * padding))
+                .align_x(alignment::Horizontal::Center)
+                .align_y(alignment::Vertical::Center)
+                .padding(padding)
+                .style(move |t| container::Style {
+                    // Subtle neutral tile: theme-aware soft tint, rounded
+                    // corners, thin muted border — no heavy shadow (Task 13).
+                    background: Some(iced::Background::Color(design_tokens::surface_hover(t))),
+                    border: Border {
+                        color: design_tokens::border_muted(t),
+                        width: 1.0,
+                        radius: radius.into(),
+                    },
+                    ..Default::default()
+                })
+                .into()
+        };
 
-        let padding = self.container_padding;
-        let radius = self.container_radius;
-        container(icon)
-            // Stable icon box: the icon sits centred inside a fixed square
-            // whose edge is the artwork plus consistent padding.
-            .width(Length::Fixed(px + 2.0 * padding))
-            .height(Length::Fixed(px + 2.0 * padding))
-            .align_x(alignment::Horizontal::Center)
-            .align_y(alignment::Vertical::Center)
-            .padding(padding)
-            .style(move |t| container::Style {
-                // Subtle neutral tile: theme-aware soft tint, rounded
-                // corners, thin muted border — no heavy shadow (Task 13).
-                background: Some(iced::Background::Color(design_tokens::surface_hover(t))),
-                border: Border {
-                    color: design_tokens::border_muted(t),
-                    width: 1.0,
-                    radius: radius.into(),
-                },
-                ..Default::default()
-            })
+        // PAPIRUS-15: an opt-in tooltip surfaces the friendly type as
+        // text.  Decorative icons never get a tooltip (hidden from
+        // assistive technology).
+        if self.show_tooltip && !self.decorative {
+            let label = self.effective_accessibility_label().unwrap_or_default();
+            tooltip::Tooltip::new(
+                base,
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, label)
+                    .color(design_tokens::text_primary(theme)),
+                tooltip::Position::Bottom,
+            )
+            .gap(design_tokens::SPACE_4)
             .into()
+        } else {
+            base
+        }
     }
 }
 
@@ -598,9 +707,154 @@ mod tests {
             FileTypeIcon::new("video.mp4", None, None, false).accessibility_label("MP4 movie clip");
         assert_eq!(icon.accessibility_label_or_default(), "MP4 movie clip");
         // Without an explicit label, fall back to the resolver's friendly
-        // display label (category-derived).
+        // accessible description (category-derived), never the raw asset
+        // filename.
         let plain = FileTypeIcon::new("video.mp4", None, None, false);
-        assert_eq!(plain.accessibility_label_or_default(), "Video");
+        assert_eq!(plain.accessibility_label_or_default(), "Video file");
+        assert_eq!(plain.accessible_description(), "Video file");
+        assert!(!plain.accessibility_label_or_default().contains("video-mp4"));
+        assert!(!plain.accessibility_label_or_default().contains(".svg"));
+    }
+
+    // ── PAPIRUS-15 accessibility contract ──────────────────────────────
+
+    #[test]
+    fn accessible_descriptions_are_derived_from_resolved_type() {
+        // Task 15 point 1: friendly descriptions derived from the resolved
+        // type — never the raw asset filename.
+        let cases: &[(&str, Option<&str>, bool, &str)] = &[
+            (
+                "report.pdf",
+                None,
+                false,
+                "Portable Document Format (PDF) document",
+            ),
+            ("video.mp4", None, false, "Video file"),
+            ("photo.png", None, false, "Image file"),
+            ("archive.zip", None, false, "Compressed archive"),
+            ("shared-folder", None, true, "Shared folder"),
+            ("unknownfile", None, false, "Unknown file type"),
+        ];
+        for (name, mime, is_dir, expected) in cases {
+            let icon = FileTypeIcon::new(name, *mime, None, *is_dir);
+            assert_eq!(
+                icon.accessible_description(),
+                *expected,
+                "accessible description for {name}"
+            );
+            assert_eq!(
+                icon.accessibility_label_or_default(),
+                *expected,
+                "default accessible label for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn accessible_descriptions_never_contain_asset_filenames() {
+        // Task 15 point 2: no raw asset filename as the accessible name.
+        // The description must not leak the icon id or the .svg path for
+        // any resolved file or folder.
+        let samples: &[(&str, Option<&str>, bool)] = &[
+            ("report.pdf", None, false),
+            ("document.docx", None, false),
+            ("budget.xlsx", None, false),
+            ("slides.pptx", None, false),
+            ("readme.md", None, false),
+            ("main.rs", None, false),
+            ("photo.png", None, false),
+            ("animation.gif", None, false),
+            ("video.mp4", None, false),
+            ("movie.mkv", None, false),
+            ("music.flac", None, false),
+            ("archive.tar.gz", None, false),
+            ("package.7z", None, false),
+            ("database.sqlite", None, false),
+            ("font.ttf", None, false),
+            ("certificate.pem", None, false),
+            ("unknownfile", None, false),
+            ("shared-folder", None, true),
+            ("download.bin", Some("image/png"), false),
+        ];
+        for (name, mime, is_dir) in samples {
+            let icon = FileTypeIcon::new(name, *mime, None, *is_dir);
+            let desc = icon.accessible_description();
+            assert!(
+                !desc.contains(".svg") && !desc.contains('/'),
+                "{name}: description {desc:?} looks like an asset path"
+            );
+            assert!(
+                !desc.contains(icon.resolved().icon_id.as_str()),
+                "{name}: description {desc:?} leaks icon id {}",
+                icon.resolved().icon_id
+            );
+            assert!(
+                !desc.trim().is_empty(),
+                "{name}: description must not be empty"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_files_are_always_described_not_left_unlabeled() {
+        // Task 15 point 6: unknown files described as "Unknown file type",
+        // never left unlabeled, and never named by the asset filename.
+        let icon = FileTypeIcon::new("no_extension", None, None, false);
+        assert_eq!(icon.accessible_description(), "Unknown file type");
+        assert_eq!(
+            icon.effective_accessibility_label().as_deref(),
+            Some("Unknown file type")
+        );
+        assert!(!icon.accessibility_label_or_default().contains("generic"));
+    }
+
+    #[test]
+    fn decorative_icons_hide_accessible_name_and_tooltip() {
+        // Task 15 point 4: decorative duplicates are hidden from assistive
+        // technology.  A decorative icon contributes no accessible name and
+        // never renders a type tooltip.
+        let decorative = FileTypeIcon::new("report.pdf", None, None, false).decorative();
+        assert!(decorative.is_decorative());
+        assert_eq!(decorative.effective_accessibility_label(), None);
+        // The underlying description is still queryable for debugging, but
+        // the AT-visible label is suppressed.
+        assert_eq!(
+            decorative.accessible_description(),
+            "Portable Document Format (PDF) document"
+        );
+
+        let informative = FileTypeIcon::new("report.pdf", None, None, false);
+        assert!(!informative.is_decorative());
+        assert!(informative.effective_accessibility_label().is_some());
+
+        // Decorative + with_tooltip: tooltip is still suppressed.
+        let decorative_tooltip = FileTypeIcon::new("report.pdf", None, None, false)
+            .decorative()
+            .with_tooltip();
+        assert!(decorative_tooltip.is_decorative());
+        assert_eq!(decorative_tooltip.effective_accessibility_label(), None);
+        let el: Element<'_, AppMessage> = decorative_tooltip.build(&Theme::Light);
+        let _ = el;
+    }
+
+    #[test]
+    fn tooltip_build_wraps_informative_icons_in_both_themes() {
+        // Task 15 point 7: icon tooltips may show the friendly type.  The
+        // tooltip path must build for both themes and all sizes.
+        for theme in [Theme::Light, Theme::Dark] {
+            for size in all_sizes() {
+                let icon = FileTypeIcon::new("video.mp4", None, None, false)
+                    .size(size)
+                    .with_tooltip();
+                let el: Element<'_, AppMessage> = icon.build(&theme);
+                let _ = el;
+            }
+            let folder = FileTypeIcon::directory("shared")
+                .size(FileTypeIconSize::Card)
+                .with_tooltip();
+            let el: Element<'_, AppMessage> = folder.build(&theme);
+            let _ = el;
+        }
     }
 
     #[test]

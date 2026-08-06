@@ -29470,7 +29470,7 @@ impl IcedChat {
                     entry.body.clone()
                 };
                 let image_header = Row::new()
-                    .push(crate::download_progress_view::file_type_icon_element(
+                    .push(crate::download_progress_view::file_type_icon_element_with_tooltip(
                         &icon_name,
                         None,
                         None,
@@ -29574,7 +29574,7 @@ impl IcedChat {
                     "image".to_string()
                 };
                 let placeholder = Column::new()
-                    .push(crate::download_progress_view::file_type_icon_element(
+                    .push(crate::download_progress_view::file_type_icon_element_with_tooltip(
                         &icon_name,
                         None,
                         None,
@@ -32212,8 +32212,11 @@ impl IcedChat {
         // PAPIRUS-11: every catalogue row leads with the same central
         // FileTypeIcon component/resolver used by chat cards and the other
         // dashboard rows — the icon answers "what type of file is this?",
-        // the action button answers "what is happening to it".
-        let type_icon = crate::download_progress_view::file_type_icon_element(
+        // the action button answers "what is happening to it".  The row
+        // already prints the filename and the MIME type as text, so the
+        // icon is decorative (PAPIRUS-15): hidden from assistive
+        // technology, no redundant type tooltip.
+        let type_icon = crate::download_progress_view::decorative_file_type_icon_element(
             &row.display_name,
             Some(row.mime_type.as_str()),
             None,
@@ -32604,7 +32607,9 @@ impl IcedChat {
             // downloaded), so there is no thumbnail to preserve — the
             // resolved Papirus icon answers "what type of file is this?",
             // while the status button answers "what is happening to it".
-            let type_icon = crate::download_progress_view::file_type_icon_element(
+            // The row already prints the filename and MIME type as text, so
+            // the icon is decorative (PAPIRUS-15).
+            let type_icon = crate::download_progress_view::decorative_file_type_icon_element(
                 &item.display_name,
                 Some(file.mime_type.as_str()),
                 None,
@@ -34060,7 +34065,9 @@ impl IcedChat {
         // MIME hint (and the filename extension) select the Papirus icon; the
         // local integrity state answers "what is happening to the file" as a
         // separate badge, never by recolouring the type icon.
-        let type_icon = crate::download_progress_view::file_type_icon_element(
+        // The row already prints the MIME type in its metadata line, so the
+        // icon is decorative (PAPIRUS-15): hidden from assistive technology.
+        let type_icon = crate::download_progress_view::decorative_file_type_icon_element(
             &item.display_name,
             item.mime_type.as_deref(),
             None,

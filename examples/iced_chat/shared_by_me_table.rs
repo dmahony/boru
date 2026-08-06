@@ -751,8 +751,11 @@ fn name_cell(
                 Some(handle) => {
                     // PAPIRUS-13: the fallback element (only rendered when a
                     // preview is absent) is the central Papirus file-type
-                    // icon, never a Lucide Icon.
-                    let fallback = crate::download_progress_view::file_type_icon_element(
+                    // icon, never a Lucide Icon.  The row already prints the
+                    // filename and a friendly kind label, so the icon is
+                    // decorative (PAPIRUS-15): hidden from assistive
+                    // technology, no redundant type tooltip.
+                    let fallback = crate::download_progress_view::decorative_file_type_icon_element(
                         &row.display_name,
                         row.mime_type.as_deref(),
                         None,
@@ -762,7 +765,7 @@ fn name_cell(
                     crate::ui_components::file_thumbnail(Some(handle), fallback, theme)
                 }
                 // No preview: central Papirus file-type icon, same as chat.
-                None => crate::download_progress_view::file_type_icon_element(
+                None => crate::download_progress_view::decorative_file_type_icon_element(
                     &row.display_name,
                     row.mime_type.as_deref(),
                     None,
@@ -771,7 +774,7 @@ fn name_cell(
                 ),
             }
         }
-        _ => crate::download_progress_view::file_type_icon_element(
+        _ => crate::download_progress_view::decorative_file_type_icon_element(
             &row.display_name,
             row.mime_type.as_deref(),
             None,
