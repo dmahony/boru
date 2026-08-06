@@ -236,12 +236,18 @@ pub trait ChatCallbacks {
     }
 
     /// Record a pending file download: `(filename, ticket_string, size_in_bytes, thumbnail_bytes)`.
+    ///
+    /// `sender_label` is the resolved display name of the peer that shared
+    /// the file, when known. Frontends use it to label the download card
+    /// ("From: Duke"); it is intentionally optional because some callers
+    /// (e.g. local re-share paths) have no remote sender.
     fn set_pending_file(
         &mut self,
         name: String,
         ticket: String,
         size: u64,
         thumbnail_hash: Option<MessageHash>,
+        sender_label: Option<String>,
     );
 
     /// Record a pending image download: `(filename, blob_hash, sender_pk)`.

@@ -769,6 +769,7 @@ impl ChatCallbacks for AppState {
         ticket: String,
         _size: u64,
         thumbnail_hash: Option<MessageHash>,
+        _sender_label: Option<String>,
     ) {
         self.pending_file = Some((name, ticket));
         let _ = thumbnail_hash;
@@ -1990,8 +1991,18 @@ pub fn handle_net_event_for_topic(
                             cb.friend_mark_online(fid);
                             if !is_muted {
                                 let sender_name = cb.resolve_name(&from);
-                                cb.push_system(format!("{} shared a file: {}", sender_name, name));
-                                cb.set_pending_file(name, ticket, size, thumbnail_hash);
+                                // VIDCARD-12: the download card renders the
+                                // filename prominently, so the surrounding
+                                // system line must not repeat the full
+                                // filename (long names would duplicate).
+                                cb.push_system(format!("{} shared a file", sender_name));
+                                cb.set_pending_file(
+                                    name,
+                                    ticket,
+                                    size,
+                                    thumbnail_hash,
+                                    Some(sender_name),
+                                );
                             }
                         }
                     }

@@ -82,6 +82,7 @@ impl ChatCallbacks for OnlineUserTracker {
         _ticket: String,
         _size: u64,
         _thumbnail: Option<[u8; 32]>,
+        _sender_label: Option<String>,
     ) {
     }
     fn set_pending_image(&mut self, _name: String, _hash: MessageHash, _from: PublicKey) {}

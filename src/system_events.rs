@@ -30,7 +30,7 @@
 //! | `{name} joined the chat`, `🟢 {name} joined`, `🟢 {name} is online`, `Friend {label} is now ONLINE` | [`Join`](SystemEventKind::Join) | `chat_callbacks::on_neighbor_status_change`, Iced `on_neighbor_up`/`record_presence`/friend status |
 //! | `{name} left the chat`, `Friend {label} is now offline` | [`Leave`](SystemEventKind::Leave) | `chat_callbacks::on_neighbor_status_change`, Iced friend status |
 //! | `{key} is now known as {name}` | [`Rename`](SystemEventKind::Rename) | `chat_core` profile-name handling |
-//! | `{name} shared a file: {file}` | [`FileShared`](SystemEventKind::FileShared) | `chat_core` `Message::FileAnnounce` |
+//! | `{name} shared a file` | [`FileShared`](SystemEventKind::FileShared) | `chat_core` `Message::FileShare` |
 //! | `Usage: …`, `Type a message … /help for commands.` | [`CommandHelp`](SystemEventKind::CommandHelp) | Iced slash-command handlers |
 //! | `Tunnel request accepted`, `Tunnel request declined`, `Tunnel closed` | [`Tunnel`](SystemEventKind::Tunnel) | Iced tunnel dialogs |
 //! | `[Whisper] Connected to {label}`, `[Whisper to {label}] …`, `[Mailbox] …`, `[Offline DM sync: …]` | [`Whisper`](SystemEventKind::Whisper) | Iced whisper/inbox events |
@@ -117,8 +117,10 @@ pub fn classify_system_event(text: &str) -> SystemEventKind {
     if normalized.contains("is now known as") {
         return SystemEventKind::Rename;
     }
-    // 3. File share: "<name> shared a file: <file>".
-    if normalized.contains("shared a file:") {
+    // 3. File share: "<name> shared a file" (the download card carries the
+    //    filename; VIDCARD-12 removed the ": <file>" suffix to avoid
+    //    duplicating long filenames in the chat log).
+    if normalized.contains("shared a file") {
         return SystemEventKind::FileShared;
     }
     // 4. Peer membership — join / leave.
@@ -245,6 +247,9 @@ mod tests {
             // ── Rename ──────────────────────────────────────────────────────
             ("ab12cd34 is now known as Alice", SystemEventKind::Rename),
             // ── FileShared ──────────────────────────────────────────────────
+            ("Alice shared a file", SystemEventKind::FileShared),
+            // Backward-compatible with older persisted lines that included
+            // the filename after a colon.
             ("Alice shared a file: report.pdf", SystemEventKind::FileShared),
             // ── CommandHelp ─────────────────────────────────────────────────
             ("Usage: /react <msg_index> <emoji>", SystemEventKind::CommandHelp),

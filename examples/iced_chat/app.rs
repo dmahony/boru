@@ -8026,6 +8026,9 @@ impl IcedChat {
         entry_index: usize,
         attachment: &DownloadAttachment,
     ) -> iced::Element<'_, AppMessage> {
+        // VIDCARD-12: the card's metadata section shows when the file was
+        // received/shared, using the chat entry's real timestamp.
+        let received_at_ms = self.entries.get(entry_index).and_then(|e| e.timestamp);
         #[cfg(feature = "video-playback")]
         let active_player = self.inline_video.as_ref().filter(|session| {
             session.key.conversation_id == self.topic
@@ -8054,6 +8057,7 @@ impl IcedChat {
             preparing,
             seek_position,
             expanded,
+            received_at_ms,
         );
         #[cfg(not(feature = "video-playback"))]
         let dependency = (
@@ -8061,16 +8065,18 @@ impl IcedChat {
             attachment.clone(),
             self.dark_mode,
             self.video_card_menu_open == Some(entry_index),
+            received_at_ms,
         );
         #[cfg(not(feature = "video-playback"))]
         return iced::widget::lazy(
             dependency,
-            |(entry_index, attachment, dark_mode, overflow_open)| {
+            |(entry_index, attachment, dark_mode, overflow_open, received_at_ms)| {
                 Self::view_download_attachment_content(
                     *entry_index,
                     attachment,
                     *dark_mode,
                     *overflow_open,
+                    *received_at_ms,
                 )
             },
         )
@@ -8083,6 +8089,7 @@ impl IcedChat {
         attachment: &DownloadAttachment,
         dark_mode: bool,
         overflow_open: bool,
+        received_at_ms: Option<i64>,
         #[cfg(feature = "video-playback")] player: Option<Arc<Video>>,
     ) -> iced::Element<'static, AppMessage> {
         #[cfg(feature = "video-playback")]
@@ -8093,10 +8100,17 @@ impl IcedChat {
             overflow_open,
             player,
             preparing,
+            seek_position,
+            expanded,
+            received_at_ms,
         );
         #[cfg(not(feature = "video-playback"))]
         crate::download_progress_view::view_download_progress(
-            entry_index, attachment, dark_mode, overflow_open,
+            entry_index,
+            attachment,
+            dark_mode,
+            overflow_open,
+            received_at_ms,
         )
     }
 
@@ -21687,6 +21701,7 @@ impl ChatCallbacks for IcedChat {
         ticket: String,
         size: u64,
         thumbnail_hash: Option<MessageHash>,
+        sender_label: Option<String>,
     ) {
         self.pending_file = Some((name.clone(), ticket.clone()));
         self.download_entry_index = Some(self.entries.len());
@@ -21700,7 +21715,7 @@ impl ChatCallbacks for IcedChat {
             xfer_kind,
             name,
             ticket,
-            "",
+            sender_label.unwrap_or_default(),
             None, // thumbnail fetched asynchronously via blob
         );
         // Store the thumbnail hash so the poster can be fetched on demand.
@@ -22415,6 +22430,7 @@ impl IcedChat {
             false,
             self.inline_video_seek,
             true,
+            entry.timestamp,
         );
         let panel = container(
             column![

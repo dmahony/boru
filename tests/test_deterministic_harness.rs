@@ -164,6 +164,7 @@ impl ChatCallbacks for TestPeer {
         _ticket: String,
         _size: u64,
         _thumbnail: Option<[u8; 32]>,
+        _sender_label: Option<String>,
     ) {
     }
 

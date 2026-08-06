@@ -73,6 +73,7 @@ impl ChatCallbacks for BurstPeer {
         ticket: String,
         _size: u64,
         _thumbnail: Option<[u8; 32]>,
+        _sender_label: Option<String>,
     ) {
         self.pending_file = Some((name, ticket));
     }

@@ -268,6 +268,7 @@ pub fn view_download_progress(
     attachment: &DownloadAttachment,
     dark_mode: bool,
     overflow_open: bool,
+    received_at_ms: Option<i64>,
 ) -> iced::Element<'static, AppMessage> {
     #[cfg(feature = "video-playback")]
     {
@@ -280,11 +281,20 @@ pub fn view_download_progress(
             false,
             None,
             false,
+            received_at_ms,
         )
     }
     #[cfg(not(feature = "video-playback"))]
     {
-        view_download_progress_inner(entry_index, attachment, dark_mode, overflow_open, (), false)
+        view_download_progress_inner(
+            entry_index,
+            attachment,
+            dark_mode,
+            overflow_open,
+            (),
+            false,
+            received_at_ms,
+        )
     }
 }
 
@@ -298,6 +308,7 @@ pub fn view_download_progress_with_player<'a>(
     preparing: bool,
     seek_position: Option<f32>,
     expanded: bool,
+    received_at_ms: Option<i64>,
 ) -> iced::Element<'a, AppMessage> {
     view_download_progress_inner(
         entry_index,
@@ -308,6 +319,7 @@ pub fn view_download_progress_with_player<'a>(
         preparing,
         seek_position,
         expanded,
+        received_at_ms,
     )
 }
 
@@ -321,6 +333,7 @@ fn view_download_progress_inner<'a>(
     preparing: bool,
     #[cfg(feature = "video-playback")] seek_position: Option<f32>,
     #[cfg(feature = "video-playback")] expanded: bool,
+    received_at_ms: Option<i64>,
 ) -> iced::Element<'a, AppMessage> {
     // Video attachments render through the reusable BoruVideoFileCard
     // component (see video_file_card.rs); this function keeps handling the
@@ -336,6 +349,7 @@ fn view_download_progress_inner<'a>(
                 preparing,
                 seek_position,
                 expanded,
+                received_at_ms,
             )
             .view(attachment);
         }
@@ -347,6 +361,7 @@ fn view_download_progress_inner<'a>(
                 overflow_open,
                 (),
                 preparing,
+                received_at_ms,
             )
             .view(attachment);
         }

@@ -43,7 +43,7 @@ use super::app::{
 use super::app::{AppMessage, DownloadAttachment, DownloadState};
 use super::download_progress_view::{
     action_button, action_buttons, human_size, human_speed, progress_section, resolve_theme,
-    secondary_button, state_badge_color,
+    secondary_button, state_badge, state_badge_color,
 };
 use crate::design_tokens;
 use crate::icon_system::{Icon, IconSize};
@@ -149,6 +149,28 @@ fn media_frame_size(dimensions: Option<(u32, u32)>) -> (f32, f32) {
 fn format_media_time(duration: std::time::Duration) -> String {
     let seconds = duration.as_secs();
     format!("{}:{:02}", seconds / 60, seconds % 60)
+}
+
+/// Compact relative label for the card's received/shared time, e.g.
+/// `"2m ago"`, `"3h ago"`, falling back to an absolute short date
+/// (`"Jan 5"`) for older entries. Real timestamps only — the caller
+/// hides the time group entirely when the timestamp is `None`.
+fn format_relative_time(timestamp_ms: i64, now_ms: i64) -> String {
+    let elapsed_secs = (now_ms - timestamp_ms) / 1000;
+    if elapsed_secs < 60 {
+        "just now".to_string()
+    } else if elapsed_secs < 3600 {
+        format!("{}m ago", elapsed_secs / 60)
+    } else if elapsed_secs < 86_400 {
+        format!("{}h ago", elapsed_secs / 3600)
+    } else {
+        use chrono::TimeZone;
+        chrono::Local
+            .timestamp_millis_opt(timestamp_ms)
+            .single()
+            .map(|timestamp| timestamp.format("%b %d").to_string())
+            .unwrap_or_default()
+    }
 }
 
 /// Uppercase file extension used as the compact format label (e.g. "MP4").
@@ -332,6 +354,10 @@ pub(crate) struct BoruVideoFileCard<'a> {
     #[cfg(feature = "video-playback")]
     player: Option<&'a Video>,
     preparing: bool,
+    /// Real chat-entry timestamp (Unix millis) of when the file was
+    /// received/shared, used for the metadata row's time group. `None`
+    /// hides the time group entirely — never fabricated.
+    received_at_ms: Option<i64>,
     #[cfg(feature = "video-playback")]
     seek_position: Option<f32>,
     #[cfg(feature = "video-playback")]
@@ -355,6 +381,7 @@ impl<'a> BoruVideoFileCard<'a> {
         preparing: bool,
         #[cfg(feature = "video-playback")] seek_position: Option<f32>,
         #[cfg(feature = "video-playback")] expanded: bool,
+        received_at_ms: Option<i64>,
     ) -> Self {
         Self {
             entry_index,
@@ -363,6 +390,7 @@ impl<'a> BoruVideoFileCard<'a> {
             #[cfg(feature = "video-playback")]
             player,
             preparing,
+            received_at_ms,
             #[cfg(feature = "video-playback")]
             seek_position,
             #[cfg(feature = "video-playback")]
@@ -797,21 +825,8 @@ impl<'a> BoruVideoFileCard<'a> {
         let state = &attachment.state;
         let presentation = video_presentation_state(attachment);
 
-        let size_label = match state {
-            DownloadState::Ready { total: Some(total) }
-            | DownloadState::Active {
-                total: Some(total), ..
-            }
-            | DownloadState::Paused {
-                total: Some(total), ..
-            }
-            | DownloadState::Completed {
-                total_size: Some(total),
-                ..
-            } if *total > 0 => human_size(*total),
-            _ => String::new(),
-        };
-
+        // ── State line ────────────────────────────────────────────────
+        // Prominent, real presentation state (e.g. "Ready to play").
         let status = if self.preparing {
             "Preparing video…".to_string()
         } else if let Some(player_status) = self.playback_status() {
@@ -828,42 +843,77 @@ impl<'a> BoruVideoFileCard<'a> {
                 VideoPresentationState::Remote => "Static preview · download to play".to_string(),
             }
         };
-
         let mut column = Column::new().push(
-            text(format!("{size_label} · {status}"))
-                .size(TYPO_XXS)
-                .color(muted),
+            crate::fonts::type_role_text(
+                crate::fonts::TypeRole::BodyEmphasised,
+                format!("●  {status}"),
+            )
+            .color(tone),
         );
 
+        // ── Metadata groups (real values only; hidden when unavailable) ─
+        // One wrapping muted line so the groups stack gracefully at narrow
+        // widths, separated by quiet dividers.
         let source_label = if attachment.source_peer.is_empty() {
             String::new()
         } else {
             format!("From: {}", attachment.source_peer)
         };
-        let speed_label = match state {
-            DownloadState::Active { .. } => attachment
-                .speed_bytes_per_sec
-                .map(human_speed)
-                .unwrap_or_default(),
+        let size_label = match state {
+            DownloadState::Ready { total: Some(total) }
+            | DownloadState::Active {
+                total: Some(total), ..
+            }
+            | DownloadState::Paused {
+                total: Some(total), ..
+            }
+            | DownloadState::Completed {
+                total_size: Some(total),
+                ..
+            }
+            | DownloadState::Shared {
+                size: Some(total), ..
+            } if *total > 0 => human_size(*total),
             _ => String::new(),
         };
-        if !source_label.is_empty() || !speed_label.is_empty() {
+        // Duration is only genuinely known while a live player is attached
+        // (the transfer protocol does not carry a duration field).
+        #[cfg(feature = "video-playback")]
+        let duration_label = self.player.map(|video| format_media_time(video.duration()));
+        #[cfg(not(feature = "video-playback"))]
+        let duration_label: Option<String> = None;
+        let time_label = self.received_at_ms.map(|received_at_ms| {
+            let relative =
+                format_relative_time(received_at_ms, chrono::Local::now().timestamp_millis());
+            if attachment.source_peer.is_empty() {
+                format!("Shared {relative}")
+            } else {
+                format!("Received {relative}")
+            }
+        });
+
+        let mut groups: Vec<String> = Vec::new();
+        if !source_label.is_empty() {
+            groups.push(source_label);
+        }
+        if !size_label.is_empty() {
+            groups.push(size_label);
+        }
+        if let Some(duration) = duration_label {
+            groups.push(duration);
+        }
+        if let Some(time) = time_label {
+            groups.push(time);
+        }
+        if !groups.is_empty() {
             column = column.push(
-                Row::new()
-                    .push(
-                        crate::fonts::type_role_text(
-                            crate::fonts::TypeRole::Metadata,
-                            source_label,
-                        )
-                        .color(muted)
-                        .width(Length::Fill),
-                    )
-                    .push(
-                        crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, speed_label)
-                            .color(tone),
-                    )
-                    .align_y(Alignment::Center)
-                    .spacing(SPACE_8),
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::Metadata,
+                    groups.join("  ·  "),
+                )
+                .color(muted)
+                .wrapping(Wrapping::Word)
+                .width(Length::Fill),
             );
         }
 
@@ -997,9 +1047,9 @@ impl<'a> BoruVideoFileCard<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        aspect_ratio_class, file_format_label, header_badge, media_frame_size, truncate_filename,
-        video_presentation_state, MediaAspectClass, VideoPresentationState,
-        HEADER_FILENAME_MAX_CHARS,
+        aspect_ratio_class, file_format_label, format_relative_time, header_badge,
+        media_frame_size, truncate_filename, video_presentation_state, MediaAspectClass,
+        VideoPresentationState, HEADER_FILENAME_MAX_CHARS,
     };
     use crate::app::{DownloadAttachment, DownloadFailure, DownloadState, TransferKind};
     use std::path::PathBuf;
@@ -1012,6 +1062,29 @@ mod tests {
         assert_eq!(aspect_ratio_class(1.0), Square);
         assert_eq!(aspect_ratio_class(1.15), Square);
         assert_eq!(aspect_ratio_class(1.16), Landscape);
+    }
+
+    #[test]
+    fn relative_time_labels_use_real_elapsed_values() {
+        let now_ms = 1_800_000_000_000_i64;
+        assert_eq!(format_relative_time(now_ms - 5_000, now_ms), "just now");
+        assert_eq!(format_relative_time(now_ms - 95_000, now_ms), "1m ago");
+        assert_eq!(format_relative_time(now_ms - 2_400_000, now_ms), "40m ago");
+        assert_eq!(format_relative_time(now_ms - 7_200_000, now_ms), "2h ago");
+    }
+
+    #[test]
+    fn relative_time_falls_back_to_absolute_date_for_old_entries() {
+        // 90 days before the reference instant is older than a day, so the
+        // label must be an absolute short date rather than "Xh ago".
+        let now_ms = 1_800_000_000_000_i64;
+        let old_ms = now_ms - 90 * 86_400_000;
+        let label = format_relative_time(old_ms, now_ms);
+        assert!(
+            label.chars().any(char::is_alphabetic),
+            "expected an absolute date label, got {label:?}"
+        );
+        assert!(!label.contains("ago"), "got a relative label: {label:?}");
     }
 
     #[test]
