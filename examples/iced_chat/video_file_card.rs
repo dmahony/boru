@@ -1440,10 +1440,10 @@ impl<'a> BoruVideoFileCard<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        aspect_ratio_class, file_format_label, format_relative_time, header_badge, media_frame_size,
-        media_placeholder_text, truncate_filename, video_presentation_state, CardBand,
-        MediaAspectClass, MediaFrameSizing, VideoPresentationState, HEADER_FILENAME_MAX_CHARS,
-        MEDIUM_CARD_BREAKPOINT, NARROW_CARD_BREAKPOINT,
+        aspect_ratio_class, file_format_label, format_relative_time, header_badge, intrinsic_ratio,
+        media_frame_size, media_placeholder_text, truncate_filename, video_presentation_state,
+        CardBand, MediaAspectClass, MediaFrameSizing, VideoPresentationState,
+        HEADER_FILENAME_MAX_CHARS, MEDIUM_CARD_BREAKPOINT, NARROW_CARD_BREAKPOINT,
     };
     use iced::Length;
     use crate::app::{DownloadAttachment, DownloadFailure, DownloadState, TransferKind};
@@ -1802,6 +1802,91 @@ mod tests {
         assert_eq!(width, 720.0);
         assert!((height - 202.5).abs() < 0.01);
         assert!((width / height - 7680.0 / 2160.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn task19_aspect_ratio_matrix_verifies_all_spec_dimensions() {
+        // VIDCARD-19 acceptance: run the spec's Task 19 matrix — every one
+        // of the ten source-dimension cases must produce a ratio-exact,
+        // bounded media frame with no stretching, squashing, unintended
+        // cropping, excessive card height, or horizontal overflow, and the
+        // frame must stay ratio-exact and bounded at narrow chat widths
+        // (the same frame drives poster AND player, Task 10).
+        let cases: &[(&str, Option<(u32, u32)>, f32, f32)] = &[
+            // (case label, source dimensions, expected wide width, expected wide height)
+            ("standard landscape 1920x1080", Some((1920, 1080)), 720.0, 405.0),
+            ("hd landscape 1280x720", Some((1280, 720)), 720.0, 405.0),
+            ("ultrawide 2560x1080", Some((2560, 1080)), 720.0, 303.75),
+            ("classic landscape 640x480", Some((640, 480)), 666.6667, 500.0),
+            ("square 1080x1080", Some((1080, 1080)), 480.0, 480.0),
+            ("near-square 1080x1200", Some((1080, 1200)), 468.0, 520.0),
+            ("vertical 1080x1920", Some((1080, 1920)), 292.5, 520.0),
+            ("tall vertical 720x1600", Some((720, 1600)), 234.0, 520.0),
+            ("small landscape 320x180", Some((320, 180)), 720.0, 405.0),
+            ("unknown metadata (no dims)", None, 720.0, 405.0),
+        ];
+
+        for (label, dims, expected_w, expected_h) in cases {
+            let ratio = intrinsic_ratio(*dims);
+
+            // Wide band: the frame is exactly ratio-exact (no stretch /
+            // squash / crop) and bounded by the class caps.
+            let (width, height) = media_frame_size(*dims, CardBand::Wide);
+            assert!(
+                (width - expected_w).abs() < 0.01,
+                "{label}: wide width {width} != expected {expected_w}"
+            );
+            assert!(
+                (height - expected_h).abs() < 0.01,
+                "{label}: wide height {height} != expected {expected_h}"
+            );
+            assert!(
+                (width / height - ratio).abs() < 1e-4,
+                "{label}: wide frame ratio {} != intrinsic {ratio}",
+                width / height
+            );
+            // No excessive card height / horizontal overflow at wide.
+            assert!(
+                height <= 520.0 + 1e-6,
+                "{label}: wide height {height} exceeds the 520 px cap"
+            );
+            assert!(
+                width <= 720.0 + 1e-6,
+                "{label}: wide width {width} exceeds the 720 px cap"
+            );
+
+            // Narrow chat column (Task 15): the same case must shrink to fit
+            // the available width, stay ratio-exact, and stay bounded — no
+            // horizontal overflow, no excessive card height.
+            let narrow = MediaFrameSizing::new(*dims, CardBand::Narrow, 352.0);
+            assert!(
+                narrow.width <= 352.0 + 1e-6,
+                "{label}: narrow width {} overflows a 352 px column",
+                narrow.width
+            );
+            assert!(
+                (narrow.width / narrow.height - ratio).abs() < 1e-3,
+                "{label}: narrow frame ratio {} != intrinsic {ratio}",
+                narrow.width / narrow.height
+            );
+            let narrow_height_cap = 520.0 * CardBand::Narrow.media_scale();
+            assert!(
+                narrow.height <= narrow_height_cap + 1e-6,
+                "{label}: narrow height {} exceeds the narrow cap {narrow_height_cap}",
+                narrow.height
+            );
+
+            // Poster and player share this exact frame (Task 10): the sizing
+            // is computed once from the same dimensions/band and both the
+            // poster stack and the player stack use `.width(sizing.width())`
+            // + `.height(sizing.height())` — pinned by the structural test
+            // `media_frame_keeps_poster_and_player_geometry_identical`.
+            assert_eq!(
+                MediaFrameSizing::new(*dims, CardBand::Narrow, 352.0),
+                narrow,
+                "{label}: sizing must be deterministic (poster == player frame)"
+            );
+        }
     }
 
     #[test]
@@ -2208,6 +2293,12 @@ mod tests {
         assert!(
             media_frame_fns.contains("button("),
             "play overlay must be a real button (keyboard accessible)"
+        );
+        assert!(
+            media_frame_fns.contains("container(play)")
+                && media_frame_fns.contains(".center_x(Length::Fill)")
+                && media_frame_fns.contains(".center_y(Length::Fill)"),
+            "play overlay must be centred inside the media frame (Task 19 matrix)"
         );
     }
 
