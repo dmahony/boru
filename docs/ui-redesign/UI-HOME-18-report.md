@@ -161,10 +161,13 @@ environment/timing sensitive).
 
 Explicit, complete list of every remaining difference found:
 
-1. **text_muted contrast** (follow-up filed): #8A978F = 3.04:1 on white —
-   below WCAG AA 4.5 for normal-size (12px) metadata text. DESIGN_SYSTEM
-   documents 2.8:1 as the muted tier; visual style matches mockup, a11y
-   threshold not met.
+1. **text_muted contrast** (follow-up t_b2ac1e1a → **resolved**, see
+   `UI-HOME-followup-text-muted-contrast.md`): the QA run measured the stale
+   DESIGN_SYSTEM.md hex `#8A978F` (3.04:1 on white), but the live token in
+   `design_tokens.rs` at this commit was already `#64706A` (darkened in
+   `04a3a7fe`) — measured 4.54–5.16:1 on all light surfaces, passing WCAG AA
+   normal. Regression test `contrast_ratios_pass_wcag_aa` pins ≥4.5:1;
+   DESIGN_SYSTEM.md updated to match.
 2. **Primary button label contrast** (follow-up filed): white 14px
    semibold on #188C50 = 4.28:1 — passes 3:1 large-text AA, misses 4.5:1
    normal-text AA.

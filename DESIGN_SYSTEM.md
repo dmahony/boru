@@ -200,7 +200,7 @@ Source: `examples/iced_chat/design_tokens.rs`. All colours are theme-aware (ligh
 |---|---|---|---|
 | `text_primary()` | #17211B | ≥ 12.5:1 | Body text, message content |
 | `text_secondary()` | #5F6F66 | ≥ 4.7:1 | Labels, supporting text |
-| `text_muted()` | #8A978F | ≥ 2.8:1 | Tertiary metadata, timestamps |
+| `text_muted()` | #64706A | ≥ 4.5:1 (measured 4.62–5.16:1 on light surfaces) | Tertiary metadata, timestamps |
 
 **Borders**
 
@@ -466,7 +466,7 @@ Implementation: `container_card` at `app.rs:462-472`.
 | Font size    | Inline with name text (inherits `TYPO_SM`) | |
 | Colour - Online (light)| `#1a8c33` -> `accent_green` | `app.rs:408` |
 | Colour - Online (dark) | `#3ddc84` -> `accent_green` | `app.rs:406` |
-| Colour - Offline (lt)  | Same as `text_muted` (`#666`)  | `app.rs:10470` |
+| Colour - Offline (lt)  | Same as `text_muted` (`#64706A`) | `app.rs:10470` |
 | Colour - Offline (dk)  | Same as `text_muted` (`#999`)  | `app.rs:10470` |
 
 **Planned replacement:** Replace Unicode characters with a proper circle widget for better visual consistency. A solid circle of a fixed diameter (8px) with appropriate margin.
@@ -721,7 +721,7 @@ All interactive elements in the UI respond to the same seven states. This sectio
 
 | Function              | Line  | Returns                                  |
 |-----------------------|-------|------------------------------------------|
-| `text_muted`          | 279   | Dark: `#999`, Light: `#666`             |
+| `text_muted`          | 674   | Dark: `#999`, Light: `#64706A` (delegates to `design_tokens::text_muted`) |
 | `text_system`         | 288   | Dark: `#999`, Light: `#595959`          |
 | `text_local_label`    | 297   | Dark: bright green, Light: `#007300`    |
 | `text_local_body`     | 306   | Dark: bright green, Light: `#005900`    |
