@@ -21,12 +21,13 @@ use iced_video_player::Video;
 
 use super::app::{
     icon_svg, AppMessage, DownloadAttachment, DownloadState, ICON_ACTIVITY, ICON_FILES,
+    ICON_FOLDER, ICON_MESH, ICON_PLAY, ICON_RETRY,
 };
 
 // Re-import the design-token helpers and constants from app.rs.
 use super::app::{
-    accent_green, accent_primary, bg_surface, border_muted, color_error, text_system, SPACE_10,
-    SPACE_12, SPACE_16, SPACE_2, SPACE_4, SPACE_6, SPACE_8, TYPO_SM,
+    accent_green, accent_primary, bg_surface, border_muted, color_error, text_muted, text_system,
+    SPACE_10, SPACE_12, SPACE_16, SPACE_2, SPACE_4, SPACE_6, SPACE_8, TYPO_SM, TYPO_XS,
 };
 
 // ── Theme dispatch (light/dark) ──────────────────────────────────────────
@@ -166,6 +167,92 @@ pub(crate) fn text_button<'a>(label: &'a str, msg: AppMessage) -> iced::widget::
                 },
                 ..Default::default()
             }
+        })
+}
+
+/// Build the inner content of an action button: an optional leading icon
+/// plus the label.  The icon is coloured with `icon_color(theme)` so it
+/// tracks the surrounding theme (white on the green primary fill, the
+/// system text colour on bordered secondary buttons).
+fn action_content<'a>(
+    icon: Option<&'static [u8]>,
+    label: &'a str,
+    icon_color: fn(&iced::Theme) -> Color,
+) -> iced::Element<'a, AppMessage> {
+    let text_el = crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, label);
+    match icon {
+        Some(svg_bytes) => row![
+            icon_svg(svg_bytes, TYPO_XS)
+                .style(move |t, _s| iced::widget::svg::Style { color: Some(icon_color(t)) }),
+            text_el,
+        ]
+        .spacing(SPACE_4)
+        .align_y(Alignment::Center)
+        .into(),
+        None => text_el.into(),
+    }
+}
+
+/// Green filled primary action button (the single main action per state).
+pub(crate) fn primary_button<'a>(
+    icon: Option<&'static [u8]>,
+    label: &'a str,
+    msg: AppMessage,
+) -> iced::widget::Button<'a, AppMessage> {
+    button(action_content(icon, label, |_t| Color::WHITE))
+        .on_press(msg)
+        .padding([SPACE_6, SPACE_12])
+        .style(super::app::BUTTON_PRIMARY_GREEN)
+}
+
+/// Light bordered secondary action button (supporting actions per state).
+pub(crate) fn secondary_button<'a>(
+    icon: Option<&'static [u8]>,
+    label: &'a str,
+    msg: AppMessage,
+) -> iced::widget::Button<'a, AppMessage> {
+    button(action_content(icon, label, text_system))
+        .on_press(msg)
+        .padding([SPACE_6, SPACE_12])
+        .style(|theme, status| {
+            let base = match status {
+                widget::button::Status::Hovered => accent_primary(theme),
+                widget::button::Status::Pressed => {
+                    let mut c = accent_primary(theme);
+                    c.r *= 0.85;
+                    c.g *= 0.85;
+                    c.b *= 0.85;
+                    c
+                }
+                _ => text_system(theme),
+            };
+            widget::button::Style {
+                text_color: base,
+                background: None,
+                border: iced::Border {
+                    color: border_muted(theme),
+                    width: 1.0,
+                    radius: SPACE_6.into(),
+                },
+                ..Default::default()
+            }
+        })
+}
+
+/// Disabled / loading button — no press handler, muted styling.
+pub(crate) fn disabled_button<'a>(label: &'a str) -> iced::widget::Button<'a, AppMessage> {
+    let lbl = crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, label);
+    button(lbl)
+        .padding([SPACE_6, SPACE_12])
+        .style(|theme, _status| widget::button::Style {
+            text_color: text_muted(theme),
+            background: None,
+            border: iced::Border {
+                color: border_muted(theme),
+                width: 1.0,
+                radius: SPACE_6.into(),
+            },
+            ..Default::default()
         })
 }
 
@@ -391,7 +478,8 @@ fn view_download_progress_inner<'a>(
     let playback_action_row: Option<iced::Element<'a, AppMessage>> =
         attachment.playback_error.as_ref().and_then(|error| {
             error.retry_available().then(|| {
-                action_button("Retry player", AppMessage::PlayInlineVideo(entry_index)).into()
+                secondary_button(None, "Retry player", AppMessage::PlayInlineVideo(entry_index))
+                    .into()
             })
         });
 
@@ -466,15 +554,9 @@ fn view_download_progress_inner<'a>(
     if let Some(playback_actions) = playback_action_row {
         body = body.push(playback_actions);
     }
-    // "Open folder" link — always visible below the action buttons
-    body = body.push(
-        button(crate::fonts::type_role_text(
-            crate::fonts::TypeRole::ButtonLabel,
-            "Open downloads folder",
-        ))
-        .on_press(AppMessage::OpenDownloadsFolder)
-        .padding([SPACE_2, SPACE_4]),
-    );
+    // VIDCARD-13: "Open Folder" is now a light-bordered secondary action in
+    // the completed/shared action row (see action_buttons); the old
+    // default-styled blue "Open downloads folder" button is removed.
     if let Some(err) = error_row {
         // Extra visual separation for the error row
         body = body.push(
@@ -608,6 +690,11 @@ pub(crate) fn progress_section<'a>(
 }
 
 /// Build the action-button row according to the current state.
+///
+/// VIDCARD-13: actions are state-appropriate with a green filled primary
+/// button and light bordered secondary buttons.  The old default-styled
+/// blue "Open downloads folder" button is replaced by a proper secondary
+/// "Open Folder" action in the completed / shared states.
 pub(crate) fn action_buttons<'a>(
     entry_index: usize,
     kind: super::app::TransferKind,
@@ -615,60 +702,88 @@ pub(crate) fn action_buttons<'a>(
     name: &str,
 ) -> iced::Element<'a, AppMessage> {
     use AppMessage::*;
+    use super::app::TransferKind::Video;
 
     let buttons: Vec<iced::Element<'a, AppMessage>> = match (kind, state) {
-        (
-            super::app::TransferKind::Video,
-            DownloadState::Completed {
-                saved_path: None, ..
-            },
-        ) => {
-            vec![text_button("Verifying…", AppMessage::Noop).into()]
+        // ── Video: verifying (download complete, save pending) ──────────
+        (Video, DownloadState::Completed { saved_path: None, .. }) => {
+            vec![disabled_button("Verifying…").into()]
         }
-        (
-            super::app::TransferKind::Video,
-            DownloadState::Completed {
-                saved_path: Some(path),
-                ..
-            },
-        ) if !path.exists() => {
-            vec![action_button("Download", ExecuteDownloadAt(entry_index)).into()]
+        // ── Video: local file missing → re-download ─────────────────────
+        (Video, DownloadState::Completed { saved_path: Some(path), .. }) if !path.exists() => {
+            vec![primary_button(Some(ICON_RETRY), "Download", ExecuteDownloadAt(entry_index)).into()]
         }
-        (super::app::TransferKind::Video, DownloadState::Failed { failure })
+        (Video, DownloadState::Failed { failure })
             if matches!(failure, super::app::DownloadFailure::FileRemoved) =>
         {
-            vec![action_button("Download", ExecuteDownloadAt(entry_index)).into()]
+            vec![primary_button(Some(ICON_RETRY), "Download", ExecuteDownloadAt(entry_index)).into()]
         }
+        // ── Video: download complete & playable ─────────────────────────
+        (Video, DownloadState::Completed { saved_path: Some(path), .. }) if path.exists() => {
+            vec![
+                primary_button(Some(ICON_PLAY), "Play", PlayInlineVideo(entry_index)).into(),
+                secondary_button(
+                    Some(ICON_FILES),
+                    "Open File",
+                    OpenDownloadedFile(name.to_string()),
+                )
+                .into(),
+                secondary_button(Some(ICON_FOLDER), "Open Folder", OpenDownloadsFolder).into(),
+                secondary_button(Some(ICON_MESH), "Re-share", ReshareFile(entry_index)).into(),
+            ]
+        }
+        // ── Video: outgoing shared file with a local copy ───────────────
+        (Video, DownloadState::Shared { ref path, .. }) if path.exists() => {
+            vec![
+                primary_button(Some(ICON_PLAY), "Play", PlayInlineVideo(entry_index)).into(),
+                secondary_button(
+                    Some(ICON_FILES),
+                    "Open File",
+                    OpenDownloadedFile(name.to_string()),
+                )
+                .into(),
+                secondary_button(Some(ICON_FOLDER), "Open Folder", OpenDownloadsFolder).into(),
+                secondary_button(Some(ICON_MESH), "Re-share", ReshareFile(entry_index)).into(),
+            ]
+        }
+        // ── Ready / not yet downloaded ──────────────────────────────────
         (_, DownloadState::Ready { .. }) => {
-            vec![action_button("Download", ExecuteDownloadAt(entry_index)).into()]
+            vec![primary_button(Some(ICON_RETRY), "Download", ExecuteDownloadAt(entry_index)).into()]
         }
+        // ── Download in progress: progress is the primary area; Cancel ──
         (_, DownloadState::Active { .. }) => {
             vec![
-                action_button("Pause", PauseDownloadAt(entry_index)).into(),
+                secondary_button(None, "Pause", PauseDownloadAt(entry_index)).into(),
                 text_button("Cancel", CancelDownloadAt(entry_index)).into(),
             ]
         }
         (_, DownloadState::Paused { .. }) => {
             vec![
-                action_button("Resume", ResumeDownloadAt(entry_index)).into(),
+                primary_button(Some(ICON_PLAY), "Resume", ResumeDownloadAt(entry_index)).into(),
                 text_button("Cancel", CancelDownloadAt(entry_index)).into(),
             ]
         }
+        // ── Generic completed / shared ──────────────────────────────────
         (_, DownloadState::Completed { .. }) => {
             vec![
-                action_button("Open", OpenDownloadedFile(name.to_string())).into(),
-                text_button("Re-share", ReshareFile(entry_index)).into(),
+                primary_button(Some(ICON_FILES), "Open", OpenDownloadedFile(name.to_string()))
+                    .into(),
+                secondary_button(Some(ICON_FOLDER), "Open Folder", OpenDownloadsFolder).into(),
+                secondary_button(Some(ICON_MESH), "Re-share", ReshareFile(entry_index)).into(),
             ]
         }
         (_, DownloadState::Shared { .. }) => {
             vec![
-                action_button("Open", OpenDownloadedFile(name.to_string())).into(),
-                text_button("Re-share", ReshareFile(entry_index)).into(),
+                primary_button(Some(ICON_FILES), "Open", OpenDownloadedFile(name.to_string()))
+                    .into(),
+                secondary_button(Some(ICON_FOLDER), "Open Folder", OpenDownloadsFolder).into(),
+                secondary_button(Some(ICON_MESH), "Re-share", ReshareFile(entry_index)).into(),
             ]
         }
+        // ── Failed: Retry primary, Remove secondary ─────────────────────
         (_, DownloadState::Failed { failure }) if failure.retry_available() => {
             vec![
-                action_button("Retry", ExecuteDownloadAt(entry_index)).into(),
+                primary_button(Some(ICON_RETRY), "Retry", ExecuteDownloadAt(entry_index)).into(),
                 text_button("Remove", CancelDownloadAt(entry_index)).into(),
             ]
         }
@@ -677,7 +792,7 @@ pub(crate) fn action_buttons<'a>(
         }
         (_, DownloadState::Cancelled) => {
             vec![
-                action_button("Retry", ExecuteDownloadAt(entry_index)).into(),
+                primary_button(Some(ICON_RETRY), "Retry", ExecuteDownloadAt(entry_index)).into(),
                 text_button("Remove", CancelDownloadAt(entry_index)).into(),
             ]
         }

@@ -798,6 +798,8 @@ pub(crate) const ICON_NOTIFICATION: &[u8] = include_bytes!("../../assets/icons/l
 pub(crate) const ICON_ONLINE: &[u8] = include_bytes!("../../assets/icons/lucide/circle-filled.svg");
 pub(crate) const ICON_OFFLINE: &[u8] = include_bytes!("../../assets/icons/lucide/circle.svg");
 pub(crate) const ICON_CHECK: &[u8] = include_bytes!("../../assets/icons/lucide/check.svg");
+pub(crate) const ICON_PLAY: &[u8] = include_bytes!("../../assets/icons/lucide/play.svg");
+pub(crate) const ICON_FOLDER: &[u8] = include_bytes!("../../assets/icons/lucide/folder.svg");
 pub(crate) const ICON_MESH: &[u8] = include_bytes!("../../assets/icons/lucide/share-2.svg");
 /// Static peer-to-peer node-graph decoration for the home hero card.
 /// Deliberately static (no animation) so it consumes no CPU while idle.

@@ -16,8 +16,9 @@
 //! - **Status and metadata** — transfer/playback status, sender, size and
 //!   speed (real values only; unavailable metadata is hidden).
 //! - **Actions** — state-appropriate buttons (Download / Pause / Resume /
-//!   Cancel / Retry / Open / Re-share / Remove) plus the existing
-//!   "Open downloads folder" link.
+//!   Cancel / Retry / Play / Open File / Open Folder / Re-share / Remove)
+//!   using the VIDCARD-13 hierarchy: green filled primary, light bordered
+//!   secondary, destructive text for removal.
 //!
 //! The component is stateless: it renders a [`DownloadAttachment`] given
 //! the live inline-player context owned by `app.rs`. All state transitions
@@ -42,7 +43,7 @@ use super::app::{
 use super::app::{AppMessage, DownloadAttachment, DownloadState};
 use super::download_progress_view::{
     action_button, action_buttons, human_size, human_speed, progress_section, resolve_theme,
-    state_badge_color,
+    secondary_button, state_badge_color,
 };
 use crate::design_tokens;
 use crate::icon_system::{Icon, IconSize};
@@ -909,28 +910,21 @@ impl<'a> BoruVideoFileCard<'a> {
         let name_str = attachment.name.clone();
         let mut column = Column::new();
 
+        // VIDCARD-13: state-appropriate primary/secondary actions come from
+        // the shared action_buttons helper (green filled primary, light
+        // bordered secondary, destructive text for removal).
         let action_row = action_buttons(self.entry_index, attachment.kind, state, &name_str);
         column = column.push(action_row);
 
         if let Some(error) = attachment.playback_error.as_ref() {
             if error.retry_available() {
-                column = column.push(action_button(
+                column = column.push(iced::Element::<'_, AppMessage>::from(secondary_button(
+                    None,
                     "Retry player",
                     AppMessage::PlayInlineVideo(self.entry_index),
-                ));
+                )));
             }
         }
-
-        // "Open folder" link — kept for behaviour parity; VIDCARD-13
-        // replaces the default iced button styling.
-        column = column.push(
-            button(crate::fonts::type_role_text(
-                crate::fonts::TypeRole::ButtonLabel,
-                "Open downloads folder",
-            ))
-            .on_press(AppMessage::OpenDownloadsFolder)
-            .padding([SPACE_2, SPACE_4]),
-        );
 
         column.spacing(SPACE_6).into()
     }
