@@ -8157,6 +8157,7 @@ impl IcedChat {
         &self,
         entry_index: usize,
         attachment: &DownloadAttachment,
+        timeline_width: f32,
     ) -> iced::Element<'_, AppMessage> {
         // VIDCARD-12: the card's metadata section shows when the file was
         // received/shared, using the chat entry's real timestamp.
@@ -8190,6 +8191,7 @@ impl IcedChat {
             seek_position,
             expanded,
             received_at_ms,
+            timeline_width,
         );
         #[cfg(not(feature = "video-playback"))]
         let dependency = (
@@ -8198,17 +8200,23 @@ impl IcedChat {
             self.dark_mode,
             self.video_card_menu_open == Some(entry_index),
             received_at_ms,
+            // Task 15: the card's responsive band and media sizing depend on
+            // the measured chat width, so the cached tree must rebuild when
+            // the timeline width changes (resize). Quantized to whole pixels
+            // (f32 is not Hash) — the card is sized by iced's layout anyway.
+            timeline_width as u32,
         );
         #[cfg(not(feature = "video-playback"))]
         return iced::widget::lazy(
             dependency,
-            |(entry_index, attachment, dark_mode, overflow_open, received_at_ms)| {
+            |(entry_index, attachment, dark_mode, overflow_open, received_at_ms, timeline_width)| {
                 Self::view_download_attachment_content(
                     *entry_index,
                     attachment,
                     *dark_mode,
                     *overflow_open,
                     *received_at_ms,
+                    *timeline_width,
                 )
             },
         )
@@ -8222,6 +8230,7 @@ impl IcedChat {
         dark_mode: bool,
         overflow_open: bool,
         received_at_ms: Option<i64>,
+        timeline_width: u32,
         #[cfg(feature = "video-playback")] player: Option<Arc<Video>>,
     ) -> iced::Element<'static, AppMessage> {
         #[cfg(feature = "video-playback")]
@@ -8235,6 +8244,7 @@ impl IcedChat {
             seek_position,
             expanded,
             received_at_ms,
+            timeline_width,
         );
         #[cfg(not(feature = "video-playback"))]
         crate::download_progress_view::view_download_progress(
@@ -8243,6 +8253,7 @@ impl IcedChat {
             dark_mode,
             overflow_open,
             received_at_ms,
+            timeline_width as f32,
         )
     }
 
@@ -22756,6 +22767,9 @@ impl IcedChat {
             self.inline_video_seek,
             true,
             entry.timestamp,
+            // The expanded overlay fills the whole window, so the card sizes
+            // against the tracked window width (Task 15 responsive band).
+            self.window_width,
         );
         let panel = container(
             column![
@@ -29380,7 +29394,7 @@ impl IcedChat {
                     let download = entry
                         .download
                         .as_ref()
-                        .map(|dl| self.view_download_attachment(i, dl));
+                        .map(|dl| self.view_download_attachment(i, dl, timeline_width));
                     if let Some(dl_el) = download {
                         // Right padding keeps the card clear of the
                         // scrollable's overlay scrollbar (~12 px).

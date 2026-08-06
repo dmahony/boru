@@ -378,6 +378,7 @@ pub fn view_download_progress(
     dark_mode: bool,
     overflow_open: bool,
     received_at_ms: Option<i64>,
+    timeline_width: f32,
 ) -> iced::Element<'static, AppMessage> {
     #[cfg(feature = "video-playback")]
     {
@@ -391,6 +392,7 @@ pub fn view_download_progress(
             None,
             false,
             received_at_ms,
+            timeline_width,
         )
     }
     #[cfg(not(feature = "video-playback"))]
@@ -403,6 +405,7 @@ pub fn view_download_progress(
             (),
             false,
             received_at_ms,
+            timeline_width,
         )
     }
 }
@@ -418,6 +421,7 @@ pub fn view_download_progress_with_player<'a>(
     seek_position: Option<f32>,
     expanded: bool,
     received_at_ms: Option<i64>,
+    timeline_width: f32,
 ) -> iced::Element<'a, AppMessage> {
     view_download_progress_inner(
         entry_index,
@@ -429,6 +433,7 @@ pub fn view_download_progress_with_player<'a>(
         seek_position,
         expanded,
         received_at_ms,
+        timeline_width,
     )
 }
 
@@ -443,6 +448,7 @@ fn view_download_progress_inner<'a>(
     #[cfg(feature = "video-playback")] seek_position: Option<f32>,
     #[cfg(feature = "video-playback")] expanded: bool,
     received_at_ms: Option<i64>,
+    timeline_width: f32,
 ) -> iced::Element<'a, AppMessage> {
     // Video attachments render through the reusable BoruVideoFileCard
     // component (see video_file_card.rs); this function keeps handling the
@@ -459,6 +465,7 @@ fn view_download_progress_inner<'a>(
                 seek_position,
                 expanded,
                 received_at_ms,
+                timeline_width,
             )
             .view(attachment);
         }
@@ -471,6 +478,7 @@ fn view_download_progress_inner<'a>(
                 (),
                 preparing,
                 received_at_ms,
+                timeline_width,
             )
             .view(attachment);
         }
@@ -945,7 +953,10 @@ pub(crate) fn action_buttons<'a>(
         }
     };
 
-    Row::with_children(buttons).spacing(SPACE_8).into()
+    // Task 15: a wrapping row keeps the actions on one line at wide/medium
+    // widths and lets them flow onto additional lines at narrow widths, so
+    // the buttons never overflow the chat column horizontally.
+    Row::with_children(buttons).spacing(SPACE_8).wrap().into()
 }
 
 #[cfg(test)]

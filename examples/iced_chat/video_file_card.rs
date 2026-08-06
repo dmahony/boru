@@ -112,7 +112,83 @@ fn aspect_ratio_class(ratio: f32) -> MediaAspectClass {
     }
 }
 
-/// Compute the bounded media-frame size for the given intrinsic dimensions.
+/// Responsive band chosen from the measured chat timeline width (Task 15).
+///
+/// - `Wide` — full spec media caps; the card stays content-driven so a
+///   portrait or square preview never forces the card to span the whole chat
+///   width.
+/// - `Medium` — media maximum dimensions are reduced (spec Task 15:
+///   "reduce media maximum dimensions") and metadata/action rows wrap
+///   naturally, while the card remains content-driven.
+/// - `Narrow` — the card becomes 100% of the chat column; action buttons
+///   wrap or stack; the header filename truncates against the remaining
+///   space; media caps are reduced so previews stay inside the viewport and
+///   nothing scrolls horizontally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CardBand {
+    Wide,
+    Medium,
+    Narrow,
+}
+
+/// Timeline width at or below which the card switches to a 100%-width
+/// layout. Below the card's natural landscape footprint (~720 px frame plus
+/// card padding) a content-driven card could not fit without overflowing, so
+/// the card fills the column and its controls wrap/stack instead.
+const NARROW_CARD_BREAKPOINT: f32 = 560.0;
+
+/// Timeline width below which the media caps are scaled down (spec Task 15
+/// medium behaviour).
+const MEDIUM_CARD_BREAKPOINT: f32 = 780.0;
+
+impl CardBand {
+    fn of(width: f32) -> Self {
+        if width <= NARROW_CARD_BREAKPOINT {
+            CardBand::Narrow
+        } else if width < MEDIUM_CARD_BREAKPOINT {
+            CardBand::Medium
+        } else {
+            CardBand::Wide
+        }
+    }
+
+    /// Media-cap scale for this band: Wide keeps the full spec caps; Medium
+    /// and Narrow shrink them proportionally so previews stay bounded.
+    fn media_scale(self) -> f32 {
+        match self {
+            CardBand::Wide => 1.0,
+            CardBand::Medium => 0.85,
+            CardBand::Narrow => 0.7,
+        }
+    }
+}
+
+/// Exact intrinsic aspect ratio, falling back to the spec's safe 16:9
+/// default while video metadata is still unknown.
+fn intrinsic_ratio(dimensions: Option<(u32, u32)>) -> f32 {
+    dimensions
+        .filter(|(width, height)| *width > 0 && *height > 0)
+        .map(|(width, height)| width as f32 / height as f32)
+        .unwrap_or(16.0 / 9.0)
+}
+
+/// Compute the largest ratio-exact box that fits inside `max_width ×
+/// max_height` when starting from `start_width`: derive the height from the
+/// width; if the height would exceed the cap, derive the width from the cap
+/// instead. The result is always ratio-exact — never stretched, squashed or
+/// cropped.
+fn bounded_ratio_box(start_width: f32, max_width: f32, max_height: f32, ratio: f32) -> (f32, f32) {
+    let mut frame_width = start_width.min(max_width);
+    let mut frame_height = frame_width / ratio;
+    if frame_height > max_height {
+        frame_height = max_height;
+        frame_width = frame_height * ratio;
+    }
+    (frame_width, frame_height)
+}
+
+/// Compute the bounded media-frame size for the given intrinsic dimensions
+/// and responsive band.
 ///
 /// Unknown dimensions fall back to a 16:9 widescreen default (the spec's safe
 /// default while metadata loads). The returned `(width, height)` always
@@ -121,12 +197,9 @@ fn aspect_ratio_class(ratio: f32) -> MediaAspectClass {
 /// landscape videos may use most or all of the card width. There is no fixed
 /// 16:9 crop — the frame is ratio-exact in every normal case and `contain`
 /// letterboxes only when an extreme ratio collides with both caps.
-fn media_frame_size(dimensions: Option<(u32, u32)>) -> (f32, f32) {
-    let (width, height) = dimensions
-        .filter(|(width, height)| *width > 0 && *height > 0)
-        .map(|(width, height)| (width as f32, height as f32))
-        .unwrap_or((16.0, 9.0));
-    let ratio = width / height;
+fn media_frame_size(dimensions: Option<(u32, u32)>, band: CardBand) -> (f32, f32) {
+    let ratio = intrinsic_ratio(dimensions);
+    let scale = band.media_scale();
     let (max_width, max_height) = match aspect_ratio_class(ratio) {
         // VIDCARD-06 landscape: the frame may use most or all of the card
         // width — the spec's typical 16:9 preview is 720×405 px — with a
@@ -134,78 +207,59 @@ fn media_frame_size(dimensions: Option<(u32, u32)>) -> (f32, f32) {
         // cannot dominate the chat. Very wide videos follow the width bound
         // and their exact ratio, producing a short, wide frame instead of an
         // excessive height; the media is contained (never cropped) inside it.
-        MediaAspectClass::Landscape => (720.0, 500.0),
-        MediaAspectClass::Square => (480.0, 520.0),
-        MediaAspectClass::Portrait => (380.0, 520.0),
+        MediaAspectClass::Landscape => (720.0 * scale, 500.0 * scale),
+        MediaAspectClass::Square => (480.0 * scale, 520.0 * scale),
+        MediaAspectClass::Portrait => (380.0 * scale, 520.0 * scale),
     };
 
-    // Start from the class's preferred width and derive the height that
-    // preserves the exact ratio; if that exceeds the height cap, derive the
-    // width from the cap instead. The result is always ratio-exact.
-    let mut frame_width = max_width;
-    let mut frame_height = frame_width / ratio;
-    if frame_height > max_height {
-        frame_height = max_height;
-        frame_width = frame_height * ratio;
-    }
-
-    (frame_width, frame_height)
+    bounded_ratio_box(max_width, max_width, max_height, ratio)
 }
 
-/// Bounded, ratio-exact media-frame sizing strategy (VIDCARD-08 / spec Task 8).
+/// Bounded, ratio-exact media-frame sizing (VIDCARD-08 / Task 15).
 ///
-/// When the intrinsic dimensions are known *and* a poster thumbnail exists,
-/// the frame is **responsive**: its width is `min(available, nominal_width)`
-/// and the poster/player derive the height from the actual rendered width
-/// (see the `height(Shrink)` + `ContentFit::Contain` widgets in
-/// `media_frame`), so the exact source ratio is preserved and both
-/// dimensions shrink proportionally at narrow window sizes — never
-/// stretching, squashing or cropping, and never overflowing the chat column.
-///
-/// When dimensions are unknown (the spec's safe 16:9 default while metadata
-/// loads) or no thumbnail exists yet, the frame stays **fixed** at the
-/// nominal size so the bounded placeholder never collapses or inflates.
+/// The frame is sized from the intrinsic dimensions (or the safe 16:9
+/// default while metadata loads), the responsive band's media caps, and the
+/// measured chat timeline width. The width is `min(available, cap)` and the
+/// height is derived ratio-exact, capped by the band's height cap — so the
+/// preview always stays inside the chat column, never overflows
+/// horizontally, and a portrait preview never becomes unreasonably tall at
+/// narrow widths. The sizing is concrete (Fixed lengths), so the poster and
+/// the active player share exactly the same media box (Task 10) and both
+/// shrink proportionally as the chat column narrows.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct MediaFrameSizing {
-    nominal_width: f32,
-    nominal_height: f32,
-    responsive: bool,
+    width: f32,
+    height: f32,
 }
 
 impl MediaFrameSizing {
-    fn new(dimensions: Option<(u32, u32)>, has_thumbnail: bool) -> Self {
-        let (nominal_width, nominal_height) = media_frame_size(dimensions);
-        Self {
+    fn new(dimensions: Option<(u32, u32)>, band: CardBand, available_width: f32) -> Self {
+        let (nominal_width, nominal_height) = media_frame_size(dimensions, band);
+        // Always stay within the measured chat column: when the column is
+        // narrower than the nominal cap the frame starts from the available
+        // width (shrinking proportionally); the height then derives
+        // ratio-exact and is capped by the band's height cap so tall
+        // portraits never overflow the viewport.
+        let start_width = if available_width > 0.0 {
+            available_width
+        } else {
+            nominal_width
+        };
+        let (width, height) = bounded_ratio_box(
+            start_width,
             nominal_width,
             nominal_height,
-            responsive: dimensions.is_some() && has_thumbnail,
-        }
+            intrinsic_ratio(dimensions),
+        );
+        Self { width, height }
     }
 
-    /// Horizontal strategy: fill the available card width (capped by
-    /// [`Self::max_width`]) when responsive, otherwise the fixed nominal box.
     fn width(&self) -> Length {
-        if self.responsive {
-            Length::Fill
-        } else {
-            Length::Fixed(self.nominal_width)
-        }
+        Length::Fixed(self.width)
     }
 
-    /// Vertical strategy: derive the height from the actual rendered width
-    /// (ratio-preserving) when responsive, otherwise the fixed nominal box.
     fn height(&self) -> Length {
-        if self.responsive {
-            Length::Shrink
-        } else {
-            Length::Fixed(self.nominal_height)
-        }
-    }
-
-    /// `min(100%, nominal_width)` cap applied when responsive so a portrait
-    /// frame never spans the full card width or the full chat column.
-    fn max_width(&self) -> Option<f32> {
-        self.responsive.then_some(self.nominal_width)
+        Length::Fixed(self.height)
     }
 }
 
@@ -552,6 +606,11 @@ pub(crate) struct BoruVideoFileCard<'a> {
     /// The open/closed state lives in the parent app (stateless component);
     /// the card only renders the menu when told it is open.
     overflow_open: bool,
+    /// Measured chat timeline width (px) supplied by the responsive wrapper
+    /// in `view_chat_log`. Drives the card's responsive band (Task 15):
+    /// the card fills the chat column at narrow widths, media caps shrink at
+    /// medium/narrow widths, and the frame stays within the available space.
+    timeline_width: f32,
     #[cfg(feature = "video-playback")]
     player: Option<&'a Video>,
     preparing: bool,
@@ -583,11 +642,13 @@ impl<'a> BoruVideoFileCard<'a> {
         #[cfg(feature = "video-playback")] seek_position: Option<f32>,
         #[cfg(feature = "video-playback")] expanded: bool,
         received_at_ms: Option<i64>,
+        timeline_width: f32,
     ) -> Self {
         Self {
             entry_index,
             dark_mode,
             overflow_open,
+            timeline_width,
             #[cfg(feature = "video-playback")]
             player,
             preparing,
@@ -599,6 +660,19 @@ impl<'a> BoruVideoFileCard<'a> {
             #[cfg(not(feature = "video-playback"))]
             _marker: std::marker::PhantomData,
         }
+    }
+
+    /// Responsive band for this card, derived from the measured chat
+    /// timeline width (Task 15).
+    fn band(&self) -> CardBand {
+        CardBand::of(self.timeline_width)
+    }
+
+    /// Inner content width available to the card: the measured chat timeline
+    /// width minus the card's horizontal padding (`SPACE_24` on each side).
+    /// Used to bound the media frame so it never overflows the chat column.
+    fn inner_available_width(&self) -> f32 {
+        (self.timeline_width - 2.0 * SPACE_24).max(0.0)
     }
 
     /// Render the full card.
@@ -647,13 +721,21 @@ impl<'a> BoruVideoFileCard<'a> {
         // VIDCARD-03 card surface: reuse the shared Boru card style —
         // soft white (theme-aware) background, thin neutral green-grey
         // border, RADIUS_CARD (16 px), very subtle shadow — with 20-24 px
-        // internal padding. Width stays `Shrink` (content-driven; capped
-        // by the readable chat column), so a portrait video with a bounded
-        // media frame never forces the card to span the whole chat width.
-        // No hidden overflow here: `.clip(true)` is only used at the
-        // media-frame boundary to respect its rounded corners.
+        // internal padding.
+        //
+        // Task 15 responsive width: the card is content-driven (`Shrink`)
+        // at wide/medium widths so a portrait or square preview never forces
+        // the card to span the whole chat width, and becomes `Fill` (100% of
+        // the chat column) at narrow widths. No hidden overflow here:
+        // `.clip(true)` is only used at the media-frame boundary to respect
+        // its rounded corners.
+        let outer_width = if self.band() == CardBand::Narrow {
+            Length::Fill
+        } else {
+            Length::Shrink
+        };
         container(body)
-            .width(Length::Shrink)
+            .width(outer_width)
             .padding([SPACE_20, SPACE_24])
             .style(|t| crate::design_tokens::card_style(t))
             .into()
@@ -681,12 +763,18 @@ impl<'a> BoruVideoFileCard<'a> {
         // Filename: single line, width-capped + clipped so a long name can
         // never widen the card. The tooltip exposes the full name and the
         // copy action in the overflow menu exposes it to the clipboard.
+        // At narrow widths the filename becomes flexible (Task 15: filenames
+        // truncate safely) — it fills the space left after the other header
+        // items inside the 100%-width card, still capped by
+        // HEADER_FILENAME_MAX_WIDTH; at wide/medium it stays content-driven.
+        let narrow = self.band() == CardBand::Narrow;
         let display_name = truncate_filename(&attachment.name, HEADER_FILENAME_MAX_CHARS);
         let filename = container(
             crate::fonts::type_role_text(crate::fonts::TypeRole::BodyEmphasised, display_name)
                 .color(design_tokens::text_primary(theme))
                 .wrapping(Wrapping::None),
         )
+        .width(if narrow { Length::Fill } else { Length::Shrink })
         .max_width(HEADER_FILENAME_MAX_WIDTH)
         .clip(true);
         let filename_tooltip = tooltip::Tooltip::new(
@@ -703,6 +791,12 @@ impl<'a> BoruVideoFileCard<'a> {
             .push(filename_tooltip)
             .align_y(Alignment::Center)
             .spacing(SPACE_8);
+        // At narrow widths the title row fills the card so the flexible
+        // filename truncates against the remaining space instead of pushing
+        // the card wider than the chat column.
+        if narrow {
+            title_row = title_row.width(Length::Fill);
+        }
 
         if let Some(format) = file_format_label(&attachment.name) {
             title_row = title_row.push(
@@ -810,9 +904,14 @@ impl<'a> BoruVideoFileCard<'a> {
         error_color: Color,
     ) -> iced::Element<'a, AppMessage> {
         let presentation = video_presentation_state(attachment);
+        // Task 15: the frame is sized from the intrinsic dimensions (or the
+        // safe 16:9 default), the responsive band's media caps and the
+        // measured chat width — bounded so it never overflows the column and
+        // never becomes unreasonably tall at narrow widths.
         let sizing = MediaFrameSizing::new(
             attachment.poster_dimensions,
-            attachment.thumbnail_handle.is_some(),
+            self.band(),
+            self.inner_available_width(),
         );
 
         // Poster: the real thumbnail (contain, centred) or an honest
@@ -822,18 +921,14 @@ impl<'a> BoruVideoFileCard<'a> {
             if let Some(ref handle) = attachment.thumbnail_handle {
                 iced::widget::image(handle.clone())
                     // Contain: preserve the poster's exact intrinsic ratio,
-                    // centred inside the frame — never stretch or crop. When
-                    // the frame is responsive the image derives its height
-                    // from the actual rendered width (Fill + Shrink), so the
-                    // whole preview shrinks proportionally at narrow window
-                    // sizes instead of overflowing (VIDCARD-08 Task 8).
+                    // centred inside the fixed bounded frame — never stretch
+                    // or crop. The frame size is computed from the measured
+                    // chat width (Task 15), so the whole preview shrinks
+                    // proportionally at medium/narrow window sizes instead of
+                    // overflowing, while remaining ratio-exact and bounded.
                     .content_fit(iced::ContentFit::Contain)
                     .width(Length::Fill)
-                    .height(if sizing.responsive {
-                        Length::Shrink
-                    } else {
-                        Length::Fill
-                    })
+                    .height(Length::Fill)
                     .into()
             } else if matches!(
                 presentation,
@@ -935,7 +1030,7 @@ impl<'a> BoruVideoFileCard<'a> {
             .center_y(Length::Fill)
         });
         let preview: iced::Element<'a, AppMessage> = {
-            let mut frame = container(widget::stack![
+            container(widget::stack![
                 poster,
                 error_preview.unwrap_or_else(|| {
                     if self.preparing {
@@ -956,11 +1051,8 @@ impl<'a> BoruVideoFileCard<'a> {
             .width(sizing.width())
             .height(sizing.height())
             .clip(true)
-            .style(media_frame_style);
-            if let Some(max_width) = sizing.max_width() {
-                frame = frame.max_width(max_width);
-            }
-            frame.into()
+            .style(media_frame_style)
+            .into()
         };
 
         #[cfg(feature = "video-playback")]
@@ -1020,41 +1112,20 @@ impl<'a> BoruVideoFileCard<'a> {
             // is contained (never stretched or cropped) and the controls
             // overlay the frame's bottom edge on the existing translucent
             // dark surface, so poster and player share width, height, aspect
-            // ratio, border radius and position. When the frame is
-            // responsive the player derives its height from the actual
-            // rendered width just like the poster; the zero-size guard keeps
-            // the fixed nominal frame until the video reports real dims.
-            let (video_w, video_h) = video.size();
-            let player_sizing = if video_w > 0 && video_h > 0 {
-                sizing
-            } else {
-                MediaFrameSizing {
-                    nominal_width: sizing.nominal_width,
-                    nominal_height: sizing.nominal_height,
-                    responsive: false,
-                }
-            };
-            let video_element: iced::Element<'a, AppMessage> = if player_sizing.responsive {
+            // ratio, border radius and position. Both use the same bounded
+            // Task 15 sizing, so the player shrinks proportionally with the
+            // measured chat width exactly like the poster.
+            let video_element: iced::Element<'a, AppMessage> = container(
                 VideoPlayer::new(&video)
                     .content_fit(iced::ContentFit::Contain)
                     .on_end_of_stream(AppMessage::CloseInlineVideo)
-                    .on_error(|_error| AppMessage::CloseInlineVideo)
-                    .width(Length::Fill)
-                    .height(Length::Shrink)
-                    .into()
-            } else {
-                container(
-                    VideoPlayer::new(&video)
-                        .content_fit(iced::ContentFit::Contain)
-                        .on_end_of_stream(AppMessage::CloseInlineVideo)
-                        .on_error(|_error| AppMessage::CloseInlineVideo),
-                )
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .center_x(Length::Fill)
-                .center_y(Length::Fill)
-                .into()
-            };
+                    .on_error(|_error| AppMessage::CloseInlineVideo),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .into();
 
             let controls_bar = container(controls)
                 .padding([SPACE_6, SPACE_8])
@@ -1081,7 +1152,7 @@ impl<'a> BoruVideoFileCard<'a> {
                 iced::widget::Space::new().width(0.0).height(0.0).into()
             };
 
-            let mut player_frame = container(widget::stack![
+            container(widget::stack![
                 video_element,
                 container(controls_bar)
                     .width(Length::Fill)
@@ -1095,14 +1166,11 @@ impl<'a> BoruVideoFileCard<'a> {
                     .align_y(Alignment::End)
                     .padding(iced::Padding::new(0.0).right(SPACE_8).bottom(SPACE_8)),
             ])
-            .width(player_sizing.width())
-            .height(player_sizing.height())
+            .width(sizing.width())
+            .height(sizing.height())
             .clip(true)
-            .style(media_frame_style);
-            if let Some(max_width) = player_sizing.max_width() {
-                player_frame = player_frame.max_width(max_width);
-            }
-            player_frame.into()
+            .style(media_frame_style)
+            .into()
         } else {
             preview
         };
@@ -1373,8 +1441,9 @@ impl<'a> BoruVideoFileCard<'a> {
 mod tests {
     use super::{
         aspect_ratio_class, file_format_label, format_relative_time, header_badge, media_frame_size,
-        media_placeholder_text, truncate_filename, video_presentation_state, MediaAspectClass,
-        MediaFrameSizing, VideoPresentationState, HEADER_FILENAME_MAX_CHARS,
+        media_placeholder_text, truncate_filename, video_presentation_state, CardBand,
+        MediaAspectClass, MediaFrameSizing, VideoPresentationState, HEADER_FILENAME_MAX_CHARS,
+        MEDIUM_CARD_BREAKPOINT, NARROW_CARD_BREAKPOINT,
     };
     use iced::Length;
     use crate::app::{DownloadAttachment, DownloadFailure, DownloadState, TransferKind};
@@ -1416,7 +1485,7 @@ mod tests {
     #[test]
     fn unknown_dimensions_fall_back_to_bounded_widescreen_default() {
         // No dimensions yet: safe 16:9 default at the landscape width bound.
-        let (width, height) = media_frame_size(None);
+        let (width, height) = media_frame_size(None, CardBand::Wide);
         assert_eq!(width, 720.0);
         assert!((height - 405.0).abs() < 0.01);
     }
@@ -1425,7 +1494,7 @@ mod tests {
     fn landscape_frame_preserves_exact_intrinsic_ratio() {
         // 16:9 fills the landscape width bound; the height derives from the
         // exact ratio (no fixed 16:9 crop, no stretch/squash).
-        let (width, height) = media_frame_size(Some((3840, 2160)));
+        let (width, height) = media_frame_size(Some((3840, 2160)), CardBand::Wide);
         assert_eq!(width, 720.0);
         assert!((height - 405.0).abs() < 0.01);
         assert!((width / height - 3840.0 / 2160.0).abs() < 1e-6);
@@ -1435,7 +1504,7 @@ mod tests {
     fn landscape_typical_hd_preview_matches_spec() {
         // VIDCARD-06 spec: a typical 16:9 preview is approximately
         // 720×405 px where space allows. 1280×720 derives exactly that.
-        let (width, height) = media_frame_size(Some((1280, 720)));
+        let (width, height) = media_frame_size(Some((1280, 720)), CardBand::Wide);
         assert_eq!(width, 720.0);
         assert!((height - 405.0).abs() < 0.01);
         assert!((width / height - 1280.0 / 720.0).abs() < 1e-6);
@@ -1446,7 +1515,7 @@ mod tests {
         // 4:3 landscape would exceed the ~500 px height cap at the full
         // landscape width, so the width derives down from the cap — the
         // result stays ratio-exact and never dominates the chat.
-        let (width, height) = media_frame_size(Some((640, 480)));
+        let (width, height) = media_frame_size(Some((640, 480)), CardBand::Wide);
         assert_eq!(height, 500.0);
         assert!((width - 666.6667).abs() < 0.01);
         assert!((width / height - 640.0 / 480.0).abs() < 1e-6);
@@ -1454,7 +1523,7 @@ mod tests {
 
     #[test]
     fn square_frame_uses_bounded_square_footprint() {
-        let (width, height) = media_frame_size(Some((1080, 1080)));
+        let (width, height) = media_frame_size(Some((1080, 1080)), CardBand::Wide);
         assert_eq!(width, 480.0);
         assert_eq!(height, 480.0);
         assert!((width / height - 1.0).abs() < 1e-6);
@@ -1466,7 +1535,7 @@ mod tests {
         // must stay ratio-exact (0.9), NOT be forced to a perfect square.
         // The height cap (520) wins, so the width derives from the cap to
         // preserve 0.9 exactly.
-        let (width, height) = media_frame_size(Some((1080, 1200)));
+        let (width, height) = media_frame_size(Some((1080, 1200)), CardBand::Wide);
         assert_eq!(height, 520.0);
         assert!(
             (width - 468.0).abs() < 0.01,
@@ -1477,7 +1546,7 @@ mod tests {
         // 1200x1080 (ratio 1.111) is near-square but slightly wide: the
         // preferred width cap (480) wins and the height derives to keep the
         // exact ratio — again no forced perfect square.
-        let (width2, height2) = media_frame_size(Some((1200, 1080)));
+        let (width2, height2) = media_frame_size(Some((1200, 1080)), CardBand::Wide);
         assert_eq!(width2, 480.0);
         assert!((width2 / height2 - 1200.0 / 1080.0).abs() < 1e-6);
     }
@@ -1486,7 +1555,7 @@ mod tests {
     fn square_frame_preferred_width_stays_in_spec_band() {
         // VIDCARD-07 spec: preferred width 420-560 px for square videos.
         // A perfect 1:1 uses the class preferred width directly.
-        let (width, _height) = media_frame_size(Some((1080, 1080)));
+        let (width, _height) = media_frame_size(Some((1080, 1080)), CardBand::Wide);
         assert!(
             (420.0..=560.0).contains(&width),
             "square preferred width {width} must stay in the 420-560 px band"
@@ -1497,7 +1566,7 @@ mod tests {
     fn square_frame_max_height_is_bounded() {
         // VIDCARD-07 spec: maximum height ~520 px. Near-square frames that
         // hit the height cap must still keep the exact ratio.
-        let (width, height) = media_frame_size(Some((1080, 1200)));
+        let (width, height) = media_frame_size(Some((1080, 1200)), CardBand::Wide);
         assert!(height <= 520.0 + 1e-6);
         assert!((width / height - 0.9).abs() < 1e-6);
     }
@@ -1507,16 +1576,21 @@ mod tests {
         // VIDCARD-07: the square preview must feel intentionally centred,
         // not like a landscape frame containing a small square on the left.
         // The media element is wrapped in a Fill-width container that centres
-        // it (`center_x(Fill)`), and the frame itself is width-capped with a
-        // Fixed preview width — it never stretches to the full card width.
+        // it (`center_x(Fill)`), and the frame itself is width-capped via
+        // the bounded `MediaFrameSizing` (Fixed size, never plain Fill) — it
+        // never stretches to the full card width.
         let src = include_str!("video_file_card.rs");
         let prod = src.split("#[cfg(test)]").next().unwrap();
 
-        // The body column wraps the media in a centring container.
+        // The body column wraps the media in a centring container. Anchor on
+        // the outer card container so the extraction survives width changes.
         let body = prod
             .split("let mut body = Column::new()")
             .nth(1)
-            .and_then(|s| s.split(".width(Length::Shrink)").next())
+            .and_then(|s| {
+                s.split(".style(|t| crate::design_tokens::card_style(t))")
+                    .next()
+            })
             .expect("card body column block must exist");
         assert!(
             body.contains("container(media).width(Length::Fill).center_x(Length::Fill)"),
@@ -1524,11 +1598,11 @@ mod tests {
         );
 
         // The media frame itself is width-capped (never plain Fill): the
-        // shared responsive sizing strategy (VIDCARD-08) derives the frame
-        // width from `MediaFrameSizing` — `Fill` bounded by `max_width` =
-        // the nominal width — so a square preview stays centred at its
-        // capped size and never stretches to the full card width, while
-        // still shrinking proportionally at very narrow windows (Task 8).
+        // bounded sizing strategy (Task 15) computes a concrete Fixed size
+        // from the band caps and the measured chat width, so a square
+        // preview stays centred at its capped size and never stretches to
+        // the full card width, while shrinking proportionally at narrow
+        // window sizes.
         let media_frame = prod
             .split("let preview: iced::Element<'a, AppMessage> = {")
             .nth(1)
@@ -1539,12 +1613,24 @@ mod tests {
             "media frame width must come from the bounded sizing strategy"
         );
         assert!(
-            media_frame.contains("sizing.max_width()"),
-            "media frame must be width-capped via max_width (never stretch to full card width)"
+            !media_frame.contains("sizing.max_width()"),
+            "media frame must not rely on the removed max_width cap (sizing is now concrete)"
         );
         assert!(
             media_frame.contains(".height(sizing.height())"),
             "media frame height must come from the bounded sizing strategy"
+        );
+
+        // The sizing itself resolves to Fixed lengths (bounded box), so the
+        // frame cannot stretch to the full card width.
+        let sizing_src = prod
+            .split("struct MediaFrameSizing")
+            .nth(1)
+            .and_then(|s| s.split("/// Neutral dark media background").next())
+            .expect("MediaFrameSizing impl must exist");
+        assert!(
+            sizing_src.contains("Length::Fixed(self.width)"),
+            "MediaFrameSizing::width must return a Fixed length (bounded, never Fill)"
         );
 
         // Metadata and actions stay as full-width siblings of the media
@@ -1558,7 +1644,7 @@ mod tests {
     #[test]
     fn portrait_frame_caps_height_and_preserves_ratio() {
         // 9:16 is height-capped; the width derives to preserve 0.5625 exactly.
-        let (width, height) = media_frame_size(Some((720, 1280)));
+        let (width, height) = media_frame_size(Some((720, 1280)), CardBand::Wide);
         assert_eq!(height, 520.0);
         assert!((width - 292.5).abs() < 0.01);
         assert!((width / height - 720.0 / 1280.0).abs() < 1e-6);
@@ -1572,7 +1658,7 @@ mod tests {
         for (width, height) in [(720u32, 1280u32), (1080, 1920), (576, 1024), (480, 640)] {
             let ratio = width as f32 / height as f32;
             assert!(ratio < 0.85, "fixture must be portrait");
-            let (frame_w, frame_h) = media_frame_size(Some((width, height)));
+            let (frame_w, frame_h) = media_frame_size(Some((width, height)), CardBand::Wide);
             assert!(
                 frame_w <= 420.0,
                 "portrait width must never exceed min(100%, 420px), got {frame_w}"
@@ -1588,7 +1674,7 @@ mod tests {
         }
         // 9:16 lands in the preferred 280-380px band with the height cap
         // applied, and the responsive max width is exactly the nominal width.
-        let (frame_w, frame_h) = media_frame_size(Some((720, 1280)));
+        let (frame_w, frame_h) = media_frame_size(Some((720, 1280)), CardBand::Wide);
         assert!(
             (280.0..=380.0).contains(&frame_w),
             "9:16 width {frame_w} outside the preferred 280-380px band"
@@ -1600,52 +1686,63 @@ mod tests {
     }
 
     #[test]
-    fn media_frame_sizing_is_responsive_with_known_dims_and_thumbnail() {
-        // Known intrinsic dimensions + a poster thumbnail → the frame fills
-        // the available width (capped at the nominal width) and derives its
-        // height from the actual rendered width, so it shrinks
-        // proportionally at narrow window sizes instead of overflowing.
-        let sizing = MediaFrameSizing::new(Some((720, 1280)), true);
-        assert!(sizing.responsive);
-        assert_eq!(sizing.width(), Length::Fill);
-        assert_eq!(sizing.height(), Length::Shrink);
-        assert_eq!(sizing.max_width(), Some(292.5));
+    fn media_frame_sizing_bounds_to_available_width() {
+        // Task 15: the frame starts from the measured chat width (capped by
+        // the band's nominal cap) and derives the height ratio-exact, so the
+        // preview shrinks proportionally at narrow window sizes instead of
+        // overflowing, while a portrait never becomes unreasonably tall. The
+        // result is a concrete Fixed box shared by poster and player.
+        let sizing = MediaFrameSizing::new(Some((720, 1280)), CardBand::Wide, 1000.0);
+        assert_eq!(sizing.width, 292.5);
+        assert_eq!(sizing.height, 520.0);
+        assert_eq!(sizing.width(), Length::Fixed(292.5));
+        assert_eq!(sizing.height(), Length::Fixed(520.0));
     }
 
     #[test]
-    fn media_frame_sizing_stays_fixed_without_thumbnail_or_dims() {
+    fn media_frame_sizing_stays_bounded_without_thumbnail_or_dims() {
         // Unknown dimensions (spec's safe 16:9 default while metadata loads)
-        // → fixed bounded frame, never a frame with no size driver. The
+        // → bounded default frame, never a frame with no size driver. The
         // fallback tracks the landscape width bound (VIDCARD-06: 720×405).
-        let unknown = MediaFrameSizing::new(None, true);
-        assert!(!unknown.responsive);
-        assert_eq!(unknown.max_width(), None);
+        let unknown = MediaFrameSizing::new(None, CardBand::Wide, 1000.0);
         assert_eq!(unknown.width(), Length::Fixed(720.0));
         assert_eq!(unknown.height(), Length::Fixed(405.0));
 
         // Known dimensions but no thumbnail yet (poster still generating) →
-        // fixed nominal frame so the placeholder cannot collapse or inflate.
-        let no_thumb = MediaFrameSizing::new(Some((720, 1280)), false);
-        assert!(!no_thumb.responsive);
+        // the frame stays bounded at the nominal size while the poster loads.
+        let no_thumb = MediaFrameSizing::new(Some((720, 1280)), CardBand::Wide, 1000.0);
         assert_eq!(no_thumb.width(), Length::Fixed(292.5));
         assert_eq!(no_thumb.height(), Length::Fixed(520.0));
     }
 
     #[test]
     fn media_frame_sizing_nominal_matches_media_frame_size() {
-        let sizing = MediaFrameSizing::new(Some((3840, 2160)), true);
-        let (width, height) = media_frame_size(Some((3840, 2160)));
-        assert_eq!(sizing.nominal_width, width);
-        assert_eq!(sizing.nominal_height, height);
+        // With a chat column wide enough that the cap wins, the sizing
+        // matches the nominal bounded box exactly.
+        let sizing = MediaFrameSizing::new(Some((3840, 2160)), CardBand::Wide, 1000.0);
+        let (width, height) = media_frame_size(Some((3840, 2160)), CardBand::Wide);
+        assert_eq!(sizing.width, width);
+        assert_eq!(sizing.height, height);
     }
 
     #[test]
-    fn media_frame_uses_neutral_dark_background_and_responsive_shrink() {
-        // VIDCARD-08 Task 8: portrait previews sit on a fixed neutral dark
-        // media background (letterboxing reads as deliberate) and the frame
-        // caps its width at the nominal size while the poster derives its
-        // height from the actual rendered width — no full-card stretch, no
-        // top/bottom crop, no horizontal overflow at narrow window sizes.
+    fn media_frame_sizing_shrinks_to_available_width() {
+        // A landscape frame in a 400 px chat column: never wider than the
+        // available space (Task 15 no-horizontal-scroll rule) and still
+        // ratio-exact.
+        let sizing = MediaFrameSizing::new(Some((1280, 720)), CardBand::Wide, 400.0);
+        assert_eq!(sizing.width, 400.0);
+        assert!((sizing.height - 225.0).abs() < 0.01);
+        assert!((sizing.width / sizing.height - 1280.0 / 720.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn media_frame_uses_neutral_dark_background_and_bounded_sizing() {
+        // VIDCARD-08 Task 8 + Task 15: portrait previews sit on a fixed
+        // neutral dark media background (letterboxing reads as deliberate)
+        // and the frame is bounded by the measured chat width — no
+        // full-card stretch, no top/bottom crop, no horizontal overflow at
+        // narrow window sizes.
         let src = include_str!("video_file_card.rs");
         let prod = src.split("#[cfg(test)]").next().unwrap();
         let frame = prod
@@ -1673,16 +1770,16 @@ mod tests {
             "media frame must not reuse the card surface color (light in light theme)"
         );
         assert!(
-            frame.contains("sizing.max_width()"),
-            "responsive frame must cap width via max_width (min(100%, nominal))"
+            frame.contains("sizing.width()"),
+            "media frame must use the bounded sizing width (min(available, cap))"
         );
         assert!(
             frame.contains("ContentFit::Contain"),
             "poster/player must render contain-style (never stretch or crop)"
         );
         assert!(
-            frame.contains("Length::Shrink"),
-            "poster/player must derive height from the actual rendered width when responsive"
+            frame.contains("Length::Fill"),
+            "poster/player must fill the bounded Fixed frame (contain letterboxes inside it)"
         );
     }
 
@@ -1691,7 +1788,7 @@ mod tests {
         // 21:9 uses the full landscape width; the height follows the exact
         // ratio instead of forcing a 16:9 box — a short, wide frame with no
         // excessive vertical height and nothing cropped.
-        let (width, height) = media_frame_size(Some((6720, 2880)));
+        let (width, height) = media_frame_size(Some((6720, 2880)), CardBand::Wide);
         assert_eq!(width, 720.0);
         assert!((height - 308.571).abs() < 0.01);
         assert!((width / height - 6720.0 / 2880.0).abs() < 1e-6);
@@ -1701,7 +1798,7 @@ mod tests {
     fn ultrawide_panorama_stays_short_and_ratio_exact() {
         // 32:9 panorama: still the full landscape width, very short frame —
         // the contain rule keeps every pixel visible (no side cropping).
-        let (width, height) = media_frame_size(Some((7680, 2160)));
+        let (width, height) = media_frame_size(Some((7680, 2160)), CardBand::Wide);
         assert_eq!(width, 720.0);
         assert!((height - 202.5).abs() < 0.01);
         assert!((width / height - 7680.0 / 2160.0).abs() < 1e-6);
@@ -1860,8 +1957,8 @@ mod tests {
             "card padding must use the 20-24 px token band"
         );
         assert!(
-            outer.contains(".width(Length::Shrink)"),
-            "card width must be content-driven (Shrink), not forced full width"
+            outer.contains(".width(outer_width)"),
+            "card width must be responsive (content-driven Shrink at wide/medium, Fill at narrow)"
         );
         assert!(
             !outer.contains(".clip("),
@@ -1984,6 +2081,101 @@ mod tests {
         );
     }
 
+    // ── Task 15: responsive card behaviour ──────────────────────────────
+
+    #[test]
+    fn card_band_classifies_timeline_widths() {
+        use CardBand::*;
+        assert_eq!(CardBand::of(320.0), Narrow);
+        assert_eq!(CardBand::of(NARROW_CARD_BREAKPOINT), Narrow);
+        assert_eq!(CardBand::of(NARROW_CARD_BREAKPOINT + 1.0), Medium);
+        assert_eq!(CardBand::of(MEDIUM_CARD_BREAKPOINT - 1.0), Medium);
+        assert_eq!(CardBand::of(MEDIUM_CARD_BREAKPOINT), Wide);
+        assert_eq!(CardBand::of(1280.0), Wide);
+    }
+
+    #[test]
+    fn media_caps_reduce_at_medium_and_narrow_bands() {
+        // Task 15: "reduce media maximum dimensions" at medium widths. A
+        // 1280×720 landscape preview keeps the full 720×405 box at Wide and
+        // shrinks proportionally at Medium (×0.85) and Narrow (×0.7).
+        let (wide_w, wide_h) = media_frame_size(Some((1280, 720)), CardBand::Wide);
+        assert_eq!(wide_w, 720.0);
+        assert!((wide_h - 405.0).abs() < 0.01);
+
+        let (medium_w, medium_h) = media_frame_size(Some((1280, 720)), CardBand::Medium);
+        assert!((medium_w - 720.0 * 0.85).abs() < 0.01);
+        assert!((medium_w / medium_h - 1280.0 / 720.0).abs() < 1e-6);
+
+        let (narrow_w, narrow_h) = media_frame_size(Some((1280, 720)), CardBand::Narrow);
+        assert!((narrow_w - 720.0 * 0.7).abs() < 0.01);
+        assert!((narrow_w / narrow_h - 1280.0 / 720.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn portrait_frame_never_exceeds_height_cap_at_narrow_widths() {
+        // Task 15: "Do NOT switch a portrait preview to full-width merely
+        // because the window becomes narrower if that would make it
+        // unreasonably tall." A 9:16 portrait inside a 352 px chat column
+        // stays height-capped and narrow instead of stretching to the column.
+        let sizing = MediaFrameSizing::new(Some((1080, 1920)), CardBand::Narrow, 352.0);
+        // Narrow portrait caps: 380*0.7 wide, 520*0.7 tall.
+        let max_height = 520.0 * CardBand::Narrow.media_scale();
+        assert!(
+            sizing.height <= max_height + 1e-6,
+            "portrait height {} exceeds the narrow cap {max_height}",
+            sizing.height
+        );
+        assert!(
+            (sizing.width / sizing.height - 1080.0 / 1920.0).abs() < 1e-4,
+            "portrait frame must stay ratio-exact"
+        );
+        assert!(
+            sizing.width <= 352.0,
+            "portrait frame must never exceed the available chat width"
+        );
+    }
+
+    #[test]
+    fn square_frame_stays_centred_and_bounded_at_narrow_widths() {
+        // A square preview at narrow widths fits the column exactly without
+        // stretching to the full card width.
+        let sizing = MediaFrameSizing::new(Some((1080, 1080)), CardBand::Narrow, 352.0);
+        assert!(sizing.width <= 352.0);
+        assert!((sizing.width - sizing.height).abs() < 1e-6);
+        assert!((sizing.width / sizing.height - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn card_outer_width_fills_at_narrow_band() {
+        // Task 15: "At narrow widths: Card width becomes 100%". The outer
+        // card container picks Fill at the Narrow band and stays
+        // content-driven (Shrink) at wide/medium so a portrait card never
+        // spans the whole chat width.
+        let src = include_str!("video_file_card.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let outer = prod
+            .split("let outer_width = if self.band() == CardBand::Narrow")
+            .nth(1)
+            .and_then(|s| {
+                s.split(".style(|t| crate::design_tokens::card_style(t))")
+                    .next()
+            })
+            .expect("outer card width block must exist");
+        assert!(
+            outer.contains("Length::Fill"),
+            "Narrow band must set the card width to Fill (100% of the chat column)"
+        );
+        assert!(
+            outer.contains("Length::Shrink"),
+            "wide/medium bands must keep the card content-driven (Shrink)"
+        );
+        assert!(
+            outer.contains(".width(outer_width)"),
+            "the outer card container must apply the responsive width"
+        );
+    }
+
     #[test]
     fn play_overlay_is_circular_high_contrast_and_has_accessible_label() {
         // VIDCARD-11: the play overlay must be a centred, circular,
@@ -2019,6 +2211,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn header_filename_is_flexible_at_narrow_band() {
+        // Task 15: "Filenames truncate safely" at narrow widths — the
+        // filename fills the space left by the other header items (still
+        // capped and clipped) instead of forcing the card wider.
+        let src = include_str!("video_file_card.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let header = prod
+            .split("fn header(")
+            .nth(1)
+            .and_then(|s| s.split("fn overflow_menu").next())
+            .expect("header body must exist");
+        assert!(
+            header.contains(".width(if narrow { Length::Fill } else { Length::Shrink })"),
+            "header filename must be flexible at narrow widths and content-driven otherwise"
+        );
+        assert!(
+            header.contains("title_row = title_row.width(Length::Fill)"),
+            "header title row must fill the card at narrow widths"
+        );
+        assert!(
+            header.contains(".max_width(HEADER_FILENAME_MAX_WIDTH)"),
+            "header filename must stay capped"
+        );
+        assert!(
+            header.contains(".clip(true)"),
+            "header filename must clip so long names truncate safely"
+        );
+    }
+
+    #[test]
     #[test]
     fn duration_badge_uses_real_metadata_only() {
         // VIDCARD-11: the duration badge must come from real player
@@ -2077,10 +2300,10 @@ mod tests {
     fn media_frame_keeps_poster_and_player_geometry_identical() {
         // Task 10 invariant: the poster and the player must share the same
         // media box so Play does not cause a layout jump. VIDCARD-11 must
-        // preserve that on top of VIDCARD-08's responsive sizing: both the
-        // poster frame and the player frame are driven by the same
-        // MediaFrameSizing (sizing / player_sizing) and share the same
-        // media-frame surface style and boundary clip.
+        // preserve that on top of VIDCARD-15's responsive sizing: both the
+        // poster frame and the player frame are driven by the same concrete
+        // MediaFrameSizing (sizing) and share the same media-frame surface
+        // style and boundary clip.
         let src = include_str!("video_file_card.rs");
         let prod = src.split("#[cfg(test)]").next().unwrap();
         let media_frame_fns = prod
@@ -2089,14 +2312,16 @@ mod tests {
             .expect("media_frame must exist");
 
         // Both the poster preview and the player use the shared
-        // MediaFrameSizing system (poster: sizing; player: player_sizing).
+        // MediaFrameSizing system (poster: sizing; player: the same sizing —
+        // VIDCARD-15 removed the separate player_sizing variant).
         assert!(
             media_frame_fns.contains("MediaFrameSizing::new("),
             "poster frame must be sized by the shared MediaFrameSizing"
         );
         assert!(
-            media_frame_fns.contains("player_sizing"),
-            "player frame must be sized by the player_sizing variant"
+            media_frame_fns.contains(".width(sizing.width())")
+                && media_frame_fns.contains(".height(sizing.height())"),
+            "poster and player frames must both be sized by the shared sizing"
         );
         assert!(
             media_frame_fns.matches(".style(media_frame_style)").count() >= 2,
@@ -2105,6 +2330,20 @@ mod tests {
         assert!(
             media_frame_fns.matches(".clip(true)").count() >= 2,
             "poster and player frames must both clip overflow at the frame boundary"
+        );
+    }
+
+    #[test]
+    fn action_buttons_wrap_at_narrow_widths() {
+        // Task 15: "Action buttons may stack vertically or wrap" at narrow
+        // widths. The shared action row is a wrapping row, so the buttons
+        // stay on one line at wide/medium and flow onto extra lines when
+        // they do not fit — never overflowing the chat column horizontally.
+        let src = include_str!("download_progress_view.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            prod.contains("Row::with_children(buttons).spacing(SPACE_8).wrap()"),
+            "action buttons must use a wrapping row so they wrap/stack at narrow widths"
         );
     }
 }
