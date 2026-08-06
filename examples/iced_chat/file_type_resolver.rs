@@ -224,6 +224,19 @@ impl PapirusCatalog {
     }
 }
 
+/// Repo-relative path for `icon_id` at a semantic Papirus size directory
+/// (16/24/32/48/64), e.g. `"assets/third_party/papirus/48/application-pdf.svg"`.
+///
+/// This is the PAPIRUS-04 size-lookup hook: [`resolve_file_icon`] returns
+/// the canonical `card` (32px) path on [`ResolvedFileIcon::asset_path`],
+/// and the `FileTypeIcon` component re-queries the pinned bundle here for
+/// the other semantic sizes (compact/list/large/hero).  `None` means the
+/// icon does not exist at that size in the pinned bundle; the component
+/// must fall back to the unknown-generic icon — never a missing asset.
+pub fn papirus_asset_path(icon_id: &str, size: u16) -> Option<String> {
+    PapirusCatalog::global().asset_path(icon_id, size)
+}
+
 // ── Seed mapping tables (PAPIRUS-08/09 extend) ───────────────────────
 
 /// (extension, icon_id, category) — ordinary extensions.
