@@ -213,7 +213,7 @@ Source: `examples/iced_chat/design_tokens.rs`. All colours are theme-aware (ligh
 
 | Token | Hex | Usage |
 |---|---|---|
-| `primary()` | #188C50 | Brand accent, buttons, links |
+| `primary()` | #187F50 | Brand accent, buttons, links (spec #188C50 darkened for WCAG AA — white label 5.01:1) |
 | `primary_hover()` | #147643 | Hover state |
 | `primary_pressed()` | #105F38 | Pressed state |
 | `primary_soft()` | #EAF5EE | Subtle accent background |

@@ -16,4 +16,5 @@ The authoritative, living specification for Boru visual tokens is
 Do not rely on the palette values that used to live in this file (e.g.
 `APP_BACKGROUND #F4F6F4`, `PRIMARY #2F6B4F`, `SIDEBAR_WIDTH 300`) — the modern
 redesign moved to the Boru Modern spec values (`color_canvas #F7F9F8`,
-`primary #188C50`, `SIDEBAR_WIDTH 304` with a 288–320 px responsive clamp).
+`primary #187F50` (spec #188C50 darkened for WCAG AA), `SIDEBAR_WIDTH 304`
+with a 288–320 px responsive clamp).

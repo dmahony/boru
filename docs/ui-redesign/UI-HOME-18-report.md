@@ -168,9 +168,13 @@ Explicit, complete list of every remaining difference found:
    `04a3a7fe`) — measured 4.54–5.16:1 on all light surfaces, passing WCAG AA
    normal. Regression test `contrast_ratios_pass_wcag_aa` pins ≥4.5:1;
    DESIGN_SYSTEM.md updated to match.
-2. **Primary button label contrast** (follow-up filed): white 14px
-   semibold on #188C50 = 4.28:1 — passes 3:1 large-text AA, misses 4.5:1
-   normal-text AA.
+2. **Primary button label contrast** (follow-up t_80938852 → **resolved**, see
+   `UI-HOME-followup-primary-button-contrast.md`): the QA run measured the
+   stale DESIGN_SYSTEM.md hex `#188C50` (4.28:1 on white), but the live token
+   in `design_tokens.rs` at this commit was already `#187F50` (darkened in
+   `04a3a7fe`) — white ButtonLabel on it measures 5.01:1, passing WCAG AA
+   normal-text 4.5:1. Regression test `contrast_ratios_pass_wcag_aa` pins
+   ≥4.5:1; DESIGN_SYSTEM.md updated to match.
 3. **iced 0.14 button focus** (follow-up t_d849e063 → resolved as accepted
    limitation, see `UI-HOME-followup-button-focus.md`): buttons cannot take
    keyboard focus (no `button::Status::Focused`). Pre-existing framework

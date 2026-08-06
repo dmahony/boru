@@ -116,7 +116,7 @@ The table below records the mapping decision for each visual attribute.
 | Primary text | `text_primary(theme)` | #17211B (light) / #CCC (dark) | design_tokens.rs:318 |
 | Secondary text | `text_secondary(theme)` | #5F6F66 (light) / #999 (dark) | design_tokens.rs:327 |
 | Muted text | `text_muted(theme)` | #64706A (light) / #999 (dark) | design_tokens.rs:420 |
-| Primary accent | `primary(theme)` | #188C50 (light) / #4A9EFF (dark) | design_tokens.rs:345 |
+| Primary accent | `primary(theme)` | #187F50 (light) / #4A9EFF (dark) | design_tokens.rs:429 |
 | Primary hover | `primary_hover(theme)` | #147643 (light) / #5CB3FF (dark) | design_tokens.rs:354 |
 | Primary soft bg | `primary_soft(theme)` | #EAF5EE (light) / rgba(0.15,0.3,0.15,0.4) (dark) | design_tokens.rs:376 |
 | Success/online | `color_success(theme)` | #20A661 (light) / #3DDC84 (dark) | design_tokens.rs:385 |

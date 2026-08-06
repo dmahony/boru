@@ -31,7 +31,7 @@ table is in DESIGN_SYSTEM.md §3.1.
 | text_primary | #17211B | 16.54:1 | 14.55:1 | 14.80:1 | PASS AA normal |
 | text_secondary | #5F6F66 | 5.31:1 | 4.67:1 | 4.76:1 | PASS AA normal |
 | text_muted | #8A978F* | 3.04:1 | 2.68:1 | 2.72:1 | **FAIL AA normal** (below 4.5:1) — see follow-up |
-| primary (bg) | #188C50 | — | — | — | white label on it = 4.28:1 → **FAIL AA normal text** (≥4.5 needed; passes large-text 3:1) — see follow-up |
+| primary (bg) | #188C50* | — | — | — | white label on it = 4.28:1 → **FAIL AA normal text** (≥4.5 needed; passes large-text 3:1) — see follow-up |
 | primary_hover | #147643 | white on it 5.67:1 | | | PASS |
 | color_success (online dot) | #20A661 | 3.14:1 | | | PASS non-text ≥3:1 (indicator only; label text also present) |
 | color_danger | #C84E4E | 4.51:1 | | | PASS non-text; white text on it 4.51:1 |
@@ -45,6 +45,11 @@ classifier — UI-HOME-05), satisfying DESIGN_SYSTEM.md §13.1.
 \* The `text_muted` row reports the hex documented in DESIGN_SYSTEM.md at QA
 time. The live token in `design_tokens.rs` was already `#64706A` (see
 follow-up ticket 1; resolved by t_b2ac1e1a).
+
+\* The `primary (bg)` row likewise reports the DESIGN_SYSTEM.md spec hex at
+QA time; the live token in `design_tokens.rs` was already `#187F50` (darkened
+in `04a3a7fe`), on which a white `ButtonLabel` measures 5.01:1 — passing AA
+normal text (see follow-up ticket 2; resolved by t_80938852).
 
 ## 4. Target sizes
 
@@ -85,9 +90,14 @@ follow-up ticket 1; resolved by t_b2ac1e1a).
    4.54–5.16:1 on all light surfaces and passes WCAG AA normal text. The
    regression test `contrast_ratios_pass_wcag_aa` pins ≥4.5:1; DESIGN_SYSTEM.md
    updated to match.
-2. **White label on primary buttons** — 4.28:1 (14px semibold
-   `ButtonLabel`) just misses AA normal-text 4.5:1. Darken primary
-   (#147643-class) or bump button labels to ≥18px semibold.
+2. **White label on primary buttons** — **RESOLVED by t_80938852** (see
+   `UI-HOME-followup-primary-button-contrast.md`): the QA row above measured
+   the stale DESIGN_SYSTEM.md spec hex `#188C50` (4.28:1). The live token in
+   `design_tokens.rs` at this commit was already `#187F50` (darkened in
+   `04a3a7fe`), on which a white 14px semibold `ButtonLabel` measures 5.01:1
+   — passing WCAG AA normal-text 4.5:1. Regression test
+   `contrast_ratios_pass_wcag_aa` pins ≥4.5:1; DESIGN_SYSTEM.md updated to
+   match.
 3. **iced 0.14 button focus** — no `Focused` status variant; buttons can't
    take keyboard focus. Pre-existing framework limitation; re-evaluate when
    the iced version supports focus styling.
