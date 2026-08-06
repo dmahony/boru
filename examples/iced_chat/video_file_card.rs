@@ -7,7 +7,9 @@
 //!
 //! The card is structured in four sections, mirroring the VIDCARD spec:
 //!
-//! - **Header** — state badge, video icon, filename, format label.
+//! - **Header** — compact transfer-state badge, video icon, single-line
+//!   truncated filename (full name in a tooltip), format label, and an
+//!   overflow menu for secondary actions.
 //! - **Media frame** — bounded poster or the active inline player, a play
 //!   overlay (only when ready), and the playback-error panel when a live
 //!   player failed to open the file.
@@ -28,7 +30,7 @@
 //! and outgoing shared file.
 
 use iced::widget::text::Wrapping;
-use iced::widget::{self, button, container, row, text, Column, Row};
+use iced::widget::{self, button, container, row, text, tooltip, Column, Row};
 use iced::{Alignment, Color, Length};
 #[cfg(feature = "video-playback")]
 use iced_video_player::{Video, VideoPlayer};
@@ -37,13 +39,14 @@ use super::app::{
     accent_primary, bg_surface, border_muted, color_error, text_system, SPACE_10, SPACE_12,
     SPACE_2, SPACE_20, SPACE_24, SPACE_4, SPACE_6, SPACE_8, TYPO_SM, TYPO_XS, TYPO_XXS,
 };
-use super::app::{
-    icon_svg, AppMessage, DownloadAttachment, DownloadState, ICON_ACTIVITY, ICON_FILES,
-};
+use super::app::{AppMessage, DownloadAttachment, DownloadState};
 use super::download_progress_view::{
     action_button, action_buttons, human_size, human_speed, progress_section, resolve_theme,
-    state_badge, state_badge_color,
+    state_badge_color,
 };
+use crate::design_tokens;
+use crate::icon_system::{Icon, IconSize};
+use crate::ui_components::OverflowMenu;
 
 // ── Video presentation state ───────────────────────────────────────────
 
@@ -155,6 +158,160 @@ fn file_format_label(name: &str) -> Option<String> {
         .map(|extension| extension.to_ascii_uppercase())
 }
 
+// ── Header helpers ────────────────────────────────────────────────────
+
+/// Maximum characters shown in the header filename before the stem is
+/// collapsed with an ellipsis (the extension stays visible).
+const HEADER_FILENAME_MAX_CHARS: usize = 56;
+
+/// Hard width cap (px) for the header filename element. Together with
+/// `.clip(true)` this guarantees a long filename can never widen the card.
+const HEADER_FILENAME_MAX_WIDTH: f32 = 420.0;
+
+/// Real transfer-state badge mapping for the card header.
+///
+/// Returns `(label, background, foreground)`. Only real states are shown;
+/// nothing is invented. Positive transfer states use the green tint family;
+/// failed / unavailable states use their own semantic tints so colour is
+/// never the only cue.
+fn header_badge(state: &DownloadState, theme: &iced::Theme) -> (String, Color, Color) {
+    match state {
+        DownloadState::Ready { .. } => (
+            "Pending".to_string(),
+            design_tokens::surface_hover(theme),
+            design_tokens::text_secondary(theme),
+        ),
+        DownloadState::Active { .. } => (
+            "Downloading".to_string(),
+            design_tokens::primary_soft(theme),
+            design_tokens::primary(theme),
+        ),
+        DownloadState::Paused { .. } => (
+            "Paused".to_string(),
+            design_tokens::primary_soft(theme),
+            design_tokens::primary(theme),
+        ),
+        DownloadState::Completed {
+            saved_path: None, ..
+        } => (
+            "Downloaded".to_string(),
+            design_tokens::primary_soft(theme),
+            design_tokens::primary(theme),
+        ),
+        DownloadState::Completed {
+            saved_path: Some(path),
+            ..
+        } if path.exists() => (
+            "Ready to play".to_string(),
+            design_tokens::primary_soft(theme),
+            design_tokens::primary(theme),
+        ),
+        DownloadState::Completed { .. } => (
+            "Unavailable".to_string(),
+            design_tokens::surface_hover(theme),
+            design_tokens::text_muted(theme),
+        ),
+        DownloadState::Shared { ref path, .. } if path.exists() => (
+            "Shared".to_string(),
+            design_tokens::primary_soft(theme),
+            design_tokens::primary(theme),
+        ),
+        DownloadState::Shared { .. } => (
+            "Unavailable".to_string(),
+            design_tokens::surface_hover(theme),
+            design_tokens::text_muted(theme),
+        ),
+        DownloadState::Failed { failure }
+            if matches!(failure, super::app::DownloadFailure::FileRemoved) =>
+        {
+            (
+                "Unavailable".to_string(),
+                design_tokens::surface_hover(theme),
+                design_tokens::text_muted(theme),
+            )
+        }
+        DownloadState::Failed { .. } => (
+            "Failed".to_string(),
+            design_tokens::destructive_soft(theme),
+            design_tokens::destructive(theme),
+        ),
+        DownloadState::Cancelled => (
+            "Cancelled".to_string(),
+            design_tokens::surface_hover(theme),
+            design_tokens::text_muted(theme),
+        ),
+    }
+}
+
+/// Compact tinted pill used for the header state badge.
+fn header_badge_pill(
+    label: &str,
+    bg: Color,
+    fg: Color,
+) -> iced::widget::Container<'static, AppMessage> {
+    container(
+        crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, label.to_string())
+            .color(fg),
+    )
+    .padding([SPACE_2, SPACE_8])
+    .style(move |_t| widget::container::Style {
+        background: Some(iced::Background::Color(bg)),
+        border: iced::Border {
+            radius: SPACE_10.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+}
+
+/// Truncate a filename for single-line display while keeping the file
+/// extension visible. Long names collapse to `stem…ext`; names without an
+/// extension are tail-truncated with an ellipsis.
+fn truncate_filename(name: &str, max_chars: usize) -> String {
+    if name.chars().count() <= max_chars {
+        return name.to_string();
+    }
+    if let Some(dot) = name.rfind('.') {
+        if dot > 0 {
+            let ext_budget = (max_chars / 3).max(4);
+            let ext: String = name[dot..].chars().take(ext_budget).collect();
+            let stem_budget = max_chars.saturating_sub(ext.chars().count() + 1);
+            let stem: String = name[..dot].chars().take(stem_budget).collect();
+            return format!("{stem}…{ext}");
+        }
+    }
+    let mut out: String = name.chars().take(max_chars.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+/// One row of the header overflow menu: a left-aligned ghost button.
+fn overflow_menu_item<'a>(label: &'a str, msg: AppMessage) -> iced::widget::Button<'a, AppMessage> {
+    button(crate::fonts::type_role_text(
+        crate::fonts::TypeRole::ButtonLabel,
+        label,
+    ))
+    .on_press(msg)
+    .padding([SPACE_4, SPACE_8])
+    .width(Length::Fill)
+    .style(|t, status| {
+        let background = match status {
+            widget::button::Status::Hovered => design_tokens::surface_hover(t),
+            widget::button::Status::Pressed => design_tokens::surface_selected(t),
+            _ => Color::TRANSPARENT,
+        };
+        widget::button::Style {
+            background: Some(iced::Background::Color(background)),
+            text_color: design_tokens::text_primary(t),
+            border: iced::Border {
+                radius: SPACE_6.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    })
+}
+
 // ── Reusable component ─────────────────────────────────────────────────
 
 /// A reusable, stateless video-file card.
@@ -167,6 +324,10 @@ fn file_format_label(name: &str) -> Option<String> {
 pub(crate) struct BoruVideoFileCard<'a> {
     entry_index: usize,
     dark_mode: bool,
+    /// Whether this card's header overflow menu is currently expanded.
+    /// The open/closed state lives in the parent app (stateless component);
+    /// the card only renders the menu when told it is open.
+    overflow_open: bool,
     #[cfg(feature = "video-playback")]
     player: Option<&'a Video>,
     preparing: bool,
@@ -187,6 +348,7 @@ impl<'a> BoruVideoFileCard<'a> {
     pub(crate) fn new(
         entry_index: usize,
         dark_mode: bool,
+        overflow_open: bool,
         #[cfg(feature = "video-playback")] player: Option<&'a Video>,
         #[cfg(not(feature = "video-playback"))] _player: (),
         preparing: bool,
@@ -196,6 +358,7 @@ impl<'a> BoruVideoFileCard<'a> {
         Self {
             entry_index,
             dark_mode,
+            overflow_open,
             #[cfg(feature = "video-playback")]
             player,
             preparing,
@@ -216,7 +379,7 @@ impl<'a> BoruVideoFileCard<'a> {
         let muted = text_system(&theme);
         let error_color = color_error(&theme);
 
-        let header = self.header(attachment, tone, muted);
+        let header = self.header(attachment, &theme);
         let media = self.media_frame(attachment, muted, error_color);
         let status = self.status_metadata(attachment, &theme, tone, muted);
         let actions = self.actions(attachment);
@@ -266,78 +429,147 @@ impl<'a> BoruVideoFileCard<'a> {
             .into()
     }
 
-    // ── Header: badge + icon + filename + format label + size ────────
+    // ── Header: badge + video icon + filename + format + overflow ────
 
     fn header(
         &self,
         attachment: &DownloadAttachment,
-        tone: Color,
-        muted: Color,
+        theme: &iced::Theme,
     ) -> iced::Element<'a, AppMessage> {
         let state = &attachment.state;
-        let attachment_icon = match attachment.kind {
-            super::app::TransferKind::Image => ICON_ACTIVITY,
-            super::app::TransferKind::Video => ICON_ACTIVITY,
-            super::app::TransferKind::File => ICON_FILES,
-        };
+        let (badge_label, badge_bg, badge_fg) = header_badge(state, theme);
+        let muted = design_tokens::text_muted(theme);
 
-        let size_text = match state {
-            DownloadState::Active {
-                total: Some(total), ..
-            } if *total > 0 => human_size(*total),
-            DownloadState::Active { bytes, .. } => {
-                format!("{} received", human_size(*bytes))
-            }
-            DownloadState::Completed {
-                total_size: Some(total),
-                ..
-            } if *total > 0 => human_size(*total),
-            DownloadState::Paused {
-                bytes,
-                total: Some(total),
-            } if *total > 0 => {
-                format!("{} / {}", human_size(*bytes), human_size(*total))
-            }
-            DownloadState::Paused { bytes, .. } => {
-                format!("{} received", human_size(*bytes))
-            }
-            DownloadState::Shared { size: Some(s), .. } if *s > 0 => human_size(*s),
-            _ => String::new(),
-        };
+        let badge = header_badge_pill(&badge_label, badge_bg, badge_fg);
 
-        let format_label = file_format_label(&attachment.name);
+        let video_icon = Icon::Video
+            .build()
+            .size(IconSize::Sm)
+            .color_fn(design_tokens::text_secondary)
+            .build();
+
+        // Filename: single line, width-capped + clipped so a long name can
+        // never widen the card. The tooltip exposes the full name and the
+        // copy action in the overflow menu exposes it to the clipboard.
+        let display_name = truncate_filename(&attachment.name, HEADER_FILENAME_MAX_CHARS);
+        let filename = container(
+            crate::fonts::type_role_text(crate::fonts::TypeRole::BodyEmphasised, display_name)
+                .color(design_tokens::text_primary(theme))
+                .wrapping(Wrapping::None),
+        )
+        .max_width(HEADER_FILENAME_MAX_WIDTH)
+        .clip(true);
+        let filename_tooltip = tooltip::Tooltip::new(
+            filename,
+            crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, attachment.name.clone())
+                .wrapping(Wrapping::WordOrGlyph),
+            tooltip::Position::Bottom,
+        )
+        .gap(SPACE_4);
 
         let mut title_row = Row::new()
-            .push(
-                icon_svg(attachment_icon, TYPO_SM)
-                    .style(move |_t, _s| iced::widget::svg::Style { color: Some(tone) }),
-            )
-            .push(state_badge(state, tone))
-            .push(
-                crate::fonts::type_role_text(
-                    crate::fonts::TypeRole::ButtonLabel,
-                    attachment.name.clone(),
-                )
-                .color(tone)
-                .wrapping(Wrapping::Word)
-                .width(Length::Fill),
-            );
+            .push(badge)
+            .push(video_icon)
+            .push(filename_tooltip)
+            .align_y(Alignment::Center)
+            .spacing(SPACE_8);
 
-        if let Some(format) = format_label {
+        if let Some(format) = file_format_label(&attachment.name) {
             title_row = title_row.push(
                 crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, format)
-                    .color(muted)
-                    .width(Length::Shrink),
+                    .color(muted),
             );
         }
 
         title_row = title_row.push(
-            crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, size_text)
-                .color(muted)
-                .width(Length::Shrink),
+            tooltip::Tooltip::new(
+                OverflowMenu::build(
+                    AppMessage::ToggleVideoCardMenu(self.entry_index),
+                    false,
+                    theme,
+                ),
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, "More actions"),
+                tooltip::Position::Bottom,
+            )
+            .gap(SPACE_4),
         );
 
-        title_row.align_y(Alignment::Center).spacing(SPACE_8).into()
+        let mut column = Column::new().push(title_row);
+        if self.overflow_open {
+            column = column.push(self.overflow_menu(attachment, theme));
+        }
+        column.spacing(SPACE_6).into()
+    }
+
+    /// Secondary actions shown under the header when the overflow menu is
+    /// open. Each item reuses an existing app action; no new behaviour.
+    fn overflow_menu(
+        &self,
+        attachment: &DownloadAttachment,
+        theme: &iced::Theme,
+    ) -> iced::Element<'a, AppMessage> {
+        let state = &attachment.state;
+        let name = attachment.name.clone();
+
+        let mut menu = Column::new().spacing(SPACE_2);
+        menu = menu.push(overflow_menu_item(
+            "Copy filename",
+            AppMessage::CopyToClipboard(name.clone()),
+        ));
+        menu = menu.push(overflow_menu_item(
+            "Open downloads folder",
+            AppMessage::OpenDownloadsFolder,
+        ));
+
+        match state {
+            DownloadState::Completed {
+                saved_path: Some(path),
+                ..
+            } if path.exists() => {
+                menu = menu.push(overflow_menu_item(
+                    "Open file",
+                    AppMessage::OpenDownloadedFile(name),
+                ));
+                menu = menu.push(overflow_menu_item(
+                    "Re-share",
+                    AppMessage::ReshareFile(self.entry_index),
+                ));
+            }
+            DownloadState::Shared { .. } => {
+                menu = menu.push(overflow_menu_item(
+                    "Open file",
+                    AppMessage::OpenDownloadedFile(name),
+                ));
+                menu = menu.push(overflow_menu_item(
+                    "Re-share",
+                    AppMessage::ReshareFile(self.entry_index),
+                ));
+            }
+            DownloadState::Active { .. }
+            | DownloadState::Paused { .. }
+            | DownloadState::Failed { .. }
+            | DownloadState::Cancelled => {
+                menu = menu.push(overflow_menu_item(
+                    "Remove",
+                    AppMessage::CancelDownloadAt(self.entry_index),
+                ));
+            }
+            _ => {}
+        }
+
+        container(menu)
+            .width(Length::Shrink)
+            .padding(SPACE_4)
+            .style(move |t| widget::container::Style {
+                background: Some(iced::Background::Color(design_tokens::surface(t))),
+                border: iced::Border {
+                    color: design_tokens::border_muted(t),
+                    width: 1.0,
+                    radius: SPACE_8.into(),
+                },
+                ..Default::default()
+            })
+            .into()
     }
 
     // ── Media frame: poster or player + play overlay + error panel ────
@@ -771,8 +1003,9 @@ impl<'a> BoruVideoFileCard<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        aspect_ratio_class, file_format_label, media_frame_size, video_presentation_state,
-        MediaAspectClass, VideoPresentationState,
+        aspect_ratio_class, file_format_label, header_badge, media_frame_size, truncate_filename,
+        video_presentation_state, MediaAspectClass, VideoPresentationState,
+        HEADER_FILENAME_MAX_CHARS,
     };
     use crate::app::{DownloadAttachment, DownloadFailure, DownloadState, TransferKind};
     use std::path::PathBuf;
@@ -931,5 +1164,71 @@ mod tests {
             section_gap_count >= 2,
             "card section gaps must use shared-scale SPACE_12, got {section_gap_count}"
         );
+    }
+
+    #[test]
+    fn truncate_filename_keeps_short_names_untouched() {
+        assert_eq!(truncate_filename("clip.mp4", 56), "clip.mp4");
+        assert_eq!(truncate_filename("", 56), "");
+    }
+
+    #[test]
+    fn truncate_filename_keeps_extension_visible() {
+        let long = format!("{}.mp4", "a".repeat(120));
+        let out = truncate_filename(&long, HEADER_FILENAME_MAX_CHARS);
+        assert!(out.ends_with(".mp4"), "extension dropped: {out}");
+        assert!(out.chars().count() <= HEADER_FILENAME_MAX_CHARS);
+        assert!(out.contains('…'));
+    }
+
+    #[test]
+    fn truncate_filename_without_extension_uses_tail_ellipsis() {
+        let long = "b".repeat(120);
+        let out = truncate_filename(&long, HEADER_FILENAME_MAX_CHARS);
+        assert_eq!(out.chars().count(), HEADER_FILENAME_MAX_CHARS);
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn truncate_filename_respects_char_boundaries() {
+        // Multi-byte characters must never be split mid-codepoint.
+        let long = format!("{}.mp4", "视频".repeat(60));
+        let out = truncate_filename(&long, HEADER_FILENAME_MAX_CHARS);
+        assert!(out.ends_with(".mp4"));
+        assert!(out.chars().count() <= HEADER_FILENAME_MAX_CHARS);
+    }
+
+    #[test]
+    fn header_badge_uses_only_real_states() {
+        let theme = iced::Theme::Light;
+        let mut attachment =
+            DownloadAttachment::new(TransferKind::Video, "clip.mp4", "ticket", "peer", None);
+
+        attachment.state = DownloadState::Active {
+            bytes: 10,
+            total: Some(100),
+        };
+        assert_eq!(header_badge(&attachment.state, &theme).0, "Downloading");
+
+        attachment.state = DownloadState::Completed {
+            saved_name: "clip.mp4".into(),
+            saved_path: None,
+            total_size: Some(100),
+        };
+        assert_eq!(header_badge(&attachment.state, &theme).0, "Downloaded");
+
+        attachment.state = DownloadState::Completed {
+            saved_name: "clip.mp4".into(),
+            saved_path: Some(PathBuf::from("/definitely/missing/clip.mp4")),
+            total_size: Some(100),
+        };
+        assert_eq!(header_badge(&attachment.state, &theme).0, "Unavailable");
+
+        attachment.state = DownloadState::Failed {
+            failure: DownloadFailure::Other {
+                detail: "boom".into(),
+            },
+        };
+        assert_eq!(header_badge(&attachment.state, &theme).0, "Failed");
     }
 }

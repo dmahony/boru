@@ -180,14 +180,24 @@ pub fn view_download_progress(
     entry_index: usize,
     attachment: &DownloadAttachment,
     dark_mode: bool,
+    overflow_open: bool,
 ) -> iced::Element<'static, AppMessage> {
     #[cfg(feature = "video-playback")]
     {
-        view_download_progress_inner(entry_index, attachment, dark_mode, None, false, None, false)
+        view_download_progress_inner(
+            entry_index,
+            attachment,
+            dark_mode,
+            overflow_open,
+            None,
+            false,
+            None,
+            false,
+        )
     }
     #[cfg(not(feature = "video-playback"))]
     {
-        view_download_progress_inner(entry_index, attachment, dark_mode, (), false)
+        view_download_progress_inner(entry_index, attachment, dark_mode, overflow_open, (), false)
     }
 }
 
@@ -196,6 +206,7 @@ pub fn view_download_progress_with_player<'a>(
     entry_index: usize,
     attachment: &DownloadAttachment,
     dark_mode: bool,
+    overflow_open: bool,
     player: Option<&'a Video>,
     preparing: bool,
     seek_position: Option<f32>,
@@ -205,6 +216,7 @@ pub fn view_download_progress_with_player<'a>(
         entry_index,
         attachment,
         dark_mode,
+        overflow_open,
         player,
         preparing,
         seek_position,
@@ -216,6 +228,7 @@ fn view_download_progress_inner<'a>(
     entry_index: usize,
     attachment: &DownloadAttachment,
     dark_mode: bool,
+    overflow_open: bool,
     #[cfg(feature = "video-playback")] player: Option<&'a Video>,
     #[cfg(not(feature = "video-playback"))] _player: (),
     preparing: bool,
@@ -231,6 +244,7 @@ fn view_download_progress_inner<'a>(
             return crate::video_file_card::BoruVideoFileCard::new(
                 entry_index,
                 dark_mode,
+                overflow_open,
                 player,
                 preparing,
                 seek_position,
@@ -243,6 +257,7 @@ fn view_download_progress_inner<'a>(
             return crate::video_file_card::BoruVideoFileCard::new(
                 entry_index,
                 dark_mode,
+                overflow_open,
                 (),
                 preparing,
             )

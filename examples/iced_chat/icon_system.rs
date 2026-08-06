@@ -56,6 +56,7 @@ const SVG_CHEVRON_DOWN: &[u8] = include_bytes!("../../assets/icons/lucide/chevro
 const SVG_CHEVRON_RIGHT: &[u8] = include_bytes!("../../assets/icons/lucide/chevron-right.svg");
 const SVG_HOME: &[u8] = include_bytes!("../../assets/icons/lucide/home.svg");
 const SVG_FOLDER: &[u8] = include_bytes!("../../assets/icons/lucide/folder.svg");
+const SVG_FILM: &[u8] = include_bytes!("../../assets/icons/lucide/film.svg");
 // Re-export the app-level constants for the Lucide icons that were already
 // embedded there.  We keep them in app.rs so app-level code that already
 // references ICON_CHAT etc. doesn't break, but the Icon enum uses them
@@ -103,6 +104,8 @@ pub enum Icon {
     Folder,
     Paperclip,
     Image,
+    /// A video file (film/clapperboard glyph) — used for video cards.
+    Video,
     Play,
     /// Upload / share-out arrow (Figure 3 share-files action).
     Upload,
@@ -164,6 +167,7 @@ impl Icon {
             Icon::Folder => SVG_FOLDER,
             Icon::Paperclip => ICON_PAPERCLIP,
             Icon::Image => SVG_IMAGE,
+            Icon::Video => SVG_FILM,
             Icon::Play => SVG_PLAY,
             Icon::Upload => SVG_UPLOAD,
 
@@ -434,6 +438,7 @@ mod tests {
             Icon::Upload,
             Icon::Paperclip,
             Icon::Image,
+            Icon::Video,
             Icon::Play,
             Icon::Online,
             Icon::Offline,

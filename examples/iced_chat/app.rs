@@ -3531,6 +3531,8 @@ pub struct IcedChat {
     toast_counter: u32,
     /// Right-click context menu state: (entry_index, x, y) when visible.
     context_menu: Option<(usize, f32, f32, ContextMenuKind)>,
+    /// Entry index whose video-card header overflow menu is open, if any.
+    video_card_menu_open: Option<usize>,
     /// Peer whose shared files we hide from UI and ignore in ProfileUpdate.
     blocked_sharers: HashSet<PublicKey>,
     /// Cached profile data received from peers via ProfileUpdate gossip.
@@ -5458,6 +5460,8 @@ pub enum AppMessage {
     ContextCopyImage(usize),
     /// Dismiss the context menu overlay.
     CloseContextMenu,
+    /// Toggle the video-card header overflow menu for a chat entry.
+    ToggleVideoCardMenu(usize),
     /// Toggle the emoji picker panel visibility.
     ToggleEmojiPicker,
     /// Insert an emoji character into the composer.
@@ -7180,6 +7184,7 @@ impl IcedChat {
             toast_message: None,
             toast_counter: 0,
             context_menu: None,
+            video_card_menu_open: None,
 
             blocked_sharers: HashSet::new(),
             profile_cache: HashMap::new(),
@@ -8042,17 +8047,31 @@ impl IcedChat {
             entry_index,
             attachment,
             self.dark_mode,
+            self.video_card_menu_open == Some(entry_index),
             player,
             preparing,
             seek_position,
             expanded,
         );
         #[cfg(not(feature = "video-playback"))]
-        let dependency = (entry_index, attachment.clone(), self.dark_mode);
+        let dependency = (
+            entry_index,
+            attachment.clone(),
+            self.dark_mode,
+            self.video_card_menu_open == Some(entry_index),
+        );
         #[cfg(not(feature = "video-playback"))]
-        return iced::widget::lazy(dependency, |(entry_index, attachment, dark_mode)| {
-            Self::view_download_attachment_content(*entry_index, attachment, *dark_mode)
-        })
+        return iced::widget::lazy(
+            dependency,
+            |(entry_index, attachment, dark_mode, overflow_open)| {
+                Self::view_download_attachment_content(
+                    *entry_index,
+                    attachment,
+                    *dark_mode,
+                    *overflow_open,
+                )
+            },
+        )
         .into();
     }
 
@@ -8061,6 +8080,7 @@ impl IcedChat {
         entry_index: usize,
         attachment: &DownloadAttachment,
         dark_mode: bool,
+        overflow_open: bool,
         #[cfg(feature = "video-playback")] player: Option<Arc<Video>>,
     ) -> iced::Element<'static, AppMessage> {
         #[cfg(feature = "video-playback")]
@@ -8068,11 +8088,14 @@ impl IcedChat {
             entry_index,
             attachment,
             dark_mode,
+            overflow_open,
             player,
             preparing,
         );
         #[cfg(not(feature = "video-playback"))]
-        crate::download_progress_view::view_download_progress(entry_index, attachment, dark_mode)
+        crate::download_progress_view::view_download_progress(
+            entry_index, attachment, dark_mode, overflow_open,
+        )
     }
 
     /// Convert a persisted `HistoryEntry` to a `ChatEntry` for in-memory replay.
@@ -8763,6 +8786,7 @@ impl IcedChat {
             AppMessage::ContextCopyText(_) => "ContextCopyText",
             AppMessage::ContextCopyImage(_) => "ContextCopyImage",
             AppMessage::CloseContextMenu => "CloseContextMenu",
+            AppMessage::ToggleVideoCardMenu(_) => "ToggleVideoCardMenu",
             AppMessage::ToggleEmojiPicker => "ToggleEmojiPicker",
             AppMessage::InsertEmoji(_) => "InsertEmoji",
             AppMessage::ToggleGifPicker => "ToggleGifPicker",
@@ -10068,6 +10092,8 @@ impl IcedChat {
         let task = match message {
             // ── Navigation ────────────────────────────────────────────
             AppMessage::GoToChatList => {
+                // Dismiss any open video-card overflow menu before leaving.
+                self.video_card_menu_open = None;
                 // Save current room to history.
                 self.save_room_to_history();
                 // Update room list preview.
@@ -11309,6 +11335,9 @@ impl IcedChat {
                 neighbor_ids,
                 generation,
             } => {
+                // Dismiss any open video-card overflow menu when the room
+                // changes (entry indices are not stable across rooms).
+                self.video_card_menu_open = None;
                 // If this completion settles an in-flight create-room submit,
                 // close the dialog and clear the loading state.
                 if self.create_room_submitting {
@@ -14965,6 +14994,7 @@ impl IcedChat {
                 }
             },
             AppMessage::ExecuteDownloadAt(entry_index) => {
+                self.video_card_menu_open = None;
                 let Some(entry) = self.entries.get(entry_index) else {
                     return iced::Task::done(AppMessage::ErrorMsg("Entry not found.".into()));
                 };
@@ -15077,6 +15107,7 @@ impl IcedChat {
                 iced::Task::none()
             }
             AppMessage::CancelDownloadAt(entry_index) => {
+                self.video_card_menu_open = None;
                 self.push_system(String::from(
                     "Pause requested — transfer suspension not yet implemented.",
                 ));
@@ -15745,6 +15776,7 @@ impl IcedChat {
                 iced::Task::none()
             }
             AppMessage::OpenDownloadedFile(name) => {
+                self.video_card_menu_open = None;
                 if let Err(error) = self.open_downloaded_file(&name) {
                     if error.starts_with("File not found:") {
                         for (idx, entry) in self.entries.iter_mut().enumerate() {
@@ -15766,6 +15798,7 @@ impl IcedChat {
                 iced::Task::none()
             }
             AppMessage::ReshareFile(entry_index) => {
+                self.video_card_menu_open = None;
                 if let Some(entry) = self.entries.get(entry_index) {
                     if let Some(dl) = &entry.download {
                         if let DownloadState::Completed {
@@ -18970,6 +19003,7 @@ impl IcedChat {
             }
 
             AppMessage::OpenDownloadsFolder => {
+                self.video_card_menu_open = None;
                 let dl_dir = self.data_dir.join("downloads");
                 let _ = std::fs::create_dir_all(&dl_dir);
                 iced::Task::perform(async move { open::that(dl_dir) }, |result| {
@@ -19690,6 +19724,7 @@ impl IcedChat {
             }
 
             AppMessage::CopyToClipboard(text) => {
+                self.video_card_menu_open = None;
                 return iced::clipboard::write(text);
             }
 
@@ -19741,6 +19776,17 @@ impl IcedChat {
 
             AppMessage::CloseContextMenu => {
                 self.context_menu = None;
+                iced::Task::none()
+            }
+
+            AppMessage::ToggleVideoCardMenu(entry_index) => {
+                self.video_card_menu_open =
+                    if self.video_card_menu_open == Some(entry_index) {
+                        None
+                    } else {
+                        Some(entry_index)
+                    };
+                self.layout_cache.borrow_mut().invalidate_from(entry_index);
                 iced::Task::none()
             }
 
@@ -22362,6 +22408,7 @@ impl IcedChat {
             entry_index,
             attachment,
             self.dark_mode,
+            false,
             Some(video.as_ref()),
             false,
             self.inline_video_seek,
