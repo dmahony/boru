@@ -18,6 +18,7 @@ mod video_file_card;
 mod downloaded_view_model;
 mod downloading_view_model;
 mod file_category;
+mod file_type_resolver;
 mod peers_downloading_view_model;
 mod activity_log_view_model;
 mod fonts;
