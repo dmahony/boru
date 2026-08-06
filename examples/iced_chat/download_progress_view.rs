@@ -109,6 +109,10 @@ struct FileTypeIconKey {
     mime_type: Option<String>,
     detected_type: Option<String>,
     size: FileTypeIconSize,
+    /// Explicit folder state (PAPIRUS-12). Never inferred from the filename;
+    /// a directory named "report.pdf" must not collide with a file of the
+    /// same name, so the flag is part of the key.
+    is_directory: bool,
 }
 
 impl std::hash::Hash for FileTypeIconKey {
@@ -119,6 +123,7 @@ impl std::hash::Hash for FileTypeIconKey {
         // FileTypeIconSize does not derive Hash; its Papirus size directory is
         // injective (16/24/32/48/64 map one-to-one), so hash that instead.
         self.size.papirus_dir().hash(state);
+        self.is_directory.hash(state);
     }
 }
 
@@ -142,10 +147,54 @@ static FILE_TYPE_ICON_CACHE: OnceLock<
 /// ([`FileTypeIcon`], resolved by [`crate::file_type_resolver`]).  Chat
 /// surfaces pass the attachment name (and any MIME they already hold) and a
 /// semantic size; they must NOT keep their own extension maps.
+///
+/// File displays call this function.  Folder displays call
+/// [`directory_icon_element`] — the explicit-directory counterpart — so a
+/// folder can never be mistaken for a file of the same name (PAPIRUS-12).
 pub(crate) fn file_type_icon_element(
     filename: &str,
     mime_type: Option<&str>,
     detected_type: Option<&str>,
+    size: FileTypeIconSize,
+    theme: &iced::Theme,
+) -> iced::Element<'static, AppMessage> {
+    file_type_icon_element_impl(filename, mime_type, detected_type, false, size, theme)
+}
+
+/// Build a Papirus **folder** icon element (PAPIRUS-12).
+///
+/// The folder is resolved through the same central resolver as every file
+/// display (priority 1: explicit directory state → `folder-open`) and
+/// rendered through the same central [`FileTypeIcon`] component.  Callers
+/// must pass explicit directory state from the application model; a folder
+/// is never inferred from a filename ending in `/`.
+///
+/// Boru's transfer model is file-based today (the secure catalogue shares
+/// individual files; folder sharing is a documented limitation surfaced by
+/// `SharedFolderPicked`), so no row currently renders a folder.  This is
+/// the folder-display entry point for the surfaces PAPIRUS-12 covers
+/// (shared folders, folder transfer summaries, folders in Shared by Me /
+/// Shared with Me, re-shared folders, folder activity entries): the moment
+/// a row carries explicit directory state it must call this function so it
+/// resolves through the central resolver/component like every file icon.
+#[allow(dead_code)]
+pub(crate) fn directory_icon_element(
+    name: &str,
+    size: FileTypeIconSize,
+    theme: &iced::Theme,
+) -> iced::Element<'static, AppMessage> {
+    file_type_icon_element_impl(name, None, None, true, size, theme)
+}
+
+/// Shared implementation behind [`file_type_icon_element`] and
+/// [`directory_icon_element`].  `is_directory` is explicit state from the
+/// application model and is part of the cache key, so a folder named
+/// `report.pdf` and a file named `report.pdf` never share an entry.
+fn file_type_icon_element_impl(
+    filename: &str,
+    mime_type: Option<&str>,
+    detected_type: Option<&str>,
+    is_directory: bool,
     size: FileTypeIconSize,
     theme: &iced::Theme,
 ) -> iced::Element<'static, AppMessage> {
@@ -154,6 +203,7 @@ pub(crate) fn file_type_icon_element(
         mime_type: mime_type.map(str::to_string),
         detected_type: detected_type.map(str::to_string),
         size,
+        is_directory,
     };
     let cache = FILE_TYPE_ICON_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache.lock().unwrap();
@@ -174,7 +224,7 @@ pub(crate) fn file_type_icon_element(
         .as_deref()
         .map(|m| Box::leak(m.to_string().into_boxed_str()) as &'static str);
     let icon: &'static FileTypeIcon<'static> = Box::leak(Box::new(
-        FileTypeIcon::new(filename, mime_type, detected_type, false).size(key.size),
+        FileTypeIcon::new(filename, mime_type, detected_type, is_directory).size(key.size),
     ));
     cache.insert(key, icon);
     icon.build(theme)
@@ -1112,5 +1162,114 @@ mod tests {
             file_type_icon_element(KEY, None, None, FileTypeIconSize::List, &iced::Theme::Light);
         // Two requests for the same key must not create two cache entries.
         assert_eq!(key_count(KEY), before + 1);
+    }
+
+    // ── PAPIRUS-12: folder icons ─────────────────────────────────────────
+
+    #[test]
+    fn directory_icon_element_resolves_to_papirus_folder_icon() {
+        // A folder display must resolve through the central resolver's
+        // priority-1 directory state to the bundled Papirus folder icon —
+        // never a generic outline or a filename-derived guess.
+        let _el: iced::Element<'_, AppMessage> =
+            directory_icon_element("shared-folder", FileTypeIconSize::List, &iced::Theme::Light);
+
+        let cache = FILE_TYPE_ICON_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        let cache = cache.lock().unwrap();
+        let entry = cache
+            .iter()
+            .find(|(key, _)| key.filename == "shared-folder" && key.is_directory)
+            .map(|(_, icon)| icon)
+            .expect("directory icon element must populate the shared cache");
+        assert_eq!(entry.resolved().icon_id, "folder-open");
+        assert_eq!(
+            entry.resolved().file_category,
+            crate::file_category::FileCategory::Folder
+        );
+        assert_eq!(
+            entry.resolved().source,
+            crate::file_type_resolver::ResolutionSource::Directory
+        );
+    }
+
+    #[test]
+    fn directory_icon_element_never_infers_folder_from_filename() {
+        // Task 12 rule: a folder is explicit model state. A filename ending
+        // with "/" passed through the FILE entry point must NOT become a
+        // folder — the file path keeps resolving as a file (unknown here)
+        // and the directory flag stays false in the cache key.
+        let _file_el: iced::Element<'_, AppMessage> = file_type_icon_element(
+            "photos/",
+            None,
+            None,
+            FileTypeIconSize::List,
+            &iced::Theme::Light,
+        );
+        let _dir_el: iced::Element<'_, AppMessage> =
+            directory_icon_element("photos", FileTypeIconSize::List, &iced::Theme::Light);
+
+        let cache = FILE_TYPE_ICON_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        let cache = cache.lock().unwrap();
+        let file_entry = cache
+            .iter()
+            .find(|(key, _)| key.filename == "photos/" && !key.is_directory)
+            .map(|(_, icon)| icon)
+            .expect("file entry for photos/ must exist");
+        assert_ne!(file_entry.resolved().file_category, crate::file_category::FileCategory::Folder);
+        assert_eq!(
+            file_entry.resolved().source,
+            crate::file_type_resolver::ResolutionSource::UnknownFallback
+        );
+        // The same display name as an explicit folder is a separate cache
+        // entry with the directory flag set — no cache collision.
+        let dir_entry = cache
+            .iter()
+            .find(|(key, _)| key.filename == "photos" && key.is_directory)
+            .map(|(_, icon)| icon)
+            .expect("directory entry for photos must exist");
+        assert_eq!(dir_entry.resolved().icon_id, "folder-open");
+        assert_eq!(
+            dir_entry.resolved().source,
+            crate::file_type_resolver::ResolutionSource::Directory
+        );
+    }
+
+    #[test]
+    fn directory_and_file_same_name_do_not_share_cache_entry() {
+        // A folder named "report.pdf" and a file named "report.pdf" are
+        // different displays and must resolve independently: the folder to
+        // the Papirus folder icon, the file to the PDF icon.
+        let _dir: iced::Element<'_, AppMessage> =
+            directory_icon_element("report.pdf", FileTypeIconSize::Card, &iced::Theme::Light);
+        let _file: iced::Element<'_, AppMessage> = file_type_icon_element(
+            "report.pdf",
+            None,
+            None,
+            FileTypeIconSize::Card,
+            &iced::Theme::Light,
+        );
+
+        let cache = FILE_TYPE_ICON_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        let cache = cache.lock().unwrap();
+        let dir_entry = cache
+            .iter()
+            .find(|(key, _)| key.filename == "report.pdf" && key.is_directory)
+            .map(|(_, icon)| icon)
+            .expect("directory entry must exist");
+        assert_eq!(dir_entry.resolved().icon_id, "folder-open");
+        assert_eq!(
+            dir_entry.resolved().file_category,
+            crate::file_category::FileCategory::Folder
+        );
+        let file_entry = cache
+            .iter()
+            .find(|(key, _)| key.filename == "report.pdf" && !key.is_directory)
+            .map(|(_, icon)| icon)
+            .expect("file entry must exist");
+        assert_eq!(file_entry.resolved().icon_id, "application-pdf");
+        assert_eq!(
+            file_entry.resolved().file_category,
+            crate::file_category::FileCategory::Pdf
+        );
     }
 }
