@@ -1,0 +1,181 @@
+{
+  "source": "PapirusDevelopmentTeam/papirus-icon-theme",
+  "commit": "5f8b701d7521e27b4859d7e4f9b0da4c423c036c",
+  "license": "GPL-3.0",
+  "sizes": ["16", "24", "32", "48", "64"],
+  "upstream_dirs": {
+    "16": "16x16",
+    "24": "24x24",
+    "32": "32x32",
+    "48": "48x48",
+    "64": "64x64"
+  },
+  "categories": {
+    "documents": [
+      "application-pdf",
+      "application-msword",
+      "application-vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "application-vnd.oasis.opendocument.text",
+      "application-rtf",
+      "application-epub+zip",
+      "text-plain",
+      "text-markdown",
+      "text-x-log"
+    ],
+    "spreadsheets": [
+      "application-vnd.ms-excel",
+      "application-vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "application-vnd.oasis.opendocument.spreadsheet",
+      "text-csv",
+      "text-tab-separated-values"
+    ],
+    "presentations": [
+      "application-vnd.ms-powerpoint",
+      "application-vnd.openxmlformats-officedocument.presentationml.presentation",
+      "application-vnd.oasis.opendocument.presentation"
+    ],
+    "images": [
+      "image-jpeg",
+      "image-png",
+      "image-gif",
+      "image-svg+xml",
+      "image-bmp",
+      "image-tiff",
+      "image-x-adobe-dng",
+      "image-vnd.adobe.photoshop",
+      "image-x-tga"
+    ],
+    "video": [
+      "video-mp4",
+      "video-x-matroska",
+      "video-webm",
+      "video-x-msvideo",
+      "video-mp2t",
+      "video-x-theora+ogg"
+    ],
+    "audio": [
+      "audio-mpeg",
+      "audio-mp3",
+      "audio-flac",
+      "audio-x-wav",
+      "audio-x-vorbis+ogg",
+      "audio-x-speex+ogg",
+      "audio-m4a",
+      "audio-x-m4a",
+      "audio-x-ms-wma",
+      "audio-ac3"
+    ],
+    "archives": [
+      "application-zip",
+      "application-x-7z-compressed",
+      "application-x-rar",
+      "application-vnd.rar",
+      "application-x-tar",
+      "application-gzip",
+      "application-x-gzip",
+      "application-x-bzip2",
+      "application-x-xz-compressed-tar",
+      "application-zstd",
+      "application-x-archive"
+    ],
+    "source_code": [
+      "text-rust",
+      "text-x-rust",
+      "application-javascript",
+      "text-javascript",
+      "text-x-python",
+      "text-x-java",
+      "text-x-kotlin",
+      "text-x-csrc",
+      "text-x-c++src",
+      "text-x-chdr",
+      "text-x-csharp",
+      "text-x-go",
+      "text-html",
+      "application-xhtml+xml",
+      "text-css",
+      "application-json",
+      "text-xml",
+      "application-xml",
+      "application-yaml",
+      "application-toml",
+      "text-x-shellscript",
+      "application-x-shellscript",
+      "text-x-vbscript",
+      "text-x-script",
+      "application-sql",
+      "text-x-sql"
+    ],
+    "executables_installers": [
+      "application-x-executable",
+      "application-x-ms-dos-executable",
+      "application-vnd.android.package-archive",
+      "application-x-rpm",
+      "application-vnd.debian.binary-package",
+      "application-x-apple-diskimage",
+      "application-x-iso9660-appimage"
+    ],
+    "disk_images": [
+      "application-x-cd-image",
+      "application-vnd.efi.iso",
+      "application-x-raw-disk-image"
+    ],
+    "databases": [
+      "application-vnd.sqlite3",
+      "application-x-sqlite3",
+      "application-vnd.oasis.opendocument.database"
+    ],
+    "fonts": [
+      "application-x-font-ttf",
+      "application-x-font-otf"
+    ],
+    "certificates_keys": [
+      "application-x-pem-key",
+      "application-pgp-keys",
+      "application-pkix-cert",
+      "application-certificate"
+    ],
+    "torrents": [
+      "application-x-bittorrent"
+    ],
+    "cad_3d": [
+      "application-x-step",
+      "model-stl"
+    ],
+    "folders": [
+      "folder",
+      "folder-open"
+    ]
+  },
+  "generic_fallbacks": [
+    "application-x-generic",
+    "text-x-generic",
+    "video-x-generic",
+    "image-x-generic",
+    "audio-x-generic",
+    "package-x-generic",
+    "font-x-generic",
+    "video",
+    "image",
+    "application-octet-stream",
+    "application-x-zerosize"
+  ],
+  "required_fallbacks": [
+    "application-x-generic",
+    "text-x-generic",
+    "video-x-generic",
+    "image-x-generic",
+    "audio-x-generic",
+    "folder",
+    "folder-open",
+    "application-octet-stream"
+  ],
+  "notes": {
+    "no_dedicated_icon_webp": "image-webp/heic have no Papirus icon; resolver falls back to image-x-generic/image",
+    "no_dedicated_icon_mov_m4v": "video-quicktime missing upstream; resolver falls back to video-x-generic/video",
+    "no_dedicated_icon_aac": "audio-aac missing upstream; resolver falls back to audio-x-generic/audio-m4a",
+    "no_dedicated_icon_typescript": "TypeScript missing upstream; resolver falls back to text-x-script/text-x-generic",
+    "no_dedicated_icon_powershell": "PowerShell uses text-x-vbscript (closest upstream match)",
+    "sizes_are_px": "16/24/32/48/64 px correspond to upstream 16x16/24x24/32x32/48x48/64x64 dirs"
+  }
+}

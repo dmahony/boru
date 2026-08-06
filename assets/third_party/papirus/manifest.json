@@ -1,0 +1,824 @@
+{
+  "commit": "5f8b701d7521e27b4859d7e4f9b0da4c423c036c",
+  "generated_by": "scripts/vendor_papirus_icons.py",
+  "icons": {
+    "application-certificate": {
+      "16": "16/application-certificate.svg",
+      "24": "24/application-certificate.svg",
+      "32": "32/application-certificate.svg",
+      "48": "48/application-certificate.svg",
+      "64": "64/application-certificate.svg"
+    },
+    "application-epub+zip": {
+      "16": "16/application-epub+zip.svg",
+      "24": "24/application-epub+zip.svg",
+      "32": "32/application-epub+zip.svg",
+      "48": "48/application-epub+zip.svg",
+      "64": "64/application-epub+zip.svg"
+    },
+    "application-gzip": {
+      "16": "16/application-gzip.svg",
+      "24": "24/application-gzip.svg",
+      "32": "32/application-gzip.svg",
+      "48": "48/application-gzip.svg",
+      "64": "64/application-gzip.svg"
+    },
+    "application-javascript": {
+      "16": "16/application-javascript.svg",
+      "24": "24/application-javascript.svg",
+      "32": "32/application-javascript.svg",
+      "48": "48/application-javascript.svg",
+      "64": "64/application-javascript.svg"
+    },
+    "application-json": {
+      "16": "16/application-json.svg",
+      "24": "24/application-json.svg",
+      "32": "32/application-json.svg",
+      "48": "48/application-json.svg",
+      "64": "64/application-json.svg"
+    },
+    "application-msword": {
+      "16": "16/application-msword.svg",
+      "24": "24/application-msword.svg",
+      "32": "32/application-msword.svg",
+      "48": "48/application-msword.svg",
+      "64": "64/application-msword.svg"
+    },
+    "application-octet-stream": {
+      "16": "16/application-octet-stream.svg",
+      "24": "24/application-octet-stream.svg",
+      "32": "32/application-octet-stream.svg",
+      "48": "48/application-octet-stream.svg",
+      "64": "64/application-octet-stream.svg"
+    },
+    "application-pdf": {
+      "16": "16/application-pdf.svg",
+      "24": "24/application-pdf.svg",
+      "32": "32/application-pdf.svg",
+      "48": "48/application-pdf.svg",
+      "64": "64/application-pdf.svg"
+    },
+    "application-pgp-keys": {
+      "16": "16/application-pgp-keys.svg",
+      "24": "24/application-pgp-keys.svg",
+      "32": "32/application-pgp-keys.svg",
+      "48": "48/application-pgp-keys.svg",
+      "64": "64/application-pgp-keys.svg"
+    },
+    "application-pkix-cert": {
+      "16": "16/application-pkix-cert.svg",
+      "24": "24/application-pkix-cert.svg",
+      "32": "32/application-pkix-cert.svg",
+      "48": "48/application-pkix-cert.svg",
+      "64": "64/application-pkix-cert.svg"
+    },
+    "application-rtf": {
+      "16": "16/application-rtf.svg",
+      "24": "24/application-rtf.svg",
+      "32": "32/application-rtf.svg",
+      "48": "48/application-rtf.svg",
+      "64": "64/application-rtf.svg"
+    },
+    "application-sql": {
+      "16": "16/application-sql.svg",
+      "24": "24/application-sql.svg",
+      "32": "32/application-sql.svg",
+      "48": "48/application-sql.svg",
+      "64": "64/application-sql.svg"
+    },
+    "application-toml": {
+      "16": "16/application-toml.svg",
+      "24": "24/application-toml.svg",
+      "32": "32/application-toml.svg",
+      "48": "48/application-toml.svg",
+      "64": "64/application-toml.svg"
+    },
+    "application-vnd.android.package-archive": {
+      "16": "16/application-vnd.android.package-archive.svg",
+      "24": "24/application-vnd.android.package-archive.svg",
+      "32": "32/application-vnd.android.package-archive.svg",
+      "48": "48/application-vnd.android.package-archive.svg",
+      "64": "64/application-vnd.android.package-archive.svg"
+    },
+    "application-vnd.debian.binary-package": {
+      "16": "16/application-vnd.debian.binary-package.svg",
+      "24": "24/application-vnd.debian.binary-package.svg",
+      "32": "32/application-vnd.debian.binary-package.svg",
+      "48": "48/application-vnd.debian.binary-package.svg",
+      "64": "64/application-vnd.debian.binary-package.svg"
+    },
+    "application-vnd.efi.iso": {
+      "16": "16/application-vnd.efi.iso.svg",
+      "24": "24/application-vnd.efi.iso.svg",
+      "32": "32/application-vnd.efi.iso.svg",
+      "48": "48/application-vnd.efi.iso.svg",
+      "64": "64/application-vnd.efi.iso.svg"
+    },
+    "application-vnd.ms-excel": {
+      "16": "16/application-vnd.ms-excel.svg",
+      "24": "24/application-vnd.ms-excel.svg",
+      "32": "32/application-vnd.ms-excel.svg",
+      "48": "48/application-vnd.ms-excel.svg",
+      "64": "64/application-vnd.ms-excel.svg"
+    },
+    "application-vnd.ms-powerpoint": {
+      "16": "16/application-vnd.ms-powerpoint.svg",
+      "24": "24/application-vnd.ms-powerpoint.svg",
+      "32": "32/application-vnd.ms-powerpoint.svg",
+      "48": "48/application-vnd.ms-powerpoint.svg",
+      "64": "64/application-vnd.ms-powerpoint.svg"
+    },
+    "application-vnd.oasis.opendocument.database": {
+      "16": "16/application-vnd.oasis.opendocument.database.svg",
+      "24": "24/application-vnd.oasis.opendocument.database.svg",
+      "32": "32/application-vnd.oasis.opendocument.database.svg",
+      "48": "48/application-vnd.oasis.opendocument.database.svg",
+      "64": "64/application-vnd.oasis.opendocument.database.svg"
+    },
+    "application-vnd.oasis.opendocument.presentation": {
+      "16": "16/application-vnd.oasis.opendocument.presentation.svg",
+      "24": "24/application-vnd.oasis.opendocument.presentation.svg",
+      "32": "32/application-vnd.oasis.opendocument.presentation.svg",
+      "48": "48/application-vnd.oasis.opendocument.presentation.svg",
+      "64": "64/application-vnd.oasis.opendocument.presentation.svg"
+    },
+    "application-vnd.oasis.opendocument.spreadsheet": {
+      "16": "16/application-vnd.oasis.opendocument.spreadsheet.svg",
+      "24": "24/application-vnd.oasis.opendocument.spreadsheet.svg",
+      "32": "32/application-vnd.oasis.opendocument.spreadsheet.svg",
+      "48": "48/application-vnd.oasis.opendocument.spreadsheet.svg",
+      "64": "64/application-vnd.oasis.opendocument.spreadsheet.svg"
+    },
+    "application-vnd.oasis.opendocument.text": {
+      "16": "16/application-vnd.oasis.opendocument.text.svg",
+      "24": "24/application-vnd.oasis.opendocument.text.svg",
+      "32": "32/application-vnd.oasis.opendocument.text.svg",
+      "48": "48/application-vnd.oasis.opendocument.text.svg",
+      "64": "64/application-vnd.oasis.opendocument.text.svg"
+    },
+    "application-vnd.openxmlformats-officedocument.presentationml.presentation": {
+      "16": "16/application-vnd.openxmlformats-officedocument.presentationml.presentation.svg",
+      "24": "24/application-vnd.openxmlformats-officedocument.presentationml.presentation.svg",
+      "32": "32/application-vnd.openxmlformats-officedocument.presentationml.presentation.svg",
+      "48": "48/application-vnd.openxmlformats-officedocument.presentationml.presentation.svg",
+      "64": "64/application-vnd.openxmlformats-officedocument.presentationml.presentation.svg"
+    },
+    "application-vnd.openxmlformats-officedocument.spreadsheetml.sheet": {
+      "16": "16/application-vnd.openxmlformats-officedocument.spreadsheetml.sheet.svg",
+      "24": "24/application-vnd.openxmlformats-officedocument.spreadsheetml.sheet.svg",
+      "32": "32/application-vnd.openxmlformats-officedocument.spreadsheetml.sheet.svg",
+      "48": "48/application-vnd.openxmlformats-officedocument.spreadsheetml.sheet.svg",
+      "64": "64/application-vnd.openxmlformats-officedocument.spreadsheetml.sheet.svg"
+    },
+    "application-vnd.openxmlformats-officedocument.wordprocessingml.document": {
+      "16": "16/application-vnd.openxmlformats-officedocument.wordprocessingml.document.svg",
+      "24": "24/application-vnd.openxmlformats-officedocument.wordprocessingml.document.svg",
+      "32": "32/application-vnd.openxmlformats-officedocument.wordprocessingml.document.svg",
+      "48": "48/application-vnd.openxmlformats-officedocument.wordprocessingml.document.svg",
+      "64": "64/application-vnd.openxmlformats-officedocument.wordprocessingml.document.svg"
+    },
+    "application-vnd.rar": {
+      "16": "16/application-vnd.rar.svg",
+      "24": "24/application-vnd.rar.svg",
+      "32": "32/application-vnd.rar.svg",
+      "48": "48/application-vnd.rar.svg",
+      "64": "64/application-vnd.rar.svg"
+    },
+    "application-vnd.sqlite3": {
+      "16": "16/application-vnd.sqlite3.svg",
+      "24": "24/application-vnd.sqlite3.svg",
+      "32": "32/application-vnd.sqlite3.svg",
+      "48": "48/application-vnd.sqlite3.svg",
+      "64": "64/application-vnd.sqlite3.svg"
+    },
+    "application-x-7z-compressed": {
+      "16": "16/application-x-7z-compressed.svg",
+      "24": "24/application-x-7z-compressed.svg",
+      "32": "32/application-x-7z-compressed.svg",
+      "48": "48/application-x-7z-compressed.svg",
+      "64": "64/application-x-7z-compressed.svg"
+    },
+    "application-x-apple-diskimage": {
+      "16": "16/application-x-apple-diskimage.svg",
+      "24": "24/application-x-apple-diskimage.svg",
+      "32": "32/application-x-apple-diskimage.svg",
+      "48": "48/application-x-apple-diskimage.svg",
+      "64": "64/application-x-apple-diskimage.svg"
+    },
+    "application-x-archive": {
+      "16": "16/application-x-archive.svg",
+      "24": "24/application-x-archive.svg",
+      "32": "32/application-x-archive.svg",
+      "48": "48/application-x-archive.svg",
+      "64": "64/application-x-archive.svg"
+    },
+    "application-x-bittorrent": {
+      "16": "16/application-x-bittorrent.svg",
+      "24": "24/application-x-bittorrent.svg",
+      "32": "32/application-x-bittorrent.svg",
+      "48": "48/application-x-bittorrent.svg",
+      "64": "64/application-x-bittorrent.svg"
+    },
+    "application-x-bzip2": {
+      "16": "16/application-x-bzip2.svg",
+      "24": "24/application-x-bzip2.svg",
+      "32": "32/application-x-bzip2.svg",
+      "48": "48/application-x-bzip2.svg",
+      "64": "64/application-x-bzip2.svg"
+    },
+    "application-x-cd-image": {
+      "16": "16/application-x-cd-image.svg",
+      "24": "24/application-x-cd-image.svg",
+      "32": "32/application-x-cd-image.svg",
+      "48": "48/application-x-cd-image.svg",
+      "64": "64/application-x-cd-image.svg"
+    },
+    "application-x-executable": {
+      "16": "16/application-x-executable.svg",
+      "24": "24/application-x-executable.svg",
+      "32": "32/application-x-executable.svg",
+      "48": "48/application-x-executable.svg",
+      "64": "64/application-x-executable.svg"
+    },
+    "application-x-font-otf": {
+      "16": "16/application-x-font-otf.svg",
+      "24": "24/application-x-font-otf.svg",
+      "32": "32/application-x-font-otf.svg",
+      "48": "48/application-x-font-otf.svg",
+      "64": "64/application-x-font-otf.svg"
+    },
+    "application-x-font-ttf": {
+      "16": "16/application-x-font-ttf.svg",
+      "24": "24/application-x-font-ttf.svg",
+      "32": "32/application-x-font-ttf.svg",
+      "48": "48/application-x-font-ttf.svg",
+      "64": "64/application-x-font-ttf.svg"
+    },
+    "application-x-generic": {
+      "16": "16/application-x-generic.svg",
+      "24": "24/application-x-generic.svg",
+      "32": "32/application-x-generic.svg",
+      "48": "48/application-x-generic.svg",
+      "64": "64/application-x-generic.svg"
+    },
+    "application-x-gzip": {
+      "16": "16/application-x-gzip.svg",
+      "24": "24/application-x-gzip.svg",
+      "32": "32/application-x-gzip.svg",
+      "48": "48/application-x-gzip.svg",
+      "64": "64/application-x-gzip.svg"
+    },
+    "application-x-iso9660-appimage": {
+      "16": "16/application-x-iso9660-appimage.svg",
+      "24": "24/application-x-iso9660-appimage.svg",
+      "32": "32/application-x-iso9660-appimage.svg",
+      "48": "48/application-x-iso9660-appimage.svg",
+      "64": "64/application-x-iso9660-appimage.svg"
+    },
+    "application-x-ms-dos-executable": {
+      "16": "16/application-x-ms-dos-executable.svg",
+      "24": "24/application-x-ms-dos-executable.svg",
+      "32": "32/application-x-ms-dos-executable.svg",
+      "48": "48/application-x-ms-dos-executable.svg",
+      "64": "64/application-x-ms-dos-executable.svg"
+    },
+    "application-x-pem-key": {
+      "16": "16/application-x-pem-key.svg",
+      "24": "24/application-x-pem-key.svg",
+      "32": "32/application-x-pem-key.svg",
+      "48": "48/application-x-pem-key.svg",
+      "64": "64/application-x-pem-key.svg"
+    },
+    "application-x-rar": {
+      "16": "16/application-x-rar.svg",
+      "24": "24/application-x-rar.svg",
+      "32": "32/application-x-rar.svg",
+      "48": "48/application-x-rar.svg",
+      "64": "64/application-x-rar.svg"
+    },
+    "application-x-raw-disk-image": {
+      "16": "16/application-x-raw-disk-image.svg",
+      "24": "24/application-x-raw-disk-image.svg",
+      "32": "32/application-x-raw-disk-image.svg",
+      "48": "48/application-x-raw-disk-image.svg",
+      "64": "64/application-x-raw-disk-image.svg"
+    },
+    "application-x-rpm": {
+      "16": "16/application-x-rpm.svg",
+      "24": "24/application-x-rpm.svg",
+      "32": "32/application-x-rpm.svg",
+      "48": "48/application-x-rpm.svg",
+      "64": "64/application-x-rpm.svg"
+    },
+    "application-x-shellscript": {
+      "16": "16/application-x-shellscript.svg",
+      "24": "24/application-x-shellscript.svg",
+      "32": "32/application-x-shellscript.svg",
+      "48": "48/application-x-shellscript.svg",
+      "64": "64/application-x-shellscript.svg"
+    },
+    "application-x-sqlite3": {
+      "16": "16/application-x-sqlite3.svg",
+      "24": "24/application-x-sqlite3.svg",
+      "32": "32/application-x-sqlite3.svg",
+      "48": "48/application-x-sqlite3.svg",
+      "64": "64/application-x-sqlite3.svg"
+    },
+    "application-x-step": {
+      "16": "16/application-x-step.svg",
+      "24": "24/application-x-step.svg",
+      "32": "32/application-x-step.svg",
+      "48": "48/application-x-step.svg",
+      "64": "64/application-x-step.svg"
+    },
+    "application-x-tar": {
+      "16": "16/application-x-tar.svg",
+      "24": "24/application-x-tar.svg",
+      "32": "32/application-x-tar.svg",
+      "48": "48/application-x-tar.svg",
+      "64": "64/application-x-tar.svg"
+    },
+    "application-x-xz-compressed-tar": {
+      "16": "16/application-x-xz-compressed-tar.svg",
+      "24": "24/application-x-xz-compressed-tar.svg",
+      "32": "32/application-x-xz-compressed-tar.svg",
+      "48": "48/application-x-xz-compressed-tar.svg",
+      "64": "64/application-x-xz-compressed-tar.svg"
+    },
+    "application-x-zerosize": {
+      "16": "16/application-x-zerosize.svg",
+      "24": "24/application-x-zerosize.svg",
+      "32": "32/application-x-zerosize.svg",
+      "48": "48/application-x-zerosize.svg",
+      "64": "64/application-x-zerosize.svg"
+    },
+    "application-xhtml+xml": {
+      "16": "16/application-xhtml+xml.svg",
+      "24": "24/application-xhtml+xml.svg",
+      "32": "32/application-xhtml+xml.svg",
+      "48": "48/application-xhtml+xml.svg",
+      "64": "64/application-xhtml+xml.svg"
+    },
+    "application-xml": {
+      "16": "16/application-xml.svg",
+      "24": "24/application-xml.svg",
+      "32": "32/application-xml.svg",
+      "48": "48/application-xml.svg",
+      "64": "64/application-xml.svg"
+    },
+    "application-yaml": {
+      "16": "16/application-yaml.svg",
+      "24": "24/application-yaml.svg",
+      "32": "32/application-yaml.svg",
+      "48": "48/application-yaml.svg",
+      "64": "64/application-yaml.svg"
+    },
+    "application-zip": {
+      "16": "16/application-zip.svg",
+      "24": "24/application-zip.svg",
+      "32": "32/application-zip.svg",
+      "48": "48/application-zip.svg",
+      "64": "64/application-zip.svg"
+    },
+    "application-zstd": {
+      "16": "16/application-zstd.svg",
+      "24": "24/application-zstd.svg",
+      "32": "32/application-zstd.svg",
+      "48": "48/application-zstd.svg",
+      "64": "64/application-zstd.svg"
+    },
+    "audio-ac3": {
+      "16": "16/audio-ac3.svg",
+      "24": "24/audio-ac3.svg",
+      "32": "32/audio-ac3.svg",
+      "48": "48/audio-ac3.svg",
+      "64": "64/audio-ac3.svg"
+    },
+    "audio-flac": {
+      "16": "16/audio-flac.svg",
+      "24": "24/audio-flac.svg",
+      "32": "32/audio-flac.svg",
+      "48": "48/audio-flac.svg",
+      "64": "64/audio-flac.svg"
+    },
+    "audio-m4a": {
+      "16": "16/audio-m4a.svg",
+      "24": "24/audio-m4a.svg",
+      "32": "32/audio-m4a.svg",
+      "48": "48/audio-m4a.svg",
+      "64": "64/audio-m4a.svg"
+    },
+    "audio-mp3": {
+      "16": "16/audio-mp3.svg",
+      "24": "24/audio-mp3.svg",
+      "32": "32/audio-mp3.svg",
+      "48": "48/audio-mp3.svg",
+      "64": "64/audio-mp3.svg"
+    },
+    "audio-mpeg": {
+      "16": "16/audio-mpeg.svg",
+      "24": "24/audio-mpeg.svg",
+      "32": "32/audio-mpeg.svg",
+      "48": "48/audio-mpeg.svg",
+      "64": "64/audio-mpeg.svg"
+    },
+    "audio-x-generic": {
+      "16": "16/audio-x-generic.svg",
+      "24": "24/audio-x-generic.svg",
+      "32": "32/audio-x-generic.svg",
+      "48": "48/audio-x-generic.svg",
+      "64": "64/audio-x-generic.svg"
+    },
+    "audio-x-m4a": {
+      "16": "16/audio-x-m4a.svg",
+      "24": "24/audio-x-m4a.svg",
+      "32": "32/audio-x-m4a.svg",
+      "48": "48/audio-x-m4a.svg",
+      "64": "64/audio-x-m4a.svg"
+    },
+    "audio-x-ms-wma": {
+      "16": "16/audio-x-ms-wma.svg",
+      "24": "24/audio-x-ms-wma.svg",
+      "32": "32/audio-x-ms-wma.svg",
+      "48": "48/audio-x-ms-wma.svg",
+      "64": "64/audio-x-ms-wma.svg"
+    },
+    "audio-x-speex+ogg": {
+      "16": "16/audio-x-speex+ogg.svg",
+      "24": "24/audio-x-speex+ogg.svg",
+      "32": "32/audio-x-speex+ogg.svg",
+      "48": "48/audio-x-speex+ogg.svg",
+      "64": "64/audio-x-speex+ogg.svg"
+    },
+    "audio-x-vorbis+ogg": {
+      "16": "16/audio-x-vorbis+ogg.svg",
+      "24": "24/audio-x-vorbis+ogg.svg",
+      "32": "32/audio-x-vorbis+ogg.svg",
+      "48": "48/audio-x-vorbis+ogg.svg",
+      "64": "64/audio-x-vorbis+ogg.svg"
+    },
+    "audio-x-wav": {
+      "16": "16/audio-x-wav.svg",
+      "24": "24/audio-x-wav.svg",
+      "32": "32/audio-x-wav.svg",
+      "48": "48/audio-x-wav.svg",
+      "64": "64/audio-x-wav.svg"
+    },
+    "folder": {
+      "16": "16/folder.svg",
+      "24": "24/folder.svg",
+      "32": "32/folder.svg",
+      "48": "48/folder.svg",
+      "64": "64/folder.svg"
+    },
+    "folder-open": {
+      "16": "16/folder-open.svg",
+      "24": "24/folder-open.svg",
+      "32": "32/folder-open.svg",
+      "48": "48/folder-open.svg",
+      "64": "64/folder-open.svg"
+    },
+    "font-x-generic": {
+      "16": "16/font-x-generic.svg",
+      "24": "24/font-x-generic.svg",
+      "32": "32/font-x-generic.svg",
+      "48": "48/font-x-generic.svg",
+      "64": "64/font-x-generic.svg"
+    },
+    "image": {
+      "16": "16/image.svg",
+      "24": "24/image.svg",
+      "32": "32/image.svg",
+      "48": "48/image.svg",
+      "64": "64/image.svg"
+    },
+    "image-bmp": {
+      "16": "16/image-bmp.svg",
+      "24": "24/image-bmp.svg",
+      "32": "32/image-bmp.svg",
+      "48": "48/image-bmp.svg",
+      "64": "64/image-bmp.svg"
+    },
+    "image-gif": {
+      "16": "16/image-gif.svg",
+      "24": "24/image-gif.svg",
+      "32": "32/image-gif.svg",
+      "48": "48/image-gif.svg",
+      "64": "64/image-gif.svg"
+    },
+    "image-jpeg": {
+      "16": "16/image-jpeg.svg",
+      "24": "24/image-jpeg.svg",
+      "32": "32/image-jpeg.svg",
+      "48": "48/image-jpeg.svg",
+      "64": "64/image-jpeg.svg"
+    },
+    "image-png": {
+      "16": "16/image-png.svg",
+      "24": "24/image-png.svg",
+      "32": "32/image-png.svg",
+      "48": "48/image-png.svg",
+      "64": "64/image-png.svg"
+    },
+    "image-svg+xml": {
+      "16": "16/image-svg+xml.svg",
+      "24": "24/image-svg+xml.svg",
+      "32": "32/image-svg+xml.svg",
+      "48": "48/image-svg+xml.svg",
+      "64": "64/image-svg+xml.svg"
+    },
+    "image-tiff": {
+      "16": "16/image-tiff.svg",
+      "24": "24/image-tiff.svg",
+      "32": "32/image-tiff.svg",
+      "48": "48/image-tiff.svg",
+      "64": "64/image-tiff.svg"
+    },
+    "image-vnd.adobe.photoshop": {
+      "16": "16/image-vnd.adobe.photoshop.svg",
+      "24": "24/image-vnd.adobe.photoshop.svg",
+      "32": "32/image-vnd.adobe.photoshop.svg",
+      "48": "48/image-vnd.adobe.photoshop.svg",
+      "64": "64/image-vnd.adobe.photoshop.svg"
+    },
+    "image-x-adobe-dng": {
+      "16": "16/image-x-adobe-dng.svg",
+      "24": "24/image-x-adobe-dng.svg",
+      "32": "32/image-x-adobe-dng.svg",
+      "48": "48/image-x-adobe-dng.svg",
+      "64": "64/image-x-adobe-dng.svg"
+    },
+    "image-x-generic": {
+      "16": "16/image-x-generic.svg",
+      "24": "24/image-x-generic.svg",
+      "32": "32/image-x-generic.svg",
+      "48": "48/image-x-generic.svg",
+      "64": "64/image-x-generic.svg"
+    },
+    "image-x-tga": {
+      "16": "16/image-x-tga.svg",
+      "24": "24/image-x-tga.svg",
+      "32": "32/image-x-tga.svg",
+      "48": "48/image-x-tga.svg",
+      "64": "64/image-x-tga.svg"
+    },
+    "model-stl": {
+      "16": "16/model-stl.svg",
+      "24": "24/model-stl.svg",
+      "32": "32/model-stl.svg",
+      "48": "48/model-stl.svg",
+      "64": "64/model-stl.svg"
+    },
+    "package-x-generic": {
+      "16": "16/package-x-generic.svg",
+      "24": "24/package-x-generic.svg",
+      "32": "32/package-x-generic.svg",
+      "48": "48/package-x-generic.svg",
+      "64": "64/package-x-generic.svg"
+    },
+    "text-css": {
+      "16": "16/text-css.svg",
+      "24": "24/text-css.svg",
+      "32": "32/text-css.svg",
+      "48": "48/text-css.svg",
+      "64": "64/text-css.svg"
+    },
+    "text-csv": {
+      "16": "16/text-csv.svg",
+      "24": "24/text-csv.svg",
+      "32": "32/text-csv.svg",
+      "48": "48/text-csv.svg",
+      "64": "64/text-csv.svg"
+    },
+    "text-html": {
+      "16": "16/text-html.svg",
+      "24": "24/text-html.svg",
+      "32": "32/text-html.svg",
+      "48": "48/text-html.svg",
+      "64": "64/text-html.svg"
+    },
+    "text-javascript": {
+      "16": "16/text-javascript.svg",
+      "24": "24/text-javascript.svg",
+      "32": "32/text-javascript.svg",
+      "48": "48/text-javascript.svg",
+      "64": "64/text-javascript.svg"
+    },
+    "text-markdown": {
+      "16": "16/text-markdown.svg",
+      "24": "24/text-markdown.svg",
+      "32": "32/text-markdown.svg",
+      "48": "48/text-markdown.svg",
+      "64": "64/text-markdown.svg"
+    },
+    "text-plain": {
+      "16": "16/text-plain.svg",
+      "24": "24/text-plain.svg",
+      "32": "32/text-plain.svg",
+      "48": "48/text-plain.svg",
+      "64": "64/text-plain.svg"
+    },
+    "text-rust": {
+      "16": "16/text-rust.svg",
+      "24": "24/text-rust.svg",
+      "32": "32/text-rust.svg",
+      "48": "48/text-rust.svg",
+      "64": "64/text-rust.svg"
+    },
+    "text-tab-separated-values": {
+      "16": "16/text-tab-separated-values.svg",
+      "24": "24/text-tab-separated-values.svg",
+      "32": "32/text-tab-separated-values.svg",
+      "48": "48/text-tab-separated-values.svg",
+      "64": "64/text-tab-separated-values.svg"
+    },
+    "text-x-c++src": {
+      "16": "16/text-x-c++src.svg",
+      "24": "24/text-x-c++src.svg",
+      "32": "32/text-x-c++src.svg",
+      "48": "48/text-x-c++src.svg",
+      "64": "64/text-x-c++src.svg"
+    },
+    "text-x-chdr": {
+      "16": "16/text-x-chdr.svg",
+      "24": "24/text-x-chdr.svg",
+      "32": "32/text-x-chdr.svg",
+      "48": "48/text-x-chdr.svg",
+      "64": "64/text-x-chdr.svg"
+    },
+    "text-x-csharp": {
+      "16": "16/text-x-csharp.svg",
+      "24": "24/text-x-csharp.svg",
+      "32": "32/text-x-csharp.svg",
+      "48": "48/text-x-csharp.svg",
+      "64": "64/text-x-csharp.svg"
+    },
+    "text-x-csrc": {
+      "16": "16/text-x-csrc.svg",
+      "24": "24/text-x-csrc.svg",
+      "32": "32/text-x-csrc.svg",
+      "48": "48/text-x-csrc.svg",
+      "64": "64/text-x-csrc.svg"
+    },
+    "text-x-generic": {
+      "16": "16/text-x-generic.svg",
+      "24": "24/text-x-generic.svg",
+      "32": "32/text-x-generic.svg",
+      "48": "48/text-x-generic.svg",
+      "64": "64/text-x-generic.svg"
+    },
+    "text-x-go": {
+      "16": "16/text-x-go.svg",
+      "24": "24/text-x-go.svg",
+      "32": "32/text-x-go.svg",
+      "48": "48/text-x-go.svg",
+      "64": "64/text-x-go.svg"
+    },
+    "text-x-java": {
+      "16": "16/text-x-java.svg",
+      "24": "24/text-x-java.svg",
+      "32": "32/text-x-java.svg",
+      "48": "48/text-x-java.svg",
+      "64": "64/text-x-java.svg"
+    },
+    "text-x-kotlin": {
+      "16": "16/text-x-kotlin.svg",
+      "24": "24/text-x-kotlin.svg",
+      "32": "32/text-x-kotlin.svg",
+      "48": "48/text-x-kotlin.svg",
+      "64": "64/text-x-kotlin.svg"
+    },
+    "text-x-log": {
+      "16": "16/text-x-log.svg",
+      "24": "24/text-x-log.svg",
+      "32": "32/text-x-log.svg",
+      "48": "48/text-x-log.svg",
+      "64": "64/text-x-log.svg"
+    },
+    "text-x-python": {
+      "16": "16/text-x-python.svg",
+      "24": "24/text-x-python.svg",
+      "32": "32/text-x-python.svg",
+      "48": "48/text-x-python.svg",
+      "64": "64/text-x-python.svg"
+    },
+    "text-x-rust": {
+      "16": "16/text-x-rust.svg",
+      "24": "24/text-x-rust.svg",
+      "32": "32/text-x-rust.svg",
+      "48": "48/text-x-rust.svg",
+      "64": "64/text-x-rust.svg"
+    },
+    "text-x-script": {
+      "16": "16/text-x-script.svg",
+      "24": "24/text-x-script.svg",
+      "32": "32/text-x-script.svg",
+      "48": "48/text-x-script.svg",
+      "64": "64/text-x-script.svg"
+    },
+    "text-x-shellscript": {
+      "16": "16/text-x-shellscript.svg",
+      "24": "24/text-x-shellscript.svg",
+      "32": "32/text-x-shellscript.svg",
+      "48": "48/text-x-shellscript.svg",
+      "64": "64/text-x-shellscript.svg"
+    },
+    "text-x-sql": {
+      "16": "16/text-x-sql.svg",
+      "24": "24/text-x-sql.svg",
+      "32": "32/text-x-sql.svg",
+      "48": "48/text-x-sql.svg",
+      "64": "64/text-x-sql.svg"
+    },
+    "text-x-vbscript": {
+      "16": "16/text-x-vbscript.svg",
+      "24": "24/text-x-vbscript.svg",
+      "32": "32/text-x-vbscript.svg",
+      "48": "48/text-x-vbscript.svg",
+      "64": "64/text-x-vbscript.svg"
+    },
+    "text-xml": {
+      "16": "16/text-xml.svg",
+      "24": "24/text-xml.svg",
+      "32": "32/text-xml.svg",
+      "48": "48/text-xml.svg",
+      "64": "64/text-xml.svg"
+    },
+    "video": {
+      "16": "16/video.svg",
+      "24": "24/video.svg",
+      "32": "32/video.svg",
+      "48": "48/video.svg",
+      "64": "64/video.svg"
+    },
+    "video-mp2t": {
+      "16": "16/video-mp2t.svg",
+      "24": "24/video-mp2t.svg",
+      "32": "32/video-mp2t.svg",
+      "48": "48/video-mp2t.svg",
+      "64": "64/video-mp2t.svg"
+    },
+    "video-mp4": {
+      "16": "16/video-mp4.svg",
+      "24": "24/video-mp4.svg",
+      "32": "32/video-mp4.svg",
+      "48": "48/video-mp4.svg",
+      "64": "64/video-mp4.svg"
+    },
+    "video-webm": {
+      "16": "16/video-webm.svg",
+      "24": "24/video-webm.svg",
+      "32": "32/video-webm.svg",
+      "48": "48/video-webm.svg",
+      "64": "64/video-webm.svg"
+    },
+    "video-x-generic": {
+      "16": "16/video-x-generic.svg",
+      "24": "24/video-x-generic.svg",
+      "32": "32/video-x-generic.svg",
+      "48": "48/video-x-generic.svg",
+      "64": "64/video-x-generic.svg"
+    },
+    "video-x-matroska": {
+      "16": "16/video-x-matroska.svg",
+      "24": "24/video-x-matroska.svg",
+      "32": "32/video-x-matroska.svg",
+      "48": "48/video-x-matroska.svg",
+      "64": "64/video-x-matroska.svg"
+    },
+    "video-x-msvideo": {
+      "16": "16/video-x-msvideo.svg",
+      "24": "24/video-x-msvideo.svg",
+      "32": "32/video-x-msvideo.svg",
+      "48": "48/video-x-msvideo.svg",
+      "64": "64/video-x-msvideo.svg"
+    },
+    "video-x-theora+ogg": {
+      "16": "16/video-x-theora+ogg.svg",
+      "24": "24/video-x-theora+ogg.svg",
+      "32": "32/video-x-theora+ogg.svg",
+      "48": "48/video-x-theora+ogg.svg",
+      "64": "64/video-x-theora+ogg.svg"
+    }
+  },
+  "import_date": "2026-08-06",
+  "license": "GPL-3.0",
+  "required_fallbacks": [
+    "application-octet-stream",
+    "application-x-generic",
+    "audio-x-generic",
+    "folder",
+    "folder-open",
+    "image-x-generic",
+    "text-x-generic",
+    "video-x-generic"
+  ],
+  "sizes": [
+    "16",
+    "24",
+    "32",
+    "48",
+    "64"
+  ],
+  "source": "PapirusDevelopmentTeam/papirus-icon-theme"
+}
