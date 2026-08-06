@@ -16137,17 +16137,38 @@ impl IcedChat {
                 thumbnail_bytes,
             } => {
                 if !thumbnail_bytes.is_empty() {
+                    // VIDCARD-18 guardrail: read the decoded poster dimensions
+                    // BEFORE handing the bytes to the image decoder, and
+                    // reject anything outside the accepted bounds. The
+                    // sender's poster is generated at MAX_POSTER_EDGE
+                    // (320 px); a hostile sender must not be able to force a
+                    // large surface allocation through the preview path.
+                    // Rejection keeps the file-type placeholder in place and
+                    // clears the pending hash so the label stays truthful.
+                    let dimensions =
+                        image::ImageReader::new(std::io::Cursor::new(&thumbnail_bytes))
+                            .with_guessed_format()
+                            .ok()
+                            .and_then(|reader| reader.into_dimensions().ok());
+                    if !video_poster::dimensions_within_bounds(dimensions) {
+                        tracing::warn!(
+                            entry_index,
+                            ?dimensions,
+                            "video thumbnail rejected: decoded dimensions outside poster bounds; keeping placeholder"
+                        );
+                        if let Some(entry) = self.entries.get_mut(entry_index) {
+                            if let Some(dl) = entry.download.as_mut() {
+                                dl.thumbnail_hash = None;
+                            }
+                        }
+                        return iced::Task::none();
+                    }
                     if let Some(entry) = self.entries.get_mut(entry_index) {
                         if let Some(dl) = entry.download.as_mut() {
                             dl.thumbnail = Some(thumbnail_bytes.clone());
                             dl.thumbnail_handle =
                                 Some(iced::widget::image::Handle::from_bytes(thumbnail_bytes));
-                            dl.poster_dimensions = image::ImageReader::new(std::io::Cursor::new(
-                                &dl.thumbnail.as_ref().unwrap(),
-                            ))
-                            .with_guessed_format()
-                            .ok()
-                            .and_then(|reader| reader.into_dimensions().ok());
+                            dl.poster_dimensions = dimensions;
                         }
                         self.layout_cache.borrow_mut().invalidate_from(entry_index);
                     }

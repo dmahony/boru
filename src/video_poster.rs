@@ -6,6 +6,26 @@ use std::path::{Path, PathBuf};
 pub const MAX_POSTER_BYTES: usize = 512 * 1024;
 /// Maximum poster edge sent to the GUI/image decoder.
 pub const MAX_POSTER_EDGE: u32 = 320;
+/// Maximum decoded edge accepted for a poster before it is handed to the
+/// image decoder. Our own generated posters are capped at `MAX_POSTER_EDGE`
+/// (320 px); a 4x headroom rejects decompression-bomb posters from a
+/// misbehaving sender while leaving every legitimate preview untouched
+/// (VIDCARD-18 guardrail: bound dimensions before allocating preview
+/// resources).
+pub const MAX_POSTER_DECODED_EDGE: u32 = MAX_POSTER_EDGE * 4;
+
+/// True when decoded poster dimensions are inside the accepted bounds and
+/// safe to hand to the image decoder. `None` (unparseable header) or any
+/// non-positive / oversized dimension is rejected so a hostile sender
+/// cannot force a large surface allocation through the preview path.
+pub fn dimensions_within_bounds(dimensions: Option<(u32, u32)>) -> bool {
+    dimensions.is_some_and(|(width, height)| {
+        width > 0
+            && height > 0
+            && width <= MAX_POSTER_DECODED_EDGE
+            && height <= MAX_POSTER_DECODED_EDGE
+    })
+}
 /// Maximum input size allowed for the optional poster probe.
 pub const MAX_POSTER_INPUT_BYTES: u64 = 512 * 1024 * 1024;
 /// ffmpeg scale filter for poster extraction.
@@ -111,8 +131,8 @@ fn dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
         .ok()?;
     (dimensions.0 > 0
         && dimensions.1 > 0
-        && dimensions.0 <= MAX_POSTER_EDGE * 4
-        && dimensions.1 <= MAX_POSTER_EDGE * 4)
+        && dimensions.0 <= MAX_POSTER_DECODED_EDGE
+        && dimensions.1 <= MAX_POSTER_DECODED_EDGE)
         .then_some(dimensions)
 }
 
@@ -131,6 +151,39 @@ mod tests {
         assert_eq!(MAX_POSTER_EDGE, 320);
         assert_eq!(MAX_POSTER_BYTES, 512 * 1024);
         assert_eq!(MAX_POSTER_INPUT_BYTES, 512 * 1024 * 1024);
+        assert_eq!(MAX_POSTER_DECODED_EDGE, 1280);
+    }
+
+    #[test]
+    fn decoded_dimension_bounds_accept_legitimate_posters() {
+        // Our own generated posters are capped at MAX_POSTER_EDGE (320px);
+        // anything at or under the 4x headroom is a legitimate preview.
+        assert!(dimensions_within_bounds(Some((320, 180))));
+        assert!(dimensions_within_bounds(Some((1, 1))));
+        assert!(dimensions_within_bounds(Some((
+            MAX_POSTER_DECODED_EDGE,
+            MAX_POSTER_DECODED_EDGE
+        ))));
+    }
+
+    #[test]
+    fn decoded_dimension_bounds_reject_hostile_posters() {
+        // A misbehaving sender must not force a large surface allocation
+        // through the preview path: non-positive, unparseable, or oversized
+        // decoded dimensions are all rejected before the image decoder runs.
+        assert!(!dimensions_within_bounds(None));
+        assert!(!dimensions_within_bounds(Some((0, 100))));
+        assert!(!dimensions_within_bounds(Some((100, 0))));
+        assert!(!dimensions_within_bounds(Some((
+            MAX_POSTER_DECODED_EDGE + 1,
+            100
+        ))));
+        assert!(!dimensions_within_bounds(Some((
+            100,
+            MAX_POSTER_DECODED_EDGE + 1
+        ))));
+        assert!(!dimensions_within_bounds(Some((u32::MAX, 100))));
+        assert!(!dimensions_within_bounds(Some((100, u32::MAX))));
     }
 
     #[test]
