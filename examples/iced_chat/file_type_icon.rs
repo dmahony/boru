@@ -33,15 +33,21 @@
 //!
 //! ## Asset loading & caching
 //!
-//! The bundled SVGs live in `assets/third_party/papirus/<size>/` and are
-//! resolved against `CARGO_MANIFEST_DIR` (compile-time absolute), so the
-//! component works regardless of the process working directory.  Handles
-//! are cached forever in a process-global map keyed by repo-relative asset
-//! path; `svg::Handle` construction copies the SVG bytes, so building one
-//! per frame would thrash the allocator and re-parse the SVG on every
-//! draw.  A single embedded copy of the unknown-generic icon (32px) is the
-//! safety net: even if a bundle path is missing at runtime, the component
-//! never renders a broken/missing icon.
+//! The bundled SVGs live in `assets/third_party/papirus/<size>/`.  The
+//! asset root is resolved **at runtime** (PAPIRUS-17): `BORU_PAPIRUS_ASSETS`
+//! env var, then `<exe_dir>/assets/third_party/papirus` (the release
+//! package layout), then `CARGO_MANIFEST_DIR` (dev builds), so the same
+//! binary works in a source checkout and in a packaged release without
+//! depending on the build machine's source path.  Handles are cached
+//! forever in a process-global map keyed by repo-relative asset path;
+//! `svg::Handle` construction copies the SVG bytes, so building one per
+//! frame would thrash the allocator and re-parse the SVG on every draw.
+//! Identical-content aliases (the manifest's `duplicates.groups`) resolve
+//! to one canonical path, so the cache stores one entry per distinct SVG
+//! content, not one per alias (PAPIRUS-17 dedup).  A single embedded copy
+//! of the unknown-generic icon (32px) is the safety net: even if a bundle
+//! path is missing at runtime, the component never renders a
+//! broken/missing icon.
 //!
 //! ## Accessibility (PAPIRUS-15)
 //!
@@ -69,7 +75,6 @@
 //! unlabeled.
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
 use iced::widget::{container, svg, tooltip};
@@ -476,6 +481,74 @@ impl<'a> FileTypeIcon<'a> {
 /// the fallback path and the resolver agree.
 const UNKNOWN_ICON_ID: &str = "application-x-generic";
 
+/// Environment variable that overrides where the bundled Papirus asset
+/// root is loaded from at runtime (PAPIRUS-17 packaging).
+///
+/// Packagers (and tests) can point this at the directory that contains the
+/// `16/24/32/48/64` size dirs, e.g.
+/// `BORU_PAPIRUS_ASSETS=/opt/boru/share/boru/assets/third_party/papirus`.
+/// When unset, the loader falls back to the executable-relative
+/// `assets/third_party/papirus` layout (the release package layout), then
+/// to `CARGO_MANIFEST_DIR` (dev builds / source checkout).
+const PAPIRUS_ASSETS_ENV: &str = "BORU_PAPIRUS_ASSETS";
+
+/// Pure core of [`papirus_asset_root`]: pick the first candidate root that
+/// actually contains the bundle (testable without touching process state).
+///
+/// Candidates are checked in priority order: env override, exe-relative
+/// package layout, then the build-time manifest dir.
+fn resolve_asset_root(
+    env_override: Option<&std::path::Path>,
+    exe_dir: Option<&std::path::Path>,
+    manifest_dir: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    let probe = |root: &std::path::Path| -> bool {
+        root.join("32")
+            .join(format!("{UNKNOWN_ICON_ID}.svg"))
+            .is_file()
+    };
+    if let Some(dir) = env_override {
+        if probe(dir) {
+            return Some(dir.to_path_buf());
+        }
+    }
+    if let Some(dir) = exe_dir {
+        let p = dir.join("assets").join("third_party").join("papirus");
+        if probe(&p) {
+            return Some(p);
+        }
+    }
+    let p = manifest_dir.join(crate::file_type_resolver::PAPIRUS_ASSET_ROOT);
+    if probe(&p) {
+        Some(p)
+    } else {
+        None
+    }
+}
+
+/// Resolve the on-disk Papirus asset root for this process.
+///
+/// Priority (PAPIRUS-17 packaging):
+/// 1. `BORU_PAPIRUS_ASSETS` env var — explicit override for packagers.
+/// 2. `<exe_dir>/assets/third_party/papirus` — release packages ship the
+///    binary and the asset bundle side by side under this layout
+///    (see `.github/workflows/release.yaml`), so icons work on any machine
+///    without depending on the build machine's source path.
+/// 3. `CARGO_MANIFEST_DIR/assets/third_party/papirus` — dev builds and
+///    source checkouts (the pre-PAPIRUS-17 behaviour).
+///
+/// The returned root is the directory that directly contains the
+/// `16/24/32/48/64` size dirs.  `None` means no bundled assets were found
+/// anywhere; the component then renders the embedded generic icon.
+fn papirus_asset_root() -> Option<std::path::PathBuf> {
+    let env_override = std::env::var_os(PAPIRUS_ASSETS_ENV).map(std::path::PathBuf::from);
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf));
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    resolve_asset_root(env_override.as_deref(), exe_dir.as_deref(), manifest_dir)
+}
+
 /// Icon ids whose **compact (16px)** bundled artwork is a `currentColor`
 /// design tuned for light surfaces (see `source_size_dir`).
 ///
@@ -542,8 +615,19 @@ fn cached_svg_handle(asset_path: &str) -> svg::Handle {
     if let Some(handle) = cache.lock().unwrap().get(asset_path) {
         return handle.clone();
     }
-    let full_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(asset_path);
-    let bytes = std::fs::read(&full_path).unwrap_or_else(|_| FALLBACK_SVG_BYTES.to_vec());
+    // PAPIRUS-17: resolve the bundled asset root at runtime so the same
+    // code works in a source checkout and in a release package (binary +
+    // assets shipped side by side, or BORU_PAPIRUS_ASSETS override).
+    // `asset_path` is repo-relative (`assets/third_party/papirus/<size>/…`);
+    // strip the root prefix and join the remainder onto the resolved root.
+    let root_prefix = format!("{}/", crate::file_type_resolver::PAPIRUS_ASSET_ROOT);
+    let relative = asset_path
+        .strip_prefix(root_prefix.as_str())
+        .unwrap_or(asset_path);
+    let bytes = papirus_asset_root()
+        .map(|root| root.join(relative))
+        .and_then(|full_path| std::fs::read(&full_path).ok())
+        .unwrap_or_else(|| FALLBACK_SVG_BYTES.to_vec());
     let handle = svg::Handle::from_memory(bytes);
     cache
         .lock()
@@ -1320,5 +1404,83 @@ mod tests {
             mc_folder >= 3.0,
             "24px folder on dark tile: {mc_folder:.2}:1 (need ≥ 3:1)"
         );
+    }
+
+    // ── PAPIRUS-17: runtime asset root (packaging) ─────────────────
+
+    /// Helper: create a fake bundle root under `std::env::temp_dir()` that
+    /// satisfies the loader's probe (`32/application-x-generic.svg` exists),
+    /// so packaging resolution tests don't depend on the real checkout.
+    fn fake_bundle_root(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("boru-papirus-test-{}-{tag}", std::process::id()));
+        std::fs::create_dir_all(dir.join("32")).expect("create fake bundle 32 dir");
+        // Write a minimal valid SVG so the probe passes.
+        std::fs::write(
+            dir.join("32").join("application-x-generic.svg"),
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+        )
+        .expect("write fake generic icon");
+        dir
+    }
+
+    #[test]
+    fn asset_root_env_override_wins() {
+        let override_root = fake_bundle_root("env");
+        let exe_dir = std::env::temp_dir().join(format!("boru-papirus-exe-{}", std::process::id()));
+        // No bundle next to the exe — only the env override has one.
+        let root = resolve_asset_root(
+            Some(&override_root),
+            Some(&exe_dir),
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+        );
+        assert_eq!(root.as_deref(), Some(override_root.as_path()));
+    }
+
+    #[test]
+    fn asset_root_falls_back_to_exe_relative_package_layout() {
+        // Release layout: <exe_dir>/assets/third_party/papirus/<size>/…
+        let exe_dir =
+            std::env::temp_dir().join(format!("boru-papirus-exe-{}-pkg", std::process::id()));
+        let bundle = exe_dir.join("assets").join("third_party").join("papirus");
+        std::fs::create_dir_all(bundle.join("32")).expect("create pkg 32 dir");
+        std::fs::write(
+            bundle.join("32").join("application-x-generic.svg"),
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+        )
+        .expect("write pkg generic icon");
+
+        let root = resolve_asset_root(
+            None,
+            Some(&exe_dir),
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+        );
+        assert_eq!(root.as_deref(), Some(bundle.as_path()));
+    }
+
+    #[test]
+    fn asset_root_falls_back_to_manifest_dir_for_dev_builds() {
+        // No env override, no exe-relative bundle → dev build uses the
+        // compile-time manifest dir.
+        let exe_dir =
+            std::env::temp_dir().join(format!("boru-papirus-exe-{}-empty", std::process::id()));
+        std::fs::create_dir_all(&exe_dir).expect("create empty exe dir");
+        let root = resolve_asset_root(
+            None,
+            Some(&exe_dir),
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+        );
+        let expected = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(crate::file_type_resolver::PAPIRUS_ASSET_ROOT);
+        assert_eq!(root.as_deref(), Some(expected.as_path()));
+    }
+
+    #[test]
+    fn asset_root_none_when_no_bundle_anywhere() {
+        let empty =
+            std::env::temp_dir().join(format!("boru-papirus-exe-{}-none", std::process::id()));
+        std::fs::create_dir_all(&empty).expect("create empty dir");
+        let root = resolve_asset_root(None, Some(&empty), &empty);
+        assert!(root.is_none(), "no bundle → no asset root");
     }
 }

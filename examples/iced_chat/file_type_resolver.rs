@@ -67,7 +67,7 @@
 //! core, priority chain, and fallback structure are final.
 
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use crate::file_category::FileCategory;
 
@@ -92,6 +92,84 @@ const UNKNOWN_ICON: &str = "application-x-generic";
 
 /// Icon used for explicit directory / folder state.
 const DIRECTORY_ICON: &str = "folder-open";
+
+// ── Resolution result cache (PAPIRUS-17) ─────────────────────────────
+
+/// Cache key for [`resolve_file_icon`] results: the **normalised** inputs
+/// that fully determine the outcome.
+///
+/// Normalising on this side means `REPORT.PDF` and `report.pdf` (or a MIME
+/// with stray case/whitespace/params) share one entry — exactly the
+/// high-hit-rate path a file list or chat log exercises, where the same few
+/// file types repeat hundreds of times per frame.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ResolveCacheKey {
+    is_directory: bool,
+    /// `normalise_mime` output of the peer-advertised MIME; `None` when
+    /// absent / whitespace-only.
+    advertised_mime: Option<String>,
+    /// `normalise_mime` output of the locally detected MIME; `None` when
+    /// absent / whitespace-only.
+    local_mime: Option<String>,
+    /// `normalised_extensions` output of the filename (compound first).
+    extensions: Vec<String>,
+}
+
+/// Upper bound on the resolver result cache.
+///
+/// Each entry is a `ResolvedFileIcon` (a few small strings) and the key
+/// space is the normalised type universe, so in practice the cache stays
+/// tiny.  The cap protects against a pathological peer flooding the chat
+/// with unique MIME strings (each unique normalised key would otherwise
+/// create an entry); on overflow the whole cache is reset, which is cheap
+/// and correct (results are deterministic, so a cold cache just
+/// recomputes).
+const RESOLVE_CACHE_MAX_ENTRIES: usize = 4096;
+
+static RESOLVE_CACHE: OnceLock<Mutex<HashMap<ResolveCacheKey, ResolvedFileIcon>>> = OnceLock::new();
+
+fn resolve_cache() -> &'static Mutex<HashMap<ResolveCacheKey, ResolvedFileIcon>> {
+    RESOLVE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Insert `(key, value)` into `cache`, bounding the size at
+/// [`RESOLVE_CACHE_MAX_ENTRIES`].  Exposed as a pure function so the bound
+/// is testable without touching the process-global cache.
+fn bounded_resolve_cache_insert(
+    cache: &mut HashMap<ResolveCacheKey, ResolvedFileIcon>,
+    key: ResolveCacheKey,
+    value: ResolvedFileIcon,
+) {
+    if cache.len() >= RESOLVE_CACHE_MAX_ENTRIES {
+        cache.clear();
+    }
+    cache.insert(key, value);
+}
+
+/// Build the normalised cache key for a resolution request.
+///
+/// `is_directory` and the **normalised** MIME strings and extension
+/// candidates fully determine [`resolve_file_icon`]'s output: the original
+/// filename only matters through its normalised extension candidates, and
+/// MIME lookups normalise internally, so two requests that differ only in
+/// case/whitespace/parameters share one entry.
+fn resolve_cache_key(
+    filename: &str,
+    advertised_mime_type: Option<&str>,
+    locally_detected_mime_type: Option<&str>,
+    is_directory: bool,
+) -> ResolveCacheKey {
+    ResolveCacheKey {
+        is_directory,
+        advertised_mime: advertised_mime_type
+            .map(normalise_mime)
+            .filter(|m| !m.is_empty()),
+        local_mime: locally_detected_mime_type
+            .map(normalise_mime)
+            .filter(|m| !m.is_empty()),
+        extensions: normalised_extensions(filename),
+    }
+}
 
 // ── Public types ─────────────────────────────────────────────────────
 
@@ -177,6 +255,13 @@ pub struct MimeMismatch {
 struct PapirusCatalog {
     icons: HashMap<String, HashMap<u16, String>>,
     required_fallbacks: Vec<String>,
+    /// Alias dedup (PAPIRUS-17): manifest-relative path -> canonical member
+    /// of the same content-duplicate group (e.g. `32/audio-x-m4a.svg` ->
+    /// `32/audio-flac.svg`).  Built from the manifest's `duplicates.groups`;
+    /// the canonical member is the lexicographically smallest path in each
+    /// group, so identical SVG content is loaded and cached **once** no
+    /// matter which alias resolved it.
+    canonical_paths: HashMap<String, String>,
 }
 
 static CATALOG: OnceLock<PapirusCatalog> = OnceLock::new();
@@ -217,9 +302,42 @@ impl PapirusCatalog {
             })
             .unwrap_or_default();
 
+        // PAPIRUS-17 alias dedup: manifest `duplicates.groups` lists the
+        // bundle paths that share identical content (keyed by content
+        // hash).  For each group pick the lexicographically smallest path
+        // as the canonical member and map every member to it, so aliases
+        // (`audio-x-m4a` ≡ `audio-flac`) resolve to a single real file and
+        // the SVG handle cache stores one entry per distinct content.
+        let mut canonical_paths: HashMap<String, String> = HashMap::new();
+        if let Some(groups) = value
+            .get("duplicates")
+            .and_then(|d| d.get("groups"))
+            .and_then(serde_json::Value::as_object)
+        {
+            for members in groups.values() {
+                let Some(members) = members.as_array() else {
+                    continue;
+                };
+                let mut paths: Vec<&str> = members
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect();
+                paths.sort_unstable();
+                let Some(canonical) = paths.first().copied() else {
+                    continue;
+                };
+                for member in paths {
+                    canonical_paths
+                        .entry(member.to_string())
+                        .or_insert_with(|| canonical.to_string());
+                }
+            }
+        }
+
         PapirusCatalog {
             icons,
             required_fallbacks,
+            canonical_paths,
         }
     }
 
@@ -237,16 +355,26 @@ impl PapirusCatalog {
     /// Repo-relative path for `icon_id` at `size`, e.g.
     /// `"assets/third_party/papirus/32/application-pdf.svg"`.
     ///
+    /// **Alias dedup (PAPIRUS-17):** when the icon's manifest path is a
+    /// member of a content-duplicate group, the returned path is the
+    /// group's canonical member, so identical SVG content is read and
+    /// cached once regardless of which alias resolved it (e.g.
+    /// `audio-x-m4a` and `audio-flac` both return
+    /// `.../32/audio-flac.svg`).
+    ///
     /// The manifest is bundled at build time and therefore trusted, but
     /// the returned path is still passed through [`is_bundled_asset_path`]
     /// (Task 16 defense in depth): even a corrupted manifest entry that
     /// escaped the bundle would be rejected here instead of reaching a
     /// filesystem read.
     pub fn asset_path(&self, icon_id: &str, size: u16) -> Option<String> {
-        let repo_relative = format!(
-            "{PAPIRUS_ASSET_ROOT}/{}",
-            self.manifest_path(icon_id, size)?
-        );
+        let manifest_path = self.manifest_path(icon_id, size)?;
+        let canonical = self
+            .canonical_paths
+            .get(manifest_path)
+            .map(String::as_str)
+            .unwrap_or(manifest_path);
+        let repo_relative = format!("{PAPIRUS_ASSET_ROOT}/{canonical}");
         if !is_bundled_asset_path(&repo_relative) {
             return None;
         }
@@ -1053,7 +1181,47 @@ const CATEGORY_FALLBACK_ICONS: &[(FileCategory, &str)] = &[
 ///
 /// See the module docs for the exact priority chain.  The returned
 /// `asset_path` is guaranteed to reference an icon in the pinned bundle.
+///
+/// ## Performance (PAPIRUS-17)
+///
+/// Results are cached by **normalised** inputs ([`ResolveCacheKey`]): the
+/// same file type seen again (e.g. `REPORT.PDF` after `report.pdf`, or a
+/// MIME whose case/whitespace/params differ) returns the identical
+/// `ResolvedFileIcon` without re-running the priority chain or rebuilding
+/// extension candidates.  The cache is bounded ([`RESOLVE_CACHE_MAX_ENTRIES`])
+/// and holds only plain data, so it is safe to call from `view()` every
+/// frame.
 pub fn resolve_file_icon(
+    filename: &str,
+    advertised_mime_type: Option<&str>,
+    locally_detected_mime_type: Option<&str>,
+    is_directory: bool,
+) -> ResolvedFileIcon {
+    let key = resolve_cache_key(
+        filename,
+        advertised_mime_type,
+        locally_detected_mime_type,
+        is_directory,
+    );
+    {
+        let cache = resolve_cache().lock().unwrap();
+        if let Some(hit) = cache.get(&key) {
+            return hit.clone();
+        }
+    }
+    let resolved = resolve_file_icon_uncached(
+        filename,
+        advertised_mime_type,
+        locally_detected_mime_type,
+        is_directory,
+    );
+    bounded_resolve_cache_insert(&mut resolve_cache().lock().unwrap(), key, resolved.clone());
+    resolved
+}
+
+/// The uncached resolution chain (priorities 1–8).  [`resolve_file_icon`]
+/// wraps this with a bounded memo cache.
+fn resolve_file_icon_uncached(
     filename: &str,
     advertised_mime_type: Option<&str>,
     locally_detected_mime_type: Option<&str>,
@@ -2817,5 +2985,176 @@ mod tests {
         assert!(icon.asset_path.starts_with(PAPIRUS_ASSET_ROOT));
         let folder = resolve_file_icon("../../..", None, None, true);
         assert_eq!(folder.icon_id, DIRECTORY_ICON);
+    }
+
+    // ── PAPIRUS-17: manifest load-once + curated bundle size ──────
+
+    /// The manifest is parsed exactly once and shared: `global()` returns
+    /// the same `'static` catalog for every caller (PAPIRUS-17 "avoid
+    /// reading the same manifest repeatedly").
+    #[test]
+    fn catalog_global_is_a_singleton() {
+        let a: &'static PapirusCatalog = PapirusCatalog::global();
+        let b: &'static PapirusCatalog = PapirusCatalog::global();
+        assert!(std::ptr::eq(a, b), "catalog must be a process singleton");
+    }
+
+    /// The curated bundle stays small (PAPIRUS-17 "do not bundle thousands
+    /// of unused icons"): 114 curated icons × 5 sizes, far below the
+    /// thousands-scale the full Papirus theme would add.
+    #[test]
+    fn curated_bundle_stays_small() {
+        let catalog = PapirusCatalog::global();
+        assert!(
+            catalog.icons.len() < 200,
+            "curated icon count must stay small, got {}",
+            catalog.icons.len()
+        );
+        for (icon_id, sizes) in &catalog.icons {
+            assert!(
+                sizes.len() <= 5,
+                "{icon_id} must not carry more than the 5 standard size dirs"
+            );
+        }
+    }
+
+    // ── PAPIRUS-17: resolver result cache ──────────────────────────
+
+    /// The cache key is built from **normalised** inputs: case, whitespace,
+    /// MIME parameters, and directory prefixes must not create distinct
+    /// entries for the same underlying type.
+    #[test]
+    fn resolve_cache_key_normalises_mime_and_extension() {
+        let a = resolve_cache_key("REPORT.PDF", Some("IMAGE/PNG"), None, false);
+        let b = resolve_cache_key("report.pdf", Some(" image/png "), None, false);
+        assert_eq!(a, b);
+
+        let c = resolve_cache_key(
+            "download.bin",
+            Some("text/plain; charset=utf-8"),
+            None,
+            false,
+        );
+        let d = resolve_cache_key("download.bin", Some("text/plain"), None, false);
+        assert_eq!(c, d, "MIME parameters must be stripped before keying");
+
+        let e = resolve_cache_key("a/report.pdf", None, None, false);
+        let f = resolve_cache_key("b/c/report.pdf", None, None, false);
+        assert_eq!(e, f, "directory components must not affect the key");
+
+        let dir1 = resolve_cache_key("report.pdf", None, None, true);
+        let dir2 = resolve_cache_key("report.pdf", None, None, false);
+        assert_ne!(dir1, dir2, "directory state must be part of the key");
+
+        let none = resolve_cache_key("x", None, None, false);
+        let empty = resolve_cache_key("x", Some("   "), None, false);
+        assert_eq!(none, empty, "whitespace-only MIME is the same as absent");
+    }
+
+    /// Repeated resolution of the same normalised type returns the cached
+    /// result — identical struct, including the mismatch record.
+    #[test]
+    fn resolve_cache_returns_identical_result_for_normalised_equivalents() {
+        let a = resolve_file_icon("photo.png", Some("image/png"), Some("video/mp4"), false);
+        let b = resolve_file_icon("PHOTO.PNG", Some(" image/png "), Some("video/mp4"), false);
+        assert_eq!(a.icon_id, b.icon_id);
+        assert_eq!(a.asset_path, b.asset_path);
+        assert_eq!(a.source, b.source);
+        assert_eq!(a.mime_mismatch, b.mime_mismatch);
+    }
+
+    /// The bounded insert helper never lets the map exceed the cap (the
+    /// process-global cache is exercised indirectly through every other
+    /// resolution test; this pins the bound itself).
+    #[test]
+    fn bounded_resolve_cache_insert_respects_cap() {
+        let mut cache: HashMap<ResolveCacheKey, ResolvedFileIcon> = HashMap::new();
+        let base = resolve_file_icon("x.pdf", None, None, false);
+        for i in 0..RESOLVE_CACHE_MAX_ENTRIES + 100 {
+            let key = ResolveCacheKey {
+                is_directory: false,
+                advertised_mime: Some(format!("application/x-test-{i}")),
+                local_mime: None,
+                extensions: vec![format!("ext{i}")],
+            };
+            bounded_resolve_cache_insert(&mut cache, key, base.clone());
+        }
+        assert!(
+            cache.len() <= RESOLVE_CACHE_MAX_ENTRIES,
+            "cache must be bounded at {RESOLVE_CACHE_MAX_ENTRIES}, got {}",
+            cache.len()
+        );
+    }
+
+    // ── PAPIRUS-17: alias dedup (canonical duplicate-group members) ──
+
+    /// Aliases that share identical content must resolve to the same
+    /// canonical asset path, so the SVG handle cache stores one entry per
+    /// distinct content instead of one per alias.
+    #[test]
+    fn duplicate_group_aliases_resolve_to_one_canonical_path() {
+        let audio_flac = papirus_asset_path("audio-flac", 32).expect("audio-flac must exist at 32");
+        let audio_m4a =
+            papirus_asset_path("audio-x-m4a", 32).expect("audio-x-m4a must exist at 32");
+        assert_eq!(
+            audio_flac, audio_m4a,
+            "audio-x-m4a is a byte-identical alias of audio-flac and must resolve to the same path"
+        );
+
+        let img_png = papirus_asset_path("image-png", 32).expect("image-png at 32");
+        let img_generic = papirus_asset_path("image-x-generic", 32).expect("image-x-generic at 32");
+        assert_eq!(
+            img_png, img_generic,
+            "image-x-generic is a byte-identical alias of image-png"
+        );
+
+        // The canonical member is the lexicographically smallest path in
+        // the group and is a real bundle path.
+        for p in [&audio_flac, &img_png] {
+            assert!(is_bundled_asset_path(p), "{p} must be a bundle path");
+            assert!(p.ends_with(".svg"), "{p} must end in .svg");
+        }
+    }
+
+    /// Singletons (icons not in any duplicate group) keep their own path.
+    #[test]
+    fn singleton_icons_keep_their_own_path() {
+        let pdf = papirus_asset_path("application-pdf", 32).expect("pdf at 32");
+        assert!(pdf.ends_with("32/application-pdf.svg"));
+        let folder = papirus_asset_path("folder-open", 32).expect("folder at 32");
+        assert!(folder.ends_with("32/folder-open.svg"));
+    }
+
+    /// Every duplicate-group member maps to a canonical path that exists in
+    /// the manifest — no alias can point outside the bundle.
+    #[test]
+    fn canonical_alias_paths_stay_inside_the_bundle() {
+        let catalog = PapirusCatalog::global();
+        for (member, canonical) in &catalog.canonical_paths {
+            assert!(
+                member.starts_with("16/")
+                    || member.starts_with("24/")
+                    || member.starts_with("32/")
+                    || member.starts_with("48/")
+                    || member.starts_with("64/"),
+                "member {member} must be a size-relative manifest path"
+            );
+            assert!(
+                canonical.ends_with(".svg"),
+                "canonical {canonical} for {member} must be an SVG"
+            );
+            let repo = format!("{PAPIRUS_ASSET_ROOT}/{canonical}");
+            assert!(
+                is_bundled_asset_path(&repo),
+                "canonical repo path {repo} for {member} must be a valid bundle path"
+            );
+            assert!(
+                catalog
+                    .icons
+                    .values()
+                    .any(|sizes| { sizes.values().any(|p| p == canonical.as_str()) }),
+                "canonical {canonical} for {member} must appear in the manifest icons map"
+            );
+        }
     }
 }

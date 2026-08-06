@@ -53,13 +53,20 @@ jobs:
       - name: Package artifact
         shell: bash
         run: |
+          # Ship the bundled Papirus icon assets next to the binary so
+          # icons work in the release package, not just dev builds
+          # (PAPIRUS-17).  The runtime loader resolves the asset root from
+          # <exe_dir>/assets/third_party/papirus when BORU_PAPIRUS_ASSETS
+          # is unset.
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/examples/${{ matrix.binary }}" dist/
+          mkdir -p dist/assets/third_party
+          cp -r assets/third_party/papirus dist/assets/third_party/papirus
           cd dist
           if [ "${{ runner.os }}" = "Windows" ]; then
-            7z a "../${{ matrix.artifact }}.zip" "${{ matrix.binary }}"
+            7z a "../${{ matrix.artifact }}.zip" "${{ matrix.binary }}" assets/
           else
-            tar -czf "../${{ matrix.artifact }}.tar.gz" "${{ matrix.binary }}"
+            tar -czf "../${{ matrix.artifact }}.tar.gz" "${{ matrix.binary }}" assets/
           fi
 
       - name: Upload artifact
