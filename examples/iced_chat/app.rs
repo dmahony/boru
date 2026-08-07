@@ -13990,6 +13990,15 @@ impl IcedChat {
                 // conversation subscriptions stay alive; only the main panel
                 // swaps to the File Sharing screen.
                 self.screen = Screen::FileSharing;
+                // FILES-03: the files icon always opens the MAIN File Sharing
+                // screen. Reset any sub-tab selection, dashboard search query,
+                // and row-popover state from a previous visit so no stale
+                // sub-screen state is left behind (matches the Escape-key
+                // reset behaviour for the dashboard).
+                self.dashboard_active_tab = crate::dashboard_view_model::DashboardTab::SharedByMe;
+                self.dashboard_search_input.clear();
+                self.shared_by_me_ui.clear();
+                self.refresh_shared_by_me_filter();
                 // Start loading the FS-13 Sharing Summary and the FS-09 Shared by
                 // Me projection immediately so the cards never render a premature
                 // empty state while storage loads.
@@ -43813,6 +43822,48 @@ mod tests {
             app.conversation_store.active_iter().into_iter().count(),
             conversation_count,
             "conversation subscriptions must not be recreated"
+        );
+        drop(runtime);
+    }
+
+    #[test]
+    fn open_file_sharing_resets_dashboard_to_main_files_screen() {
+        // FILES-03 acceptance: clicking the files icon must always land on the
+        // MAIN File Sharing screen — the default Files tab — with no stale
+        // sub-tab, search, or row-popover state left behind from a previous
+        // visit.
+        let (runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        // Put the app in a state that a previous File Sharing visit could have
+        // left behind: on a non-default dashboard sub-tab (Downloaded), with a
+        // dashboard search query, a row overflow menu open, and on the Chat
+        // screen (not FileSharing).
+        let topic = TopicId::from_bytes([9u8; 32]);
+        app.screen = Screen::Chat { topic };
+        app.dashboard_active_tab = crate::dashboard_view_model::DashboardTab::Downloaded;
+        app.dashboard_search_input = "recap".to_string();
+        app.shared_by_me_ui.menu_open = Some("local:default:m1".to_string());
+
+        let task = app.update(AppMessage::OpenFileSharing);
+        drop(task);
+
+        // Lands on the main File Sharing screen.
+        assert_eq!(app.screen, Screen::FileSharing);
+        // Sub-tab selection is reset to the default Files tab.
+        assert_eq!(
+            app.dashboard_active_tab,
+            crate::dashboard_view_model::DashboardTab::SharedByMe,
+            "files icon must reset the dashboard to the main Files tab"
+        );
+        // Search query and row popover state are cleared so the main screen
+        // renders unfiltered with no open menus.
+        assert!(
+            app.dashboard_search_input.is_empty(),
+            "files icon must clear a leftover dashboard search query"
+        );
+        assert!(
+            app.shared_by_me_ui.menu_open.is_none(),
+            "files icon must clear a leftover row menu"
         );
         drop(runtime);
     }
