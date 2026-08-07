@@ -18614,6 +18614,14 @@ impl IcedChat {
             }
             AppMessage::CloseImageLightbox => {
                 self.lightbox_image = None;
+                // The lightbox overlay replaces the base chat view, so the
+                // windowed scrollable's viewport is stranded above the latest
+                // entry when the overlay disappears. Re-arm the follow-latest
+                // bottom sentinel and queue the snap so the chat log returns
+                // to the bottom — but only when the user was following latest
+                // before opening the image; a manual scroll-up keeps the
+                // reading position (keep_latest_visible is a no-op then).
+                self.keep_latest_visible();
                 iced::Task::none()
             }
 
@@ -48094,6 +48102,49 @@ mod tests {
         // A later update with the flag already clear emits no second snap.
         let _task2 = app.update(AppMessage::Scrolled(800.0, 200.0));
         assert!(!app.scroll_to_bottom_pending);
+    }
+
+    #[test]
+    fn close_image_lightbox_rearms_snap_only_while_following() {
+        // Relay-disabled builder: no real peer needed, and it never hangs on
+        // the relay-less debsrv test host (unlike build_join_request_test_app).
+        let (_runtime, mut app) = build_prewarm_test_app();
+        app.total_content_height.set(1000.0);
+
+        // User is at the bottom (follow_latest) and opens an enlarged image.
+        app.follow_latest = true;
+        app.scroll_offset = 800.0;
+        app.scroll_to_bottom_pending = false;
+        let _open = app.update(AppMessage::OpenImageLightbox(0));
+        assert_eq!(app.lightbox_image, Some(0), "lightbox opened");
+
+        // Closing re-arms the bottom sentinel and queues the snap so the
+        // windowed scrollable returns to the latest message.  The update
+        // tail consumes the flag in the same update (no stale flag left for
+        // a later Scrolled event to cancel).
+        let _close = app.update(AppMessage::CloseImageLightbox);
+        assert!(app.lightbox_image.is_none(), "lightbox closed");
+        assert_eq!(app.scroll_offset, f32::MAX, "bottom sentinel re-armed");
+        assert!(
+            !app.scroll_to_bottom_pending,
+            "snap consumed by the update tail in the same update"
+        );
+
+        // If the user had manually scrolled up before opening the image,
+        // closing preserves the reading position (no snap, no sentinel).
+        app.follow_latest = false;
+        app.scroll_offset = 300.0;
+        app.scroll_to_bottom_pending = false;
+        let _open2 = app.update(AppMessage::OpenImageLightbox(0));
+        let _close2 = app.update(AppMessage::CloseImageLightbox);
+        assert_eq!(
+            app.scroll_offset, 300.0,
+            "scrolled-up reading position preserved on lightbox close"
+        );
+        assert!(
+            !app.scroll_to_bottom_pending,
+            "no snap queued while reading older messages"
+        );
     }
 
     #[test]
