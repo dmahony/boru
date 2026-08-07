@@ -1511,6 +1511,17 @@ fn home_connection_variant(
     }
 }
 
+/// Short display form of a peer id for the chat header: the first 8 chars,
+/// an ellipsis, and the last 4 chars for ids longer than 16 chars;
+/// unchanged for shorter ids. Pure so it can be unit-tested in isolation.
+fn peer_id_short_form(full_key: &str) -> String {
+    if full_key.len() > 16 {
+        format!("{}…{}", &full_key[..8], &full_key[full_key.len() - 4..])
+    } else {
+        full_key.to_string()
+    }
+}
+
 /// A bounded, presentation-ready mesh event with a real capture time.
 #[derive(Debug, Clone)]
 struct MeshEvent {
@@ -28808,44 +28819,50 @@ impl IcedChat {
                     color: Some(presence.color(t)),
                 });
 
-            // Long peer IDs: show the key truncated with a copy affordance and
-            // a tooltip that reveals the full value. The copy button uses the
-            // existing CopyPeerId flow (toast + clipboard).
-            let peer_key_row: iced::Element<'_, AppMessage> = match peer {
+            // CHAT-03: combined "Name | peerid" header element. The peer's
+            // short ID sits next to the name with a pipe separator, and the
+            // whole combined element is the single copy affordance — clicking
+            // it copies the FULL peer id (toast + clipboard via CopyPeerId).
+            // A tooltip reveals the full value on hover.
+            let name_peer_row: iced::Element<'_, AppMessage> = match peer {
                 Some(key) => {
                     let full_key = key.to_string();
-                    let truncated_key = if full_key.len() > 16 {
-                        format!("{}…{}", &full_key[..8], &full_key[full_key.len() - 4..])
-                    } else {
-                        full_key.clone()
-                    };
-                    let copy_btn = tool_btn(
-                        Icon::Copy.build().size(IconSize::Xs).build(),
-                        "Copy peer ID",
-                        Some(AppMessage::CopyPeerId(key)),
-                    );
-                    let key_tooltip: iced::Element<'_, AppMessage> =
-                        iced::widget::tooltip::Tooltip::new(
-                            crate::fonts::type_role_text(
-                                crate::fonts::TypeRole::TechnicalValue,
-                                truncated_key,
-                            )
-                            .style(move |t| iced::widget::text::Style {
-                                color: Some(text_secondary(t)),
-                            }),
-                            crate::fonts::type_role_text(
-                                crate::fonts::TypeRole::Metadata,
-                                full_key,
-                            ),
-                            iced::widget::tooltip::Position::Bottom,
+                    let short_key = peer_id_short_form(&full_key);
+                    let combined = row![
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::BodyEmphasised,
+                            room_name.clone(),
                         )
-                        .into();
-                    row![key_tooltip, copy_btn]
-                        .spacing(SPACE_2)
-                        .align_y(Alignment::Center)
-                        .into()
+                        .wrapping(iced::widget::text::Wrapping::None),
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::TechnicalValue,
+                            format!(" | {short_key}"),
+                        )
+                        .style(move |t| iced::widget::text::Style {
+                            color: Some(text_secondary(t)),
+                        }),
+                    ]
+                    .spacing(SPACE_2)
+                    .align_y(Alignment::Center);
+                    iced::widget::tooltip::Tooltip::new(
+                        iced::widget::mouse_area(combined)
+                            .on_press(AppMessage::CopyPeerId(key))
+                            .interaction(iced::mouse::Interaction::Pointer),
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::Metadata,
+                            format!("Copy peer ID · {full_key}"),
+                        ),
+                        iced::widget::tooltip::Position::Bottom,
+                    )
+                    .into()
                 }
-                None => iced::widget::Space::new().width(Length::Fixed(0.0)).into(),
+                None => crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::BodyEmphasised,
+                    room_name.clone(),
+                )
+                .width(Length::Fill)
+                .wrapping(iced::widget::text::Wrapping::None)
+                .into(),
             };
 
             // Security / connection cue derived from real state: iroh always
@@ -28874,17 +28891,7 @@ impl IcedChat {
             );
 
             let peer_identity = column![
-                row![
-                    crate::fonts::type_role_text(
-                        crate::fonts::TypeRole::BodyEmphasised,
-                        room_name.clone(),
-                    )
-                    .width(Length::Fill)
-                    .wrapping(iced::widget::text::Wrapping::None),
-                    peer_key_row,
-                ]
-                .spacing(SPACE_4)
-                .align_y(Alignment::Center),
+                name_peer_row,
                 row![
                     status_dot,
                     crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, status_text)
@@ -28947,13 +28954,11 @@ impl IcedChat {
             )
         };
 
-        // Copy: copies the peer ID for direct chats, the room ticket for groups.
+        // Copy: peer-ID copy moved into the combined "Name | peerid" header
+        // element (CHAT-03), so the toolbar copy button only remains for
+        // groups, where it copies the room ticket (invite link).
         let copy: iced::Element<'_, AppMessage> = match peer {
-            Some(key) => tool_btn(
-                Icon::Copy.build().size(IconSize::Sm).build().into(),
-                "Copy peer ID",
-                Some(AppMessage::CopyPeerId(key)),
-            ),
+            Some(_key) => iced::widget::Space::new().width(Length::Fixed(0.0)).into(),
             None => {
                 let ticket = self.ticket_str.clone();
                 if ticket.is_empty() {
@@ -39217,6 +39222,19 @@ fn format_file_size(bytes: u64) -> String {
 mod tests {
     use super::*;
     use chrono::{FixedOffset, TimeZone, Utc};
+
+    #[test]
+    fn peer_id_short_form_truncates_long_ids_head_and_tail() {
+        let long = "0123456789abcdef0123456789abcdef";
+        assert_eq!(peer_id_short_form(long), "01234567…cdef");
+    }
+
+    #[test]
+    fn peer_id_short_form_keeps_short_ids_unchanged() {
+        assert_eq!(peer_id_short_form("a1b2c3d4"), "a1b2c3d4");
+        // Exactly 16 chars stays as-is (the truncation threshold is >16).
+        assert_eq!(peer_id_short_form("0123456789abcdef"), "0123456789abcdef");
+    }
 
     #[test]
     fn home_connection_variant_maps_each_network_state_truthfully() {
