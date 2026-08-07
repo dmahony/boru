@@ -23614,7 +23614,7 @@ impl IcedChat {
         if let Some(section) = preflight_section {
             overlay = overlay.push_body(section);
         }
-        overlay = overlay
+        let overlay = overlay
             .secondary("Cancel", AppMessage::CloseReceiveTicketDialog)
             .secondary_enabled(!self.receive_ticket_preflight_busy)
             .primary(
