@@ -440,6 +440,14 @@ pub mod transfer_state_projection;
 /// new CWD fallback).  Always available (no feature gate).
 pub mod data_dir;
 
+/// KLIPY (external GIF search) configuration and API-key security.
+///
+/// Reads the provider API key from `KLIPY_API_KEY` at runtime; never
+/// hardcodes, commits, logs, or transmits the key to peers.  Always
+/// available (no feature gate) so the auth seam can be reused by any
+/// GIF provider adapter.
+pub mod klipy_config;
+
 /// Group encryption — p2panda-based end-to-end encrypted group messaging.
 ///
 /// Provides type bridges between iroh and p2panda cryptographic types,

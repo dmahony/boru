@@ -57,6 +57,7 @@ use boru_core::discovery_secret::DiscoverySecret;
 use boru_core::download_limits::DownloadLimitsConfig;
 use boru_core::download_manager::DownloadManager;
 use boru_core::file_indexer::FileIndexer;
+use boru_core::klipy_config::KlipyConfig;
 use boru_core::friend_request::{
     FriendRequest, FriendRequestError, FriendRequestStatus, FriendRequestStore,
 };
@@ -4104,6 +4105,10 @@ pub struct IcedChat {
     gif_search_text: String,
     /// GIF search results with preview thumbnails.
     gif_results: Vec<GifResult>,
+    /// Whether external GIF search is disabled because KLIPY is not
+    /// configured (no KLIPY_API_KEY).  Drives the picker's
+    /// provider-not-configured state instead of hitting the network.
+    gif_not_configured: bool,
     /// Whether the invite member dialog is shown.
     show_invite_member_dialog: bool,
     /// Selected friends to invite in the invite member dialog.
@@ -5899,7 +5904,7 @@ pub enum AppMessage {
     GifSearchChanged(String),
     /// Send a GIF by URL as an image attachment.
     SendGifUrl(String),
-    /// Trigger a GIF search against the GIPHY API.
+    /// Trigger a GIF search through the configured external provider (KLIPY).
     GifSearchSubmit,
     /// GIF search results arrived.
     GifSearchResults(Vec<GifResult>),
@@ -7495,6 +7500,7 @@ impl IcedChat {
             show_gif_picker: false,
             gif_search_text: String::new(),
             gif_results: Vec::new(),
+            gif_not_configured: false,
             show_invite_member_dialog: false,
             invite_member_selected: HashSet::new(),
             details_panel_open: false,
@@ -21626,6 +21632,15 @@ impl IcedChat {
 
             AppMessage::ToggleGifPicker => {
                 self.show_gif_picker = !self.show_gif_picker;
+                if self.show_gif_picker {
+                    // Reflect current KLIPY configuration when the picker
+                    // opens, so the provider-not-configured state shows
+                    // immediately instead of on first search.
+                    self.gif_not_configured = !KlipyConfig::from_env().is_configured();
+                    if self.gif_not_configured {
+                        self.gif_results.clear();
+                    }
+                }
                 iced::Task::none()
             }
 
@@ -21639,10 +21654,27 @@ impl IcedChat {
                 if query.is_empty() {
                     return iced::Task::none();
                 }
+                // KLIPY configuration — the API key is read at runtime from
+                // the KLIPY_API_KEY environment variable (or a future secure
+                // store) through `KlipyConfig`.  No key is ever hardcoded or
+                // committed, and the raw value never appears in Debug output
+                // or logs (see src/klipy_config.rs).
+                let config = KlipyConfig::from_env();
+                let Some(api_key) = config.api_key().map(str::to_owned) else {
+                    self.gif_not_configured = true;
+                    self.gif_results.clear();
+                    self.toast_counter = self.toast_counter.wrapping_add(1);
+                    self.toast_message = Some(
+                        "KLIPY is not configured — set KLIPY_API_KEY to enable external GIF search"
+                            .to_string(),
+                    );
+                    return iced::Task::none();
+                };
+                self.gif_not_configured = false;
                 let task = iced::Task::perform(
                     async move {
-                        // GIPHY search API
-                        const API_KEY: &str = "GlVGYHkr3WSBnllca54iNt0yFbjz7L65";
+                        // GIPHY search API (interim provider until the KLIPY
+                        // adapter lands; the key comes from KLIPY_API_KEY).
                         // Simple URL encode for the query
                         let encoded_query: String = query
                             .chars()
@@ -21662,7 +21694,7 @@ impl IcedChat {
                             .collect();
                         let url = format!(
                             "https://api.giphy.com/v1/gifs/search?api_key={}&q={}&limit=20&rating=g&lang=en",
-                            API_KEY, encoded_query,
+                            api_key, encoded_query,
                         );
                         let client = reqwest::Client::new();
                         let resp = client.get(&url).send().await.ok()?;
@@ -21705,6 +21737,7 @@ impl IcedChat {
 
             AppMessage::GifSearchResults(results) => {
                 self.gif_results = results;
+                self.gif_not_configured = false;
                 iced::Task::none()
             }
 
@@ -29075,7 +29108,15 @@ impl IcedChat {
 
         // Results grid with image thumbnails
         let mut results_col = column![].spacing(SPACE_4);
-        if self.gif_results.is_empty() {
+        if self.gif_not_configured {
+            results_col = results_col.push(
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::SupportingText,
+                    "KLIPY is not configured — set the KLIPY_API_KEY environment variable to enable external GIF search",
+                )
+                .color(text_muted(&theme)),
+            );
+        } else if self.gif_results.is_empty() {
             results_col = results_col.push(
                 crate::fonts::type_role_text(
                     crate::fonts::TypeRole::SupportingText,

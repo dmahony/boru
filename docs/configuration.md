@@ -52,6 +52,7 @@ settings files. This document covers all available options.
 | `BORU_PERF_SLOW_MS` | Integer | `100` | Slow-operation threshold in milliseconds |
 | `BORU_DEBUG` | `0`/`1` | `0` | Enable gossip debug event log |
 | `BORU_DEBUG_PATH` | Path | `~/.local/share/boru/gossip-debug.log` | Gossip debug log path |
+| `KLIPY_API_KEY` | String | — | Optional API key for external GIF search (KLIPY provider). When unset, external GIF search is disabled gracefully and the picker shows a "KLIPY not configured" state. See [External GIF Search](#external-gif-search-klipy). |
 | `RUST_LOG` | EnvFilter | `info` | Tracing filter (overrides file log filter) |
 | `XDG_DATA_HOME` | Path | `~/.local/share` | Base for default data directory |
 
@@ -91,6 +92,39 @@ JSON or unreadable files as an error. The example schema is in
 The default file location is `<data_dir>/catalogue_limits.json`. Deployments may
 also load another path explicitly at startup. An absent file is not an error;
 callers can use `CatalogueLimitsConfig::default()` when no override is needed.
+
+## External GIF Search (KLIPY)
+
+External GIF search (the GIF picker in the chat composer) uses the KLIPY
+provider. It is **optional** and disabled by default.
+
+- The API key is read at runtime from the `KLIPY_API_KEY` environment
+  variable. It is **never hardcoded or committed**, and it is **not stored in
+  `settings.json`** or any other plaintext config file.
+- When `KLIPY_API_KEY` is unset, the GIF picker shows a "KLIPY is not
+  configured" state; the app continues to work normally (text chat,
+  attachments, and user-uploaded GIFs are unaffected).
+- The key is never logged: `Debug` output for the config module redacts it
+  (`<redacted>`), and request URLs that embed the key are never written to
+  logs or error messages.
+- The key is never sent to peers and never included in chat messages.
+- Example configuration file with a documented placeholder:
+  `docs/klipy.env.example` (copy it to `klipy.env` or export the variable).
+
+**Privacy.** Search terms are sent to the KLIPY service when you use the GIF
+picker. Boru does not send usernames, peer IDs, room IDs, message contents,
+contact details, or attachment metadata to KLIPY, and does not add behavioural
+analytics. Full search queries are not logged at normal log levels.
+
+**Desktop-build risk.** Boru's desktop builds do **not** embed a shared API
+key in the binary; the key is supplied per-user through the environment. If a
+distribution ever embeds a shared key instead, that key is recoverable by
+anyone who downloads the binary, so embedding is strongly discouraged. Prefer
+per-user `KLIPY_API_KEY` configuration.
+
+**Authentication seam.** All key access goes through `KlipyConfig`
+(`boru_core::klipy_config`), so the authentication mechanism can be replaced
+(e.g. secure store, OAuth) without changing the UI or the domain model.
 
 ## Download Limits File (`download_limits.json`)
 
