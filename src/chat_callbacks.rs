@@ -193,6 +193,19 @@ pub trait ChatCallbacks {
         false
     }
 
+    /// Whether a file-share announcement with this ticket was already
+    /// surfaced.
+    ///
+    /// The sender broadcasts a video's `FileShare` immediately (without a
+    /// poster) and re-announces the same ticket once the poster is ready.
+    /// Frontends return true here when an existing, still-pending download
+    /// card already carries this ticket, so the follow-up upgrades the
+    /// card's thumbnail instead of producing a duplicate card and system
+    /// line. The default treats every announcement as new.
+    fn is_known_file_ticket(&self, _ticket: &str) -> bool {
+        false
+    }
+
     /// Mark a tracked friend as online.
     fn friend_mark_online(&mut self, fid: FriendId);
 

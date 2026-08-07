@@ -107,6 +107,7 @@ use iroh::{
 use iroh_blobs::{store::fs::FsStore, ticket::BlobTicket};
 use n0_future::task;
 use n0_future::Stream;
+use n0_future::StreamExt;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, trace, warn};
@@ -7215,8 +7216,19 @@ async fn generate_shared_by_me_thumbnail(
     if is_video {
         let path = std::path::PathBuf::from(object.source_path.as_deref()?);
         let cache_dir = cache_dir.to_path_buf();
+        // Prefer the content-hash poster cache key: it skips the second
+        // full-file read inside `generate` (the cache key is blake3 of the
+        // content, which is exactly this hash).
+        let content_hash = content_hash.to_string();
         let poster = tokio::task::spawn_blocking(move || {
-            boru_core::video_poster::generate(&path, &cache_dir).ok()
+            let hash = content_hash.parse::<iroh_blobs::Hash>().ok();
+            match hash {
+                Some(hash) => {
+                    boru_core::video_poster::generate_with_content_hash(&path, &cache_dir, &hash)
+                        .ok()
+                }
+                None => boru_core::video_poster::generate(&path, &cache_dir).ok(),
+            }
         })
         .await
         .ok()?;
@@ -15845,72 +15857,143 @@ impl IcedChat {
                         entry.body = format!("Uploading: {filename}");
                     }
                 }
+                // A fresh transfer id binds the upload-progress events to
+                // the card created above (Progress → Completed).
+                let transfer_id = TransferId::next();
+                // Bind the transfer id to the card NOW (before the async task
+                // runs) so progress events route deterministically to it. No
+                // `Started` event is emitted: the card is already Active, and
+                // a queued `Started` drained after `FileDownloaded` resolves
+                // the card would flip the terminal `Shared` state back to
+                // Active (the Started arm has no terminal guard, unlike
+                // Progress/Completed).
+                if let Some(idx) = self.download_entry_index {
+                    if let Some(entry) = self.entries.get_mut(idx) {
+                        if let Some(dl) = entry.download.as_mut() {
+                            dl.transfer_id = Some(transfer_id);
+                        }
+                    }
+                    self.transfer_id_to_index.insert(transfer_id, idx);
+                }
 
                 let blob_store = self.blob_store.clone();
+                let storage = self.storage.clone();
                 let sender = self.sender.clone();
                 let secret_key = self.secret_key.clone();
                 let endpoint_addr = self.endpoint.addr();
                 let poster_cache_dir = self.data_dir.join("cache").join("video-posters");
-                let _local_label = self.local_label.clone();
-                let _local_pk = self.local_public;
+                let progress_queue = self.download_progress_queue.clone();
+                let transfer_name = filename.clone();
                 // Cap large file uploads with a generous timeout so a stuck
                 // connection doesn't leave the spinner frozen forever.
                 let upload_timeout = std::time::Duration::from_secs(3600);
                 iced::Task::perform(
                     async move {
                         let result = tokio::time::timeout(upload_timeout, async move {
-                            let path_buf = std::path::PathBuf::from(&abs_path);
-                            let metadata = tokio::fs::metadata(&path_buf)
-                                .await
-                                .map_err(|e| format!("Failed to inspect file: {e}"))?;
-                            let _file_size = metadata.len();
-                            // Stream the file into iroh blobs — no whole-file
-                            // memory limit needed.
-                            let file = tokio::fs::File::open(&path_buf)
-                                .await
-                                .map_err(|e| format!("Failed to open file: {e}"))?;
-                            let stream = tokio_util::io::ReaderStream::new(file);
-                            let tag = blob_store
-                                .blobs()
-                                .add_stream(Box::pin(stream))
-                                .await
-                                .await
-                                .map_err(|e| format!("Failed to store file: {e}"))?;
-                            let ticket_str =
-                                blob_ticket_string(endpoint_addr, tag.hash, tag.format);
-                            // The local file is the sender's verified selection. Probe it
-                            // off the Iced update loop; failure only omits the optional
-                            // thumbnail blob and must not fail the upload.
-                            let thumbnail_bytes = if is_video {
-                                let poster_path = path_buf.clone();
-                                let cache_dir = poster_cache_dir.clone();
-                                tokio::task::spawn_blocking(move || {
-                                    video_poster::generate(&poster_path, &cache_dir)
+                            // The upload card already carries this transfer
+                            // id (bound at creation), so the Progress and
+                            // Completed events below route to it directly.
+
+                            // Fast path: a file previously shared from this
+                            // exact source path may already be in the blob
+                            // store — skip re-ingesting it entirely.
+                            let known_blob = match storage.as_ref() {
+                                Some(stg) => {
+                                    let hash = stg
+                                        .file_object_hash_by_source_path(&abs_path)
                                         .ok()
-                                        .map(|poster| poster.bytes)
-                                })
-                                .await
-                                .ok()
-                                .flatten()
-                            } else {
-                                None
-                            };
-                            // Store the poster as a blob so receivers can fetch it
-                            // via iroh — keeps gossip messages small.
-                            let thumbnail_hash = match thumbnail_bytes.as_ref() {
-                                Some(bytes) => blob_store
-                                    .blobs()
-                                    .add_bytes(bytes.clone())
-                                    .await
-                                    .ok()
-                                    .map(|tag| MessageHash::from(*tag.hash.as_bytes())),
+                                        .flatten()
+                                        .and_then(|hash_hex| {
+                                            hash_hex.parse::<iroh_blobs::Hash>().ok()
+                                        });
+                                    match hash {
+                                        Some(hash)
+                                            if blob_store
+                                                .blobs()
+                                                .has(hash)
+                                                .await
+                                                .ok()
+                                                .unwrap_or(false) =>
+                                        {
+                                            Some((hash, iroh_blobs::BlobFormat::Raw))
+                                        }
+                                        _ => None,
+                                    }
+                                }
                                 None => None,
                             };
+
+                            let (blob_hash, format) = match known_blob {
+                                Some(known) => known,
+                                None => {
+                                    let path_buf = std::path::PathBuf::from(&abs_path);
+                                    let metadata = tokio::fs::metadata(&path_buf)
+                                        .await
+                                        .map_err(|e| format!("Failed to inspect file: {e}"))?;
+                                    let _file_size = metadata.len();
+                                    // Stream the file into iroh blobs — no
+                                    // whole-file memory limit needed.
+                                    let file = tokio::fs::File::open(&path_buf)
+                                        .await
+                                        .map_err(|e| format!("Failed to open file: {e}"))?;
+                                    let stream = tokio_util::io::ReaderStream::new(file);
+                                    // Walk the import stream so CopyProgress
+                                    // events can drive the upload bar.
+                                    let import = blob_store
+                                        .blobs()
+                                        .add_stream(Box::pin(stream))
+                                        .await;
+                                    let mut add = import.stream().await;
+                                    let mut total: Option<u64> = None;
+                                    let mut temp_tag: Option<iroh_blobs::api::TempTag> = None;
+                                    while let Some(item) = add.next().await {
+                                        match item {
+                                            iroh_blobs::api::blobs::AddProgressItem::Size(s) => {
+                                                total = Some(s);
+                                            }
+                                            iroh_blobs::api::blobs::AddProgressItem::CopyProgress(
+                                                offset,
+                                            ) => {
+                                                let mut q = progress_queue.lock().unwrap();
+                                                q.push_back(TransferProgress::Progress {
+                                                    id: transfer_id,
+                                                    kind: transfer_kind,
+                                                    name: transfer_name.clone(),
+                                                    bytes: offset,
+                                                    total,
+                                                });
+                                            }
+                                            iroh_blobs::api::blobs::AddProgressItem::OutboardProgress(
+                                                _,
+                                            )
+                                            | iroh_blobs::api::blobs::AddProgressItem::CopyDone => {}
+                                            iroh_blobs::api::blobs::AddProgressItem::Done(tt) => {
+                                                temp_tag = Some(tt);
+                                            }
+                                            iroh_blobs::api::blobs::AddProgressItem::Error(e) => {
+                                                return Err(format!(
+                                                    "Failed to store file: {e}"
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    let tt = temp_tag.ok_or_else(|| {
+                                        "Failed to store file: import ended without a tag"
+                                            .to_string()
+                                    })?;
+                                    (tt.hash(), tt.format())
+                                }
+                            };
+                            let ticket_str = blob_ticket_string(endpoint_addr, blob_hash, format);
+
+                            // ── Announce immediately. The video poster is
+                            // generated afterwards and re-announced as a
+                            // follow-up, so the share never waits on it. ──
                             let msg = crate::Message::FileShare {
                                 name: filename.clone(),
                                 ticket: ticket_str.clone(),
                                 size: file_size,
-                                thumbnail_hash,
+                                thumbnail_hash: None,
                                 collection_hash: None,
                                 collection_entries: 0,
                             };
@@ -15923,9 +16006,7 @@ impl IcedChat {
                                         name = %filename,
                                         file_size,
                                         encoded_len = _encoded_len,
-                                        has_thumbnail = thumbnail_bytes.is_some(),
-                                        thumbnail_len = thumbnail_bytes.as_ref().map(|b| b.len()).unwrap_or(0),
-                                        "FileShare broadcast OK"
+                                        "FileShare broadcast OK (poster deferred)"
                                     ),
                                     Err(e) => tracing::error!(
                                         name = %filename,
@@ -15936,6 +16017,103 @@ impl IcedChat {
                                     ),
                                 }
                             }
+
+                            // ── Video poster (off the broadcast critical
+                            // path). The cache key is the video's content
+                            // hash — known from the ingest — so no second
+                            // full-file read is needed. ──
+                            let thumbnail_bytes = if is_video {
+                                let poster_path = abs_path.clone();
+                                let cache_dir = poster_cache_dir.clone();
+                                let content_hash = blob_hash;
+                                tokio::task::spawn_blocking(move || {
+                                    video_poster::generate_with_content_hash(
+                                        std::path::Path::new(&poster_path),
+                                        &cache_dir,
+                                        &content_hash,
+                                    )
+                                    .ok()
+                                    .map(|poster| poster.bytes)
+                                })
+                                .await
+                                .ok()
+                                .flatten()
+                            } else {
+                                None
+                            };
+                            // Store the poster as a blob so receivers can
+                            // fetch it via iroh — keeps gossip messages
+                            // small — and re-announce the same ticket with
+                            // the hash so their pending card upgrades to
+                            // the poster.
+                            let thumbnail_hash = match thumbnail_bytes.as_ref() {
+                                Some(bytes) => blob_store
+                                    .blobs()
+                                    .add_bytes(bytes.clone())
+                                    .await
+                                    .ok()
+                                    .map(|tag| MessageHash::from(*tag.hash.as_bytes())),
+                                None => None,
+                            };
+                            if let Some(thumb) = thumbnail_hash {
+                                let msg2 = crate::Message::FileShare {
+                                    name: filename.clone(),
+                                    ticket: ticket_str.clone(),
+                                    size: file_size,
+                                    thumbnail_hash: Some(thumb),
+                                    collection_hash: None,
+                                    collection_entries: 0,
+                                };
+                                if let Ok(encoded2) =
+                                    SignedMessage::sign_and_encode(&secret_key, &msg2)
+                                {
+                                    if let Some(ref sender) = sender {
+                                        match sender.broadcast(encoded2).await {
+                                            Ok(()) => tracing::info!(
+                                                name = %filename,
+                                                "FileShare poster follow-up OK"
+                                            ),
+                                            Err(e) => tracing::error!(
+                                                name = %filename,
+                                                error = %e,
+                                                "FileShare poster follow-up FAILED"
+                                            ),
+                                        }
+                                    }
+                                }
+                            }
+
+                            // ── Sender-side bookkeeping (off the critical
+                            // path): remember path → blob so a re-share of
+                            // the same file skips re-ingesting. ──
+                            if let Some(stg) = storage.as_ref() {
+                                let hash_hex = blob_hash.to_hex().to_string();
+                                if let Err(e) = stg.record_local_file_object(
+                                    &hash_hex,
+                                    file_size,
+                                    "application/octet-stream",
+                                    &filename,
+                                    &abs_path,
+                                    &hash_hex,
+                                ) {
+                                    tracing::warn!(
+                                        name = %filename,
+                                        error = %e,
+                                        "record_local_file_object failed after broadcast"
+                                    );
+                                }
+                            }
+
+                            // ── Progress: upload complete ──
+                            {
+                                let mut q = progress_queue.lock().unwrap();
+                                q.push_back(TransferProgress::Completed {
+                                    id: transfer_id,
+                                    kind: transfer_kind,
+                                    name: transfer_name,
+                                });
+                            }
+
                             Ok::<_, String>((filename, ticket_str, thumbnail_bytes, abs_path))
                         })
                         .await;
@@ -16160,16 +16338,6 @@ impl IcedChat {
                         #[expect(unused_imports)]
                         use iroh_blobs::api::proto::TagInfo;
                         let hash: MessageHash = *tag.hash.as_bytes();
-                        if let Some(storage) = storage.as_ref() {
-                            storage
-                                .register_chat_upload(
-                                    &local_pk.to_string(),
-                                    &wire_name,
-                                    mime_type,
-                                    &opt_bytes,
-                                )
-                                .map_err(|e| format!("Failed to add image to profile: {e}"))?;
-                        }
                         let msg = crate::Message::ImageShare {
                             name: wire_name.clone(),
                             hash,
@@ -16178,6 +16346,24 @@ impl IcedChat {
                             .map_err(|e| format!("Failed to sign: {e}"))?;
                         if let Some(ref sender) = sender {
                             sender.broadcast(encoded).await.ok();
+                        }
+                        // Sender-side bookkeeping off the broadcast critical
+                        // path: register the upload with the profile only
+                        // after the announcement is out. A failure here must
+                        // not fail the send — the image is already delivered.
+                        if let Some(storage) = storage.as_ref() {
+                            if let Err(e) = storage.register_chat_upload(
+                                &local_pk.to_string(),
+                                &wire_name,
+                                mime_type,
+                                &opt_bytes,
+                            ) {
+                                tracing::warn!(
+                                    name = %wire_name,
+                                    error = %e,
+                                    "register_chat_upload failed after image broadcast"
+                                );
+                            }
                         }
                         Ok((local_pk, fname, display_name, opt_bytes, hash))
                     },
@@ -24238,6 +24424,18 @@ impl ChatCallbacks for IcedChat {
         }
     }
 
+    fn is_known_file_ticket(&self, ticket: &str) -> bool {
+        // A video-poster follow-up re-announces the same ticket while the
+        // original card is still pending (no thumbnail yet). Only treat
+        // that exact case as known — a deliberate re-share of the same
+        // file must still create a fresh card.
+        self.entries.iter().any(|entry| {
+            entry.download.as_ref().is_some_and(|dl| {
+                dl.ticket == ticket && dl.thumbnail_hash.is_none() && !dl.state.is_terminal()
+            })
+        })
+    }
+
     fn set_pending_file(
         &mut self,
         name: String,
@@ -24246,6 +24444,26 @@ impl ChatCallbacks for IcedChat {
         thumbnail_hash: Option<MessageHash>,
         sender_label: Option<String>,
     ) {
+        // Video-poster follow-up: the sender re-announces the same ticket
+        // once the poster blob is ready. Upgrade the existing card instead
+        // of pushing a duplicate entry.
+        if let Some(idx) = self.entries.iter().position(|entry| {
+            entry.download.as_ref().is_some_and(|dl| {
+                dl.ticket == ticket && dl.thumbnail_hash.is_none() && !dl.state.is_terminal()
+            })
+        }) {
+            if let Some(entry) = self.entries.get_mut(idx) {
+                if let Some(dl) = entry.download.as_mut() {
+                    dl.thumbnail_hash = thumbnail_hash;
+                }
+            }
+            // Queue the sender's poster blob for an off-thread fetch, same
+            // as the initial-card path below.
+            if let Some(hash) = thumbnail_hash {
+                self.pending_thumbnail_fetch.push_back((idx, hash, ticket.clone()));
+            }
+            return;
+        }
         self.pending_file = Some((name.clone(), ticket.clone()));
         self.download_entry_index = Some(self.entries.len());
         let xfer_kind = if classify_attachment(None, &name) == MediaKind::Video {
@@ -48885,6 +49103,68 @@ mod tests {
             std::path::PathBuf::from("/tmp/ui15-note.txt"),
         ));
         drop(task);
+        drop(runtime);
+    }
+
+    /// A video-poster follow-up re-announces the same ticket with the
+    /// poster hash once it is ready. It must upgrade the existing pending
+    /// card instead of creating a duplicate entry or system line.
+    #[test]
+    fn video_poster_follow_up_upgrades_existing_card() {
+        let (runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let ticket = "blobAAAAvideo-ticket-123".to_string();
+
+        // First announcement: no poster yet → one pending card.
+        app.set_pending_file(
+            "clip.mp4".to_string(),
+            ticket.clone(),
+            1024,
+            None,
+            Some("Alice".to_string()),
+        );
+        assert_eq!(app.entries.len(), 1, "first announcement creates one card");
+        let idx = app.entries.len() - 1;
+        assert_eq!(
+            app.entries[idx].download.as_ref().unwrap().thumbnail_hash,
+            None
+        );
+        assert!(app.is_known_file_ticket(&ticket));
+
+        // Follow-up: same ticket, poster hash now available → upgrade.
+        let thumb = MessageHash::from([9u8; 32]);
+        app.set_pending_file(
+            "clip.mp4".to_string(),
+            ticket.clone(),
+            1024,
+            Some(thumb),
+            Some("Alice".to_string()),
+        );
+        assert_eq!(app.entries.len(), 1, "follow-up must not add a second card");
+        assert_eq!(
+            app.entries[idx].download.as_ref().unwrap().thumbnail_hash,
+            Some(thumb)
+        );
+        // The poster fetch is queued exactly once.
+        assert_eq!(app.pending_thumbnail_fetch.len(), 1);
+
+        // Once the card is terminal (download finished), a deliberate
+        // re-share of the same file is a fresh announcement.
+        if let Some(dl) = app.entries[idx].download.as_mut() {
+            dl.state = DownloadState::Completed {
+                saved_name: "clip.mp4".to_string(),
+                saved_path: Some(std::path::PathBuf::from("/tmp/clip.mp4")),
+                total_size: Some(1024),
+            };
+        }
+        assert!(!app.is_known_file_ticket(&ticket));
+        app.set_pending_file(
+            "clip.mp4".to_string(),
+            ticket.clone(),
+            1024,
+            None,
+            Some("Alice".to_string()),
+        );
+        assert_eq!(app.entries.len(), 2, "re-share after completion is a new card");
         drop(runtime);
     }
 

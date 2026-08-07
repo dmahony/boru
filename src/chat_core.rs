@@ -2043,7 +2043,14 @@ pub fn handle_net_event_for_topic(
                                         Some(sender_name),
                                     );
                                 } else {
-                                    cb.push_system(format!("{} shared a file", sender_name));
+                                    // The sender may re-announce the same
+                                    // ticket once a video poster is ready;
+                                    // skip the system line for that
+                                    // follow-up so it doesn't read as a
+                                    // second share.
+                                    if !cb.is_known_file_ticket(&ticket) {
+                                        cb.push_system(format!("{} shared a file", sender_name));
+                                    }
                                     cb.set_pending_file(
                                         name,
                                         ticket,

@@ -61,14 +61,46 @@ pub fn cache_key(content: &[u8]) -> String {
 /// This function is intentionally blocking; callers must run it in a
 /// `spawn_blocking` task so media probing never runs in the Iced update loop.
 pub fn generate(path: &Path, cache_dir: &Path) -> Result<Poster, String> {
+    generate_inner(path, cache_dir, None)
+}
+
+/// Like [`generate`], but with the file's content hash already known.
+///
+/// The chat send path knows the video's iroh blob hash (BLAKE3 of the
+/// content) before generating the poster, so it can skip the full-file read
+/// that [`generate`] uses to derive the cache key. The key format is
+/// identical (BLAKE3 hex of the file bytes), so both callers share one
+/// cache namespace and existing cached posters stay valid.
+pub fn generate_with_content_hash(
+    path: &Path,
+    cache_dir: &Path,
+    content_hash: &iroh_blobs::Hash,
+) -> Result<Poster, String> {
+    generate_inner(path, cache_dir, Some(content_hash))
+}
+
+fn generate_inner(
+    path: &Path,
+    cache_dir: &Path,
+    content_hash: Option<&iroh_blobs::Hash>,
+) -> Result<Poster, String> {
     let input_size = std::fs::metadata(path)
         .map_err(|e| format!("inspect video: {e}"))?
         .len();
     if input_size == 0 || input_size > MAX_POSTER_INPUT_BYTES {
         return Err("video is outside the poster probe size limit".to_string());
     }
-    let bytes = std::fs::read(path).map_err(|e| format!("read video: {e}"))?;
-    let key = cache_key(&bytes);
+    let key = match content_hash {
+        // The blob hash is BLAKE3 of the file bytes — exactly what
+        // `cache_key` computes, but without re-reading the file.
+        Some(hash) => blake3::Hash::from_bytes(*hash.as_bytes())
+            .to_hex()
+            .to_string(),
+        None => {
+            let bytes = std::fs::read(path).map_err(|e| format!("read video: {e}"))?;
+            cache_key(&bytes)
+        }
+    };
     let cache_path = cache_dir.join(format!("{key}.webp"));
     if let Ok(cached) = std::fs::read(&cache_path) {
         if !cached.is_empty() && cached.len() <= MAX_POSTER_BYTES {

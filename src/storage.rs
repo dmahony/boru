@@ -3165,6 +3165,65 @@ impl Storage {
         }
     }
 
+    /// Look up the content hash of a file object previously recorded with
+    /// this exact source path. Used by the chat send fast path to skip
+    /// re-ingesting a file whose blob is already in the store.
+    pub fn file_object_hash_by_source_path(&self, source_path: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let result = conn
+            .query_row(
+                "SELECT content_hash FROM file_objects WHERE source_path = ?1 LIMIT 1",
+                params![source_path],
+                |row| row.get(0),
+            )
+            .optional()
+            .std_context("file_object hash by source path")?;
+        Ok(result)
+    }
+
+    /// Record that a local file lives at `source_path` and is present in
+    /// the iroh-blobs store as `blob_hash`, so a later share of the same
+    /// path can skip re-ingesting the blob.
+    ///
+    /// Idempotent upsert: the row keeps any existing inline `data` (the
+    /// blob store owns the content for chat-sent files, so `data` stays
+    /// NULL here). The `blob_hash` is what the peer file-access handler
+    /// needs to serve the content from the store.
+    pub fn record_local_file_object(
+        &self,
+        content_hash: &str,
+        size: u64,
+        mime_type: &str,
+        filename: &str,
+        source_path: &str,
+        blob_hash: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = now_ms() as i64;
+        conn.execute(
+            "INSERT INTO file_objects
+                (content_hash, size, mime_type, filename, created_at_ms, source_path, blob_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(content_hash) DO UPDATE SET
+                size = excluded.size,
+                mime_type = excluded.mime_type,
+                filename = excluded.filename,
+                source_path = excluded.source_path,
+                blob_hash = excluded.blob_hash",
+            params![
+                content_hash,
+                size as i64,
+                mime_type,
+                filename,
+                now,
+                source_path,
+                blob_hash,
+            ],
+        )
+        .std_context("record local file object")?;
+        Ok(())
+    }
+
     /// Check whether a file object with the given hash exists.
     pub fn file_object_exists(&self, content_hash: &str) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
@@ -6429,6 +6488,65 @@ mod tests {
             .unwrap();
         storage.update_download_progress(id, 1, "complete").unwrap();
         assert!(storage.resume_download(id).is_err());
+    }
+
+    #[test]
+    fn record_local_file_object_fast_path_round_trip() {
+        let storage = Storage::memory().unwrap();
+        let hash = "a".repeat(64);
+        let path = "/home/user/videos/clip.mp4";
+
+        // Unknown source path → no record.
+        assert!(storage
+            .file_object_hash_by_source_path(path)
+            .unwrap()
+            .is_none());
+
+        // Record a chat-sent local file (no inline data; blob_hash set).
+        storage
+            .record_local_file_object(
+                &hash,
+                1024,
+                "application/octet-stream",
+                "clip.mp4",
+                path,
+                &hash,
+            )
+            .unwrap();
+
+        // Lookup by source path returns the content hash.
+        assert_eq!(
+            storage.file_object_hash_by_source_path(path).unwrap(),
+            Some(hash.clone())
+        );
+
+        // The row is a blob-reference file object: no inline data, and the
+        // source path is recorded so the file-access handler can serve it.
+        let object = storage.get_file_object(&hash).unwrap().unwrap();
+        assert_eq!(object.data, None);
+        assert_eq!(object.source_path.as_deref(), Some(path));
+
+        // Re-recording the same content under a new source path updates the
+        // mapping (idempotent upsert, no duplicate rows).
+        let path2 = "/home/user/videos/clip-copy.mp4";
+        storage
+            .record_local_file_object(
+                &hash,
+                1024,
+                "application/octet-stream",
+                "clip.mp4",
+                path2,
+                &hash,
+            )
+            .unwrap();
+        assert_eq!(
+            storage.file_object_hash_by_source_path(path2).unwrap(),
+            Some(hash.clone())
+        );
+        assert!(storage
+            .file_object_hash_by_source_path(path)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
