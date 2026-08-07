@@ -621,6 +621,47 @@ fn save_friend_profile_image(data_dir: &std::path::Path, peer: &PublicKey, bytes
     }
 }
 
+/// Persisted seen-peers file name (PUBLIC-03). Stores the set of peer
+/// public keys observed at least once, so a peer that reconnects or is
+/// seen again after an app restart is not re-announced as "new".
+const SEEN_PEERS_FILE: &str = "seen_peers.json";
+
+/// Load the persisted set of peer public keys observed at least once.
+///
+/// The set is seeded with every existing friend: a contact already in the
+/// friends store has demonstrably been seen before (they exchanged a
+/// request/acceptance), so they must never be re-announced as a "new user"
+/// after an upgrade or restart.
+fn load_seen_peers(data_dir: &std::path::Path, friends: &FriendsStore) -> HashSet<PublicKey> {
+    let mut seen: HashSet<PublicKey> = friends
+        .iter()
+        .filter_map(|(id, _)| id.parse_public_key().ok())
+        .collect();
+    let path = data_dir.join(SEEN_PEERS_FILE);
+    if let Ok(bytes) = fs::read(&path) {
+        if let Ok(list) = serde_json::from_slice::<Vec<String>>(&bytes) {
+            for key in list {
+                if let Ok(pk) = key.parse::<PublicKey>() {
+                    seen.insert(pk);
+                }
+            }
+        }
+    }
+    seen
+}
+
+/// Persist the seen-peers set to `<data_dir>/seen_peers.json` (atomic).
+fn save_seen_peers(data_dir: &std::path::Path, seen: &HashSet<PublicKey>) {
+    let keys: Vec<String> = seen.iter().map(|pk| pk.to_string()).collect();
+    if let Err(err) = boru_core::chat_core::atomic_write::atomic_write_json(
+        &data_dir.join(SEEN_PEERS_FILE),
+        &keys,
+        "seen peers",
+    ) {
+        tracing::warn!("failed to save seen peers: {err}");
+    }
+}
+
 /// Load all cached friend profile images from disk into the in-memory handle map.
 fn load_cached_friend_profile_images(
     data_dir: &std::path::Path,
@@ -3408,6 +3449,12 @@ pub struct IcedChat {
     /// AWAY_THRESHOLD_MS), recomputed by ConnMonitorTick so the UI can
     /// re-render when peers transition between Online and Away.
     presence_away_peers: HashSet<PublicKey>,
+    /// Peers that have been observed at least once (persisted across
+    /// restarts in `<data_dir>/seen_peers.json`). The first-ever sighting
+    /// of a peer (online transition) pushes a "New user" Recent Activity
+    /// entry; the set prevents duplicate entries for reconnects/restarts
+    /// (PUBLIC-03).
+    seen_peers: HashSet<PublicKey>,
     /// Revision counter for the friends sidebar cache.
     friends_sidebar_revision: u64,
     /// Revision counter for the chats sidebar cache.
@@ -7009,6 +7056,11 @@ impl IcedChat {
             .filter_map(|(id, _)| id.parse_public_key().ok())
             .map(|pk| (pk, now_ms().max(0) as u64))
             .collect();
+        // PUBLIC-03: seed the persisted seen-peers set with every existing
+        // friend, so a known contact is never announced as a "new user"
+        // after upgrade or restart. Only genuinely unseen peers (mDNS
+        // discovers / gossip neighbors / new friends) produce the entry.
+        let seen_peers = load_seen_peers(&data_dir, &friends);
         // Initialise per-user image storage. The files root defaults to
         // `<data_dir>/files` but can be overridden via
         // `BORU_CHAT_FILES_DIR` for testing or alternate layouts.
@@ -7360,6 +7412,7 @@ impl IcedChat {
             history_clear_feedback_is_error: false,
             peer_presence_map,
             presence_away_peers: HashSet::new(),
+            seen_peers,
             friends_sidebar_revision: 1,
             chats_sidebar_revision: 0,
             discovered_sidebar_revision: 0,
@@ -8723,6 +8776,34 @@ impl IcedChat {
         }
         self.recent_activity
             .push_front(RecentActivityEvent::with_kind(description, kind));
+    }
+
+    /// Record that `peer` has been observed for the first time ever
+    /// (PUBLIC-03). Returns true when the peer was genuinely new — the
+    /// Recent Activity feed gets a "New user … came online" entry and the
+    /// seen set is persisted — and false when the peer was already known
+    /// (reconnect, restart, or our own node).
+    ///
+    /// The persisted seen set is seeded with existing friends at startup,
+    /// so known contacts never re-announce after an upgrade or restart;
+    /// only genuinely unseen peers (mDNS discoveries, new gossip
+    /// neighbors, new friends) produce the entry.
+    fn note_peer_first_seen(&mut self, peer: PublicKey) -> bool {
+        if peer == self.local_public {
+            return false;
+        }
+        if !self.seen_peers.insert(peer) {
+            return false;
+        }
+        let name = self.resolve_name(&peer);
+        self.push_activity(format!("New user {name} came online"), ActivityKind::Online);
+        // Persist in a background thread so the atomic write (fsync +
+        // rename) never blocks the iced event loop. This fires only when a
+        // genuinely new peer appears, so the cost is negligible.
+        let data_dir = self.data_dir.clone();
+        let seen = self.seen_peers.clone();
+        std::thread::spawn(move || save_seen_peers(&data_dir, &seen));
+        true
     }
 
     /// Rebuild both entry indexes after bulk mutations (room switch, load, eviction).
@@ -22703,10 +22784,16 @@ impl IcedChat {
                 }
                 self.friends_dirty = true;
             }
-            let name = self.resolve_name(peer);
             if *online {
-                self.push_activity(format!("{name} came online"), ActivityKind::Online);
+                // PUBLIC-03: a peer never seen before (across restarts)
+                // gets a distinct "New user" entry; known peers keep the
+                // plain came-online entry on reconnects.
+                if !self.note_peer_first_seen(*peer) {
+                    let name = self.resolve_name(peer);
+                    self.push_activity(format!("{name} came online"), ActivityKind::Online);
+                }
             } else {
+                let name = self.resolve_name(peer);
                 self.push_activity(format!("{name} went offline"), ActivityKind::Offline);
             }
         }
@@ -22859,7 +22946,14 @@ impl IcedChat {
                         self.mark_friends_sidebar_dirty();
                         self.peer_presence_map.insert(peer, now_ms().max(0) as u64);
                         self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
-                        if has_been_seen {
+                        if self.note_peer_first_seen(peer) {
+                            // PUBLIC-03: first-ever sighting of this peer —
+                            // the helper already pushed the "New user" Recent
+                            // Activity entry and persisted the seen set. No
+                            // system message (there is no prior state to
+                            // announce a transition from) and no duplicate
+                            // generic entry.
+                        } else if has_been_seen {
                             self.push_system(format!("Friend {label} is now ONLINE"));
                             self.push_activity(
                                 format!("{label} came online"),
@@ -46176,6 +46270,157 @@ mod tests {
         let second = app.recent_activity_card_data();
         assert_eq!(first.rows, second.rows);
         assert_eq!(first.total, second.total);
+    }
+
+    // ── PUBLIC-03: new-user recent-activity entries ─────────────────────
+    // A peer observed for the very first time (across restarts) produces a
+    // distinct "New user … came online" Recent Activity entry; known peers
+    // reconnecting or a restarted app must not re-announce them.
+
+    /// First-ever sighting pushes a "New user" entry and records the peer
+    /// in the seen set.
+    #[test]
+    fn first_seen_peer_pushes_new_user_activity() {
+        let (_runtime, mut app) = build_prewarm_test_app();
+        let pk = SecretKey::generate().public();
+
+        assert!(app.note_peer_first_seen(pk), "peer is new");
+        assert!(app.seen_peers.contains(&pk), "peer recorded in seen set");
+        let data = app.recent_activity_card_data();
+        assert_eq!(data.rows.len(), 1, "one new-user entry");
+        assert_eq!(data.rows[0].kind, ActivityKind::Online);
+        assert!(
+            data.rows[0].description.contains("New user"),
+            "entry is the distinct new-user wording: {}",
+            data.rows[0].description
+        );
+        assert!(
+            data.rows[0].description.contains(&pk.fmt_short().to_string()),
+            "entry carries the peer display name: {}",
+            data.rows[0].description
+        );
+    }
+
+    /// A second online transition for the same peer (reconnect) must not
+    /// create another "New user" entry.
+    #[test]
+    fn known_peer_reconnect_does_not_push_new_user_again() {
+        let (_runtime, mut app) = build_prewarm_test_app();
+        let pk = SecretKey::generate().public();
+
+        assert!(app.note_peer_first_seen(pk), "first sighting is new");
+        let count_after_first = app.recent_activity.len();
+        assert_eq!(count_after_first, 1);
+
+        assert!(
+            !app.note_peer_first_seen(pk),
+            "second sighting is a known peer"
+        );
+        assert_eq!(
+            app.recent_activity.len(),
+            count_after_first,
+            "reconnect must not add another entry"
+        );
+        let data = app.recent_activity_card_data();
+        let new_user_count = data
+            .rows
+            .iter()
+            .filter(|r| r.description.contains("New user"))
+            .count();
+        assert_eq!(new_user_count, 1, "exactly one new-user entry ever");
+    }
+
+    /// Our own node is never announced as a new user.
+    #[test]
+    fn own_peer_is_never_announced_as_new() {
+        let (_runtime, mut app) = build_prewarm_test_app();
+        let local = app.local_public;
+        assert!(
+            !app.note_peer_first_seen(local),
+            "own public key is never a new user"
+        );
+        assert!(
+            app.recent_activity.is_empty(),
+            "no activity entry for own node"
+        );
+    }
+
+    /// flush_pending_neighbor_status emits the "New user" wording for a
+    /// first-time online peer and the plain wording for a known peer.
+    #[test]
+    fn flush_neighbor_status_uses_new_user_wording_only_once() {
+        let (_runtime, mut app) = build_prewarm_test_app();
+        let pk = SecretKey::generate().public();
+
+        app.on_neighbor_status_change(pk, true);
+        app.flush_pending_neighbor_status();
+
+        let data = app.recent_activity_card_data();
+        assert_eq!(data.rows.len(), 1);
+        assert!(
+            data.rows[0].description.contains("New user"),
+            "first online transition is a new user: {}",
+            data.rows[0].description
+        );
+
+        // Simulate a reconnect later in the same session.
+        app.on_neighbor_status_change(pk, false);
+        app.flush_pending_neighbor_status();
+        app.on_neighbor_status_change(pk, true);
+        app.flush_pending_neighbor_status();
+
+        let data = app.recent_activity_card_data();
+        assert!(
+            data.rows.iter().any(|r| r.description.contains("came online")
+                && !r.description.contains("New user")),
+            "known-peer reconnect keeps the plain came-online wording"
+        );
+        let new_user_count = data
+            .rows
+            .iter()
+            .filter(|r| r.description.contains("New user"))
+            .count();
+        assert_eq!(new_user_count, 1, "still exactly one new-user entry");
+    }
+
+    /// load_seen_peers seeds the set with existing friends so a known
+    /// contact is never announced after upgrade/restart.
+    #[test]
+    fn load_seen_peers_seeds_existing_friends() {
+        let mut friends = FriendsStore::empty_at(&std::env::temp_dir());
+        let pk = SecretKey::generate().public();
+        let fid = FriendId::from_public_key(pk);
+        friends.ensure_friend(fid.clone());
+        friends.set_label(fid.clone(), "Alice");
+        friends.set_relationship(fid, FriendRelationship::Friends);
+
+        let seen = load_seen_peers(&std::env::temp_dir(), &friends);
+        assert!(seen.contains(&pk), "existing friend seeded into seen set");
+    }
+
+    /// The seen set round-trips through the JSON persistence file, so a
+    /// restarted app does not re-announce every previously-seen peer.
+    #[test]
+    fn seen_peers_roundtrip_via_json_persistence() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "boru-seen-peers-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&data_dir).expect("create temp dir");
+
+        let mut seen = HashSet::new();
+        let pk = SecretKey::generate().public();
+        seen.insert(pk);
+        save_seen_peers(&data_dir, &seen);
+
+        let friends = FriendsStore::empty_at(&data_dir);
+        let loaded = load_seen_peers(&data_dir, &friends);
+        assert!(loaded.contains(&pk), "persisted peer survives restart");
+
+        let _ = std::fs::remove_dir_all(&data_dir);
     }
 
     // ── File Sharing card dependency isolation (PERF-2, t_f6dcbb3a) ──
