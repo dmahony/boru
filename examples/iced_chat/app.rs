@@ -36090,10 +36090,16 @@ impl IcedChat {
                 .width(Length::Fill)
                 .into()
         } else {
-            text(display_name.clone())
-                .size(TYPO_LG)
-                .width(Length::Fill)
-                .into()
+            // FONTS-09: the friend's display name (which may be a raw short
+            // key like "6c0f88fe9f") is a user-facing name here, so it uses
+            // the IBM Plex Sans display-name role (SectionTitle) — matching
+            // the peer profile header — never JetBrains Mono.
+            crate::fonts::type_role_text(
+                crate::fonts::TypeRole::SectionTitle,
+                display_name.clone(),
+            )
+            .width(Length::Fill)
+            .into()
         };
 
         let header = row![]
@@ -39089,6 +39095,140 @@ mod tests {
         assert!(
             !identity.contains("TYPO_"),
             "profile identity card must not use raw TYPO_ sizes"
+        );
+    }
+
+    // ── FONTS-09: JetBrains Mono stays for technical values ────────────
+    //
+    // Genuine technical identifiers (peer IDs, hashes, fingerprints, ports,
+    // debug IDs) keep the TechnicalValue role (JetBrains Mono); user-facing
+    // display names — even an alphanumeric short key like "6c0f88fe9f" —
+    // use IBM Plex Sans (or Figtree in chat), never monospace.
+
+    #[test]
+    fn font09_technical_identifiers_keep_jetbrains_mono() {
+        // Every genuine technical-value site must resolve through
+        // TypeRole::TechnicalValue (JetBrains Mono): friend ID / public key,
+        // tunnel host:port endpoint, peer key row, room topic hex, contact
+        // peer ID, key fingerprint, content hash, connection-detail inputs
+        // and log viewer contents.
+        let src = include_str!("app.rs");
+        let identity = method_source(src, "fn profile_identity_card(", "fn download_for_transfer(");
+        assert!(
+            identity.contains("TypeRole::TechnicalValue"),
+            "friend ID (public key) must use TypeRole::TechnicalValue"
+        );
+        let tunnels = method_source(src, "fn view_tunnels_card(", "fn view_main_empty_state(");
+        assert!(
+            tunnels.contains("TypeRole::TechnicalValue"),
+            "tunnel host:port endpoint must use TypeRole::TechnicalValue"
+        );
+        let chat_header = method_source(src, "fn view_chat_header(", "fn chat_search_matches(");
+        assert!(
+            chat_header.contains("TypeRole::TechnicalValue"),
+            "peer key row must use TypeRole::TechnicalValue"
+        );
+        let options = method_source(src, "fn view_chat_options_popover(", "fn view_details_panel(");
+        assert!(
+            options.contains("TypeRole::TechnicalValue"),
+            "room topic hex must use TypeRole::TechnicalValue"
+        );
+        let details = method_source(src, "fn view_details_panel_direct(", "fn view_group_info_panel(");
+        assert!(
+            details.contains("TypeRole::TechnicalValue"),
+            "contact peer ID and key fingerprint must use TypeRole::TechnicalValue"
+        );
+        let settings = method_source(src, "fn view_settings_screen_content(", "fn view_settings_screen_cached(");
+        assert!(
+            settings.contains("TypeRole::TechnicalValue"),
+            "content hash must use TypeRole::TechnicalValue"
+        );
+        let log_src = include_str!("log_viewer.rs");
+        assert!(
+            log_src.contains("TypeRole::TechnicalValue"),
+            "log viewer contents must use TypeRole::TechnicalValue"
+        );
+        let conn_src = include_str!("connection_details.rs");
+        assert!(
+            conn_src.contains("TypeRole::TechnicalValue"),
+            "connection-detail inputs must use TypeRole::TechnicalValue"
+        );
+    }
+
+    #[test]
+    fn font09_display_names_use_plex_or_figtree_not_mono() {
+        // Display-name sites — sidebar friends / discovered peers / online
+        // peers, chat sender labels, and profile headers — must render the
+        // name in IBM Plex Sans (Body / SectionTitle) or Figtree
+        // (ChatSender), never in JetBrains Mono, even when the name is an
+        // alphanumeric raw key.
+        let src = include_str!("app.rs");
+        let friends = method_source(
+            src,
+            "fn view_sidebar_friends_rows_content(",
+            "fn sidebar_requests_dependency(",
+        );
+        assert!(
+            friends.contains("TypeRole::Body"),
+            "sidebar friend labels must use TypeRole::Body (IBM Plex Sans)"
+        );
+        assert!(
+            !friends.contains("TypeRole::TechnicalValue"),
+            "sidebar friend labels must NOT use JetBrains Mono"
+        );
+        let discovered = method_source(
+            src,
+            "fn view_sidebar_discovered_peers_content(",
+            "fn view_sidebar_public_rooms(",
+        );
+        assert!(
+            discovered.contains("TypeRole::Body"),
+            "discovered-peer names must use TypeRole::Body (IBM Plex Sans)"
+        );
+        assert!(
+            !discovered.contains("TypeRole::TechnicalValue"),
+            "discovered-peer names must NOT use JetBrains Mono"
+        );
+        let peers = method_source(src, "fn view_online_peers_card(", "fn view_recent_activity_card(");
+        assert!(
+            peers.contains("TypeRole::Body"),
+            "online-peer names must use TypeRole::Body (IBM Plex Sans)"
+        );
+        assert!(
+            !peers.contains("TypeRole::TechnicalValue"),
+            "online-peer names must NOT use JetBrains Mono"
+        );
+        let chat_log = method_source(src, "fn view_chat_log(", "fn view_composer(");
+        assert!(
+            chat_log.contains("TypeRole::ChatSender.font()"),
+            "chat sender labels must use TypeRole::ChatSender (Figtree)"
+        );
+        assert!(
+            !chat_log.contains("TypeRole::TechnicalValue"),
+            "chat sender labels must NOT use JetBrains Mono"
+        );
+        // FONTS-09 fix: the friend profile header previously rendered the
+        // display name with the raw default font (Source Sans 3). It must
+        // now use the IBM Plex Sans SectionTitle role, like the peer
+        // profile header.
+        let friend_profile = method_source(
+            src,
+            "fn view_friend_profile_content(",
+            "fn view_share_local_service_dialog<'a>(",
+        );
+        assert!(
+            friend_profile.contains("TypeRole::SectionTitle"),
+            "friend profile display name must use TypeRole::SectionTitle (IBM Plex Sans)"
+        );
+        assert!(
+            !friend_profile.contains("TypeRole::TechnicalValue"),
+            "friend profile display name must NOT use JetBrains Mono"
+        );
+        // The peer profile header (already correct) keeps SectionTitle.
+        let peer_profile = method_source(src, "fn view_peer_profile_content(", "fn view_peer_catalogue(");
+        assert!(
+            peer_profile.contains("TypeRole::SectionTitle"),
+            "peer profile display name must use TypeRole::SectionTitle (IBM Plex Sans)"
         );
     }
 
