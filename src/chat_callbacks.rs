@@ -250,6 +250,28 @@ pub trait ChatCallbacks {
         sender_label: Option<String>,
     );
 
+    /// Record a pending whole-directory (HashSeq collection) download.
+    ///
+    /// `name` is the root folder name, `ticket` is a `BlobFormat::HashSeq`
+    /// BlobTicket string, `size` is the total payload bytes,
+    /// `collection_hash` is the collection root hash, and `collection_entries`
+    /// is the number of files in the collection.
+    ///
+    /// The default implementation falls back to [`set_pending_file`] so
+    /// frontends that only know single-file transfers still surface a
+    /// download card — the ticket is a valid (HashSeq) BlobTicket.
+    fn set_pending_folder(
+        &mut self,
+        name: String,
+        ticket: String,
+        size: u64,
+        _collection_hash: Option<MessageHash>,
+        _collection_entries: u64,
+        sender_label: Option<String>,
+    ) {
+        self.set_pending_file(name, ticket, size, None, sender_label);
+    }
+
     /// Record a pending image download: `(filename, blob_hash, sender_pk)`.
     /// The frontend should automatically download and render the image.
     fn set_pending_image(&mut self, name: String, hash: MessageHash, from: PublicKey);

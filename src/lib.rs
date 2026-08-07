@@ -114,6 +114,14 @@ pub mod chat_core;
 /// whether a message uses it.
 pub mod wire_compression;
 
+/// Whole-directory (HashSeq collection) transfer — import a folder tree into
+/// iroh-blobs as a single collection and export a received collection back
+/// to disk as a folder tree.
+///
+/// Available when the `net` feature is enabled (requires iroh-blobs).
+#[cfg(feature = "net")]
+pub mod collection_transfer;
+
 /// Semantic event-type mapping for chat system messages.
 ///
 /// Classifies the plain-text system messages produced by

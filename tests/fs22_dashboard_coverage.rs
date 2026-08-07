@@ -680,6 +680,7 @@ fn invalid_remote_descriptors_never_render_and_status_precedence_is_safe() {
         version_number: 1,
         updated_at_ms: 12,
         collection_ids: vec![],
+        children: vec![],
     };
     assert!(project_validated_remote_shared_file("peer-z", &file("", "shared-7"), true).is_none());
     assert!(project_validated_remote_shared_file("peer-z", &file("photo.png", ""), true).is_none());

@@ -3536,6 +3536,7 @@ impl Storage {
                 version_number: row.version.min(u32::MAX as u64) as u32,
                 updated_at_ms: row.updated_at_ms,
                 collection_ids: Vec::new(),
+                children: vec![],
             });
         }
         Ok(CatalogueView {

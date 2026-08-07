@@ -897,7 +897,8 @@ pub enum Message {
     },
     /// Announce a file available for download.
     FileShare {
-        /// The file name (basename only, no path).
+        /// The file name (basename only, no path).  For a whole-directory
+        /// share this holds the root folder name.
         name: String,
         /// BlobTicket serialized to string.
         ticket: String,
@@ -911,6 +912,17 @@ pub enum Message {
         /// keeping gossip messages small.
         #[serde(default, deserialize_with = "deserialize_tolerant_opt_hash")]
         thumbnail_hash: Option<MessageHash>,
+        /// Optional HashSeq collection root hash.  When present this share
+        /// is a whole directory: the `ticket` is a `BlobFormat::HashSeq`
+        /// BlobTicket whose root hash is this value, and `name` is the root
+        /// folder name.  Absent for the legacy single-file form.
+        #[serde(default, deserialize_with = "deserialize_tolerant_opt_hash")]
+        collection_hash: Option<MessageHash>,
+        /// Number of entries (files) in the collection.  Only meaningful
+        /// when [`collection_hash`](Self::collection_hash) is present; 0 for
+        /// single-file shares.
+        #[serde(default, deserialize_with = "deserialize_tolerant_u64")]
+        collection_entries: u64,
     },
     /// Graceful goodbye — the sender is leaving the chat.
     /// This is a best-effort notification: the gossip protocol also
@@ -1984,6 +1996,8 @@ pub fn handle_net_event_for_topic(
                     ticket,
                     size,
                     thumbnail_hash,
+                    collection_hash,
+                    collection_entries,
                 } => {
                     if from != cb.local_public() {
                         let fid = FriendId::from_public_key(from);
@@ -1995,14 +2009,26 @@ pub fn handle_net_event_for_topic(
                                 // filename prominently, so the surrounding
                                 // system line must not repeat the full
                                 // filename (long names would duplicate).
-                                cb.push_system(format!("{} shared a file", sender_name));
-                                cb.set_pending_file(
-                                    name,
-                                    ticket,
-                                    size,
-                                    thumbnail_hash,
-                                    Some(sender_name),
-                                );
+                                if collection_hash.is_some() {
+                                    cb.push_system(format!("{} shared a folder", sender_name));
+                                    cb.set_pending_folder(
+                                        name,
+                                        ticket,
+                                        size,
+                                        collection_hash,
+                                        collection_entries,
+                                        Some(sender_name),
+                                    );
+                                } else {
+                                    cb.push_system(format!("{} shared a file", sender_name));
+                                    cb.set_pending_file(
+                                        name,
+                                        ticket,
+                                        size,
+                                        thumbnail_hash,
+                                        Some(sender_name),
+                                    );
+                                }
                             }
                         }
                     }
@@ -3328,6 +3354,8 @@ mod tests {
             ticket: "ticket123".into(),
             size: 1024,
             thumbnail_hash: None,
+            collection_hash: None,
+            collection_entries: 0,
         };
         let bytes = postcard::to_stdvec(&msg).unwrap();
         let decoded: Message = postcard::from_bytes(&bytes).unwrap();
@@ -3584,6 +3612,8 @@ mod tests {
                         .into(),
                     size: 42_000,
                     thumbnail_hash: Some([0xab; 32]),
+                    collection_hash: None,
+                    collection_entries: 0,
                 },
             ),
             ("Leave", Message::Leave),
@@ -3772,6 +3802,8 @@ mod tests {
             ticket: "blob:iroh:".repeat(20),
             size: 0,
             thumbnail_hash: None,
+            collection_hash: None,
+            collection_entries: 0,
         };
         let encoded = SignedMessage::sign_and_encode_compressed(&key, &msg).unwrap();
         let (_, decoded, _) = SignedMessage::verify_and_decode(&encoded).unwrap();
@@ -4127,6 +4159,8 @@ mod tests {
                 ticket: "abc123".into(),
                 size: 0,
                 thumbnail_hash: None,
+                collection_hash: None,
+                collection_entries: 0,
             },
             sent_at: now_secs(),
         };
@@ -5253,6 +5287,75 @@ mod tests {
             } => {
                 assert_eq!(name, "doc.pdf");
                 assert_eq!(ticket, "tkt");
+            }
+            other => panic!("expected FileShare, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn old_wire_format_file_share_decodes_to_single_file_defaults() {
+        // The exact legacy wire bytes (name + ticket only) must decode to a
+        // FileShare whose new collection fields default to "single file":
+        // collection_hash = None and collection_entries = 0.  This is the
+        // backward-compatibility guarantee for peers running pre-SENDME-01
+        // builds.
+        let old_bytes = [
+            0x02, // discriminant 2 = FileShare
+            0x07, // name length
+            0x64, 0x6f, 0x63, 0x2e, 0x70, 0x64, 0x66, // "doc.pdf"
+            0x03, // ticket length
+            0x74, 0x6b, 0x74, // "tkt"
+        ];
+        let decoded: Message =
+            postcard::from_bytes(&old_bytes).expect("legacy FileShare should decode correctly");
+        match decoded {
+            Message::FileShare {
+                name,
+                ticket,
+                size,
+                thumbnail_hash,
+                collection_hash,
+                collection_entries,
+            } => {
+                assert_eq!(name, "doc.pdf");
+                assert_eq!(ticket, "tkt");
+                assert_eq!(size, 0);
+                assert_eq!(thumbnail_hash, None);
+                assert_eq!(collection_hash, None, "legacy payload must be a single-file share");
+                assert_eq!(collection_entries, 0);
+            }
+            other => panic!("expected FileShare, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn new_wire_format_folder_share_roundtrips_with_legacy_decode() {
+        // A SENDME-01 folder share carries collection_hash + collection_entries.
+        // Round-trip through postcard and verify both fields survive.
+        let msg = Message::FileShare {
+            name: "photos".into(),
+            ticket: "blob:iroh:folderticket".into(),
+            size: 123_456,
+            thumbnail_hash: None,
+            collection_hash: Some([0x42; 32]),
+            collection_entries: 17,
+        };
+        let bytes = postcard::to_stdvec(&msg).unwrap();
+        let decoded: Message = postcard::from_bytes(&bytes).unwrap();
+        match decoded {
+            Message::FileShare {
+                name,
+                ticket,
+                size,
+                collection_hash,
+                collection_entries,
+                ..
+            } => {
+                assert_eq!(name, "photos");
+                assert_eq!(ticket, "blob:iroh:folderticket");
+                assert_eq!(size, 123_456);
+                assert_eq!(collection_hash, Some([0x42; 32]));
+                assert_eq!(collection_entries, 17);
             }
             other => panic!("expected FileShare, got {other:?}"),
         }

@@ -161,6 +161,14 @@ pub struct RemoteSharedFile {
     /// Identifiers of the collections this file belongs to.
     #[serde(default)]
     pub collection_ids: Vec<String>,
+    /// Child file entries when this entry is a whole-directory (HashSeq
+    /// collection) share.  A non-empty `children` vec means this entry
+    /// represents a folder: `content_hash` is the collection root hash and
+    /// `display_name` is the root folder name.  Absent/empty for ordinary
+    /// single-file shares.  This is the catalogue-model representation of a
+    /// received collection as ONE entry with children (SENDME-01).
+    #[serde(default)]
+    pub children: Vec<RemoteSharedFile>,
 }
 
 impl RemoteSharedFile {
@@ -199,7 +207,20 @@ impl RemoteSharedFile {
             version_number,
             updated_at_ms: now_ms(),
             collection_ids,
+            children: vec![],
         }
+    }
+
+    /// True when this entry represents a whole-directory (HashSeq
+    /// collection) share with child entries.
+    pub fn is_folder(&self) -> bool {
+        !self.children.is_empty()
+    }
+
+    /// Return the child entries of a folder share, or an empty slice for a
+    /// single-file entry.
+    pub fn folder_children(&self) -> &[RemoteSharedFile] {
+        &self.children
     }
 
     /// Validate every field against length, format, and content constraints.
@@ -207,6 +228,19 @@ impl RemoteSharedFile {
     /// Returns `Ok(())` when all constraints pass, or `Err` with a
     /// description of the first violation found.
     pub fn validate(&self) -> Result<()> {
+        self.validate_fields()?;
+        // A received collection is represented as ONE catalogue entry with
+        // child entries.  Child entries are validated recursively with a
+        // depth bound so a hostile folder tree cannot force unbounded
+        // recursion during validation.
+        self.validate_children(0)?;
+        Ok(())
+    }
+
+    /// Validate this entry's own fields (shared_file_id, display_name,
+    /// description, mime_type, size, hashes, timestamps, collection_ids).
+    /// Does not descend into [`Self::children`] — see [`Self::validate`].
+    fn validate_fields(&self) -> Result<()> {
         // ── shared_file_id ──────────────────────────────────────────────
         if self.shared_file_id.is_empty() {
             return Err(n0_error::anyerr!("shared_file_id must not be empty"));
@@ -322,6 +356,41 @@ impl RemoteSharedFile {
 
         Ok(())
     }
+
+    /// Recursively validate [`Self::children`], bounding nesting depth.
+    ///
+    /// A folder entry's children must individually pass the same validation
+    /// rules as top-level entries.  Depth is bounded to prevent stack
+    /// exhaustion from a maliciously deep folder tree; the total entry count
+    /// is bounded by [`crate::catalogue_limits::MAX_ENTRIES_PER_COLLECTION`]
+    /// across all levels.
+    fn validate_children(&self, depth: usize) -> Result<()> {
+        const MAX_COLLECTION_DEPTH: usize = 32;
+        if self.children.is_empty() {
+            return Ok(());
+        }
+        if depth >= MAX_COLLECTION_DEPTH {
+            return Err(n0_error::anyerr!(
+                "folder share exceeds maximum nesting depth of {MAX_COLLECTION_DEPTH}"
+            ));
+        }
+        if self.children.len() > crate::catalogue_limits::MAX_ENTRIES_PER_COLLECTION {
+            return Err(n0_error::anyerr!(
+                "folder share has {} entries, exceeding maximum of {}",
+                self.children.len(),
+                crate::catalogue_limits::MAX_ENTRIES_PER_COLLECTION
+            ));
+        }
+        for (i, child) in self.children.iter().enumerate() {
+            child
+                .validate_fields()
+                .std_context(format!("invalid folder child [{i}]"))?;
+            child
+                .validate_children(depth + 1)
+                .std_context(format!("invalid folder child [{i}]"))?;
+        }
+        Ok(())
+    }
 }
 
 // ── TryFrom<SharedFile> ──────────────────────────────────────────────────
@@ -384,6 +453,7 @@ impl TryFrom<&SharedFile> for RemoteSharedFile {
             version_number: 1,
             updated_at_ms: now_ms(),
             collection_ids: vec![],
+            children: vec![],
         })
     }
 }
@@ -994,6 +1064,123 @@ mod tests {
             description: None,
         };
         assert!(collection.validate().is_err());
+    }
+
+    // ── Folder share (SENDME-01 children) ──────────────────────────────
+
+    #[test]
+    fn folder_entry_with_children_validates_and_is_folder() {
+        let child = RemoteSharedFile::new(
+            "child-hash",
+            "report.pdf",
+            None,
+            1024,
+            "application/pdf",
+            None,
+            1,
+        );
+        let folder = RemoteSharedFile {
+            display_name: "documents".into(),
+            size_bytes: 2048,
+            children: vec![child],
+            ..RemoteSharedFile::new(
+                "collection-root",
+                "documents",
+                None,
+                2048,
+                "inode/directory",
+                None,
+                1,
+            )
+        };
+        assert!(folder.is_folder(), "entry with children is a folder");
+        assert_eq!(folder.folder_children().len(), 1);
+        assert!(folder.validate().is_ok());
+    }
+
+    #[test]
+    fn single_file_entry_is_not_a_folder() {
+        let file =
+            RemoteSharedFile::new("hash", "photo.jpg", None, 100, "image/jpeg", None, 1);
+        assert!(!file.is_folder());
+        assert!(file.folder_children().is_empty());
+        assert!(file.validate().is_ok());
+    }
+
+    #[test]
+    fn folder_child_with_invalid_fields_rejected() {
+        // A folder entry whose child fails validation must fail as a whole:
+        // hostile children (bad ids, names, sizes) cannot ride inside a
+        // valid-looking folder.
+        let bad_child = RemoteSharedFile {
+            shared_file_id: String::new(), // empty → invalid
+            ..RemoteSharedFile::new("h", "x", None, 1, "text/plain", None, 1)
+        };
+        let folder = RemoteSharedFile {
+            children: vec![bad_child],
+            ..RemoteSharedFile::new(
+                "collection-root",
+                "docs",
+                None,
+                1,
+                "inode/directory",
+                None,
+                1,
+            )
+        };
+        assert!(folder.validate().is_err());
+    }
+
+    #[test]
+    fn folder_depth_and_entry_count_bounded() {
+        // Depth: a 33-level chain must be rejected (bound is 32).
+        let mut entry = RemoteSharedFile::new("h", "leaf", None, 1, "text/plain", None, 1);
+        for i in 0..33 {
+            entry = RemoteSharedFile {
+                display_name: format!("level-{i}"),
+                children: vec![entry],
+                ..RemoteSharedFile::new("h", "folder", None, 1, "inode/directory", None, 1)
+            };
+        }
+        assert!(entry.validate().is_err(), "excessively deep folder must be rejected");
+
+        // Entry count: a folder with more than MAX_ENTRIES_PER_COLLECTION
+        // children must be rejected (allocating 10_001 entries is fine for
+        // a test but keep it deterministic — construct just over the bound
+        // using the constant directly).
+        let too_many = crate::catalogue_limits::MAX_ENTRIES_PER_COLLECTION + 1;
+        let children: Vec<RemoteSharedFile> = (0..too_many)
+            .map(|i| RemoteSharedFile::new(format!("h{i}"), "x", None, 1, "text/plain", None, 1))
+            .collect();
+        let folder = RemoteSharedFile {
+            children,
+            ..RemoteSharedFile::new("root", "big", None, 1, "inode/directory", None, 1)
+        };
+        assert!(folder.validate().is_err());
+    }
+
+    #[test]
+    fn folder_children_survive_postcard_roundtrip_and_default_to_empty() {
+        let child = RemoteSharedFile::new("ch", "a.txt", None, 10, "text/plain", None, 1);
+        let folder = RemoteSharedFile {
+            display_name: "photos".into(),
+            children: vec![child],
+            ..RemoteSharedFile::new("root", "photos", None, 10, "inode/directory", None, 1)
+        };
+        let bytes = postcard::to_stdvec(&folder).unwrap();
+        let decoded: RemoteSharedFile = postcard::from_bytes(&bytes).unwrap();
+        assert!(decoded.is_folder());
+        assert_eq!(decoded.folder_children()[0].display_name, "a.txt");
+        assert!(decoded.validate().is_ok());
+
+        // A legacy payload (no `children` field) decodes with an empty vec —
+        // same serde-default pattern as `description`/`collection_ids`.
+        let legacy =
+            RemoteSharedFile::new("old", "legacy.bin", None, 10, "application/octet-stream", None, 1);
+        let legacy_bytes = postcard::to_stdvec(&legacy).unwrap();
+        let decoded_legacy: RemoteSharedFile = postcard::from_bytes(&legacy_bytes).unwrap();
+        assert!(!decoded_legacy.is_folder());
+        assert!(decoded_legacy.folder_children().is_empty());
     }
 
     // ── TryFrom<SharedFile> ─────────────────────────────────────────────

@@ -878,6 +878,8 @@ mod tests {
                 ticket: ticket("holiday"),
                 size: 88_000_000,
                 thumbnail_hash: Some(hash("thumb")),
+                collection_hash: None,
+                collection_entries: 0,
             },
         );
         add("Leave", Message::Leave);
@@ -1166,6 +1168,8 @@ mod tests {
                 ticket: ticket("cat"),
                 size: 123_456,
                 thumbnail_hash: Some([0xAB; 32]),
+                collection_hash: None,
+                collection_entries: 0,
             },
         );
         add(
@@ -1175,6 +1179,8 @@ mod tests {
                 ticket: ticket("preso"),
                 size: 42_000_000,
                 thumbnail_hash: None,
+                collection_hash: None,
+                collection_entries: 0,
             },
         );
 

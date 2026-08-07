@@ -691,6 +691,7 @@ mod tests {
             version_number: 1,
             updated_at_ms: 12,
             collection_ids: vec![],
+            children: vec![],
         };
         assert_eq!(
             project_remote_shared_file("peer-z", &remote).id.as_str(),
@@ -881,6 +882,7 @@ mod tests {
             version_number: 1,
             updated_at_ms: 12,
             collection_ids: vec![],
+            children: vec![],
         };
         // Missing display name → never renders.
         assert!(

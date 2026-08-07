@@ -1190,6 +1190,8 @@ fn all_message_variants_handle_gracefully() {
             ticket: "tkt".into(),
             size: 0,
             thumbnail_hash: None,
+            collection_hash: None,
+            collection_entries: 0,
         },
         Message::Leave,
         Message::Presence,

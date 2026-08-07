@@ -702,13 +702,17 @@ fn view_download_progress_inner<'a>(
     // separate from the file-type icon.  The icon is informative and shows
     // the friendly type in a hover tooltip (PAPIRUS-15 point 7); the
     // filename remains the primary content label.
-    let file_type_icon = file_type_icon_element_with_tooltip(
-        &attachment.name,
-        None,
-        None,
-        FileTypeIconSize::Card,
-        &theme,
-    );
+    let file_type_icon = if attachment.is_folder {
+        directory_icon_element(&attachment.name, FileTypeIconSize::Card, &theme)
+    } else {
+        file_type_icon_element_with_tooltip(
+            &attachment.name,
+            None,
+            None,
+            FileTypeIconSize::Card,
+            &theme,
+        )
+    };
 
     let title_row = Row::new()
         .push(file_type_icon)
@@ -747,6 +751,20 @@ fn view_download_progress_inner<'a>(
                     .width(Length::Fill),
             )
         }
+    };
+
+    // ── Row 2b: folder entry count (SENDME-01) ──────────────────────────
+    let folder_info_row = if attachment.is_folder && attachment.collection_entries > 0 {
+        Some(
+            crate::fonts::type_role_text(
+                crate::fonts::TypeRole::Metadata,
+                format!("{} files in folder", attachment.collection_entries),
+            )
+            .color(muted)
+            .width(Length::Fill),
+        )
+    } else {
+        None
     };
 
     // ── Row 3: Progress bar + percentage ────────────────────────────────
@@ -831,6 +849,9 @@ fn view_download_progress_inner<'a>(
 
     if let Some(src) = source_row {
         body = body.push(src);
+    }
+    if let Some(folder_info) = folder_info_row {
+        body = body.push(folder_info);
     }
     if let Some(prog) = progress_row {
         body = body.push(prog);

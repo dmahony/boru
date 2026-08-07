@@ -521,6 +521,7 @@ impl CatalogueHandler {
             version_number: row.version as u32,
             updated_at_ms: row.updated_at_ms,
             collection_ids: Vec::new(),
+            children: vec![],
         }))
     }
 }

@@ -942,6 +942,8 @@ mod tests {
                     ticket: "ticket123".into(),
                     size: 1024,
                     thumbnail_hash: None,
+                    collection_hash: None,
+                    collection_entries: 0,
                 },
                 sent_at: 1000,
             };
@@ -957,6 +959,8 @@ mod tests {
                 ticket: "ticket456".into(),
                 size: 2048,
                 thumbnail_hash: None,
+                collection_hash: None,
+                collection_entries: 0,
             },
             sent_at: 1000,
         };

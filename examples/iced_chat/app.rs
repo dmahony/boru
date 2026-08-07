@@ -1983,6 +1983,12 @@ pub(crate) struct DownloadAttachment {
     /// Content identity extracted from the blob ticket; never inferred from
     /// the peer-controlled filename or MIME metadata.
     pub(crate) expected_content_hash: Option<String>,
+    /// True when this attachment is a whole-directory (HashSeq collection)
+    /// share rather than a single file.  The ticket is a HashSeq BlobTicket.
+    pub(crate) is_folder: bool,
+    /// Number of entries (files) in a folder share.  Meaningful only when
+    /// [`is_folder`](Self::is_folder) is true; 0 for single-file shares.
+    pub(crate) collection_entries: u64,
 }
 
 impl std::hash::Hash for DownloadAttachment {
@@ -2002,6 +2008,8 @@ impl std::hash::Hash for DownloadAttachment {
         self.duration_ms.hash(state);
         self.playback_error.hash(state);
         self.expected_content_hash.hash(state);
+        self.is_folder.hash(state);
+        self.collection_entries.hash(state);
     }
 }
 
@@ -2043,7 +2051,23 @@ impl DownloadAttachment {
             duration_ms: None,
             playback_error: None,
             expected_content_hash,
+            is_folder: false,
+            collection_entries: 0,
         }
+    }
+
+    /// Create a folder (HashSeq collection) attachment.
+    pub(crate) fn new_folder(
+        kind: TransferKind,
+        name: impl Into<String>,
+        ticket: impl Into<String>,
+        source_peer: impl Into<String>,
+        collection_entries: u64,
+    ) -> Self {
+        let mut attachment = Self::new(kind, name, ticket, source_peer, None);
+        attachment.is_folder = true;
+        attachment.collection_entries = collection_entries;
+        attachment
     }
 
     fn total_bytes_label(bytes: u64) -> String {
@@ -4617,6 +4641,7 @@ impl CatalogueRowSnapshot {
             version_number: self.version_number,
             updated_at_ms: self.updated_at_ms,
             collection_ids: self.collection_ids.clone(),
+            children: vec![],
         }
     }
 }
@@ -5306,6 +5331,12 @@ pub enum AppMessage {
     OpenDownloadsFolder,
     ErrorMsg(String),
     ExecuteFileSend(String),
+    /// Open the native folder picker and send the selected directory as a
+    /// HashSeq collection (SENDME-01).
+    AttachFolderPressed,
+    /// Send a whole directory as a HashSeq collection (SENDME-01).  Encoded
+    /// payload is `name|abs_dir_path|abs_dir_path` (same shape as files).
+    ExecuteFolderSend(String),
     ExecuteDownload,
     /// Start downloading the attachment belonging to a specific chat entry.
     /// Keeping the entry index in the message allows multiple file rows to
@@ -8935,6 +8966,8 @@ impl IcedChat {
             AppMessage::LinkPreviewLoaded(..) => "LinkPreviewLoaded",
             AppMessage::ErrorMsg(_) => "ErrorMsg",
             AppMessage::ExecuteFileSend(_) => "ExecuteFileSend",
+            AppMessage::AttachFolderPressed => "AttachFolderPressed",
+            AppMessage::ExecuteFolderSend(_) => "ExecuteFolderSend",
             AppMessage::ExecuteDownload => "ExecuteDownload",
             AppMessage::ExecuteDownloadAt(_) => "ExecuteDownloadAt",
             AppMessage::PauseDownloadAt(_) => "PauseDownloadAt",
@@ -13540,6 +13573,31 @@ impl IcedChat {
                 )
             }
 
+            AppMessage::AttachFolderPressed => {
+                iced::Task::perform(
+                    rfd::AsyncFileDialog::new()
+                        .set_title("Select a folder to share")
+                        .pick_folder(),
+                    |dir| {
+                        if let Some(dir) = dir {
+                            // rfd 0.15 `FileHandle::file_name()` returns the
+                            // name directly (a `String`), not an `Option`.
+                            let name = dir.file_name();
+                            if name.is_empty() {
+                                return AppMessage::ErrorMsg(
+                                    "Could not determine folder name".to_string(),
+                                );
+                            }
+                            let path = dir.path().to_string_lossy().to_string();
+                            let encoded = format!("{name}|{path}|{path}");
+                            AppMessage::ExecuteFolderSend(encoded)
+                        } else {
+                            AppMessage::Noop
+                        }
+                    },
+                )
+            }
+
             AppMessage::ToggleHelp => {
                 self.help_visible = !self.help_visible;
                 if let Some(action_id) = self.pending_toggle_help_action.take() {
@@ -15086,6 +15144,8 @@ impl IcedChat {
                                 ticket: ticket_str.clone(),
                                 size: file_size,
                                 thumbnail_hash,
+                                collection_hash: None,
+                                collection_entries: 0,
                             };
                             let encoded_msg = SignedMessage::sign_and_encode(&secret_key, &msg)
                                 .map_err(|e| format!("Failed to sign: {e}"))?;
@@ -15123,6 +15183,118 @@ impl IcedChat {
                             name,
                             ticket,
                             thumbnail,
+                            local_path: Some(local_path),
+                        },
+                        Err(e) => AppMessage::FileUploadFailed(e),
+                    },
+                )
+            }
+
+            AppMessage::ExecuteFolderSend(encoded) => {
+                let parts: Vec<&str> = encoded.splitn(3, '|').collect();
+                if parts.len() < 3 {
+                    return iced::Task::none();
+                }
+                let folder_name = parts[0].to_string();
+                let abs_path = parts[1].to_string();
+                self.pending_file_upload = Some((folder_name.clone(), 0));
+                self.file_upload_spinner_frame = 0;
+
+                // Create a local "sharing" card immediately so the user sees
+                // feedback while the directory is imported and broadcast.
+                let local_label = self.local_label.clone();
+                self.download_entry_index = Some(self.entries.len());
+                self.entries_push(ChatEntry::system_download(
+                    String::new(),
+                    TransferKind::File,
+                    folder_name.clone(),
+                    String::new(),
+                    &local_label,
+                    None,
+                ));
+                if let Some(idx) = self.download_entry_index {
+                    if let Some(entry) = self.entries.get_mut(idx) {
+                        if let Some(dl) = entry.download.as_mut() {
+                            dl.is_folder = true;
+                            dl.state = DownloadState::Active {
+                                bytes: 0,
+                                total: None,
+                            };
+                        }
+                        entry.body = format!("Sharing folder: {folder_name}");
+                    }
+                }
+
+                let blob_store = self.blob_store.clone();
+                let sender = self.sender.clone();
+                let secret_key = self.secret_key.clone();
+                let endpoint_addr = self.endpoint.addr();
+                let upload_timeout = std::time::Duration::from_secs(3600);
+                iced::Task::perform(
+                    async move {
+                        let result = tokio::time::timeout(upload_timeout, async move {
+                            let path_buf = std::path::PathBuf::from(&abs_path);
+                            if !path_buf.is_dir() {
+                                return Err("Selected path is not a directory".to_string());
+                            }
+                            // Import the whole directory into a HashSeq
+                            // collection (SENDME-01 pipeline).
+                            let (temp_tag, total_size, collection) = boru_core::collection_transfer::import_collection(
+                                &blob_store,
+                                &path_buf,
+                                8,
+                            )
+                            .await
+                            .map_err(|e| format!("Failed to import folder: {e}"))?;
+                            let hash = temp_tag.hash();
+                            let ticket_str = blob_ticket_string(
+                                endpoint_addr,
+                                hash,
+                                iroh_blobs::BlobFormat::HashSeq,
+                            );
+                            let collection_hash: MessageHash = *hash.as_bytes();
+                            let collection_entries = collection.len() as u64;
+                            let msg = crate::Message::FileShare {
+                                name: folder_name.clone(),
+                                ticket: ticket_str.clone(),
+                                size: total_size,
+                                thumbnail_hash: None,
+                                collection_hash: Some(collection_hash),
+                                collection_entries,
+                            };
+                            let encoded_msg =
+                                SignedMessage::sign_and_encode(&secret_key, &msg)
+                                    .map_err(|e| format!("Failed to sign: {e}"))?;
+                            if let Some(ref sender) = sender {
+                                match sender.broadcast(encoded_msg).await {
+                                    Ok(()) => tracing::info!(
+                                        name = %folder_name,
+                                        size = total_size,
+                                        entries = collection_entries,
+                                        "FolderShare broadcast OK"
+                                    ),
+                                    Err(e) => tracing::error!(
+                                        name = %folder_name,
+                                        size = total_size,
+                                        error = %e,
+                                        "FolderShare broadcast FAILED"
+                                    ),
+                                }
+                            }
+                            Ok::<_, String>((folder_name.clone(), ticket_str, abs_path))
+                        })
+                        .await;
+                        match result {
+                            Ok(Ok(v)) => Ok(v),
+                            Ok(Err(e)) => Err(e),
+                            Err(_elapsed) => Err("Folder upload timed out after 1 hour.".to_string()),
+                        }
+                    },
+                    |r: Result<(String, String, String), String>| match r {
+                        Ok((name, ticket, local_path)) => AppMessage::FileDownloaded {
+                            name,
+                            ticket,
+                            thumbnail: None,
                             local_path: Some(local_path),
                         },
                         Err(e) => AppMessage::FileUploadFailed(e),
@@ -15316,6 +15488,7 @@ impl IcedChat {
                 let ticket_str = dl.ticket.clone();
                 let name = dl.name.clone();
                 let kind = dl.kind;
+                let is_folder = dl.is_folder;
                 let data_dir = self.data_dir.clone();
                 let progress_queue = self.download_progress_queue.clone();
                 iced::Task::perform(
@@ -15329,6 +15502,22 @@ impl IcedChat {
 
                         let dl_dir = data_dir.join("downloads");
                         let _ = tokio::fs::create_dir_all(&dl_dir).await;
+                        if is_folder {
+                            // Whole-directory share (SENDME-01): download the
+                            // HashSeq collection and expand it into a folder
+                            // tree under the downloads directory.
+                            let save_dir = boru_core::collection_transfer::download_collection_to_dir(
+                                &blob_store,
+                                &endpoint,
+                                hash,
+                                candidates,
+                                &name,
+                                &dl_dir,
+                            )
+                            .await
+                            .map_err(|e| format!("Folder download failed: {e}"))?;
+                            return Ok::<_, String>((name.clone(), save_dir));
+                        }
                         let save_path = dl_dir.join(&name);
                         download_blob_to_file(
                             &blob_store,
@@ -22465,6 +22654,36 @@ impl ChatCallbacks for IcedChat {
             self.pending_thumbnail_fetch
                 .push_back((entry_index, hash, ticket.clone()));
         }
+    }
+
+    fn set_pending_folder(
+        &mut self,
+        name: String,
+        ticket: String,
+        size: u64,
+        collection_hash: Option<MessageHash>,
+        collection_entries: u64,
+        sender_label: Option<String>,
+    ) {
+        self.pending_file = Some((name.clone(), ticket.clone()));
+        self.download_entry_index = Some(self.entries.len());
+        let mut entry = ChatEntry::system_download(
+            format!("Folder received: {name}"),
+            TransferKind::File,
+            name,
+            ticket.clone(),
+            sender_label.unwrap_or_default(),
+            None,
+        );
+        if let Some(dl) = entry.download.as_mut() {
+            dl.is_folder = true;
+            dl.collection_entries = collection_entries;
+            dl.expected_content_hash = collection_hash.map(|h| hex::encode(h));
+            dl.state = DownloadState::Ready { total: Some(size) };
+        }
+        let entry_index = self.download_entry_index.unwrap_or(self.entries.len());
+        self.entries_push(entry);
+        let _ = entry_index;
     }
 
     fn set_pending_image(&mut self, name: String, hash: MessageHash, from: PublicKey) {
@@ -30227,6 +30446,18 @@ impl IcedChat {
             )
             .into();
 
+        // ── Folder button (folder icon) ── whole-directory share (SENDME-01)
+        let folder_btn: iced::Element<'_, AppMessage> =
+            iced::widget::tooltip::Tooltip::new(
+                button(icon_svg(ICON_FOLDER, TYPO_SM))
+                    .on_press(AppMessage::AttachFolderPressed)
+                    .style(BUTTON_ICON)
+                    .padding([SPACE_4, SPACE_6]),
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, "Share a folder"),
+                iced::widget::tooltip::Position::Bottom,
+            )
+            .into();
+
         // ── Center: expandable message input ── transparent bg, fills space
         let input = text_input("Type a message…", &self.composer_text)
             .id(COMPOSER_INPUT)
@@ -30344,7 +30575,7 @@ impl IcedChat {
 
         // ── Composer row ──
         //  attach | text input (fill) | gif | emoji | send
-        let composer_bar = row![attach_btn, input, gif_btn, emoji_btn, send_btn]
+        let composer_bar = row![attach_btn, folder_btn, input, gif_btn, emoji_btn, send_btn]
             .spacing(SPACE_6)
             .align_y(Alignment::Center)
             .padding(Padding::new(SPACE_4));
