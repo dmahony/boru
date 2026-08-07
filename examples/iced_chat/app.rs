@@ -2493,6 +2493,50 @@ pub struct ChatEntry {
     parsed_segments: Option<Vec<link_preview::TextSegment>>,
 }
 
+/// Maximum size of an external catalogue GIF media file we will download
+/// (15 MiB — playback renditions are usually a few MB, this headroom covers
+/// larger MP4 renditions while still bounding memory).
+const GIF_MEDIA_MAX_BYTES: usize = 15 * 1024 * 1024;
+
+/// Fetch external catalogue GIF media bytes over HTTP.
+///
+/// Used by the SharedGif receive path: the payload carries direct media
+/// URLs, so the receiver fetches the rendition directly and never calls the
+/// provider search endpoint again.  Bounded by [`GIF_MEDIA_MAX_BYTES`] and
+/// an 8-second timeout so a missing or expired URL fails fast and the UI
+/// can render a clear fallback.
+async fn fetch_gif_media_bytes(url: &str) -> Result<Vec<u8>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .user_agent("Mozilla/5.0 (compatible; BoruChat; +https://boru.chat)")
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()
+        .map_err(|e| format!("gif media client: {e}"))?;
+    let mut response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("fetch: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("HTTP {}", response.status()));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| format!("read body: {e}"))?
+    {
+        if body.len() + chunk.len() > GIF_MEDIA_MAX_BYTES {
+            return Err(format!("media exceeds {GIF_MEDIA_MAX_BYTES} bytes"));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    if body.is_empty() {
+        return Err("empty media body".to_string());
+    }
+    Ok(body)
+}
+
 /// Decode an animated GIF into iced-moving-picture `Frames` (raw RGBA
 /// handles + per-frame delays). Returns None if the image is not a GIF or has
 /// only one frame — single-frame GIFs render as static images.
@@ -3358,6 +3402,11 @@ pub struct IcedChat {
     pending_file: Option<(String, String)>,
     /// Pending image download: (filename, blob_hash, sender_pk).
     pending_image: VecDeque<(String, MessageHash, PublicKey)>,
+    /// Pending external catalogue GIF: (payload, sender_pk, message_hash).
+    /// Fetched over HTTP from the provider media URL (not the iroh blob
+    /// store), then rendered inline — or shown as a clear fallback when the
+    /// media cannot be loaded.
+    pending_gif: VecDeque<(boru_core::gif_provider::SharedGif, PublicKey, MessageHash)>,
     /// Pending video thumbnail blob fetch: (entry_index, thumbnail_hash, ticket).
     /// The sender publishes a small poster blob and includes its hash in the
     /// FileShare message; receivers fetch it off the UI thread so the card can
@@ -5813,6 +5862,19 @@ pub enum AppMessage {
         /// silently mutate the wrong conversation's entries.
         generation: u64,
     },
+    /// External catalogue GIF media fetched over HTTP.
+    ///
+    /// `bytes` is `Ok` when the media URL was fetched and decoded, or `Err`
+    /// with a human-readable message when the media is missing, expired, or
+    /// unreachable — the handler then renders a clear fallback entry.
+    GifMediaFetched {
+        sender: PublicKey,
+        gif: boru_core::gif_provider::SharedGif,
+        message_hash: MessageHash,
+        bytes: Result<Vec<u8>, String>,
+        /// Conversation generation captured when the fetch was started.
+        generation: u64,
+    },
     FriendAdded {
         fid: String,
         label: String,
@@ -7507,6 +7569,7 @@ impl IcedChat {
             pending_file: None,
             pending_offline_ids: HashMap::new(),
             pending_image: VecDeque::new(),
+            pending_gif: VecDeque::new(),
             pending_thumbnail_fetch: VecDeque::new(),
             pending_image_upload: None,
             image_upload_spinner_frame: 0,
@@ -8307,6 +8370,36 @@ impl IcedChat {
         )
     }
 
+    /// Start fetching the next pending external catalogue GIF media over
+    /// HTTP.  Runs off the UI thread via `Task::perform`; a failure (missing
+    /// or expired URL, network error, oversized body) produces an `Err` that
+    /// the handler renders as a clear fallback card.
+    fn start_next_pending_gif_fetch(&mut self) -> iced::Task<AppMessage> {
+        let Some((gif, sender_pk, message_hash)) = self.pending_gif.pop_front() else {
+            return iced::Task::none();
+        };
+        let generation = self.conversation_generation;
+        // Prefer the playback rendition, then the fallback, then the preview —
+        // matching SharedGif::render_candidates() priority.
+        let url = gif.first_renderable_url().map(|s| s.to_string());
+        iced::Task::perform(
+            async move {
+                let url = match url {
+                    Some(u) => u,
+                    None => return Err("GIF media URL is missing".to_string()),
+                };
+                fetch_gif_media_bytes(&url).await
+            },
+            move |bytes| AppMessage::GifMediaFetched {
+                sender: sender_pk,
+                gif,
+                message_hash,
+                bytes,
+                generation,
+            },
+        )
+    }
+
     /// Start the next pending image download (if any) and the next pending
     /// video thumbnail blob fetch (if any) in one batched task.
     fn drain_pending_transfers(&mut self) -> iced::Task<AppMessage> {
@@ -8316,6 +8409,9 @@ impl IcedChat {
         }
         if !self.pending_thumbnail_fetch.is_empty() {
             tasks.push(self.start_next_pending_thumbnail_fetch());
+        }
+        if !self.pending_gif.is_empty() {
+            tasks.push(self.start_next_pending_gif_fetch());
         }
         if tasks.is_empty() {
             iced::Task::none()
@@ -9469,6 +9565,7 @@ impl IcedChat {
             AppMessage::ThumbnailFetched { .. } => "ThumbnailFetched",
             AppMessage::ExecuteImageSend(_) => "ExecuteImageSend",
             AppMessage::ImageDownloaded { .. } => "ImageDownloaded",
+            AppMessage::GifMediaFetched { .. } => "GifMediaFetched",
             AppMessage::FriendAdded { .. } => "FriendAdded",
             AppMessage::RemoveFriend(_) => "RemoveFriend",
             AppMessage::FriendRemoved { .. } => "FriendRemoved",
@@ -11758,7 +11855,9 @@ impl IcedChat {
                 // draft text, and all other per-conversation state.
                 if self.switch_to_conversation(topic) {
                     complete_open_room_action(self);
-                    let task = if !self.pending_image.is_empty() || !self.pending_thumbnail_fetch.is_empty()
+                    let task = if !self.pending_image.is_empty()
+                        || !self.pending_thumbnail_fetch.is_empty()
+                        || !self.pending_gif.is_empty()
                     {
                         iced::Task::batch([
                             self.replay_pending_events_batch(topic),
@@ -14754,7 +14853,10 @@ impl IcedChat {
                 if let Some(read_receipt_task) = self.process_net_event_sync(&topic, &event) {
                     tasks.push(read_receipt_task);
                 }
-                if !self.pending_image.is_empty() || !self.pending_thumbnail_fetch.is_empty() {
+                if !self.pending_image.is_empty()
+                    || !self.pending_thumbnail_fetch.is_empty()
+                    || !self.pending_gif.is_empty()
+                {
                     tasks.push(self.drain_pending_transfers());
                 }
                 // Check if a profile image ticket arrived from a remote peer
@@ -17386,6 +17488,99 @@ impl IcedChat {
                     store.push_with_id(hist_entry);
                 }
                 self.drain_pending_transfers()
+            }
+            AppMessage::GifMediaFetched {
+                sender,
+                gif,
+                message_hash,
+                bytes,
+                generation,
+            } => {
+                // State-safety: a GIF media fetch started in a previous
+                // conversation must not push its entry into the currently
+                // active conversation's display.  Unlike ImageDownloaded we
+                // warn + early-return rather than debug_assert: room switches
+                // are fast and a stale fetch is a normal race, not a bug.
+                if self.conversation_generation != generation {
+                    warn!(
+                        ?sender,
+                        gif_id = %gif.provider_id,
+                        current = self.conversation_generation,
+                        expected = generation,
+                        "stale GIF media fetch ignored after room switch",
+                    );
+                    return iced::Task::none();
+                }
+                if self.has_message(&message_hash) {
+                    return self.drain_pending_transfers();
+                }
+                let sender_name = if sender == self.local_public {
+                    self.local_label.clone()
+                } else {
+                    self.names
+                        .get(&sender)
+                        .cloned()
+                        .unwrap_or_else(|| sender.fmt_short().to_string())
+                };
+                let kind = Self::image_chat_kind(sender, self.local_public);
+                match bytes {
+                    Ok(media_bytes) => {
+                        info!(
+                            ?sender,
+                            gif_id = %gif.provider_id,
+                            media_size = media_bytes.len(),
+                            "external GIF media fetched",
+                        );
+                        // Reuse the standard image rendering path (GIF
+                        // frames decode automatically for animated GIFs).
+                        let mut entry = ChatEntry::image(
+                            kind,
+                            &sender_name,
+                            String::new(),
+                            media_bytes,
+                            Some(message_hash),
+                            None,
+                            Some(sender),
+                            None,
+                            None,
+                        );
+                        if entry.image_handle.is_none() && entry.image_error.is_none() {
+                            entry.image_error =
+                                Some("GIF media could not be decoded".to_string());
+                            entry.bump_gen();
+                        }
+                        self.entries_push(entry);
+                        self.drain_pending_transfers()
+                    }
+                    Err(error) => {
+                        // Missing or expired media URL → render a clear
+                        // fallback card instead of a broken/blank image.
+                        warn!(
+                            ?sender,
+                            gif_id = %gif.provider_id,
+                            %error,
+                            "external GIF media unavailable",
+                        );
+                        let mut entry = ChatEntry::image(
+                            kind,
+                            &sender_name,
+                            String::new(),
+                            Vec::new(),
+                            Some(message_hash),
+                            None,
+                            Some(sender),
+                            None,
+                            Some(format!("GIF unavailable: {error}")),
+                        );
+                        // No bytes → no decodable handle; the view renders
+                        // the image_error fallback placeholder.
+                        entry.image_handle = None;
+                        entry.image_bytes = None;
+                        entry.bump_gen();
+                        self.entries_push(entry);
+                        self.drain_pending_transfers()
+                    }
+                }
             }
             AppMessage::ProfileImageDownloaded(peer, image_bytes) => {
                 let size = image_bytes.len();
@@ -22825,6 +23020,7 @@ impl IcedChat {
                 crate::Message::Message { .. }
                     | crate::Message::FileShare { .. }
                     | crate::Message::ImageShare { .. }
+                    | crate::Message::SharedGif { .. }
             ),
             // NeighborUp/Down, Closed, Error are never user messages.
             _ => false,
@@ -22861,6 +23057,7 @@ impl IcedChat {
             // label carries the file type instead of an emoji glyph.
             crate::Message::FileShare { name, .. } => format!("File: {name}"),
             crate::Message::ImageShare { .. } => "Image".to_string(),
+            crate::Message::SharedGif { .. } => "GIF".to_string(),
             _ => "New message".to_string(),
         };
         // Limit preview length for notification bodies
@@ -23870,6 +24067,15 @@ impl ChatCallbacks for IcedChat {
 
     fn set_pending_image(&mut self, name: String, hash: MessageHash, from: PublicKey) {
         self.pending_image.push_back((name, hash, from));
+    }
+
+    fn set_pending_gif(
+        &mut self,
+        gif: boru_core::gif_provider::SharedGif,
+        from: PublicKey,
+        message_hash: MessageHash,
+    ) {
+        self.pending_gif.push_back((gif, from, message_hash));
     }
 
     fn has_message(&self, hash: &MessageHash) -> bool {

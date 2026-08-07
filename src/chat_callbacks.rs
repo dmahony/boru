@@ -276,6 +276,20 @@ pub trait ChatCallbacks {
     /// The frontend should automatically download and render the image.
     fn set_pending_image(&mut self, name: String, hash: MessageHash, from: PublicKey);
 
+    /// Record a pending external catalogue GIF: `(payload, sender_pk, message_hash)`.
+    ///
+    /// The frontend should fetch the media URL from the payload and render
+    /// it, or render a clear fallback when the media cannot be loaded.
+    /// The default implementation is a no-op, so frontends that do not
+    /// render catalogue GIFs can ignore the message gracefully.
+    fn set_pending_gif(
+        &mut self,
+        _gif: crate::gif_provider::SharedGif,
+        _from: PublicKey,
+        _message_hash: MessageHash,
+    ) {
+    }
+
     /// Check whether any chat entry has the given protocol message hash.
     fn has_message(&self, hash: &MessageHash) -> bool;
 

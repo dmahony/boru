@@ -77,6 +77,113 @@ pub struct GifMediaSource {
     pub file_size: Option<u64>,
 }
 
+/// Provider-neutral chat message payload for an external catalogue GIF.
+///
+/// Carries only the information required to render the selected GIF:
+/// provider identity, rendition URLs, container format, dimensions, and
+/// alt text.  It deliberately excludes provider API keys, the original
+/// search query, and tracking values — a receiving client never calls the
+/// provider search endpoint again and never learns anything about the
+/// sender's search.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedGif {
+    /// Stable provider identifier (e.g. `"klipy"`, `"giphy"`).
+    pub provider: String,
+    /// Provider-assigned identifier for this GIF.
+    pub provider_id: String,
+    /// Direct URL of the animated rendition for playback.
+    pub playback_url: String,
+    /// Optional small rendition for previews / thumbnails.
+    #[serde(default)]
+    pub preview_url: Option<String>,
+    /// Optional compatibility rendition (e.g. classic GIF) used when
+    /// `playback_url` is missing or has expired.
+    #[serde(default)]
+    pub fallback_url: Option<String>,
+    /// Container format of the playback rendition.
+    #[serde(default = "default_gif_format")]
+    pub format: GifMediaFormat,
+    /// Playback pixel width, when known.
+    #[serde(default)]
+    pub width: Option<u32>,
+    /// Playback pixel height, when known.
+    #[serde(default)]
+    pub height: Option<u32>,
+    /// Alternative text for accessibility, when supplied.
+    #[serde(default)]
+    pub alt_text: Option<String>,
+}
+
+fn default_gif_format() -> GifMediaFormat {
+    GifMediaFormat::Unknown
+}
+
+impl Default for SharedGif {
+    fn default() -> Self {
+        Self {
+            provider: String::new(),
+            provider_id: String::new(),
+            playback_url: String::new(),
+            preview_url: None,
+            fallback_url: None,
+            format: GifMediaFormat::Unknown,
+            width: None,
+            height: None,
+            alt_text: None,
+        }
+    }
+}
+
+impl SharedGif {
+    /// Ordered rendition URLs to try for rendering, in preference order:
+    /// playback → fallback → preview.  Empty URLs are skipped so a missing
+    /// or expired rendition degrades to the next candidate.
+    pub fn render_candidates(&self) -> impl Iterator<Item = &str> + '_ {
+        [
+            self.playback_url.as_str(),
+            self.fallback_url.as_deref().unwrap_or(""),
+            self.preview_url.as_deref().unwrap_or(""),
+        ]
+        .into_iter()
+        .filter(|url| !url.is_empty())
+    }
+
+    /// First non-empty renderable URL, or `None` when every rendition URL
+    /// is missing (the caller should render a clear fallback).
+    pub fn first_renderable_url(&self) -> Option<&str> {
+        self.render_candidates().next()
+    }
+
+    /// Whether at least one rendition URL is present for rendering.
+    pub fn is_renderable(&self) -> bool {
+        self.first_renderable_url().is_some()
+    }
+
+    /// Build a chat payload from a provider-neutral search result.
+    ///
+    /// Selects the rendition that best serves each role: the playback
+    /// rendition becomes `playback_url`, the original (when available) the
+    /// `fallback_url`, and the preview the `preview_url`.  Keeps the
+    /// provider and provider_id so the payload stays provider-neutral and
+    /// extensible, and copies dimensions + alt text when known.
+    pub fn from_search_result(result: &GifSearchResult) -> Self {
+        let playback = &result.playback;
+        let fallback = result.original.as_ref().map(|source| source.url.clone());
+        let preview = result.preview.url.clone();
+        Self {
+            provider: result.provider.clone(),
+            provider_id: result.provider_id.clone(),
+            playback_url: playback.url.clone(),
+            preview_url: (!preview.is_empty()).then_some(preview),
+            fallback_url: fallback.filter(|url| !url.is_empty()),
+            format: playback.format,
+            width: playback.width,
+            height: playback.height,
+            alt_text: result.alt_text.clone(),
+        }
+    }
+}
+
 /// A single GIF returned by a provider.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GifSearchResult {
@@ -290,5 +397,125 @@ mod tests {
         let decoded: GifSearchPage = postcard::from_bytes(&bytes).expect("deserialize");
         assert!(decoded.items.is_empty());
         assert!(decoded.next_cursor.is_none());
+    }
+
+    fn sample_shared_gif() -> SharedGif {
+        SharedGif {
+            provider: "klipy".to_string(),
+            provider_id: "gif-42".to_string(),
+            playback_url: "https://media.example/playback.mp4".to_string(),
+            preview_url: Some("https://media.example/preview.gif".to_string()),
+            fallback_url: Some("https://media.example/original.gif".to_string()),
+            format: GifMediaFormat::Mp4,
+            width: Some(480),
+            height: Some(360),
+            alt_text: Some("a cat".to_string()),
+        }
+    }
+
+    #[test]
+    fn shared_gif_round_trips_through_postcard() {
+        let gif = sample_shared_gif();
+        let bytes = postcard::to_allocvec(&gif).expect("serialize");
+        let decoded: SharedGif = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(gif, decoded);
+    }
+
+    #[test]
+    fn shared_gif_missing_optional_fields_decode() {
+        // A payload with only the required fields (provider, provider_id,
+        // playback_url, format) must still decode; optional fields default
+        // to None/Unknown instead of failing.
+        let minimal = SharedGif {
+            provider: "klipy".to_string(),
+            provider_id: "gif-1".to_string(),
+            playback_url: "https://media.example/playback.mp4".to_string(),
+            ..Default::default()
+        };
+        let bytes = postcard::to_allocvec(&minimal).expect("serialize");
+        let decoded: SharedGif = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(decoded.provider, "klipy");
+        assert_eq!(decoded.preview_url, None);
+        assert_eq!(decoded.fallback_url, None);
+        assert_eq!(decoded.format, GifMediaFormat::Unknown);
+        assert_eq!(decoded.width, None);
+        assert_eq!(decoded.alt_text, None);
+        assert!(decoded.is_renderable());
+    }
+
+    #[test]
+    fn shared_gif_unknown_provider_value_round_trips() {
+        // The payload is provider-neutral: any provider string is a valid
+        // value and must survive serialization unchanged (extensible for
+        // future providers without a schema change).
+        let gif = SharedGif {
+            provider: "some-future-provider".to_string(),
+            provider_id: "xyz".to_string(),
+            playback_url: "https://media.example/future.webp".to_string(),
+            format: GifMediaFormat::AnimatedWebP,
+            ..Default::default()
+        };
+        let bytes = postcard::to_allocvec(&gif).expect("serialize");
+        let decoded: SharedGif = postcard::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(decoded.provider, "some-future-provider");
+        assert_eq!(decoded.provider_id, "xyz");
+        assert_eq!(decoded.format, GifMediaFormat::AnimatedWebP);
+    }
+
+    #[test]
+    fn shared_gif_render_candidates_skip_empty_urls() {
+        // Missing/expired media URLs must degrade gracefully: the renderer
+        // tries playback → fallback → preview, skipping empty entries.
+        let gif = SharedGif {
+            provider: "klipy".to_string(),
+            provider_id: "gif-1".to_string(),
+            playback_url: String::new(), // expired / missing
+            fallback_url: Some("https://media.example/original.gif".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            gif.first_renderable_url(),
+            Some("https://media.example/original.gif")
+        );
+
+        let only_preview = SharedGif {
+            provider: "klipy".to_string(),
+            provider_id: "gif-1".to_string(),
+            playback_url: String::new(),
+            preview_url: Some("https://media.example/preview.gif".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            only_preview.first_renderable_url(),
+            Some("https://media.example/preview.gif")
+        );
+
+        let none_renderable = SharedGif {
+            provider: "klipy".to_string(),
+            provider_id: "gif-1".to_string(),
+            playback_url: String::new(),
+            ..Default::default()
+        };
+        assert_eq!(none_renderable.first_renderable_url(), None);
+        assert!(!none_renderable.is_renderable());
+    }
+
+    #[test]
+    fn shared_gif_from_search_result_maps_renditions() {
+        let page = sample_page();
+        let result = &page.items[0];
+        let gif = SharedGif::from_search_result(result);
+        assert_eq!(gif.provider, "klipy");
+        assert_eq!(gif.provider_id, "abc123");
+        assert_eq!(gif.playback_url, "https://media.example/playback.mp4");
+        assert_eq!(gif.format, GifMediaFormat::Mp4);
+        assert_eq!(gif.width, Some(480));
+        assert_eq!(gif.height, Some(360));
+        assert_eq!(
+            gif.preview_url.as_deref(),
+            Some("https://media.example/preview.gif")
+        );
+        // original is None in the sample page → no fallback_url.
+        assert_eq!(gif.fallback_url, None);
     }
 }

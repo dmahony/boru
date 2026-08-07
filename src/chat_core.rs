@@ -552,6 +552,8 @@ pub struct AppState {
     /// Pending image downloads queue: (filename, blob_hash, sender_pk).
     /// Vec so rapid ImageShare events are all queued (multi-image burst fix).
     pub pending_image: Vec<(String, MessageHash, PublicKey)>,
+    /// Pending external catalogue GIF shares: (payload, sender_pk).
+    pub pending_gif: Vec<(crate::gif_provider::SharedGif, PublicKey)>,
     /// Durable friends list store.
     pub friends: FriendsStore,
     /// Whether the friends store has unsaved changes.
@@ -592,6 +594,7 @@ impl AppState {
             help_visible: false,
             pending_file: None,
             pending_image: Vec::new(),
+            pending_gif: Vec::new(),
             friends,
             friends_dirty: false,
             names,
@@ -777,6 +780,15 @@ impl ChatCallbacks for AppState {
 
     fn set_pending_image(&mut self, name: String, hash: MessageHash, from: PublicKey) {
         self.pending_image.push((name, hash, from));
+    }
+
+    fn set_pending_gif(
+        &mut self,
+        gif: crate::gif_provider::SharedGif,
+        from: PublicKey,
+        _message_hash: MessageHash,
+    ) {
+        self.pending_gif.push((gif, from));
     }
 
     fn has_message(&self, hash: &MessageHash) -> bool {
@@ -1022,6 +1034,17 @@ pub enum Message {
         group_id: [u8; 32],
         /// Forward-secure encrypted group message envelope.
         envelope: EncryptedGroupEnvelope,
+    },
+    /// Announce an external catalogue GIF (provider-neutral payload).
+    ///
+    /// Carries a [`crate::gif_provider::SharedGif`] with the direct
+    /// rendition URLs, so the receiver renders the media without calling
+    /// the provider search endpoint again.  The payload deliberately
+    /// contains no API key, search query, or tracking values.
+    SharedGif {
+        /// Provider-neutral GIF payload.
+        #[serde(default)]
+        gif: crate::gif_provider::SharedGif,
     },
 }
 
@@ -2040,6 +2063,17 @@ pub fn handle_net_event_for_topic(
                             cb.friend_mark_online(fid);
                             if !is_muted {
                                 cb.set_pending_image(name, hash, from);
+                            }
+                        }
+                    }
+                }
+                Message::SharedGif { gif } => {
+                    if from != cb.local_public() {
+                        let fid = FriendId::from_public_key(from);
+                        if cb.is_friend(&from) || cb.accepts_group_peer(topic, &from) {
+                            cb.friend_mark_online(fid);
+                            if !is_muted {
+                                cb.set_pending_gif(gif, from, incoming_hash);
                             }
                         }
                     }
@@ -3389,6 +3423,122 @@ mod tests {
     }
 
     #[test]
+    fn message_serialization_roundtrip_shared_gif() {
+        let msg = Message::SharedGif {
+            gif: crate::gif_provider::SharedGif {
+                provider: "klipy".into(),
+                provider_id: "gif-7".into(),
+                playback_url: "https://media.example/playback.mp4".into(),
+                preview_url: Some("https://media.example/preview.gif".into()),
+                fallback_url: Some("https://media.example/original.gif".into()),
+                format: crate::gif_provider::GifMediaFormat::Mp4,
+                width: Some(480),
+                height: Some(360),
+                alt_text: Some("a cat".into()),
+            },
+        };
+        let bytes = postcard::to_stdvec(&msg).unwrap();
+        let decoded: Message = postcard::from_bytes(&bytes).unwrap();
+        match decoded {
+            Message::SharedGif { gif } => {
+                assert_eq!(gif.provider, "klipy");
+                assert_eq!(gif.provider_id, "gif-7");
+                assert_eq!(gif.playback_url, "https://media.example/playback.mp4");
+                assert_eq!(gif.format, crate::gif_provider::GifMediaFormat::Mp4);
+                assert_eq!(gif.width, Some(480));
+                assert_eq!(gif.height, Some(360));
+            }
+            _ => panic!("expected SharedGif"),
+        }
+    }
+
+    #[test]
+    fn message_shared_gif_legacy_variants_still_decode() {
+        // Appending Message::SharedGif must not change the postcard variant
+        // index of any pre-existing message type: a stored Message::Message
+        // and Message::ImageShare (both serialized before this variant was
+        // added) must still decode unchanged.
+        let text = Message::Message {
+            text: "hello world".into(),
+        };
+        let text_bytes = postcard::to_stdvec(&text).unwrap();
+        match postcard::from_bytes::<Message>(&text_bytes).unwrap() {
+            Message::Message { text } => assert_eq!(text, "hello world"),
+            other => panic!("expected Message::Message, got {other:?}"),
+        }
+
+        let image = Message::ImageShare {
+            name: "old.png".into(),
+            hash: [0xcd; 32],
+        };
+        let image_bytes = postcard::to_stdvec(&image).unwrap();
+        match postcard::from_bytes::<Message>(&image_bytes).unwrap() {
+            Message::ImageShare { name, hash } => {
+                assert_eq!(name, "old.png");
+                assert_eq!(hash, [0xcd; 32]);
+            }
+            other => panic!("expected Message::ImageShare, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn shared_gif_net_event_routes_to_pending_gif() {
+        let remote_key = SecretKey::generate();
+        let mut app = test_app();
+        let fid = FriendId::from_public_key(remote_key.public());
+        app.friends.ensure_friend(fid.clone());
+        app.friends.mark_online(fid);
+
+        let event = NetEvent::Message {
+            from: remote_key.public(),
+            message: Message::SharedGif {
+                gif: crate::gif_provider::SharedGif {
+                    provider: "klipy".into(),
+                    provider_id: "gif-9".into(),
+                    playback_url: "https://media.example/playback.mp4".into(),
+                    ..Default::default()
+                },
+            },
+            sent_at: now_secs(),
+        };
+        handle_net_event(event, &mut app).unwrap();
+        assert_eq!(app.pending_gif.len(), 1);
+        assert_eq!(app.pending_gif[0].0.provider_id, "gif-9");
+        assert_eq!(app.pending_gif[0].1, remote_key.public());
+        // SharedGif renders inline (no text system message).
+        assert!(
+            !app.entries.iter().any(|e| e.body.contains("gif-9")),
+            "shared GIF should not create a text system message"
+        );
+    }
+
+    #[test]
+    fn shared_gif_unknown_provider_round_trips_in_message() {
+        // Provider-neutral means an unknown provider string must survive the
+        // full SignedMessage envelope without any provider-specific logic.
+        let key = SecretKey::generate();
+        let msg = Message::SharedGif {
+            gif: crate::gif_provider::SharedGif {
+                provider: "mystery-provider".into(),
+                provider_id: "abc".into(),
+                playback_url: "https://media.example/x.webp".into(),
+                format: crate::gif_provider::GifMediaFormat::AnimatedWebP,
+                ..Default::default()
+            },
+        };
+        let encoded = SignedMessage::sign_and_encode(&key, &msg).unwrap();
+        let (pk, decoded, _sent_at) = SignedMessage::verify_and_decode(&encoded).unwrap();
+        assert_eq!(pk, key.public());
+        match decoded {
+            Message::SharedGif { gif } => {
+                assert_eq!(gif.provider, "mystery-provider");
+                assert_eq!(gif.format, crate::gif_provider::GifMediaFormat::AnimatedWebP);
+            }
+            other => panic!("expected SharedGif, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn signed_message_sign_and_verify_roundtrip() {
         let key = SecretKey::generate();
         let msg = Message::Message {
@@ -3708,6 +3858,22 @@ mod tests {
                         },
                         vec![],
                     ),
+                },
+            ),
+            (
+                "SharedGif",
+                Message::SharedGif {
+                    gif: crate::gif_provider::SharedGif {
+                        provider: "klipy".into(),
+                        provider_id: "gif-200".into(),
+                        playback_url: "https://media.example/playback.mp4".into(),
+                        preview_url: Some("https://media.example/preview.gif".into()),
+                        fallback_url: Some("https://media.example/original.gif".into()),
+                        format: crate::gif_provider::GifMediaFormat::Mp4,
+                        width: Some(480),
+                        height: Some(360),
+                        alt_text: Some("a cat".into()),
+                    },
                 },
             ),
         ]

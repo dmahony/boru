@@ -1004,6 +1004,22 @@ mod tests {
                 ),
             },
         );
+        add(
+            "SharedGif",
+            Message::SharedGif {
+                gif: crate::gif_provider::SharedGif {
+                    provider: "klipy".into(),
+                    provider_id: "gif-100".into(),
+                    playback_url: "https://media.example/playback.mp4".into(),
+                    preview_url: Some("https://media.example/preview.gif".into()),
+                    fallback_url: Some("https://media.example/original.gif".into()),
+                    format: crate::gif_provider::GifMediaFormat::Mp4,
+                    width: Some(480),
+                    height: Some(360),
+                    alt_text: Some("a cat".into()),
+                },
+            },
+        );
 
         corpus
     }
