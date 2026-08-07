@@ -7,8 +7,10 @@
 //! Visual notes (Figure 3 target):
 //! - Icons match the mockup semantics: chat bubble (public room), two people
 //!   (group chat), person + plus (add friend), upload arrow (share files).
-//! - Labels use the card-title role (Source Sans 3 SemiBold 18); descriptions
-//!   stay muted 13 px supporting text at the plan's 1.45 line height.
+//! - Labels use the card-title role at the FONTS-07 quick-action size (IBM
+//!   Plex Sans SemiBold 17); descriptions stay muted supporting text at the
+//!   FONTS-07 size (IBM Plex Sans Regular 14) and the plan's 1.45 line
+//!   height. No Archivo SemiCondensed on these cards.
 //! - The card radius matches the rail `CardShell` cards (`RADIUS_CARD`) so
 //!   every home card shares the same corner rhythm.
 //! - Card structure (UI-HOME-06): 56 px light-green icon container, 24 px
@@ -25,6 +27,20 @@ use crate::icon_system::{Icon, IconSize};
 
 /// Diameter of the light-green quick-action icon container (task: 52–60 px).
 const QUICK_ACTION_ICON_SIZE: f32 = 56.0;
+
+/// Quick-action card title size (FONTS-07: IBM Plex Sans SemiBold ~16–17 px).
+///
+/// `TypeRole::CardTitle` defaults to 18 px for dashboard cards app-wide; the
+/// approved quick-action mockup uses the tighter 16–17 px band, so the role's
+/// font/weight (IBM Plex Sans SemiBold) is kept and only the size is
+/// overridden locally for these cards.
+const QUICK_ACTION_TITLE_SIZE: f32 = 17.0;
+
+/// Quick-action card description size (FONTS-07: IBM Plex Sans Regular ~14 px).
+const QUICK_ACTION_DESCRIPTION_SIZE: f32 = 14.0;
+
+/// Quick-action card description line height (FONTS-07: 1.4–1.45).
+const QUICK_ACTION_DESCRIPTION_LINE_HEIGHT: f32 = 1.45;
 
 pub(crate) struct QuickAction {
     icon: Icon,
@@ -111,23 +127,28 @@ pub fn quick_action_card<'a>(action: &'a QuickAction, theme: &Theme) -> Element<
         .push(quick_action_icon(action.icon))
         .push(Space::new().height(Length::Fixed(SPACE_16)))
         .push(
-            // Quick-action title — card_title (Source Sans 3 SemiBold 18).
+            // Quick-action title — TypeRole::CardTitle (IBM Plex Sans
+            // SemiBold) at the FONTS-07 quick-action size (17 px; the role
+            // default 18 px stays shared with other dashboard cards).
             crate::fonts::type_role_text(crate::fonts::TypeRole::CardTitle, action.label)
+                .size(QUICK_ACTION_TITLE_SIZE)
                 .width(Length::Fill),
         )
         .push(Space::new().height(Length::Fixed(SPACE_8)))
         .push(
-            // Supporting description — supporting_text (Source Sans 3
-            // Regular 13) at the plan's 1.45 body line height. Width is
-            // Fill so the text wraps within the card; the card height is
-            // content-driven so the full description is always visible
-            // (UI-HOME-01 audit §4 root cause: a fixed 132 px height
-            // clipped wrapped descriptions — that box is gone).
+            // Supporting description — TypeRole::SupportingText (IBM Plex
+            // Sans Regular) at the FONTS-07 quick-action size (14 px) with
+            // the plan's 1.4–1.45 line height. Width is Fill so the text
+            // wraps within the card; the card height is content-driven so
+            // the full description is always visible (UI-HOME-01 audit §4
+            // root cause: a fixed 132 px height clipped wrapped
+            // descriptions — that box is gone).
             crate::fonts::type_role_text_lh(
                 crate::fonts::TypeRole::SupportingText,
                 action.description,
-                1.45,
+                QUICK_ACTION_DESCRIPTION_LINE_HEIGHT,
             )
+            .size(QUICK_ACTION_DESCRIPTION_SIZE)
             .color(design_tokens::text_muted(theme))
             .width(Length::Fill),
         )
@@ -385,32 +406,47 @@ mod tests {
         );
         assert!(
             prod.contains("TypeRole::CardTitle"),
-            "quick-action labels must use TypeRole::CardTitle (SS3 SemiBold 18)"
+            "quick-action labels must use TypeRole::CardTitle (IBM Plex Sans SemiBold 17)"
         );
         assert!(
             prod.contains("TypeRole::SupportingText"),
-            "quick-action descriptions must use TypeRole::SupportingText (SS3 Regular 13)"
+            "quick-action descriptions must use TypeRole::SupportingText (IBM Plex Sans Regular 14)"
         );
         assert!(
             prod.contains("type_role_text_lh("),
             "quick-action descriptions must use the line-height helper (plan 1.45)"
+        );
+        // FONTS-07: the quick-action cards size their roles locally (17 px
+        // title / 14 px description at 1.45) instead of the shared role
+        // defaults (CardTitle 18 / SupportingText 13) used elsewhere.
+        assert!(
+            prod.contains(".size(QUICK_ACTION_TITLE_SIZE)"),
+            "quick-action titles must override the card-title size to the FONTS-07 17 px band"
+        );
+        assert!(
+            prod.contains(".size(QUICK_ACTION_DESCRIPTION_SIZE)"),
+            "quick-action descriptions must override the supporting-text size to the FONTS-07 14 px"
+        );
+        assert!(
+            prod.contains("QUICK_ACTION_DESCRIPTION_LINE_HEIGHT"),
+            "quick-action descriptions must use the FONTS-07 1.4–1.45 line-height constant"
         );
     }
 
     #[test]
     fn quick_action_natural_height_exceeds_old_fixed_box() {
         // Clipping-math regression (UI-HOME-01 audit root cause + UI-HOME-12):
-        // with real role metrics the tallest quick-action content — 56 px
-        // icon tile + 16 px gap + 18 px title + 8 px gap + a two-line 13 px
-        // description at 1.45 line height + 20 px vertical padding + action
-        // indicator — needs more than the removed 132 px fixed height, which
-        // is why cards must be content-driven.
+        // with the FONTS-07 quick-action metrics the tallest card content —
+        // 56 px icon tile + 16 px gap + 17 px title + 8 px gap + a two-line
+        // 14 px description at 1.45 line height + 20 px vertical padding +
+        // action indicator — needs more than the removed 132 px fixed height,
+        // which is why cards must be content-driven.
         use crate::design_tokens::{SPACE_12, SPACE_16, SPACE_20, SPACE_8};
-        use crate::fonts::TypeRole;
 
         let tile = super::QUICK_ACTION_ICON_SIZE;
-        let title = TypeRole::CardTitle.size_px() * 1.3; // single-line heading
-        let description_two_lines = TypeRole::SupportingText.size_px() * 1.45 * 2.0;
+        let title = super::QUICK_ACTION_TITLE_SIZE * 1.3; // single-line heading
+        let description_two_lines =
+            super::QUICK_ACTION_DESCRIPTION_SIZE * super::QUICK_ACTION_DESCRIPTION_LINE_HEIGHT * 2.0;
         let indicator = crate::icon_system::IconSize::Xs.px() + SPACE_12;
         let vertical_padding = 2.0 * SPACE_20;
         let gaps = SPACE_16 + SPACE_8;
