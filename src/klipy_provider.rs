@@ -272,14 +272,20 @@ impl KlipyGifProvider {
     }
 
     fn map_page(&self, resp: KlipySearchResponse) -> GifSearchPage {
-        let items = resp
+        let Some(payload) = resp.payload else {
+            return GifSearchPage {
+                items: Vec::new(),
+                next_cursor: None,
+            };
+        };
+        let items = payload
             .data
             .unwrap_or_default()
             .into_iter()
             .filter_map(map_item)
             .collect::<Vec<_>>();
-        let current_page = resp.current_page.unwrap_or(1);
-        let next_cursor = if resp.has_next.unwrap_or(false) {
+        let current_page = payload.current_page.unwrap_or(1);
+        let next_cursor = if payload.has_next.unwrap_or(false) {
             Some((current_page + 1).to_string())
         } else {
             None
@@ -342,14 +348,24 @@ fn map_reqwest_error(e: reqwest::Error) -> GifProviderError {
 
 #[derive(Debug, Deserialize)]
 struct KlipySearchResponse {
+    /// The live API wraps the item list and paging fields in a top-level
+    /// `data` object (`{"result": true, "data": {"data": [...], ...}}`).
+    #[serde(rename = "data", default)]
+    payload: Option<KlipySearchPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KlipySearchPayload {
     data: Option<Vec<KlipyGifItem>>,
     current_page: Option<u32>,
     has_next: Option<bool>,
-    // `result`, `per_page`, and unknown fields are ignored (tolerant).
+    // `per_page`, `meta`, and unknown fields are ignored (tolerant).
 }
 
 #[derive(Debug, Deserialize)]
 struct KlipyGifItem {
+    /// The API sends numeric ids; tolerate both numeric and string ids.
+    #[serde(default, deserialize_with = "de_optional_id")]
     id: Option<String>,
     slug: Option<String>,
     title: Option<String>,
@@ -357,6 +373,20 @@ struct KlipyGifItem {
     #[serde(rename = "type", default)]
     kind: Option<String>,
     // tags, blur_preview, and unknown fields are ignored (tolerant).
+}
+
+/// Deserialize an optional id that the API may send as a JSON number or a
+/// string. Anything else (null, object, array) is treated as absent.
+fn de_optional_id<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(match value {
+        serde_json::Value::String(s) => Some(s),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    })
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -623,38 +653,43 @@ mod tests {
     }
 
     fn sample_response_json() -> String {
+        // Mirrors the live API envelope: `data` is an object wrapping the
+        // item list and paging fields, and item ids are JSON numbers.
         r#"{
-          "result": "success",
-          "data": [
-            {
-              "id": "gif-id-1",
-              "slug": "happy-cat",
-              "title": "Happy Cat",
-              "type": "gif",
-              "file": {
-                "hd": {
-                  "gif": {"url": "https://static.klipy.com/ii/hd/happy-cat.gif", "width": 480, "height": 270, "size": 1200000},
-                  "webp": {"url": "https://static.klipy.com/ii/hd/happy-cat.webp", "width": 480, "height": 270, "size": 300000},
-                  "mp4": {"url": "https://static.klipy.com/ii/hd/happy-cat.mp4", "width": 480, "height": 270, "size": 400000}
+          "result": true,
+          "data": {
+            "data": [
+              {
+                "id": 2484942301552561,
+                "slug": "happy-cat",
+                "title": "Happy Cat",
+                "type": "gif",
+                "file": {
+                  "hd": {
+                    "gif": {"url": "https://static.klipy.com/ii/hd/happy-cat.gif", "width": 480, "height": 270, "size": 1200000},
+                    "webp": {"url": "https://static.klipy.com/ii/hd/happy-cat.webp", "width": 480, "height": 270, "size": 300000},
+                    "mp4": {"url": "https://static.klipy.com/ii/hd/happy-cat.mp4", "width": 480, "height": 270, "size": 400000}
+                  },
+                  "md": {
+                    "gif": {"url": "https://static.klipy.com/ii/md/happy-cat.gif", "width": 320, "height": 180, "size": 500000},
+                    "mp4": {"url": "https://static.klipy.com/ii/md/happy-cat.mp4", "width": 320, "height": 180, "size": 150000}
+                  },
+                  "sm": {
+                    "gif": {"url": "https://static.klipy.com/ii/sm/happy-cat.gif", "width": 220, "height": 124, "size": 200000},
+                    "mp4": {"url": "https://static.klipy.com/ii/sm/happy-cat.mp4", "width": 220, "height": 124, "size": 80000}
+                  },
+                  "xs": {
+                    "webp": {"url": "https://static.klipy.com/ii/xs/happy-cat.webp", "width": 100, "height": 56, "size": 20000}
+                  }
                 },
-                "md": {
-                  "gif": {"url": "https://static.klipy.com/ii/md/happy-cat.gif", "width": 320, "height": 180, "size": 500000},
-                  "mp4": {"url": "https://static.klipy.com/ii/md/happy-cat.mp4", "width": 320, "height": 180, "size": 150000}
-                },
-                "sm": {
-                  "gif": {"url": "https://static.klipy.com/ii/sm/happy-cat.gif", "width": 220, "height": 124, "size": 200000},
-                  "mp4": {"url": "https://static.klipy.com/ii/sm/happy-cat.mp4", "width": 220, "height": 124, "size": 80000}
-                },
-                "xs": {
-                  "webp": {"url": "https://static.klipy.com/ii/xs/happy-cat.webp", "width": 100, "height": 56, "size": 20000}
-                }
-              },
-              "tags": ["cat", "happy"]
-            }
-          ],
-          "current_page": 1,
-          "per_page": 8,
-          "has_next": true
+                "tags": ["cat", "happy"]
+              }
+            ],
+            "current_page": 1,
+            "per_page": 8,
+            "has_next": true,
+            "meta": {}
+          }
         }"#
         .to_string()
     }
@@ -784,14 +819,17 @@ mod tests {
     #[tokio::test]
     async fn missing_optional_fields_are_tolerated() {
         let json = r#"{
-          "data": [
-            {"slug": "no-file", "title": "Missing file object"},
-            {"slug": "no-media", "file": {"hd": {"jpg": {"url": "x.jpg"}}}},
-            {"file": {"xs": {"gif": {"url": "https://a/x.gif"}}}},
-            {"slug": "ok", "file": {"xs": {"gif": {"url": "https://a/ok.gif", "width": 10, "height": 5}}}}
-          ],
-          "current_page": 1,
-          "has_next": false
+          "result": true,
+          "data": {
+            "data": [
+              {"slug": "no-file", "title": "Missing file object"},
+              {"slug": "no-media", "file": {"hd": {"jpg": {"url": "x.jpg"}}}},
+              {"file": {"xs": {"gif": {"url": "https://a/x.gif"}}}},
+              {"slug": "ok", "file": {"xs": {"gif": {"url": "https://a/ok.gif", "width": 10, "height": 5}}}}
+            ],
+            "current_page": 1,
+            "has_next": false
+          }
         }"#;
         let (addr, _rx) = spawn_mock(vec![(200, json.to_string())]).await;
         let provider = provider_for(addr);
@@ -813,10 +851,13 @@ mod tests {
     #[tokio::test]
     async fn advertisements_are_skipped() {
         let json = r#"{
-          "data": [
-            {"slug": "ad-1", "type": "ad", "file": {"xs": {"gif": {"url": "https://a/ad.gif"}}}},
-            {"slug": "real", "file": {"xs": {"gif": {"url": "https://a/real.gif"}}}}
-          ]
+          "result": true,
+          "data": {
+            "data": [
+              {"slug": "ad-1", "type": "ad", "file": {"xs": {"gif": {"url": "https://a/ad.gif"}}}},
+              {"slug": "real", "file": {"xs": {"gif": {"url": "https://a/real.gif"}}}}
+            ]
+          }
         }"#;
         let (addr, _rx) = spawn_mock(vec![(200, json.to_string())]).await;
         let provider = provider_for(addr);
@@ -1204,11 +1245,13 @@ mod tests {
         // KLIPY may legitimately return zero results for a search; that must
         // map to an empty neutral page with no next cursor, not an error.
         let json = r#"{
-          "result": "success",
-          "data": [],
-          "current_page": 1,
-          "per_page": 24,
-          "has_next": false
+          "result": true,
+          "data": {
+            "data": [],
+            "current_page": 1,
+            "per_page": 24,
+            "has_next": false
+          }
         }"#;
         let (addr, _rx) = spawn_mock(vec![(200, json.to_string())]).await;
         let provider = provider_for(addr);

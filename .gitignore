@@ -1,5 +1,6 @@
 /target
 .worktrees/
+config/klipy.env
 .gradle/
 build/
 mobile/.gradle/
