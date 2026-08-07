@@ -1305,4 +1305,46 @@ mod tests {
         );
         assert!(raw.contains("hash1/hash2.jpg"));
     }
+
+    #[test]
+    fn stored_shared_gif_message_remains_readable_after_save_load() {
+        // KLIPY-11 message test: a stored SharedGif message (raw signed bytes
+        // in a HistoryEntry) must survive a ChatHistoryStore save/load
+        // round-trip and still decode through the standard verify path.
+        let dir = temp_dir("shared_gif");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut store = ChatHistoryStore::empty_at(&dir);
+        let topic = make_topic(0x7A);
+        let key = iroh::SecretKey::generate();
+
+        let msg = crate::chat_core::Message::SharedGif {
+            gif: crate::gif_provider::SharedGif {
+                provider: "klipy".into(),
+                provider_id: "stored-gif-1".into(),
+                playback_url: "https://media.example/playback.mp4".into(),
+                format: crate::gif_provider::GifMediaFormat::Mp4,
+                ..Default::default()
+            },
+        };
+        let signed = crate::chat_core::SignedMessage::sign_and_encode(&key, &msg).unwrap();
+        let entry = HistoryEntry::new(topic, key.public().to_string(), signed.to_vec(), "gif", "GIF");
+        store.push_with_id(entry);
+        store.save().unwrap();
+
+        let reloaded = ChatHistoryStore::load(&dir).unwrap().expect("history file exists");
+        assert_eq!(reloaded.len(), 1);
+        let stored = &reloaded.entries()[0];
+        let (pk, decoded, _sent_at) =
+            crate::chat_core::SignedMessage::verify_and_decode(&stored.signed_bytes).unwrap();
+        assert_eq!(pk, key.public());
+        match decoded {
+            crate::chat_core::Message::SharedGif { gif } => {
+                assert_eq!(gif.provider, "klipy");
+                assert_eq!(gif.provider_id, "stored-gif-1");
+                assert_eq!(gif.playback_url, "https://media.example/playback.mp4");
+                assert_eq!(gif.format, crate::gif_provider::GifMediaFormat::Mp4);
+            }
+            other => panic!("expected SharedGif, got {other:?}"),
+        }
+    }
 }

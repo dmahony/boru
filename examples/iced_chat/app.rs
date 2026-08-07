@@ -40721,6 +40721,300 @@ mod tests {
         assert!(shared.is_renderable());
     }
 
+    // ── GIF picker state machine (KLIPY-11) ────────────────────────────
+    // These drive the picker's update() handlers with provider-neutral
+    // messages.  No live KLIPY service is ever contacted: the tests that
+    // trigger a search/trending request run with KLIPY_API_KEY removed (and
+    // restored), so `default_gif_provider()` deterministically takes the
+    // NotConfigured path and the returned iced Task (which would perform the
+    // HTTP request) is dropped without running.
+
+    /// Serialize access to `KLIPY_API_KEY` so parallel tests never race on
+    /// the process-global env var.
+    static KLIPY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Run `f` with `KLIPY_API_KEY` removed, restoring the original value
+    /// afterwards.  Returns whatever `f` returned.
+    fn with_klipy_unset<R>(f: impl FnOnce() -> R) -> R {
+        let _guard = KLIPY_ENV_LOCK.lock().unwrap();
+        let original = std::env::var(boru_core::klipy_config::KLIPY_API_KEY_ENV).ok();
+        std::env::remove_var(boru_core::klipy_config::KLIPY_API_KEY_ENV);
+        let result = f();
+        if let Some(v) = original {
+            std::env::set_var(boru_core::klipy_config::KLIPY_API_KEY_ENV, v);
+        }
+        result
+    }
+
+    fn sample_page(items: Vec<GifSearchResult>, next_cursor: Option<String>) -> GifSearchPage {
+        GifSearchPage { items, next_cursor }
+    }
+
+    #[test]
+    fn gif_search_debounce_bumps_seq_and_ignores_stale_timer() {
+        with_klipy_unset(|| {
+            let (runtime, mut app, _local, _peer) = build_join_request_test_app();
+            assert_eq!(app.gif_debounce_seq, 0);
+
+            // GifSearchChanged schedules a tokio sleep-based debounce task,
+            // which needs a reactor context, so run the update calls inside
+            // the test app's runtime.  The returned tasks are dropped without
+            // being polled — no network, no waiting.
+            runtime.block_on(async {
+                // First keystroke schedules a debounce at seq 1.
+                let task = app.update(AppMessage::GifSearchChanged("cat".to_string()));
+                drop(task);
+                assert_eq!(app.gif_search_text, "cat");
+                assert_eq!(app.gif_debounce_seq, 1);
+
+                // Second keystroke supersedes it at seq 2.
+                let task = app.update(AppMessage::GifSearchChanged("cats".to_string()));
+                drop(task);
+                assert_eq!(app.gif_search_text, "cats");
+                assert_eq!(app.gif_debounce_seq, 2);
+
+                // A stale timer (seq 1) must be ignored — no search state change.
+                let task = app.update(AppMessage::GifSearchDebounced(1));
+                drop(task);
+                assert!(!app.gif_has_searched, "stale debounce must not start a search");
+                assert!(app.gif_results.is_empty());
+
+                // The current timer (seq 2) proceeds to search; with the key
+                // removed the picker lands in the deterministic not-configured
+                // state (missing-key path) instead of hitting the live service.
+                let task = app.update(AppMessage::GifSearchDebounced(2));
+                drop(task);
+                assert!(app.gif_has_searched, "current debounce must start a search");
+                assert!(!app.gif_showing_trending);
+                assert!(app.gif_not_configured);
+                assert!(!app.gif_loading);
+            });
+        });
+    }
+
+    #[test]
+    fn gif_search_results_store_page_and_clear_loading() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let seq = 7;
+        app.gif_request_seq = seq;
+        app.gif_loading = true;
+        let page = sample_page(
+            vec![result_with(Some(media_source(
+                "https://media.test/original.gif",
+                GifMediaFormat::Gif,
+            )))],
+            Some("2".to_string()),
+        );
+        let task = app.update(AppMessage::GifSearchResults { seq, page });
+        drop(task);
+        assert!(!app.gif_loading, "results arrival must clear loading");
+        assert!(app.gif_error.is_none());
+        assert!(app.gif_has_searched);
+        assert!(!app.gif_showing_trending);
+        assert_eq!(app.gif_results.len(), 1);
+        assert_eq!(app.gif_results[0].provider_id, "gif-1");
+        assert_eq!(app.gif_next_cursor.as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn gif_search_stale_results_rejected() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let seq = 5;
+        app.gif_request_seq = seq;
+        app.gif_loading = true;
+        let stale_page = sample_page(
+            vec![result_with(None)],
+            None,
+        );
+        let task = app.update(AppMessage::GifSearchResults { seq: seq - 1, page: stale_page });
+        drop(task);
+        assert!(app.gif_results.is_empty(), "stale seq must not replace results");
+        assert!(app.gif_loading, "stale response must not clear loading");
+
+        // The matching seq still applies.
+        let task = app.update(AppMessage::GifSearchResults {
+            seq,
+            page: sample_page(vec![result_with(None)], None),
+        });
+        drop(task);
+        assert_eq!(app.gif_results.len(), 1);
+        assert!(!app.gif_loading);
+    }
+
+    #[test]
+    fn gif_search_empty_results_state() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let seq = 3;
+        app.gif_request_seq = seq;
+        let task = app.update(AppMessage::GifSearchResults {
+            seq,
+            page: sample_page(vec![], None),
+        });
+        drop(task);
+        assert!(app.gif_results.is_empty());
+        assert!(app.gif_has_searched, "an empty page is still a completed search");
+        assert!(app.gif_next_cursor.is_none());
+    }
+
+    #[test]
+    fn gif_search_failed_sets_error_state() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let seq = 4;
+        app.gif_request_seq = seq;
+        app.gif_loading = true;
+        let task = app.update(AppMessage::GifSearchFailed {
+            seq,
+            message: "boom".to_string(),
+        });
+        drop(task);
+        assert!(!app.gif_loading);
+        assert_eq!(app.gif_error.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn gif_search_failed_stale_seq_ignored() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        app.gif_request_seq = 9;
+        let task = app.update(AppMessage::GifSearchFailed {
+            seq: 8,
+            message: "stale error".to_string(),
+        });
+        drop(task);
+        assert!(app.gif_error.is_none(), "stale failure must not set the error");
+    }
+
+    #[test]
+    fn gif_trending_results_store_page_and_keep_trending_flag() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let seq = 6;
+        app.gif_request_seq = seq;
+        let task = app.update(AppMessage::GifTrendingResults {
+            seq,
+            page: sample_page(vec![result_with(None)], None),
+        });
+        drop(task);
+        assert_eq!(app.gif_results.len(), 1);
+        assert!(app.gif_showing_trending, "trending results keep the trending flag");
+        assert!(!app.gif_loading);
+    }
+
+    #[test]
+    fn gif_pagination_appends_and_dedups() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let seq = 10;
+        app.gif_request_seq = seq;
+        // First page: one item already present.
+        let first = result_with(None);
+        app.gif_results = vec![first.clone()];
+        app.gif_appending = true;
+        // Second page: same provider_id (dup) plus a new item.
+        let mut second = result_with(None);
+        second.provider_id = "gif-2".to_string();
+        let task = app.update(AppMessage::GifSearchResults {
+            seq,
+            page: sample_page(vec![first.clone(), second.clone()], Some("3".to_string())),
+        });
+        drop(task);
+        assert!(!app.gif_appending, "append mode must reset after the page lands");
+        let ids: Vec<&str> = app.gif_results.iter().map(|r| r.provider_id.as_str()).collect();
+        assert_eq!(ids, vec!["gif-1", "gif-2"], "dedup keeps the existing id first");
+        assert_eq!(app.gif_next_cursor.as_deref(), Some("3"));
+    }
+
+    #[test]
+    fn gif_load_more_requires_cursor_and_not_loading() {
+        with_klipy_unset(|| {
+            let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+            // No cursor → no-op.
+            app.gif_next_cursor = None;
+            let task = app.update(AppMessage::GifLoadMore);
+            drop(task);
+            assert!(!app.gif_appending);
+
+            // While a request is in flight → no-op.
+            app.gif_next_cursor = Some("2".to_string());
+            app.gif_loading = true;
+            let task = app.update(AppMessage::GifLoadMore);
+            drop(task);
+            assert!(!app.gif_appending);
+
+            // Cursor present and idle → append mode starts (missing-key path
+            // keeps the deterministic not-configured state; no live request).
+            app.gif_loading = false;
+            app.gif_search_text = "cat".to_string();
+            let task = app.update(AppMessage::GifLoadMore);
+            drop(task);
+            assert!(app.gif_appending, "idle picker with a cursor starts append mode");
+            assert!(app.gif_not_configured);
+        });
+    }
+
+    #[test]
+    fn gif_send_closes_picker_and_clears_search() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        app.show_gif_picker = true;
+        app.gif_search_text = "cat".to_string();
+        let gif = result_with(Some(media_source(
+            "https://media.test/original.gif",
+            GifMediaFormat::Gif,
+        )));
+        let task = app.update(AppMessage::SendGif(gif));
+        drop(task);
+        assert!(!app.show_gif_picker, "sending a GIF closes the picker");
+        assert!(app.gif_search_text.is_empty(), "search text cleared after send");
+    }
+
+    #[test]
+    fn gif_picker_missing_key_state() {
+        with_klipy_unset(|| {
+            let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+            let task = app.update(AppMessage::ToggleGifPicker);
+            drop(task);
+            assert!(app.show_gif_picker);
+            assert!(app.gif_not_configured, "missing key must surface immediately");
+            assert!(!app.gif_loading);
+            assert!(app.gif_results.is_empty());
+        });
+    }
+
+    #[test]
+    fn gif_picker_close_during_request_clears_loading() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        app.show_gif_picker = true;
+        app.gif_loading = true;
+        let task = app.update(AppMessage::ToggleGifPicker);
+        drop(task);
+        assert!(!app.show_gif_picker);
+        assert!(!app.gif_loading, "closing the picker must cancel in-flight state");
+    }
+
+    #[test]
+    fn gif_media_fetched_error_renders_fallback_entry() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let gif = boru_core::gif_provider::SharedGif {
+            provider: "klipy".into(),
+            provider_id: "gif-expired".into(),
+            playback_url: "https://media.example/expired.mp4".into(),
+            ..Default::default()
+        };
+        let hash = [0xABu8; 32];
+        let generation = app.conversation_generation;
+        let task = app.update(AppMessage::GifMediaFetched {
+            sender: _local,
+            gif,
+            message_hash: hash,
+            bytes: Err("media expired".to_string()),
+            generation,
+        });
+        drop(task);
+        let last = app.entries.last().expect("fallback entry pushed");
+        assert!(
+            last.image_error.as_deref().is_some_and(|e| e.contains("GIF unavailable")),
+            "expected a GIF unavailable fallback card, got {:?}",
+            last.image_error
+        );
+    }
+
     // ── Local service scan pure logic (TUN-01) ─────────────────────────
     // These exercise `boru_core::local_service_scan`'s network-free helpers:
     // dedupe, label priority, the well-known-port table, and the self-exclusion

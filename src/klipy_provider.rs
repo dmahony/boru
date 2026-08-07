@@ -1188,4 +1188,147 @@ mod tests {
         assert_eq!(KlipyGifProvider::parse_page(Some("0")), 1);
         assert_eq!(KlipyGifProvider::parse_page(Some("garbage")), 1);
     }
+
+    #[tokio::test]
+    async fn empty_results_return_empty_page() {
+        // KLIPY may legitimately return zero results for a search; that must
+        // map to an empty neutral page with no next cursor, not an error.
+        let json = r#"{
+          "result": "success",
+          "data": [],
+          "current_page": 1,
+          "per_page": 24,
+          "has_next": false
+        }"#;
+        let (addr, _rx) = spawn_mock(vec![(200, json.to_string())]).await;
+        let provider = provider_for(addr);
+        let page = provider
+            .search(GifSearchRequest {
+                query: "no such gif".to_string(),
+                cursor: None,
+                limit: 24,
+                content_rating: None,
+            })
+            .await
+            .expect("empty search should succeed");
+        assert!(page.items.is_empty(), "expected no items");
+        assert!(page.next_cursor.is_none(), "no next page after empty results");
+    }
+
+    #[tokio::test]
+    async fn missing_data_field_returns_empty_page() {
+        // Some KLIPY responses omit `data` entirely (e.g. an empty page);
+        // the adapter must tolerate that like an empty array.
+        let json = r#"{"result": "success", "current_page": 2, "has_next": false}"#;
+        let (addr, _rx) = spawn_mock(vec![(200, json.to_string())]).await;
+        let provider = provider_for(addr);
+        let page = provider
+            .trending(GifTrendingRequest {
+                cursor: None,
+                limit: 24,
+                content_rating: None,
+            })
+            .await
+            .expect("missing data should not error");
+        assert!(page.items.is_empty());
+        assert!(page.next_cursor.is_none());
+    }
+
+    #[tokio::test]
+    async fn rate_limit_without_retry_after_header() {
+        // A 429 without a Retry-After header must map to retry_after None.
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.expect("accept");
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let header = "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            let _ = sock.write_all(header.as_bytes()).await;
+        });
+        let provider = provider_for(addr);
+        let err = provider
+            .search(GifSearchRequest {
+                query: "cat".to_string(),
+                cursor: None,
+                limit: 24,
+                content_rating: None,
+            })
+            .await
+            .expect_err("should be rate limited");
+        assert_eq!(
+            err,
+            GifProviderError::RateLimited { retry_after: None },
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn format_selection_falls_back_when_preferred_missing() {
+        // Only GIF renditions available (no WebP/MP4 anywhere): preview picks
+        // the smallest gif and playback falls back to the same tier.
+        let files = KlipyFiles {
+            xs: Some(KlipyMediaSet {
+                gif: Some(KlipyMedia {
+                    url: Some("https://static.klipy.com/ii/xs/cat.gif".into()),
+                    width: Some(100),
+                    height: Some(56),
+                    size: Some(20000),
+                }),
+                webp: None,
+                mp4: None,
+            }),
+            sm: None,
+            md: None,
+            hd: None,
+        };
+        let preview = select_rendition(&files, &PREVIEW_FORMATS, &PREVIEW_TIERS)
+            .expect("preview from xs gif");
+        assert_eq!(preview.format, GifMediaFormat::Gif);
+        assert_eq!(preview.width, Some(100));
+        let playback = select_rendition(&files, &PLAYBACK_FORMATS, &PLAYBACK_TIERS)
+            .expect("playback falls back to xs");
+        assert_eq!(playback.format, GifMediaFormat::Gif);
+        assert_eq!(playback.url, "https://static.klipy.com/ii/xs/cat.gif");
+    }
+
+    #[test]
+    fn format_selection_prefers_webp_preview_over_gif() {
+        // When a tier has both WebP and GIF, preview prefers WebP (lighter).
+        let files = KlipyFiles {
+            xs: Some(KlipyMediaSet {
+                gif: Some(KlipyMedia {
+                    url: Some("https://static.klipy.com/ii/xs/cat.gif".into()),
+                    width: Some(100),
+                    height: Some(56),
+                    size: Some(20000),
+                }),
+                webp: Some(KlipyMedia {
+                    url: Some("https://static.klipy.com/ii/xs/cat.webp".into()),
+                    width: Some(100),
+                    height: Some(56),
+                    size: Some(12000),
+                }),
+                mp4: None,
+            }),
+            sm: None,
+            md: None,
+            hd: None,
+        };
+        let preview = select_rendition(&files, &PREVIEW_FORMATS, &PREVIEW_TIERS)
+            .expect("preview");
+        assert_eq!(preview.format, GifMediaFormat::AnimatedWebP);
+        assert_eq!(preview.url, "https://static.klipy.com/ii/xs/cat.webp");
+    }
+
+    #[test]
+    fn redacted_url_masks_key_and_drops_query() {
+        let provider = KlipyGifProvider::new_default("key-in-url-123");
+        let url = provider.api_url("search");
+        let redacted = provider.redacted_url(&url);
+        assert!(!redacted.contains("key-in-url-123"), "{redacted}");
+        assert!(redacted.contains("***"), "{redacted}");
+        // The path segment position of the key is replaced with ***.
+        assert!(redacted.contains("/api/v1/***/gifs/search"), "{redacted}");
+    }
 }
