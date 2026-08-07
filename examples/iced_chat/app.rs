@@ -3239,6 +3239,14 @@ pub struct IcedChat {
     pub terminal: TerminalTab,
     /// Track which image is currently shown in the full-screen lightbox overlay.
     lightbox_image: Option<usize>,
+    /// Guard counter for the stale-`Scrolled` race when the lightbox closes.
+    /// The windowed scrollable is re-created (its tree path changes because
+    /// the overlay is a `stack![base, overlay]` wrapper), and the fresh
+    /// widget's initial `Scrolled(0, vp)` event would clobber the `f32::MAX`
+    /// bottom sentinel before the snap task lands.  While > 0, non-bottom
+    /// `Scrolled` events keep the sentinel armed and re-queue the snap;
+    /// a bottom event confirms the snap landed and disarms the guard.
+    lightbox_close_snap_guard: u8,
     /// Pending topic we're connecting to (used during the async handoff
     /// from clicking a room to actually subscribing).
     pending_topic: Option<TopicId>,
@@ -6344,6 +6352,32 @@ pub struct PerfSnapshot {
 ///   stores only prefix sums of length total, with the final total omitted).
 /// - When `dirty_from` is `None`, the cache fully matches `entries`.
 /// - When `dirty_from` is `Some(i)`, entries index `i..` need recomputation.
+
+/// Compute the display size of a chat image, shared by `view_chat_log`
+/// (rendered box) and `LayoutCache` (height estimate) so the two never
+/// diverge.  A mismatch between the cached `total_content_height` and the
+/// real rendered column height is what makes the scrollbar jump and images
+/// jitter as they enter the window — the cache must predict the same box
+/// the view will render.
+///
+/// Clamps to `IMAGE_PREVIEW_MAX_WIDTH` x `IMAGE_PREVIEW_MAX_HEIGHT`,
+/// preserving aspect ratio (scale-down only, never upscale).  Unknown
+/// dimensions fall back to the full max box, which is exactly what the
+/// view renders while a placeholder is shown, so the estimated height
+/// stays stable across image decode / hydration.
+fn chat_image_display_size(entry: &ChatEntry) -> (f32, f32) {
+    let (orig_w, orig_h) = match (entry.image_width, entry.image_height) {
+        (Some(w), Some(h)) if w > 0 && h > 0 => (w as f32, h as f32),
+        _ => (IMAGE_PREVIEW_MAX_WIDTH, IMAGE_PREVIEW_MAX_HEIGHT),
+    };
+    let scale = (IMAGE_PREVIEW_MAX_WIDTH / orig_w)
+        .min(IMAGE_PREVIEW_MAX_HEIGHT / orig_h)
+        .min(1.0);
+    let display_w = (orig_w * scale).round().max(1.0);
+    let display_h = (orig_h * scale).round().max(50.0);
+    (display_w, display_h)
+}
+
 pub struct LayoutCache {
     heights: Vec<f32>,
     /// Prefix-sum: cum[i] = sum(heights[0..i]), same length as heights.
@@ -6374,7 +6408,8 @@ impl LayoutCache {
     const DATE_SEP_H: f32 = 32.0;
     const SYSTEM_H: f32 = 24.0;
     const MSG_BASE_H: f32 = 76.0;
-    const IMAGE_EXTRA: f32 = 304.0;
+    /// Height of the image card header row (icon + label) above the preview.
+    const IMAGE_HEADER_H: f32 = 26.0;
     const REACTION_EXTRA: f32 = 22.0;
 
     fn new(text_size: f32) -> Self {
@@ -6411,7 +6446,15 @@ impl LayoutCache {
                     || entry.image_identifier.is_some()
                     || entry.image_error.is_some()
                 {
-                    h += Self::IMAGE_EXTRA;
+                    // The entry renders an image card header plus a framed
+                    // preview whose box is computed from the real pixel
+                    // dimensions (or the max box fallback while decoding).
+                    // Use the same box the view renders so total_height
+                    // matches the real content height — a flat constant
+                    // (old IMAGE_EXTRA=304) drifted from the actual box and
+                    // made the scrollbar jump as images entered the window.
+                    let (_, display_h) = chat_image_display_size(entry);
+                    h += Self::IMAGE_HEADER_H + display_h + 2.0; // +2 = 1px border each side
                 }
                 if !entry.reactions.is_empty() {
                     h += Self::REACTION_EXTRA;
@@ -7428,6 +7471,7 @@ impl IcedChat {
             main_screen_reconnect_frame: 0,
             reduced_motion: Self::detect_reduced_motion(),
             lightbox_image: None,
+            lightbox_close_snap_guard: 0,
             pending_topic: None,
             room_loading: false,
             room_generation: 0,
@@ -18902,14 +18946,21 @@ impl IcedChat {
             }
             AppMessage::CloseImageLightbox => {
                 self.lightbox_image = None;
-                // The lightbox overlay replaces the base chat view, so the
-                // windowed scrollable's viewport is stranded above the latest
-                // entry when the overlay disappears. Re-arm the follow-latest
-                // bottom sentinel and queue the snap so the chat log returns
-                // to the bottom — but only when the user was following latest
-                // before opening the image; a manual scroll-up keeps the
-                // reading position (keep_latest_visible is a no-op then).
-                self.keep_latest_visible();
+                // Requirement (CHAT-SCROLL): closing the lightbox must
+                // ALWAYS return the chat log to the latest message (bottom),
+                // like a normal messenger — even when the user had scrolled
+                // up before opening the image.  Force follow-latest, re-arm
+                // the f32::MAX bottom sentinel, and queue the snap.
+                self.follow_latest = true;
+                self.scroll_offset = f32::MAX;
+                self.scroll_to_bottom_pending = true;
+                // The lightbox overlay is a `stack![base, overlay]` wrapper;
+                // removing it re-creates the windowed scrollable, whose
+                // first `Scrolled(0, vp)` event would clobber the sentinel
+                // before the snap task lands.  Arm the stale-event guard so
+                // non-bottom events keep the sentinel and re-queue the snap
+                // until a bottom event confirms arrival.
+                self.lightbox_close_snap_guard = 3;
                 iced::Task::none()
             }
 
@@ -21446,14 +21497,33 @@ impl IcedChat {
                 // view()).
                 let total = self.total_content_height.get();
                 if total > 0.0 {
-                    self.scroll_offset = offset;
                     self.viewport_height = vp_h;
                     // Detect whether the user is at the bottom of the chat
                     // log.  The 10px epsilon absorbs sub-pixel rounding and
                     // viewport re-measurement during resize.
                     if offset + vp_h >= total - 10.0 {
                         self.follow_latest = true;
+                        self.scroll_offset = offset;
+                        // A bottom event confirms the lightbox-close snap
+                        // landed (or the user reached the bottom); the
+                        // stale-event guard is no longer needed.
+                        self.lightbox_close_snap_guard = 0;
+                    } else if self.lightbox_close_snap_guard > 0 {
+                        // Stale event from the freshly re-created scrollable
+                        // right after the lightbox overlay disappeared: the
+                        // fresh widget starts at the TOP (offset 0) and this
+                        // event would clobber the f32::MAX bottom sentinel
+                        // before the snap task lands.  Keep the sentinel
+                        // armed, stay in follow-latest, and re-queue the snap
+                        // (the update tail consumes the flag and re-emits
+                        // snap_to_end).  A genuine user scroll cannot arrive
+                        // in this window because the overlay removal and the
+                        // first layout happen in the same frame.
+                        self.scroll_offset = f32::MAX;
+                        self.scroll_to_bottom_pending = true;
+                        self.lightbox_close_snap_guard -= 1;
                     } else {
+                        self.scroll_offset = offset;
                         self.follow_latest = false;
                         // A manual scroll away from the bottom cancels any
                         // queued snap-to-bottom so a stale snap can never
@@ -31499,20 +31569,11 @@ impl IcedChat {
             }
 
             // ── Image / animated GIF (decoded once at construction) ──
-            // Compute display size from original image dimensions.
-            // If the image fits within the max width, use its original size.
-            // Otherwise, scale down proportionally to fit.
-            let (orig_w, orig_h) = match (entry.image_width, entry.image_height) {
-                (Some(w), Some(h)) if w > 0 && h > 0 => (w as f32, h as f32),
-                _ => (IMAGE_PREVIEW_MAX_WIDTH, IMAGE_PREVIEW_MAX_HEIGHT),
-            };
-            let aspect = orig_w / orig_h;
-            let max_w = IMAGE_PREVIEW_MAX_WIDTH;
-            let (display_w, display_h) = if orig_w <= max_w {
-                (orig_w, orig_h)
-            } else {
-                (max_w, (max_w / aspect).round().max(50.0))
-            };
+            // Display size is computed by the shared helper used by the
+            // LayoutCache too, so the rendered box always matches the
+            // cached height — that is what keeps the scrollbar stable as
+            // images enter the window and prevents decode-driven reflow.
+            let (display_w, display_h) = chat_image_display_size(entry);
 
             if let Some(frames) = entry.gif_frames.as_deref() {
                 // Animated GIF: the iced-moving-picture Gif widget manages its
@@ -31606,9 +31667,17 @@ impl IcedChat {
                         .wrapping(Wrapping::WordOrGlyph),
                     )
                     .spacing(SPACE_2);
+                // The placeholder occupies the SAME fixed box the decoded
+                // image will use (display_w × display_h), so the entry
+                // height never changes when the image hydrates/decodes —
+                // a variable-height placeholder reflowed the windowed list
+                // and made images jitter while loading.
                 col = col.push(
                     container(placeholder)
-                        .width(Length::Fill)
+                        .width(Length::Fixed(display_w))
+                        .height(Length::Fixed(display_h))
+                        .center_x(Length::Fill)
+                        .center_y(Length::Fill)
                         .padding([SPACE_8, SPACE_10])
                         .style(container_card),
                 );
@@ -49080,7 +49149,7 @@ mod tests {
     }
 
     #[test]
-    fn close_image_lightbox_rearms_snap_only_while_following() {
+    fn close_image_lightbox_always_snaps_to_bottom() {
         // Relay-disabled builder: no real peer needed, and it never hangs on
         // the relay-less debsrv test host (unlike build_join_request_test_app).
         let (_runtime, mut app) = build_prewarm_test_app();
@@ -49093,32 +49162,164 @@ mod tests {
         let _open = app.update(AppMessage::OpenImageLightbox(0));
         assert_eq!(app.lightbox_image, Some(0), "lightbox opened");
 
-        // Closing re-arms the bottom sentinel and queues the snap so the
-        // windowed scrollable returns to the latest message.  The update
-        // tail consumes the flag in the same update (no stale flag left for
-        // a later Scrolled event to cancel).
+        // Closing re-arms the bottom sentinel, forces follow-latest, and
+        // queues the snap so the windowed scrollable returns to the latest
+        // message.  The update tail consumes the flag in the same update
+        // (no stale flag left for a later Scrolled event to cancel).
         let _close = app.update(AppMessage::CloseImageLightbox);
         assert!(app.lightbox_image.is_none(), "lightbox closed");
         assert_eq!(app.scroll_offset, f32::MAX, "bottom sentinel re-armed");
+        assert!(app.follow_latest, "follow-latest forced on close");
         assert!(
             !app.scroll_to_bottom_pending,
             "snap consumed by the update tail in the same update"
         );
+        assert!(
+            app.lightbox_close_snap_guard > 0,
+            "stale-event guard armed for the re-created scrollable"
+        );
 
-        // If the user had manually scrolled up before opening the image,
-        // closing preserves the reading position (no snap, no sentinel).
+        // CHAT-SCROLL requirement: even if the user had manually scrolled
+        // up before opening the image, closing the lightbox ALWAYS returns
+        // to the bottom — the old preserve-reading-position semantics is
+        // overridden.
         app.follow_latest = false;
         app.scroll_offset = 300.0;
         app.scroll_to_bottom_pending = false;
         let _open2 = app.update(AppMessage::OpenImageLightbox(0));
         let _close2 = app.update(AppMessage::CloseImageLightbox);
         assert_eq!(
-            app.scroll_offset, 300.0,
-            "scrolled-up reading position preserved on lightbox close"
+            app.scroll_offset, f32::MAX,
+            "always snaps to bottom on lightbox close, even when scrolled up"
         );
+        assert!(app.follow_latest, "follow-latest forced even when scrolled up");
         assert!(
             !app.scroll_to_bottom_pending,
-            "no snap queued while reading older messages"
+            "snap consumed by the update tail in the same update"
+        );
+    }
+
+    #[test]
+    fn close_lightbox_stale_scrolled_event_keeps_sentinel_and_requeues_snap() {
+        // After the lightbox closes, the overlay stack is removed and the
+        // windowed scrollable is re-created.  The fresh widget's first
+        // Scrolled event reports offset 0 (top) — that stale event must not
+        // clobber the f32::MAX bottom sentinel before the snap task lands.
+        let (_runtime, mut app) = build_prewarm_test_app();
+        app.total_content_height.set(1000.0);
+        app.follow_latest = true;
+        app.scroll_offset = 800.0;
+        app.scroll_to_bottom_pending = false;
+        let _open = app.update(AppMessage::OpenImageLightbox(0));
+        let _close = app.update(AppMessage::CloseImageLightbox);
+        assert_eq!(app.scroll_offset, f32::MAX, "sentinel armed on close");
+
+        // Stale event from the re-created scrollable: offset 0, not bottom.
+        let _stale = app.update(AppMessage::Scrolled(0.0, 200.0));
+        assert_eq!(
+            app.scroll_offset, f32::MAX,
+            "stale Scrolled(0) must not clobber the bottom sentinel"
+        );
+        assert!(app.follow_latest, "follow-latest preserved through stale event");
+        assert!(
+            !app.scroll_to_bottom_pending,
+            "stale event re-armed the snap; tail consumed it in the same update"
+        );
+        assert_eq!(
+            app.lightbox_close_snap_guard, 2,
+            "stale-event guard decremented once"
+        );
+
+        // A genuine bottom event confirms the snap landed and disarms.
+        let _landed = app.update(AppMessage::Scrolled(800.0, 200.0));
+        assert_eq!(app.scroll_offset, 800.0, "snap landed at the bottom");
+        assert!(app.follow_latest);
+        assert_eq!(app.lightbox_close_snap_guard, 0, "guard disarmed at bottom");
+    }
+
+    #[test]
+    fn layout_cache_image_entry_height_tracks_real_display_box() {
+        // CHAT-SCROLL: the layout cache must predict the same image box the
+        // view renders, so total_content_height matches the real content and
+        // the scrollbar does not jump as images enter the window or decode.
+        let mut cache = LayoutCache::new(TYPO_SM);
+
+        // A 800×600 image scales down to the 360-wide preview: display_h = 270.
+        let mut img_entry = ChatEntry::image(
+            ChatKind::Remote,
+            "peer",
+            "",
+            vec![0u8; 64],
+            None,
+            None,
+            None,
+            Some("img/id".to_string()),
+            None,
+        );
+        img_entry.image_width = Some(800);
+        img_entry.image_height = Some(600);
+        let mut entries = vec![img_entry];
+        cache.ensure(&entries, TYPO_SM);
+        let expected = LayoutCache::MSG_BASE_H
+            + LayoutCache::IMAGE_HEADER_H
+            + 270.0
+            + 2.0;
+        assert!(
+            (cache.heights[0] - expected).abs() < 0.01,
+            "image entry height {} should track the rendered 270px display box (expected {expected})",
+            cache.heights[0]
+        );
+
+        // A very tall image must be clamped to the max preview box (400),
+        // so the entry cannot blow up the scrollbar.
+        let mut cache = LayoutCache::new(TYPO_SM);
+        let mut tall = ChatEntry::image(
+            ChatKind::Remote,
+            "peer",
+            "",
+            vec![0u8; 64],
+            None,
+            None,
+            None,
+            Some("img/id".to_string()),
+            None,
+        );
+        tall.image_width = Some(200);
+        tall.image_height = Some(2000);
+        let tall_entries = vec![tall];
+        cache.ensure(&tall_entries, TYPO_SM);
+        let tall_expected = LayoutCache::MSG_BASE_H
+            + LayoutCache::IMAGE_HEADER_H
+            + 400.0
+            + 2.0;
+        assert!(
+            (cache.heights[0] - tall_expected).abs() < 0.01,
+            "tall image height {} should clamp to the 400px max box (expected {tall_expected})",
+            cache.heights[0]
+        );
+
+        // Unknown dimensions (placeholder while decoding) use the same max
+        // box, so the estimated height is stable across decode/hydration.
+        let mut cache = LayoutCache::new(TYPO_SM);
+        let mut unknown = ChatEntry::image(
+            ChatKind::Remote,
+            "peer",
+            "",
+            vec![0u8; 64],
+            None,
+            None,
+            None,
+            Some("img/id".to_string()),
+            None,
+        );
+        unknown.image_width = None;
+        unknown.image_height = None;
+        let unknown_entries = vec![unknown];
+        cache.ensure(&unknown_entries, TYPO_SM);
+        assert!(
+            (cache.heights[0] - tall_expected).abs() < 0.01,
+            "unknown-dimension image height {} should match the max box (expected {tall_expected})",
+            cache.heights[0]
         );
     }
 
