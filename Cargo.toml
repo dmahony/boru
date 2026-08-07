@@ -173,6 +173,7 @@ rand = { version = "0.10", features = ["chacha"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 rusqlite = { version = "0.39", features = ["bundled"] }
 criterion = "0.5"
+iced_tiny_skia = "0.14"
 
 [[bench]]
 name = "phase23"

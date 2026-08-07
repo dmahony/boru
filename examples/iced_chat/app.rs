@@ -45603,4 +45603,345 @@ fn vr_create_tunnel_confirm_cancel_and_validation() {
         "tunnel store entry carries the configured service name"
     );
 }
+
+    // ── FONTS-17 Visual QA: offscreen capture harness ──────────────────
+    //
+    // Renders REAL app screens offscreen with the tiny-skia half of iced's
+    // fallback renderer (no Xvfb, no window, no network/peers) and saves PNGs
+    // to ./captures/ (or $CAPTURE_DIR). Used by the FONTS-17 visual QA card.
+    // Run: rb test --example boru --features gui,video-playback,terminal -- offscreen_capture --nocapture
+    #[cfg(test)]
+    mod offscreen_capture {
+        use super::*;
+        use iced::advanced::graphics::text::font_system;
+        use iced::advanced::layout;
+        use iced::advanced::mouse;
+        use iced::advanced::renderer;
+        use iced::advanced::renderer::Headless;
+        use iced::advanced::widget::Tree;
+        use iced::{Font, Pixels, Rectangle, Size};
+        use std::borrow::Cow;
+
+        fn load_fonts() {
+            let mut fs = font_system().write().unwrap();
+            let fonts: &[&[u8]] = &[
+                include_bytes!("fonts/Figtree-Regular.ttf"),
+                include_bytes!("fonts/Figtree-Medium.ttf"),
+                include_bytes!("fonts/Figtree-SemiBold.ttf"),
+                include_bytes!("fonts/Raleway-ExtraBold.ttf"),
+                include_bytes!("fonts/JetBrainsMono-Regular.ttf"),
+                include_bytes!("fonts/JetBrainsMono-Medium.ttf"),
+                include_bytes!("fonts/ArchivoSemiCondensed-SemiBold.ttf"),
+                include_bytes!("fonts/ArchivoSemiCondensed-Bold.ttf"),
+                include_bytes!("fonts/IBMPlexSans-Regular.ttf"),
+                include_bytes!("fonts/IBMPlexSans-Medium.ttf"),
+                include_bytes!("fonts/IBMPlexSans-SemiBold.ttf"),
+            ];
+            for bytes in fonts {
+                fs.load_font(Cow::Borrowed(*bytes));
+            }
+        }
+
+        fn captures_dir() -> std::path::PathBuf {
+            std::env::var("CAPTURE_DIR")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| std::path::PathBuf::from("./captures"))
+        }
+
+        /// Render an iced Element offscreen and write it to `captures/<name>.png`.
+        fn render_element(
+            element: &mut iced::Element<'_, AppMessage>,
+            name: &str,
+            canvas_w: u32,
+            canvas_h: u32,
+            dark_mode: bool,
+        ) {
+            let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
+                Font::default(),
+                Pixels(16.0),
+            ));
+            let mut tree = Tree::new(element.as_widget());
+            let limits = layout::Limits::new(Size::ZERO, Size::new(canvas_w as f32, canvas_h as f32));
+            let node = element.as_widget_mut().layout(&mut tree, &renderer, &limits);
+            let theme = IcedChat::theme_from_dark(dark_mode);
+            let viewport = Rectangle::with_size(Size::new(canvas_w as f32, canvas_h as f32));
+            element.as_widget().draw(
+                &tree,
+                &mut renderer,
+                &theme,
+                &renderer::Style::default(),
+                iced::advanced::Layout::new(&node),
+                mouse::Cursor::default(),
+                &viewport,
+            );
+            let background = bg_surface(&theme);
+            let rgba = renderer.screenshot(Size::new(canvas_w, canvas_h), 1.0, background);
+            let dir = captures_dir();
+            std::fs::create_dir_all(&dir).expect("create captures dir");
+            let path = dir.join(format!("{name}.png"));
+            image::save_buffer_with_format(
+                &path,
+                &rgba,
+                canvas_w,
+                canvas_h,
+                image::ExtendedColorType::Rgba8,
+                image::ImageFormat::Png,
+            )
+            .expect("save png");
+            eprintln!("captured {name}.png");
+        }
+
+        /// Build an offline app with realistic seed state for capture.
+        fn seed_app(
+            local_label: &str,
+            peer_public: &PublicKey,
+            dark_mode: bool,
+        ) -> (tokio::runtime::Runtime, IcedChat) {
+            let (runtime, mut app) = build_prewarm_test_app();
+            app.screen = Screen::ChatList;
+            app.dark_mode = dark_mode;
+            app.window_width = 1200.0;
+            app.local_label = local_label.to_string();
+            app.mesh_health = MeshHealth::Good;
+            app.mesh_connected_at = Some(std::time::Instant::now());
+            app.neighbors.insert(*peer_public);
+            app.direct_peers = 1;
+            app.sender_ready = true;
+            (runtime, app)
+        }
+
+        fn seed_friends(app: &mut IcedChat, dark_mode: bool) {
+            use boru_core::friends::{FriendId, FriendRecord, FriendRelationship, FriendStatus};
+            let names = ["Alice", "Bob", "Carol", "Dan"];
+            for (i, name) in names.iter().enumerate() {
+                let pk = SecretKey::generate().public();
+                let fid = FriendId::from_public_key(pk);
+                let record = FriendRecord {
+                    label: Some(name.to_string()),
+                    status: FriendStatus {
+                        online: i % 2 == 0,
+                        last_seen_at_unix_ms: Some(boru_core::chat_core::now_ms()),
+                        last_offline_at_unix_ms: None,
+                    },
+                    relationship: FriendRelationship::Friends,
+                    ..Default::default()
+                };
+                app.friends.upsert(fid, record);
+            }
+            app.dark_mode = dark_mode;
+        }
+
+        fn now_ms() -> u64 {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64
+        }
+
+        #[test]
+        fn capture_home_light() {
+            load_fonts();
+            let peer = SecretKey::generate().public();
+            let (_rt, mut app) = seed_app("6c0f88fe9f", &peer, false);
+            app.dashboard_sharing_summary = Some(crate::sharing_summary::SharingSummary::default());
+            let mut element = app.view();
+            render_element(&mut element, "home_light", 1200, 800, false);
+        }
+
+        #[test]
+        fn capture_home_dark() {
+            load_fonts();
+            let peer = SecretKey::generate().public();
+            let (_rt, mut app) = seed_app("6c0f88fe9f", &peer, true);
+            let mut element = app.view();
+            render_element(&mut element, "home_dark", 1200, 800, true);
+        }
+
+        #[test]
+        fn capture_chat_light() {
+            load_fonts();
+            let peer = SecretKey::generate().public();
+            let (_rt, mut app) = seed_app("6c0f88fe9f", &peer, false);
+            let topic = TopicId::from_bytes([7u8; 32]);
+            app.screen = Screen::Chat { topic };
+            app.topic = topic;
+            app.ticket_str = "room-ticket-abc".to_string();
+            app.entries = vec![
+                ChatEntry::system("You joined the room")
+                    .with_timestamp(Some(now_ms() as i64 - 300_000)),
+                ChatEntry::remote("Alice", "Have you seen the new type system?", None, None, None)
+                    .with_timestamp(Some(now_ms() as i64 - 250_000)),
+                ChatEntry::local("6c0f88fe9f", "Yes — Archivo looks much sharper.")
+                    .with_timestamp(Some(now_ms() as i64 - 200_000)),
+                ChatEntry::remote("Alice", "And the sidebar finally matches.", None, None, None)
+                    .with_timestamp(Some(now_ms() as i64 - 150_000)),
+                ChatEntry::system("Bob is online").with_timestamp(Some(now_ms() as i64 - 60_000)),
+            ];
+            app.names.insert(peer, "Alice".to_string());
+            for entry in app.entries.iter_mut() {
+                entry.update_cache();
+            }
+            app.sender = Some(boru_core::api::GossipSender::new(
+                irpc::channel::mpsc::Sender::from(tokio::sync::mpsc::channel::<
+                    boru_core::api::Command,
+                >(8).0),
+            ));
+            app.sender_ready = true;
+            app.composer_text = "Typing a message…".to_string();
+            let mut element = app.view();
+            render_element(&mut element, "chat_light", 1200, 800, false);
+        }
+
+        #[test]
+        fn capture_chat_dark() {
+            load_fonts();
+            let peer = SecretKey::generate().public();
+            let (_rt, mut app) = seed_app("6c0f88fe9f", &peer, true);
+            let topic = TopicId::from_bytes([7u8; 32]);
+            app.screen = Screen::Chat { topic };
+            app.topic = topic;
+            app.entries = vec![
+                ChatEntry::system("You joined the room")
+                    .with_timestamp(Some(now_ms() as i64 - 300_000)),
+                ChatEntry::remote("Alice", "Have you seen the new type system?", None, None, None)
+                    .with_timestamp(Some(now_ms() as i64 - 250_000)),
+                ChatEntry::local("6c0f88fe9f", "Yes — Archivo looks much sharper.")
+                    .with_timestamp(Some(now_ms() as i64 - 200_000)),
+                ChatEntry::remote("Alice", "And the sidebar finally matches.", None, None, None)
+                    .with_timestamp(Some(now_ms() as i64 - 150_000)),
+            ];
+            app.names.insert(peer, "Alice".to_string());
+            for entry in app.entries.iter_mut() {
+                entry.update_cache();
+            }
+            app.sender = Some(boru_core::api::GossipSender::new(
+                irpc::channel::mpsc::Sender::from(tokio::sync::mpsc::channel::<
+                    boru_core::api::Command,
+                >(8).0),
+            ));
+            app.sender_ready = true;
+            app.composer_text = "Nice work".to_string();
+            let mut element = app.view();
+            render_element(&mut element, "chat_dark", 1200, 800, true);
+        }
+
+        #[test]
+        fn capture_file_sharing_light() {
+            load_fonts();
+            let peer = SecretKey::generate().public();
+            let (_rt, mut app) = seed_app("6c0f88fe9f", &peer, false);
+            app.screen = Screen::FileSharing;
+            seed_friends(&mut app, false);
+            use crate::shared_by_me_table::{
+                RecipientAccess, RecipientView, SharedByMeRow,
+            };
+            app.dashboard_shared_by_me_filter = vec![
+                SharedByMeRow {
+                    id: "local:default:m1".to_string(),
+                    content_hash: "aa11".repeat(16),
+                    display_name: "demo-recap.mp4".to_string(),
+                    mime_type: Some("video/mp4".to_string()),
+                    size_bytes: Some(24_000_000),
+                    shared_on_ms: now_ms() - 3_600_000,
+                    recipients: vec![RecipientView {
+                        id: peer.to_string(),
+                        label: "Alice".to_string(),
+                        access: RecipientAccess::Allowed,
+                    }],
+                    has_explicit_recipients: true,
+                    source_available: true,
+                    downloads: None,
+                },
+                SharedByMeRow {
+                    id: "local:default:m2".to_string(),
+                    content_hash: "bb22".repeat(16),
+                    display_name: "handbook.pdf".to_string(),
+                    mime_type: Some("application/pdf".to_string()),
+                    size_bytes: Some(1_200_000),
+                    shared_on_ms: now_ms() - 86_400_000,
+                    recipients: vec![RecipientView {
+                        id: peer.to_string(),
+                        label: "Alice".to_string(),
+                        access: RecipientAccess::Allowed,
+                    }],
+                    has_explicit_recipients: true,
+                    source_available: true,
+                    downloads: None,
+                },
+            ];
+            let mut element = app.view();
+            render_element(&mut element, "file_sharing_light", 1200, 800, false);
+        }
+
+        #[test]
+        fn capture_create_group_dialog_light() {
+            load_fonts();
+            let peer = SecretKey::generate().public();
+            let (_rt, mut app) = seed_app("6c0f88fe9f", &peer, false);
+            seed_friends(&mut app, false);
+            app.show_create_group_dialog = true;
+            app.create_group_name = "Family".to_string();
+            let mut element = app.view();
+            render_element(&mut element, "create_group_dialog_light", 1200, 800, false);
+        }
+
+        #[test]
+        fn capture_create_room_dialog_light() {
+            load_fonts();
+            let peer = SecretKey::generate().public();
+            let (_rt, mut app) = seed_app("6c0f88fe9f", &peer, false);
+            app.show_create_room_dialog = true;
+            app.create_room_name = "General".to_string();
+            app.create_room_advertise = true;
+            let mut element = app.view();
+            render_element(&mut element, "create_room_dialog_light", 1200, 800, false);
+        }
+
+        #[test]
+        fn capture_create_tunnel_dialog_light() {
+            load_fonts();
+            let peer = SecretKey::generate().public();
+            let (_rt, mut app) = seed_app("6c0f88fe9f", &peer, false);
+            seed_friends(&mut app, false);
+            app.show_create_tunnel_dialog = true;
+            let mut element = app.view();
+            render_element(&mut element, "create_tunnel_dialog_light", 1200, 800, false);
+        }
+
+        #[test]
+        fn capture_video_card_light() {
+            load_fonts();
+            let attachment = DownloadAttachment::new(
+                TransferKind::Video,
+                "interview-recap.mp4",
+                "blob:video-ticket-1",
+                "Alice",
+                None,
+            );
+            let card = crate::video_file_card::BoruVideoFileCard::new(
+                0,
+                false,
+                false,
+                None,
+                false,
+                None,
+                false,
+                Some(now_ms() as i64),
+                720.0,
+            );
+            let mut element = card.view(&attachment);
+            render_element(&mut element, "video_file_card_light", 800, 420, false);
+        }
+
+        #[test]
+        fn capture_settings_light() {
+            load_fonts();
+            let peer = SecretKey::generate().public();
+            let (_rt, mut app) = seed_app("6c0f88fe9f", &peer, false);
+            app.screen = Screen::Settings;
+            seed_friends(&mut app, false);
+            let mut element = app.view();
+            render_element(&mut element, "settings_light", 1200, 800, false);
+        }
+    }
 }
