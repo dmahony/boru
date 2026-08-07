@@ -456,3 +456,12 @@ pub mod group_encryption;
 /// synchronous file I/O and CPU-bound blake3 computation.
 #[cfg(feature = "net")]
 pub mod file_hasher;
+
+/// Provider-neutral GIF domain model — the [`GifProvider`] trait and its
+/// neutral request/response types.
+///
+/// Always available (no feature gate) because it is pure data plus a
+/// trait: no networking, no provider credentials.  Provider-specific
+/// wire models live inside the adapter module that implements
+/// [`GifProvider`](gif_provider::GifProvider).
+pub mod gif_provider;
