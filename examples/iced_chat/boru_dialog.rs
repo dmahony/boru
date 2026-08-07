@@ -181,18 +181,23 @@ impl<'a, Message: Clone + 'a> BoruDialog<'a, Message> {
         // ── Header: title + optional subtitle + close button ────────────
         let mut title_col = Column::new().spacing(design_tokens::SPACE_2);
         title_col = title_col.push(
+            // FONTS Task 11: dialog title is Archivo SemiCondensed Bold at
+            // the DIALOG_TITLE scale (26 px, band 24–28 px) — the PageTitle
+            // family/weight with the dialog size token.
             text(title)
-                .font(TypeRole::SectionTitle.font())
-                .size(TypeRole::SectionTitle.size_px())
+                .font(TypeRole::PageTitle.font())
+                .size(crate::fonts::DIALOG_TITLE)
                 .style(move |t| iced::widget::text::Style {
                     color: Some(design_tokens::text_primary(t)),
                 }),
         );
         if let Some(subtitle) = subtitle {
             title_col = title_col.push(
+                // FONTS Task 11: subtitle is IBM Plex Sans Regular at the
+                // DIALOG_SUBTITLE scale (14 px, band 14–15 px).
                 text(subtitle)
                     .font(TypeRole::SupportingText.font())
-                    .size(TypeRole::SupportingText.size_px())
+                    .size(crate::fonts::DIALOG_SUBTITLE)
                     .style(move |t| iced::widget::text::Style {
                         color: Some(design_tokens::text_secondary(t)),
                     }),

@@ -74,8 +74,9 @@ use crate::ui_components;
 
 /// A form field label rendered above a control.
 ///
-/// Uses the `FormLabel` typography role (Source Sans 3 SemiBold, 14 px) with
-/// secondary text colour so it reads as a label, not body copy.
+/// Uses the `ButtonLabel` typography role (IBM Plex Sans SemiBold, 14 px)
+/// with secondary text colour so it reads as a label, not body copy.
+/// (FONTS-04/11: form labels are IBM Plex Sans Medium-or-SemiBold.)
 pub fn form_label(label: &str) -> Element<'static, AppMessage> {
     text(label.to_string())
         .font(TypeRole::ButtonLabel.font())
@@ -371,7 +372,9 @@ impl<'a> TextArea<'a> {
             .on_action(self.on_action)
             .placeholder(self.placeholder)
             .padding([design_tokens::SPACE_8, design_tokens::SPACE_12])
-            .height(Length::Fixed(self.min_height));
+            .height(Length::Fixed(self.min_height))
+            // FONTS Task 11: input text is IBM Plex Sans Regular (Body role).
+            .font(TypeRole::Body.font());
 
         editor = if has_error {
             editor.style(text_editor_error_style)
@@ -497,6 +500,8 @@ where
             .width(Length::Fill)
             .padding([design_tokens::SPACE_8, design_tokens::SPACE_12])
             .text_size(TypeRole::Body.size_px())
+            // FONTS Task 11: select text is IBM Plex Sans Regular (Body role).
+            .font(TypeRole::Body.font())
             .style(pick_list_style)
             .menu_style(select_menu_style);
 
@@ -583,6 +588,9 @@ where
         )
         .width(Length::Fill)
         .padding([design_tokens::SPACE_8, design_tokens::SPACE_12])
+        // FONTS Task 11: combo-box input text is IBM Plex Sans Regular
+        // (Body role), matching the other form inputs.
+        .font(TypeRole::Body.font())
         .input_style(ui_components::text_input_style)
         .menu_style(select_menu_style);
 
@@ -649,6 +657,8 @@ pub fn checkbox_field<'a>(
         .label(label)
         .on_toggle(on_toggle)
         .text_size(TypeRole::Body.size_px())
+        // FONTS Task 11: checkbox label is IBM Plex Sans Regular (Body role).
+        .font(TypeRole::Body.font())
         .style(checkbox_style);
 
     match helper {
@@ -698,6 +708,9 @@ pub fn toggle_field<'a>(
     let tg = toggler(is_toggled)
         .label(label)
         .on_toggle(on_toggle)
+        // FONTS Task 11: toggle label is IBM Plex Sans Regular (Body role).
+        .text_size(TypeRole::Body.size_px())
+        .font(TypeRole::Body.font())
         .style(toggler_style);
 
     match helper {

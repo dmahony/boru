@@ -39094,6 +39094,52 @@ mod tests {
     }
 
     #[test]
+    fn creation_dialogs_fonts11_typography() {
+        // FONTS Task 11: creation-dialog chrome resolves through TypeRole —
+        // dialog titles Archivo SemiCondensed Bold at the DIALOG_TITLE scale
+        // (26 px, band 24–28 px), subtitle IBM Plex Sans Regular at the
+        // DIALOG_SUBTITLE scale (14 px, band 14–15 px), form labels IBM Plex
+        // Sans SemiBold (ButtonLabel), inputs IBM Plex Sans Regular (Body),
+        // and buttons IBM Plex Sans SemiBold (ButtonLabel). No direct
+        // font-family calls in the dialog chrome.
+        let dialog_src = include_str!("boru_dialog.rs");
+        assert!(
+            dialog_src.contains("TypeRole::PageTitle.font()")
+                && dialog_src.contains("crate::fonts::DIALOG_TITLE"),
+            "dialog title must use the PageTitle family (Archivo SemiCondensed Bold) at the DIALOG_TITLE scale"
+        );
+        assert!(
+            dialog_src.contains("TypeRole::SupportingText.font()")
+                && dialog_src.contains("crate::fonts::DIALOG_SUBTITLE"),
+            "dialog subtitle must use SupportingText (IBM Plex Sans Regular) at the DIALOG_SUBTITLE scale"
+        );
+        assert!(
+            dialog_src.contains("TypeRole::ButtonLabel.font()"),
+            "dialog footer buttons must use ButtonLabel (IBM Plex Sans SemiBold)"
+        );
+        assert!(
+            !dialog_src.contains("source_sans(") && !dialog_src.contains("manrope("),
+            "dialog chrome must not use legacy direct font-family calls"
+        );
+        // Form primitives (labels, inputs, selects, checkbox/toggle labels)
+        // must resolve to IBM Plex Sans roles rather than the Source Sans 3
+        // default font.
+        let form_src = include_str!("form_components.rs");
+        assert!(
+            form_src.contains("TypeRole::ButtonLabel.font()"),
+            "form labels must use ButtonLabel (IBM Plex Sans SemiBold)"
+        );
+        assert!(
+            form_src.contains("TypeRole::Body.font()"),
+            "form inputs/selects/labels must use TypeRole::Body (IBM Plex Sans Regular)"
+        );
+        assert!(
+            form_src.contains("TypeRole::SupportingText.font()"),
+            "helper/error text must use SupportingText (IBM Plex Sans Regular)"
+        );
+    }
+
+    #[test]
     fn shared_chrome_no_raw_typo_text() {
         // UI-HOME-14: the shared chrome helpers (sidebar empty state, local
         // profile block, profile identity card, info row, section card) must

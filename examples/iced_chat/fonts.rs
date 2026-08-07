@@ -261,10 +261,12 @@ pub fn ibm_plex_sans(weight: Weight) -> Font {
 //   composer_text 15 · technical_value 12 · brand_wordmark 28
 //
 // The `sizes` module below keeps only the constants still referenced by
-// app code (`HOME_SUBTITLE` and the legacy `TYPO_*` aliases). The former
-// named scale constants (PAGE_TITLE, CONVERSATION_TITLE, SIDEBAR_IDENTITY,
-// CHAT_MESSAGE, BODY, SECONDARY) were removed in FONTS-16 — no token or
-// call site referenced them; `TypeRole::size_px()` is the single source.
+// app code (`HOME_SUBTITLE`, the dialog-scale tokens `DIALOG_TITLE` /
+// `DIALOG_SUBTITLE` added in FONTS-11, and the legacy `TYPO_*` aliases).
+// The former named scale constants (PAGE_TITLE, CONVERSATION_TITLE,
+// SIDEBAR_IDENTITY, CHAT_MESSAGE, BODY, SECONDARY) were removed in
+// FONTS-16 — no token or call site referenced them; `TypeRole::size_px()`
+// is the single source for the role sizes.
 
 mod sizes {
     //! Type-size constants (pixels).  Boru Modern spec scale.
@@ -276,6 +278,10 @@ mod sizes {
 
     /// Home subtitle (UI-HOME-02) — 16 px (approved mockup range 15–17 px).
     pub const HOME_SUBTITLE: f32 = 16.0;
+    /// Creation-dialog title (FONTS Task 11) — 26 px (approved band 24–28 px).
+    pub const DIALOG_TITLE: f32 = 26.0;
+    /// Creation-dialog subtitle (FONTS Task 11) — 14 px (approved band 14–15 px).
+    pub const DIALOG_SUBTITLE: f32 = 14.0;
 
     // ── Legacy size aliases (kept for gradual migration in app.rs) ────
     /// @deprecated use `TypeRole::PageTitle` (28 px) instead.
@@ -304,7 +310,7 @@ pub use sizes::*;
 // FONTS Task 16 baseline (all values are within the approved ranges):
 //   display_heading  Archivo SemiCondensed Bold 32   page greeting / hero
 //   page_title       Archivo SemiCondensed Bold 28   application page title
-//   section_title    IBM Plex Sans SemiBold 20       section heading (creation-dialog titles reuse this role; FONTS-11 gives them the 24–28 px treatment)
+//   section_title    IBM Plex Sans SemiBold 20       section heading (creation-dialog titles use PageTitle family @ DIALOG_TITLE — FONTS-11)
 //   card_title       IBM Plex Sans SemiBold 18       dashboard card title
 //   body             IBM Plex Sans Regular 15        body copy and descriptions
 //   body_emphasised  IBM Plex Sans SemiBold 15       emphasised body copy
@@ -326,7 +332,8 @@ pub enum TypeRole {
     /// Application page title — Archivo SemiCondensed Bold 28.
     PageTitle,
     /// Section heading — IBM Plex Sans SemiBold 20.
-    /// (Creation-dialog titles reuse this role; FONTS-11 sizes them 24–28 px.)
+    /// (Creation-dialog titles use the PageTitle family at the DIALOG_TITLE
+    /// scale — Archivo SemiCondensed Bold 26 px, FONTS-11.)
     SectionTitle,
     /// Card title — IBM Plex Sans SemiBold 18.
     CardTitle,
@@ -868,7 +875,8 @@ mod tests {
         //   DisplayHeading 32, PageTitle 28, CardTitle 17–18, Body 14–15,
         //   Button 14, Metadata 12–13, Chat body 15–16, Chat sender 14–15,
         //   Technical ID 12–14. DialogTitle 24–28 has no dedicated role —
-        //   creation dialogs reuse SectionTitle (FONTS-11 sizes them).
+        //   creation dialogs use the PageTitle family at the DIALOG_TITLE
+        //   scale token (26 px, FONTS-11).
         assert_eq!(TypeRole::DisplayHeading.size_px(), 32.0);
         assert_eq!(TypeRole::PageTitle.size_px(), 28.0);
         assert_eq!(TypeRole::SectionTitle.size_px(), 20.0);
@@ -884,6 +892,26 @@ mod tests {
         assert_eq!(TypeRole::ComposerText.size_px(), 15.0);
         assert_eq!(TypeRole::TechnicalValue.size_px(), 12.0);
         assert_eq!(TypeRole::BrandWordmark.size_px(), 28.0);
+    }
+
+    #[test]
+    fn dialog_size_tokens_fit_task11_bands() {
+        // FONTS Task 11: dialog title Archivo SemiCondensed Bold 24–28 px,
+        // subtitle IBM Plex Sans Regular 14–15 px. The DIALOG_TITLE /
+        // DIALOG_SUBTITLE scale tokens must sit inside those approved bands.
+        assert!(
+            (24.0..=28.0).contains(&DIALOG_TITLE),
+            "DIALOG_TITLE {DIALOG_TITLE} must be within 24–28 px"
+        );
+        assert!(
+            (14.0..=15.0).contains(&DIALOG_SUBTITLE),
+            "DIALOG_SUBTITLE {DIALOG_SUBTITLE} must be within 14–15 px"
+        );
+        // The dialog title must resolve to the Archivo SemiCondensed Bold
+        // family — the same family the PageTitle role uses — so callers can
+        // apply `TypeRole::PageTitle.font()` with the DIALOG_TITLE size.
+        assert_eq!(TypeRole::PageTitle.family_name(), ARCHIVO_SEMI_CONDENSED);
+        assert_eq!(TypeRole::PageTitle.weight(), Weight::Bold);
     }
 
     #[test]
