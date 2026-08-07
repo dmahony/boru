@@ -473,3 +473,13 @@ pub mod file_hasher;
 /// wire models live inside the adapter module that implements
 /// [`GifProvider`](gif_provider::GifProvider).
 pub mod gif_provider;
+
+/// KLIPY GIF provider adapter — a concrete [`GifProvider`] implementation
+/// for the KLIPY HTTP API.
+///
+/// All KLIPY-specific wire models and request/response types stay inside
+/// this module; nothing leaks into the neutral domain model or app code.
+/// Gated behind `gui` because it uses the optional `reqwest`/`url`/
+/// `serde_json` dependencies.
+#[cfg(feature = "gui")]
+pub mod klipy_provider;
