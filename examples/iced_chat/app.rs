@@ -2537,6 +2537,25 @@ async fn fetch_gif_media_bytes(url: &str) -> Result<Vec<u8>, String> {
     Ok(body)
 }
 
+/// Detect whether a picked/dropped file should be treated as an inline image
+/// attachment (routed through the encrypted `ExecuteImageSend` pipeline) vs.
+/// a generic file (`ExecuteFileSend`).
+///
+/// This is the single routing rule shared by the OS file picker
+/// (`AttachPressed`) and the drag-and-drop composer path
+/// (`ComposerFileDropped`). GIF/WebP/BMP are images so user-uploaded
+/// animation files keep flowing through the encrypted attachment pipeline
+/// (KLIPY-07); MP4 and other video files are generic files.
+fn is_attachment_image(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.ends_with(".png")
+        || lower.ends_with(".jpg")
+        || lower.ends_with(".jpeg")
+        || lower.ends_with(".gif")
+        || lower.ends_with(".webp")
+        || lower.ends_with(".bmp")
+}
+
 /// Decode an animated GIF into iced-moving-picture `Frames` (raw RGBA
 /// handles + per-frame delays). Returns None if the image is not a GIF or has
 /// only one frame — single-frame GIFs render as static images.
@@ -14141,12 +14160,7 @@ impl IcedChat {
                             let path = file.path().to_string_lossy().to_string();
                             let encoded = format!("{name}|{path}|{path}");
                             // Auto-detect image files by extension for inline display
-                            let is_image = name.to_lowercase().ends_with(".png")
-                                || name.to_lowercase().ends_with(".jpg")
-                                || name.to_lowercase().ends_with(".jpeg")
-                                || name.to_lowercase().ends_with(".gif")
-                                || name.to_lowercase().ends_with(".webp")
-                                || name.to_lowercase().ends_with(".bmp");
+                            let is_image = is_attachment_image(&name);
                             if is_image {
                                 AppMessage::ExecuteImageSend(encoded)
                             } else {
@@ -14217,12 +14231,7 @@ impl IcedChat {
                 let encoded = format!("{name}|{path_str}|{path_str}");
                 // Auto-detect image files by extension for inline display (same
                 // rule as the AttachPressed file dialog result).
-                let is_image = name.to_lowercase().ends_with(".png")
-                    || name.to_lowercase().ends_with(".jpg")
-                    || name.to_lowercase().ends_with(".jpeg")
-                    || name.to_lowercase().ends_with(".gif")
-                    || name.to_lowercase().ends_with(".webp")
-                    || name.to_lowercase().ends_with(".bmp");
+                let is_image = is_attachment_image(&name);
                 if is_image {
                     iced::Task::done(AppMessage::ExecuteImageSend(encoded))
                 } else {
@@ -48005,6 +48014,101 @@ mod tests {
         ));
         drop(task);
         drop(runtime);
+    }
+
+    // ── KLIPY-07: user-uploaded GIF attachment routing ──────────────
+
+    /// The shared attachment routing helper treats .gif/.webp/.bmp as images
+    /// (so user-selected animation files keep using the encrypted image
+    /// attachment pipeline) while .png/.jpg/.jpeg are unchanged.
+    #[test]
+    fn attachment_image_detection_covers_gif_webp_bmp() {
+        for name in [
+            "anim.gif", "anim.GIF", "clip.webp", "clip.WEBP", "pic.bmp", "pic.BMP", "photo.png",
+            "photo.jpg", "photo.jpeg", "photo.JPEG",
+        ] {
+            assert!(
+                is_attachment_image(name),
+                "{name} should route through the image attachment pipeline"
+            );
+        }
+    }
+
+    /// Video and other non-image files are NOT routed as inline images —
+    /// MP4/MOV and text go through the generic file pipeline, exactly as
+    /// before KLIPY.
+    #[test]
+    fn attachment_image_detection_excludes_video_and_text() {
+        for name in ["movie.mp4", "movie.MP4", "clip.mov", "clip.avi", "note.txt", "a.pdf"] {
+            assert!(
+                !is_attachment_image(name),
+                "{name} should route through the generic file pipeline"
+            );
+        }
+    }
+
+    /// Helper: build a tiny animated GIF in memory (used by the renderer
+    /// tests below). Multi-frame → decode_gif_frames should return Some.
+    fn tiny_animated_gif(frames: u32) -> Vec<u8> {
+        use image::codecs::gif::{GifEncoder, Repeat};
+        use image::{Delay, Frame};
+        let mut bytes = Vec::new();
+        {
+            let mut enc = GifEncoder::new(&mut bytes);
+            enc.set_repeat(Repeat::Infinite).unwrap();
+            for i in 0..frames {
+                let img = image::RgbaImage::from_pixel(4, 4, image::Rgba([i as u8 * 40, 0, 0, 255]));
+                enc.encode_frame(Frame::from_parts(
+                    img,
+                    0,
+                    0,
+                    Delay::from_numer_denom_ms(1, 10),
+                ))
+                .unwrap();
+            }
+        }
+        bytes
+    }
+
+    /// A downloaded multi-frame GIF still enters the animated renderer path:
+    /// decode_gif_frames returns Frames for a real animated GIF.
+    #[test]
+    fn decode_gif_frames_animated_returns_some() {
+        let gif = tiny_animated_gif(3);
+        let frames = decode_gif_frames(&gif);
+        assert!(
+            frames.is_some(),
+            "multi-frame GIF must decode into animated frames"
+        );
+    }
+
+    /// A single-frame GIF stays on the static image path (decode_gif_frames
+    /// returns None) so it renders as a normal image, not a looping widget.
+    #[test]
+    fn decode_gif_frames_single_frame_returns_none() {
+        let gif = tiny_animated_gif(1);
+        assert!(
+            decode_gif_frames(&gif).is_none(),
+            "single-frame GIF must stay on the static image path"
+        );
+    }
+
+    /// Non-GIF bytes never enter the animated decoder path.
+    #[test]
+    fn decode_gif_frames_non_gif_returns_none() {
+        let png = {
+            use image::ImageEncoder;
+            let img = image::RgbaImage::from_pixel(4, 4, image::Rgba([10, 20, 30, 255]));
+            let mut bytes = Vec::new();
+            image::codecs::png::PngEncoder::new(&mut bytes)
+                .write_image(img.as_raw(), 4, 4, image::ExtendedColorType::Rgba8)
+                .unwrap();
+            bytes
+        };
+        assert!(
+            decode_gif_frames(&png).is_none(),
+            "PNG bytes must not be treated as an animated GIF"
+        );
     }
 
     // ── PeerPresence state transition tests ───────────────────────────

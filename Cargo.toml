@@ -361,6 +361,11 @@ path = "tests/test_hostile_input.rs"
 required-features = ["net"]
 
 [[test]]
+name = "test_user_uploaded_gif"
+path = "tests/test_user_uploaded_gif.rs"
+required-features = ["net"]
+
+[[test]]
 name = "test_crash_recovery"
 path = "tests/test_crash_recovery.rs"
 required-features = ["net"]
