@@ -376,6 +376,50 @@ mod tests {
     }
 
     #[test]
+    fn share_dialog_caps_body_and_keeps_footer() {
+        // TUN-UI: the Create Tunnel (Share Local Service) dialog must cap
+        // its body with `.scroll_body` so the footer (Cancel / Create
+        // Tunnel) stays on screen when the Local Services suggestion list
+        // grows the dialog past the window height. Mirror the exact builder
+        // sequence used by `view_share_local_service_dialog` (app.rs): five
+        // body sections, then secondary + primary footer rows, then the cap.
+        let dialog = BoruDialog::<TestMessage>::new("Create Tunnel")
+            .subtitle("Securely route traffic between peers.")
+            .push_body(text("Tunnel Details").into())
+            .push_body(text("Connection Target").into())
+            .push_body(text("Local Services").into())
+            .push_body(text("Permissions / Options").into())
+            .push_body(text("Status / Guidance").into())
+            .scroll_body(520.0)
+            .secondary("Cancel", TestMessage::Cancel)
+            .primary("Create Tunnel", TestMessage::Create);
+        assert_eq!(
+            dialog.max_body_height,
+            Some(520.0),
+            "share dialog must cap its body height so the footer stays visible"
+        );
+        assert!(
+            dialog.secondary.is_some(),
+            "share dialog must keep the Cancel footer row"
+        );
+        assert!(
+            dialog.primary.is_some(),
+            "share dialog must keep the Create Tunnel footer row"
+        );
+        assert_eq!(
+            dialog.body.len(),
+            5,
+            "share dialog pushes five body sections before the footer"
+        );
+        // The capped body + footer must still build into a valid element.
+        let el: Element<'static, TestMessage> = dialog
+            .on_close(TestMessage::Close)
+            .on_backdrop(TestMessage::Backdrop)
+            .build(&theme());
+        let _ = el;
+    }
+
+    #[test]
     fn dialog_builds_with_backdrop_dismiss() {
         let el: Element<'static, TestMessage> = BoruDialog::new("Create Tunnel")
             .on_backdrop(TestMessage::Backdrop)

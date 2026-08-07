@@ -39524,6 +39524,11 @@ impl IcedChat {
             .primary_enabled(port_valid && !share_submitting)
             .on_close(AppMessage::CancelShareLocalService)
             .on_backdrop(AppMessage::CancelShareLocalService)
+            // TUN-UI: cap the body so the footer (Cancel / Create Tunnel)
+            // stays on screen when the Local Services suggestion list grows
+            // the dialog past the window height. Same value as the Create
+            // Group Chat dialog.
+            .scroll_body(520.0)
             .build(&theme);
 
         iced::widget::stack![base, overlay].into()
@@ -42251,6 +42256,38 @@ mod tests {
         assert!(
             create_tunnel.contains("BoruDialog::new"),
             "Create Tunnel must use BoruDialog"
+        );
+    }
+
+    #[test]
+    fn share_local_service_dialog_caps_body_for_footer() {
+        // TUN-UI: the Create Tunnel (Share Local Service) dialog must call
+        // `.scroll_body(...)` so the footer (Cancel / Create Tunnel) stays
+        // on screen once the Local Services suggestion list renders. Without
+        // the cap the Shrink-height panel grows past the window and the
+        // footer is pushed off-screen. The cap must be applied with the same
+        // value convention as the Create Group Chat dialog (520.0).
+        let src = include_str!("app.rs");
+        let share_dialog = method_source(
+            src,
+            "fn view_share_local_service_dialog<'a>(",
+            "fn view_local_service_suggestion_row<'a>(",
+        );
+        assert!(
+            share_dialog.contains(".scroll_body(520.0)"),
+            "Create Tunnel (share local service) dialog must cap its body with .scroll_body(520.0) so the footer stays visible"
+        );
+        assert!(
+            share_dialog.contains(".secondary(\"Cancel\""),
+            "share dialog must keep the Cancel footer row"
+        );
+        assert!(
+            share_dialog.contains(".primary(") && share_dialog.contains("Creating…"),
+            "share dialog must keep the Create Tunnel footer row (primary action)"
+        );
+        assert!(
+            share_dialog.contains("\"Create Tunnel\""),
+            "share dialog primary label must be Create Tunnel"
         );
     }
 
