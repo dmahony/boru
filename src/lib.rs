@@ -254,6 +254,14 @@ pub mod backfill;
 #[cfg(feature = "net")]
 pub mod tunnel;
 
+/// Local TCP service discovery for the "Share Local Service" dialog.
+///
+/// Enumerates loopback-reachable listeners, verifies them with connect tests,
+/// fingerprints HTTP services, and labels them. Isolated from the GUI so a
+/// future non-desktop backend could substitute its own enumeration strategy.
+#[cfg(feature = "gui")]
+pub mod local_service_scan;
+
 /// Per-user profile settings and sharing controls.
 ///
 /// Owns the on-disk `user_profile.json` that lives beside `secret_key.txt`.

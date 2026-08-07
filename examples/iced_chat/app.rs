@@ -3803,6 +3803,14 @@ pub struct IcedChat {
     /// Controls whether the receiving side displays `http://` before the
     /// loopback address — never inferred from the port or service name.
     share_service_is_http: bool,
+    /// Locally running services discovered for the share dialog suggestion
+    /// list. Empty until the first scan completes.
+    share_service_suggestions: Vec<boru_core::local_service_scan::LocalServiceSuggestion>,
+    /// Whether a local-service scan is currently in flight.
+    share_service_scanning: bool,
+    /// When the last scan finished, used for the ~30s reopen cache so
+    /// reopening the dialog is instant.
+    share_service_scan_cached_at: Option<std::time::Instant>,
     /// Received secure-tunnel offers, keyed by tunnel id.
     ///
     /// Populated when a friend sends a signed `ContactAction::TunnelOffer`
@@ -5658,6 +5666,10 @@ pub enum AppMessage {
     ConfirmShareLocalService,
     /// Cancel the share dialog.
     CancelShareLocalService,
+    /// A local-service scan finished with discovered suggestions.
+    ShareLocalServiceScanDone(Vec<boru_core::local_service_scan::LocalServiceSuggestion>),
+    /// The user picked a suggested local service (port) in the share dialog.
+    SelectShareLocalServiceSuggestion(u16),
     /// A local service tunnel was created successfully.
     TunnelShared {
         /// Display name of the shared service.
@@ -7672,6 +7684,9 @@ impl IcedChat {
                 boru_core::tunnel::service::TunnelDuration::UntilExit,
             ]),
             share_service_is_http: true,
+            share_service_suggestions: Vec::new(),
+            share_service_scanning: false,
+            share_service_scan_cached_at: None,
             received_tunnels: HashMap::new(),
             shared_tunnels: HashMap::new(),
             toast_message: None,
@@ -9351,6 +9366,8 @@ impl IcedChat {
             AppMessage::ShareLocalServiceExpiryChanged(_) => "ShareLocalServiceExpiryChanged",
             AppMessage::ConfirmShareLocalService => "ConfirmShareLocalService",
             AppMessage::CancelShareLocalService => "CancelShareLocalService",
+            AppMessage::ShareLocalServiceScanDone(_) => "ShareLocalServiceScanDone",
+            AppMessage::SelectShareLocalServiceSuggestion(_) => "SelectShareLocalServiceSuggestion",
             AppMessage::TunnelShared { .. } => "TunnelShared",
             AppMessage::TunnelShareFailed { .. } => "TunnelShareFailed",
             AppMessage::ShareLocalServiceHttpToggled(_) => "ShareLocalServiceHttpToggled",
@@ -10917,8 +10934,12 @@ impl IcedChat {
                 self.share_service_is_http = true;
                 self.share_service_submitting = false;
                 self.share_service_error = None;
+                let scan = self.start_share_service_scan();
                 // Auto-focus the first meaningful field (tunnel name).
-                iced::widget::operation::focus(SHARE_SERVICE_NAME_INPUT)
+                iced::Task::batch(vec![
+                    scan,
+                    iced::widget::operation::focus(SHARE_SERVICE_NAME_INPUT),
+                ])
             }
             AppMessage::CancelCreateTunnel => {
                 self.show_create_tunnel_dialog = false;
@@ -17601,8 +17622,12 @@ impl IcedChat {
                 self.share_service_is_http = true;
                 self.share_service_submitting = false;
                 self.share_service_error = None;
+                let scan = self.start_share_service_scan();
                 // Auto-focus the tunnel name field.
-                iced::widget::operation::focus(SHARE_SERVICE_NAME_INPUT)
+                iced::Task::batch(vec![
+                    scan,
+                    iced::widget::operation::focus(SHARE_SERVICE_NAME_INPUT),
+                ])
             }
             AppMessage::ShareLocalServiceNameChanged(value) => {
                 self.share_service_name = value;
@@ -17630,6 +17655,25 @@ impl IcedChat {
                 }
                 self.share_local_service_open = false;
                 self.share_service_error = None;
+                iced::Task::none()
+            }
+            AppMessage::ShareLocalServiceScanDone(suggestions) => {
+                self.share_service_scanning = false;
+                self.share_service_suggestions = suggestions;
+                self.share_service_scan_cached_at = Some(std::time::Instant::now());
+                iced::Task::none()
+            }
+            AppMessage::SelectShareLocalServiceSuggestion(port) => {
+                if let Some(suggestion) = self
+                    .share_service_suggestions
+                    .iter()
+                    .find(|s| s.port == port)
+                {
+                    self.share_service_port = port.to_string();
+                    self.share_service_name = suggestion.label.clone();
+                    self.share_service_is_http = suggestion.is_http;
+                    self.share_service_error = None;
+                }
                 iced::Task::none()
             }
             AppMessage::ConfirmShareLocalService => {
@@ -23384,6 +23428,33 @@ impl IcedChat {
         let cutoff = SystemTime::now() - Duration::from_secs(3600); // 1 hour
         self.profile_cache
             .retain(|_, data| data.last_updated >= cutoff);
+    }
+
+    /// Kick off an asynchronous local-service scan for the Share Local
+    /// Service dialog, respecting the ~30s reopen cache. Runs off the UI
+    /// thread via `iced::Task::perform`; results arrive as
+    /// `AppMessage::ShareLocalServiceScanDone`.
+    fn start_share_service_scan(&mut self) -> iced::Task<AppMessage> {
+        // ~30s cache: reopening the dialog within the TTL reuses the last
+        // scan so the suggestion list appears instantly.
+        if let Some(at) = self.share_service_scan_cached_at {
+            if at.elapsed() < boru_core::local_service_scan::SCAN_CACHE_TTL {
+                return iced::Task::none();
+            }
+        }
+        self.share_service_scanning = true;
+        let own_pid = std::process::id();
+        // Exclude Boru's own received-tunnel loopback listeners so the app
+        // never suggests its internal tunnel listener as a shareable service.
+        let excluded_ports: Vec<u16> = self
+            .received_tunnels
+            .values()
+            .filter_map(|s| s.local_addr.map(|a| a.port()))
+            .collect();
+        iced::Task::perform(
+            boru_core::local_service_scan::scan_local_services(Some(own_pid), excluded_ports),
+            AppMessage::ShareLocalServiceScanDone,
+        )
     }
 }
 
@@ -39334,6 +39405,26 @@ impl IcedChat {
             .push(port_field.build())
             .build();
 
+        // Local Services — discovered running services the user can pick.
+        // Suggestions are convenience; manual port entry remains the primary
+        // path (the port field above always works).
+        let mut suggestions_section = FormSection::new("Local Services");
+        if self.share_service_scanning {
+            suggestions_section =
+                suggestions_section.push(helper_text("Scanning for local services…"));
+        } else if self.share_service_suggestions.is_empty() {
+            suggestions_section = suggestions_section.push(helper_text(
+                "No local services found. You can still enter a port above.",
+            ));
+        } else {
+            for suggestion in &self.share_service_suggestions {
+                suggestions_section = suggestions_section.push(
+                    self.view_local_service_suggestion_row(suggestion, &theme),
+                );
+            }
+        }
+        let suggestions_section = suggestions_section.build();
+
         // Permissions / Options — access duration.
         let options_section = FormSection::new("Permissions / Options")
             .push(
@@ -39361,6 +39452,7 @@ impl IcedChat {
             .width(self.dialog_width(BORU_DIALOG_WIDTH_STANDARD))
             .push_body(details_section)
             .push_body(target_section)
+            .push_body(suggestions_section)
             .push_body(options_section)
             .push_body(guidance_section)
             .secondary("Cancel", AppMessage::CancelShareLocalService)
@@ -39375,6 +39467,97 @@ impl IcedChat {
             .build(&theme);
 
         iced::widget::stack![base, overlay].into()
+    }
+
+    /// Render one discovered local service as a clickable suggestion row.
+    ///
+    /// Clicking the row fills the share dialog's port/name/HTTP fields via
+    /// [`AppMessage::SelectShareLocalServiceSuggestion`]. The row shows the
+    /// resolved label, the loopback port, and an HTTP badge when the probe
+    /// answered.
+    fn view_local_service_suggestion_row<'a>(
+        &'a self,
+        suggestion: &boru_core::local_service_scan::LocalServiceSuggestion,
+        theme: &iced::Theme,
+    ) -> iced::Element<'a, AppMessage> {
+        use iced::widget::{button, container, row, text, Space};
+        use iced::{Alignment, Background, Border, Color, Length};
+
+        let port = suggestion.port;
+        let is_http = suggestion.is_http;
+        let label = suggestion.label.clone();
+        let is_selected = self.share_service_port.trim() == port.to_string();
+
+        let mut content = row![
+            text(label.clone())
+                .font(crate::fonts::TypeRole::Body.font())
+                .size(crate::fonts::TypeRole::Body.size_px())
+                .style(move |t| text::Style {
+                    color: Some(crate::design_tokens::text_primary(t)),
+                    ..Default::default()
+                }),
+            Space::new().width(Length::Fill),
+            text(format!(":{port}"))
+                .font(crate::fonts::TypeRole::TechnicalValue.font())
+                .size(crate::fonts::TypeRole::TechnicalValue.size_px())
+                .style(move |t| text::Style {
+                    color: Some(crate::design_tokens::text_muted(t)),
+                    ..Default::default()
+                }),
+        ]
+        .spacing(SPACE_8)
+        .align_y(Alignment::Center)
+        .width(Length::Fill);
+
+        if is_http {
+            content = content.push(
+                container(
+                    text("HTTP")
+                        .font(crate::fonts::TypeRole::Metadata.font())
+                        .size(crate::fonts::TypeRole::Metadata.size_px())
+                        .style(move |t| text::Style {
+                            color: Some(crate::design_tokens::primary(t)),
+                            ..Default::default()
+                        }),
+                )
+                .padding([2, 6])
+                .style(move |t| container::Style {
+                    background: Some(Background::Color(crate::design_tokens::primary_soft(t))),
+                    border: Border {
+                        radius: crate::design_tokens::RADIUS_SM.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            );
+        }
+
+        let selected = is_selected;
+        button(content)
+            .on_press(AppMessage::SelectShareLocalServiceSuggestion(port))
+            .padding([SPACE_6, SPACE_8])
+            .width(Length::Fill)
+            .style(move |t, status| iced::widget::button::Style {
+                background: Some(Background::Color(if selected {
+                    crate::design_tokens::surface_selected(t)
+                } else {
+                    match status {
+                        iced::widget::button::Status::Hovered => {
+                            crate::design_tokens::surface_hover(t)
+                        }
+                        iced::widget::button::Status::Pressed => {
+                            crate::design_tokens::surface_selected(t)
+                        }
+                        _ => Color::TRANSPARENT,
+                    }
+                })),
+                border: Border {
+                    radius: crate::design_tokens::RADIUS_MD.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .into()
     }
 
     /// Confirmation overlay for removing a friend.
@@ -39569,6 +39752,119 @@ fn format_file_size(bytes: u64) -> String {
 mod tests {
     use super::*;
     use chrono::{FixedOffset, TimeZone, Utc};
+
+    // ── Local service scan pure logic (TUN-01) ─────────────────────────
+    // These exercise `boru_core::local_service_scan`'s network-free helpers:
+    // dedupe, label priority, the well-known-port table, and the self-exclusion
+    // filter. No network, no app instance, no relay — safe to run on debsrv.
+
+    use boru_core::local_service_scan::{
+        dedupe_and_sort, exclude_self, parse_http_head, resolve_label, sort_suggestions,
+        well_known_label, ListenerEntry, LocalServiceSuggestion,
+    };
+
+    fn listener(addr: &str, port: u16, pid: Option<u32>) -> ListenerEntry {
+        ListenerEntry {
+            local_addr: addr.parse().unwrap(),
+            port,
+            pid,
+        }
+    }
+
+    #[test]
+    fn local_service_scan_dedupe_collapses_bind_addrs_per_port() {
+        let listeners = vec![
+            listener("0.0.0.0", 3000, Some(11)),
+            listener("127.0.0.1", 3000, Some(11)),
+            listener("::1", 3000, Some(11)),
+            listener("0.0.0.0", 8080, Some(12)),
+            listener("192.168.1.5", 5432, Some(13)),
+        ];
+        let deduped = dedupe_and_sort(listeners);
+        assert_eq!(deduped.len(), 3, "one entry per unique port");
+        let ports: Vec<u16> = deduped.iter().map(|e| e.port).collect();
+        assert_eq!(ports, vec![3000, 5432, 8080], "sorted ascending by port");
+        // The loopback binding wins for port 3000.
+        let p3000 = deduped.iter().find(|e| e.port == 3000).unwrap();
+        assert!(p3000.local_addr.is_loopback(), "loopback binding preferred");
+    }
+
+    #[test]
+    fn local_service_scan_well_known_port_table() {
+        assert_eq!(well_known_label(3000), Some("Dev server"));
+        assert_eq!(well_known_label(5432), Some("Postgres"));
+        assert_eq!(well_known_label(3306), Some("MySQL"));
+        assert_eq!(well_known_label(8080), Some("HTTP"));
+        assert_eq!(well_known_label(22), Some("SSH"));
+        assert_eq!(well_known_label(49152), None, "ephemeral port has no label");
+    }
+
+    #[test]
+    fn local_service_scan_label_priority_process_name_first() {
+        // Process name wins over Server header.
+        assert_eq!(
+            resolve_label(3000, Some("node"), Some("Express")),
+            "node"
+        );
+        // Server header beats the well-known table.
+        assert_eq!(
+            resolve_label(3000, None, Some("nginx/1.24")),
+            "nginx/1.24"
+        );
+        // Well-known table beats the fallback.
+        assert_eq!(resolve_label(5432, None, None), "Postgres");
+        // Fallback for unknown port.
+        assert_eq!(resolve_label(49152, None, None), "TCP service on :49152");
+    }
+
+    #[test]
+    fn local_service_scan_exclude_self_filters_pid_and_ports() {
+        let listeners = vec![
+            listener("127.0.0.1", 3000, Some(100)),
+            listener("127.0.0.1", 8080, Some(200)),
+            listener("127.0.0.1", 9000, None),
+        ];
+        let kept = exclude_self(listeners, Some(100), &[8080]);
+        assert_eq!(kept.len(), 1, "own pid + excluded port both filtered");
+        assert_eq!(kept[0].port, 9000);
+    }
+
+    #[test]
+    fn local_service_scan_sort_http_first_then_port() {
+        let suggestions = vec![
+            LocalServiceSuggestion {
+                port: 3000,
+                label: "Dev server".to_string(),
+                is_http: true,
+            },
+            LocalServiceSuggestion {
+                port: 5432,
+                label: "Postgres".to_string(),
+                is_http: false,
+            },
+            LocalServiceSuggestion {
+                port: 8080,
+                label: "HTTP".to_string(),
+                is_http: true,
+            },
+        ];
+        let sorted = sort_suggestions(suggestions);
+        let ports: Vec<u16> = sorted.iter().map(|s| s.port).collect();
+        assert_eq!(ports, vec![3000, 8080, 5432], "HTTP first, then port");
+    }
+
+    #[test]
+    fn local_service_scan_parse_http_head_extracts_status_and_server() {
+        let (is_http, server) = parse_http_head(
+            "HTTP/1.1 200 OK\r\nServer: nginx/1.24\r\nContent-Length: 0\r\n",
+        );
+        assert!(is_http);
+        assert_eq!(server.as_deref(), Some("nginx/1.24"));
+
+        let (is_http, server) = parse_http_head("NOT-HTTP garbage");
+        assert!(!is_http);
+        assert_eq!(server, None);
+    }
 
     #[test]
     fn peer_id_short_form_truncates_long_ids_head_and_tail() {

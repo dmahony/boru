@@ -79,6 +79,10 @@ rfd = { version = "0.15", optional = true }
 # net dependencies (optional)
 futures-concurrency = { version = "7.6.1", optional = true }
 
+# Local TCP listener discovery for the Share Local Service dialog (desktop GUI).
+netstat2 = { version = "0.11", optional = true }
+sysinfo = { version = "0.38", default-features = false, features = ["system"], optional = true }
+
 iroh = { version = "1", default-features = false, optional = true }
 iroh-mdns-address-lookup = { version = "0.4", optional = true }
 iroh-mainline-address-lookup = { version = "0.4", optional = true }
@@ -209,7 +213,7 @@ simulator = [
 ]
 metrics = ["iroh-metrics/metrics"]
 examples = ["net"]
-gui = ["net", "dep:iced", "dep:iced_moving_picture", "dep:tokio", "dep:rfd", "dep:tracing-subscriber", "dep:tracing-appender", "dep:mimalloc", "dep:rayon", "dep:profiling", "dep:rustc-hash", "dep:regex", "dep:open", "dep:url", "dep:reqwest"]
+gui = ["net", "dep:iced", "dep:iced_moving_picture", "dep:tokio", "dep:rfd", "dep:tracing-subscriber", "dep:tracing-appender", "dep:mimalloc", "dep:rayon", "dep:profiling", "dep:rustc-hash", "dep:regex", "dep:open", "dep:url", "dep:reqwest", "dep:netstat2", "dep:sysinfo"]
 video-playback = ["gui", "dep:iced_video_player"]
 terminal = ["gui", "dep:iced_term"]
 
