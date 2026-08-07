@@ -1547,6 +1547,206 @@ pub fn gutter_scrollable<'a, Message>(
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// 17c. SECTION APPEAR FADE
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Number of 100 ms `SplashTick` frames a sidebar section appearance
+/// animation plays.
+///
+/// SIDEBAR-01: when a sidebar section gains its first item it expands and
+/// plays a short animation. iced 0.14 has no general content-opacity widget
+/// (only `Image`/`Svg` support it), so the animation is a draw-time center
+/// scale from 96 % → 100 % applied via `Renderer::with_transformation`.
+/// Layout is untouched — the whole sidebar is not re-laid-out per frame and
+/// the section's `iced::widget::lazy` cache is preserved.
+pub const SIDEBAR_FADE_FRAMES: u32 = 5;
+
+/// A delegating widget that plays a short "appear" animation on its content.
+///
+/// While `frame < SIDEBAR_FADE_FRAMES`, drawing applies a subtle center
+/// scale that eases from 96 % to 100 %. Once the counter reaches
+/// `SIDEBAR_FADE_FRAMES` callers stop wrapping content (see [`section_fade`]),
+/// so the widget tree is identical to the pre-animation state when idle.
+///
+/// All `layout`/`update`/`operate`/`mouse_interaction`/`overlay` calls are
+/// forwarded unchanged to the inner content; only `draw` wraps the child in
+/// the transformation.
+pub struct SectionFade<'a> {
+    frame: u32,
+    content: Element<'a, AppMessage>,
+}
+
+/// Stable widget tag so iced never mixes this wrapper's tree state with the
+/// inner content's (same pitfall as `Prebuilt` in `app.rs` — forwarding the
+/// inner tag makes iced treat the wrapper and its content as the same widget
+/// and downcast the wrong tree state).
+struct SectionFadeTag;
+
+impl<'a> From<SectionFade<'a>> for Element<'a, AppMessage> {
+    fn from(widget: SectionFade<'a>) -> Self {
+        iced::Element::new(widget)
+    }
+}
+
+impl<'a> iced::advanced::Widget<AppMessage, Theme, iced::Renderer> for SectionFade<'a> {
+    fn tag(&self) -> iced::advanced::widget::tree::Tag {
+        iced::advanced::widget::tree::Tag::of::<SectionFadeTag>()
+    }
+
+    fn state(&self) -> iced::advanced::widget::tree::State {
+        iced::advanced::widget::tree::State::new(())
+    }
+
+    fn children(&self) -> Vec<iced::advanced::widget::tree::Tree> {
+        vec![iced::advanced::widget::tree::Tree::new(self.content.as_widget())]
+    }
+
+    fn diff(&self, tree: &mut iced::advanced::widget::tree::Tree) {
+        tree.diff_children(std::slice::from_ref(&self.content.as_widget()));
+    }
+
+    fn size(&self) -> iced::Size<iced::Length> {
+        self.content.as_widget().size()
+    }
+
+    fn size_hint(&self) -> iced::Size<iced::Length> {
+        self.content.as_widget().size_hint()
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut iced::advanced::widget::tree::Tree,
+        renderer: &iced::Renderer,
+        limits: &iced::advanced::layout::Limits,
+    ) -> iced::advanced::layout::Node {
+        self.content
+            .as_widget_mut()
+            .layout(&mut tree.children[0], renderer, limits)
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut iced::advanced::widget::tree::Tree,
+        layout: iced::advanced::Layout<'_>,
+        renderer: &iced::Renderer,
+        operation: &mut dyn iced::advanced::widget::Operation,
+    ) {
+        self.content
+            .as_widget_mut()
+            .operate(&mut tree.children[0], layout, renderer, operation);
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut iced::advanced::widget::tree::Tree,
+        event: &iced::Event,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::advanced::mouse::Cursor,
+        renderer: &iced::Renderer,
+        clipboard: &mut dyn iced::advanced::Clipboard,
+        shell: &mut iced::advanced::Shell<'_, AppMessage>,
+        viewport: &iced::Rectangle,
+    ) {
+        self.content.as_widget_mut().update(
+            &mut tree.children[0],
+            event,
+            layout,
+            cursor,
+            renderer,
+            clipboard,
+            shell,
+            viewport,
+        );
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &iced::advanced::widget::tree::Tree,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::advanced::mouse::Cursor,
+        viewport: &iced::Rectangle,
+        renderer: &iced::Renderer,
+    ) -> iced::advanced::mouse::Interaction {
+        self.content.as_widget().mouse_interaction(
+            &tree.children[0],
+            layout,
+            cursor,
+            viewport,
+            renderer,
+        )
+    }
+
+    fn draw(
+        &self,
+        tree: &iced::advanced::widget::tree::Tree,
+        renderer: &mut iced::Renderer,
+        theme: &Theme,
+        style: &iced::advanced::renderer::Style,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::advanced::mouse::Cursor,
+        viewport: &iced::Rectangle,
+    ) {
+        let t = (self.frame as f32 / SIDEBAR_FADE_FRAMES as f32).clamp(0.0, 1.0);
+        // Ease-out so the motion settles quickly instead of creeping.
+        let eased = 1.0 - (1.0 - t) * (1.0 - t);
+        let scale = 0.96 + 0.04 * eased;
+        let center = layout.bounds().center();
+        let transform = iced::Transformation::translate(center.x, center.y)
+            * iced::Transformation::scale(scale)
+            * iced::Transformation::translate(-center.x, -center.y);
+        use iced::advanced::Renderer as _;
+        renderer.with_transformation(transform, |renderer| {
+            self.content.as_widget().draw(
+                &tree.children[0],
+                renderer,
+                theme,
+                style,
+                layout,
+                cursor,
+                viewport,
+            );
+        });
+    }
+
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut iced::advanced::widget::tree::Tree,
+        layout: iced::advanced::Layout<'b>,
+        renderer: &iced::Renderer,
+        viewport: &iced::Rectangle,
+        translation: iced::Vector,
+    ) -> Option<iced::advanced::overlay::Element<'b, AppMessage, Theme, iced::Renderer>> {
+        self.content.as_widget_mut().overlay(
+            &mut tree.children[0],
+            layout,
+            renderer,
+            viewport,
+            translation,
+        )
+    }
+}
+
+/// Wrap sidebar section content in the appear animation while it is playing.
+///
+/// Returns the content unchanged once `frame >= SIDEBAR_FADE_FRAMES` so the
+/// widget tree is identical to the pre-animation state (no extra wrapper, no
+/// per-frame work) when the section is idle.
+pub fn section_fade<'a>(
+    frame: u32,
+    content: impl Into<Element<'a, AppMessage>>,
+) -> Element<'a, AppMessage> {
+    if frame >= SIDEBAR_FADE_FRAMES {
+        content.into()
+    } else {
+        SectionFade {
+            frame,
+            content: content.into(),
+        }
+        .into()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // 18. SIDEBAR EMPTY STATE
 // ═══════════════════════════════════════════════════════════════════════
 

@@ -112,7 +112,7 @@ use crate::connection_details::{
 };
 use crate::perf_tracker::PerfTracker;
 use crate::ui_components::{
-    chat_status_footer, connection_footer, ghost_icon_button, secondary_button,
+    chat_status_footer, connection_footer, ghost_icon_button, secondary_button, section_fade,
     sidebar_empty_state, text_input_field, Avatar, SidebarSectionHeader,
 };
 use crate::{fmt_relay_mode, Message, NetEvent, SignedMessage, Ticket};
@@ -3160,6 +3160,11 @@ pub struct IcedChat {
     sidebar_selected_topic: Rc<Cell<Option<TopicId>>>,
     /// Track sidebar section collapsed state: [chats, groups, friends, discover, requests, public_rooms]
     sidebar_section_collapsed: [bool; 6],
+    /// Per-section appearance-animation frame (SIDEBAR-01). A value below
+    /// `SIDEBAR_FADE_FRAMES` means the section just gained its first item and
+    /// is still animating in; `SplashTick` advances it towards
+    /// `SIDEBAR_FADE_FRAMES` (== no animation / idle).
+    sidebar_fade_frame: [u32; 6],
 
     // ── Chat state (active room — display cache) ──
     /// Active conversation topic (display cache).
@@ -7352,6 +7357,7 @@ impl IcedChat {
             cached_requests_dep: std::cell::RefCell::new(None),
             sidebar_selected_topic: Rc::new(Cell::new(None)),
             sidebar_section_collapsed: [false; 6],
+            sidebar_fade_frame: [crate::ui_components::SIDEBAR_FADE_FRAMES; 6],
             initial_bootstrap_peers: initial_bootstrap,
             return_to_chat_list_after_open,
             whisper_handle,
@@ -14070,8 +14076,19 @@ impl IcedChat {
             }
 
             AppMessage::ToggleSidebarSectionCollapsed(index) => {
-                if index < self.sidebar_section_collapsed.len() {
+                if index < self.sidebar_section_collapsed.len()
+                    && self.sidebar_section_count(index) > 0
+                {
+                    // SIDEBAR-01: empty sections stay collapsed — only
+                    // populated sections respond to the manual toggle.
                     self.sidebar_section_collapsed[index] = !self.sidebar_section_collapsed[index];
+                    if !self.sidebar_section_collapsed[index] {
+                        // Manual expand shows existing items; don't replay the
+                        // appearance animation (it only plays when the first
+                        // item arrives).
+                        self.sidebar_fade_frame[index] =
+                            crate::ui_components::SIDEBAR_FADE_FRAMES;
+                    }
                 }
                 iced::Task::none()
             }
@@ -19150,6 +19167,16 @@ impl IcedChat {
                                 (self.main_screen_reconnect_frame + 1) % 10;
                         }
                     }
+                    // Advance sidebar section fade-in counters so sections
+                    // that just gained their first item finish their
+                    // appearance animation. The `SplashTick` subscription in
+                    // `main.rs` stays alive while any counter is below
+                    // `SIDEBAR_FADE_FRAMES`.
+                    for frame in self.sidebar_fade_frame.iter_mut() {
+                        if *frame < crate::ui_components::SIDEBAR_FADE_FRAMES {
+                            *frame += 1;
+                        }
+                    }
                 } // end !reduced_motion guard
                 iced::Task::none()
             }
@@ -23354,30 +23381,57 @@ impl IcedChat {
         }
     }
 
+    /// Current item count for a sidebar section index
+    /// (0 chats, 1 groups, 2 friends, 3 discover, 4 requests, 5 public rooms).
+    fn sidebar_section_count(&self, index: usize) -> usize {
+        match index {
+            0 => self.cached_chat_count,
+            1 => self.cached_group_count,
+            2 => self.cached_friend_count,
+            3 => self.cached_discover_count,
+            4 => self.cached_request_count,
+            5 => self.cached_public_room_count,
+            _ => 0,
+        }
+    }
+
+    /// True while any sidebar section is playing its appearance animation.
+    /// The `SplashTick` subscription in `main.rs` stays alive while this is
+    /// true so the fade counters keep advancing to `SIDEBAR_FADE_FRAMES`.
+    pub(crate) fn sidebar_fade_active(&self) -> bool {
+        self.sidebar_fade_frame
+            .iter()
+            .any(|&frame| frame < crate::ui_components::SIDEBAR_FADE_FRAMES)
+    }
+
     /// Recompute all cached sidebar counts from the underlying store data.
     /// Call this when a sidebar revision counter changes so the next
     /// `view_sidebar()` render uses up-to-date cached values.
+    ///
+    /// SIDEBAR-01: while here, detect sections that just gained their first
+    /// item (count 0 → > 0) and auto-expand them (empty sections are rendered
+    /// collapsed) while starting their appearance animation.
     fn refresh_sidebar_counts(&mut self) {
-        self.cached_chat_count = self
+        let new_chat_count = self
             .conversation_store
             .active_iter()
             .into_iter()
             .filter(|e| !matches!(e.kind, ConversationKind::Group))
             .count();
-        self.cached_group_count = self
+        let new_group_count = self
             .conversation_store
             .active_iter()
             .into_iter()
             .filter(|e| matches!(e.kind, ConversationKind::Group))
             .count();
-        self.cached_friend_count = self
+        let new_friend_count = self
             .friends
             .iter()
             .filter(|(_, r)| r.relationship.can_message())
             .count();
-        self.cached_discover_count = self.discovered_peers.len();
-        self.cached_public_room_count = self.directory_store.lock().unwrap().len();
-        self.cached_request_count = self
+        let new_discover_count = self.discovered_peers.len();
+        let new_public_room_count = self.directory_store.lock().unwrap().len();
+        let new_request_count = self
             .friend_request_store
             .list_incoming_by_status(
                 &self.local_public.to_string(),
@@ -23397,6 +23451,40 @@ impl IcedChat {
                         .len()
                 })
                 .unwrap_or(0);
+
+        let old_counts = [
+            self.cached_chat_count,
+            self.cached_group_count,
+            self.cached_friend_count,
+            self.cached_discover_count,
+            self.cached_public_room_count,
+            self.cached_request_count,
+        ];
+        let new_counts = [
+            new_chat_count,
+            new_group_count,
+            new_friend_count,
+            new_discover_count,
+            new_public_room_count,
+            new_request_count,
+        ];
+        let fade_frames = crate::ui_components::SIDEBAR_FADE_FRAMES;
+        for (i, (&old, &new)) in old_counts.iter().zip(new_counts.iter()).enumerate() {
+            if old == 0 && new > 0 {
+                // First item arrived: auto-expand (empty sections are rendered
+                // collapsed) and start the appearance animation. With
+                // reduced-motion the section just appears instantly.
+                self.sidebar_section_collapsed[i] = false;
+                self.sidebar_fade_frame[i] = if self.reduced_motion { fade_frames } else { 0 };
+            }
+        }
+
+        self.cached_chat_count = new_chat_count;
+        self.cached_group_count = new_group_count;
+        self.cached_friend_count = new_friend_count;
+        self.cached_discover_count = new_discover_count;
+        self.cached_public_room_count = new_public_room_count;
+        self.cached_request_count = new_request_count;
     }
 }
 
@@ -24523,79 +24611,107 @@ impl IcedChat {
             })
             .spacing(0);
 
+        // SIDEBAR-01: a section renders collapsed while it is empty (or the
+        // user collapsed it). Empty sections can never be expanded manually,
+        // so `effective` = manual flag OR no items.
+        let chats_collapsed = self.sidebar_section_collapsed[0] || chat_count == 0;
+        let groups_collapsed = self.sidebar_section_collapsed[1] || group_count == 0;
+        let friends_collapsed = self.sidebar_section_collapsed[2] || friend_count == 0;
+        let discover_collapsed = self.sidebar_section_collapsed[3] || discover_count == 0;
+        let public_rooms_collapsed = self.sidebar_section_collapsed[5] || public_room_count == 0;
+        let requests_collapsed = self.sidebar_section_collapsed[4] || request_count == 0;
+
         // CHATS section
         sections = sections.push(
             SidebarSectionHeader::new("CHATS")
                 .count(chat_count)
-                .collapsed(self.sidebar_section_collapsed[0])
+                .collapsed(chats_collapsed)
                 .on_toggle(AppMessage::ToggleSidebarSectionCollapsed(0))
                 .add_action(Icon::Plus, AppMessage::CreateNewRoom)
                 .build(&theme),
         );
-        if !self.sidebar_section_collapsed[0] {
-            sections = sections.push(self.view_sidebar_chats());
+        if !chats_collapsed {
+            sections = sections.push(section_fade(
+                self.sidebar_fade_frame[0],
+                self.view_sidebar_chats(),
+            ));
         }
 
         // GROUPS section
         sections = sections.push(
             SidebarSectionHeader::new("GROUPS")
                 .count(group_count)
-                .collapsed(self.sidebar_section_collapsed[1])
+                .collapsed(groups_collapsed)
                 .on_toggle(AppMessage::ToggleSidebarSectionCollapsed(1))
                 .add_action(Icon::Users, AppMessage::OpenGroups)
                 .build(&theme),
         );
-        if !self.sidebar_section_collapsed[1] {
-            sections = sections.push(self.view_sidebar_groups());
+        if !groups_collapsed {
+            sections = sections.push(section_fade(
+                self.sidebar_fade_frame[1],
+                self.view_sidebar_groups(),
+            ));
         }
 
         // FRIENDS section
         sections = sections.push(
             SidebarSectionHeader::new("FRIENDS")
                 .count(friend_count)
-                .collapsed(self.sidebar_section_collapsed[2])
+                .collapsed(friends_collapsed)
                 .on_toggle(AppMessage::ToggleSidebarSectionCollapsed(2))
                 .build(&theme),
         );
-        if !self.sidebar_section_collapsed[2] {
-            sections = sections.push(self.view_sidebar_friends());
+        if !friends_collapsed {
+            sections = sections.push(section_fade(
+                self.sidebar_fade_frame[2],
+                self.view_sidebar_friends(),
+            ));
         }
 
         // DISCOVER section
         sections = sections.push(
             SidebarSectionHeader::new("DISCOVER")
                 .count(discover_count)
-                .collapsed(self.sidebar_section_collapsed[3])
+                .collapsed(discover_collapsed)
                 .on_toggle(AppMessage::ToggleSidebarSectionCollapsed(3))
                 .build(&theme),
         );
-        if !self.sidebar_section_collapsed[3] {
-            sections = sections.push(self.view_sidebar_discovered_peers());
+        if !discover_collapsed {
+            sections = sections.push(section_fade(
+                self.sidebar_fade_frame[3],
+                self.view_sidebar_discovered_peers(),
+            ));
         }
 
         // PUBLIC ROOMS section
         sections = sections.push(
             SidebarSectionHeader::new("PUBLIC ROOMS")
                 .count(public_room_count)
-                .collapsed(self.sidebar_section_collapsed[5])
+                .collapsed(public_rooms_collapsed)
                 .on_toggle(AppMessage::ToggleSidebarSectionCollapsed(5))
                 .add_action(Icon::Plus, AppMessage::CreateNewRoom)
                 .build(&theme),
         );
-        if !self.sidebar_section_collapsed[5] {
-            sections = sections.push(self.view_sidebar_public_rooms());
+        if !public_rooms_collapsed {
+            sections = sections.push(section_fade(
+                self.sidebar_fade_frame[5],
+                self.view_sidebar_public_rooms(),
+            ));
         }
 
         // REQUESTS section
         sections = sections.push(
             SidebarSectionHeader::new("REQUESTS")
                 .count(request_count)
-                .collapsed(self.sidebar_section_collapsed[4])
+                .collapsed(requests_collapsed)
                 .on_toggle(AppMessage::ToggleSidebarSectionCollapsed(4))
                 .build(&theme),
         );
-        if !self.sidebar_section_collapsed[4] {
-            sections = sections.push(self.view_sidebar_requests());
+        if !requests_collapsed {
+            sections = sections.push(section_fade(
+                self.sidebar_fade_frame[4],
+                self.view_sidebar_requests(),
+            ));
         }
 
         let sections_scroll = crate::ui_components::gutter_scrollable(sections)
@@ -44110,6 +44226,131 @@ mod tests {
             conversation_count,
             "conversation subscriptions must not be recreated"
         );
+        drop(runtime);
+    }
+
+    #[test]
+    fn sidebar_empty_sections_auto_expand_and_fade_on_first_item() {
+        // SIDEBAR-01: a section rendered collapsed while empty must expand
+        // and start its appearance animation the moment its first item
+        // arrives; later items in an already-populated section must NOT
+        // restart the animation.
+        let (runtime, mut app) = build_prewarm_test_app();
+        app.reduced_motion = false; // deterministic: animation frames advance
+
+        // Fresh app: no conversations, no requests.
+        app.refresh_sidebar_counts();
+        assert_eq!(app.cached_chat_count, 0, "empty store has no chats");
+        assert_eq!(app.cached_group_count, 0);
+        assert_eq!(app.cached_request_count, 0);
+        assert_eq!(
+            app.sidebar_fade_frame,
+            [crate::ui_components::SIDEBAR_FADE_FRAMES; 6],
+            "no fade is playing before the first item arrives"
+        );
+        assert!(!app.sidebar_fade_active(), "no animation active");
+
+        // First chat arrives → auto-expand CHATS + start the fade.
+        app.conversation_store.upsert(ConversationEntry::new(
+            TopicId::from_bytes([9u8; 32]),
+            "peer-x",
+            "First chat",
+        ));
+        app.refresh_sidebar_counts();
+
+        assert_eq!(app.cached_chat_count, 1);
+        assert!(
+            !app.sidebar_section_collapsed[0],
+            "first item auto-expands the CHATS section"
+        );
+        assert_eq!(
+            app.sidebar_fade_frame[0],
+            0,
+            "first item starts the appearance animation"
+        );
+        assert!(app.sidebar_fade_active(), "fade is active during the animation");
+
+        // The animation advances on SplashTick and stops at the frame cap.
+        let task = app.update(AppMessage::SplashTick);
+        drop(task);
+        assert_eq!(app.sidebar_fade_frame[0], 1, "SplashTick advances the fade");
+        for _ in 0..(crate::ui_components::SIDEBAR_FADE_FRAMES + 2) {
+            let task = app.update(AppMessage::SplashTick);
+            drop(task);
+        }
+        assert_eq!(
+            app.sidebar_fade_frame[0],
+            crate::ui_components::SIDEBAR_FADE_FRAMES,
+            "fade caps at SIDEBAR_FADE_FRAMES"
+        );
+        assert!(!app.sidebar_fade_active(), "fade finished");
+
+        // A second item arriving in an already-populated section does not
+        // re-trigger the animation.
+        app.conversation_store.upsert(ConversationEntry::new(
+            TopicId::from_bytes([10u8; 32]),
+            "peer-y",
+            "Second chat",
+        ));
+        app.refresh_sidebar_counts();
+        assert_eq!(app.cached_chat_count, 2);
+        assert_eq!(
+            app.sidebar_fade_frame[0],
+            crate::ui_components::SIDEBAR_FADE_FRAMES,
+            "second item in a populated section does not re-trigger the fade"
+        );
+        assert!(!app.sidebar_fade_active(), "still idle after second item");
+
+        drop(runtime);
+    }
+
+    #[test]
+    fn sidebar_manual_toggle_only_affects_populated_sections() {
+        // SIDEBAR-01: empty sections stay collapsed (toggle is inert), and
+        // manually expanding a populated section does not replay the
+        // appearance animation.
+        let (runtime, mut app) = build_prewarm_test_app();
+        app.reduced_motion = false;
+
+        app.refresh_sidebar_counts();
+        assert_eq!(app.cached_chat_count, 0);
+
+        // Toggling an empty section is a no-op: it must never expand.
+        let task = app.update(AppMessage::ToggleSidebarSectionCollapsed(0));
+        drop(task);
+        assert!(
+            !app.sidebar_section_collapsed[0],
+            "empty section toggle is inert (stays expanded-flag but renders collapsed)"
+        );
+
+        // Populate the section: auto-expanded by refresh.
+        app.conversation_store.upsert(ConversationEntry::new(
+            TopicId::from_bytes([9u8; 32]),
+            "peer-x",
+            "First chat",
+        ));
+        app.refresh_sidebar_counts();
+        assert!(!app.sidebar_section_collapsed[0]);
+
+        // Manual collapse works on a populated section.
+        let task = app.update(AppMessage::ToggleSidebarSectionCollapsed(0));
+        drop(task);
+        assert!(
+            app.sidebar_section_collapsed[0],
+            "populated section can be manually collapsed"
+        );
+
+        // Manual expand restores it and does NOT replay the fade.
+        let task = app.update(AppMessage::ToggleSidebarSectionCollapsed(0));
+        drop(task);
+        assert!(!app.sidebar_section_collapsed[0]);
+        assert_eq!(
+            app.sidebar_fade_frame[0],
+            crate::ui_components::SIDEBAR_FADE_FRAMES,
+            "manual expand does not replay the appearance animation"
+        );
+        assert!(!app.sidebar_fade_active());
+
         drop(runtime);
     }
 
