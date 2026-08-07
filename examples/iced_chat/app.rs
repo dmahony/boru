@@ -2191,6 +2191,17 @@ impl std::hash::Hash for DownloadAttachment {
     }
 }
 
+/// Derive the BLAKE3 content identity from a blob ticket string.
+///
+/// `None` when the ticket is empty (uploader card before the upload
+/// finishes) or does not parse as a single-blob `BlobTicket`.
+pub(crate) fn content_hash_from_ticket(ticket: &str) -> Option<String> {
+    ticket
+        .parse::<iroh_blobs::ticket::BlobTicket>()
+        .ok()
+        .map(|ticket| hex::encode(ticket.hash().as_bytes()))
+}
+
 impl DownloadAttachment {
     pub(crate) fn new(
         kind: TransferKind,
@@ -2200,10 +2211,7 @@ impl DownloadAttachment {
         thumbnail: Option<Vec<u8>>,
     ) -> Self {
         let ticket = ticket.into();
-        let expected_content_hash = ticket
-            .parse::<iroh_blobs::ticket::BlobTicket>()
-            .ok()
-            .map(|ticket| hex::encode(ticket.hash().as_bytes()));
+        let expected_content_hash = content_hash_from_ticket(&ticket);
         let poster_dimensions = thumbnail.as_deref().and_then(|bytes| {
             image::ImageReader::new(std::io::Cursor::new(bytes))
                 .with_guessed_format()
@@ -16540,43 +16548,54 @@ impl IcedChat {
                         }
                         self.layout_cache.borrow_mut().invalidate_from(entry_index);
 
-                        tokio::spawn(async move {
-                            let dl_dir = data_dir.join("downloads");
-                            let _ = tokio::fs::create_dir_all(&dl_dir).await;
-                            let save_path = dl_dir.join(&name);
+                        // VIDCARD-fix: run the download through
+                        // iced::Task::perform and dispatch DownloadDone on
+                        // completion. The previous tokio::spawn pushed only
+                        // TransferProgress events, so the queued Completed
+                        // event flipped the card to the "Verifying"
+                        // placeholder (Completed { saved_path: None }) and
+                        // nothing ever upgraded it with the real path — the
+                        // video stayed stuck at Verifying forever even
+                        // though the file existed on disk.
+                        let task_name = name.clone();
+                        return iced::Task::perform(
+                            async move {
+                                let dl_dir = data_dir.join("downloads");
+                                let _ = tokio::fs::create_dir_all(&dl_dir).await;
+                                let save_path = dl_dir.join(&task_name);
 
-                            let parsed: iroh_blobs::ticket::BlobTicket = match ticket.parse() {
-                                Ok(t) => t,
-                                Err(e) => {
-                                    tracing::error!("Invalid ticket: {e}");
-                                    return;
+                                let parsed: iroh_blobs::ticket::BlobTicket = ticket
+                                    .parse()
+                                    .map_err(|e| format!("Invalid ticket: {e}"))?;
+                                let (addr, hash, _format) = parsed.into_parts();
+                                let candidates = download_candidates(addr.id, &neighbors);
+
+                                download_blob_to_file(
+                                    &blob_store,
+                                    &endpoint,
+                                    hash,
+                                    candidates,
+                                    task_name.clone(),
+                                    kind,
+                                    &save_path,
+                                    move |ev| {
+                                        if let Ok(mut q) = progress_queue.lock() {
+                                            q.push_back(ev);
+                                        }
+                                    },
+                                    Some(total_size),
+                                )
+                                .await
+                                .map_err(|e| format!("Download failed: {e}"))?;
+                                Ok::<_, String>((task_name, save_path))
+                            },
+                            |result| match result {
+                                Ok((name, save_path)) => {
+                                    AppMessage::DownloadDone(name, save_path)
                                 }
-                            };
-                            let (addr, hash, _format) = parsed.into_parts();
-                            let candidates = download_candidates(addr.id, &neighbors);
-
-                            let _ = download_blob_to_file(
-                                &blob_store,
-                                &endpoint,
-                                hash,
-                                candidates,
-                                name,
-                                kind,
-                                &save_path,
-                                move |ev| {
-                                    if let Ok(mut q) = progress_queue.lock() {
-                                        q.push_back(ev);
-                                    }
-                                },
-                                Some(total_size),
-                            )
-                            .await;
-                        });
-
-                        self.push_system(
-                                "Download started — click play again when the progress bar reaches 100%.",
-                            );
-                        return iced::Task::none();
+                                Err(e) => AppMessage::DownloadFailed(e),
+                            },
+                        );
                     } else {
                         self.push_system("Video is not ready to play yet.");
                         return iced::Task::none();
@@ -16785,6 +16804,7 @@ impl IcedChat {
                     // If the download hasn't started yet, begin it now so the
                     // blob-store file (which the streaming server serves)
                     // starts growing immediately.
+                    let mut tasks = Vec::new();
                     if matches!(download.state, DownloadState::Ready { .. }) {
                         if let Some(e) = self.entries.get_mut(entry_index) {
                             if let Some(ref mut d) = e.download {
@@ -16799,50 +16819,71 @@ impl IcedChat {
                         self.download_entry_index = Some(entry_index);
                         let task_data_dir = data_dir.clone();
                         let task_name = name.clone();
-                        tokio::spawn(async move {
-                            let ticket: iroh_blobs::ticket::BlobTicket = match ticket_str
-                                .parse()
-                            {
-                                Ok(t) => t,
-                                Err(e) => {
-                                    tracing::error!("Stream: invalid ticket: {e}");
-                                    return;
+                        let task_ticket = ticket_str.clone();
+                        let task_kind = kind;
+                        let task_is_folder = is_folder;
+                        let task_blob_store = blob_store.clone();
+                        let task_endpoint = endpoint.clone();
+                        let task_neighbors = neighbors.clone();
+                        let task_progress_queue = progress_queue.clone();
+                        // VIDCARD-fix: the previous tokio::spawn discarded the
+                        // download result and never dispatched DownloadDone, so
+                        // when the stream-triggered download finished, the
+                        // queued TransferProgress::Completed left the card at
+                        // the "Verifying" placeholder forever. Route the
+                        // completion through DownloadDone (same as the
+                        // non-stream path) so the card leaves Verifying and
+                        // becomes playable once the file is on disk.
+                        tasks.push(iced::Task::perform(
+                            async move {
+                                let ticket: iroh_blobs::ticket::BlobTicket = task_ticket
+                                    .parse()
+                                    .map_err(|e| format!("Invalid ticket: {e}"))?;
+                                let (addr, hash, _format) = ticket.into_parts();
+                                let candidates =
+                                    download_candidates(addr.id, &task_neighbors);
+                                let dl_dir = task_data_dir.join("downloads");
+                                let _ = tokio::fs::create_dir_all(&dl_dir).await;
+                                if task_is_folder {
+                                    let save_dir = boru_core::collection_transfer::download_collection_to_dir(
+                                        &task_blob_store,
+                                        &task_endpoint,
+                                        hash,
+                                        candidates,
+                                        &task_name,
+                                        &dl_dir,
+                                    )
+                                    .await
+                                    .map_err(|e| format!("Folder download failed: {e}"))?;
+                                    return Ok::<_, String>((task_name, save_dir));
                                 }
-                            };
-                            let (addr, hash, _format) = ticket.into_parts();
-                            let candidates = download_candidates(addr.id, &neighbors);
-                            let dl_dir = task_data_dir.join("downloads");
-                            let _ = tokio::fs::create_dir_all(&dl_dir).await;
-                            if is_folder {
-                                let _ = boru_core::collection_transfer::download_collection_to_dir(
-                                    &blob_store,
-                                    &endpoint,
+                                let save_path = dl_dir.join(&task_name);
+                                download_blob_to_file(
+                                    &task_blob_store,
+                                    &task_endpoint,
                                     hash,
                                     candidates,
-                                    &task_name,
-                                    &dl_dir,
+                                    task_name.clone(),
+                                    task_kind,
+                                    &save_path,
+                                    move |ev| {
+                                        if let Ok(mut q) = task_progress_queue.lock() {
+                                            q.push_back(ev);
+                                        }
+                                    },
+                                    None,
                                 )
-                                .await;
-                                return;
-                            }
-                            let save_path = dl_dir.join(&task_name);
-                            let _ = download_blob_to_file(
-                                &blob_store,
-                                &endpoint,
-                                hash,
-                                candidates,
-                                task_name,
-                                kind,
-                                &save_path,
-                                move |ev| {
-                                    if let Ok(mut q) = progress_queue.lock() {
-                                        q.push_back(ev);
-                                    }
-                                },
-                                None,
-                            )
-                            .await;
-                        });
+                                .await
+                                .map_err(|e| format!("Download failed: {e}"))?;
+                                Ok::<_, String>((task_name, save_path))
+                            },
+                            |result| match result {
+                                Ok((name, save_path)) => {
+                                    AppMessage::DownloadDone(name, save_path)
+                                }
+                                Err(e) => AppMessage::DownloadFailed(e),
+                            },
+                        ));
                     }
 
                     // The growing file lives in the FsStore data directory:
@@ -16855,7 +16896,7 @@ impl IcedChat {
                         .join("data")
                         .join(format!("{content_hash}.data"));
                     let content_type = Self::content_type_for_filename(&name);
-                    iced::Task::perform(
+                    tasks.push(iced::Task::perform(
                         async move {
                             StreamingServer::start(store_data_path, total_size, content_type)
                                 .await
@@ -16873,7 +16914,8 @@ impl IcedChat {
                                 error,
                             },
                         },
-                    )
+                    ));
+                    iced::Task::batch(tasks)
                 }
                 #[cfg(not(feature = "video-playback"))]
                 {
@@ -17404,6 +17446,14 @@ impl IcedChat {
                     if let Some(entry) = self.entries.get_mut(idx) {
                         if let Some(dl) = entry.download.as_mut() {
                             dl.ticket = ticket.clone();
+                            // VIDCARD-fix: the uploader's own card was created
+                            // with an empty ticket (ExecuteFileSend), so
+                            // expected_content_hash parsed at construction was
+                            // None. Re-derive it from the real ticket now —
+                            // otherwise PlayInlineVideo bails with "content
+                            // identity is missing" for the sender's own
+                            // uploads.
+                            dl.expected_content_hash = content_hash_from_ticket(&ticket);
                             dl.thumbnail = thumbnail.clone();
                             dl.thumbnail_handle = thumbnail.as_deref().map(|bytes| {
                                 iced::widget::image::Handle::from_bytes(bytes.to_vec())
@@ -44973,6 +45023,109 @@ mod tests {
             crate::video_file_card::VideoPresentationState::Ready,
             "video card must become playable after DownloadDone upgrades the Verifying placeholder"
         );
+    }
+
+    /// VIDCARD-fix sender path: `content_hash_from_ticket` derives the BLAKE3
+    /// content identity from a real blob ticket, and the uploader's own card —
+    /// created with an empty ticket like `ExecuteFileSend` does — gains the
+    /// hash when `FileDownloaded` applies the real ticket (the sender-side
+    /// "content identity is missing" fix).
+    #[test]
+    fn uploader_record_has_expected_content_hash_after_file_downloaded() {
+        // Build a real blob ticket (same shape blob_ticket_string produces).
+        let peer = iroh::SecretKey::generate().public();
+        let addr = iroh::EndpointAddr::new(peer);
+        let hash = iroh_blobs::Hash::new(b"verified video bytes");
+        let ticket = iroh_blobs::ticket::BlobTicket::new(addr, hash, iroh_blobs::BlobFormat::Raw)
+            .to_string();
+
+        // Uploader card is created with an EMPTY ticket (ExecuteFileSend).
+        let mut uploader_card = ChatEntry::system_download(
+            "Uploading: clip.mp4",
+            TransferKind::Video,
+            "clip.mp4",
+            "",
+            "Me",
+            None,
+        );
+        let dl = uploader_card.download.as_mut().unwrap();
+        assert!(
+            dl.expected_content_hash.is_none(),
+            "uploader card starts without content identity (empty ticket)"
+        );
+
+        // FileDownloaded applies the real ticket and re-derives the hash.
+        dl.ticket = ticket.clone();
+        dl.expected_content_hash = content_hash_from_ticket(&ticket);
+        let derived = dl.expected_content_hash.clone().expect("hash derived");
+        assert_eq!(
+            derived,
+            hash.to_hex(),
+            "uploader record must carry the ticket's BLAKE3 hash"
+        );
+        assert_eq!(
+            content_hash_from_ticket("not-a-ticket"),
+            None,
+            "garbage tickets yield no identity"
+        );
+    }
+
+    /// VIDCARD-fix receiver path: after a completed download leaves the card
+    /// at the Verifying placeholder, the real path + content identity make it
+    /// playable — and `verify_local_attachment` accepts the derived hash for a
+    /// file that matches (no regression to download-card terminal states).
+    #[test]
+    fn video_verifying_clears_and_verify_accepts_uploader_hash() {
+        // Receiver card with a real ticket -> content identity present.
+        let peer = iroh::SecretKey::generate().public();
+        let addr = iroh::EndpointAddr::new(peer);
+        let hash = iroh_blobs::Hash::new(b"verified video bytes");
+        let ticket = iroh_blobs::ticket::BlobTicket::new(addr, hash, iroh_blobs::BlobFormat::Raw)
+            .to_string();
+        let mut attachment =
+            DownloadAttachment::new(TransferKind::Video, "clip.mp4", ticket, "peer", None);
+        assert_eq!(
+            attachment.expected_content_hash.as_deref(),
+            Some(hash.to_hex().as_str()),
+            "receiver record must carry the ticket's BLAKE3 hash"
+        );
+
+        // Simulate the queued TransferProgress::Completed beating DownloadDone.
+        attachment.state = DownloadState::Completed {
+            saved_name: "clip.mp4".into(),
+            saved_path: None,
+            total_size: Some(20),
+        };
+        assert_eq!(
+            crate::video_file_card::video_presentation_state(&attachment),
+            crate::video_file_card::VideoPresentationState::Verifying
+        );
+
+        // DownloadDone fills the real path (guard allows the placeholder).
+        assert!(download_done_can_complete(&attachment.state));
+        attachment.state = DownloadState::Completed {
+            saved_name: "clip.mp4".into(),
+            saved_path: Some(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("examples/iced_chat/app.rs")),
+            total_size: Some(20),
+        };
+        assert_eq!(
+            crate::video_file_card::video_presentation_state(&attachment),
+            crate::video_file_card::VideoPresentationState::Ready,
+            "Verifying must clear once the real path arrives"
+        );
+
+        // verify_local_attachment accepts the derived hash for a matching file.
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("clip.mp4");
+        std::fs::write(&path, b"verified video bytes").unwrap();
+        let verified = boru_core::video_playback::verify_local_attachment(
+            &path,
+            root.path(),
+            attachment.expected_content_hash.as_ref().unwrap(),
+            Some(20),
+        );
+        assert!(verified.is_ok(), "derived hash must verify the local file");
     }
 
     /// VID-01 uploader hijack prevention: `started_target_index` prefers the
