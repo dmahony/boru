@@ -8525,10 +8525,16 @@ impl IcedChat {
             return iced::Task::none();
         };
         let generation = self.conversation_generation;
-        // Prefer a rendition the static-image renderer can decode. The
-        // playback rendition may be MP4 (provider preference) which the
-        // image path cannot display — skip it in that case.
-        let url = gif.first_image_renderable_url().map(|s| s.to_string());
+        // Choose the rendition to fetch by format: MP4 playback renditions
+        // are played through the inline video player, GIF/WebP renditions
+        // through the static-image path. For builds without the video
+        // player, skip MP4 and fall back to a renderable image rendition.
+        let url = if gif.format == GifMediaFormat::Mp4 && cfg!(feature = "video-playback") {
+            gif.first_renderable_url()
+        } else {
+            gif.first_image_renderable_url()
+        }
+        .map(|s| s.to_string());
         iced::Task::perform(
             async move {
                 let url = match url {
@@ -17848,6 +17854,74 @@ impl IcedChat {
                             media_size = media_bytes.len(),
                             "external GIF media fetched",
                         );
+                        // MP4 playback renditions play through the inline
+                        // video player: save the rendition to the managed
+                        // downloads dir and render a Ready video card whose
+                        // Play button verifies + opens the local file.
+                        // GIF/WebP renditions keep the image path below.
+                        if gif.format == GifMediaFormat::Mp4 && cfg!(feature = "video-playback") {
+                            let hash_hex = blake3::hash(&media_bytes).to_hex().to_string();
+                            let file_stem: String = gif
+                                .provider_id
+                                .chars()
+                                .map(|c| {
+                                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.'
+                                    {
+                                        c
+                                    } else {
+                                        '-'
+                                    }
+                                })
+                                .collect();
+                            let file_name = if file_stem.is_empty() {
+                                format!("klipy-gif-{}.mp4", &hash_hex[..12])
+                            } else {
+                                format!("{file_stem}.mp4")
+                            };
+                            let dl_dir = self.data_dir.join("downloads");
+                            let save_path = dl_dir.join(&file_name);
+                            let saved = std::fs::create_dir_all(&dl_dir)
+                                .and_then(|_| std::fs::write(&save_path, &media_bytes))
+                                .is_ok();
+                            let mut entry = ChatEntry::system_download(
+                                format!("Video received: {file_name}"),
+                                TransferKind::Video,
+                                file_name.clone(),
+                                String::new(), // content already local — no ticket
+                                sender_name.clone(),
+                                None,
+                            );
+                            // Present like a chat message (remote/local), not
+                            // a system notice.
+                            entry.kind = kind;
+                            entry.label = sender_name.clone();
+                            entry.message_hash = Some(message_hash);
+                            entry.sender_key = Some(sender);
+                            if let Some(dl) = entry.download.as_mut() {
+                                dl.expected_content_hash = Some(hash_hex);
+                                if saved {
+                                    dl.state = DownloadState::Shared {
+                                        name: file_name,
+                                        path: save_path,
+                                        size: Some(media_bytes.len() as u64),
+                                    };
+                                } else {
+                                    dl.state = DownloadState::Failed {
+                                        failure: DownloadFailure::Other {
+                                            detail: "could not save shared MP4 GIF to downloads"
+                                                .to_string(),
+                                        },
+                                    };
+                                    warn!(
+                                        gif_id = %gif.provider_id,
+                                        ?save_path,
+                                        "failed to save shared MP4 GIF for video playback",
+                                    );
+                                }
+                            }
+                            self.entries_push(entry);
+                            return self.drain_pending_transfers();
+                        }
                         // Reuse the standard image rendering path (GIF
                         // frames decode automatically for animated GIFs).
                         let mut entry = ChatEntry::image(
@@ -23525,16 +23599,31 @@ impl IcedChat {
     ) -> Option<iced::Task<AppMessage>> {
         if let NetEvent::Message { from, message, .. } = event {
             let msg_hash = message_hash(message);
-            info!(
-                topic = %topic,
-                message_hash = ?msg_hash,
-                local_peer = %self.local_public.fmt_short(),
-                neighbor_count = self.neighbors.len(),
-                sender_ready = self.sender_ready,
-                receive_decode_result = "ok",
-                persistence_result = "pending",
-                "message delivery telemetry"
-            );
+            if Self::_is_user_visible_event(event) {
+                info!(
+                    topic = %topic,
+                    message_hash = ?msg_hash,
+                    local_peer = %self.local_public.fmt_short(),
+                    neighbor_count = self.neighbors.len(),
+                    sender_ready = self.sender_ready,
+                    receive_decode_result = "ok",
+                    persistence_result = "pending",
+                    "message delivery telemetry"
+                );
+            } else {
+                // Protocol traffic (AboutMe, Presence, Heartbeat,
+                // LatencyPing, NeighborUp/Down, ...) is exchanged ~1/s
+                // between peers while a lobby is the active conversation;
+                // log it at trace so INFO stays readable.
+                trace!(
+                    topic = %topic,
+                    message_hash = ?msg_hash,
+                    local_peer = %self.local_public.fmt_short(),
+                    neighbor_count = self.neighbors.len(),
+                    sender_ready = self.sender_ready,
+                    "protocol message delivery telemetry"
+                );
+            }
             debug!(from = %from.fmt_short(), "decoded gossip message");
         }
         if let NetEvent::Message { from, .. } = event {
@@ -40920,10 +41009,9 @@ mod tests {
         // KLIPY-06's SharedGif conversion keeps the provider-neutral
         // identity and rendition URLs; the picker's SendGif handler builds
         // this payload and broadcasts it (no full-size download on send).
-        // The playback rendition is MP4 (provider preference) but the chat
-        // render path is images-only, so the primary URL must fall back to
-        // a renderable GIF/WebP rendition — otherwise the card renders
-        // blank.
+        // The playback rendition stays as the provider chose it (MP4 here);
+        // the receiver dispatches on `format` — MP4 plays via the inline
+        // video player, GIF/WebP via the image path.
         let gif = result_with(Some(media_source(
             "https://media.test/original.gif",
             GifMediaFormat::Gif,
@@ -40931,7 +41019,7 @@ mod tests {
         let shared = boru_core::gif_provider::SharedGif::from_search_result(&gif);
         assert_eq!(shared.provider, "test");
         assert_eq!(shared.provider_id, "gif-1");
-        assert_eq!(shared.playback_url, "https://media.test/preview.gif");
+        assert_eq!(shared.playback_url, "https://media.test/playback.mp4");
         assert_eq!(
             shared.preview_url.as_deref(),
             Some("https://media.test/preview.gif")
@@ -40940,7 +41028,7 @@ mod tests {
             shared.fallback_url.as_deref(),
             Some("https://media.test/original.gif")
         );
-        assert_eq!(shared.format, GifMediaFormat::Gif);
+        assert_eq!(shared.format, GifMediaFormat::Mp4);
         assert!(shared.is_renderable());
     }
 

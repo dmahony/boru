@@ -1661,10 +1661,14 @@ async fn handle_run_local_gui_message_test(
                 .as_millis() as i64,
             command: command_json,
         };
-        let before = journal.latest_sequence();
+        let before = journal.entry_count();
         tx.enqueue(request)
             .map_err(|e| format!("GUI action enqueue failed: {}", e.message))?;
-        while journal.latest_sequence() <= before {
+        // Wait for the journal to grow. Entry count is used (not
+        // latest_sequence) because the first record ever gets sequence 0,
+        // so `latest_sequence() > before` can never become true when the
+        // journal starts empty (before == 0).
+        while journal.entry_count() <= before {
             if tokio::time::Instant::now() >= deadline {
                 return Err("timed out waiting for GUI action".to_string());
             }

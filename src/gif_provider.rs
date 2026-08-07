@@ -183,28 +183,13 @@ impl SharedGif {
     /// provider and provider_id so the payload stays provider-neutral and
     /// extensible, and copies dimensions + alt text when known.
     ///
-    /// The chat card render path decodes images only — it cannot play MP4.
-    /// The provider prefers MP4 for playback, so when the playback rendition
-    /// is MP4 the primary URL falls back to a renderable GIF/WebP rendition
-    /// (preview first: smallest, then the original) so the shared GIF
-    /// actually displays instead of a blank card.
+    /// The chat render path is format-aware: MP4 playback renditions are
+    /// played through the inline video player, while GIF/WebP renditions
+    /// render through the static-image path.  The payload keeps the
+    /// provider's preferred playback rendition (often MP4) and the
+    /// receiver dispatches on [`Self::format`].
     pub fn from_search_result(result: &GifSearchResult) -> Self {
-        let playback = if result.playback.format != GifMediaFormat::Mp4 {
-            &result.playback
-        } else {
-            let candidates = [Some(&result.preview), result.original.as_ref()];
-            candidates
-                .into_iter()
-                .flatten()
-                .find(|s| s.format == GifMediaFormat::Gif)
-                .or_else(|| {
-                    candidates
-                        .into_iter()
-                        .flatten()
-                        .find(|s| s.format != GifMediaFormat::Mp4)
-                })
-                .unwrap_or(&result.playback)
-        };
+        let playback = &result.playback;
         let fallback = result.original.as_ref().map(|source| source.url.clone());
         let preview = result.preview.url.clone();
         Self {
@@ -539,18 +524,19 @@ mod tests {
 
     #[test]
     fn shared_gif_from_search_result_maps_renditions() {
-        // The provider prefers MP4 for playback, but the chat card render
-        // path is images-only: the primary URL must fall back to the
-        // renderable preview/fallback rendition (here: the preview GIF).
+        // The payload keeps the provider's preferred playback rendition
+        // (MP4 here); the receiver dispatches on `format` — MP4 renditions
+        // play through the inline video player, GIF/WebP through the image
+        // path. The preview/fallback URLs stay as render fallbacks.
         let page = sample_page();
         let result = &page.items[0];
         let gif = SharedGif::from_search_result(result);
         assert_eq!(gif.provider, "klipy");
         assert_eq!(gif.provider_id, "abc123");
-        assert_eq!(gif.playback_url, "https://media.example/preview.gif");
-        assert_eq!(gif.format, GifMediaFormat::Gif);
-        assert_eq!(gif.width, Some(100));
-        assert_eq!(gif.height, Some(75));
+        assert_eq!(gif.playback_url, "https://media.example/playback.mp4");
+        assert_eq!(gif.format, GifMediaFormat::Mp4);
+        assert_eq!(gif.width, Some(480));
+        assert_eq!(gif.height, Some(360));
         assert_eq!(
             gif.preview_url.as_deref(),
             Some("https://media.example/preview.gif")
