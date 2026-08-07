@@ -29568,7 +29568,7 @@ impl IcedChat {
         .align_y(iced::Alignment::Center);
 
         // Search input
-        let search_input = text_input("Search GIFs…", &self.gif_search_text)
+        let search_input = text_input("Search KLIPY", &self.gif_search_text)
             .on_input(AppMessage::GifSearchChanged)
             .on_submit(AppMessage::GifSearchSubmit)
             .size(crate::fonts::TypeRole::Body.size_px())

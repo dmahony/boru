@@ -141,9 +141,9 @@ Additional privacy guarantees:
 
 **Attribution.** KLIPY's integration requirements (verified 2026-08-08)
 require "Search KLIPY" as the default placeholder text in the search input
-(watermark / "Powered by KLIPY" marks are optional). The current Boru picker
-placeholder is still "Search GIFs…" and does not yet meet this requirement —
-see [`docs/gif-search.md`](gif-search.md) §7 for status and follow-up.
+(watermark / "Powered by KLIPY" marks are optional). The Boru picker's search
+input placeholder is "Search KLIPY", meeting this REQUIRED attribution — see
+[`docs/gif-search.md`](gif-search.md) §7.
 
 
 **Desktop-build risk.** Boru's desktop builds do **not** embed a shared API

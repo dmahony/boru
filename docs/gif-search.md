@@ -161,9 +161,9 @@ Boru is privacy-focused; external GIF search is optional and off by default.
 When it is used:
 
 - **Search terms are sent to KLIPY.** The picker is the only place this
-  happens. (Note: the picker surface is currently titled "GIF Search" and is
-  not KLIPY-branded; KLIPY's attribution requirements call for a "Search
-  KLIPY" placeholder — see §7.)
+  happens. (Note: the picker surface is titled "GIF Search" and the search
+  input placeholder carries the REQUIRED "Search KLIPY" attribution — see
+  §7.)
 - Boru does **not** send usernames, peer IDs, room IDs, message contents,
   contact details, or attachment metadata to KLIPY.
 - No behavioural analytics are added.
@@ -221,12 +221,10 @@ change; re-check before shipping attribution work.
 - Official KLIPY logo assets are provided by KLIPY via its attribution
   guidelines / logo downloads.
 
-> **Current status (gap):** the Boru GIF picker's search placeholder is
-> `"Search GIFs…"` (`examples/iced_chat/app.rs`, `view_gif_picker`), which
-> does **not** yet meet the REQUIRED "Search KLIPY" attribution. Updating the
-> placeholder to comply with KLIPY's integration requirements is tracked as a
-> follow-up task; it is intentionally **not** part of this documentation
-> change.
+> **Current status (compliant):** the Boru GIF picker's search input
+> placeholder is **"Search KLIPY"** (`examples/iced_chat/app.rs`,
+> `view_gif_picker`), satisfying the REQUIRED KLIPY attribution. The OPTIONAL
+> watermark and "Powered by KLIPY" marks are intentionally **not** added.
 
 ---
 
