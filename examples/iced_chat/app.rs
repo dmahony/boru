@@ -2508,10 +2508,15 @@ const GIF_MEDIA_MAX_BYTES: usize = 15 * 1024 * 1024;
 /// provider search endpoint again.  Bounded by [`GIF_MEDIA_MAX_BYTES`] and
 /// an 8-second timeout so a missing or expired URL fails fast and the UI
 /// can render a clear fallback.
+///
+/// # Privacy
+/// The request uses a neutral browser-like `User-Agent` (no Boru branding,
+/// no peer/room identifiers) so the media CDN cannot attribute the fetch to
+/// a specific Boru identity.
 async fn fetch_gif_media_bytes(url: &str) -> Result<Vec<u8>, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(8))
-        .user_agent("Mozilla/5.0 (compatible; BoruChat; +https://boru.chat)")
+        .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
         .redirect(reqwest::redirect::Policy::limited(5))
         .build()
         .map_err(|e| format!("gif media client: {e}"))?;
@@ -29583,6 +29588,16 @@ impl IcedChat {
             .spacing(SPACE_4)
             .align_y(iced::Alignment::Center);
 
+        // KLIPY-09 privacy: make it explicit that external search is optional
+        // and that search terms leave the device for the KLIPY service.  No
+        // Boru identity, messages, or contacts are ever sent.
+        let privacy_note = crate::fonts::type_role_text(
+            crate::fonts::TypeRole::Metadata,
+            "Optional — search terms are sent to the KLIPY GIF service. Your identity, messages, and contacts never leave Boru.",
+        )
+        .color(text_muted(&theme))
+        .wrapping(iced::widget::text::Wrapping::Glyph);
+
         // ── Results area ── state machine: not-configured / loading /
         // error / no-results / empty / grid (+ load more).
         let mut results_col = column![].spacing(SPACE_4);
@@ -29746,7 +29761,7 @@ impl IcedChat {
         let scroll = crate::ui_components::gutter_scrollable(results_col).height(iced::Length::Fixed(300.0));
 
         container(
-            column![header, search_row, scroll]
+            column![header, search_row, privacy_note, scroll]
                 .spacing(SPACE_6)
                 .padding(SPACE_8),
         )
@@ -33653,6 +33668,43 @@ impl IcedChat {
 
         let data_card = section_card("DATA", vec![clear_history_row.into()]);
 
+        // ── Privacy section (KLIPY-09) ──
+        // Concise note about external GIF search: it is optional, and the only
+        // data that leaves the device is the search term sent to the KLIPY
+        // provider.  Boru never sends identity, messages, contacts, or
+        // attachment metadata to KLIPY and adds no behavioural analytics.
+        let gif_privacy_row = Column::new()
+            .push(
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::Body,
+                    "External GIF search",
+                )
+                .style(move |t| iced::widget::text::Style {
+                    color: Some(if matches!(t, iced::Theme::Dark) {
+                        Color::from_rgb(0.9, 0.9, 0.9)
+                    } else {
+                        Color::from_rgb(0.15, 0.15, 0.15)
+                    }),
+                    ..Default::default()
+                }),
+            )
+            .push(
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::SupportingText,
+                    "GIF search is optional and only runs when you search in the GIF picker. \
+                     Search terms are sent to the KLIPY GIF service. Boru never sends your \
+                     identity, messages, contacts, or attachment metadata to KLIPY, and adds \
+                     no behavioural analytics.",
+                )
+                .style(text_muted_style)
+                .wrapping(iced::widget::text::Wrapping::Glyph),
+            )
+            .spacing(SPACE_2)
+            .width(Length::Fill)
+            .align_x(Alignment::Start);
+
+        let privacy_card = section_card("PRIVACY", vec![gif_privacy_row.into()]);
+
         // ── Assemble page ──
         let content = Column::new()
             .push(appearance_card)
@@ -33662,7 +33714,10 @@ impl IcedChat {
             .push(network_card)
             .push(Space::new().height(Length::Fixed(SPACE_12)))
             .push(relay_card)
+            .push(Space::new().height(Length::Fixed(SPACE_12)))
             .push(data_card)
+            .push(Space::new().height(Length::Fixed(SPACE_12)))
+            .push(privacy_card)
             .spacing(SPACE_6)
             .width(Length::Fill);
 

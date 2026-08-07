@@ -118,7 +118,26 @@ provider, attribution and caching limits), see
 **Privacy.** Search terms are sent to the KLIPY service when you use the GIF
 picker. Boru does not send usernames, peer IDs, room IDs, message contents,
 contact details, or attachment metadata to KLIPY, and does not add behavioural
-analytics. Full search queries are not logged at normal log levels.
+analytics. Full search queries are not logged at normal log levels (request
+URLs in logs have the API key and query string redacted).
+
+Additional privacy guarantees:
+
+- **External search is opt-in per use.** The GIF picker only contacts KLIPY
+  when you open it and type a search (or load trending suggestions). Merely
+  opening a conversation never loads external media.
+- **Remote peers cannot trigger searches on your device.** A received GIF
+  message carries direct media URLs; the receiving client fetches the
+  rendition (bounded to 15 MiB) and never calls the provider search endpoint.
+- **No full-resolution auto-load.** Previews download the smallest rendition;
+  playback uses a mid-tier rendition, not the original. Full-size originals
+  are only ever fetched if a playback rendition is missing or expired, and
+  never merely because a conversation is opened.
+- **No tracking in stored payloads.** `SharedGif` messages carry only the
+  provider, provider ID, rendition URLs, format, dimensions, and alt text —
+  no tracking parameters, search queries, or identity.
+- **No proxying.** Only GIF search/trending/media requests go to KLIPY; all
+  Boru P2P chat and file-transfer traffic stays on iroh's own transport.
 
 **Attribution.** KLIPY's integration requirements (verified 2026-08-08)
 require "Search KLIPY" as the default placeholder text in the search input

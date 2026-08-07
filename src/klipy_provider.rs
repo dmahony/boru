@@ -304,12 +304,33 @@ pub fn default_gif_provider() -> Result<Arc<dyn GifProvider>, GifProviderError> 
 }
 
 /// Convert a reqwest transport error into a neutral provider error.
+///
+/// # Privacy
+/// reqwest's `Display` embeds the full request URL, which for KLIPY requests
+/// contains both the API key (path segment) and the user's search query
+/// (query string).  We must never propagate that text — it would leak the key
+/// and the full query into error messages and logs.  Instead we classify the
+/// failure into a coarse, safe description.
 fn map_reqwest_error(e: reqwest::Error) -> GifProviderError {
     if e.is_timeout() {
         GifProviderError::Timeout
     } else {
+        // Only coarse classification — never `{e}` (URL with key + query).
+        let kind = if e.is_connect() {
+            "connection failed"
+        } else if e.is_body() {
+            "response body read failed"
+        } else if e.is_decode() {
+            "response decode failed"
+        } else if e.is_redirect() {
+            "unexpected redirect"
+        } else if e.is_builder() {
+            "request build failed"
+        } else {
+            "request failed"
+        };
         GifProviderError::Network {
-            details: format!("KLIPY request failed: {e}"),
+            details: format!("KLIPY request failed: {kind}"),
         }
     }
 }
@@ -963,6 +984,128 @@ mod tests {
             "redacted URL leaked the API key: {redacted}"
         );
         assert!(redacted.contains("***"), "{redacted}");
+    }
+
+    #[test]
+    fn redacted_url_drops_query_string() {
+        // The debug log line must never include the search query; redacted_url
+        // drops the query entirely so "q=..." never reaches the log.
+        let provider = KlipyGifProvider::new_default("test-key-redact-query");
+        let mut url = provider.api_url("search");
+        url.query_pairs_mut().append_pair("q", "secret search phrase");
+        let redacted = provider.redacted_url(&url);
+        assert!(
+            !redacted.contains("secret%20search%20phrase")
+                && !redacted.contains("secret search phrase")
+                && !redacted.contains("q="),
+            "redacted URL leaked the query: {redacted}"
+        );
+        assert!(redacted.contains("***"), "{redacted}");
+    }
+
+    #[tokio::test]
+    async fn network_error_details_never_leak_key_or_query() {
+        // Point the provider at a port where nothing is listening: the
+        // connection is refused, producing a reqwest transport error.  The
+        // error text must not contain the API key or the search query — the
+        // reqwest Display would otherwise embed the full request URL.
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        drop(listener); // nothing accepts → connection refused
+
+        let provider = KlipyGifProvider::new(
+            "network-err-secret-key-999",
+            Url::parse(&format!("http://{addr}")).expect("url"),
+        )
+        .with_timeout(Duration::from_secs(5));
+
+        let err = provider
+            .search(GifSearchRequest {
+                query: "network-err-secret-query".to_string(),
+                cursor: None,
+                limit: 24,
+                content_rating: None,
+            })
+            .await
+            .expect_err("connection refused should error");
+
+        let text = err.to_string();
+        assert!(
+            !text.contains("network-err-secret-key-999"),
+            "error leaked the API key: {text}"
+        );
+        assert!(
+            !text.contains("network-err-secret-query"),
+            "error leaked the search query: {text}"
+        );
+        assert!(matches!(err, GifProviderError::Network { .. }), "{text}");
+    }
+
+    #[tokio::test]
+    async fn default_provider_sends_no_identity_or_locale_params() {
+        // KLIPY-09 privacy: the search request must not carry Boru identity
+        // (usernames/peer IDs/room IDs) or any locale attribute unless the
+        // caller explicitly opts in via with_customer_id/with_locale.  The
+        // default provider built from the shared config sends neither.
+        let (addr, mut rx) = spawn_mock(vec![(200, sample_response_json())]).await;
+        let provider = provider_for(addr);
+        provider
+            .search(GifSearchRequest {
+                query: "cat".to_string(),
+                cursor: None,
+                limit: 8,
+                content_rating: Some(GifContentRating::G),
+            })
+            .await
+            .expect("search");
+        let request = rx.recv().await.expect("request");
+        assert!(
+            !request.contains("customer_id="),
+            "unexpected customer_id in request: {request}"
+        );
+        assert!(
+            !request.contains("locale="),
+            "unexpected locale in request: {request}"
+        );
+        // Only the documented query/pagination/filter params are sent.
+        assert!(request.contains("q=cat"), "{request}");
+        assert!(request.contains("page=1"), "{request}");
+        assert!(request.contains("per_page=8"), "{request}");
+        assert!(request.contains("format_filter="), "{request}");
+    }
+
+    #[tokio::test]
+    async fn media_preview_fetch_uses_preview_rendition_not_original() {
+        // KLIPY-09 privacy: previews must download only the small preview
+        // rendition — never the full-size original.  The neutral model's
+        // GifSearchResult.preview is the xs/sm tier selected by the adapter;
+        // this asserts the adapter never promotes `original` into `preview`.
+        let (addr, _rx) = spawn_mock(vec![(200, sample_response_json())]).await;
+        let provider = provider_for(addr);
+        let page = provider
+            .trending(GifTrendingRequest {
+                cursor: None,
+                limit: 24,
+                content_rating: None,
+            })
+            .await
+            .expect("trending");
+        let item = &page.items[0];
+        // The fixture's xs tier is a WebP; preview must be that, not hd gif.
+        assert_eq!(item.preview.format, GifMediaFormat::AnimatedWebP);
+        assert!(
+            item.preview.url.contains("/xs/"),
+            "preview should be the smallest tier: {}",
+            item.preview.url
+        );
+        assert!(
+            !item.preview.url.contains("/hd/"),
+            "preview must not be the full-size original: {}",
+            item.preview.url
+        );
+        // Playback is mid-tier (sm mp4), not the hd original either.
+        assert_eq!(item.playback.format, GifMediaFormat::Mp4);
+        assert!(item.playback.url.contains("/sm/"), "{}", item.playback.url);
     }
 
     #[test]
