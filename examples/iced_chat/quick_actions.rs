@@ -13,28 +13,32 @@
 //!   height. No Archivo SemiCondensed on these cards.
 //! - The card radius matches the rail `CardShell` cards (`RADIUS_CARD`) so
 //!   every home card shares the same corner rhythm.
-//! - Card structure (UI-HOME-06): 56 px light-green icon container, 24 px
-//!   horizontal padding, 16 px icon→title gap, 8 px title→description gap,
-//!   and a subtle bottom-right action indicator. Heights are content-driven:
-//!   the card grows with wrapped text instead of clipping it.
+//! - Card structure (HOME-02 compact): 40 px light-green icon container,
+//!   12 px vertical / 16 px horizontal padding, 8 px icon→title gap,
+//!   4 px title→description gap, and a subtle bottom-right action
+//!   indicator. Heights are content-driven: the card grows with wrapped
+//!   text instead of clipping it.
 
 use iced::widget::{button, container, Column, Row, Space};
 use iced::{Alignment, Background, Border, Color, Element, Length, Theme, Vector};
 
-use crate::app::{AppMessage, SPACE_12, SPACE_16, SPACE_20, SPACE_24, SPACE_8};
+use crate::app::{AppMessage, SPACE_12, SPACE_16, SPACE_4, SPACE_8};
 use crate::design_tokens;
 use crate::icon_system::{Icon, IconSize};
 
-/// Diameter of the light-green quick-action icon container (task: 52–60 px).
-const QUICK_ACTION_ICON_SIZE: f32 = 56.0;
+/// Diameter of the light-green quick-action icon container (HOME-02
+/// compact: 40 px — down from the 52–60 px band to make the four cards
+/// denser while the 24 px icon inside keeps an 8 px margin).
+const QUICK_ACTION_ICON_SIZE: f32 = 40.0;
 
 /// Quick-action card title size (FONTS-07: IBM Plex Sans SemiBold ~16–17 px).
 ///
 /// `TypeRole::CardTitle` defaults to 18 px for dashboard cards app-wide; the
 /// approved quick-action mockup uses the tighter 16–17 px band, so the role's
 /// font/weight (IBM Plex Sans SemiBold) is kept and only the size is
-/// overridden locally for these cards.
-const QUICK_ACTION_TITLE_SIZE: f32 = 17.0;
+/// overridden locally for these cards. HOME-02 uses the bottom of the band
+/// (16 px) so the compact cards stay readable but denser.
+const QUICK_ACTION_TITLE_SIZE: f32 = 16.0;
 
 /// Quick-action card description size (FONTS-07: IBM Plex Sans Regular ~14 px).
 const QUICK_ACTION_DESCRIPTION_SIZE: f32 = 14.0;
@@ -76,10 +80,10 @@ const ACTIONS: &[QuickAction] = &[
     },
 ];
 
-/// Light-green circular icon tile (UI-HOME-06: 52–60 px container).
+/// Light-green circular icon tile (HOME-02 compact: 40 px container).
 ///
 /// Mirrors the `icon_tile` look (soft brand-green background, centered
-/// icon) at the larger size the approved quick-action card calls for.
+/// icon) at the compact size the HOME-02 cards call for.
 fn quick_action_icon<'a>(icon: Icon) -> Element<'a, AppMessage> {
     let tile = QUICK_ACTION_ICON_SIZE;
     container(icon.build().size(IconSize::Lg).build())
@@ -125,16 +129,19 @@ fn action_indicator<'a>() -> Element<'a, AppMessage> {
 pub fn quick_action_card<'a>(action: &'a QuickAction, theme: &Theme) -> Element<'a, AppMessage> {
     let content = Column::new()
         .push(quick_action_icon(action.icon))
-        .push(Space::new().height(Length::Fixed(SPACE_16)))
+        // HOME-02: icon→title gap tightened from SPACE_16 to SPACE_8 so the
+        // four cards sit noticeably closer together vertically.
+        .push(Space::new().height(Length::Fixed(SPACE_8)))
         .push(
             // Quick-action title — TypeRole::CardTitle (IBM Plex Sans
-            // SemiBold) at the FONTS-07 quick-action size (17 px; the role
+            // SemiBold) at the FONTS-07 quick-action size (16 px; the role
             // default 18 px stays shared with other dashboard cards).
             crate::fonts::type_role_text(crate::fonts::TypeRole::CardTitle, action.label)
                 .size(QUICK_ACTION_TITLE_SIZE)
                 .width(Length::Fill),
         )
-        .push(Space::new().height(Length::Fixed(SPACE_8)))
+        // HOME-02: title→description gap tightened from SPACE_8 to SPACE_4.
+        .push(Space::new().height(Length::Fixed(SPACE_4)))
         .push(
             // Supporting description — TypeRole::SupportingText (IBM Plex
             // Sans Regular) at the FONTS-07 quick-action size (14 px) with
@@ -152,7 +159,9 @@ pub fn quick_action_card<'a>(action: &'a QuickAction, theme: &Theme) -> Element<
             .color(design_tokens::text_muted(theme))
             .width(Length::Fill),
         )
-        .push(Space::new().height(Length::Fixed(SPACE_12)))
+        // HOME-02: description→indicator gap tightened from SPACE_12 to
+        // SPACE_8.
+        .push(Space::new().height(Length::Fixed(SPACE_8)))
         .push(action_indicator())
         .spacing(0)
         .align_x(Alignment::Center)
@@ -160,8 +169,10 @@ pub fn quick_action_card<'a>(action: &'a QuickAction, theme: &Theme) -> Element<
 
     button(content)
         .on_press(action.message.clone())
-        // 20 px vertical / 24 px horizontal padding (UI-HOME-06: 20–24 px).
-        .padding([SPACE_20, SPACE_24])
+        // HOME-02 compact: 12 px vertical / 16 px horizontal padding (was
+        // 20 px / 24 px) — smaller card, denser grid, still an easy tap
+        // target because the whole card is the button.
+        .padding([SPACE_12, SPACE_16])
         // Content-driven height: no fixed box, no hidden overflow — the
         // card grows to contain icon + title + full description.
         .width(Length::Fill)
@@ -383,9 +394,10 @@ mod tests {
         // UI-HOME-06 (and UI-HOME-12 before it): the old fixed 132 px card
         // height clipped wrapped descriptions (UI-HOME-01 audit §4). Cards
         // must size to their content — no fixed height, no hidden overflow —
-        // and keep the approved structure: 52–60 px icon container, 20–24 px
-        // padding, 14–18 px icon→title gap, ~8 px title→description gap,
-        // light-green icon background, and TypeRole-based typography.
+        // and keep the approved structure: compact HOME-02 metrics (40 px
+        // icon container, 12/16 px padding, 8 px icon→title gap, 4 px
+        // title→description gap), light-green icon background, and
+        // TypeRole-based typography.
         let src = include_str!("quick_actions.rs");
         let prod = src.split("#[cfg(test)]").next().unwrap();
         assert!(
@@ -397,16 +409,16 @@ mod tests {
             "quick-action cards must not hide overflow with clipping"
         );
         assert!(
-            prod.contains("QUICK_ACTION_ICON_SIZE: f32 = 56.0"),
-            "icon container must be 56 px (52–60 px band)"
+            prod.contains("QUICK_ACTION_ICON_SIZE: f32 = 40.0"),
+            "icon container must be 40 px (HOME-02 compact)"
         );
         assert!(
-            prod.contains(".padding([SPACE_20, SPACE_24])"),
-            "card padding must be 20 px vertical / 24 px horizontal"
+            prod.contains(".padding([SPACE_12, SPACE_16])"),
+            "card padding must be 12 px vertical / 16 px horizontal (HOME-02 compact)"
         );
         assert!(
             prod.contains("TypeRole::CardTitle"),
-            "quick-action labels must use TypeRole::CardTitle (IBM Plex Sans SemiBold 17)"
+            "quick-action labels must use TypeRole::CardTitle (IBM Plex Sans SemiBold 16)"
         );
         assert!(
             prod.contains("TypeRole::SupportingText"),
@@ -416,12 +428,12 @@ mod tests {
             prod.contains("type_role_text_lh("),
             "quick-action descriptions must use the line-height helper (plan 1.45)"
         );
-        // FONTS-07: the quick-action cards size their roles locally (17 px
+        // FONTS-07: the quick-action cards size their roles locally (16 px
         // title / 14 px description at 1.45) instead of the shared role
         // defaults (CardTitle 18 / SupportingText 13) used elsewhere.
         assert!(
             prod.contains(".size(QUICK_ACTION_TITLE_SIZE)"),
-            "quick-action titles must override the card-title size to the FONTS-07 17 px band"
+            "quick-action titles must override the card-title size to the FONTS-07 16 px band"
         );
         assert!(
             prod.contains(".size(QUICK_ACTION_DESCRIPTION_SIZE)"),
@@ -434,22 +446,21 @@ mod tests {
     }
 
     #[test]
-    fn quick_action_natural_height_exceeds_old_fixed_box() {
-        // Clipping-math regression (UI-HOME-01 audit root cause + UI-HOME-12):
-        // with the FONTS-07 quick-action metrics the tallest card content —
-        // 56 px icon tile + 16 px gap + 17 px title + 8 px gap + a two-line
-        // 14 px description at 1.45 line height + 20 px vertical padding +
-        // action indicator — needs more than the removed 132 px fixed height,
-        // which is why cards must be content-driven.
-        use crate::design_tokens::{SPACE_12, SPACE_16, SPACE_20, SPACE_8};
+    fn quick_action_natural_height_is_compact_but_unclipped() {
+        // HOME-02: the compact card (40 px icon + 12/16 px padding +
+        // tightened 8/4/8 px gaps) must be noticeably shorter than the old
+        // 200+ px band while still exceeding the removed 132 px fixed box —
+        // i.e. content-driven (full description visible) but denser.
+        use crate::design_tokens::{SPACE_12, SPACE_4, SPACE_8};
 
         let tile = super::QUICK_ACTION_ICON_SIZE;
         let title = super::QUICK_ACTION_TITLE_SIZE * 1.3; // single-line heading
-        let description_two_lines =
-            super::QUICK_ACTION_DESCRIPTION_SIZE * super::QUICK_ACTION_DESCRIPTION_LINE_HEIGHT * 2.0;
-        let indicator = crate::icon_system::IconSize::Xs.px() + SPACE_12;
-        let vertical_padding = 2.0 * SPACE_20;
-        let gaps = SPACE_16 + SPACE_8;
+        let description_two_lines = super::QUICK_ACTION_DESCRIPTION_SIZE
+            * super::QUICK_ACTION_DESCRIPTION_LINE_HEIGHT
+            * 2.0;
+        let indicator = crate::icon_system::IconSize::Xs.px() + SPACE_8;
+        let vertical_padding = 2.0 * SPACE_12;
+        let gaps = SPACE_8 + SPACE_4;
         let natural = tile + gaps + title + description_two_lines + indicator + vertical_padding;
         assert!(
             natural > 132.0,
@@ -457,9 +468,14 @@ mod tests {
              a fixed-height card would clip the description"
         );
         assert!(
-            natural >= 200.0,
-            "quick-action card should be near the plan's 220–250 px band \
-             when text wraps (computed natural height {natural:.1} px)"
+            natural < 200.0,
+            "HOME-02 compact card should be noticeably smaller than the old 200+ px band \
+             (computed natural height {natural:.1} px)"
+        );
+        assert!(
+            natural >= 150.0,
+            "compact card should stay near the 150–165 px target band \
+             (computed natural height {natural:.1} px)"
         );
     }
 }
