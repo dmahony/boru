@@ -89,6 +89,16 @@ impl DirectoryStore {
         self.ads.insert((ad.topic, author), (ad, Instant::now()));
     }
 
+    /// Return `true` if an advertisement already exists for the given room
+    /// and author.
+    ///
+    /// Useful for callers that want to distinguish a genuinely new
+    /// announcement from a periodic refresh (the same author re-broadcasts
+    /// every ~60 s, and that should not count as a fresh event).
+    pub fn contains(&self, topic: TopicId, author: PublicKey) -> bool {
+        self.ads.contains_key(&(topic, author))
+    }
+
     /// Persist all current advertisements to the SQLite directory table.
     pub fn save_to_db(&self, conn: &Connection) -> Result<()> {
         conn.execute("DELETE FROM directory_ads", [])?;
@@ -323,6 +333,25 @@ mod tests {
 
         let active = store.list_active();
         assert_eq!(active.len(), 2);
+    }
+
+    /// `contains` distinguishes a new announcement from a periodic refresh
+    /// from the same author (the re-broadcast dedup used by the recent
+    /// activity feed).
+    #[test]
+    fn directory_store_contains_tracks_room_author_pairs() {
+        let mut store = DirectoryStore::new();
+        let topic = make_topic(1);
+        let author_a = make_public_key(42);
+        let author_b = make_public_key(43);
+
+        assert!(!store.contains(topic, author_a));
+        store.upsert(make_ad("room-a", topic), author_a);
+        assert!(store.contains(topic, author_a));
+        // A different author announcing the same topic is still new.
+        assert!(!store.contains(topic, author_b));
+        // A different topic by the same author is new.
+        assert!(!store.contains(make_topic(2), author_a));
     }
 
     #[test]

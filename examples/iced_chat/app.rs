@@ -10950,6 +10950,13 @@ impl IcedChat {
                     self.public_rooms_sidebar_revision =
                         self.public_rooms_sidebar_revision.wrapping_add(1);
 
+                    // PUBLIC-02: surface the local creation in the home
+                    // screen's Recent Activity feed.
+                    self.push_activity(
+                        format!("You created public room \"{display_name}\""),
+                        ActivityKind::Generic,
+                    );
+
                     // Keep publishing this user-created public room after the
                     // initial directory advertisement.  The DHT record carries
                     // the room metadata so later discovery can present a
@@ -17781,23 +17788,29 @@ impl IcedChat {
                 } else {
                     self.advertised_rooms.insert(topic);
                     info!(%topic, "room advertising enabled");
+                    let room_name = self
+                        .conversation_store
+                        .find(&topic)
+                        .map(|e| {
+                            if e.name.is_empty() {
+                                topic.to_string()
+                            } else {
+                                e.name.clone()
+                            }
+                        })
+                        .unwrap_or_else(|| topic.to_string());
+                    // PUBLIC-02: making a room public is a local
+                    // announcement — surface it in the Recent Activity feed.
+                    self.push_activity(
+                        format!("You announced public room \"{room_name}\""),
+                        ActivityKind::Generic,
+                    );
                     // Broadcast an immediate RoomAdvertisement so the room
                     // appears in the directory without waiting for the next
                     // ~60s periodic tick.
                     if let Some(ref dir_sender) = self.directory_sender {
                         let sk = self.secret_key.clone();
                         let s = dir_sender.clone();
-                        let room_name = self
-                            .conversation_store
-                            .find(&topic)
-                            .map(|e| {
-                                if e.name.is_empty() {
-                                    topic.to_string()
-                                } else {
-                                    e.name.clone()
-                                }
-                            })
-                            .unwrap_or_else(|| topic.to_string());
                         let neighbor_count = self
                             .room_neighbor_counts
                             .get(&topic)
@@ -19581,15 +19594,33 @@ impl IcedChat {
                 // manual ticket exchange.
                 let mut discovered_room_tasks = Vec::new();
                 let mut directory_changed = false;
+                // PUBLIC-02: descriptions collected while the directory rx
+                // lock is held (cannot call &mut self push_activity there);
+                // flushed into the Recent Activity feed after the scope.
+                let mut announced_rooms: Vec<String> = Vec::new();
                 {
                     let mut dir_guard = self.directory_room_rx.try_lock();
                     if let Ok(ref mut rx) = dir_guard {
                         while let Ok(DirectoryRoomUpdate(ad, from)) = rx.try_recv() {
                             info!(from = %from, topic = %ad.topic, "received room advertisement");
-                            self.directory_store
-                                .lock()
-                                .unwrap()
-                                .upsert(ad.clone(), from);
+                            // PUBLIC-02: surface genuinely new public-room
+                            // announcements in the home screen's Recent
+                            // Activity feed.  The same author re-broadcasts
+                            // every ~60 s; only the first sighting is a fresh
+                            // event worth showing.
+                            let is_new_ad = {
+                                let mut store = self.directory_store.lock().unwrap();
+                                let is_new = !store.contains(ad.topic, from);
+                                store.upsert(ad.clone(), from);
+                                is_new
+                            };
+                            if is_new_ad {
+                                let creator = self.resolve_name(&from);
+                                announced_rooms.push(format!(
+                                    "{creator} announced public room \"{}\"",
+                                    ad.room_name
+                                ));
+                            }
                             directory_changed = true;
 
                             // Parse the authenticated ticket and use its topic;
@@ -19623,6 +19654,12 @@ impl IcedChat {
                 }
                 if !discovered_room_tasks.is_empty() {}
                 tasks.extend(discovered_room_tasks);
+                // PUBLIC-02: flush collected room announcements into the
+                // Recent Activity feed now that the directory rx lock scope
+                // has ended (push_activity takes &mut self).
+                for description in announced_rooms {
+                    self.push_activity(description, ActivityKind::Generic);
+                }
                 if directory_changed {
                     // The Discover screen's room list changed.
                     self.invalidate_prewarm(&[Screen::Discover]);
@@ -45052,6 +45089,45 @@ mod tests {
         let card = IcedChat::view_recent_activity_card(&data);
         let _ = card;
         let _ = app.view_main_empty_state();
+    }
+
+    /// PUBLIC-02: a public-room announcement — whether from a local
+    /// creation, the "announce room" toggle, or a peer's directory
+    /// advertisement — must land in the Recent Activity card data and
+    /// survive view refresh (recomputing the card dependency keeps the rows).
+    #[test]
+    fn public_room_announcement_appears_in_recent_activity_card() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        app.push_activity(
+            format!("You created public room \"Lounge\""),
+            ActivityKind::Generic,
+        );
+        app.push_activity(
+            format!("Alice announced public room \"Coding\""),
+            ActivityKind::Generic,
+        );
+
+        let first = app.recent_activity_card_data();
+        assert!(
+            first
+                .rows
+                .iter()
+                .any(|r| r.description.contains("Lounge")),
+            "locally created public room must appear in Recent Activity"
+        );
+        assert!(
+            first
+                .rows
+                .iter()
+                .any(|r| r.description.contains("Coding")),
+            "peer public-room announcement must appear in Recent Activity"
+        );
+        assert_eq!(first.total, 2);
+
+        // Survives view refresh: recomputing the card dependency keeps rows.
+        let second = app.recent_activity_card_data();
+        assert_eq!(first.rows, second.rows);
+        assert_eq!(first.total, second.total);
     }
 
     // ── File Sharing card dependency isolation (PERF-2, t_f6dcbb3a) ──
