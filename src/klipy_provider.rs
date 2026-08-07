@@ -39,22 +39,22 @@
 //! changes or clears the search) cancels the in-flight HTTP request; no
 //! background task is spawned, so there is nothing to leak or join.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use serde::Deserialize;
 use url::Url;
 
-use crate::gif_provider::{
-    GifContentRating, GifMediaFormat, GifMediaSource, GifProvider, GifProviderError,
-    GifSearchPage, GifSearchRequest, GifSearchResult, GifTrendingRequest,
-};
-use crate::klipy_config::KlipyConfig;
-
 /// Environment variable holding the KLIPY application key (re-exported from
 /// [`crate::klipy_config`], the single auth seam for external GIF search).
 pub use crate::klipy_config::KLIPY_API_KEY_ENV;
+use crate::{
+    gif_provider::{
+        GifContentRating, GifMediaFormat, GifMediaSource, GifProvider, GifProviderError,
+        GifSearchPage, GifSearchRequest, GifSearchResult, GifTrendingRequest,
+    },
+    klipy_config::KlipyConfig,
+};
 
 /// Default KLIPY API base URL.
 pub const DEFAULT_BASE_URL: &str = "https://api.klipy.com";
@@ -142,9 +142,7 @@ impl KlipyGifProvider {
     /// Returns [`GifProviderError::NotConfigured`] when no key is
     /// configured, so callers can degrade gracefully.
     pub fn from_config(config: &KlipyConfig) -> Result<Self, GifProviderError> {
-        let api_key = config
-            .api_key()
-            .ok_or(GifProviderError::NotConfigured)?;
+        let api_key = config.api_key().ok_or(GifProviderError::NotConfigured)?;
         Ok(Self::new_default(api_key.to_string()))
     }
 
@@ -227,7 +225,11 @@ impl KlipyGifProvider {
             .unwrap_or(1)
     }
 
-    async fn fetch_page(&self, url: Url, endpoint: &str) -> Result<GifSearchPage, GifProviderError> {
+    async fn fetch_page(
+        &self,
+        url: Url,
+        endpoint: &str,
+    ) -> Result<GifSearchPage, GifProviderError> {
         tracing::debug!(
             url = %self.redacted_url(&url),
             timeout_ms = self.timeout.as_millis(),
@@ -247,9 +249,7 @@ impl KlipyGifProvider {
                 .and_then(|s| s.trim().parse::<u64>().ok());
             return Err(GifProviderError::RateLimited { retry_after });
         }
-        if status == reqwest::StatusCode::UNAUTHORIZED
-            || status == reqwest::StatusCode::FORBIDDEN
-        {
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
             return Err(GifProviderError::InvalidApiKey);
         }
         if !status.is_success() {
@@ -263,11 +263,10 @@ impl KlipyGifProvider {
             .map_err(|_| GifProviderError::Timeout)?
             .map_err(map_reqwest_error)?;
 
-        let parsed: KlipySearchResponse = serde_json::from_slice(&body).map_err(|e| {
-            GifProviderError::InvalidResponse {
+        let parsed: KlipySearchResponse =
+            serde_json::from_slice(&body).map_err(|e| GifProviderError::InvalidResponse {
                 details: format!("invalid JSON from KLIPY: {e}"),
-            }
-        })?;
+            })?;
 
         Ok(self.map_page(parsed))
     }
@@ -300,7 +299,9 @@ impl KlipyGifProvider {
 /// can depend on [`GifProvider`] without ever naming the concrete KLIPY
 /// provider type.
 pub fn default_gif_provider() -> Result<Arc<dyn GifProvider>, GifProviderError> {
-    Ok(Arc::new(KlipyGifProvider::from_config(&KlipyConfig::from_env())?))
+    Ok(Arc::new(KlipyGifProvider::from_config(
+        &KlipyConfig::from_env(),
+    )?))
 }
 
 /// Convert a reqwest transport error into a neutral provider error.
@@ -439,12 +440,7 @@ const PLAYBACK_FORMATS: [GifMediaFormat; 3] = [
     GifMediaFormat::Gif,
     GifMediaFormat::AnimatedWebP,
 ];
-const PLAYBACK_TIERS: [SizeTier; 4] = [
-    SizeTier::Sm,
-    SizeTier::Md,
-    SizeTier::Hd,
-    SizeTier::Xs,
-];
+const PLAYBACK_TIERS: [SizeTier; 4] = [SizeTier::Sm, SizeTier::Md, SizeTier::Hd, SizeTier::Xs];
 
 /// Preferred formats and tiers for the optional original rendition: the
 /// largest GIF (or WebP/MP4) when available.
@@ -512,10 +508,7 @@ fn map_item(item: KlipyGifItem) -> Option<GifSearchResult> {
 
 #[async_trait]
 impl GifProvider for KlipyGifProvider {
-    async fn search(
-        &self,
-        request: GifSearchRequest,
-    ) -> Result<GifSearchPage, GifProviderError> {
+    async fn search(&self, request: GifSearchRequest) -> Result<GifSearchPage, GifProviderError> {
         let page = Self::parse_page(request.cursor.as_deref());
         let mut url = self.api_url("search");
         {
@@ -564,10 +557,13 @@ impl GifProvider for KlipyGifProvider {
 
 #[cfg(test)]
 mod tests {
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        sync::mpsc,
+    };
+
     use super::*;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
-    use tokio::sync::mpsc;
 
     /// Minimal canned HTTP server used as a KLIPY fixture.  Each accepted
     /// connection is served the next `(status, body)` pair; request start
@@ -712,11 +708,17 @@ mod tests {
 
         // Request must include the key in the path and the filter params.
         let request = rx.recv().await.expect("request");
-        assert!(request.contains("api/v1/test-key-123/gifs/search"), "{request}");
+        assert!(
+            request.contains("api/v1/test-key-123/gifs/search"),
+            "{request}"
+        );
         assert!(request.contains("q=cat"), "{request}");
         assert!(request.contains("per_page=8"), "{request}");
         assert!(request.contains("content_filter=high"), "{request}");
-        assert!(request.contains("format_filter=gif%2Cwebp%2Cmp4"), "{request}");
+        assert!(
+            request.contains("format_filter=gif%2Cwebp%2Cmp4"),
+            "{request}"
+        );
     }
 
     #[tokio::test]
@@ -738,7 +740,10 @@ mod tests {
         assert_eq!(page.next_cursor.as_deref(), Some("2"));
 
         let request = rx.recv().await.expect("request");
-        assert!(request.contains("api/v1/test-key-123/gifs/trending"), "{request}");
+        assert!(
+            request.contains("api/v1/test-key-123/gifs/trending"),
+            "{request}"
+        );
         assert!(request.contains("page=2"), "{request}");
         assert!(request.contains("per_page=50"), "{request}");
         assert!(!request.contains("q="), "{request}");
@@ -840,7 +845,10 @@ mod tests {
             })
             .await
             .expect_err("should error");
-        assert!(matches!(err, GifProviderError::InvalidResponse { .. }), "{err:?}");
+        assert!(
+            matches!(err, GifProviderError::InvalidResponse { .. }),
+            "{err:?}"
+        );
     }
 
     #[tokio::test]
@@ -1004,15 +1012,16 @@ mod tests {
         let configured = KlipyConfig::from_value(Some("config-key-abc".to_string()));
         let provider = KlipyGifProvider::from_config(&configured).expect("configured");
         let url = provider.api_url("search");
-        assert!(url.to_string().contains("api/v1/config-key-abc/gifs/search"));
+        assert!(url
+            .to_string()
+            .contains("api/v1/config-key-abc/gifs/search"));
         // Debug must never leak the key.
         assert!(!format!("{provider:?}").contains("config-key-abc"));
     }
 
     #[test]
     fn api_key_never_appears_in_debug_output() {
-        let provider =
-            KlipyGifProvider::new_default("super-secret-klipy-key-987654321");
+        let provider = KlipyGifProvider::new_default("super-secret-klipy-key-987654321");
         let debug = format!("{provider:?}");
         assert!(
             !debug.contains("super-secret-klipy-key-987654321"),
@@ -1032,7 +1041,8 @@ mod tests {
         // drops the query entirely so "q=..." never reaches the log.
         let provider = KlipyGifProvider::new_default("test-key-redact-query");
         let mut url = provider.api_url("search");
-        url.query_pairs_mut().append_pair("q", "secret search phrase");
+        url.query_pairs_mut()
+            .append_pair("q", "secret search phrase");
         let redacted = provider.redacted_url(&url);
         assert!(
             !redacted.contains("secret%20search%20phrase")
@@ -1212,7 +1222,10 @@ mod tests {
             .await
             .expect("empty search should succeed");
         assert!(page.items.is_empty(), "expected no items");
-        assert!(page.next_cursor.is_none(), "no next page after empty results");
+        assert!(
+            page.next_cursor.is_none(),
+            "no next page after empty results"
+        );
     }
 
     #[tokio::test]
@@ -1243,7 +1256,8 @@ mod tests {
             let (mut sock, _) = listener.accept().await.expect("accept");
             let mut buf = [0u8; 4096];
             let _ = sock.read(&mut buf).await;
-            let header = "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            let header =
+                "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
             let _ = sock.write_all(header.as_bytes()).await;
         });
         let provider = provider_for(addr);
@@ -1315,8 +1329,7 @@ mod tests {
             md: None,
             hd: None,
         };
-        let preview = select_rendition(&files, &PREVIEW_FORMATS, &PREVIEW_TIERS)
-            .expect("preview");
+        let preview = select_rendition(&files, &PREVIEW_FORMATS, &PREVIEW_TIERS).expect("preview");
         assert_eq!(preview.format, GifMediaFormat::AnimatedWebP);
         assert_eq!(preview.url, "https://static.klipy.com/ii/xs/cat.webp");
     }

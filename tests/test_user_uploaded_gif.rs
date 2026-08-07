@@ -20,21 +20,21 @@
 //! None of these tests contact any external GIF provider (KLIPY) — the
 //! only network is two localhost iroh peers on a memory lookup.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use boru_core::chat_callbacks::{ChatCallbacks, TransferKind, TransferProgress};
-use boru_core::chat_core::{
-    download_blob_to_file, download_blob_with_safety, download_candidates, forward_gossip_events,
-    handle_net_event, Message, MessageHash, NetEvent, SignedMessage,
+use boru_core::{
+    chat_callbacks::{ChatCallbacks, TransferKind, TransferProgress},
+    chat_core::{
+        download_blob_to_file, download_blob_with_safety, download_candidates,
+        forward_gossip_events, handle_net_event, Message, MessageHash, NetEvent, SignedMessage,
+    },
+    friends::FriendId,
+    image_store::ImageStore,
+    net::{Gossip, GOSSIP_ALPN},
+    proto::TopicId,
+    public_room_config::PublicRoomConfig,
+    public_room_safety::PublicRoomSafety,
 };
-use boru_core::friends::FriendId;
-use boru_core::image_store::ImageStore;
-use boru_core::net::{Gossip, GOSSIP_ALPN};
-use boru_core::proto::TopicId;
-use boru_core::public_room_config::PublicRoomConfig;
-use boru_core::public_room_safety::PublicRoomSafety;
 use iroh::{
     address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router, PublicKey,
     RelayMode, SecretKey,
@@ -49,8 +49,10 @@ use tokio::sync::Mutex;
 /// Build a real 3-frame animated GIF (4×4, red/green/blue frames) using the
 /// `image` crate encoder — the same decoder/encoder family the app uses.
 fn make_animated_gif() -> Vec<u8> {
-    use image::codecs::gif::{GifEncoder, Repeat};
-    use image::{Delay, Frame, RgbaImage};
+    use image::{
+        codecs::gif::{GifEncoder, Repeat},
+        Delay, Frame, RgbaImage,
+    };
     let mut bytes = Vec::new();
     {
         let mut enc = GifEncoder::new(&mut bytes);
@@ -286,7 +288,9 @@ async fn connect_two_peers() -> Result<(
     drain_net(&net_rx_a, &mut sim_a);
     drain_net(&net_rx_b, &mut sim_b);
 
-    Ok((peer_a, peer_b, topic, sender_a, sender_b, net_rx_a, net_rx_b))
+    Ok((
+        peer_a, peer_b, topic, sender_a, sender_b, net_rx_a, net_rx_b,
+    ))
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -438,7 +442,10 @@ async fn png_attachment_roundtrip_preserves_bytes() -> Result<()> {
         downloaded, png,
         "PNG must be unaffected by the GIF byte-for-byte branch"
     );
-    println!("✓ PNG ({}) round-tripped byte-for-byte via ImageShare", downloaded.len());
+    println!(
+        "✓ PNG ({}) round-tripped byte-for-byte via ImageShare",
+        downloaded.len()
+    );
     Ok(())
 }
 
@@ -456,7 +463,11 @@ fn image_share_wire_message_has_no_provider_fields() {
     let obj = obj.expect("ImageShare variant should serialize as an object");
     let mut keys: Vec<&String> = obj.keys().collect();
     keys.sort();
-    assert_eq!(keys, vec!["hash", "name"], "ImageShare must carry only name+hash");
+    assert_eq!(
+        keys,
+        vec!["hash", "name"],
+        "ImageShare must carry only name+hash"
+    );
     let raw = serde_json::to_string(&msg).unwrap().to_lowercase();
     for forbidden in ["provider", "klipy", "url", "external"] {
         assert!(
@@ -484,8 +495,8 @@ async fn mp4_file_share_progress_emits_started_and_completed() -> Result<()> {
 
     // Build the same BlobTicket the GUI's ExecuteFileSend constructs.
     let addr = peer_a.endpoint.addr();
-    let ticket = iroh_blobs::ticket::BlobTicket::new(addr, hash, iroh_blobs::BlobFormat::Raw)
-        .to_string();
+    let ticket =
+        iroh_blobs::ticket::BlobTicket::new(addr, hash, iroh_blobs::BlobFormat::Raw).to_string();
     let msg = Message::FileShare {
         name: "movie.mp4".into(),
         ticket: ticket.clone(),
@@ -550,7 +561,9 @@ async fn mp4_file_share_progress_emits_started_and_completed() -> Result<()> {
 
     let events = events.lock().await;
     assert!(
-        events.iter().any(|e| matches!(e, TransferProgress::Started { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, TransferProgress::Started { .. })),
         "expected a Started progress event, got: {events:?}"
     );
     assert!(

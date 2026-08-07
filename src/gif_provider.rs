@@ -22,10 +22,7 @@ use serde::{Deserialize, Serialize};
 #[async_trait]
 pub trait GifProvider: Send + Sync + 'static {
     /// Search for GIFs matching [`GifSearchRequest::query`].
-    async fn search(
-        &self,
-        request: GifSearchRequest,
-    ) -> Result<GifSearchPage, GifProviderError>;
+    async fn search(&self, request: GifSearchRequest) -> Result<GifSearchPage, GifProviderError>;
 
     /// Fetch trending / suggested GIFs.
     async fn trending(
