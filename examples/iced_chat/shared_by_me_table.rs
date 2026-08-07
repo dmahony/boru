@@ -253,11 +253,46 @@ pub(crate) fn relative_shared(shared_on_ms: u64, now_ms: u64) -> String {
     crate::presentation::relative_time_at(shared_on_ms, now_ms, 10)
 }
 
-/// Compact kind label for the secondary metadata line. Falls back to "File"
-/// when the MIME type is unknown so long/empty values never break layout.
+/// Compact kind label for the secondary metadata line.
+///
+/// Maps the common MIME families to short, readable labels so the meta line
+/// never needs to wrap in the narrow NAME column (a wrapped meta line is the
+/// main cause of oversized rows — FILES-02). Unknown types fall back to a
+/// truncated MIME string; `None`/empty values fall back to "File".
 pub(crate) fn kind_label(mime_type: Option<&str>) -> String {
     match mime_type {
-        Some(value) if !value.is_empty() => value.to_string(),
+        Some(value) if !value.is_empty() => {
+            if value.starts_with("application/pdf") {
+                "PDF".to_string()
+            } else if value.starts_with("image/") {
+                "Image".to_string()
+            } else if value.starts_with("video/") {
+                "Video".to_string()
+            } else if value.starts_with("audio/") {
+                "Audio".to_string()
+            } else if value.starts_with("text/") {
+                "Text".to_string()
+            } else if value
+                .starts_with("application/vnd.openxmlformats-officedocument.wordprocessingml")
+            {
+                "Word".to_string()
+            } else if value
+                .starts_with("application/vnd.openxmlformats-officedocument.spreadsheetml")
+            {
+                "Excel".to_string()
+            } else if value
+                .starts_with("application/vnd.openxmlformats-officedocument.presentationml")
+            {
+                "PowerPoint".to_string()
+            } else if value.starts_with("application/zip")
+                || value.starts_with("application/x-compressed")
+                || value.starts_with("application/x-7z")
+            {
+                "Archive".to_string()
+            } else {
+                truncated_name(value, KIND_MAX_CHARS)
+            }
+        }
         _ => "File".to_string(),
     }
 }
@@ -373,6 +408,14 @@ const COL_ACTIONS: f32 = 36.0;
 const MAX_VISIBLE_CHIPS: usize = 3;
 /// Maximum characters of a recipient label shown inside a chip.
 const CHIP_LABEL_MAX_CHARS: usize = 14;
+/// Maximum characters of an unknown MIME type shown in the row meta line.
+/// Unknown types are truncated so the meta line stays on one line (FILES-02).
+const KIND_MAX_CHARS: usize = 12;
+/// Maximum characters of the whole row meta line ("kind · size · shared Xh
+/// ago"). The NAME column is ~190 px in the two-column dashboard, which fits
+/// roughly 30-34 chars of the 12 px Metadata type; capping the line here
+/// guarantees it never wraps and inflates the row height (FILES-02).
+const META_MAX_CHARS: usize = 32;
 
 /// Build the full "Files I'm Sharing" card.
 ///
@@ -722,7 +765,7 @@ fn view_row(
     }
 
     container(column)
-        .padding([design_tokens::SPACE_8, design_tokens::SPACE_8])
+        .padding([design_tokens::SPACE_4, design_tokens::SPACE_8])
         .width(Length::Fill)
         .style(move |t| container::Style {
             background: Some(Background::Color(
@@ -798,11 +841,14 @@ fn name_cell(
         .color(design_tokens::text_primary(theme));
 
     let kind = kind_label(row.mime_type.as_deref());
-    let meta_line = text(format!(
-        "{} · {} · shared {}",
-        kind,
-        format_size(row.size_bytes),
-        relative_shared(row.shared_on_ms, now_ms_u64())
+    let meta_line = text(truncated_name(
+        &format!(
+            "{} · {} · shared {}",
+            kind,
+            format_size(row.size_bytes),
+            relative_shared(row.shared_on_ms, now_ms_u64())
+        ),
+        META_MAX_CHARS,
     ))
     .size(TypeRole::Metadata.size_px())
     .font(TypeRole::Metadata.font())
@@ -1448,7 +1494,7 @@ fn skeleton_body(theme: &Theme) -> Element<'static, AppMessage> {
         }
         r = r.push(Space::new().width(Length::Fill));
         container(r)
-            .padding([design_tokens::SPACE_8, design_tokens::SPACE_8])
+            .padding([design_tokens::SPACE_4, design_tokens::SPACE_8])
             .width(Length::Fill)
     };
     Column::new()
@@ -1589,6 +1635,78 @@ mod tests {
         assert_eq!(out[0].size_bytes, None);
         assert_eq!(format_size(out[0].size_bytes), "—");
         assert_eq!(kind_label(out[0].mime_type.as_deref()), "File");
+    }
+
+    #[test]
+    fn kind_label_maps_common_mime_families_to_compact_labels() {
+        // FILES-02: the row meta line must stay on ONE line in the narrow
+        // NAME column. Long raw MIME strings (e.g. the ~65-char OpenXML
+        // types) used to wrap and inflate rows to 3-4 text lines.
+        assert_eq!(kind_label(Some("application/pdf")), "PDF");
+        assert_eq!(kind_label(Some("image/jpeg")), "Image");
+        assert_eq!(kind_label(Some("video/mp4")), "Video");
+        assert_eq!(kind_label(Some("audio/mpeg")), "Audio");
+        assert_eq!(kind_label(Some("text/plain")), "Text");
+        assert_eq!(
+            kind_label(Some(
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            )),
+            "Word"
+        );
+        assert_eq!(
+            kind_label(Some(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )),
+            "Excel"
+        );
+        assert_eq!(
+            kind_label(Some(
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            )),
+            "PowerPoint"
+        );
+        assert_eq!(kind_label(Some("application/zip")), "Archive");
+        // Unknown MIME types are truncated, never emitted in full.
+        let unknown = kind_label(Some("application/x-some-very-long-format"));
+        assert!(unknown.chars().count() <= KIND_MAX_CHARS, "got {unknown}");
+        assert!(unknown.ends_with('…'), "got {unknown}");
+        assert_eq!(kind_label(None), "File");
+        assert_eq!(kind_label(Some("")), "File");
+    }
+
+    #[test]
+    fn meta_line_is_truncated_to_single_line_budget() {
+        // FILES-02: even with a compact kind, the combined "kind · size ·
+        // shared Xh ago" line is capped at META_MAX_CHARS so it never wraps
+        // in the ~190 px NAME column and never inflates the row height.
+        let row = SharedByMeRow {
+            id: "local:local:meta-a".into(),
+            content_hash: "aaaa".repeat(16),
+            display_name: "report.pdf".into(),
+            mime_type: Some(
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    .into(),
+            ),
+            size_bytes: Some(2 * 1024 * 1024),
+            shared_on_ms: 1_784_814_720_000,
+            recipients: vec![],
+            has_explicit_recipients: false,
+            source_available: true,
+            downloads: None,
+        };
+        let meta = format!(
+            "{} · {} · shared {}",
+            kind_label(row.mime_type.as_deref()),
+            format_size(row.size_bytes),
+            relative_shared(row.shared_on_ms, row.shared_on_ms)
+        );
+        let truncated = truncated_name(&meta, META_MAX_CHARS);
+        assert!(
+            truncated.chars().count() <= META_MAX_CHARS,
+            "meta line over budget: {truncated}"
+        );
+        // The compact kind survives at the front.
+        assert!(truncated.starts_with("Word"), "got {truncated}");
     }
 
     #[test]

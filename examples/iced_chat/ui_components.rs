@@ -2665,7 +2665,9 @@ impl ConnectivityNotice {
 
 /// Uniform thumbnail box edge (px). Every image/video file row renders its
 /// preview at this exact size, so thumbnails never vary by content.
-pub(crate) const FILE_THUMBNAIL_EDGE: f32 = 40.0;
+/// FILES-02: 40 → 32 px so media rows match the compact text-row height
+/// (~36 px name block) instead of inflating the row.
+pub(crate) const FILE_THUMBNAIL_EDGE: f32 = 32.0;
 
 /// Render a uniform-size thumbnail preview for a picture or video file.
 ///
