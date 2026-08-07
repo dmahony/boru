@@ -1,17 +1,6 @@
 This file contains the SIL Open Font License for the font families used
 in this project.
 
---- Source Sans 3 ---
-
-Copyright 2010, 2012 Adobe Systems Incorporated (http://www.adobe.com/),
-with Reserved Font Name "Source". All Rights Reserved. Source is a
-trademark of Adobe Systems Incorporated in the United States and/or
-other countries.
-
---- Manrope ---
-
-Copyright 2023 The Manrope Project Authors (https://github.com/sharanda/manrope)
-
 --- Raleway ---
 
 Copyright 2010 The Raleway Project Authors (impallari@gmail.com),

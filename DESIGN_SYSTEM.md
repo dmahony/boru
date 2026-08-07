@@ -16,29 +16,29 @@ This document specifies every visual token, component, and behaviour in the Boru
 
 | Family | Weights loaded | Scope |
 |---|---|---|
-| **Source Sans 3** | 400 (Regular), 500 (Medium), 600 (SemiBold), 700 (Bold) | Primary app font — UI text, nav, forms, buttons, supporting text |
-| **Manrope** | 600 (SemiBold), 700 (Bold) | Display headings only |
+| **Archivo SemiCondensed** | 600 (SemiBold), 700 (Bold) | Major display/page headings |
+| **IBM Plex Sans** | 400 (Regular), 500 (Medium), 600 (SemiBold) | Primary app UI — nav, forms, buttons, supporting text |
 | **Figtree** | 400 (Regular), 500 (Medium), 600 (SemiBold) | Chat messages, sender names, message metadata, composer |
 | **Raleway** | 800 (ExtraBold) | BORU wordmark / branding only |
 | **JetBrains Mono** | 400 (Regular), 500 (Medium) | Technical/code values |
 
-Fonts are bundled at compile time via `include_bytes!` in `fonts.rs` and loaded at startup by `fonts::load_fonts()` (UI-HOME-11: every required weight is a registered static instance — no synthetic bolding). Inter, the Manrope variable font, and the JetBrains Mono variable/italic fonts remain bundled for legacy compatibility but are not loaded by default. Licence and source records for every family live in `examples/iced_chat/fonts/` (`THIRD_PARTY_NOTICES.md` + per-family `*-OFL.txt`).
+Fonts are bundled at compile time via `include_bytes!` in `fonts.rs` and loaded at startup by `fonts::load_fonts()` (UI-HOME-11: every required weight is a registered static instance — no synthetic bolding). The legacy JetBrains Mono variable/italic fonts remain bundled for legacy compatibility but are not loaded by default. Licence and source records for every family live in `examples/iced_chat/fonts/` (`THIRD_PARTY_NOTICES.md` + per-family `*-OFL.txt`). The legacy families were removed in FONTS-12.
 
 ### Canonical Semantic Roles (UI-HOME-11)
 
-`fonts::TypeRole` is the central typography system approved by the Boru plan. Each role knows its family, weight and default pixel size; screens migrate onto these roles in UI-HOME-12/13/14. The legacy `Typography` enum remains for existing call sites until migration completes.
+`fonts::TypeRole` is the central typography system approved by the Boru plan. Each role knows its family, weight and default pixel size; screens migrate onto these roles in UI-HOME-12/13/14. The legacy `Typography` enum was removed in FONTS-04.
 
 | Role | Family | Weight | px |
 |---|---|---|---|
-| `display_heading` | Manrope | Bold (700) | 32 |
-| `page_title` | Source Sans 3 | SemiBold (600) | 28 |
-| `section_title` | Source Sans 3 | SemiBold (600) | 20 |
-| `card_title` | Source Sans 3 | SemiBold (600) | 18 |
-| `body` | Source Sans 3 | Regular (400) | 15 |
-| `body_emphasised` | Source Sans 3 | SemiBold (600) | 15 |
-| `button_label` | Source Sans 3 | SemiBold (600) | 14 |
-| `supporting_text` | Source Sans 3 | Regular (400) | 13 |
-| `metadata` | Source Sans 3 | Regular (400) | 12 |
+| `display_heading` | Archivo SemiCondensed | Bold (700) | 32 |
+| `page_title` | Archivo SemiCondensed | Bold (700) | 28 |
+| `section_title` | IBM Plex Sans | SemiBold (600) | 20 |
+| `card_title` | IBM Plex Sans | SemiBold (600) | 18 |
+| `body` | IBM Plex Sans | Regular (400) | 15 |
+| `body_emphasised` | IBM Plex Sans | SemiBold (600) | 15 |
+| `button_label` | IBM Plex Sans | SemiBold (600) | 14 |
+| `supporting_text` | IBM Plex Sans | Regular (400) | 13 |
+| `metadata` | IBM Plex Sans | Regular (400) | 12 |
 | `chat_message` | Figtree | Regular (400) | 15 |
 | `chat_sender` | Figtree | SemiBold (600) | 14 |
 | `chat_metadata` | Figtree | Regular (400) | 12 |
@@ -46,18 +46,19 @@ Fonts are bundled at compile time via `include_bytes!` in `fonts.rs` and loaded 
 | `technical_value` | JetBrains Mono | Regular (400) | 12 |
 | `brand_wordmark` | Raleway | ExtraBold (800) | 28 |
 
-Fallbacks: every role degrades to Source Sans 3 at the same (or nearest registered) weight when its family is unavailable; `technical_value` degrades to the platform monospace family. No remote font service is used at runtime.
+Fallbacks (FONTS Task 14): display/page headings degrade to Arial Narrow → generic sans-serif; UI and chat roles degrade to the system sans-serif (Arial on Windows); `technical_value` degrades to the platform monospace family (Consolas on Windows); the wordmark stays Raleway. No remote font service is used at runtime.
 
 ### Type Scale
 
+The canonical role sizes live in `TypeRole::size_px()` (FONTS Task 16
+baseline — all within the approved ranges). `fonts.rs` module `sizes`
+keeps only the constants app code references directly:
+
 | Token | px | Semantic role | Weight |
 |---|---|---|---|
-| `PAGE_TITLE` | 28 | Page title | SemiBold |
-| `CONVERSATION_TITLE` | 18 | Section heading, room name | SemiBold |
-| `SIDEBAR_IDENTITY` | 16 | Sidebar identity name | SemiBold |
-| `CHAT_MESSAGE` | 15 | Chat message body | Regular |
-| `BODY` | 14 | Body text, labels, buttons | Regular |
-| `SECONDARY` | 12 | Secondary metadata, timestamps | Regular |
+| `HOME_SUBTITLE` | 16 | Home subtitle (Body role) | Regular |
+| `DIALOG_TITLE` | 26 | Creation-dialog title (PageTitle family) | Bold |
+| `DIALOG_SUBTITLE` | 14 | Creation-dialog subtitle (SupportingText) | Regular |
 
 **Legacy aliases** (keep app.rs compiling; values updated to spec):
 `XL`(28), `LG`(18), `MD`(15), `SM`(14), `XS`(12), `XXS`(12)
@@ -1106,7 +1107,7 @@ One `Icon` enum maps every semantic action to a Lucide SVG asset; `IconSize` nam
 
 ### 19.4 `fonts.rs` — typography
 
-`Typography` enum provides semantic roles (PageTitle, SectionHeading, ChatMessage, …) with correct family/weight/size; `load_fonts()` registers Source Sans 3, Raleway, and JetBrains Mono at startup.
+`TypeRole` enum provides semantic roles (DisplayHeading, PageTitle, SectionTitle, ChatMessage, …) with correct family/weight/size; `load_fonts()` registers Archivo SemiCondensed, IBM Plex Sans, Figtree, Raleway, and JetBrains Mono at startup.
 
 ### 19.5 Responsive breakpoints
 

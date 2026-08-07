@@ -13,9 +13,6 @@
 //! | Figtree         | 400 · 500 · 600               | Chat messages, sender, metadata, composer | Arial → system sans-serif |
 //! | JetBrains Mono  | 400 · 500                     | Technical/code values           | Consolas → monospace               |
 //! | Raleway         | 800 (ExtraBold)               | BORU wordmark / branding only   | Raleway (bundled — unchanged)      |
-//! | Source Sans 3   | 400 · 500 · 600 · 700         | Legacy — app default font + one chip label (removed in FONTS-12) | — |
-//! | Manrope         | 600 (SemiBold) · 700 (Bold)   | Legacy — no longer referenced by tokens (removed in FONTS-12) | — |
-//! | Inter           | 400 · 500 · 600 · 700         | Legacy fallback (bundled, not loaded) | — |
 //!
 //! In iced terms, `TypeRole::fallback_family()` maps these chains to
 //! `Family` values: display/page-heading roles → `Family::Name("Arial
@@ -26,59 +23,18 @@
 //!
 //! ## Licence
 //!
-//! Source Sans 3, Inter, Manrope, Figtree, Raleway, JetBrains Mono,
-//! Archivo SemiCondensed, and IBM Plex Sans are licensed under the SIL
-//! Open Font License 1.1. See fonts/OFL.txt and the per-family OFL
-//! records (fonts/Figtree-OFL.txt, fonts/Manrope-OFL.txt,
+//! Figtree, Raleway, JetBrains Mono, Archivo SemiCondensed, and IBM
+//! Plex Sans are licensed under the SIL Open Font License 1.1. See
+//! fonts/OFL.txt and the per-family OFL records (fonts/Figtree-OFL.txt,
 //! fonts/JetBrainsMono-OFL.txt, fonts/Raleway-OFL.txt,
-//! fonts/SourceSans3-OFL.txt, fonts/Archivo-OFL.txt,
-//! fonts/IBMPlexSans-OFL.txt) plus fonts/THIRD_PARTY_NOTICES.md for
-//! exact sources and versions.
+//! fonts/Archivo-OFL.txt, fonts/IBMPlexSans-OFL.txt) plus
+//! fonts/THIRD_PARTY_NOTICES.md for exact sources and versions.
 
 use iced::font::{self, Family, Weight};
 use iced::widget::text;
 use iced::Font;
 
 // ── Font file data (bundled at compile time, loaded at startup) ──────
-
-/// Source Sans 3 Regular (400).
-const SOURCE_SANS_REGULAR_BYTES: &[u8] = include_bytes!("fonts/SourceSans3-Regular.ttf");
-
-/// Source Sans 3 SemiBold (600).
-const SOURCE_SANS_SEMI_BOLD_BYTES: &[u8] = include_bytes!("fonts/SourceSans3-SemiBold.ttf");
-
-/// Source Sans 3 Medium (500) — legacy registration, kept for the app
-/// default font and legacy call sites until FONTS-12.
-const SOURCE_SANS_MEDIUM_BYTES: &[u8] = include_bytes!("fonts/SourceSans3-Medium.ttf");
-
-/// Source Sans 3 Bold (700) — kept loaded; several call sites request `Weight::Bold`.
-const SOURCE_SANS_BOLD_BYTES: &[u8] = include_bytes!("fonts/SourceSans3-Bold.ttf");
-
-/// Inter Regular (400).
-#[expect(dead_code)]
-const INTER_REGULAR_BYTES: &[u8] = include_bytes!("fonts/Inter-Regular.ttf");
-
-/// Inter Medium (500).
-#[expect(dead_code)]
-const INTER_MEDIUM_BYTES: &[u8] = include_bytes!("fonts/Inter-Medium.ttf");
-
-/// Inter SemiBold (600).
-#[expect(dead_code)]
-const INTER_SEMI_BOLD_BYTES: &[u8] = include_bytes!("fonts/Inter-SemiBold.ttf");
-
-/// Inter Bold (700).
-#[expect(dead_code)]
-const INTER_BOLD_BYTES: &[u8] = include_bytes!("fonts/Inter-Bold.ttf");
-
-/// Manrope variable font (200–800) — legacy bundled asset, NOT loaded at startup.
-#[expect(dead_code)]
-const MANROPE_BYTES: &[u8] = include_bytes!("fonts/Manrope.ttf");
-
-/// Manrope SemiBold (600) — static instance registered for display headings.
-const MANROPE_SEMI_BOLD_BYTES: &[u8] = include_bytes!("fonts/Manrope-SemiBold.ttf");
-
-/// Manrope Bold (700) — static instance registered for display headings.
-const MANROPE_BOLD_BYTES: &[u8] = include_bytes!("fonts/Manrope-Bold.ttf");
 
 /// Figtree Regular (400) — chat message / composer text.
 const FIGTREE_REGULAR_BYTES: &[u8] = include_bytes!("fonts/Figtree-Regular.ttf");
@@ -125,18 +81,6 @@ const IBM_PLEX_SANS_SEMI_BOLD_BYTES: &[u8] = include_bytes!("fonts/IBMPlexSans-S
 
 // ── Font family names ────────────────────────────────────────────────
 
-/// Internal family name for Source Sans 3.
-pub const SOURCE_SANS: &str = "Source Sans 3";
-
-/// Internal family name for Inter.
-#[expect(dead_code)]
-pub const INTER: &str = "Inter";
-
-/// Internal family name for Manrope (legacy — no token references it since
-/// FONTS-04; kept for the still-loaded statics until FONTS-12 removes them).
-#[expect(dead_code)]
-pub const MANROPE: &str = "Manrope";
-
 /// Internal family name for Figtree.
 pub const FIGTREE: &str = "Figtree";
 
@@ -157,42 +101,6 @@ pub const IBM_PLEX_SANS: &str = "IBM Plex Sans";
 pub const ARIAL_NARROW: &str = "Arial Narrow";
 
 // ── Font constructors ────────────────────────────────────────────────
-
-/// Return a `Font` for Source Sans 3 at the given weight.
-pub fn source_sans(weight: Weight) -> Font {
-    Font {
-        family: Family::Name(SOURCE_SANS),
-        weight,
-        stretch: iced::font::Stretch::Normal,
-        style: iced::font::Style::Normal,
-    }
-}
-
-/// Return a `Font` for Inter at the given weight.
-#[expect(dead_code)]
-pub fn inter(weight: Weight) -> Font {
-    Font {
-        family: Family::Name(INTER),
-        weight,
-        stretch: iced::font::Stretch::Normal,
-        style: iced::font::Style::Normal,
-    }
-}
-
-/// Return a `Font` for Manrope at the given weight.
-///
-/// Legacy — no `TypeRole` references Manrope since FONTS-04 (display
-/// headings use Archivo SemiCondensed). Kept for the still-loaded statics
-/// until FONTS-12 removes them.
-#[expect(dead_code)]
-pub fn manrope(weight: Weight) -> Font {
-    Font {
-        family: Family::Name(MANROPE),
-        weight,
-        stretch: iced::font::Stretch::Normal,
-        style: iced::font::Style::Normal,
-    }
-}
 
 /// Return a `Font` for Figtree at the given weight.
 pub fn figtree(weight: Weight) -> Font {
@@ -546,20 +454,9 @@ pub fn type_role_text_lh<'a>(
 ///
 /// Loads Archivo SemiCondensed (display/page headings), IBM Plex Sans
 /// (primary UI), Figtree (chat), Raleway ExtraBold (wordmark), and
-/// JetBrains Mono (technical values). Source Sans 3 and Manrope remain
-/// loaded for legacy call sites (app default font / one chip label) until
-/// FONTS-12 removes them; Inter is kept as compiled-in data but never
-/// loaded at startup.
+/// JetBrains Mono (technical values).
 pub fn load_fonts() -> iced::Task<crate::app::AppMessage> {
     iced::Task::batch(vec![
-        // Source Sans 3 — 400 · 500 · 600 (+700 for legacy call sites).
-        font::load(SOURCE_SANS_REGULAR_BYTES).map(|_| crate::app::AppMessage::Noop),
-        font::load(SOURCE_SANS_MEDIUM_BYTES).map(|_| crate::app::AppMessage::Noop),
-        font::load(SOURCE_SANS_SEMI_BOLD_BYTES).map(|_| crate::app::AppMessage::Noop),
-        font::load(SOURCE_SANS_BOLD_BYTES).map(|_| crate::app::AppMessage::Noop),
-        // Manrope — 600 · 700 (display headings).
-        font::load(MANROPE_SEMI_BOLD_BYTES).map(|_| crate::app::AppMessage::Noop),
-        font::load(MANROPE_BOLD_BYTES).map(|_| crate::app::AppMessage::Noop),
         // Figtree — 400 · 500 · 600 (chat).
         font::load(FIGTREE_REGULAR_BYTES).map(|_| crate::app::AppMessage::Noop),
         font::load(FIGTREE_MEDIUM_BYTES).map(|_| crate::app::AppMessage::Noop),
@@ -587,24 +484,11 @@ mod tests {
 
     #[test]
     fn font_bytes_are_non_empty() {
-        // Source Sans 3
-        assert!(!SOURCE_SANS_REGULAR_BYTES.is_empty());
-        assert!(!SOURCE_SANS_SEMI_BOLD_BYTES.is_empty());
-        assert!(!SOURCE_SANS_BOLD_BYTES.is_empty());
         // Raleway
         assert!(!RALEWAY_EXTRA_BOLD_BYTES.is_empty());
         // JetBrains Mono
         assert!(!JETBRAINS_MONO_BYTES.is_empty());
         assert!(!JETBRAINS_MONO_ITALIC_BYTES.is_empty());
-        // Inter (still bundled)
-        assert!(!INTER_REGULAR_BYTES.is_empty());
-        assert!(!INTER_MEDIUM_BYTES.is_empty());
-        assert!(!INTER_SEMI_BOLD_BYTES.is_empty());
-        assert!(!INTER_BOLD_BYTES.is_empty());
-        // Manrope (still bundled) + registered statics
-        assert!(!MANROPE_BYTES.is_empty());
-        assert!(!MANROPE_SEMI_BOLD_BYTES.is_empty());
-        assert!(!MANROPE_BOLD_BYTES.is_empty());
         // Figtree
         assert!(!FIGTREE_REGULAR_BYTES.is_empty());
         assert!(!FIGTREE_MEDIUM_BYTES.is_empty());
@@ -612,8 +496,6 @@ mod tests {
         // JetBrains Mono statics
         assert!(!JETBRAINS_MONO_REGULAR_BYTES.is_empty());
         assert!(!JETBRAINS_MONO_MEDIUM_BYTES.is_empty());
-        // Source Sans 3 Medium
-        assert!(!SOURCE_SANS_MEDIUM_BYTES.is_empty());
         // Archivo SemiCondensed statics
         assert!(!ARCHIVO_SEMI_CONDENSED_SEMI_BOLD_BYTES.is_empty());
         assert!(!ARCHIVO_SEMI_CONDENSED_BOLD_BYTES.is_empty());
@@ -626,9 +508,7 @@ mod tests {
     #[test]
     fn every_required_family_weight_is_registered() {
         // The FONTS-04 token families, each at the exact weights the roles
-        // request. Source Sans 3 / Manrope are still bundled+loaded for
-        // legacy call sites (FONTS-12 removes them), so they also appear in
-        // the loaded list below.
+        // request.
         let expectations: &[(&str, Weight)] = &[
             (ARCHIVO_SEMI_CONDENSED, Weight::Semibold), // 600
             (ARCHIVO_SEMI_CONDENSED, Weight::Bold),     // 700
@@ -643,11 +523,6 @@ mod tests {
             (JETBRAINS_MONO, Weight::Medium), // 500
         ];
         let loaded: &[(&str, Weight)] = &[
-            (SOURCE_SANS, Weight::Normal),
-            (SOURCE_SANS, Weight::Medium),
-            (SOURCE_SANS, Weight::Semibold),
-            (MANROPE, Weight::Semibold),
-            (MANROPE, Weight::Bold),
             (FIGTREE, Weight::Normal),
             (FIGTREE, Weight::Medium),
             (FIGTREE, Weight::Semibold),
@@ -730,7 +605,8 @@ mod tests {
         // named family is absent), UI and chat roles to the system
         // sans-serif (Arial on Windows), technical values to the platform
         // monospace (Consolas on Windows), and the wordmark stays Raleway.
-        // No Source Sans 3 fallback remains.
+        // The legacy families were removed in FONTS-12, so every fallback
+        // must be one of the approved platform families below.
         assert_eq!(
             TypeRole::TechnicalValue.fallback_family(),
             iced::font::Family::Monospace
@@ -781,10 +657,17 @@ mod tests {
                     assert_eq!(role.fallback_family(), iced::font::Family::Name(RALEWAY));
                 }
             }
-            assert_ne!(
-                role.fallback_family(),
-                iced::font::Family::Name(SOURCE_SANS),
-                "Source Sans 3 must not remain a fallback for {role:?}"
+            // Every fallback must be one of the approved FONTS-14 platform
+            // families — no legacy family may reappear.
+            let approved = [
+                iced::font::Family::Name(ARIAL_NARROW),
+                iced::font::Family::SansSerif,
+                iced::font::Family::Monospace,
+                iced::font::Family::Name(RALEWAY),
+            ];
+            assert!(
+                approved.contains(&role.fallback_family()),
+                "fallback family for {role:?} must be an approved FONTS-14 platform family"
             );
             let fw = role.fallback_weight();
             assert!(
@@ -837,7 +720,7 @@ mod tests {
     #[test]
     fn ui_roles_use_ibm_plex_sans() {
         // FONTS-04: every general-UI role maps to IBM Plex Sans (never the
-        // legacy Source Sans 3 default).
+        // legacy default font, removed in FONTS-12).
         let roles: &[TypeRole] = &[
             TypeRole::SectionTitle,
             TypeRole::CardTitle,

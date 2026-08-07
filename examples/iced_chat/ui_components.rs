@@ -1669,7 +1669,7 @@ pub fn system_event_chip<'a, Message: 'a>(
                     .push(
                         text(label)
                             .size(TypeRole::Metadata.size_px())
-                            .font(crate::fonts::source_sans(iced::font::Weight::Semibold))
+                            .font(crate::fonts::ibm_plex_sans(iced::font::Weight::Semibold))
                             .color(accent),
                     )
                     .push(
@@ -2768,7 +2768,7 @@ mod tests {
     fn chat_status_footer_uses_plex_metadata_role() {
         // FONTS-08: the chat footer status line is chrome — it must resolve
         // through the central TypeRole::Metadata role (IBM Plex Sans), not
-        // the Source Sans app default or a raw size literal.
+        // a raw size literal or the legacy default font.
         let src = include_str!("ui_components.rs");
         let footer = method_source(src, "fn chat_status_footer<'a>(", "fn white_color(");
         assert!(
@@ -2776,8 +2776,8 @@ mod tests {
             "chat footer status text must use TypeRole::Metadata (IBM Plex Sans)"
         );
         assert!(
-            !footer.contains("source_sans("),
-            "chat footer must not use Source Sans directly"
+            !footer.contains("legacy_font_call("),
+            "chat footer must not use legacy direct font calls"
         );
     }
 

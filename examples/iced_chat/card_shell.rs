@@ -284,7 +284,7 @@ impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
         // badge, status badge, fill spacer and optional action button.
         let mut title_col = Column::new()
             .push(
-                // Card title — card_title (Source Sans 3 SemiBold 18);
+                // Card title — card_title (IBM Plex Sans SemiBold 18);
                 // uppercase + muted per the Fig 3 rail look.
                 crate::fonts::type_role_text(
                     crate::fonts::TypeRole::CardTitle,
@@ -302,7 +302,7 @@ impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
             .align_x(Alignment::Start);
         if let Some(subtitle) = self.subtitle {
             title_col = title_col.push(
-                // Subtitle — supporting_text (Source Sans 3 Regular 13).
+                // Subtitle — supporting_text (IBM Plex Sans Regular 13).
                 crate::fonts::type_role_text(
                     crate::fonts::TypeRole::SupportingText,
                     subtitle,
@@ -470,7 +470,7 @@ impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
 /// values (including "online/total" pairs) never borrow from locals inside `build`.
 fn count_badge<'a, Message: 'a>(label: String) -> Element<'a, Message> {
     container(
-        // Count badge — metadata (Source Sans 3 Regular 12); the primary
+        // Count badge — metadata (IBM Plex Sans Regular 12); the primary
         // colour comes from the container style below.
         crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, label),
     )
@@ -515,7 +515,7 @@ fn status_badge_element<'a, Message: 'a>(
         ),
     };
     container(
-        // Status pill — metadata (Source Sans 3 Regular 12).
+        // Status pill — metadata (IBM Plex Sans Regular 12).
         crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, label.to_string()),
     )
     // UI-HOME-09: tokenise the vertical padding (was a raw 2.0 literal).
@@ -854,19 +854,19 @@ mod tests {
         let prod = src.split("#[cfg(test)]").next().unwrap();
         assert!(
             prod.contains("TypeRole::CardTitle"),
-            "header title must use TypeRole::CardTitle (SS3 SemiBold 18)"
+            "header title must use TypeRole::CardTitle (Plex SemiBold 18)"
         );
         assert!(
             prod.contains("TypeRole::Metadata"),
-            "count/status badges must use TypeRole::Metadata (SS3 Regular 12)"
+            "count/status badges must use TypeRole::Metadata (Plex Regular 12)"
         );
         assert!(
             prod.contains("TypeRole::ButtonLabel"),
-            "\"View all\" action must use TypeRole::ButtonLabel (SS3 SemiBold 14)"
+            "\"View all\" action must use TypeRole::ButtonLabel (Plex SemiBold 14)"
         );
         assert!(
             prod.contains("TypeRole::SupportingText"),
-            "subtitle + empty message must use TypeRole::SupportingText (SS3 Regular 13)"
+            "subtitle + empty message must use TypeRole::SupportingText (Plex Regular 13)"
         );
         assert!(
             !prod.contains("Typography::"),

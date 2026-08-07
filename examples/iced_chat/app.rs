@@ -38360,10 +38360,9 @@ mod tests {
     // ── UI-HOME-13: chat timeline / composer typography regression guards ──
     //
     // The chat screen must resolve its fonts through the central `TypeRole`
-    // roles (Figtree) rather than the legacy Source Sans default font or
-    // hard-coded Source Sans weights. These are source-level guards: they
-    // assert the *contract* the view code relies on, in the same style as
-    // the `.block_on(` guard above.
+    // roles (Figtree for messages, IBM Plex Sans for chrome). These are
+    // source-level guards: they assert the *contract* the view code relies
+    // on, in the same style as the `.block_on(` guard above.
 
     /// Extract the production (non-test) source of one method body.
     fn method_source<'a>(src: &'a str, start_marker: &str, end_marker: &str) -> &'a str {
@@ -38381,8 +38380,7 @@ mod tests {
     #[test]
     fn chat_timeline_uses_type_role_figtree_roles() {
         // UI-HOME-13: message bubbles, sender names and timestamps must use
-        // the central Figtree roles (TypeRole), not the legacy Source Sans
-        // default font or hard-coded Source Sans SemiBold labels.
+        // the central Figtree roles (TypeRole).
         let src = include_str!("app.rs");
         let timeline = method_source(src, "fn view_chat_log(", "fn view_composer(");
         assert!(
@@ -38404,12 +38402,6 @@ mod tests {
             timeline.contains("LineHeight::Relative(1.45)"),
             "chat message body must use ~1.45 relative line height"
         );
-        // Sender labels must no longer be hard-coded to Source Sans SemiBold.
-        assert_eq!(
-            timeline.matches("source_sans(iced::font::Weight::Semibold)").count(),
-            0,
-            "chat timeline sender labels must not use Source Sans SemiBold directly"
-        );
     }
 
     #[test]
@@ -38430,11 +38422,10 @@ mod tests {
     }
 
     #[test]
-    fn chat_chrome_uses_plex_roles_not_source_sans() {
+    fn chat_chrome_uses_plex_roles() {
         // FONTS-08: chat chrome (empty state, connecting spinner label,
         // image-unavailable placeholder, pending upload status, header,
-        // search, menus, footer) must resolve through IBM Plex Sans roles —
-        // never the Source Sans app default or a raw source_sans call.
+        // search, menus, footer) must resolve through IBM Plex Sans roles.
         let src = include_str!("app.rs");
         let log = method_source(src, "fn view_chat_log(", "fn view_composer(");
         assert!(
@@ -38448,10 +38439,6 @@ mod tests {
         assert!(
             log.contains("TypeRole::Metadata"),
             "chat image-unavailable error line must use TypeRole::Metadata (IBM Plex Sans)"
-        );
-        assert!(
-            !log.contains("source_sans("),
-            "chat chrome must not use Source Sans directly"
         );
         // The chat message body itself stays Figtree (guarded separately);
         // make sure the chrome-only call sites above did not displace the
@@ -38548,14 +38535,6 @@ mod tests {
         assert!(
             fonts_src.contains("LineHeight::Relative(line_height)"),
             "type_role_text_lh must apply a relative line height"
-        );
-        assert!(
-            !home.contains("manrope("),
-            "home screen must not declare Manrope locally; use TypeRole::DisplayHeading"
-        );
-        assert!(
-            !home.contains("source_sans("),
-            "home screen must not declare Source Sans 3 locally; use TypeRole roles"
         );
         assert!(
             !home.contains("archivo_semi_condensed("),
@@ -39117,13 +39096,8 @@ mod tests {
             dialog_src.contains("TypeRole::ButtonLabel.font()"),
             "dialog footer buttons must use ButtonLabel (IBM Plex Sans SemiBold)"
         );
-        assert!(
-            !dialog_src.contains("source_sans(") && !dialog_src.contains("manrope("),
-            "dialog chrome must not use legacy direct font-family calls"
-        );
         // Form primitives (labels, inputs, selects, checkbox/toggle labels)
-        // must resolve to IBM Plex Sans roles rather than the Source Sans 3
-        // default font.
+        // must resolve to IBM Plex Sans roles.
         let form_src = include_str!("form_components.rs");
         assert!(
             form_src.contains("TypeRole::ButtonLabel.font()"),
@@ -39221,7 +39195,7 @@ mod tests {
         // FONTS-06: sidebar contact/peer names (conversation rows, groups,
         // friends, discovered peers, public rooms, requests) must render in
         // IBM Plex Sans Medium via the central `sidebar_name_text` helper —
-        // not the `Body` role (Regular 400) and never Source Sans.
+        // not the `Body` role (Regular 400).
         let src = include_str!("app.rs");
         assert!(
             src.contains("fn sidebar_name_text<"),
@@ -39308,9 +39282,8 @@ mod tests {
             "chat sender labels must NOT use JetBrains Mono"
         );
         // FONTS-09 fix: the friend profile header previously rendered the
-        // display name with the raw default font (Source Sans 3). It must
-        // now use the IBM Plex Sans SectionTitle role, like the peer
-        // profile header.
+        // display name with the raw default font. It must now use the IBM
+        // Plex Sans SectionTitle role, like the peer profile header.
         let friend_profile = method_source(
             src,
             "fn view_friend_profile_content(",

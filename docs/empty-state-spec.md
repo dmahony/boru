@@ -186,7 +186,7 @@ When implementing empty states, verify against this list:
 - [ ] **No multiple actions** — at most one inline ghost button per empty state, preferably zero
 - [ ] **No duplicate actions** — if the action exists elsewhere in the same section (e.g. "Manage Requests →" in Requests, action cards in the landing screen), omit it from the empty state
 - [ ] **No bounce/elastic easing** if an animation is introduced — use a subtle fade or no animation
-- [ ] **No Inter font** — system font stack only (as specified in DESIGN_SYSTEM.md §1)
+- [ ] **No custom UI font** — system font stack only (as specified in DESIGN_SYSTEM.md §1; the bundled UI family is IBM Plex Sans)
 
 ---
 

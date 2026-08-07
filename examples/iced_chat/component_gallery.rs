@@ -1710,22 +1710,6 @@ fn typography_gallery() -> Element<'static, AppMessage> {
     };
     let weights_demo = Column::new()
         .spacing(design_tokens::SPACE_8)
-        .push(family_row("Source Sans 3"))
-        .push(
-            Row::new()
-                .spacing(design_tokens::SPACE_12)
-                .push(weight_sample("Source Sans 3", iced::font::Weight::Normal, "400"))
-                .push(weight_sample("Source Sans 3", iced::font::Weight::Medium, "500"))
-                .push(weight_sample("Source Sans 3", iced::font::Weight::Semibold, "600"))
-                .push(weight_sample("Source Sans 3", iced::font::Weight::Bold, "700")),
-        )
-        .push(family_row("Manrope"))
-        .push(
-            Row::new()
-                .spacing(design_tokens::SPACE_12)
-                .push(weight_sample("Manrope", iced::font::Weight::Semibold, "600"))
-                .push(weight_sample("Manrope", iced::font::Weight::Bold, "700")),
-        )
         .push(family_row("Figtree"))
         .push(
             Row::new()
