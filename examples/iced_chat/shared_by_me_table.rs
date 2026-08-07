@@ -854,8 +854,23 @@ fn name_cell(
     .font(TypeRole::Metadata.font())
     .color(design_tokens::text_muted(theme));
 
-    let name_block = Column::new()
+    // The icon sits beside the filename and is vertically centred on it; the
+    // metadata sub-line hangs below the pair.  Previously the icon was
+    // vertically centred on the *whole* text block, so when a long kind/MIME
+    // label wrapped to extra lines the icon dropped below the filename and
+    // the file entry looked pushed too high relative to its icon (layout
+    // regression fixed with the Papirus file-type icon work).  Wrapping
+    // metadata can no longer push the icon down or run beside it.
+    let icon_and_name = Row::new()
+        .push(icon)
+        .push(Space::new().width(Length::Fixed(design_tokens::SPACE_8)))
         .push(name_text)
+        .spacing(0)
+        .align_y(Alignment::Center)
+        .width(Length::Fill);
+
+    let name_block = Column::new()
+        .push(icon_and_name)
         .push(meta_line)
         .spacing(design_tokens::SPACE_2)
         .width(Length::Fill)
@@ -872,14 +887,7 @@ fn name_cell(
         name_block.into()
     };
 
-    Row::new()
-        .push(icon)
-        .push(Space::new().width(Length::Fixed(design_tokens::SPACE_8)))
-        .push(with_tooltip)
-        .spacing(0)
-        .align_y(Alignment::Center)
-        .width(Length::Fill)
-        .into()
+    with_tooltip
 }
 
 fn shared_with_cell(
