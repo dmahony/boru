@@ -496,10 +496,12 @@ const PAPIRUS_ASSETS_ENV: &str = "BORU_PAPIRUS_ASSETS";
 /// actually contains the bundle (testable without touching process state).
 ///
 /// Candidates are checked in priority order: env override, exe-relative
-/// package layout, then the build-time manifest dir.
+/// package layout, exe-parent sibling layout, process cwd, then the
+/// build-time manifest dir.
 fn resolve_asset_root(
     env_override: Option<&std::path::Path>,
     exe_dir: Option<&std::path::Path>,
+    cwd: Option<&std::path::Path>,
     manifest_dir: &std::path::Path,
 ) -> Option<std::path::PathBuf> {
     let probe = |root: &std::path::Path| -> bool {
@@ -513,6 +515,23 @@ fn resolve_asset_root(
         }
     }
     if let Some(dir) = exe_dir {
+        let p = dir.join("assets").join("third_party").join("papirus");
+        if probe(&p) {
+            return Some(p);
+        }
+        // Binary in a `bin/`-style subdirectory beside a shared assets
+        // tree (`<exe_dir>/../assets/third_party/papirus`).
+        if let Some(parent) = dir.parent() {
+            let p = parent.join("assets").join("third_party").join("papirus");
+            if probe(&p) {
+                return Some(p);
+            }
+        }
+    }
+    // Running the binary from a directory that contains the bundle
+    // (`<cwd>/assets/third_party/papirus`) — the "copy the binary into a
+    // folder that also has assets" ad-hoc layout.
+    if let Some(dir) = cwd {
         let p = dir.join("assets").join("third_party").join("papirus");
         if probe(&p) {
             return Some(p);
@@ -534,7 +553,11 @@ fn resolve_asset_root(
 ///    binary and the asset bundle side by side under this layout
 ///    (see `.github/workflows/release.yaml`), so icons work on any machine
 ///    without depending on the build machine's source path.
-/// 3. `CARGO_MANIFEST_DIR/assets/third_party/papirus` — dev builds and
+/// 3. `<exe_dir>/../assets/third_party/papirus` — binary in a `bin/`-style
+///    subdirectory beside a shared assets tree.
+/// 4. `<cwd>/assets/third_party/papirus` — the "copy the binary into a
+///    folder that also has assets" ad-hoc layout.
+/// 5. `CARGO_MANIFEST_DIR/assets/third_party/papirus` — dev builds and
 ///    source checkouts (the pre-PAPIRUS-17 behaviour).
 ///
 /// The returned root is the directory that directly contains the
@@ -545,8 +568,14 @@ fn papirus_asset_root() -> Option<std::path::PathBuf> {
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf));
+    let cwd = std::env::current_dir().ok();
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    resolve_asset_root(env_override.as_deref(), exe_dir.as_deref(), manifest_dir)
+    resolve_asset_root(
+        env_override.as_deref(),
+        exe_dir.as_deref(),
+        cwd.as_deref(),
+        manifest_dir,
+    )
 }
 
 /// Icon ids whose **compact (16px)** bundled artwork is a `currentColor`
@@ -1519,6 +1548,7 @@ mod tests {
         let root = resolve_asset_root(
             Some(&override_root),
             Some(&exe_dir),
+            None,
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
         );
         assert_eq!(root.as_deref(), Some(override_root.as_path()));
@@ -1540,6 +1570,7 @@ mod tests {
         let root = resolve_asset_root(
             None,
             Some(&exe_dir),
+            None,
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
         );
         assert_eq!(root.as_deref(), Some(bundle.as_path()));
@@ -1555,6 +1586,7 @@ mod tests {
         let root = resolve_asset_root(
             None,
             Some(&exe_dir),
+            None,
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
         );
         let expected = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1563,11 +1595,64 @@ mod tests {
     }
 
     #[test]
+    fn asset_root_falls_back_to_exe_parent_sibling_layout() {
+        // Binary in a `bin/`-style subdirectory beside a shared assets
+        // tree: <exe_dir>/../assets/third_party/papirus (FILES-01 deploy
+        // robustness — a bare binary copied into a folder whose sibling
+        // `assets/` carries the bundle must still find the icons).
+        let root_dir =
+            std::env::temp_dir().join(format!("boru-papirus-exe-{}-sibling", std::process::id()));
+        let exe_dir = root_dir.join("bin");
+        let bundle = root_dir.join("assets").join("third_party").join("papirus");
+        std::fs::create_dir_all(bundle.join("32")).expect("create sibling 32 dir");
+        std::fs::write(
+            bundle.join("32").join("application-x-generic.svg"),
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+        )
+        .expect("write sibling generic icon");
+
+        let root = resolve_asset_root(
+            None,
+            Some(&exe_dir),
+            None,
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+        );
+        assert_eq!(root.as_deref(), Some(bundle.as_path()));
+    }
+
+    #[test]
+    fn asset_root_falls_back_to_cwd_layout() {
+        // "Copy the binary into a folder that also has assets": running
+        // from a directory that contains the bundle under ./assets (no env
+        // var, no exe-relative tree) must still find the icons.
+        let cwd_dir =
+            std::env::temp_dir().join(format!("boru-papirus-exe-{}-cwd", std::process::id()));
+        let bundle = cwd_dir.join("assets").join("third_party").join("papirus");
+        std::fs::create_dir_all(bundle.join("32")).expect("create cwd 32 dir");
+        std::fs::write(
+            bundle.join("32").join("application-x-generic.svg"),
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+        )
+        .expect("write cwd generic icon");
+        let empty_exe =
+            std::env::temp_dir().join(format!("boru-papirus-exe-{}-cwd-exe", std::process::id()));
+        std::fs::create_dir_all(&empty_exe).expect("create empty exe dir");
+
+        let root = resolve_asset_root(
+            None,
+            Some(&empty_exe),
+            Some(&cwd_dir),
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+        );
+        assert_eq!(root.as_deref(), Some(bundle.as_path()));
+    }
+
+    #[test]
     fn asset_root_none_when_no_bundle_anywhere() {
         let empty =
             std::env::temp_dir().join(format!("boru-papirus-exe-{}-none", std::process::id()));
         std::fs::create_dir_all(&empty).expect("create empty dir");
-        let root = resolve_asset_root(None, Some(&empty), &empty);
+        let root = resolve_asset_root(None, Some(&empty), None, &empty);
         assert!(root.is_none(), "no bundle → no asset root");
     }
 }

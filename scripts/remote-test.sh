@@ -151,6 +151,16 @@ deploy_machine() {
     if [[ -f "$SCRIPT_DIR/splash.py" ]]; then
         scp "${SSH_OPTIONS[@]}" "$SCRIPT_DIR/splash.py" "$SSH_HOST:$REMOTE_ROOT/splash.py"
     fi
+    # Ship the bundled Papirus file-type icon assets next to the binary so
+    # the deployed app resolves real file-type icons (FILES-01). The runtime
+    # loader probes <exe_dir>/assets/third_party/papirus — the same layout
+    # the release workflow packages (.github/workflows/release.yaml). Without
+    # the bundle every row falls back to the generic unknown-file icon.
+    if [[ -d "$PROJECT_DIR/assets/third_party/papirus" ]]; then
+        echo "→ shipping Papirus icon assets" >&2
+        scp -r "${SSH_OPTIONS[@]}" "$PROJECT_DIR/assets/third_party/papirus" "$SSH_HOST:$REMOTE_ROOT/assets-third-party.tmp"
+        remote_command "rm -rf $(remote_quote "$REMOTE_ROOT/assets") && mkdir -p $(remote_quote "$REMOTE_ROOT/assets/third_party") && mv -f $(remote_quote "$REMOTE_ROOT/assets-third-party.tmp") $(remote_quote "$REMOTE_ROOT/assets/third_party/papirus")"
+    fi
     remote_command "chmod 755 $(remote_quote "$REMOTE_SUPERVISOR.tmp") $(remote_quote "$REMOTE_BINARY.tmp") && mv -f $(remote_quote "$REMOTE_SUPERVISOR.tmp") $(remote_quote "$REMOTE_SUPERVISOR") && mv -f $(remote_quote "$REMOTE_BINARY.tmp") $(remote_quote "$REMOTE_BINARY")"
     echo "deployed $machine ($SSH_HOST)"
 }

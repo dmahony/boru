@@ -1979,4 +1979,91 @@ mod tests {
             "fixed column total must stay width-neutral ({FIXED_TOTAL} px)"
         );
     }
+
+    #[test]
+    fn shared_by_me_rows_resolve_file_type_specific_icons() {
+        // FILES-01: every "Files I'm sharing" row must show a file-type
+        // icon, not the generic unknown-file fallback. Drive the exact entry
+        // point `name_cell` uses for non-media rows
+        // (decorative_file_type_icon_element with the stored MIME + filename
+        // at List size) and assert the resolved Papirus icon/category for the
+        // acceptance-criteria list: image, video, pdf, doc, zip, audio — and
+        // that an unknown type gets the generic fallback, never a missing
+        // icon or a panic.
+        let theme = &iced::Theme::Light;
+        let cases: &[(&str, Option<&str>, &str, crate::file_category::FileCategory)] = &[
+            (
+                "vacation-photo.jpg",
+                Some("image/jpeg"),
+                "image-jpeg",
+                crate::file_category::FileCategory::Image,
+            ),
+            (
+                "demo-clip.mp4",
+                Some("video/mp4"),
+                "video-mp4",
+                crate::file_category::FileCategory::Video,
+            ),
+            (
+                "report.pdf",
+                Some("application/pdf"),
+                "application-pdf",
+                crate::file_category::FileCategory::Pdf,
+            ),
+            (
+                "notes.docx",
+                Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+                "application-vnd.openxmlformats-officedocument.wordprocessingml.document",
+                crate::file_category::FileCategory::Document,
+            ),
+            (
+                "budget.xlsx",
+                Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+                "application-vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                crate::file_category::FileCategory::Spreadsheet,
+            ),
+            (
+                "bundle.zip",
+                Some("application/zip"),
+                "application-zip",
+                crate::file_category::FileCategory::Archive,
+            ),
+            (
+                "song.mp3",
+                Some("audio/mpeg"),
+                "audio-mpeg",
+                crate::file_category::FileCategory::Audio,
+            ),
+            // Unknown type: sensible generic fallback, still a real icon.
+            (
+                "mystery.xyz",
+                Some("application/octet-stream"),
+                "application-x-generic",
+                crate::file_category::FileCategory::Unknown,
+            ),
+        ];
+        for (name, mime, expected_icon, expected_category) in cases {
+            // Build the actual element the row renders — exercises the
+            // cache + FileTypeIcon::build path (must not panic).
+            let element = crate::download_progress_view::decorative_file_type_icon_element(
+                name,
+                *mime,
+                None,
+                crate::file_type_icon::FileTypeIconSize::List,
+                theme,
+            );
+            let _ = element;
+            // Resolve through the same central component and assert the
+            // exact Papirus icon id + category the row will draw.
+            let icon = crate::file_type_icon::FileTypeIcon::new(name, *mime, None, false);
+            assert_eq!(
+                icon.resolved().icon_id, *expected_icon,
+                "file {name} must resolve to {expected_icon}"
+            );
+            assert_eq!(
+                icon.resolved().file_category, *expected_category,
+                "file {name} must keep category {expected_category:?}"
+            );
+        }
+    }
 }
