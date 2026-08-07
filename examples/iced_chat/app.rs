@@ -47868,6 +47868,84 @@ mod tests {
         assert_eq!(first.total, second.total);
     }
 
+    /// PUBLIC-01: a room announcement received over the directory gossip
+    /// topic must be accepted into the public-rooms directory, appear in the
+    /// PUBLIC ROOMS sidebar, and NOT create a duplicate entry when the same
+    /// author re-broadcasts the same room (the ~60s periodic tick and the
+    /// immediate create-time announcement both land in this drain).
+    #[test]
+    fn directory_room_announcement_accepted_deduped_and_rendered() {
+        let (_runtime, mut app) = build_prewarm_test_app();
+
+        // Replace the app's directory channel with a live one so the test can
+        // feed announcements through the same path main.rs's directory
+        // receiver uses (dir_tx → directory_room_rx → ConnMonitorTick drain).
+        let (dir_tx, dir_rx) = tokio::sync::mpsc::channel::<DirectoryRoomUpdate>(8);
+        app.directory_room_rx = Arc::new(Mutex::new(dir_rx));
+
+        let author = SecretKey::generate().public();
+        let topic = TopicId::from_bytes([0xAB; 32]);
+        let ad = RoomAdvertisement {
+            room_name: "Lounge".to_string(),
+            description: String::new(),
+            topic,
+            ticket: boru_core::chat_core::Ticket::new(topic, vec![]).to_string(),
+            member_count: 0,
+            last_activity: 0,
+        };
+
+        // First announcement: accepted and inserted into the directory.
+        dir_tx
+            .try_send(DirectoryRoomUpdate(ad.clone(), author))
+            .expect("feed announcement");
+        let task = app.update(AppMessage::ConnMonitorTick);
+        drop(task);
+
+        {
+            let store = app.directory_store.lock().unwrap();
+            assert!(store.contains(topic, author), "announcement accepted");
+            assert_eq!(store.list_active().len(), 1);
+        }
+        let dep = app.sidebar_public_rooms_dependency();
+        assert_eq!(dep.rooms.len(), 1, "public room appears in sidebar");
+        assert_eq!(dep.rooms[0].room_name, "Lounge");
+
+        // Re-broadcast of the SAME room from the SAME author (periodic tick
+        // fallback): must not create a second entry.
+        dir_tx
+            .try_send(DirectoryRoomUpdate(ad.clone(), author))
+            .expect("feed re-announcement");
+        let task = app.update(AppMessage::ConnMonitorTick);
+        drop(task);
+
+        {
+            let store = app.directory_store.lock().unwrap();
+            assert_eq!(
+                store.list_active().len(),
+                1,
+                "same (topic, author) must not duplicate"
+            );
+        }
+        let dep = app.sidebar_public_rooms_dependency();
+        assert_eq!(dep.rooms.len(), 1);
+
+        // A different author announcing the SAME room is a distinct directory
+        // entry (keyed by (topic, author)) but still renders as one sidebar
+        // row per author — assert the store keeps both without collapsing.
+        let author2 = SecretKey::generate().public();
+        dir_tx
+            .try_send(DirectoryRoomUpdate(ad.clone(), author2))
+            .expect("feed second author");
+        let task = app.update(AppMessage::ConnMonitorTick);
+        drop(task);
+
+        {
+            let store = app.directory_store.lock().unwrap();
+            assert_eq!(store.list_active().len(), 2);
+            assert!(store.contains(topic, author2));
+        }
+    }
+
     // ── PUBLIC-03: new-user recent-activity entries ─────────────────────
     // A peer observed for the very first time (across restarts) produces a
     // distinct "New user … came online" Recent Activity entry; known peers
