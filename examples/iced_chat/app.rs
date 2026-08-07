@@ -38630,9 +38630,18 @@ impl IcedChat {
         let dep = self.friend_profile_dependency(peer);
         let display_name = dep.display_name.clone();
         let dark_mode = dep.dark_mode;
+        // The base MUST be Fill×Fill (matching every other screen's base in
+        // `view()`).  `iced::widget::lazy` reports a Shrink size hint
+        // regardless of its content, so without an explicit Fill size the
+        // transient overlays stacked over this base (share-local-service
+        // dialog, remove/block confirms, toast) get clipped to the base's
+        // computed Shrink bounds — the dialog panel renders top-anchored and
+        // its lower fields (Local port, expiry, footer) are cut off.
         let base: iced::widget::Container<'_, AppMessage> = iced::widget::container(
             iced::widget::lazy(dep, move |dep| Self::view_friend_profile_content(dep, peer)),
-        );
+        )
+        .width(iced::Length::Fill)
+        .height(iced::Length::Fill);
 
         // ── Three-dot context menu overlay ──
         if self.friend_profile_menu_open {
@@ -49923,4 +49932,52 @@ fn vr_create_tunnel_picker_port_validation() {
             render_element(&mut element, "settings_light", 1200, 800, false);
         }
     }
+fn vr_create_tunnel_friend_profile_base_is_fill_sized() {
+    // Regression guard for the "Create Tunnel screen cannot enter a port"
+    // bug.  `iced::widget::lazy` always reports a `Shrink` size hint, so the
+    // friend-profile base container MUST be explicitly Fill×Fill — otherwise
+    // the transient overlays stacked over it (share-local-service dialog,
+    // remove/block confirms, toast) are laid out inside Shrink bounds: the
+    // dialog renders top-anchored and its lower fields (Local port, expiry,
+    // footer) are clipped out of the visible window.
+    let (_runtime, mut app, _local, peer) = build_join_request_test_app();
+    vr_seed_friend(&mut app, peer, "Bob");
+
+    // Base (no overlay open) must fill the whole main panel.  The Element
+    // borrows `app`, so the size hint is captured inside a scoped block.
+    let base_hint = {
+        let base = app.view_friend_profile(peer);
+        base.as_widget().size_hint()
+    };
+    assert_eq!(
+        base_hint.width,
+        iced::Length::Fill,
+        "friend-profile base width must be Fill so overlays fill the window"
+    );
+    assert_eq!(
+        base_hint.height,
+        iced::Length::Fill,
+        "friend-profile base height must be Fill so overlays fill the window"
+    );
+
+    // With the share-local-service dialog open, the stacked element must
+    // still report Fill so the centred panel is not clipped.
+    let _ = app.update(AppMessage::ShowCreateTunnelDialog);
+    let _ = app.update(AppMessage::CreateTunnel(peer));
+    assert!(app.share_local_service_open, "share form opens");
+    let overlay_hint = {
+        let with_overlay = app.view_friend_profile(peer);
+        with_overlay.as_widget().size_hint()
+    };
+    assert_eq!(
+        overlay_hint.width,
+        iced::Length::Fill,
+        "share-dialog stack width must be Fill"
+    );
+    assert_eq!(
+        overlay_hint.height,
+        iced::Length::Fill,
+        "share-dialog stack height must be Fill"
+    );
+}
 }
