@@ -96,11 +96,15 @@ callers can use `CatalogueLimitsConfig::default()` when no override is needed.
 ## External GIF Search (KLIPY)
 
 External GIF search (the GIF picker in the chat composer) uses the KLIPY
-provider. It is **optional** and disabled by default.
+provider. It is **optional** and disabled by default. For developer-facing
+details (obtaining a key, the `GifProvider` abstraction, adding another
+provider, attribution and caching limits), see
+[`docs/gif-search.md`](gif-search.md).
 
 - The API key is read at runtime from the `KLIPY_API_KEY` environment
   variable. It is **never hardcoded or committed**, and it is **not stored in
-  `settings.json`** or any other plaintext config file.
+  `settings.json`** or any other plaintext config file. Keys are obtained
+  from the KLIPY Partner Panel (`https://partner.klipy.com/api-keys`).
 - When `KLIPY_API_KEY` is unset, the GIF picker shows a "KLIPY is not
   configured" state; the app continues to work normally (text chat,
   attachments, and user-uploaded GIFs are unaffected).
@@ -115,6 +119,13 @@ provider. It is **optional** and disabled by default.
 picker. Boru does not send usernames, peer IDs, room IDs, message contents,
 contact details, or attachment metadata to KLIPY, and does not add behavioural
 analytics. Full search queries are not logged at normal log levels.
+
+**Attribution.** KLIPY's integration requirements (verified 2026-08-08)
+require "Search KLIPY" as the default placeholder text in the search input
+(watermark / "Powered by KLIPY" marks are optional). The current Boru picker
+placeholder is still "Search GIFs…" and does not yet meet this requirement —
+see [`docs/gif-search.md`](gif-search.md) §7 for status and follow-up.
+
 
 **Desktop-build risk.** Boru's desktop builds do **not** embed a shared API
 key in the binary; the key is supplied per-user through the environment. If a

@@ -54,4 +54,6 @@ networking details. The File Sharing dashboard is documented in
 [`docs/file-sharing-guide.md`](docs/file-sharing-guide.md) (user guide) and
 [`docs/fs-06-persistence-projections.md`](docs/fs-06-persistence-projections.md)
 (architecture), with the release note and rollback guidance in
-[`docs/fs-25-release-note.md`](docs/fs-25-release-note.md).
+[`docs/fs-25-release-note.md`](docs/fs-25-release-note.md). External GIF search
+(KLIPY provider, configuration, privacy, adding another provider) is documented
+in [`docs/gif-search.md`](docs/gif-search.md).
