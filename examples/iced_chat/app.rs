@@ -1286,8 +1286,14 @@ fn tunnel_expiry_label(expires_at_ms: u64) -> String {
 }
 
 /// A peer is considered Away when no presence/activity has refreshed its
-/// last-seen timestamp for this long (10 seconds).
-const AWAY_THRESHOLD_MS: u64 = 10_000;
+/// last-seen timestamp for this long (5 minutes).
+///
+/// The 5-minute rule (SIDEBAR-04): active peers broadcast an invisible
+/// Heartbeat every ~2s and PresenceWithTicket every ~5s while connected,
+/// so a healthy peer's last-seen is refreshed well within this window and
+/// stays Online. Away is reserved for peers that have genuinely been
+/// silent for over 5 minutes.
+const AWAY_THRESHOLD_MS: u64 = 5 * 60 * 1000;
 
 /// Human-readable connection route label from Iroh path data.
 ///
@@ -45365,7 +45371,7 @@ mod tests {
     }
 
     /// peer_presence() returns Away when the last-seen timestamp is older
-    /// than AWAY_THRESHOLD_MS.
+    /// than AWAY_THRESHOLD_MS (5 minutes — SIDEBAR-04).
     #[test]
     fn peer_presence_returns_away_for_stale_peer() {
         let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
@@ -45374,6 +45380,32 @@ mod tests {
         // Insert a timestamp well past the away threshold.
         let stale = now.saturating_sub(AWAY_THRESHOLD_MS + 1);
         app.peer_presence_map.insert(pk, stale);
+        assert_eq!(app.peer_presence(&pk), PeerPresence::Away);
+    }
+
+    /// The away threshold is exactly 5 minutes (SIDEBAR-04): a peer whose
+    /// last-seen is 5 minutes old is Away, while one that refreshed 4
+    /// minutes ago is still Online.
+    #[test]
+    fn peer_presence_away_threshold_is_five_minutes() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let pk = iroh::SecretKey::generate().public();
+        let now = now_ms().max(0) as u64;
+
+        // 4 minutes old → still Online.
+        let four_min = now.saturating_sub(4 * 60 * 1000);
+        app.peer_presence_map.insert(pk, four_min);
+        assert_eq!(app.peer_presence(&pk), PeerPresence::Online);
+
+        // Exactly at the boundary (5 minutes) → still Online, because the
+        // check is strictly greater than AWAY_THRESHOLD_MS.
+        let five_min = now.saturating_sub(AWAY_THRESHOLD_MS);
+        app.peer_presence_map.insert(pk, five_min);
+        assert_eq!(app.peer_presence(&pk), PeerPresence::Online);
+
+        // Just past the boundary → Away.
+        let five_min_plus = now.saturating_sub(AWAY_THRESHOLD_MS + 1);
+        app.peer_presence_map.insert(pk, five_min_plus);
         assert_eq!(app.peer_presence(&pk), PeerPresence::Away);
     }
 
