@@ -42,6 +42,21 @@
 //! the mismatch on [`ResolvedFileIcon::mime_mismatch`] so the UI can show a
 //! warning state.
 //!
+//! ## octet-stream is "no MIME info" (PAPIRUS-21)
+//!
+//! `application/octet-stream` is the MIME for "unknown binary data"; it
+//! carries **no** type signal.  Boru's legacy extension→MIME map stamped
+//! this value for every extension it did not recognise, and peers may
+//! advertise it for the same reason.  The resolver therefore treats it as
+//! an absent hint everywhere in the priority chain: a stored or advertised
+//! octet-stream never outranks a real filename extension (priority 6), so
+//! `budget.xlsx` with octet-stream resolves to the spreadsheet icon, and an
+//! unknown `mystery.crypt` with octet-stream still ends on the generic
+//! unknown icon (priority 8).  Because it carries no category signal either,
+//! an octet-stream side never triggers a MIME mismatch record.  The
+//! `application-octet-stream` icon itself stays reachable through the
+//! extension table for explicit `.bin`-style names.
+//!
 //! ## Security (Task 16)
 //!
 //! The icon pipeline treats **all** input as untrusted:
@@ -92,6 +107,18 @@ const UNKNOWN_ICON: &str = "application-x-generic";
 
 /// Icon used for explicit directory / folder state.
 const DIRECTORY_ICON: &str = "folder-open";
+
+/// MIME type that means "unknown binary data", not a concrete type.
+///
+/// `application/octet-stream` is the placeholder Boru's legacy
+/// extension→MIME map (predating PAPIRUS) stamped for every extension it
+/// did not recognise, and peers may advertise it for the same reason.  It
+/// carries **no** type signal, so the resolver treats it as an absent hint
+/// everywhere in the priority chain (PAPIRUS-21): a stored or advertised
+/// octet-stream never outranks a real filename extension (priority 6).  The
+/// `application-octet-stream` icon itself stays reachable through the
+/// extension table for explicit `.bin`-style names.
+const MIME_NO_INFO: &str = "application/octet-stream";
 
 // ── Resolution result cache (PAPIRUS-17) ─────────────────────────────
 
@@ -146,6 +173,15 @@ fn bounded_resolve_cache_insert(
     cache.insert(key, value);
 }
 
+/// Normalise a MIME hint for cache keying; `None` when it carries no type
+/// signal — absent, whitespace-only, or the `application/octet-stream`
+/// "unknown binary" placeholder.  PAPIRUS-21 treats octet-stream as no
+/// information, so it must not create a distinct cache entry from absent.
+fn meaningful_mime(mime: Option<&str>) -> Option<String> {
+    mime.map(normalise_mime)
+        .filter(|m| !m.is_empty() && m != MIME_NO_INFO)
+}
+
 /// Build the normalised cache key for a resolution request.
 ///
 /// `is_directory` and the **normalised** MIME strings and extension
@@ -161,12 +197,8 @@ fn resolve_cache_key(
 ) -> ResolveCacheKey {
     ResolveCacheKey {
         is_directory,
-        advertised_mime: advertised_mime_type
-            .map(normalise_mime)
-            .filter(|m| !m.is_empty()),
-        local_mime: locally_detected_mime_type
-            .map(normalise_mime)
-            .filter(|m| !m.is_empty()),
+        advertised_mime: meaningful_mime(advertised_mime_type),
+        local_mime: meaningful_mime(locally_detected_mime_type),
         extensions: normalised_extensions(filename),
     }
 }
@@ -1057,6 +1089,12 @@ const MIME_ICONS: &[(&str, &str, FileCategory)] = &[
     ),
     ("model/obj", "model-stl", FileCategory::ThreeDimensional),
     ("model/gltf", "model-stl", FileCategory::ThreeDimensional),
+    // `application/octet-stream` maps to the generic binary icon, but the
+    // entry is deliberately bypassed by `mime_lookup` (PAPIRUS-21: octet-
+    // stream is "no MIME info" — see module docs).  The icon stays in this
+    // table so the manifest-verification test confirms it is bundled, and
+    // it remains reachable via the `.bin` extension entry in
+    // `EXTENSION_ICONS`.
     (
         "application/octet-stream",
         "application-octet-stream",
@@ -1392,8 +1430,17 @@ fn normalise_mime(mime: &str) -> String {
 }
 
 /// Exact MIME → icon lookup (PAPIRUS-08 full mapping).
+///
+/// `application/octet-stream` is deliberately excluded (PAPIRUS-21): it is
+/// the "unknown binary" placeholder, not a concrete type, so it carries no
+/// type signal and must never outrank a real filename extension (priority
+/// 6).  `mime_category_hint` and `detect_mismatch` build on this, so an
+/// octet-stream side yields no category hint and no mismatch record either.
 fn mime_lookup(mime: &str) -> Option<(&'static str, FileCategory)> {
     let mime = normalise_mime(mime);
+    if mime == MIME_NO_INFO {
+        return None;
+    }
     MIME_ICONS
         .iter()
         .find(|(m, _, _)| *m == mime)
@@ -2069,12 +2116,11 @@ mod tests {
                 FileCategory::Spreadsheet,
             ),
             ("text/x-rust", "text-x-rust", FileCategory::SourceCode),
-            (
-                "application/octet-stream",
-                "application-octet-stream",
-                FileCategory::Unknown,
-            ),
         ];
+        // NOTE: `application/octet-stream` is intentionally NOT in this
+        // exact-MIME list — PAPIRUS-21 treats octet-stream as "no MIME
+        // info" (it never wins at priority 4); see the PAPIRUS-21 section
+        // below for its dedicated scenarios.
         for (mime, icon_id, category) in cases {
             let icon = resolve_file_icon("download.bin", Some(mime), None, false);
             assert_eq!(&icon.icon_id, icon_id, "for MIME {mime}");
@@ -3400,5 +3446,152 @@ mod tests {
                 "canonical {canonical} for {member} must appear in the manifest icons map"
             );
         }
+    }
+
+    // ── PAPIRUS-21: octet-stream MIME is "no MIME info" ──────────
+
+    /// A stored/advertised `application/octet-stream` must never outrank a
+    /// real filename extension: `budget.xlsx` with octet-stream resolves to
+    /// the spreadsheet icon exactly as the same file does in a chat card
+    /// (extension-only path).
+    #[test]
+    fn octet_stream_advertised_falls_through_to_extension() {
+        let cases: &[(&str, &str, FileCategory)] = &[
+            (
+                "document.docx",
+                "application-vnd.openxmlformats-officedocument.wordprocessingml.document",
+                FileCategory::Document,
+            ),
+            (
+                "budget.xlsx",
+                "application-vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                FileCategory::Spreadsheet,
+            ),
+            (
+                "slides.pptx",
+                "application-vnd.openxmlformats-officedocument.presentationml.presentation",
+                FileCategory::Presentation,
+            ),
+            ("movie.mp4", "video-mp4", FileCategory::Video),
+            ("song.mp3", "audio-mp3", FileCategory::Audio),
+            ("bundle.zip", "application-zip", FileCategory::Archive),
+            (
+                "package.7z",
+                "application-x-7z-compressed",
+                FileCategory::Archive,
+            ),
+            ("main.rs", "text-rust", FileCategory::SourceCode),
+            ("script.py", "text-x-python", FileCategory::SourceCode),
+        ];
+        for (name, icon_id, category) in cases {
+            let icon = resolve_file_icon(name, Some(MIME_NO_INFO), None, false);
+            assert_eq!(&icon.icon_id, icon_id, "for {name:?}");
+            assert_eq!(icon.file_category, *category, "for {name:?}");
+            assert_eq!(
+                icon.source,
+                ResolutionSource::Extension,
+                "for {name:?}: octet-stream must not win at priority 4"
+            );
+            assert!(
+                PapirusCatalog::global().has_icon(&icon.icon_id),
+                "for {name:?}: resolved icon {} must exist",
+                icon.icon_id
+            );
+        }
+
+        // The extension-resolved icon is pixel-identical to the chat-card
+        // icon (same canonical asset path).
+        let with_mime = resolve_file_icon("budget.xlsx", Some(MIME_NO_INFO), None, false);
+        let chat_card = resolve("budget.xlsx");
+        assert_eq!(with_mime.asset_path, chat_card.asset_path);
+    }
+
+    /// The same fall-through applies when the octet-stream value is stored
+    /// as the locally detected MIME (e.g. legacy rows written before
+    /// PAPIRUS-21) — the extension still wins.
+    #[test]
+    fn octet_stream_locally_detected_falls_through_to_extension() {
+        let icon = resolve_file_icon("budget.xlsx", None, Some(MIME_NO_INFO), false);
+        assert_eq!(icon.file_category, FileCategory::Spreadsheet);
+        assert_eq!(
+            icon.icon_id,
+            "application-vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        );
+        assert_eq!(icon.source, ResolutionSource::Extension);
+        assert!(icon.mime_mismatch.is_none());
+
+        let icon = resolve_file_icon("movie.mp4", None, Some(MIME_NO_INFO), false);
+        assert_eq!(icon.icon_id, "video-mp4");
+        assert_eq!(icon.file_category, FileCategory::Video);
+        assert_eq!(icon.source, ResolutionSource::Extension);
+    }
+
+    /// An unknown extension with octet-stream still ends on the generic
+    /// unknown icon — octet-stream adds no signal, so `mystery.crypt`
+    /// behaves exactly like `mystery.crypt` with no MIME at all.
+    #[test]
+    fn octet_stream_with_unknown_extension_stays_generic() {
+        let icon = resolve_file_icon("mystery.crypt", Some(MIME_NO_INFO), None, false);
+        assert_eq!(icon.icon_id, UNKNOWN_ICON);
+        assert_eq!(icon.file_category, FileCategory::Unknown);
+        assert_eq!(icon.source, ResolutionSource::UnknownFallback);
+        assert!(PapirusCatalog::global().has_icon(&icon.icon_id));
+
+        // Identical to the no-MIME resolution of the same name.
+        let plain = resolve("mystery.crypt");
+        assert_eq!(icon.icon_id, plain.icon_id);
+        assert_eq!(icon.asset_path, plain.asset_path);
+    }
+
+    /// An explicit `.bin` name still resolves to the bundled octet-stream
+    /// binary icon — via the extension table, not via the MIME hint.
+    #[test]
+    fn octet_stream_with_bin_extension_resolves_binary_icon() {
+        let icon = resolve_file_icon("firmware.bin", Some(MIME_NO_INFO), None, false);
+        assert_eq!(icon.icon_id, "application-octet-stream");
+        assert_eq!(icon.file_category, FileCategory::Unknown);
+        assert_eq!(icon.source, ResolutionSource::Extension);
+        assert!(PapirusCatalog::global().has_icon(&icon.icon_id));
+    }
+
+    /// An extensionless file with octet-stream falls to the generic unknown
+    /// icon (the canonical "unknown" terminal), never a missing asset.
+    #[test]
+    fn octet_stream_without_extension_falls_back_to_unknown_generic() {
+        let icon = resolve_file_icon("download", Some(MIME_NO_INFO), None, false);
+        assert_eq!(icon.icon_id, UNKNOWN_ICON);
+        assert_eq!(icon.file_category, FileCategory::Unknown);
+        assert_eq!(icon.source, ResolutionSource::UnknownFallback);
+        assert!(PapirusCatalog::global().has_icon(&icon.icon_id));
+    }
+
+    /// octet-stream carries no category signal, so it never triggers a
+    /// MIME mismatch record when paired with a real type — there is no
+    /// conflict to warn about.
+    #[test]
+    fn octet_stream_never_triggers_mime_mismatch() {
+        let icon = resolve_file_icon("photo.png", Some(MIME_NO_INFO), Some("image/png"), false);
+        assert_eq!(icon.icon_id, "image-png");
+        assert_eq!(icon.source, ResolutionSource::LocalMime);
+        assert_eq!(icon.confidence, IconConfidence::Exact);
+        assert!(icon.mime_mismatch.is_none());
+
+        let icon = resolve_file_icon("clip.mp4", Some("video/mp4"), Some(MIME_NO_INFO), false);
+        assert_eq!(icon.icon_id, "video-mp4");
+        assert_eq!(icon.source, ResolutionSource::AdvertisedMime);
+        assert!(icon.mime_mismatch.is_none());
+    }
+
+    /// The cache key treats octet-stream as absent, so `budget.xlsx` with
+    /// octet-stream and `budget.xlsx` with no MIME share one entry.
+    #[test]
+    fn octet_stream_cache_key_equals_absent() {
+        let a = resolve_cache_key("budget.xlsx", Some(MIME_NO_INFO), None, false);
+        let b = resolve_cache_key("budget.xlsx", None, None, false);
+        assert_eq!(a, b);
+
+        let c = resolve_cache_key("movie.mp4", None, Some(MIME_NO_INFO), false);
+        let d = resolve_cache_key("movie.mp4", None, None, false);
+        assert_eq!(c, d);
     }
 }

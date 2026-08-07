@@ -19878,7 +19878,15 @@ impl IcedChat {
                         meta_hasher.update(&ts.to_le_bytes());
                         let metadata_id = meta_hasher.finalize().to_hex().to_string();
 
-                        // Detect MIME type from file extension
+                        // Detect MIME type from file extension.  PAPIRUS-21:
+                        // cover the extensions the central resolver knows so
+                        // files shared through the UI are stored with a real
+                        // MIME and show the same type icon everywhere (the
+                        // MIME strings below are the exact ones
+                        // file_type_resolver.rs maps).  Unknown extensions
+                        // keep the octet-stream placeholder, which the
+                        // resolver treats as "no MIME info" and falls back
+                        // to the filename extension.
                         let mime_type = match abs_path
                             .extension()
                             .and_then(|ext| ext.to_str())
@@ -19886,14 +19894,99 @@ impl IcedChat {
                             .to_ascii_lowercase()
                             .as_str()
                         {
+                            // Documents
                             "txt" => "text/plain",
-                            "md" => "text/markdown",
-                            "json" => "application/json",
+                            "md" | "markdown" => "text/markdown",
+                            "log" => "text/x-log",
                             "pdf" => "application/pdf",
+                            "doc" => "application/msword",
+                            "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            "odt" => "application/vnd.oasis.opendocument.text",
+                            "rtf" => "application/rtf",
+                            // Spreadsheets
+                            "xls" => "application/vnd.ms-excel",
+                            "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            "ods" => "application/vnd.oasis.opendocument.spreadsheet",
+                            "csv" => "text/csv",
+                            "tsv" => "text/tab-separated-values",
+                            // Presentations
+                            "ppt" => "application/vnd.ms-powerpoint",
+                            "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                            "odp" => "application/vnd.oasis.opendocument.presentation",
+                            // Images
                             "png" => "image/png",
                             "jpg" | "jpeg" => "image/jpeg",
                             "gif" => "image/gif",
                             "webp" => "image/webp",
+                            "svg" => "image/svg+xml",
+                            "bmp" => "image/bmp",
+                            "tiff" | "tif" => "image/tiff",
+                            // Video
+                            "mp4" | "m4v" => "video/mp4",
+                            "webm" => "video/webm",
+                            "mkv" => "video/x-matroska",
+                            "avi" => "video/x-msvideo",
+                            "mov" => "video/quicktime",
+                            "mpeg" | "mpg" => "video/mpeg",
+                            "ogv" => "video/ogg",
+                            // Audio
+                            "mp3" => "audio/mpeg",
+                            "flac" => "audio/flac",
+                            "wav" => "audio/x-wav",
+                            "ogg" => "audio/ogg",
+                            "m4a" => "audio/x-m4a",
+                            "wma" => "audio/x-ms-wma",
+                            "opus" => "audio/opus",
+                            "aac" => "audio/aac",
+                            // Archives
+                            "zip" => "application/zip",
+                            "7z" => "application/x-7z-compressed",
+                            "rar" => "application/vnd.rar",
+                            "tar" => "application/x-tar",
+                            "gz" | "gzip" => "application/gzip",
+                            "bz2" => "application/x-bzip2",
+                            "xz" => "application/x-xz-compressed-tar",
+                            "zst" => "application/zstd",
+                            // Source code
+                            "rs" => "text/x-rust",
+                            "py" => "text/x-python",
+                            "js" => "application/javascript",
+                            "ts" => "text/typescript",
+                            "html" | "htm" => "text/html",
+                            "css" => "text/css",
+                            "json" => "application/json",
+                            "xml" => "application/xml",
+                            "yaml" | "yml" => "application/yaml",
+                            "toml" => "application/toml",
+                            "sh" | "bash" | "zsh" | "fish" => "text/x-shellscript",
+                            "ps1" | "psm1" | "psd1" => "text/x-powershell",
+                            "java" => "text/x-java",
+                            "kt" | "kts" => "text/x-kotlin",
+                            "c" => "text/x-c",
+                            "cpp" | "cc" | "cxx" => "text/x-c++",
+                            "cs" => "text/x-csharp",
+                            "go" => "text/x-go",
+                            "sql" => "application/sql",
+                            // Executables / installers / disk images
+                            "exe" | "bat" | "cmd" => "application/x-ms-dos-executable",
+                            "elf" | "so" | "dll" | "dylib" => "application/x-executable",
+                            "deb" => "application/vnd.debian.binary-package",
+                            "rpm" => "application/x-rpm",
+                            "apk" => "application/vnd.android.package-archive",
+                            "msi" => "application/x-msi",
+                            "iso" => "application/x-cd-image",
+                            "img" => "application/x-raw-disk-image",
+                            "dmg" => "application/x-apple-diskimage",
+                            // Databases / fonts / keys
+                            "sqlite" | "sqlite3" | "db" | "dbf" => "application/x-sqlite3",
+                            "ttf" | "otf" | "ttc" => "application/x-font-ttf",
+                            "woff" | "woff2" => "font/woff",
+                            "pem" => "application/x-pem-key",
+                            "key" | "pub" | "asc" | "gpg" | "ppk" => "application/pgp-keys",
+                            // Ebooks / torrents / 3D
+                            "epub" | "mobi" => "application/epub+zip",
+                            "torrent" => "application/x-bittorrent",
+                            "stl" | "obj" | "fbx" | "glb" | "gltf" | "blend" | "3ds" => "model/stl",
                             _ => "application/octet-stream",
                         };
 
