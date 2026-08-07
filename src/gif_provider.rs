@@ -1,7 +1,7 @@
 //! Provider-neutral GIF domain model.
 //!
 //! Defines the [`GifProvider`] trait plus the neutral request/response
-//! types every GIF provider (KLIPY, GIPHY, Tenor, …) speaks.  The rest of
+//! types every GIF provider (KLIPY, Tenor, …) speaks.  The rest of
 //! the application depends only on these types — provider-specific wire
 //! models stay inside the adapter module that implements [`GifProvider`].
 //!
@@ -87,7 +87,7 @@ pub struct GifMediaSource {
 /// sender's search.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SharedGif {
-    /// Stable provider identifier (e.g. `"klipy"`, `"giphy"`).
+    /// Stable provider identifier (e.g. `"klipy"`, `"tenor"`).
     pub provider: String,
     /// Provider-assigned identifier for this GIF.
     pub provider_id: String,

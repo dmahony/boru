@@ -18,7 +18,7 @@ The only external GIF provider is **GIPHY**, integrated inline in the iced app s
 
 - **Hardcoded API key** const inside the `GifSearchSubmit` handler: `app.rs:21575`
   ```rust
-  const API_KEY: &str = "GlVGYHkr3WSBnllca54iNt0yFbjz7L65";
+  const API_KEY: &str = "[REDACTED — removed in KLIPY-08]";
   ```
 - There is **no environment variable, config file entry, or feature flag** for the key (verified: no `KLIPY_API_KEY`, `GIPHY_API_KEY`, or any GIF-related env var anywhere in the repo; `docs/configuration.md` lists only `BORU_*` vars).
 - The key ships in the binary and is sent to `api.giphy.com` on every search.

@@ -9,7 +9,7 @@
 //!   2. A PNG uses the same pipeline and round-trips unchanged (other file
 //!      types are unaffected).
 //!   3. The wire form of `Message::ImageShare` contains only `name`/`hash` —
-//!      no provider, URL, or KLIPY/GIPHY fields (user-uploaded GIFs can
+//!      no provider, URL, or KLIPY fields (user-uploaded GIFs can
 //!      never become provider-GIF messages).
 //!   4. A `.mp4`-named `FileShare` download emits `TransferProgress::Started`
 //!      and `Completed` events (progress/retry path still works).
@@ -17,7 +17,7 @@
 //!      (a `PublicRoomSafety` blob-size cap rejects an oversized GIF).
 //!   6. `ImageStore` still stores a `.gif` under the `gif` extension.
 //!
-//! None of these tests contact any external GIF provider (GIPHY/KLIPY) — the
+//! None of these tests contact any external GIF provider (KLIPY) — the
 //! only network is two localhost iroh peers on a memory lookup.
 
 use std::collections::HashMap;
@@ -443,7 +443,7 @@ async fn png_attachment_roundtrip_preserves_bytes() -> Result<()> {
 }
 
 /// The wire form of `Message::ImageShare` carries exactly `name` + `hash` —
-/// no provider, URL, or KLIPY/GIPHY metadata. User-uploaded GIFs therefore
+/// no provider, URL, or KLIPY metadata. User-uploaded GIFs therefore
 /// cannot be turned into provider-GIF messages.
 #[test]
 fn image_share_wire_message_has_no_provider_fields() {
@@ -458,7 +458,7 @@ fn image_share_wire_message_has_no_provider_fields() {
     keys.sort();
     assert_eq!(keys, vec!["hash", "name"], "ImageShare must carry only name+hash");
     let raw = serde_json::to_string(&msg).unwrap().to_lowercase();
-    for forbidden in ["provider", "giphy", "klipy", "url", "external"] {
+    for forbidden in ["provider", "klipy", "url", "external"] {
         assert!(
             !raw.contains(forbidden),
             "ImageShare wire message must not contain {forbidden}"
