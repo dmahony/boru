@@ -3110,6 +3110,17 @@ pub struct IcedChat {
     conversation_generation: u64,
     /// Screen to return to when closing the settings page.
     settings_return_to: Option<Screen>,
+    /// Screen to return to when closing the friend requests page.
+    friend_requests_return_to: Option<Screen>,
+    /// Screen to return to when closing a peer profile / remote catalogue
+    /// (both share the `ClosePeerProfile` handler).
+    peer_profile_return_to: Option<Screen>,
+    /// Screen to return to when closing the friend profile page.
+    friend_profile_return_to: Option<Screen>,
+    /// Screen to return to when closing the Discover (public rooms) page.
+    discover_return_to: Option<Screen>,
+    /// Screen to return to when closing the Groups page.
+    groups_return_to: Option<Screen>,
 
     // ── Pre-warm (PERF-4R-B) ──
     /// Pre-built screen trees keyed by screen; the `u64` is the FxHash of the
@@ -5932,6 +5943,13 @@ pub enum AppMessage {
     DirectorySubscribed(Option<GossipSender>),
     /// Open the public room directory (Discover screen).
     OpenDirectory,
+    /// Close the Discover (public rooms) screen and return to the previous
+    /// screen (the one the user came from, e.g. the File Sharing dashboard).
+    CloseDiscover,
+    /// Open the full Groups screen.
+    OpenGroups,
+    /// Close the Groups screen and return to the previous screen.
+    CloseGroups,
     /// Join a room from the directory.
     DirectoryRoomJoin(RoomAdvertisement),
     /// Delete a locally-created room advertisement from the directory.
@@ -7283,6 +7301,11 @@ impl IcedChat {
             scroll_to_bottom_pending: false,
             settings: app_settings.clone(),
             settings_return_to: None,
+            friend_requests_return_to: None,
+            peer_profile_return_to: None,
+            friend_profile_return_to: None,
+            discover_return_to: None,
+            groups_return_to: None,
             prewarm_cache: std::collections::HashMap::new(),
             prewarming: false,
             idle_timer: IdleTimer::new(),
@@ -9241,6 +9264,9 @@ impl IcedChat {
             AppMessage::SubscribeDirectoryTopic => "SubscribeDirectoryTopic",
             AppMessage::DirectorySubscribed(..) => "DirectorySubscribed",
             AppMessage::OpenDirectory => "OpenDirectory",
+            AppMessage::CloseDiscover => "CloseDiscover",
+            AppMessage::OpenGroups => "OpenGroups",
+            AppMessage::CloseGroups => "CloseGroups",
             AppMessage::DirectoryRoomJoin(..) => "DirectoryRoomJoin",
             AppMessage::DeleteDirectoryRoom(_) => "DeleteDirectoryRoom",
             AppMessage::DirectoryRoomUpdate(..) => "DirectoryRoomUpdate",
@@ -13864,6 +13890,22 @@ impl IcedChat {
                     self.help_visible = false;
                 } else if matches!(self.screen, Screen::Settings) {
                     self.screen = self.settings_return_to.take().unwrap_or(Screen::ChatList);
+                } else if matches!(self.screen, Screen::FriendRequests) {
+                    self.screen = self
+                        .friend_requests_return_to
+                        .take()
+                        .unwrap_or(Screen::ChatList);
+                } else if matches!(
+                    self.screen,
+                    Screen::PeerProfile(_) | Screen::PeerCatalogue(_)
+                ) {
+                    self.screen = self.peer_profile_return_to.take().unwrap_or(Screen::ChatList);
+                } else if matches!(self.screen, Screen::FriendProfile(_)) {
+                    self.screen = self.friend_profile_return_to.take().unwrap_or(Screen::ChatList);
+                } else if matches!(self.screen, Screen::Discover) {
+                    self.screen = self.discover_return_to.take().unwrap_or(Screen::ChatList);
+                } else if matches!(self.screen, Screen::Groups) {
+                    self.screen = self.groups_return_to.take().unwrap_or(Screen::ChatList);
                 } else if matches!(self.screen, Screen::FileSharing)
                     && !self.dashboard_search_input.is_empty()
                 {
@@ -13969,6 +14011,13 @@ impl IcedChat {
 
             // ── Friend Requests ───────────────────────────────────────
             AppMessage::OpenFriendRequests => {
+                // FILES-04: remember where the user came from so the back
+                // button returns to the File Sharing dashboard (or whatever
+                // screen the user was on) instead of always dumping to the
+                // chat list.
+                if !matches!(self.screen, Screen::FriendRequests) {
+                    self.friend_requests_return_to = Some(self.screen.clone());
+                }
                 self.screen = Screen::FriendRequests;
                 if let Some(action_id) = self.pending_open_friends_action.take() {
                     let _ = self
@@ -14028,7 +14077,7 @@ impl IcedChat {
             }
 
             AppMessage::CloseFriendRequests => {
-                self.screen = Screen::ChatList;
+                self.screen = self.friend_requests_return_to.take().unwrap_or(Screen::ChatList);
                 iced::Task::none()
             }
 
@@ -17069,6 +17118,9 @@ impl IcedChat {
             }
 
             AppMessage::OpenPeerProfile(peer) => {
+                if !matches!(self.screen, Screen::PeerProfile(peer) | Screen::PeerCatalogue(peer)) {
+                    self.peer_profile_return_to = Some(self.screen.clone());
+                }
                 if !self.profile_cache.contains_key(&peer) {
                     // Create a minimal profile from the friend record as fallback,
                     // so the profile page is accessible even without gossip ProfileUpdate data.
@@ -17102,7 +17154,7 @@ impl IcedChat {
                 iced::Task::none()
             }
             AppMessage::ClosePeerProfile => {
-                self.screen = Screen::ChatList;
+                self.screen = self.peer_profile_return_to.take().unwrap_or(Screen::ChatList);
                 iced::Task::none()
             }
 
@@ -17149,6 +17201,9 @@ impl IcedChat {
             AppMessage::PeerCatalogueReceived { peer, files } => {
                 self.catalogue_loading = false;
                 self.peer_catalogue_view = Some((peer, files));
+                if !matches!(self.screen, Screen::PeerCatalogue(peer) | Screen::PeerProfile(peer)) {
+                    self.peer_profile_return_to = Some(self.screen.clone());
+                }
                 self.screen = Screen::PeerCatalogue(peer);
                 iced::Task::none()
             }
@@ -17170,6 +17225,9 @@ impl IcedChat {
                 self.friend_remove_confirm = false;
                 self.friend_block_confirm = false;
                 self.friend_profile_renaming = false;
+                if !matches!(self.screen, Screen::FriendProfile(peer)) {
+                    self.friend_profile_return_to = Some(self.screen.clone());
+                }
                 self.screen = Screen::FriendProfile(peer);
                 iced::Task::none()
             }
@@ -17179,7 +17237,7 @@ impl IcedChat {
                 self.friend_remove_confirm = false;
                 self.friend_block_confirm = false;
                 self.friend_profile_renaming = false;
-                self.screen = Screen::ChatList;
+                self.screen = self.friend_profile_return_to.take().unwrap_or(Screen::ChatList);
                 iced::Task::none()
             }
             AppMessage::ToggleFriendProfileMenu => {
@@ -17899,7 +17957,25 @@ impl IcedChat {
             }
             // ── Room advertisement / Directory ──────────────────────────
             AppMessage::OpenDirectory => {
+                if !matches!(self.screen, Screen::Discover) {
+                    self.discover_return_to = Some(self.screen.clone());
+                }
                 self.screen = Screen::Discover;
+                iced::Task::none()
+            }
+            AppMessage::CloseDiscover => {
+                self.screen = self.discover_return_to.take().unwrap_or(Screen::ChatList);
+                iced::Task::none()
+            }
+            AppMessage::OpenGroups => {
+                if !matches!(self.screen, Screen::Groups) {
+                    self.groups_return_to = Some(self.screen.clone());
+                }
+                self.screen = Screen::Groups;
+                iced::Task::none()
+            }
+            AppMessage::CloseGroups => {
+                self.screen = self.groups_return_to.take().unwrap_or(Screen::ChatList);
                 iced::Task::none()
             }
             AppMessage::DirectoryRoomJoin(ad) => {
@@ -23651,7 +23727,7 @@ impl IcedChat {
             Screen::PeerCatalogue(peer) => self.view_peer_catalogue(*peer),
             Screen::FriendProfile(peer) => self.view_friend_profile(*peer),
             Screen::Discover => self.serve_prewarmed(Screen::Discover, || self.view_discover()),
-            Screen::Groups => self.serve_prewarmed(Screen::Groups, || self.view_sidebar_groups()),
+            Screen::Groups => self.serve_prewarmed(Screen::Groups, || self.view_groups_screen()),
             #[cfg(feature = "terminal")]
             Screen::Terminal => self.terminal.view().map(AppMessage::TerminalEvent),
             Screen::Gallery => crate::component_gallery::view_gallery(),
@@ -24466,6 +24542,7 @@ impl IcedChat {
                 .count(group_count)
                 .collapsed(self.sidebar_section_collapsed[1])
                 .on_toggle(AppMessage::ToggleSidebarSectionCollapsed(1))
+                .add_action(Icon::Users, AppMessage::OpenGroups)
                 .build(&theme),
         );
         if !self.sidebar_section_collapsed[1] {
@@ -24896,6 +24973,55 @@ impl IcedChat {
         // (zero diff / layout / render) unless the group list actually changed.
         let dep = self.groups_dependency();
         iced::widget::lazy(dep, Self::view_groups_section_content).into()
+    }
+
+    /// Full-screen Groups view: a header with a back button (returning to the
+    /// previous screen, e.g. the File Sharing dashboard) above the shared
+    /// groups section content.
+    fn view_groups_screen(&self) -> iced::Element<'_, AppMessage> {
+        let dep = self.groups_dependency();
+        iced::widget::lazy(dep, Self::view_groups_screen_content).into()
+    }
+
+    /// Static renderer for the full-screen Groups view, driven by the
+    /// [`GroupsDependency`] snapshot so `iced::widget::lazy` can cache it.
+    fn view_groups_screen_content(dep: &GroupsDependency) -> iced::Element<'static, AppMessage> {
+        use iced::widget::{button, Column, Row};
+        use iced::{Alignment, Length};
+
+        let header = Row::new()
+            .push(
+                // FILES-04: explicit back button returning to the previous
+                // screen (File Sharing dashboard when opened from there).
+                button(
+                    Row::new()
+                        .push(Icon::Back.build().size(IconSize::Sm).build())
+                        .push(
+                            crate::fonts::type_role_text(
+                                crate::fonts::TypeRole::ButtonLabel,
+                                "Back",
+                            ),
+                        )
+                        .spacing(SPACE_4)
+                        .align_y(Alignment::Center),
+                )
+                .on_press(AppMessage::CloseGroups)
+                .padding([SPACE_4, SPACE_8])
+                .style(BUTTON_GHOST_BG),
+            )
+            .push(
+                crate::fonts::type_role_text(crate::fonts::TypeRole::SectionTitle, "Groups")
+                    .width(Length::Fill),
+            )
+            .align_y(Alignment::Center)
+            .spacing(SPACE_12);
+
+        Column::new()
+            .push(header)
+            .push(Self::view_groups_section_content(dep))
+            .padding(SPACE_16)
+            .spacing(SPACE_12)
+            .into()
     }
 
     /// Static renderer for the Groups section/screen, driven by the
@@ -32841,7 +32967,7 @@ impl IcedChat {
             Screen::Groups => {
                 let dep = self.groups_dependency();
                 let hash = fxhash_of(&dep);
-                let element = Self::view_groups_section_content(&dep);
+                let element = Self::view_groups_screen_content(&dep);
                 (hash, element)
             }
             Screen::FriendRequests => {
@@ -32972,17 +33098,27 @@ impl IcedChat {
         let display_name = dep.display_name.clone();
         let header = Row::new()
             .push(
-                crate::fonts::type_role_text(crate::fonts::TypeRole::SectionTitle, display_name.clone())
-                    .width(Length::Fill),
+                // FILES-04: explicit back button returning to the previous
+                // screen (File Sharing dashboard when opened from there).
+                button(
+                    Row::new()
+                        .push(Icon::Back.build().size(IconSize::Sm).build())
+                        .push(
+                            crate::fonts::type_role_text(
+                                crate::fonts::TypeRole::ButtonLabel,
+                                "Back",
+                            ),
+                        )
+                        .spacing(SPACE_4)
+                        .align_y(Alignment::Center),
+                )
+                .on_press(AppMessage::ClosePeerProfile)
+                .padding([SPACE_4, SPACE_8])
+                .style(BUTTON_GHOST_BG),
             )
             .push(
-                button(icon_svg(ICON_CLOSE, TYPO_MD))
-                    .on_press(AppMessage::ClosePeerProfile)
-                    .padding([SPACE_4, SPACE_8])
-                    .style(move |t, _status| iced::widget::button::Style {
-                        text_color: text_muted(t),
-                        ..Default::default()
-                    }),
+                crate::fonts::type_role_text(crate::fonts::TypeRole::SectionTitle, display_name.clone())
+                    .width(Length::Fill),
             )
             .align_y(Alignment::Center)
             .spacing(SPACE_12);
@@ -33102,20 +33238,30 @@ impl IcedChat {
 
         let header = Row::new()
             .push(
+                // FILES-04: explicit back button returning to the previous
+                // screen (File Sharing dashboard when opened from there).
+                button(
+                    Row::new()
+                        .push(Icon::Back.build().size(IconSize::Sm).build())
+                        .push(
+                            crate::fonts::type_role_text(
+                                crate::fonts::TypeRole::ButtonLabel,
+                                "Back",
+                            ),
+                        )
+                        .spacing(SPACE_4)
+                        .align_y(Alignment::Center),
+                )
+                .on_press(AppMessage::ClosePeerProfile)
+                .padding([SPACE_4, SPACE_8])
+                .style(BUTTON_GHOST_BG),
+            )
+            .push(
                 crate::fonts::type_role_text(
                     crate::fonts::TypeRole::SectionTitle,
                     format!("{} — Shared Files", display_name),
                 )
                 .width(Length::Fill),
-            )
-            .push(
-                button(icon_svg(ICON_CLOSE, TYPO_MD))
-                    .on_press(AppMessage::ClosePeerProfile)
-                    .padding([SPACE_4, SPACE_8])
-                    .style(move |t, _status| iced::widget::button::Style {
-                        text_color: text_muted(t),
-                        ..Default::default()
-                    }),
             )
             .align_y(Alignment::Center)
             .spacing(SPACE_12);
@@ -36677,7 +36823,7 @@ impl IcedChat {
                         .spacing(SPACE_4)
                         .align_y(Alignment::Center),
                 )
-                .on_press(AppMessage::GoToChatList)
+                .on_press(AppMessage::CloseDiscover)
                 .padding([SPACE_6, SPACE_12])
                 .style(BUTTON_GHOST_BG),
             )
@@ -37120,6 +37266,24 @@ impl IcedChat {
         };
 
         let header = row![]
+            // FILES-04: explicit back button returning to the previous
+            // screen (File Sharing dashboard when opened from there).
+            .push(
+                button(
+                    row![
+                        Icon::Back.build().size(IconSize::Sm).build(),
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::ButtonLabel,
+                            "Back",
+                        ),
+                    ]
+                    .spacing(SPACE_4)
+                    .align_y(Alignment::Center),
+                )
+                .on_press(AppMessage::CloseFriendProfile)
+                .padding([SPACE_4, SPACE_8])
+                .style(BUTTON_GHOST_BG),
+            )
             .push(name_element)
             .push(
                 button(Icon::MoreVertical.build().size(IconSize::Md).build())
@@ -40477,6 +40641,118 @@ mod tests {
     }
 
     #[test]
+    fn back_from_friend_requests_returns_to_file_sharing() {
+        let (_runtime, mut app, _local_public, _peer_public) = build_join_request_test_app();
+        let _ = app.update(AppMessage::OpenFileSharing);
+        assert_eq!(app.screen, Screen::FileSharing);
+
+        let _ = app.update(AppMessage::OpenFriendRequests);
+        assert_eq!(app.screen, Screen::FriendRequests);
+
+        let _ = app.update(AppMessage::CloseFriendRequests);
+        assert_eq!(app.screen, Screen::FileSharing);
+    }
+
+    #[test]
+    fn back_from_peer_profile_returns_to_file_sharing() {
+        let (_runtime, mut app, _local_public, peer_public) = build_join_request_test_app();
+        let _ = app.update(AppMessage::OpenFileSharing);
+        assert_eq!(app.screen, Screen::FileSharing);
+
+        let _ = app.update(AppMessage::OpenPeerProfile(peer_public));
+        assert_eq!(app.screen, Screen::PeerProfile(peer_public));
+
+        let _ = app.update(AppMessage::ClosePeerProfile);
+        assert_eq!(app.screen, Screen::FileSharing);
+    }
+
+    #[test]
+    fn back_from_peer_catalogue_returns_to_file_sharing() {
+        let (_runtime, mut app, _local_public, peer_public) = build_join_request_test_app();
+        let _ = app.update(AppMessage::OpenFileSharing);
+        assert_eq!(app.screen, Screen::FileSharing);
+
+        let _ = app.update(AppMessage::PeerCatalogueReceived {
+            peer: peer_public,
+            files: Vec::new(),
+        });
+        assert_eq!(app.screen, Screen::PeerCatalogue(peer_public));
+
+        let _ = app.update(AppMessage::ClosePeerProfile);
+        assert_eq!(app.screen, Screen::FileSharing);
+    }
+
+    #[test]
+    fn back_from_friend_profile_returns_to_file_sharing() {
+        let (_runtime, mut app, _local_public, peer_public) = build_join_request_test_app();
+        let _ = app.update(AppMessage::OpenFileSharing);
+        assert_eq!(app.screen, Screen::FileSharing);
+
+        let _ = app.update(AppMessage::OpenFriendProfile(peer_public));
+        assert_eq!(app.screen, Screen::FriendProfile(peer_public));
+
+        let _ = app.update(AppMessage::CloseFriendProfile);
+        assert_eq!(app.screen, Screen::FileSharing);
+    }
+
+    #[test]
+    fn back_from_discover_returns_to_file_sharing() {
+        let (_runtime, mut app, _local_public, _peer_public) = build_join_request_test_app();
+        let _ = app.update(AppMessage::OpenFileSharing);
+        assert_eq!(app.screen, Screen::FileSharing);
+
+        let _ = app.update(AppMessage::OpenDirectory);
+        assert_eq!(app.screen, Screen::Discover);
+
+        let _ = app.update(AppMessage::CloseDiscover);
+        assert_eq!(app.screen, Screen::FileSharing);
+    }
+
+    #[test]
+    fn back_from_groups_returns_to_file_sharing() {
+        let (_runtime, mut app, _local_public, _peer_public) = build_join_request_test_app();
+        let _ = app.update(AppMessage::OpenFileSharing);
+        assert_eq!(app.screen, Screen::FileSharing);
+
+        let _ = app.update(AppMessage::OpenGroups);
+        assert_eq!(app.screen, Screen::Groups);
+
+        let _ = app.update(AppMessage::CloseGroups);
+        assert_eq!(app.screen, Screen::FileSharing);
+    }
+
+    #[test]
+    fn back_from_screen_without_return_to_falls_back_to_chat_list() {
+        // Opening a sub-screen directly (no recorded origin) must still close
+        // to a usable screen instead of panicking on a missing return_to.
+        let (_runtime, mut app, _local_public, peer_public) = build_join_request_test_app();
+        assert_eq!(app.screen, Screen::ChatList);
+
+        let _ = app.update(AppMessage::OpenFriendRequests);
+        assert_eq!(app.screen, Screen::FriendRequests);
+        // No return_to recorded? Then close goes to ChatList (the existing
+        // default). The Open handler always records, so force the fallback
+        // by simulating a stale entry: close twice.
+        let _ = app.update(AppMessage::CloseFriendRequests);
+        let _ = app.update(AppMessage::CloseFriendRequests);
+        assert_eq!(app.screen, Screen::ChatList);
+
+        // Same fallback for a screen opened without a recorded origin.
+        let _ = app.update(AppMessage::OpenGroups);
+        assert_eq!(app.screen, Screen::Groups);
+        app.groups_return_to = None;
+        let _ = app.update(AppMessage::CloseGroups);
+        assert_eq!(app.screen, Screen::ChatList);
+
+        // And for peer profiles.
+        let _ = app.update(AppMessage::OpenPeerProfile(peer_public));
+        assert_eq!(app.screen, Screen::PeerProfile(peer_public));
+        app.peer_profile_return_to = None;
+        let _ = app.update(AppMessage::ClosePeerProfile);
+        assert_eq!(app.screen, Screen::ChatList);
+    }
+
+    #[test]
     fn sidebar_requests_dependency_filters_to_pending_incoming_requests() {
         let (_runtime, mut app, local_public, peer_public) = build_join_request_test_app();
         let local_pk = local_public.to_string();
@@ -41548,7 +41824,18 @@ mod tests {
                 .bind()
                 .await
                 .expect("bind endpoint");
-            endpoint.online().await;
+            // ENDPOINT-ONLINE-HANG: `online()` can block forever when the
+            // relay handshake stalls. Time-box it so tests don't hang
+            // (mirrors the app's own startup fix in main.rs).
+            if tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                endpoint.online(),
+            )
+            .await
+            .is_err()
+            {
+                eprintln!("test endpoint.online() timed out after 15s, proceeding anyway");
+            }
 
             let gossip = boru_core::net::Gossip::builder()
                 .max_message_size(16 * 1024) // 16 KiB — tiny, thumbnails go via blobs now
