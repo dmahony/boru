@@ -3078,6 +3078,24 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_section_header_stores_friends_add_action() {
+        // SIDEBAR: the FRIENDS header's action icon must open the Friend
+        // Requests (add/remove) screen, mirroring CHATS/GROUPS/PUBLIC ROOMS.
+        let header = SidebarSectionHeader::new("FRIENDS")
+            .add_action(Icon::UserPlus, AppMessage::OpenFriendRequests);
+        match header.add_action {
+            Some((icon, msg)) => {
+                assert_eq!(icon, Icon::UserPlus);
+                assert!(
+                    matches!(msg, AppMessage::OpenFriendRequests),
+                    "FRIENDS header action must route to OpenFriendRequests"
+                );
+            }
+            None => panic!("expected an add action to be stored"),
+        }
+    }
+
+    #[test]
     fn sidebar_section_header_builds_with_toggle() {
         // Regression: `on_toggle` was stored but never attached as
         // `on_press`, so the header rendered as an inert button and sidebar

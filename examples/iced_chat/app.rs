@@ -25222,6 +25222,7 @@ impl IcedChat {
                 .count(friend_count)
                 .collapsed(friends_collapsed)
                 .on_toggle(AppMessage::ToggleSidebarSectionCollapsed(2))
+                .add_action(Icon::UserPlus, AppMessage::OpenFriendRequests)
                 .build(&theme),
         );
         if !friends_collapsed {
