@@ -39,6 +39,7 @@
 //! changes or clears the search) cancels the in-flight HTTP request; no
 //! background task is spawned, so there is nothing to leak or join.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -286,6 +287,20 @@ impl KlipyGifProvider {
         };
         GifSearchPage { items, next_cursor }
     }
+}
+
+/// Build the default configured GIF provider as a trait object.
+///
+/// Reads the API key through the shared [`KlipyConfig`] auth seam at
+/// runtime.  Returns [`GifProviderError::NotConfigured`] when no key is set
+/// so callers can show the provider-not-configured state instead of
+/// crashing.
+///
+/// The returned value is a provider-neutral `Arc<dyn GifProvider>` — UI code
+/// can depend on [`GifProvider`] without ever naming the concrete KLIPY
+/// provider type.
+pub fn default_gif_provider() -> Result<Arc<dyn GifProvider>, GifProviderError> {
+    Ok(Arc::new(KlipyGifProvider::from_config(&KlipyConfig::from_env())?))
 }
 
 /// Convert a reqwest transport error into a neutral provider error.

@@ -57,7 +57,10 @@ use boru_core::discovery_secret::DiscoverySecret;
 use boru_core::download_limits::DownloadLimitsConfig;
 use boru_core::download_manager::DownloadManager;
 use boru_core::file_indexer::FileIndexer;
-use boru_core::klipy_config::KlipyConfig;
+use boru_core::gif_provider::{
+    GifContentRating, GifMediaFormat, GifProvider, GifProviderError,
+    GifSearchPage, GifSearchRequest, GifSearchResult, GifTrendingRequest,
+};
 use boru_core::friend_request::{
     FriendRequest, FriendRequestError, FriendRequestStatus, FriendRequestStore,
 };
@@ -3029,13 +3032,30 @@ enum ContextMenuKind {
     Image,
 }
 
-/// A GIF search result with preview thumbnail bytes.
-#[derive(Debug, Clone)]
-struct GifResult {
-    title: String,
-    full_url: String,
-    /// Downloaded preview GIF bytes for thumbnail display.
-    preview_bytes: Vec<u8>,
+/// User-facing message for a provider error (no key, no sensitive data).
+fn gif_provider_error_message(error: &GifProviderError) -> String {
+    match error {
+        GifProviderError::NotConfigured => {
+            "GIF search is not configured — set the KLIPY_API_KEY environment variable".to_string()
+        }
+        GifProviderError::InvalidApiKey => {
+            "GIF provider rejected the API key — check KLIPY_API_KEY".to_string()
+        }
+        GifProviderError::RateLimited { retry_after } => match retry_after {
+            Some(secs) => format!("GIF provider rate limited — retry in {secs}s"),
+            None => "GIF provider rate limited — try again shortly".to_string(),
+        },
+        GifProviderError::Timeout => "GIF search timed out — try again".to_string(),
+        GifProviderError::Network { details } => format!("GIF search network error: {details}"),
+        GifProviderError::InvalidResponse { details } => {
+            format!("GIF provider returned an invalid response: {details}")
+        }
+        GifProviderError::MediaUnavailable { details } => {
+            format!("GIF media unavailable: {details}")
+        }
+        GifProviderError::Cancelled => "GIF search cancelled".to_string(),
+        GifProviderError::Other { details } => format!("GIF search failed: {details}"),
+    }
 }
 
 // ── Pre-warm (PERF-4R-B) ─────────────────────────────────────────────
@@ -4171,8 +4191,33 @@ pub struct IcedChat {
     show_gif_picker: bool,
     /// Search text for the GIF picker.
     gif_search_text: String,
-    /// GIF search results with preview thumbnails.
-    gif_results: Vec<GifResult>,
+    /// Provider-neutral GIF search results (from `GifProvider`).
+    gif_results: Vec<GifSearchResult>,
+    /// Preview thumbnail bytes keyed by `provider_id` (small WebP/GIF
+    /// renditions only — never full-size originals).
+    gif_preview_cache: HashMap<String, Vec<u8>>,
+    /// Whether a GIF search/trending request is currently in flight.
+    gif_loading: bool,
+    /// Whether the current results are trending (shown before any search).
+    gif_showing_trending: bool,
+    /// Whether a search has been submitted at least once (distinguishes the
+    /// empty state from the no-results state).
+    gif_has_searched: bool,
+    /// User-facing error from the last GIF request, if any.
+    gif_error: Option<String>,
+    /// Opaque pagination cursor for the next page of results.
+    gif_next_cursor: Option<String>,
+    /// Whether the next results message should append to (paginate) rather
+    /// than replace the current `gif_results`.
+    gif_appending: bool,
+    /// Monotonic request id; responses carrying an older id are stale and
+    /// must be ignored (prevents out-of-order completions overwriting newer
+    /// results).
+    gif_request_seq: u64,
+    /// Debounce timer id; only the latest scheduled debounce fires.
+    gif_debounce_seq: u64,
+    /// Spinner frame for the GIF loading state.
+    gif_spinner_frame: usize,
     /// Whether external GIF search is disabled because KLIPY is not
     /// configured (no KLIPY_API_KEY).  Drives the picker's
     /// provider-not-configured state instead of hitting the network.
@@ -5983,12 +6028,31 @@ pub enum AppMessage {
     ToggleGifPicker,
     /// Search text changed in the GIF picker.
     GifSearchChanged(String),
-    /// Send a GIF by URL as an image attachment.
-    SendGifUrl(String),
-    /// Trigger a GIF search through the configured external provider (KLIPY).
+    /// Send a GIF selected from the picker as an image attachment.
+    SendGif(GifSearchResult),
+    /// Trigger a GIF search through the configured external provider.
     GifSearchSubmit,
-    /// GIF search results arrived.
-    GifSearchResults(Vec<GifResult>),
+    /// Debounce timer fired with the debounce seq; only the latest fires.
+    GifSearchDebounced(u64),
+    /// GIF search results arrived (provider-neutral page + request seq).
+    GifSearchResults {
+        seq: u64,
+        page: GifSearchPage,
+    },
+    /// Trending GIFs arrived (provider-neutral page + request seq).
+    GifTrendingResults {
+        seq: u64,
+        page: GifSearchPage,
+    },
+    /// A GIF request failed (request seq + user-facing message).
+    GifSearchFailed {
+        seq: u64,
+        message: String,
+    },
+    /// A GIF preview thumbnail finished downloading (provider_id, bytes).
+    GifPreviewLoaded(String, Vec<u8>),
+    /// Load the next page of GIF results (pagination).
+    GifLoadMore,
     /// Copy the user's own friend ID (public key) to the clipboard with visual feedback.
     CopyFriendId,
     /// Clear the "Copied!" visual feedback after copy.
@@ -7581,6 +7645,16 @@ impl IcedChat {
             show_gif_picker: false,
             gif_search_text: String::new(),
             gif_results: Vec::new(),
+            gif_preview_cache: HashMap::new(),
+            gif_loading: false,
+            gif_showing_trending: false,
+            gif_has_searched: false,
+            gif_error: None,
+            gif_next_cursor: None,
+            gif_appending: false,
+            gif_request_seq: 0,
+            gif_debounce_seq: 0,
+            gif_spinner_frame: 0,
             gif_not_configured: false,
             show_invite_member_dialog: false,
             invite_member_selected: HashSet::new(),
@@ -9626,9 +9700,14 @@ impl IcedChat {
             AppMessage::InsertEmoji(_) => "InsertEmoji",
             AppMessage::ToggleGifPicker => "ToggleGifPicker",
             AppMessage::GifSearchChanged(_) => "GifSearchChanged",
-            AppMessage::SendGifUrl(_) => "SendGif",
+            AppMessage::SendGif(_) => "SendGif",
             AppMessage::GifSearchSubmit => "GifSearchSubmit",
-            AppMessage::GifSearchResults(_) => "GifSearchResults",
+            AppMessage::GifSearchDebounced(_) => "GifSearchDebounced",
+            AppMessage::GifSearchResults { .. } => "GifSearchResults",
+            AppMessage::GifTrendingResults { .. } => "GifTrendingResults",
+            AppMessage::GifSearchFailed { .. } => "GifSearchFailed",
+            AppMessage::GifPreviewLoaded(..) => "GifPreviewLoaded",
+            AppMessage::GifLoadMore => "GifLoadMore",
             AppMessage::CopyFriendId => "CopyFriendId",
             AppMessage::FriendIdCopiedClear => "FriendIdCopiedClear",
             AppMessage::CopyShareTicket(_) => "CopyShareTicket",
@@ -19971,6 +20050,9 @@ impl IcedChat {
                 if self.pending_file_upload.is_some() {
                     self.file_upload_spinner_frame = (self.file_upload_spinner_frame + 1) % 10;
                 }
+                if self.gif_loading {
+                    self.gif_spinner_frame = (self.gif_spinner_frame + 1) % 10;
+                }
                 // Flush debounced neighbor status changes — batch rapid
                 // online/offline transitions into one visible update per tick.
                 self.flush_pending_neighbor_status();
@@ -21837,143 +21919,213 @@ impl IcedChat {
             AppMessage::ToggleGifPicker => {
                 self.show_gif_picker = !self.show_gif_picker;
                 if self.show_gif_picker {
-                    // Reflect current KLIPY configuration when the picker
+                    // Reflect current provider configuration when the picker
                     // opens, so the provider-not-configured state shows
                     // immediately instead of on first search.
-                    self.gif_not_configured = !KlipyConfig::from_env().is_configured();
+                    self.gif_not_configured = boru_core::default_gif_provider().is_err();
+                    self.gif_results.clear();
+                    self.gif_preview_cache.clear();
+                    self.gif_error = None;
+                    self.gif_has_searched = false;
+                    self.gif_next_cursor = None;
                     if self.gif_not_configured {
-                        self.gif_results.clear();
+                        self.gif_loading = false;
+                        return iced::Task::none();
                     }
+                    // Show trending GIFs as suggestions before any search.
+                    self.gif_showing_trending = true;
+                    return self.start_gif_trending(None);
                 }
+                self.gif_loading = false;
                 iced::Task::none()
             }
 
             AppMessage::GifSearchChanged(text) => {
                 self.gif_search_text = text;
-                iced::Task::none()
+                if self.gif_search_text.trim().is_empty() {
+                    // Empty query: cancel pending work and show trending again.
+                    self.gif_has_searched = false;
+                    self.gif_results.clear();
+                    self.gif_preview_cache.clear();
+                    self.gif_next_cursor = None;
+                    if self.gif_not_configured {
+                        return iced::Task::none();
+                    }
+                    self.gif_showing_trending = true;
+                    return self.start_gif_trending(None);
+                }
+                // Debounce: schedule a search after a quiet period.  Each
+                // keystroke bumps the debounce seq so only the latest timer
+                // fires (older timers are ignored by the seq guard).
+                let seq = self.gif_debounce_seq.wrapping_add(1);
+                self.gif_debounce_seq = seq;
+                let task = iced::Task::perform(
+                    tokio::time::sleep(std::time::Duration::from_millis(400)),
+                    move |_| AppMessage::GifSearchDebounced(seq),
+                );
+                task
             }
 
-            AppMessage::GifSearchSubmit => {
-                let query = self.gif_search_text.clone();
+            AppMessage::GifSearchDebounced(seq) => {
+                if seq != self.gif_debounce_seq {
+                    // A newer keystroke superseded this debounce timer.
+                    return iced::Task::none();
+                }
+                let query = self.gif_search_text.trim().to_string();
                 if query.is_empty() {
                     return iced::Task::none();
                 }
-                // KLIPY configuration — the API key is read at runtime from
-                // the KLIPY_API_KEY environment variable (or a future secure
-                // store) through `KlipyConfig`.  No key is ever hardcoded or
-                // committed, and the raw value never appears in Debug output
-                // or logs (see src/klipy_config.rs).
-                let config = KlipyConfig::from_env();
-                let Some(api_key) = config.api_key().map(str::to_owned) else {
-                    self.gif_not_configured = true;
-                    self.gif_results.clear();
-                    self.toast_counter = self.toast_counter.wrapping_add(1);
-                    self.toast_message = Some(
-                        "KLIPY is not configured — set KLIPY_API_KEY to enable external GIF search"
-                            .to_string(),
-                    );
-                    return iced::Task::none();
-                };
-                self.gif_not_configured = false;
-                let task = iced::Task::perform(
-                    async move {
-                        // GIPHY search API (interim provider until the KLIPY
-                        // adapter lands; the key comes from KLIPY_API_KEY).
-                        // Simple URL encode for the query
-                        let encoded_query: String = query
-                            .chars()
-                            .map(|c| match c {
-                                ' ' => "%20".to_string(),
-                                '!'..='~'
-                                    if c.is_alphanumeric()
-                                        || c == '-'
-                                        || c == '_'
-                                        || c == '.'
-                                        || c == '~' =>
-                                {
-                                    c.to_string()
-                                }
-                                _ => format!("%{:02X}", c as u8),
-                            })
-                            .collect();
-                        let url = format!(
-                            "https://api.giphy.com/v1/gifs/search?api_key={}&q={}&limit=20&rating=g&lang=en",
-                            api_key, encoded_query,
-                        );
-                        let client = reqwest::Client::new();
-                        let resp = client.get(&url).send().await.ok()?;
-                        let body: serde_json::Value = resp.json().await.ok()?;
-                        let mut results: Vec<GifResult> = Vec::new();
-                        for gif in body["data"].as_array()? {
-                            let title = gif["title"].as_str().unwrap_or("").to_string();
-                            let full_url = gif["images"]["original"]["url"].as_str()?.to_string();
-                            let preview_url = gif["images"]["fixed_height"]["url"]
-                                .as_str()
-                                .unwrap_or(&full_url);
-                            // Download preview thumbnail
-                            let preview_bytes = {
-                                let resp = client.get(preview_url).send().await;
-                                match resp {
-                                    Ok(r) => {
-                                        r.bytes().await.map(|b| b.to_vec()).unwrap_or_default()
-                                    }
-                                    Err(_) => Vec::new(),
-                                }
-                            };
-                            results.push(GifResult {
-                                title,
-                                full_url,
-                                preview_bytes,
-                            });
-                        }
-                        Some(results)
-                    },
-                    |result| match result {
-                        Some(results) => AppMessage::GifSearchResults(results),
-                        None => {
-                            tracing::warn!("GIPHY search failed or returned no results");
-                            AppMessage::Noop
-                        }
-                    },
-                );
-                return task;
+                self.gif_showing_trending = false;
+                self.gif_has_searched = true;
+                return self.start_gif_search(query, None);
             }
 
-            AppMessage::GifSearchResults(results) => {
-                self.gif_results = results;
-                self.gif_not_configured = false;
+            AppMessage::GifSearchSubmit => {
+                let query = self.gif_search_text.trim().to_string();
+                if query.is_empty() {
+                    return iced::Task::none();
+                }
+                // Cancel any pending debounce timer.
+                self.gif_debounce_seq = self.gif_debounce_seq.wrapping_add(1);
+                self.gif_showing_trending = false;
+                self.gif_has_searched = true;
+                return self.start_gif_search(query, None);
+            }
+
+            AppMessage::GifSearchResults { seq, page } => {
+                // Stale-response guard: an older request completing late must
+                // not replace newer results.
+                if seq != self.gif_request_seq {
+                    return iced::Task::none();
+                }
+                self.gif_loading = false;
+                self.gif_error = None;
+                self.gif_showing_trending = false;
+                self.gif_has_searched = true;
+                if self.gif_appending {
+                    // Pagination: append, deduplicating by provider_id.
+                    let mut seen: HashSet<String> =
+                        self.gif_results.iter().map(|r| r.provider_id.clone()).collect();
+                    for item in page.items {
+                        if seen.insert(item.provider_id.clone()) {
+                            self.gif_results.push(item);
+                        }
+                    }
+                    self.gif_appending = false;
+                } else {
+                    self.gif_results = page.items;
+                }
+                self.gif_next_cursor = page.next_cursor;
+                return self.gif_preview_download_tasks();
+            }
+
+            AppMessage::GifTrendingResults { seq, page } => {
+                if seq != self.gif_request_seq {
+                    return iced::Task::none();
+                }
+                self.gif_loading = false;
+                self.gif_error = None;
+                self.gif_showing_trending = true;
+                if self.gif_appending {
+                    let mut seen: HashSet<String> =
+                        self.gif_results.iter().map(|r| r.provider_id.clone()).collect();
+                    for item in page.items {
+                        if seen.insert(item.provider_id.clone()) {
+                            self.gif_results.push(item);
+                        }
+                    }
+                    self.gif_appending = false;
+                } else {
+                    self.gif_results = page.items;
+                }
+                self.gif_next_cursor = page.next_cursor;
+                return self.gif_preview_download_tasks();
+            }
+
+            AppMessage::GifSearchFailed { seq, message } => {
+                if seq != self.gif_request_seq {
+                    return iced::Task::none();
+                }
+                self.gif_loading = false;
+                self.gif_appending = false;
+                self.gif_error = Some(message);
                 iced::Task::none()
             }
 
-            AppMessage::SendGifUrl(url) => {
-                let url_clone = url.clone();
+            AppMessage::GifPreviewLoaded(provider_id, bytes) => {
+                self.gif_preview_cache.insert(provider_id, bytes);
+                iced::Task::none()
+            }
+
+            AppMessage::GifLoadMore => {
+                if self.gif_loading {
+                    return iced::Task::none();
+                }
+                let Some(cursor) = self.gif_next_cursor.clone() else {
+                    return iced::Task::none();
+                };
+                self.gif_appending = true;
+                if self.gif_showing_trending {
+                    return self.start_gif_trending(Some(cursor));
+                }
+                let query = self.gif_search_text.trim().to_string();
+                if query.is_empty() {
+                    self.gif_appending = false;
+                    return iced::Task::none();
+                }
+                return self.start_gif_search(query, Some(cursor));
+            }
+
+            AppMessage::SendGif(gif) => {
+                // Provider-neutral handoff: `gif` is a GifSearchResult (not a
+                // KLIPY type).  Build KLIPY-06's SharedGif chat payload from
+                // it and broadcast the signed message — receivers fetch the
+                // rendition URLs directly (no sender-side full-size download,
+                // no API key, no search query on the wire).  The sender's own
+                // bubble renders through the same pending-GIF fetch path used
+                // for remote receipts (gossip does not echo own broadcasts).
+                let shared_gif =
+                    boru_core::gif_provider::SharedGif::from_search_result(&gif);
+                let message = crate::Message::SharedGif {
+                    gif: shared_gif.clone(),
+                };
+                let message_hash = message_hash(&message);
                 self.show_gif_picker = false;
                 self.gif_search_text.clear();
-                self.toast_counter = self.toast_counter.wrapping_add(1);
-                self.toast_message = Some("Downloading GIF...".to_string());
-                let task = iced::Task::perform(
+                let encoded = match SignedMessage::sign_and_encode(&self.secret_key, &message) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        self.toast_counter = self.toast_counter.wrapping_add(1);
+                        self.toast_message = Some(format!("Failed to send GIF: {e}"));
+                        return iced::Task::none();
+                    }
+                };
+                let sender = self.sender.clone();
+                let sender_ready = self.sender_ready;
+                let neighbor_count = self.neighbors.len();
+                let broadcast_task = iced::Task::perform(
                     async move {
-                        let client = reqwest::Client::new();
-                        let resp = client
-                            .get(&url_clone)
-                            .send()
-                            .await
-                            .map_err(|e| format!("{e}"))?;
-                        let bytes = resp.bytes().await.map_err(|e| format!("{e}"))?;
-                        let tmp = std::env::temp_dir()
-                            .join(format!("boru_gif_{}.gif", std::process::id()));
-                        tokio::fs::write(&tmp, &bytes)
-                            .await
-                            .map_err(|e| format!("{e}"))?;
-                        let abs_path = tmp.to_string_lossy().to_string();
-                        Ok::<String, String>(format!("gif.gif|{abs_path}|"))
+                        if sender_ready && neighbor_count > 0 {
+                            if let Some(sender) = sender {
+                                if sender.broadcast(encoded).await.is_err() {
+                                    warn!("SharedGif broadcast failed");
+                                }
+                            }
+                        } else {
+                            info!(
+                                sender_ready,
+                                neighbor_count,
+                                "SharedGif queued for retry (no mesh yet)"
+                            );
+                        }
                     },
-                    |result| match result {
-                        Ok(encoded) => AppMessage::ExecuteImageSend(encoded),
-                        Err(_e) => AppMessage::Noop,
-                    },
+                    |_| AppMessage::Noop,
                 );
-                return task;
+                // Local echo: render the sender's own bubble via the standard
+                // pending-GIF fetch path (same as a remote receipt).
+                self.set_pending_gif(shared_gif, self.local_public, message_hash);
+                let fetch_task = self.start_next_pending_gif_fetch();
+                iced::Task::batch([broadcast_task, fetch_task])
             }
 
             AppMessage::CopyFriendId => {
@@ -29277,6 +29429,116 @@ impl IcedChat {
             .into()
     }
 
+    // ── GIF picker async helpers ─────────────────────────────────────────
+    //
+    // All GIF picker network work goes through the provider-neutral
+    // `GifProvider` trait object (obtained via `boru_core::default_gif_provider()`),
+    // never a concrete KLIPY type.  Responses carry a monotonic request seq;
+    // `update()` discards stale completions so an older search can never
+    // overwrite newer results.
+
+    /// Start a GIF search through the configured provider.
+    fn start_gif_search(&mut self, query: String, cursor: Option<String>) -> iced::Task<AppMessage> {
+        let Some(provider) = boru_core::default_gif_provider().ok() else {
+            self.gif_not_configured = true;
+            self.gif_loading = false;
+            return iced::Task::none();
+        };
+        let seq = self.gif_request_seq.wrapping_add(1);
+        self.gif_request_seq = seq;
+        self.gif_loading = true;
+        self.gif_error = None;
+        let task = iced::Task::perform(
+            async move {
+                let result = provider
+                    .search(GifSearchRequest {
+                        query,
+                        cursor,
+                        limit: 24,
+                        content_rating: Some(GifContentRating::G),
+                    })
+                    .await;
+                (seq, result)
+            },
+            |(seq, result)| match result {
+                Ok(page) => AppMessage::GifSearchResults { seq, page },
+                Err(error) => AppMessage::GifSearchFailed {
+                    seq,
+                    message: gif_provider_error_message(&error),
+                },
+            },
+        );
+        task
+    }
+
+    /// Start a trending-GIF request through the configured provider.
+    fn start_gif_trending(&mut self, cursor: Option<String>) -> iced::Task<AppMessage> {
+        let Some(provider) = boru_core::default_gif_provider().ok() else {
+            self.gif_not_configured = true;
+            self.gif_loading = false;
+            return iced::Task::none();
+        };
+        let seq = self.gif_request_seq.wrapping_add(1);
+        self.gif_request_seq = seq;
+        self.gif_loading = true;
+        self.gif_error = None;
+        let task = iced::Task::perform(
+            async move {
+                let result = provider
+                    .trending(GifTrendingRequest {
+                        cursor,
+                        limit: 24,
+                        content_rating: Some(GifContentRating::G),
+                    })
+                    .await;
+                (seq, result)
+            },
+            |(seq, result)| match result {
+                Ok(page) => AppMessage::GifTrendingResults { seq, page },
+                Err(error) => AppMessage::GifSearchFailed {
+                    seq,
+                    message: gif_provider_error_message(&error),
+                },
+            },
+        );
+        task
+    }
+
+    /// Fire one small preview-thumbnail download per result that does not
+    /// already have cached bytes.  Only the small `preview` rendition
+    /// (WebP/GIF) is fetched — never a full-size original.
+    fn gif_preview_download_tasks(&self) -> iced::Task<AppMessage> {
+        let mut tasks: Vec<iced::Task<AppMessage>> = Vec::new();
+        for result in &self.gif_results {
+            if self.gif_preview_cache.contains_key(&result.provider_id) {
+                continue;
+            }
+            // MP4 previews cannot be rendered by iced's image widget; skip them.
+            if result.preview.format == GifMediaFormat::Mp4 {
+                continue;
+            }
+            let url = result.preview.url.clone();
+            let provider_id = result.provider_id.clone();
+            tasks.push(iced::Task::perform(
+                async move {
+                    let client = reqwest::Client::new();
+                    let resp = client.get(&url).send().await.ok()?;
+                    let bytes = resp.bytes().await.ok()?;
+                    Some((provider_id, bytes.to_vec()))
+                },
+                |opt| match opt {
+                    Some((provider_id, bytes)) => AppMessage::GifPreviewLoaded(provider_id, bytes),
+                    None => AppMessage::Noop,
+                },
+            ));
+        }
+        if tasks.is_empty() {
+            iced::Task::none()
+        } else {
+            iced::Task::batch(tasks)
+        }
+    }
+
     /// Render the GIF picker panel with common GIF URLs and search/custom input.
     fn view_gif_picker(&self) -> iced::Element<'_, AppMessage> {
         use iced::widget::{button, column, container, row, text, text_input};
@@ -29321,46 +29583,110 @@ impl IcedChat {
             .spacing(SPACE_4)
             .align_y(iced::Alignment::Center);
 
-        // Results grid with image thumbnails
+        // ── Results area ── state machine: not-configured / loading /
+        // error / no-results / empty / grid (+ load more).
         let mut results_col = column![].spacing(SPACE_4);
+
         if self.gif_not_configured {
             results_col = results_col.push(
-                crate::fonts::type_role_text(
-                    crate::fonts::TypeRole::SupportingText,
-                    "KLIPY is not configured — set the KLIPY_API_KEY environment variable to enable external GIF search",
-                )
-                .color(text_muted(&theme)),
+                column![
+                    crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::SupportingText,
+                        "GIF search is not configured",
+                    )
+                    .color(text_muted(&theme)),
+                    crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::Metadata,
+                        "Set the KLIPY_API_KEY environment variable to enable external GIF search.",
+                    )
+                    .color(text_muted(&theme)),
+                ]
+                .spacing(SPACE_2),
+            );
+        } else if self.gif_loading && self.gif_results.is_empty() {
+            // Loading spinner.
+            const SPINNER_FRAMES: [&str; 10] =
+                ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            let spinner = SPINNER_FRAMES[self.gif_spinner_frame % SPINNER_FRAMES.len()];
+            results_col = results_col.push(
+                row![
+                    crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::Body,
+                        spinner,
+                    )
+                    .color(text_muted(&theme)),
+                    crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::SupportingText,
+                        if self.gif_showing_trending {
+                            "Loading trending GIFs…"
+                        } else {
+                            "Searching GIFs…"
+                        },
+                    )
+                    .color(text_muted(&theme)),
+                ]
+                .spacing(SPACE_6)
+                .align_y(iced::Alignment::Center),
+            );
+        } else if let Some(error) = &self.gif_error {
+            results_col = results_col.push(
+                column![
+                    crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::SupportingText,
+                        "Couldn't load GIFs",
+                    )
+                    .color(text_muted(&theme)),
+                    crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::Metadata,
+                        error.as_str(),
+                    )
+                    .color(text_muted(&theme)),
+                    button(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::ButtonLabel,
+                            "Retry",
+                        )
+                    )
+                    .on_press(AppMessage::GifSearchSubmit)
+                    .padding([SPACE_4, SPACE_8]),
+                ]
+                .spacing(SPACE_2),
             );
         } else if self.gif_results.is_empty() {
-            results_col = results_col.push(
-                crate::fonts::type_role_text(
-                    crate::fonts::TypeRole::SupportingText,
-                    "Type a search term and press Enter or Search",
-                )
-                .color(text_muted(&theme)),
-            );
+            if self.gif_has_searched {
+                results_col = results_col.push(
+                    crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::SupportingText,
+                        "No GIFs found — try a different search term",
+                    )
+                    .color(text_muted(&theme)),
+                );
+            } else {
+                results_col = results_col.push(
+                    crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::SupportingText,
+                        "Type a search term and press Enter or Search",
+                    )
+                    .color(text_muted(&theme)),
+                );
+            }
         } else {
-            // Render in rows of 2 thumbnails each
+            // Render in rows of 2 thumbnails each.
             for chunk in self.gif_results.chunks(2) {
                 let mut row_widgets = row![].spacing(SPACE_4);
                 for gif in chunk {
-                    let url = gif.full_url.clone();
-                    let title = if gif.title.is_empty() {
-                        "GIF"
-                    } else {
-                        &gif.title
-                    };
-                    let has_preview = !gif.preview_bytes.is_empty();
+                    let title = gif.title.as_deref().filter(|s| !s.is_empty()).unwrap_or("GIF");
+                    let preview = self.gif_preview_cache.get(&gif.provider_id).cloned();
 
-                    let thumbnail: iced::Element<'_, AppMessage> = if has_preview {
-                        let handle =
-                            iced::widget::image::Handle::from_bytes(gif.preview_bytes.clone());
-                        iced::widget::image(handle)
-                            .width(iced::Length::Fixed(150.0))
-                            .height(iced::Length::Fixed(100.0))
-                            .into()
-                    } else {
-                        container(
+                    let thumbnail: iced::Element<'_, AppMessage> = match preview {
+                        Some(bytes) if !bytes.is_empty() => {
+                            let handle = iced::widget::image::Handle::from_bytes(bytes);
+                            iced::widget::image(handle)
+                                .width(iced::Length::Fixed(150.0))
+                                .height(iced::Length::Fixed(100.0))
+                                .into()
+                        }
+                        _ => container(
                             crate::fonts::type_role_text(
                                 crate::fonts::TypeRole::Metadata,
                                 "...",
@@ -29375,7 +29701,7 @@ impl IcedChat {
                             background: Some(iced::Background::Color(bg_surface_secondary(t))),
                             ..Default::default()
                         })
-                        .into()
+                        .into(),
                     };
 
                     let card = button(
@@ -29390,13 +29716,30 @@ impl IcedChat {
                         .spacing(SPACE_2)
                         .width(iced::Length::Fixed(150.0)),
                     )
-                    .on_press(AppMessage::SendGifUrl(url))
+                    .on_press(AppMessage::SendGif(gif.clone()))
                     .padding(SPACE_4)
                     .style(|_t, _s| iced::widget::button::Style::default());
 
                     row_widgets = row_widgets.push(card);
                 }
                 results_col = results_col.push(row_widgets);
+            }
+            // Load-more button when another page exists.
+            if self.gif_next_cursor.is_some() {
+                results_col = results_col.push(
+                    button(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::ButtonLabel,
+                            if self.gif_loading { "Loading…" } else { "Load more" },
+                        )
+                    )
+                    .on_press_maybe(if self.gif_loading {
+                        None
+                    } else {
+                        Some(AppMessage::GifLoadMore)
+                    })
+                    .padding([SPACE_4, SPACE_8]),
+                );
             }
         }
 
@@ -40141,7 +40484,71 @@ fn format_file_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use boru_core::gif_provider::GifMediaSource;
     use chrono::{FixedOffset, TimeZone, Utc};
+
+    // ── GIF picker pure logic (KLIPY-05) ───────────────────────────────
+    // Network-free helpers: rendition selection for the send path and the
+    // provider-error message mapper.  No provider, no app instance.
+
+    fn media_source(url: &str, format: GifMediaFormat) -> GifMediaSource {
+        GifMediaSource {
+            url: url.to_string(),
+            format,
+            width: None,
+            height: None,
+            file_size: None,
+        }
+    }
+
+    fn result_with(original: Option<GifMediaSource>) -> GifSearchResult {
+        GifSearchResult {
+            provider: "test".to_string(),
+            provider_id: "gif-1".to_string(),
+            title: Some("test".to_string()),
+            alt_text: None,
+            preview: media_source("https://media.test/preview.gif", GifMediaFormat::Gif),
+            playback: media_source("https://media.test/playback.mp4", GifMediaFormat::Mp4),
+            original,
+        }
+    }
+
+    #[test]
+    fn provider_error_message_is_user_facing_and_safe() {
+        let msg = gif_provider_error_message(&GifProviderError::NotConfigured);
+        assert!(msg.contains("KLIPY_API_KEY"));
+        let msg = gif_provider_error_message(&GifProviderError::InvalidApiKey);
+        assert!(msg.contains("KLIPY_API_KEY"));
+        let msg = gif_provider_error_message(&GifProviderError::RateLimited {
+            retry_after: Some(42),
+        });
+        assert!(msg.contains("42"), "retry hint surfaced");
+    }
+
+    #[test]
+    fn shared_gif_from_search_result_handoff() {
+        // KLIPY-06's SharedGif conversion keeps the provider-neutral
+        // identity and rendition URLs; the picker's SendGif handler builds
+        // this payload and broadcasts it (no full-size download on send).
+        let gif = result_with(Some(media_source(
+            "https://media.test/original.gif",
+            GifMediaFormat::Gif,
+        )));
+        let shared = boru_core::gif_provider::SharedGif::from_search_result(&gif);
+        assert_eq!(shared.provider, "test");
+        assert_eq!(shared.provider_id, "gif-1");
+        assert_eq!(shared.playback_url, "https://media.test/playback.mp4");
+        assert_eq!(
+            shared.preview_url.as_deref(),
+            Some("https://media.test/preview.gif")
+        );
+        assert_eq!(
+            shared.fallback_url.as_deref(),
+            Some("https://media.test/original.gif")
+        );
+        assert_eq!(shared.format, GifMediaFormat::Mp4);
+        assert!(shared.is_renderable());
+    }
 
     // ── Local service scan pure logic (TUN-01) ─────────────────────────
     // These exercise `boru_core::local_service_scan`'s network-free helpers:

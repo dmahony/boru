@@ -483,3 +483,13 @@ pub mod gif_provider;
 /// `serde_json` dependencies.
 #[cfg(feature = "gui")]
 pub mod klipy_provider;
+
+/// Build the default configured GIF provider (currently KLIPY) as a
+/// provider-neutral `Arc<dyn GifProvider>` trait object.
+///
+/// Re-exported at the crate root so UI code can obtain the configured
+/// provider without importing provider-specific modules or types.  Returns
+/// [`GifProviderError::NotConfigured`](gif_provider::GifProviderError::NotConfigured)
+/// when no API key is configured.
+#[cfg(feature = "gui")]
+pub use klipy_provider::default_gif_provider;
