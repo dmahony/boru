@@ -6464,6 +6464,12 @@ fn sidebar_name_text<'a>(
 
 /// Renders the local-user profile block in the sidebar: avatar (profile image
 /// or generated initials circle), display name, online/away/offline status, and a settings gear button.
+///
+/// SIDEBAR-03: the top-left profile header avatar renders at 2× the list-row
+/// avatar size (AVATAR_SM stays for sidebar list rows; this block is the only
+/// site that uses the doubled token).
+const PROFILE_HEADER_AVATAR_SIZE: f32 = AVATAR_SM * 2.0;
+
 fn view_local_profile_block(
     local_label: String,
     presence: PeerPresence,
@@ -6493,8 +6499,8 @@ fn view_local_profile_block(
     {
         iced::widget::image(handle.clone())
             .content_fit(iced::ContentFit::Cover)
-            .width(Length::Fixed(AVATAR_SM))
-            .height(Length::Fixed(AVATAR_SM))
+            .width(Length::Fixed(PROFILE_HEADER_AVATAR_SIZE))
+            .height(Length::Fixed(PROFILE_HEADER_AVATAR_SIZE))
             .into()
     } else {
         let bytes = local_public.as_bytes();
@@ -6513,12 +6519,12 @@ fn view_local_profile_block(
                 .width(Length::Fill),
         )
         .center_y(Length::Fill)
-        .width(Length::Fixed(AVATAR_SM))
-        .height(Length::Fixed(AVATAR_SM))
+        .width(Length::Fixed(PROFILE_HEADER_AVATAR_SIZE))
+        .height(Length::Fixed(PROFILE_HEADER_AVATAR_SIZE))
         .style(move |t| container::Style {
             background: Some(Background::Color(avatar_color)),
             border: Border {
-                radius: (AVATAR_SM / 2.0).into(),
+                radius: (PROFILE_HEADER_AVATAR_SIZE / 2.0).into(),
                 ..Default::default()
             },
             ..Default::default()
@@ -40599,6 +40605,42 @@ mod tests {
         assert!(
             profile.contains("status_label"),
             "status label must still render below the display name"
+        );
+    }
+
+    #[test]
+    fn sidebar03_profile_header_avatar_is_doubled() {
+        // SIDEBAR-03: the top-left profile header avatar must render at 2× the
+        // list-row avatar size. The header block (both the profile-image path
+        // and the generated initials circle) must use the doubled token with a
+        // matching radius, while sidebar list-row avatars keep AVATAR_SM.
+        let src = include_str!("app.rs");
+        assert!(
+            src.contains("const PROFILE_HEADER_AVATAR_SIZE: f32 = AVATAR_SM * 2.0;"),
+            "profile header avatar token must be defined as exactly 2× AVATAR_SM"
+        );
+        let profile = method_source(src, "fn view_local_profile_block(", "fn profile_identity_card(");
+        assert!(
+            profile.contains("Length::Fixed(PROFILE_HEADER_AVATAR_SIZE)"),
+            "profile-image avatar must use the doubled PROFILE_HEADER_AVATAR_SIZE"
+        );
+        assert!(
+            profile.contains("radius: (PROFILE_HEADER_AVATAR_SIZE / 2.0).into()"),
+            "initials-circle radius must be half of the doubled avatar size"
+        );
+        assert!(
+            !profile.contains("Length::Fixed(AVATAR_SM)"),
+            "profile header must NOT use the list-row AVATAR_SM size"
+        );
+        // List-row avatars keep AVATAR_SM (unchanged by SIDEBAR-03).
+        let conversation_row = method_source(
+            src,
+            "fn view_sidebar_conversation_row(",
+            "fn view_sidebar_discovered_peers(",
+        );
+        assert!(
+            conversation_row.contains("AVATAR_SM"),
+            "sidebar list-row avatars must keep AVATAR_SM"
         );
     }
 
