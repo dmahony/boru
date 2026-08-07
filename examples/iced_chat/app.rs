@@ -25886,7 +25886,8 @@ impl IcedChat {
         };
 
         // ── Greeting (page header) ──
-        // UI-HOME-12: display_heading — Manrope Bold 32 px, 1.2 line height.
+        // UI-HOME-12: display_heading — Archivo SemiCondensed Bold 32 px,
+        // 1.2 line height (via TypeRole::DisplayHeading).
         let display_name = if dep.local_label.is_empty() {
             "there"
         } else {
@@ -25902,7 +25903,7 @@ impl IcedChat {
         // A long display name (e.g. a bare peer key) must wrap inside the
         // header instead of overflowing it (UI-HOME-10).
         .wrapping(iced::widget::text::Wrapping::WordOrGlyph);
-        // Subtitle — Source Sans 3 Regular at the UI-HOME-02 size token
+        // Subtitle — IBM Plex Sans Regular at the UI-HOME-02 size token
         // (16 px; the canonical `body` role is 15 px, plan band 15–17 px).
         let welcome_line = crate::fonts::type_role_text(
             crate::fonts::TypeRole::Body,
@@ -25990,7 +25991,7 @@ impl IcedChat {
 
         let mut hero_text = Column::new()
             .push(
-                // Connection heading — section_title (Source Sans 3 SemiBold 20).
+                // Connection heading — section_title (IBM Plex Sans SemiBold 20).
                 // Fills the hero text column and glyph-wraps a long degraded /
                 // offline reason instead of overflowing the card (UI-HOME-10).
                 crate::fonts::type_role_text(
@@ -26003,7 +26004,7 @@ impl IcedChat {
             )
             .push(Space::new().height(Length::Fixed(SPACE_4)))
             .push(
-                // Body copy — Source Sans 3 Regular 15, 1.45 line height.
+                // Body copy — IBM Plex Sans Regular 15, 1.45 line height.
                 crate::fonts::type_role_text_lh(
                     crate::fonts::TypeRole::Body,
                     "Private communication, peer to peer.",
@@ -38424,22 +38425,23 @@ mod tests {
 
     #[test]
     fn home_screen_uses_type_role_roles() {
-        // UI-HOME-12 approved mapping: greeting -> display_heading (Manrope
-        // Bold 32), subtitle -> body@16, pill -> metadata, hero headline ->
-        // section_title, hero body -> body lh 1.45, Retry/Details ->
-        // button_label, mesh card -> card_title / supporting_text /
-        // body_emphasised / button_label. The whole home screen must resolve
-        // fonts through the central TypeRole roles — no local font
-        // declarations (Manrope may only arrive via DisplayHeading).
+        // UI-HOME-12 approved mapping: greeting -> display_heading (Archivo
+        // SemiCondensed Bold 32), subtitle -> body@16, pill -> metadata,
+        // hero headline -> section_title (IBM Plex Sans SemiBold 20), hero
+        // body -> body lh 1.45, Retry/Details -> button_label, mesh card ->
+        // card_title / supporting_text / body_emphasised / button_label.
+        // The whole home screen must resolve fonts through the central
+        // TypeRole roles — no local font declarations (Archivo may only
+        // arrive via DisplayHeading/PageTitle).
         let src = include_str!("app.rs");
         let home = method_source(src, "fn view_chat_list_content(", "fn view_chat_panel(");
         assert!(
             home.contains("TypeRole::DisplayHeading"),
-            "greeting must use TypeRole::DisplayHeading (Manrope Bold 32)"
+            "greeting must use TypeRole::DisplayHeading (Archivo SemiCondensed Bold 32)"
         );
         assert!(
             home.contains("TypeRole::SectionTitle"),
-            "hero headline must use TypeRole::SectionTitle (SS3 SemiBold 20)"
+            "hero headline must use TypeRole::SectionTitle (IBM Plex Sans SemiBold 20)"
         );
         assert!(
             home.contains("TypeRole::ButtonLabel"),
@@ -38480,6 +38482,91 @@ mod tests {
         assert!(
             !home.contains("manrope("),
             "home screen must not declare Manrope locally; use TypeRole::DisplayHeading"
+        );
+        assert!(
+            !home.contains("source_sans("),
+            "home screen must not declare Source Sans 3 locally; use TypeRole roles"
+        );
+        assert!(
+            !home.contains("archivo_semi_condensed("),
+            "home screen must not hardcode Archivo locally; it may only arrive via TypeRole::DisplayHeading"
+        );
+    }
+
+    #[test]
+    fn home_screen_fonts05_approved_family_mapping() {
+        // FONTS Task 5 (spec) — the redesigned home screen must render with:
+        //   greeting "Good <time>, <name>" -> DisplayHeading (Archivo
+        //     SemiCondensed Bold 32 px, lh ~1.2)
+        //   subtitle "Welcome to Boru" -> Body @ HOME_SUBTITLE (IBM Plex
+        //     Sans Regular 16 px, muted secondary)
+        //   connection card title "Boru is connected and ready." ->
+        //     SectionTitle (IBM Plex Sans SemiBold 20 px)
+        //   connection card subtitle "Private communication, peer to peer."
+        //     -> Body lh 1.45 (IBM Plex Sans Regular 15 px)
+        //   dashboard headings (Mesh Health / Online Peers / Recent
+        //     Activity / Tunnels) -> CardTitle via CardShell (IBM Plex Sans
+        //     SemiBold 18 px) — NOT Archivo
+        // The BORU wordmark stays Raleway and no business logic changes.
+        let src = include_str!("app.rs");
+        let home = method_source(src, "fn view_chat_list_content(", "fn view_chat_panel(");
+        // Greeting resolves through DisplayHeading (Archivo SemiCondensed
+        // Bold 32) with the ~1.2 line-height helper.
+        assert!(
+            home.contains("type_role_text_lh(\n            crate::fonts::TypeRole::DisplayHeading,")
+                || home.contains("crate::fonts::type_role_text_lh(\n            crate::fonts::TypeRole::DisplayHeading,"),
+            "greeting must use type_role_text_lh with TypeRole::DisplayHeading"
+        );
+        assert!(
+            home.contains("format!(\"Good {}, {display_name}\", dep.time_of_day_greeting)"),
+            "greeting copy must stay 'Good <time>, <display_name>'"
+        );
+        // Subtitle uses the body role at the HOME_SUBTITLE scale token,
+        // muted secondary colour — no hardcoded family.
+        assert!(
+            home.contains("crate::fonts::type_role_text(\n            crate::fonts::TypeRole::Body,\n            \"Welcome to Boru\",\n        )"),
+            "subtitle must use type_role_text(TypeRole::Body, \"Welcome to Boru\")"
+        );
+        assert!(
+            home.contains(".size(crate::fonts::HOME_SUBTITLE)"),
+            "subtitle must use the HOME_SUBTITLE scale constant (16 px)"
+        );
+        assert!(
+            home.contains(".color(text_secondary(&theme))"),
+            "subtitle must use the muted secondary colour"
+        );
+        // Connection card headline + subtitle.
+        assert!(
+            home.contains("crate::fonts::type_role_text(\n                    crate::fonts::TypeRole::SectionTitle,"),
+            "connection card title must use TypeRole::SectionTitle (IBM Plex Sans SemiBold 20)"
+        );
+        assert!(
+            home.contains("\"Boru is connected and ready.\".to_string()"),
+            "connection card ready copy must remain"
+        );
+        assert!(
+            home.contains("crate::fonts::type_role_text_lh(\n                    crate::fonts::TypeRole::Body,\n                    \"Private communication, peer to peer.\",\n                    1.45,"),
+            "connection card subtitle must use type_role_text_lh(TypeRole::Body, ..., 1.45)"
+        );
+        // Dashboard headings: all four cards are built from the shared
+        // CardShell foundation, which renders titles with TypeRole::CardTitle
+        // (IBM Plex Sans SemiBold 18) — never Archivo.
+        assert!(
+            home.contains("CardShell::new(\"Mesh Health\""),
+            "Mesh Health card must be a CardShell (CardTitle -> IBM Plex Sans, not Archivo)"
+        );
+        let rail = method_source(src, "fn view_online_peers_card(", "fn view_main_empty_state(");
+        assert!(
+            rail.contains("CardShell::new(\"Online Peers\"")
+                && rail.contains("CardShell::new(\"Recent Activity\"")
+                && rail.contains("CardShell::new(\"Tunnels\""),
+            "Online Peers / Recent Activity / Tunnels cards must be CardShell (CardTitle -> IBM Plex Sans, not Archivo)"
+        );
+        // Wordmark unchanged: the BORU logo element still resolves to
+        // Raleway ExtraBold (BoruLogo From impl).
+        assert!(
+            src.contains("crate::fonts::raleway_extra_bold()"),
+            "BORU wordmark must stay on raleway_extra_bold (unchanged)"
         );
     }
 
