@@ -6260,6 +6260,33 @@ struct SidebarIdentityCacheKey {
     has_profile_image: bool,
 }
 
+/// FONTS-06: sidebar contact/peer name size (IBM Plex Sans Medium ~14–15 px).
+///
+/// Sidebar rows (CHATS conversation names, GROUPS group names, FRIENDS,
+/// DISCOVER, PUBLIC ROOMS, REQUESTS) render contact/peer display names in
+/// IBM Plex Sans Medium at this size. The name role keeps the `Body` size
+/// band (15 px) so row heights don't shift; `BodyEmphasised` would be too
+/// heavy (SemiBold) and `Body` too light (Regular), so the approved Medium
+/// weight resolves through the central family constructor
+/// (`ibm_plex_sans(Weight::Medium)`) exactly as `TypeRole::font()` does.
+const SIDEBAR_NAME_SIZE: f32 = 15.0;
+
+/// Build a sidebar contact/peer name in IBM Plex Sans Medium (FONTS-06).
+///
+/// `TypeRole` has no Medium-weight UI role (Body is Regular 400,
+/// BodyEmphasised is SemiBold 600), so the name uses the canonical IBM Plex
+/// Sans family constructor at the approved Medium 500 weight and the
+/// FONTS-06 name size — the same token-based helper `TypeRole::font()`
+/// resolves IBM Plex Sans through. Raw peer identifiers shown as technical
+/// values keep `TypeRole::TechnicalValue` (JetBrains Mono, FONTS-09).
+fn sidebar_name_text<'a>(
+    content: impl iced::widget::text::IntoFragment<'a>,
+) -> iced::widget::text::Text<'a, iced::Theme, iced::Renderer> {
+    iced::widget::text(content)
+        .font(crate::fonts::ibm_plex_sans(iced::font::Weight::Medium))
+        .size(SIDEBAR_NAME_SIZE)
+}
+
 /// Renders the local-user profile block in the sidebar: avatar (profile image
 /// or generated initials circle), display name, online/away/offline status, and a settings gear button.
 fn view_local_profile_block(
@@ -6330,7 +6357,8 @@ fn view_local_profile_block(
     // the sidebar instead of overflowing it (UI-HOME-10).
     let name_col = Column::new()
         .push(
-            crate::fonts::type_role_text(crate::fonts::TypeRole::Body, display_name)
+            // FONTS-06: local display name in IBM Plex Sans Medium.
+            sidebar_name_text(display_name)
                 .width(Length::Fill)
                 .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
         )
@@ -23966,7 +23994,8 @@ impl IcedChat {
             // text wraps inside the clip container and the row grows taller
             // instead of truncating (UI-18 long-value stress finding).
             let name_label = container(
-                crate::fonts::type_role_text(crate::fonts::TypeRole::Body, name.clone())
+                // FONTS-06: group name in IBM Plex Sans Medium.
+                sidebar_name_text(name.clone())
                     .wrapping(iced::widget::text::Wrapping::None)
                     .color(crate::design_tokens::text_primary(&theme))
                     .width(Length::Fill),
@@ -24284,7 +24313,8 @@ impl IcedChat {
         // `Wrapping::None` keeps the row single-line; without it the text
         // wraps inside the clip container and the row grows (UI-18 finding).
         let name_label = container(
-            crate::fonts::type_role_text(crate::fonts::TypeRole::Body, name.clone())
+            // FONTS-06: conversation/contact name in IBM Plex Sans Medium.
+            sidebar_name_text(name.clone())
                 .wrapping(iced::widget::text::Wrapping::None)
                 .width(Length::Fill)
                 .style(move |t| iced::widget::text::Style {
@@ -24472,12 +24502,9 @@ impl IcedChat {
             }
 
             // Label line: clip long display names and show the full text in a tooltip.
-            let label_text = crate::fonts::type_role_text(
-                crate::fonts::TypeRole::Body,
-                peer.display_name.clone(),
-            )
-            .color(crate::design_tokens::text_primary(&theme))
-            .width(Length::Fill);
+            let label_text = sidebar_name_text(peer.display_name.clone())
+                .color(crate::design_tokens::text_primary(&theme))
+                .width(Length::Fill);
             let label_el: iced::Element<'static, AppMessage> =
                 if peer.display_name.chars().count() > 24 {
                     iced::widget::tooltip::Tooltip::new(
@@ -24626,14 +24653,11 @@ impl IcedChat {
             }
 
             // Room name line: clip long names and show the full text in a tooltip.
-            let name_text = crate::fonts::type_role_text(
-                crate::fonts::TypeRole::Body,
-                room_name.clone(),
-            )
-            .color(crate::design_tokens::text_primary(&Self::theme_from_dark(
-                dep.dark_mode,
-            )))
-            .width(Length::Fill);
+            let name_text = sidebar_name_text(room_name.clone())
+                .color(crate::design_tokens::text_primary(&Self::theme_from_dark(
+                    dep.dark_mode,
+                )))
+                .width(Length::Fill);
             let name_el: iced::Element<'static, AppMessage> = if room_name.chars().count() > 24 {
                 iced::widget::tooltip::Tooltip::new(
                     container(name_text).width(Length::Fill).clip(true),
@@ -24877,16 +24901,13 @@ impl IcedChat {
 
             // Label line: clip long friend labels / peer IDs and show the
             // full text in a tooltip.
-            let label_text = crate::fonts::type_role_text(
-                crate::fonts::TypeRole::Body,
-                friend.label.clone(),
-            )
-            .color(if online {
-                crate::design_tokens::text_primary(&theme)
-            } else {
-                crate::design_tokens::text_secondary(&theme)
-            })
-            .width(Length::Fill);
+            let label_text = sidebar_name_text(friend.label.clone())
+                .color(if online {
+                    crate::design_tokens::text_primary(&theme)
+                } else {
+                    crate::design_tokens::text_secondary(&theme)
+                })
+                .width(Length::Fill);
             let label_el: iced::Element<'static, AppMessage> = if friend.label.chars().count() > 24
             {
                 iced::widget::tooltip::Tooltip::new(
@@ -25097,11 +25118,7 @@ impl IcedChat {
             for request in &dep.incoming {
                 let row_el = Row::new()
                     .push(
-                        crate::fonts::type_role_text(
-                            crate::fonts::TypeRole::Body,
-                            request.label.clone(),
-                        )
-                        .width(Length::Fill),
+                        sidebar_name_text(request.label.clone()).width(Length::Fill),
                     )
                     .push(
                         button(Icon::Check.build().size(IconSize::Xs).build())
@@ -25190,11 +25207,7 @@ impl IcedChat {
                     .push(
                         Row::new()
                             .push(
-                                crate::fonts::type_role_text(
-                                    crate::fonts::TypeRole::Body,
-                                    request.label.clone(),
-                                )
-                                .width(Length::Fill),
+                                sidebar_name_text(request.label.clone()).width(Length::Fill),
                             )
                             .push(
                                 container(
@@ -38865,22 +38878,22 @@ mod tests {
             "fn view_sidebar_discovered_peers(",
         );
         assert!(
-            row.contains("TypeRole::Body"),
-            "sidebar conversation row names must use TypeRole::Body"
+            row.contains("sidebar_name_text("),
+            "sidebar conversation row names must use sidebar_name_text (FONTS-06 IBM Plex Sans Medium)"
         );
         let rooms =
             method_source(src, "fn view_sidebar_public_rooms_content(", "fn view_sidebar_friends(");
         assert!(
-            rooms.contains("TypeRole::Body"),
-            "public room names must use TypeRole::Body"
+            rooms.contains("sidebar_name_text("),
+            "public room names must use sidebar_name_text (FONTS-06 IBM Plex Sans Medium)"
         );
         let requests =
             method_source(src, "fn view_sidebar_requests_content(", "fn view_sidebar_requests(");
         // The section body is large; check the row-render fn (last match).
         let requests_body = requests.rsplit("fn view_sidebar_requests_content").next().unwrap();
         assert!(
-            requests_body.contains("TypeRole::Body"),
-            "sidebar request labels must use TypeRole::Body"
+            requests_body.contains("sidebar_name_text("),
+            "sidebar request labels must use sidebar_name_text (FONTS-06 IBM Plex Sans Medium)"
         );
     }
 
@@ -39155,13 +39168,54 @@ mod tests {
         );
     }
 
+    // ── FONTS-06: sidebar typography regression guards ─────────────────
+
+    #[test]
+    fn sidebar_names_use_ibm_plex_medium() {
+        // FONTS-06: sidebar contact/peer names (conversation rows, groups,
+        // friends, discovered peers, public rooms, requests) must render in
+        // IBM Plex Sans Medium via the central `sidebar_name_text` helper —
+        // not the `Body` role (Regular 400) and never Source Sans.
+        let src = include_str!("app.rs");
+        assert!(
+            src.contains("fn sidebar_name_text<"),
+            "sidebar name helper must exist"
+        );
+        assert!(
+            src.contains("ibm_plex_sans(iced::font::Weight::Medium)"),
+            "sidebar names must use IBM Plex Sans Medium"
+        );
+        // Every sidebar section renderer routes its primary name through the
+        // helper instead of the Body role.
+        for (marker, end) in [
+            ("fn view_groups_section_content(", "fn view_sidebar_ticket_join("),
+            ("fn view_sidebar_conversation_row(", "fn view_sidebar_discovered_peers("),
+            ("fn view_sidebar_discovered_peers_content(", "fn view_sidebar_public_rooms("),
+            ("fn view_sidebar_public_rooms_content(", "fn view_sidebar_friends("),
+            ("fn view_sidebar_friends_rows_content(", "fn view_sidebar_requests("),
+            ("fn view_sidebar_requests_content(", "fn view_main_empty_state("),
+        ] {
+            let section = method_source(src, marker, end);
+            assert!(
+                section.contains("sidebar_name_text("),
+                "{marker} must render its name via sidebar_name_text (FONTS-06 IBM Plex Sans Medium)"
+            );
+        }
+        // The local-profile identity row also uses the sidebar name helper.
+        let profile = method_source(src, "fn view_local_profile_block(", "fn profile_identity_card(");
+        assert!(
+            profile.contains("sidebar_name_text("),
+            "local profile display name must use sidebar_name_text"
+        );
+    }
+
     #[test]
     fn font09_display_names_use_plex_or_figtree_not_mono() {
         // Display-name sites — sidebar friends / discovered peers / online
         // peers, chat sender labels, and profile headers — must render the
-        // name in IBM Plex Sans (Body / SectionTitle) or Figtree
-        // (ChatSender), never in JetBrains Mono, even when the name is an
-        // alphanumeric raw key.
+        // name in IBM Plex Sans (Body / SectionTitle / FONTS-06
+        // sidebar_name_text) or Figtree (ChatSender), never in JetBrains
+        // Mono, even when the name is an alphanumeric raw key.
         let src = include_str!("app.rs");
         let friends = method_source(
             src,
@@ -39169,8 +39223,8 @@ mod tests {
             "fn sidebar_requests_dependency(",
         );
         assert!(
-            friends.contains("TypeRole::Body"),
-            "sidebar friend labels must use TypeRole::Body (IBM Plex Sans)"
+            friends.contains("sidebar_name_text("),
+            "sidebar friend labels must use sidebar_name_text (FONTS-06 IBM Plex Sans Medium)"
         );
         assert!(
             !friends.contains("TypeRole::TechnicalValue"),
@@ -39182,8 +39236,8 @@ mod tests {
             "fn view_sidebar_public_rooms(",
         );
         assert!(
-            discovered.contains("TypeRole::Body"),
-            "discovered-peer names must use TypeRole::Body (IBM Plex Sans)"
+            discovered.contains("sidebar_name_text("),
+            "discovered-peer names must use sidebar_name_text (FONTS-06 IBM Plex Sans Medium)"
         );
         assert!(
             !discovered.contains("TypeRole::TechnicalValue"),
@@ -39229,6 +39283,35 @@ mod tests {
         assert!(
             peer_profile.contains("TypeRole::SectionTitle"),
             "peer profile display name must use TypeRole::SectionTitle (IBM Plex Sans)"
+        );
+        assert!(
+            !peer_profile.contains("TypeRole::TechnicalValue"),
+            "peer profile display name must NOT use JetBrains Mono"
+        );
+    }
+
+    #[test]
+    fn sidebar_section_labels_use_fonts06_size() {
+        // FONTS-06: all-caps sidebar section labels (CHATS / GROUPS / …)
+        // keep the ButtonLabel family/weight (IBM Plex Sans SemiBold) but
+        // render at the 11–12 px band via SIDEBAR_SECTION_LABEL_SIZE.
+        let src = include_str!("ui_components.rs");
+        assert!(
+            src.contains("const SIDEBAR_SECTION_LABEL_SIZE: f32 = 12.0;"),
+            "sidebar section label size const must exist (FONTS-06 11–12 px)"
+        );
+        let header = method_source(
+            src,
+            "/// Build the header element.",
+            "// 17b. SCROLLABLE WITH EMBEDDED SCROLLBAR",
+        );
+        assert!(
+            header.contains("TypeRole::ButtonLabel.font()"),
+            "sidebar section label must keep the IBM Plex Sans SemiBold button-label family/weight"
+        );
+        assert!(
+            header.contains(".size(SIDEBAR_SECTION_LABEL_SIZE)"),
+            "sidebar section label must use the FONTS-06 11–12 px size"
         );
     }
 

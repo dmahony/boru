@@ -1342,6 +1342,16 @@ pub fn card_header<'a>(
 // 17. SIDEBAR SECTION HEADER
 // ═══════════════════════════════════════════════════════════════════════
 
+/// FONTS-06: sidebar section label size (IBM Plex Sans SemiBold 11–12 px).
+///
+/// All-caps sidebar section labels (CHATS / GROUPS / FRIENDS / DISCOVER /
+/// PUBLIC ROOMS / REQUESTS) keep the `ButtonLabel` role's family and weight
+/// (IBM Plex Sans SemiBold) but render at the tighter FONTS-06 11–12 px band
+/// instead of the 14 px button default. iced 0.14's text widgets expose no
+/// letter-spacing API, so the spec's "modest letter spacing" is approximated
+/// by the SemiBold weight at this small size (no API to set it explicitly).
+const SIDEBAR_SECTION_LABEL_SIZE: f32 = 12.0;
+
 /// A collapsible sidebar section header with an optional count badge and a
 /// trailing add action.
 ///
@@ -1414,9 +1424,12 @@ impl<'a> SidebarSectionHeader<'a> {
                     .height(Length::Shrink),
             )
             .push(
+                // FONTS-06: all-caps section label in IBM Plex Sans SemiBold
+                // at the 11–12 px band (ButtonLabel family/weight, tighter
+                // sidebar size via SIDEBAR_SECTION_LABEL_SIZE).
                 text(self.title)
                     .font(TypeRole::ButtonLabel.font())
-                    .size(TypeRole::ButtonLabel.size_px())
+                    .size(SIDEBAR_SECTION_LABEL_SIZE)
                     .color(design_tokens::text_muted(theme))
                     .width(Length::Shrink),
             );
