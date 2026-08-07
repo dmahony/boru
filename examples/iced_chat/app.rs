@@ -3760,6 +3760,12 @@ pub struct IcedChat {
     create_group_search: String,
     /// Whether the tunnel creation (friend-picker) dialog is shown.
     show_create_tunnel_dialog: bool,
+    /// Port entered in the create-tunnel (friend-picker) dialog for the
+    /// tunnel's local listener on the receiving side. Empty means
+    /// "automatic" (ephemeral port).
+    create_tunnel_port: String,
+    /// Inline validation error for the create-tunnel port field.
+    create_tunnel_port_error: Option<String>,
     /// Pending incoming tunnel requests, in arrival order.
     tunnel_requests: Vec<TunnelRequest>,
     /// Reusable advanced connection-details dialog state.
@@ -5353,6 +5359,8 @@ pub enum AppMessage {
     // ── Tunnel creation ──
     /// Show the tunnel creation (friend-picker) dialog.
     ShowCreateTunnelDialog,
+    /// The tunnel port input changed in the create-tunnel dialog.
+    CreateTunnelPortChanged(String),
     /// Initiate a tunnel to a specific peer.
     CreateTunnel(PublicKey),
     /// Close the tunnel creation dialog without action.
@@ -5686,6 +5694,11 @@ pub enum AppMessage {
         cancellation: tokio_util::sync::CancellationToken,
         /// Shared live connection info updated by the listener transport.
         live_info: std::sync::Arc<boru_core::tunnel::service::TunnelLiveInfo>,
+        /// Port the sharer requested through the TunnelOffer, when one was
+        /// chosen. `Some(p)` with `p != local_addr.port()` means the listener
+        /// fell back to an ephemeral port because the requested port was
+        /// unavailable.
+        requested_port: Option<u16>,
     },
     /// Connecting to a received tunnel failed.
     ReceivedTunnelConnectFailed {
@@ -7625,6 +7638,8 @@ impl IcedChat {
             create_group_selected_members: HashSet::new(),
             create_group_search: String::new(),
             show_create_tunnel_dialog: false,
+            create_tunnel_port: String::new(),
+            create_tunnel_port_error: None,
             tunnel_requests: Vec::new(),
             dht,
             private_dht_disabled,
@@ -9503,6 +9518,7 @@ impl IcedChat {
             AppMessage::ConfirmCreateGroup => "ConfirmCreateGroup",
             AppMessage::GroupCreated { .. } => "GroupCreated",
             AppMessage::ShowCreateTunnelDialog => "ShowCreateTunnelDialog",
+            AppMessage::CreateTunnelPortChanged(_) => "CreateTunnelPortChanged",
             AppMessage::CreateTunnel(_) => "CreateTunnel",
             AppMessage::CancelCreateTunnel => "CancelCreateTunnel",
             AppMessage::TunnelRequestReceived { .. } => "TunnelRequestReceived",
@@ -10854,14 +10870,44 @@ impl IcedChat {
 
             AppMessage::ShowCreateTunnelDialog => {
                 self.show_create_tunnel_dialog = true;
+                self.create_tunnel_port_error = None;
+                iced::Task::none()
+            }
+            AppMessage::CreateTunnelPortChanged(value) => {
+                self.create_tunnel_port = value;
+                self.create_tunnel_port_error = None;
                 iced::Task::none()
             }
             AppMessage::CreateTunnel(peer) => {
+                // Validate the port chosen in the friend-picker dialog before
+                // handing off to the share-local-service form. Port `0` is
+                // reserved for automatic selection; out-of-range values are
+                // rejected so the tunnel never silently binds an unintended
+                // listener port.
+                let port = self.create_tunnel_port.trim();
+                if !port.is_empty() {
+                    match port.parse::<u16>() {
+                        Ok(parsed) if parsed != 0 => {}
+                        _ => {
+                            self.create_tunnel_port_error = Some(
+                                "Enter a valid port (1-65535), or leave empty for an automatic port."
+                                    .to_string(),
+                            );
+                            self.toast_message = Some(
+                                "Enter a valid port (1-65535), or leave empty for an automatic port."
+                                    .to_string(),
+                            );
+                            self.toast_counter = 160;
+                            return iced::Task::none();
+                        }
+                    }
+                }
                 // Friend picked from the "Share Tunnel" dialog. Hand off to
                 // the existing Share-local-service dialog for that friend,
                 // which collects the loopback target + expiry and registers
                 // the tunnel with the shared TunnelService on confirm.
                 self.show_create_tunnel_dialog = false;
+                self.create_tunnel_port_error = None;
                 self.screen = Screen::FriendProfile(peer);
                 self.friend_profile_menu_open = false;
                 self.share_local_service_open = true;
@@ -17662,6 +17708,12 @@ impl IcedChat {
                             is_http: self.share_service_is_http,
                             owner_endpoint_addr: self.endpoint.addr(),
                             expires_at_ms: def.expires_at_ms,
+                            preferred_local_port: self
+                                .create_tunnel_port
+                                .trim()
+                                .parse::<u16>()
+                                .ok()
+                                .filter(|&p| p != 0),
                         };
                         // Dispatch the offer over the authenticated whisper
                         // control channel so the friend's GUI can display it.
@@ -17754,16 +17806,49 @@ impl IcedChat {
                 }
                 let offer = state.offer.clone();
                 let endpoint = self.endpoint.clone();
+                let requested_port = offer.preferred_local_port.filter(|&p| p != 0);
                 iced::Task::perform(
                     async move {
-                        let listener = boru_core::tunnel::LocalTunnelListener::bind_loopback(
-                            endpoint,
-                            offer.owner_endpoint_addr.clone(),
-                            offer.tunnel_id,
-                            offer.capability.clone(),
-                            0,
-                        )
-                        .await?;
+                        // Bind the sharer's preferred loopback port when one
+                        // was chosen; fall back to an ephemeral port with a
+                        // clear message when the requested port is already in
+                        // use on this machine.
+                        let listener =
+                            match requested_port {
+                                Some(port) => {
+                                    match boru_core::tunnel::LocalTunnelListener::bind_loopback(
+                                        endpoint.clone(),
+                                        offer.owner_endpoint_addr.clone(),
+                                        offer.tunnel_id,
+                                        offer.capability.clone(),
+                                        port,
+                                    )
+                                    .await
+                                    {
+                                        Ok(listener) => listener,
+                                        Err(_) => {
+                                            boru_core::tunnel::LocalTunnelListener::bind_loopback(
+                                                endpoint,
+                                                offer.owner_endpoint_addr,
+                                                offer.tunnel_id,
+                                                offer.capability,
+                                                0,
+                                            )
+                                            .await?
+                                        }
+                                    }
+                                }
+                                None => {
+                                    boru_core::tunnel::LocalTunnelListener::bind_loopback(
+                                        endpoint,
+                                        offer.owner_endpoint_addr,
+                                        offer.tunnel_id,
+                                        offer.capability,
+                                        0,
+                                    )
+                                    .await?
+                                }
+                            };
                         let local_addr = listener.local_addr()?;
                         let live_info = listener.live_info();
                         let cancellation = tokio_util::sync::CancellationToken::new();
@@ -17780,6 +17865,7 @@ impl IcedChat {
                                 local_addr,
                                 cancellation,
                                 live_info,
+                                requested_port,
                             }
                         }
                         Err(error) => AppMessage::ReceivedTunnelConnectFailed {
@@ -17794,6 +17880,7 @@ impl IcedChat {
                 local_addr,
                 cancellation,
                 live_info,
+                requested_port,
             } => {
                 if let Some(state) = self.received_tunnels.get_mut(&tunnel_id) {
                     state.connected = true;
@@ -17801,6 +17888,18 @@ impl IcedChat {
                     state.cancellation = Some(cancellation);
                     state.live_info = Some(live_info);
                     state.connection_failed = false;
+                }
+                // A requested port that could not be bound falls back to an
+                // ephemeral port; surface the actual address so the user is
+                // not left pointing at a port the tunnel does not use.
+                if let Some(requested) = requested_port {
+                    if requested != local_addr.port() {
+                        self.toast_message = Some(format!(
+                            "Port {requested} was unavailable; the tunnel is listening on port {}.",
+                            local_addr.port()
+                        ));
+                        self.toast_counter = 200;
+                    }
                 }
                 iced::Task::none()
             }
@@ -24792,7 +24891,9 @@ impl IcedChat {
         base: iced::widget::Container<'a, AppMessage>,
     ) -> iced::Element<'a, AppMessage> {
         use crate::boru_dialog::{BoruDialog, BORU_DIALOG_WIDTH_STANDARD};
-        use crate::form_components::{FormSection, SelectablePeerList, SelectablePeerRow};
+        use crate::form_components::{
+            FormSection, SelectablePeerList, SelectablePeerRow, TextInput,
+        };
 
         let theme = Self::theme_from_dark(self.dark_mode);
 
@@ -24816,10 +24917,31 @@ impl IcedChat {
             .build())
             .build();
 
+        // Tunnel port — the loopback port the tunnel will listen on at the
+        // receiving side. Empty means an automatic (ephemeral) port; a
+        // chosen port is carried through the TunnelOffer so the receiver's
+        // listener binds it when available.
+        let mut port_field = TextInput::new(
+            "Tunnel port",
+            "Automatic",
+            &self.create_tunnel_port,
+            AppMessage::CreateTunnelPortChanged,
+        )
+        .helper(
+            "Port the tunnel will listen on (1-65535). Leave empty for an automatic port.",
+        );
+        if let Some(error) = &self.create_tunnel_port_error {
+            port_field = port_field.error(error.clone());
+        }
+        let port_section = FormSection::new("Tunnel Port")
+            .push(port_field.build())
+            .build();
+
         let overlay = BoruDialog::new("Create Tunnel")
             .subtitle("Securely route traffic between peers.")
             .width(self.dialog_width(BORU_DIALOG_WIDTH_STANDARD))
             .push_body(connection_section)
+            .push_body(port_section)
             .secondary("Cancel", AppMessage::CancelCreateTunnel)
             .on_close(AppMessage::CancelCreateTunnel)
             .on_backdrop(AppMessage::CancelCreateTunnel)
@@ -49013,7 +49135,14 @@ fn vr_create_tunnel_opens_renders_picks_friend_and_configures() {
     assert!(!app.show_create_tunnel_dialog);
     let _ = app.update(AppMessage::ShowCreateTunnelDialog);
     assert!(app.show_create_tunnel_dialog, "picker opens (observable flag)");
+    // The create-tunnel picker carries an optional tunnel port; empty by
+    // default means an automatic (ephemeral) listener port.
+    assert!(app.create_tunnel_port.is_empty(), "port defaults to automatic");
     let _ = app.view(); // renders without panic
+
+    // Intentional state: the port input accepts a valid port.
+    let _ = app.update(AppMessage::CreateTunnelPortChanged("8443".into()));
+    assert_eq!(app.create_tunnel_port, "8443");
 
     // Observable: picking a friend routes to the share-local-service
     // form (dialog flags + screen transition).
@@ -49094,6 +49223,68 @@ fn vr_create_tunnel_confirm_cancel_and_validation() {
             .any(|t| t.service_name == "Media"),
         "tunnel store entry carries the configured service name"
     );
+}
+
+#[test]
+fn vr_create_tunnel_picker_port_validation() {
+    let (_runtime, mut app, _local, peer) = build_join_request_test_app();
+    vr_seed_friend(&mut app, peer, "Bob");
+
+    // Observable: an invalid port (out of range) keeps the picker open
+    // with a toast; the tunnel creation is not handed off to the share
+    // form and no screen transition happens.
+    let _ = app.update(AppMessage::ShowCreateTunnelDialog);
+    let _ = app.update(AppMessage::CreateTunnelPortChanged("70000".into()));
+    let _ = app.update(AppMessage::CreateTunnel(peer));
+    assert!(app.show_create_tunnel_dialog, "picker stays open on invalid port");
+    assert!(
+        app.create_tunnel_port_error.is_some(),
+        "inline error set for out-of-range port"
+    );
+    assert_eq!(
+        app.toast_message.as_deref(),
+        Some("Enter a valid port (1-65535), or leave empty for an automatic port."),
+        "invalid port surfaces a toast"
+    );
+    assert!(
+        !matches!(app.screen, Screen::FriendProfile(p) if p == peer),
+        "no screen transition on invalid port"
+    );
+
+    // Observable: a non-numeric port is rejected the same way.
+    let _ = app.update(AppMessage::CreateTunnelPortChanged("not-a-port".into()));
+    let _ = app.update(AppMessage::CreateTunnel(peer));
+    assert!(app.show_create_tunnel_dialog, "picker stays open on non-numeric port");
+    assert!(
+        app.create_tunnel_port_error.is_some(),
+        "inline error set for non-numeric port"
+    );
+
+    // Observable: port `0` is reserved for automatic selection and is
+    // rejected rather than silently binding an unintended listener.
+    let _ = app.update(AppMessage::CreateTunnelPortChanged("0".into()));
+    let _ = app.update(AppMessage::CreateTunnel(peer));
+    assert!(app.show_create_tunnel_dialog, "picker stays open on port 0");
+    assert!(
+        app.create_tunnel_port_error.is_some(),
+        "inline error set for port 0"
+    );
+
+    // Observable: a valid port proceeds to the share form, and the chosen
+    // port is carried into the tunnel state used to build the offer.
+    let _ = app.update(AppMessage::CreateTunnelPortChanged("8080".into()));
+    let _ = app.update(AppMessage::CreateTunnel(peer));
+    assert!(!app.show_create_tunnel_dialog, "picker closes on valid port");
+    assert!(
+        app.share_local_service_open,
+        "share-local-service form opens after valid port"
+    );
+    assert_eq!(
+        app.create_tunnel_port_error, None,
+        "no inline error after valid port"
+    );
+    assert_eq!(app.create_tunnel_port, "8080");
+    let _ = app.view(); // renders without panic
 }
 
     // ── FONTS-17 Visual QA: offscreen capture harness ──────────────────

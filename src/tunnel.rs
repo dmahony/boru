@@ -122,6 +122,15 @@ pub struct TunnelOffer {
     pub owner_endpoint_addr: iroh::EndpointAddr,
     /// Unix epoch milliseconds at which the offer expires.
     pub expires_at_ms: u64,
+    /// Preferred loopback port for the recipient's local tunnel listener.
+    ///
+    /// `None` (or `0`) selects an ephemeral port automatically. The sharer
+    /// picks this port in the create-tunnel dialog so the recipient's
+    /// listener binds a predictable local port when it is available; the
+    /// recipient falls back to an ephemeral port with a clear message when
+    /// the requested port is already in use.
+    #[serde(default)]
+    pub preferred_local_port: Option<u16>,
 }
 
 /// Reason a received tunnel capability was rejected.
@@ -649,6 +658,7 @@ mod tests {
             is_http: true,
             owner_endpoint_addr: iroh::EndpointAddr::new(owner.public()),
             expires_at_ms: 200,
+            preferred_local_port: Some(8080),
         };
         let bytes = postcard::to_stdvec(&offer).expect("serialize offer");
         let decoded: TunnelOffer = postcard::from_bytes(&bytes).expect("deserialize offer");
@@ -656,6 +666,7 @@ mod tests {
         assert_eq!(decoded.service_name, "Development Server");
         assert!(decoded.is_http);
         assert_eq!(decoded.expires_at_ms, 200);
+        assert_eq!(decoded.preferred_local_port, Some(8080));
         assert_eq!(
             decoded.capability.allowed_peer_endpoint_id,
             recipient.public()
@@ -672,6 +683,7 @@ mod tests {
             is_http: false,
             owner_endpoint_addr: iroh::EndpointAddr::new(owner.public()),
             expires_at_ms: 200,
+            preferred_local_port: None,
         };
         // The offer's capability verifies for the intended recipient within
         // its validity window.

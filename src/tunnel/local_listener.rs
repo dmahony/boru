@@ -308,6 +308,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn binds_requested_loopback_port_when_available() -> anyhow::Result<()> {
+        let endpoint = Endpoint::bind(presets::Minimal).await?;
+        let owner = Endpoint::bind(presets::Minimal).await?;
+        // Reserve a concrete loopback port so the test asserts the exact
+        // requested port is bound, not just any loopback port.
+        let probe = TcpListener::bind("127.0.0.1:0").await?;
+        let requested = probe.local_addr()?.port();
+        drop(probe);
+        let tunnel = LocalTunnelListener::bind_loopback(
+            endpoint,
+            EndpointAddr::new(owner.id()),
+            TunnelId([11; 32]),
+            TunnelCapability::sign(
+                &SecretKey::generate(),
+                owner.id(),
+                TunnelId([11; 32]),
+                0,
+                u64::MAX,
+            ),
+            requested,
+        )
+        .await?;
+        let addr = tunnel.local_addr()?;
+        assert_eq!(addr.port(), requested, "requested port is bound");
+        owner.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn rejects_non_loopback_bind_addresses() -> anyhow::Result<()> {
         let endpoint = Endpoint::bind(presets::Minimal).await?;
         let result = LocalTunnelListener::bind(
