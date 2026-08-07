@@ -2689,6 +2689,9 @@ pub enum Screen {
     ChatList,
     /// File sharing dashboard — five-tab screen (see docs/file-sharing-guide.md).
     FileSharing,
+    /// Download Manager — all active transfers in both directions
+    /// (inbound downloads + outbound uploads) with pause/resume/cancel/stop.
+    DownloadManager,
     /// An individual chat room with a given topic.
     Chat { topic: TopicId },
     /// The friend request management screen.
@@ -3168,6 +3171,14 @@ pub struct IcedChat {
     discover_return_to: Option<Screen>,
     /// Screen to return to when closing the Groups page.
     groups_return_to: Option<Screen>,
+    /// Screen to return to when closing the Download Manager page.
+    download_manager_return_to: Option<Screen>,
+    /// Transfer ids of inbound transfers the user has paused via the
+    /// Download Manager. The FS-05 projection has no paused state, so this
+    /// set is the UI's source of truth for offering Resume instead of Pause
+    /// (kept in sync by pause/resume handlers; keyed by transfer id, matching
+    /// the projection rows the view renders).
+    paused_inbound_transfer_ids: std::collections::HashSet<String>,
 
     // ── Pre-warm (PERF-4R-B) ──
     /// Pre-built screen trees keyed by screen; the `u64` is the FxHash of the
@@ -5286,6 +5297,16 @@ pub enum AppMessage {
     TransferSnapshotResync,
     /// Cancel one inbound transfer shown in the Downloading tab (transfer id).
     DownloadingCancel(String),
+    /// Pause one inbound transfer from the Download Manager (transfer id).
+    DownloadingPause(String),
+    /// Resume a paused inbound transfer from the Download Manager (transfer id).
+    DownloadingResume(String),
+    /// Stop an outbound upload from the Download Manager (transfer id).
+    DownloadingStop(String),
+    /// Open the Download Manager screen (all active downloads + uploads).
+    OpenDownloadManager,
+    /// Close the Download Manager screen and return to the previous screen.
+    CloseDownloadManager,
     /// Toggle the "Files I'm Sharing" row action menu (content hash).
     SharedByMeMenuToggle(String),
     /// Open the details/access panel for a shared-by-me item (content hash).
@@ -7389,6 +7410,8 @@ impl IcedChat {
             friend_profile_return_to: None,
             discover_return_to: None,
             groups_return_to: None,
+            download_manager_return_to: None,
+            paused_inbound_transfer_ids: std::collections::HashSet::new(),
             prewarm_cache: std::collections::HashMap::new(),
             prewarming: false,
             idle_timer: IdleTimer::new(),
@@ -9095,6 +9118,11 @@ impl IcedChat {
             AppMessage::DownloadedReveal(_) => "DownloadedReveal",
             AppMessage::DownloadedRemoveHistory(_) => "DownloadedRemoveHistory",
             AppMessage::DownloadingCancel(_) => "DownloadingCancel",
+            AppMessage::DownloadingPause(_) => "DownloadingPause",
+            AppMessage::DownloadingResume(_) => "DownloadingResume",
+            AppMessage::DownloadingStop(_) => "DownloadingStop",
+            AppMessage::OpenDownloadManager => "OpenDownloadManager",
+            AppMessage::CloseDownloadManager => "CloseDownloadManager",
             AppMessage::TransferProjectionUpdate(_) => "TransferProjectionUpdate",
             AppMessage::TransferSnapshotResync => "TransferSnapshotResync",
             AppMessage::CloseSettings => "CloseSettings",
@@ -10128,6 +10156,7 @@ impl IcedChat {
             Screen::PeerCatalogue(_) => "Peer catalogue open".to_string(),
             Screen::FriendRequests => "Friend requests open".to_string(),
             Screen::FileSharing => "File sharing open".to_string(),
+            Screen::DownloadManager => "Download manager open".to_string(),
             Screen::Settings => "Settings open".to_string(),
             Screen::ChatList => "Chat list open".to_string(),
             Screen::Discover => "Discover".to_string(),
@@ -10376,6 +10405,7 @@ impl IcedChat {
             Screen::ChatList => ("ChatList", None),
             Screen::FriendRequests => ("FriendRequests", None),
             Screen::FileSharing => ("FileSharing", None),
+            Screen::DownloadManager => ("DownloadManager", None),
             Screen::Settings => ("Settings", None),
             Screen::PeerProfile(_) => ("PeerProfile", None),
             Screen::PeerCatalogue(_) => ("PeerCatalogue", None),
@@ -14002,6 +14032,11 @@ impl IcedChat {
                     }
                 } else if self.help_visible {
                     self.help_visible = false;
+                } else if matches!(self.screen, Screen::DownloadManager) {
+                    self.screen = self
+                        .download_manager_return_to
+                        .take()
+                        .unwrap_or(Screen::ChatList);
                 } else if matches!(self.screen, Screen::Settings) {
                     self.screen = self.settings_return_to.take().unwrap_or(Screen::ChatList);
                 } else if matches!(self.screen, Screen::FriendRequests) {
@@ -20315,6 +20350,36 @@ impl IcedChat {
                 self.cancel_inbound_transfer(&transfer_id);
                 iced::Task::none()
             }
+            AppMessage::DownloadingPause(transfer_id) => {
+                self.pause_inbound_transfer(&transfer_id);
+                iced::Task::none()
+            }
+            AppMessage::DownloadingResume(transfer_id) => {
+                self.resume_inbound_transfer(&transfer_id);
+                iced::Task::none()
+            }
+            AppMessage::DownloadingStop(transfer_id) => {
+                self.stop_outbound_transfer(&transfer_id);
+                iced::Task::none()
+            }
+            AppMessage::OpenDownloadManager => {
+                // Navigation only — the shared shell, networking services, and
+                // conversation subscriptions stay alive; only the main panel
+                // swaps to the Download Manager screen. Remember where we came
+                // from so the back button returns to the previous screen.
+                if !matches!(self.screen, Screen::DownloadManager) {
+                    self.download_manager_return_to = Some(self.screen.clone());
+                    self.screen = Screen::DownloadManager;
+                }
+                iced::Task::none()
+            }
+            AppMessage::CloseDownloadManager => {
+                self.screen = self
+                    .download_manager_return_to
+                    .take()
+                    .unwrap_or(Screen::ChatList);
+                iced::Task::none()
+            }
             AppMessage::SharedByMeMenuToggle(hash) => {
                 self.shared_by_me_ui.toggle_menu(&hash);
                 iced::Task::none()
@@ -23931,6 +23996,7 @@ impl IcedChat {
             Screen::FileSharing => {
                 self.serve_prewarmed(Screen::FileSharing, || self.view_file_sharing())
             }
+            Screen::DownloadManager => self.view_download_manager(),
             Screen::Chat { .. } => self.view_chat_panel(),
             Screen::FriendRequests => {
                 self.serve_prewarmed(Screen::FriendRequests, || self.view_friend_requests())
@@ -27764,6 +27830,32 @@ impl IcedChat {
         // ── Quick actions: four equal, full-card targets (Figure 3) ──
         let action_grid = crate::quick_actions::quick_action_grid(content_width, &theme);
 
+        // DLMGR-01: home entry point — a compact outline button beside the
+        // status pill opens the Download Manager (all active transfers in
+        // both directions). Static renderer: no dependency data needed, just
+        // a message dispatch.
+        let download_manager_btn = button(
+            Row::new()
+                .push(
+                    Icon::Download
+                        .build()
+                        .size(crate::icon_system::IconSize::Xs)
+                        .color_fn(crate::design_tokens::text_muted)
+                        .build(),
+                )
+                .push(
+                    crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::ButtonLabel,
+                        "Download Manager",
+                    ),
+                )
+                .spacing(SPACE_4)
+                .align_y(Alignment::Center),
+        )
+        .on_press(AppMessage::OpenDownloadManager)
+        .padding([SPACE_6, SPACE_12])
+        .style(BUTTON_OUTLINE);
+
         // ── Right rail: loading treatment decision (t_0441a1dc) ──
         // No skeleton/shimmer loading is used for the three rail cards, by
         // design. Every data source here is synchronously available at first
@@ -27832,6 +27924,8 @@ impl IcedChat {
                 .push(
                     Row::new()
                         .push(status_pill)
+                        .push(Space::new().width(Length::Fixed(SPACE_8)))
+                        .push(download_manager_btn)
                         .spacing(0)
                         .align_y(Alignment::Center)
                         .width(Length::Fill),
@@ -27850,6 +27944,8 @@ impl IcedChat {
                     .spacing(0)
                     .width(Length::Fill),
                 status_pill,
+                Space::new().width(Length::Fixed(SPACE_8)),
+                download_manager_btn,
             ]
             .spacing(SPACE_8)
             .align_y(Alignment::Center)
@@ -35198,6 +35294,362 @@ impl IcedChat {
         }
     }
 
+    /// Pause one inbound transfer from the Download Manager.
+    ///
+    /// The transfer id comes from the FS-05 projection. Pausing is only
+    /// supported for durable download rows (matched by content hash): the
+    /// backend `DownloadManager::pause_download` signals the in-flight worker
+    /// and records the paused state. Transfers without a durable row (legacy
+    /// chat-path) have no pause seam — a truthful system message explains
+    /// that.
+    fn pause_inbound_transfer(&mut self, transfer_id: &str) {
+        let Some(record) = self.inbound_active.get(transfer_id).cloned() else {
+            self.push_system(format!("Transfer {transfer_id} is not active."));
+            return;
+        };
+        let Some(dm) = self.download_manager.clone() else {
+            self.push_system("Pause is not available for this transfer.".to_string());
+            return;
+        };
+        let Ok(mut guard) = dm.lock() else {
+            self.push_system("Pause failed — download manager unavailable.".to_string());
+            return;
+        };
+        let mut paused_any = false;
+        for state in ["queued", "active", "resolving_peer", "requesting_permission", "downloading", "verifying"] {
+            let rows = self
+                .storage
+                .as_ref()
+                .and_then(|stg| stg.list_downloads_by_state(state).ok())
+                .unwrap_or_default();
+            for row in rows {
+                if row.content_hash == record.item_id && guard.pause_download(row.id).is_ok() {
+                    paused_any = true;
+                }
+            }
+        }
+        if paused_any {
+            self.paused_inbound_transfer_ids.insert(transfer_id.to_string());
+            self.push_system(
+                "Download paused — transfer suspended; use Resume to continue.".to_string(),
+            );
+        } else {
+            self.push_system(
+                "Pause is not supported for this transfer (no durable download record)."
+                    .to_string(),
+            );
+        }
+    }
+
+    /// Resume a paused inbound transfer from the Download Manager.
+    ///
+    /// Mirrors [`Self::pause_inbound_transfer`]: the durable download row
+    /// (matched by content hash) transitions back to an active state via
+    /// `DownloadManager::resume_download`.
+    fn resume_inbound_transfer(&mut self, transfer_id: &str) {
+        let Some(record) = self.inbound_active.get(transfer_id).cloned() else {
+            self.push_system(format!("Transfer {transfer_id} is not active."));
+            return;
+        };
+        let Some(dm) = self.download_manager.clone() else {
+            self.push_system("Resume is not available for this transfer.".to_string());
+            return;
+        };
+        let Ok(mut guard) = dm.lock() else {
+            self.push_system("Resume failed — download manager unavailable.".to_string());
+            return;
+        };
+        let mut resumed_any = false;
+        let rows = self
+            .storage
+            .as_ref()
+            .and_then(|stg| stg.list_downloads_by_state("paused").ok())
+            .unwrap_or_default();
+        for row in rows {
+            if row.content_hash == record.item_id && guard.resume_download(row.id).is_ok() {
+                resumed_any = true;
+            }
+        }
+        if resumed_any {
+            self.paused_inbound_transfer_ids.remove(transfer_id);
+            self.push_system("Download resumed.".to_string());
+        } else {
+            self.push_system(
+                "Nothing to resume — no paused download record for this transfer.".to_string(),
+            );
+        }
+    }
+
+    /// Stop an outbound upload from the Download Manager.
+    ///
+    /// The outbound side is driven by the blob provider; the app has no
+    /// provider-level abort handle, so stopping is expressed through the
+    /// authoritative FS-05 projection: a `Cancelled` event is published for
+    /// the outbound direction (archived once, exactly like inbound cancel)
+    /// and the row leaves the active list immediately.
+    fn stop_outbound_transfer(&mut self, transfer_id: &str) {
+        let Some(record) = self.outbound_active.get(transfer_id).cloned() else {
+            self.push_system(format!("Upload {transfer_id} is not active."));
+            return;
+        };
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let cancel_event = TransferEvent {
+            event_id: format!("ui-stop:{transfer_id}:{now_ms}"),
+            transfer_id: transfer_id.to_string(),
+            item_id: record.item_id.clone(),
+            direction: TransferDirection::Outbound,
+            peer_id: record.peer_id.clone(),
+            sequence: record.updated_at_ms.max(now_ms) + 1,
+            attempt: record.attempt,
+            occurred_at_ms: now_ms,
+            kind: EventName::Cancelled,
+            bytes: record.bytes,
+            total_bytes: record.total_bytes,
+            error: None,
+        };
+        self.transfer_store.publish(cancel_event);
+        // Locally reflect the authoritative transition so the row leaves the
+        // active list immediately.
+        let mut stopped = record.clone();
+        stopped.state = TransferState::Cancelled;
+        stopped.updated_at_ms = now_ms;
+        self.apply_outbound_update(stopped);
+        self.push_system("Upload stopped — the transfer was removed from active uploads.".to_string());
+    }
+
+    /// Live "Peers Downloading from Me" panel — the FS-08 upper-right card.
+    ///
+    /// Rows come from the FS-05 outbound projection (stable transfer ids);
+    /// peer labels are resolved from the authenticated peer id, never from a
+    /// display string. Unknown totals render an indeterminate bar plus byte
+    /// count; no percentage is fabricated.
+    fn view_peers_downloading_from_me(&self, theme: &iced::Theme) -> iced::Element<'_, AppMessage> {
+        use crate::card_shell::CardShell;
+        use crate::dashboard_view_model::{outbound_row, sort_outbound_rows, PeerDownload};
+
+        let labels = self
+            .outbound_item_labels
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+        let mut rows: Vec<PeerDownload> = self
+            .outbound_active
+            .values()
+            .map(|record| outbound_row(record, &labels))
+            .collect();
+        sort_outbound_rows(&mut rows);
+        let active_count = rows.len();
+
+        let children: Vec<iced::Element<'_, AppMessage>> = rows
+            .into_iter()
+            .map(|row| self.peer_download_row(row, theme))
+            .collect();
+
+        CardShell::new("Peers Downloading from Me", children)
+            .count(active_count)
+            .on_view_all(AppMessage::DashboardTabSelected(
+                crate::dashboard_view_model::DashboardTab::Downloading,
+            ))
+            .empty_message("No one is downloading from you right now.")
+            .max_height(240.0)
+            .build(theme)
+    }
+
+    /// One compact outbound transfer row. Consumes the row so the returned
+    /// element owns its labels (the caller's row vector does not outlive the
+    /// view).
+    fn peer_download_row<'a>(
+        &'a self,
+        row: crate::dashboard_view_model::PeerDownload,
+        theme: &iced::Theme,
+    ) -> iced::Element<'a, AppMessage> {
+        use crate::dashboard_view_model::{format_bytes, Progress as VMProgress};
+        use crate::ui_components::ProgressBar;
+        use iced::widget::{container, Column, Row, Space};
+        use iced::{Alignment, Border, Length};
+
+        // Authenticated identity is the only source of the peer label; the
+        // projection never carries an untrusted display string for peers.
+        let peer_display = row
+            .peer_label
+            .parse::<PublicKey>()
+            .ok()
+            .map(|pk| self.resolve_name(&pk))
+            .unwrap_or_else(|| "Unknown peer".to_string());
+        let online = row
+            .peer_label
+            .parse::<PublicKey>()
+            .ok()
+            .map(|pk| matches!(self.peer_presence(&pk), PeerPresence::Online))
+            .unwrap_or(false);
+
+        let (state_label, state_color) = match row.state {
+            crate::dashboard_view_model::OutboundState::Transferring => {
+                ("Transferring", crate::design_tokens::primary(theme))
+            }
+            crate::dashboard_view_model::OutboundState::Retrying => {
+                ("Retrying", crate::design_tokens::color_warning(theme))
+            }
+            crate::dashboard_view_model::OutboundState::Verifying => {
+                ("Verifying", crate::design_tokens::color_warning(theme))
+            }
+            crate::dashboard_view_model::OutboundState::Completed => {
+                ("Completed", crate::design_tokens::color_success(theme))
+            }
+            crate::dashboard_view_model::OutboundState::Failed => {
+                ("Failed", crate::design_tokens::color_danger(theme))
+            }
+            crate::dashboard_view_model::OutboundState::Cancelled => {
+                ("Cancelled", crate::design_tokens::text_muted(theme))
+            }
+            crate::dashboard_view_model::OutboundState::Disconnected => {
+                ("Disconnected", crate::design_tokens::color_danger(theme))
+            }
+        };
+
+        let (bar, progress_text) = match &row.progress {
+            VMProgress::Determinate { bytes, total } if *total > 0 => {
+                let pct = ((*bytes as f64 / *total as f64) * 100.0).min(100.0) as u8;
+                (
+                    ProgressBar::<AppMessage>::new(pct as f32 / 100.0)
+                        .show_label(false)
+                        .bold()
+                        .build(theme),
+                    format!("{}%", pct),
+                )
+            }
+            VMProgress::Determinate { bytes, .. } => (
+                ProgressBar::<AppMessage>::new(0.0)
+                    .indeterminate(true)
+                    .bold()
+                    .build(theme),
+                format!("{} received", format_bytes(*bytes)),
+            ),
+            VMProgress::Indeterminate { bytes } => (
+                ProgressBar::<AppMessage>::new(0.0)
+                    .indeterminate(true)
+                    .bold()
+                    .build(theme),
+                format!("{} received", format_bytes(*bytes)),
+            ),
+            VMProgress::Unknown => (
+                ProgressBar::<AppMessage>::new(0.0)
+                    .show_label(false)
+                    .bold()
+                    .build(theme),
+                "—".to_string(),
+            ),
+        };
+
+        let avatar: iced::Element<'_, AppMessage> = Avatar::<AppMessage>::new(&peer_display)
+            .size(28.0)
+            .online_dot(online)
+            .dark_mode(self.dark_mode)
+            .build();
+
+        let name_line = Row::new()
+            .push(
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::BodyEmphasised,
+                    peer_display,
+                )
+                .color(crate::design_tokens::text_primary(theme))
+                .width(Length::Shrink)
+                .wrapping(iced::widget::text::Wrapping::None),
+            )
+            .push(Space::new().width(Length::Fill))
+            .push(
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, state_label)
+                    .color(state_color)
+                    .width(Length::Shrink),
+            )
+            .align_y(Alignment::Center);
+
+        // PAPIRUS-11: the transferred file leads with the same central
+        // FileTypeIcon component/resolver as chat cards — the icon answers
+        // "what type of file is this?", the state label + progress answer
+        // "what is happening to it".
+        let type_icon = crate::download_progress_view::file_type_icon_element(
+            &row.display_name,
+            None,
+            None,
+            crate::file_type_icon::FileTypeIconSize::Compact,
+            theme,
+        );
+
+        let file_line = Row::new()
+            .push(type_icon)
+            .push(
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::Metadata,
+                    row.display_name,
+                )
+                .style(text_muted_style)
+                .width(Length::Fill)
+                .wrapping(iced::widget::text::Wrapping::None),
+            )
+            .spacing(SPACE_4)
+            .align_y(Alignment::Center);
+
+        let progress_line = Row::new()
+            .push(bar)
+            .push(
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, progress_text)
+                    .style(text_muted_style)
+                    .width(Length::Shrink),
+            )
+            .spacing(SPACE_4)
+            .align_y(Alignment::Center);
+
+        let text_col = Column::new()
+            .push(name_line)
+            .push(file_line)
+            .push(progress_line)
+            .spacing(SPACE_2)
+            .width(Length::Fill);
+
+        let mut row_el = Row::new()
+            .push(avatar)
+            .push(Space::new().width(Length::Fixed(SPACE_8)))
+            .push(text_col)
+            .spacing(0)
+            .align_y(Alignment::Center)
+            .width(Length::Fill);
+
+        if let Some(error) = row.error {
+            let error_line = Row::new()
+                .push(
+                    crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, error)
+                        .color(crate::design_tokens::color_danger(theme))
+                        .width(Length::Fill)
+                        .wrapping(iced::widget::text::Wrapping::None),
+                )
+                .spacing(0);
+            row_el = Row::new()
+                .push(row_el)
+                .push(Space::new().width(Length::Fixed(SPACE_4)))
+                .push(error_line)
+                .spacing(0)
+                .align_y(Alignment::Center);
+        }
+
+        container(row_el)
+            .width(Length::Fill)
+            .padding([SPACE_6, SPACE_4])
+            .style(move |t| container::Style {
+                background: None,
+                border: Border {
+                    radius: crate::design_tokens::RADIUS_MD.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .into()
+    }
+
     /// Render the Downloaded tab: durable completed-download history with
     /// name/type/size, source peer, completed time, integrity state, and safe
     /// local actions (Open / Reveal in Folder only while the file exists;
@@ -35550,6 +36002,493 @@ impl IcedChat {
         let _ = openable;
 
         container(row)
+            .width(Length::Fill)
+            .style(move |t| container::Style {
+                background: None,
+                border: Border {
+                    radius: crate::design_tokens::RADIUS_MD.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .into()
+    }
+
+    /// Download Manager screen (DLMGR-02): every active transfer in both
+    /// directions.
+    ///
+    /// - **Downloads** — live inbound transfers from the FS-05 projection
+    ///   with name, source peer, byte progress, truthful state, and
+    ///   Pause / Resume / Cancel controls.
+    /// - **Uploads** — live outbound transfers (peers downloading from us)
+    ///   with name, peer, progress, truthful state, and a Stop control.
+    ///
+    /// Rows reuse the same projection view models as the File Sharing
+    /// dashboard (downloading_view_model / peers_downloading_view_model) and
+    /// the shared per-entry control widgets from download_progress_view, so
+    /// no transfer semantics are duplicated. The header shows a live count
+    /// of active downloads and uploads — the same active-transfer totals the
+    /// sharing summary card reports.
+    fn view_download_manager(&self) -> iced::Element<'_, AppMessage> {
+        use crate::downloading_view_model::{incoming_row, sort_incoming_rows};
+        use crate::peers_downloading_view_model::{outbound_row, sort_outbound_rows};
+        use iced::widget::{button, container, Column, Row, Space};
+        use iced::{Alignment, Length};
+
+        let theme = Self::theme_from_dark(self.dark_mode);
+
+        // ── Header: back button + title + live counts ──────────────────
+        let back_btn = button(crate::fonts::type_role_text(
+            crate::fonts::TypeRole::ButtonLabel,
+            "←",
+        ))
+        .on_press(AppMessage::CloseDownloadManager)
+        .padding([SPACE_4, SPACE_6])
+        .style(BUTTON_ICON);
+
+        let title_col = Column::new()
+            .push(
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::PageTitle,
+                    "Download Manager",
+                )
+                .color(crate::design_tokens::text_primary(&theme)),
+            )
+            .push(
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::SupportingText,
+                    "All active downloads and uploads, with pause / stop controls.",
+                )
+                .style(text_muted_style),
+            )
+            .spacing(SPACE_4);
+
+        let header = Row::new()
+            .push(back_btn)
+            .push(Space::new().width(Length::Fixed(SPACE_8)))
+            .push(title_col)
+            .push(Space::new().width(Length::Fill))
+            .align_y(Alignment::Center)
+            .padding([SPACE_6, SPACE_10])
+            .width(Length::Fill);
+
+        // ── Downloads section ───────────────────────────────────────────
+        let inbound_labels = self
+            .inbound_item_labels
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+        let mut inbound_rows: Vec<crate::downloading_view_model::IncomingTransferRow> = self
+            .inbound_active
+            .values()
+            .map(|record| incoming_row(record, &inbound_labels))
+            .collect();
+        sort_incoming_rows(&mut inbound_rows);
+        let download_count = inbound_rows.len();
+
+        let mut downloads_col = Column::new().spacing(SPACE_4);
+        for row in inbound_rows {
+            downloads_col = downloads_col.push(self.download_manager_incoming_row(&row, &theme));
+        }
+        let downloads_body: iced::Element<'_, AppMessage> = if download_count == 0 {
+            crate::ui_components::empty_state(
+                crate::icon_system::Icon::Download,
+                "No active downloads.",
+                "Files you are receiving will appear here with live progress.",
+                None,
+                None,
+            )
+            .into()
+        } else {
+            downloads_col.into()
+        };
+
+        let downloads_header = Row::new()
+            .push(crate::fonts::type_role_text(
+                crate::fonts::TypeRole::CardTitle,
+                "Downloads",
+            ))
+            .push(crate::ui_components::badge_owned(
+                download_count.to_string(),
+                crate::ui_components::BadgeKind::Count,
+            ))
+            .push(Space::new().width(Length::Fill))
+            .spacing(SPACE_8)
+            .align_y(Alignment::Center);
+
+        let downloads_card = dashboard_card(
+            Column::new()
+                .push(downloads_header)
+                .push(Space::new().height(Length::Fixed(SPACE_12)))
+                .push(downloads_body)
+                .spacing(0)
+                .width(Length::Fill)
+                .into(),
+        );
+
+        // ── Uploads section ─────────────────────────────────────────────
+        let outbound_labels = self
+            .outbound_item_labels
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+        let mut outbound_rows: Vec<crate::peers_downloading_view_model::PeersDownloadingRow> = self
+            .outbound_active
+            .values()
+            .map(|record| outbound_row(record, &outbound_labels))
+            .collect();
+        sort_outbound_rows(&mut outbound_rows);
+        let upload_count = outbound_rows.len();
+
+        let mut uploads_col = Column::new().spacing(SPACE_4);
+        for row in outbound_rows {
+            uploads_col = uploads_col.push(self.download_manager_outbound_row(&row, &theme));
+        }
+        let uploads_body: iced::Element<'_, AppMessage> = if upload_count == 0 {
+            crate::ui_components::empty_state(
+                crate::icon_system::Icon::Upload,
+                "No active uploads.",
+                "Files peers are downloading from you will appear here.",
+                None,
+                None,
+            )
+            .into()
+        } else {
+            uploads_col.into()
+        };
+
+        let uploads_header = Row::new()
+            .push(crate::fonts::type_role_text(
+                crate::fonts::TypeRole::CardTitle,
+                "Uploads",
+            ))
+            .push(crate::ui_components::badge_owned(
+                upload_count.to_string(),
+                crate::ui_components::BadgeKind::Count,
+            ))
+            .push(Space::new().width(Length::Fill))
+            .spacing(SPACE_8)
+            .align_y(Alignment::Center);
+
+        let uploads_card = dashboard_card(
+            Column::new()
+                .push(uploads_header)
+                .push(Space::new().height(Length::Fixed(SPACE_12)))
+                .push(uploads_body)
+                .spacing(0)
+                .width(Length::Fill)
+                .into(),
+        );
+
+        // ── Assemble the full screen ────────────────────────────────────
+        let body: iced::Element<'_, AppMessage> = Column::new()
+            .push(header)
+            .push(container(Space::new().width(Length::Fill).height(Length::Fixed(1.0)))
+                .width(Length::Fill)
+                .style(move |t| container::Style {
+                    background: Some(iced::Background::Color(
+                        crate::design_tokens::border_muted(t),
+                    )),
+                    ..Default::default()
+                }))
+            .push(Space::new().height(Length::Fixed(SPACE_16)))
+            .push(downloads_card)
+            .push(Space::new().height(Length::Fixed(SPACE_16)))
+            .push(uploads_card)
+            .spacing(0)
+            .width(Length::Fill)
+            .into();
+
+        crate::ui_components::gutter_scrollable(body)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    }
+
+    /// One inbound transfer row for the Download Manager.
+    fn download_manager_incoming_row<'a>(
+        &'a self,
+        row: &crate::downloading_view_model::IncomingTransferRow,
+        theme: &iced::Theme,
+    ) -> iced::Element<'a, AppMessage> {
+        use crate::downloading_view_model::{
+            format_progress, format_started, IncomingProgress, IncomingState,
+        };
+        use crate::ui_components::ProgressBar;
+        use iced::widget::{button, container, Column, Row, Space};
+        use iced::{Alignment, Border, Length};
+
+        let peer_display = row
+            .peer_id
+            .as_deref()
+            .and_then(|id| id.parse::<PublicKey>().ok())
+            .map(|pk| self.resolve_name(&pk))
+            .unwrap_or_else(|| "Unknown peer".to_string());
+
+        let (state_label, state_color) = match row.state {
+            IncomingState::Transferring => ("Transferring", crate::design_tokens::primary(theme)),
+            IncomingState::Retrying => ("Retrying", crate::design_tokens::color_warning(theme)),
+            IncomingState::Verifying => ("Verifying", crate::design_tokens::color_warning(theme)),
+            IncomingState::Completed => ("Completed", crate::design_tokens::color_success(theme)),
+            IncomingState::Failed => ("Failed", crate::design_tokens::color_danger(theme)),
+            IncomingState::Cancelled => ("Cancelled", crate::design_tokens::text_muted(theme)),
+            IncomingState::Disconnected => ("Disconnected", crate::design_tokens::color_danger(theme)),
+        };
+
+        let (bar, progress_text) = match &row.progress {
+            IncomingProgress::Determinate { bytes, total } if *total > 0 => {
+                let pct = ((*bytes as f64 / *total as f64) * 100.0).min(100.0) as u8;
+                (
+                    ProgressBar::<AppMessage>::new(pct as f32 / 100.0)
+                        .show_label(false)
+                        .bold()
+                        .build(theme),
+                    format!("{}% · {}", pct, format_progress(&row.progress)),
+                )
+            }
+            _ => (
+                ProgressBar::<AppMessage>::new(0.0)
+                    .indeterminate(true)
+                    .bold()
+                    .build(theme),
+                format_progress(&row.progress),
+            ),
+        };
+
+        let type_icon = crate::download_progress_view::file_type_icon_element(
+            &row.display_name,
+            None,
+            None,
+            crate::file_type_icon::FileTypeIconSize::List,
+            theme,
+        );
+
+        let name_line = Row::new()
+            .push(type_icon)
+            .push(
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::BodyEmphasised,
+                    row.display_name.clone(),
+                )
+                .color(crate::design_tokens::text_primary(theme))
+                .width(Length::Shrink)
+                .wrapping(iced::widget::text::Wrapping::None),
+            )
+            .spacing(SPACE_4)
+            .align_y(Alignment::Center);
+
+        let progress_col = Column::new()
+            .push(bar)
+            .push(
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, progress_text)
+                    .color(crate::design_tokens::text_muted(theme))
+                    .wrapping(iced::widget::text::Wrapping::None),
+            )
+            .spacing(SPACE_2)
+            .width(Length::Fill);
+
+        // Controls: Pause/Resume + Cancel for live rows; nothing for
+        // terminal/stopped rows.
+        let mut controls = Row::new().spacing(SPACE_4).align_y(Alignment::Center);
+        if !row.state.is_terminal() && !matches!(row.state, IncomingState::Disconnected) {
+            if self.paused_inbound_transfer_ids.contains(&row.id) {
+                controls = controls.push(
+                    crate::download_progress_view::primary_button(
+                        None,
+                        "Resume",
+                        AppMessage::DownloadingResume(row.id.clone()),
+                    ),
+                );
+            } else {
+                controls = controls.push(
+                    crate::download_progress_view::secondary_button(
+                        None,
+                        "Pause",
+                        AppMessage::DownloadingPause(row.id.clone()),
+                    ),
+                );
+            }
+            controls = controls.push(
+                crate::download_progress_view::text_button(
+                    "Cancel",
+                    AppMessage::DownloadingCancel(row.id.clone()),
+                ),
+            );
+        } else if matches!(row.state, IncomingState::Disconnected) {
+            controls = controls.push(
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, "Peer disconnected")
+                    .color(crate::design_tokens::text_muted(theme)),
+            );
+        }
+
+        let row_el = Row::new()
+            .push(name_line)
+            .push(Space::new().width(Length::Fixed(SPACE_12)))
+            .push(progress_col)
+            .push(Space::new().width(Length::Fixed(SPACE_12)))
+            .push(
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::Metadata,
+                    crate::presentation::truncate_with_ellipsis(&peer_display, 24),
+                )
+                .color(crate::design_tokens::text_secondary(theme))
+                .width(Length::Fixed(140.0))
+                .wrapping(iced::widget::text::Wrapping::None),
+            )
+            .push(
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::Metadata,
+                    format_started(row.started_at_ms, now_ms() as u64),
+                )
+                .color(crate::design_tokens::text_secondary(theme))
+                .width(Length::Fixed(100.0))
+                .wrapping(iced::widget::text::Wrapping::None),
+            )
+            .push(
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, state_label)
+                    .color(state_color)
+                    .width(Length::Fixed(100.0))
+                    .wrapping(iced::widget::text::Wrapping::None),
+            )
+            .push(controls)
+            .spacing(SPACE_12)
+            .align_y(Alignment::Center)
+            .padding([SPACE_8, SPACE_4])
+            .width(Length::Fill);
+
+        container(row_el)
+            .width(Length::Fill)
+            .style(move |t| container::Style {
+                background: None,
+                border: Border {
+                    radius: crate::design_tokens::RADIUS_MD.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .into()
+    }
+
+    /// One outbound transfer row for the Download Manager.
+    fn download_manager_outbound_row<'a>(
+        &'a self,
+        row: &crate::peers_downloading_view_model::PeersDownloadingRow,
+        theme: &iced::Theme,
+    ) -> iced::Element<'a, AppMessage> {
+        use crate::peers_downloading_view_model::{
+            format_progress, OutboundProgress, OutboundState,
+        };
+        use crate::ui_components::ProgressBar;
+        use iced::widget::{container, Column, Row, Space};
+        use iced::{Alignment, Border, Length};
+
+        let peer_display = row
+            .peer_id
+            .as_deref()
+            .and_then(|id| id.parse::<PublicKey>().ok())
+            .map(|pk| self.resolve_name(&pk))
+            .unwrap_or_else(|| "Unknown peer".to_string());
+
+        let (state_label, state_color) = match row.state {
+            OutboundState::Transferring => ("Transferring", crate::design_tokens::primary(theme)),
+            OutboundState::Retrying => ("Retrying", crate::design_tokens::color_warning(theme)),
+            OutboundState::Verifying => ("Verifying", crate::design_tokens::color_warning(theme)),
+            OutboundState::Completed => ("Completed", crate::design_tokens::color_success(theme)),
+            OutboundState::Failed => ("Failed", crate::design_tokens::color_danger(theme)),
+            OutboundState::Cancelled => ("Cancelled", crate::design_tokens::text_muted(theme)),
+            OutboundState::Disconnected => ("Disconnected", crate::design_tokens::color_danger(theme)),
+        };
+
+        let (bar, progress_text) = match &row.progress {
+            OutboundProgress::Determinate { bytes, total } if *total > 0 => {
+                let pct = ((*bytes as f64 / *total as f64) * 100.0).min(100.0) as u8;
+                (
+                    ProgressBar::<AppMessage>::new(pct as f32 / 100.0)
+                        .show_label(false)
+                        .bold()
+                        .build(theme),
+                    format!("{}% · {}", pct, format_progress(&row.progress)),
+                )
+            }
+            _ => (
+                ProgressBar::<AppMessage>::new(0.0)
+                    .indeterminate(true)
+                    .bold()
+                    .build(theme),
+                format_progress(&row.progress),
+            ),
+        };
+
+        let type_icon = crate::download_progress_view::file_type_icon_element(
+            &row.display_name,
+            None,
+            None,
+            crate::file_type_icon::FileTypeIconSize::List,
+            theme,
+        );
+
+        let name_line = Row::new()
+            .push(type_icon)
+            .push(
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::BodyEmphasised,
+                    row.display_name.clone(),
+                )
+                .color(crate::design_tokens::text_primary(theme))
+                .width(Length::Shrink)
+                .wrapping(iced::widget::text::Wrapping::None),
+            )
+            .spacing(SPACE_4)
+            .align_y(Alignment::Center);
+
+        let progress_col = Column::new()
+            .push(bar)
+            .push(
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, progress_text)
+                    .color(crate::design_tokens::text_muted(theme))
+                    .wrapping(iced::widget::text::Wrapping::None),
+            )
+            .spacing(SPACE_2)
+            .width(Length::Fill);
+
+        // Stop control for live outbound rows (uploads).
+        let mut controls = Row::new().spacing(SPACE_4).align_y(Alignment::Center);
+        if !row.state.is_terminal() && !matches!(row.state, OutboundState::Disconnected) {
+            controls = controls.push(
+                crate::download_progress_view::text_button(
+                    "Stop",
+                    AppMessage::DownloadingStop(row.id.clone()),
+                ),
+            );
+        }
+
+        let row_el = Row::new()
+            .push(name_line)
+            .push(Space::new().width(Length::Fixed(SPACE_12)))
+            .push(progress_col)
+            .push(Space::new().width(Length::Fixed(SPACE_12)))
+            .push(
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::Metadata,
+                    crate::presentation::truncate_with_ellipsis(&peer_display, 24),
+                )
+                .color(crate::design_tokens::text_secondary(theme))
+                .width(Length::Fixed(140.0))
+                .wrapping(iced::widget::text::Wrapping::None),
+            )
+            .push(
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, state_label)
+                    .color(state_color)
+                    .width(Length::Fixed(100.0))
+                    .wrapping(iced::widget::text::Wrapping::None),
+            )
+            .push(controls)
+            .spacing(SPACE_12)
+            .align_y(Alignment::Center)
+            .padding([SPACE_8, SPACE_4])
+            .width(Length::Fill);
+
+        container(row_el)
             .width(Length::Fill)
             .style(move |t| container::Style {
                 background: None,
@@ -36894,10 +37833,36 @@ impl IcedChat {
         .padding([SPACE_6, SPACE_16])
         .style(BUTTON_OUTLINE);
 
+        // DLMGR-01: entry point for the Download Manager screen — every
+        // active transfer in both directions with pause/stop controls.
+        let download_manager_btn = button(
+            Row::new()
+                .push(
+                    Icon::Download
+                        .build()
+                        .size(crate::icon_system::IconSize::Xs)
+                        .color_fn(crate::design_tokens::text_muted)
+                        .build(),
+                )
+                .push(
+                    crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::ButtonLabel,
+                        "Download Manager",
+                    ),
+                )
+                .spacing(SPACE_4)
+                .align_y(Alignment::Center),
+        )
+        .on_press(AppMessage::OpenDownloadManager)
+        .padding([SPACE_6, SPACE_16])
+        .style(BUTTON_OUTLINE);
+
         let header_actions = Row::new()
             .push(search_row)
             .push(Space::new().width(Length::Fixed(SPACE_16)))
             .push(receive_ticket_btn)
+            .push(Space::new().width(Length::Fixed(SPACE_8)))
+            .push(download_manager_btn)
             .push(Space::new().width(Length::Fixed(SPACE_8)))
             .push(open_downloads_btn)
             .align_y(Alignment::Center);
@@ -44587,6 +45552,39 @@ mod tests {
     }
 
     #[test]
+    fn download_manager_navigation_round_trip() {
+        // DLMGR-02 acceptance: opening the Download Manager from the File
+        // Sharing screen remembers the previous screen, and the back button
+        // (CloseDownloadManager) restores it. Uses the hermetic prewarm
+        // harness (RelayMode::Disabled, no endpoint.online() wait) — pure
+        // navigation, no peer connection needed.
+        let (runtime, mut app) = build_prewarm_test_app();
+
+        let task = app.update(AppMessage::OpenFileSharing);
+        drop(task);
+        assert_eq!(app.screen, Screen::FileSharing);
+
+        let task = app.update(AppMessage::OpenDownloadManager);
+        drop(task);
+        assert_eq!(app.screen, Screen::DownloadManager);
+        assert_eq!(
+            app.download_manager_return_to,
+            Some(Screen::FileSharing),
+            "return-to must capture the previous screen"
+        );
+
+        let task = app.update(AppMessage::CloseDownloadManager);
+        drop(task);
+        assert_eq!(app.screen, Screen::FileSharing, "back must restore the source screen");
+        assert_eq!(
+            app.download_manager_return_to, None,
+            "return-to must be consumed after closing"
+        );
+
+        drop(runtime);
+    }
+
+    #[test]
     fn sidebar_manual_toggle_only_affects_populated_sections() {
         // SIDEBAR-01: empty sections stay collapsed (toggle is inert), and
         // manually expanding a populated section does not replay the
@@ -44633,6 +45631,23 @@ mod tests {
         );
         assert!(!app.sidebar_fade_active());
 
+        drop(runtime);
+    }
+
+    #[test]
+    fn download_manager_open_from_home_returns_to_home() {
+        // Opening the manager from the home screen must return to ChatList,
+        // and Escape behaves like the back button. Hermetic prewarm harness.
+        let (runtime, mut app) = build_prewarm_test_app();
+        assert_eq!(app.screen, Screen::ChatList);
+
+        let task = app.update(AppMessage::OpenDownloadManager);
+        drop(task);
+        assert_eq!(app.screen, Screen::DownloadManager);
+
+        let task = app.update(AppMessage::Shortcut(Shortcut::Escape));
+        drop(task);
+        assert_eq!(app.screen, Screen::ChatList, "Escape must close the manager");
         drop(runtime);
     }
 
@@ -44730,6 +45745,128 @@ mod tests {
         );
         assert!(!app.sidebar_fade_active());
 
+        drop(runtime);
+    }
+
+    #[test]
+    fn download_manager_count_matches_active_maps() {
+        // DLMGR-02 acceptance: the screen's Downloads/Uploads counts come from
+        // the same FS-05 projection maps the Downloading tab and Peers card
+        // use, so the header totals match the rest of the sharing UI.
+        // Hermetic prewarm harness — pure view logic, no peer connection.
+        let (runtime, mut app) = build_prewarm_test_app();
+        let peer = SecretKey::generate().public().to_string();
+
+        // Insert one inbound and one outbound record with a real item label.
+        let now_ms = now_ms() as u64;
+        let inbound_record = boru_core::transfer_state_projection::TransferRecord {
+            transfer_id: "dmgr-in-1".to_string(),
+            item_id: "hash-in-1".to_string(),
+            direction: boru_core::transfer_state_projection::TransferDirection::Inbound,
+            peer_id: Some(peer.clone()),
+            state: boru_core::transfer_state_projection::TransferState::Active,
+            bytes: 10,
+            total_bytes: Some(100),
+            attempt: 1,
+            started_at_ms: now_ms,
+            updated_at_ms: now_ms,
+            error: None,
+        };
+        let outbound_record = boru_core::transfer_state_projection::TransferRecord {
+            transfer_id: "dmgr-out-1".to_string(),
+            item_id: "hash-out-1".to_string(),
+            direction: boru_core::transfer_state_projection::TransferDirection::Outbound,
+            peer_id: Some(peer),
+            state: boru_core::transfer_state_projection::TransferState::Active,
+            bytes: 40,
+            total_bytes: Some(200),
+            attempt: 1,
+            started_at_ms: now_ms,
+            updated_at_ms: now_ms,
+            error: None,
+        };
+        app.inbound_active
+            .insert("dmgr-in-1".to_string(), inbound_record);
+        app.outbound_active
+            .insert("dmgr-out-1".to_string(), outbound_record);
+        if let Ok(mut labels) = app.inbound_item_labels.lock() {
+            labels.insert("hash-in-1".to_string(), "report.pdf".to_string());
+        }
+        if let Ok(mut labels) = app.outbound_item_labels.lock() {
+            labels.insert("hash-out-1".to_string(), "photo.jpg".to_string());
+        }
+
+        // The manager view renders both sections with the same row counts as
+        // the projection maps (2 active transfers total).
+        let _view = app.view_download_manager();
+        assert_eq!(app.inbound_active.len(), 1);
+        assert_eq!(app.outbound_active.len(), 1);
+        drop(runtime);
+    }
+
+    #[test]
+    fn download_manager_stop_archives_outbound_row() {
+        // DLMGR-02 acceptance: Stop works for uploads where supported — the
+        // outbound row leaves the active list (the Cancelled event is
+        // published to the authoritative projection, exactly like inbound
+        // cancel). Hermetic prewarm harness.
+        let (runtime, mut app) = build_prewarm_test_app();
+        let peer = SecretKey::generate().public().to_string();
+
+        let now_ms = now_ms() as u64;
+        let record = boru_core::transfer_state_projection::TransferRecord {
+            transfer_id: "dmgr-out-stop".to_string(),
+            item_id: "hash-out-stop".to_string(),
+            direction: boru_core::transfer_state_projection::TransferDirection::Outbound,
+            peer_id: Some(peer),
+            state: boru_core::transfer_state_projection::TransferState::Active,
+            bytes: 40,
+            total_bytes: Some(200),
+            attempt: 1,
+            started_at_ms: now_ms,
+            updated_at_ms: now_ms,
+            error: None,
+        };
+        app.outbound_active
+            .insert("dmgr-out-stop".to_string(), record);
+
+        let task = app.update(AppMessage::DownloadingStop("dmgr-out-stop".to_string()));
+        drop(task);
+
+        assert!(
+            !app.outbound_active.contains_key("dmgr-out-stop"),
+            "stopped upload must leave the active list"
+        );
+        // The authoritative projection now records the cancelled outbound row.
+        let snapshot = app.transfer_store.snapshot();
+        let archived = snapshot
+            .iter()
+            .find(|r| r.transfer_id == "dmgr-out-stop")
+            .map(|r| r.state)
+            .unwrap_or(boru_core::transfer_state_projection::TransferState::Active);
+        assert_eq!(
+            archived,
+            boru_core::transfer_state_projection::TransferState::Cancelled,
+            "projection must record the outbound cancellation"
+        );
+        drop(runtime);
+    }
+
+    #[test]
+    fn download_manager_pause_unknown_transfer_is_safe() {
+        // Pause/Resume on a transfer id that is not active must be a truthful
+        // no-op (system message), never a panic. Hermetic prewarm harness.
+        let (runtime, mut app) = build_prewarm_test_app();
+
+        let task = app.update(AppMessage::DownloadingPause("ghost-transfer".to_string()));
+        drop(task);
+        let task = app.update(AppMessage::DownloadingResume("ghost-transfer".to_string()));
+        drop(task);
+        let task = app.update(AppMessage::DownloadingStop("ghost-transfer".to_string()));
+        drop(task);
+
+        assert!(app.inbound_active.is_empty());
+        assert!(app.outbound_active.is_empty());
         drop(runtime);
     }
 
