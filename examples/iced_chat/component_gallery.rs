@@ -1772,7 +1772,7 @@ fn typography_gallery() -> Element<'static, AppMessage> {
         );
 
     let fallback_note = text(format!(
-        "Fallbacks: display/page → Archivo SemiCondensed; UI → IBM Plex Sans; chat → Figtree; {} → platform monospace; brand → Raleway.",
+        "Fallbacks (FONTS-14): display/page → Arial Narrow → sans-serif; UI/chat → system sans-serif; {} → monospace; brand → Raleway.",
         "technical_value"
     ))
     .size(TypeRole::Metadata.size_px())
@@ -1789,7 +1789,7 @@ fn typography_gallery() -> Element<'static, AppMessage> {
         .spacing(design_tokens::SPACE_16)
         .push(fallback_sample(
             TypeRole::DisplayHeading,
-            "Fallback display_heading → Archivo SemiCondensed",
+            "Fallback display_heading → Arial Narrow → sans-serif",
         ))
         .push(fallback_sample(
             TypeRole::TechnicalValue,

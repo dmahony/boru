@@ -6,16 +6,23 @@
 //!
 //! ## Font families
 //!
-//! | Family          | Weights loaded               | Scope                          |
-//! |-----------------|------------------------------|--------------------------------|
-//! | Archivo SemiCondensed | 600 (SemiBold) · 700 (Bold) | Major display/page headings (DisplayHeading, PageTitle) |
-//! | IBM Plex Sans   | 400 (Regular) · 500 (Medium) · 600 (SemiBold) | Primary app UI: sections, cards, body, buttons, metadata |
-//! | Figtree         | 400 · 500 · 600               | Chat messages, sender, metadata, composer |
-//! | JetBrains Mono  | 400 · 500                     | Technical/code values           |
-//! | Raleway         | 800 (ExtraBold)               | BORU wordmark / branding only   |
-//! | Source Sans 3   | 400 · 500 · 600 · 700         | Legacy — app default font + one chip label (removed in FONTS-12) |
-//! | Manrope         | 600 (SemiBold) · 700 (Bold)   | Legacy — no longer referenced by tokens (removed in FONTS-12) |
-//! | Inter           | 400 · 500 · 600 · 700         | Legacy fallback (bundled, not loaded) |
+//! | Family          | Weights loaded               | Scope                          | Fallback chain (FONTS-14)          |
+//! |-----------------|------------------------------|--------------------------------|------------------------------------|
+//! | Archivo SemiCondensed | 600 (SemiBold) · 700 (Bold) | Major display/page headings (DisplayHeading, PageTitle) | Arial Narrow → generic sans-serif |
+//! | IBM Plex Sans   | 400 (Regular) · 500 (Medium) · 600 (SemiBold) | Primary app UI: sections, cards, body, buttons, metadata | Arial → system sans-serif |
+//! | Figtree         | 400 · 500 · 600               | Chat messages, sender, metadata, composer | Arial → system sans-serif |
+//! | JetBrains Mono  | 400 · 500                     | Technical/code values           | Consolas → monospace               |
+//! | Raleway         | 800 (ExtraBold)               | BORU wordmark / branding only   | Raleway (bundled — unchanged)      |
+//! | Source Sans 3   | 400 · 500 · 600 · 700         | Legacy — app default font + one chip label (removed in FONTS-12) | — |
+//! | Manrope         | 600 (SemiBold) · 700 (Bold)   | Legacy — no longer referenced by tokens (removed in FONTS-12) | — |
+//! | Inter           | 400 · 500 · 600 · 700         | Legacy fallback (bundled, not loaded) | — |
+//!
+//! In iced terms, `TypeRole::fallback_family()` maps these chains to
+//! `Family` values: display/page-heading roles → `Family::Name("Arial
+//! Narrow")` (iced/fontdb resolves the terminal generic sans-serif when the
+//! named family is absent); UI and chat roles → `Family::SansSerif` (the
+//! system sans-serif — Arial on Windows); technical values →
+//! `Family::Monospace`; the wordmark stays `Family::Name("Raleway")`.
 //!
 //! ## Licence
 //!
@@ -144,6 +151,10 @@ pub const ARCHIVO_SEMI_CONDENSED: &str = "Archivo SemiCondensed";
 
 /// Internal family name for IBM Plex Sans (general app UI).
 pub const IBM_PLEX_SANS: &str = "IBM Plex Sans";
+
+/// Platform fallback family for display/page-heading roles (FONTS Task 14:
+/// Archivo SemiCondensed → Arial Narrow → generic sans-serif).
+pub const ARIAL_NARROW: &str = "Arial Narrow";
 
 // ── Font constructors ────────────────────────────────────────────────
 
@@ -429,26 +440,25 @@ impl TypeRole {
     }
 
     /// Fallback font family for this role, used when the primary family is
-    /// not registered on the platform. The fallback names the same family
-    /// the role's primary mapping uses (Archivo SemiCondensed for display
-    /// headings, IBM Plex Sans for UI roles, Figtree for chat, Raleway for
-    /// the wordmark, platform monospace for technical values). When even the
-    /// bundled family is absent, iced/fontdb resolves the platform chain
-    /// from FONTS Task 14:
-    ///   Archivo SemiCondensed → Arial Narrow → sans-serif
-    ///   IBM Plex Sans        → Arial → system sans-serif
-    ///   Figtree              → Arial → system sans-serif
-    ///   JetBrains Mono       → Consolas → monospace
-    ///   Raleway              → Raleway (bundled wordmark — unchanged)
+    /// not registered on the platform. Returns the FONTS Task 14 platform
+    /// chain as an iced `Family`:
+    ///   display/page headings → `Family::Name("Arial Narrow")` (iced/fontdb
+    ///     resolves the terminal generic sans-serif when Arial Narrow is
+    ///     absent — e.g. Linux/macOS)
+    ///   UI roles              → `Family::SansSerif` (system sans-serif —
+    ///     Arial on Windows)
+    ///   chat roles            → `Family::SansSerif` (system sans-serif —
+    ///     Arial on Windows)
+    ///   technical values      → `Family::Monospace` (platform monospace —
+    ///     Consolas on Windows)
+    ///   brand wordmark        → Raleway (bundled — unchanged)
     pub fn fallback_family(self) -> Family {
         match self {
-            Self::DisplayHeading | Self::PageTitle => Family::Name(ARCHIVO_SEMI_CONDENSED),
+            Self::DisplayHeading | Self::PageTitle => Family::Name(ARIAL_NARROW),
             Self::TechnicalValue => Family::Monospace,
             Self::BrandWordmark => Family::Name(RALEWAY),
-            Self::ChatMessage | Self::ChatSender | Self::ChatMetadata | Self::ComposerText => {
-                Family::Name(FIGTREE)
-            }
-            _ => Family::Name(IBM_PLEX_SANS),
+            // UI and chat roles both degrade to the system sans-serif.
+            _ => Family::SansSerif,
         }
     }
 
@@ -726,26 +736,27 @@ mod tests {
 
     #[test]
     fn type_role_fallbacks_are_platform_appropriate() {
-        // FONTS Task 14: display/page headings fall back to Archivo
-        // SemiCondensed, UI roles to IBM Plex Sans, chat to Figtree, the
-        // wordmark to Raleway, and technical values to the platform
-        // monospace. (iced/fontdb then resolves Arial Narrow / Arial /
-        // Consolas chains when even the bundled family is absent.)
+        // FONTS Task 14: display/page headings fall back to Arial Narrow
+        // (iced/fontdb resolves the terminal generic sans-serif when the
+        // named family is absent), UI and chat roles to the system
+        // sans-serif (Arial on Windows), technical values to the platform
+        // monospace (Consolas on Windows), and the wordmark stays Raleway.
+        // No Source Sans 3 fallback remains.
         assert_eq!(
             TypeRole::TechnicalValue.fallback_family(),
             iced::font::Family::Monospace
         );
         assert_eq!(
             TypeRole::DisplayHeading.fallback_family(),
-            iced::font::Family::Name(ARCHIVO_SEMI_CONDENSED)
+            iced::font::Family::Name(ARIAL_NARROW)
         );
         assert_eq!(
             TypeRole::PageTitle.fallback_family(),
-            iced::font::Family::Name(ARCHIVO_SEMI_CONDENSED)
+            iced::font::Family::Name(ARIAL_NARROW)
         );
         assert_eq!(
             TypeRole::ChatMessage.fallback_family(),
-            iced::font::Family::Name(FIGTREE)
+            iced::font::Family::SansSerif
         );
         assert_eq!(
             TypeRole::BrandWordmark.fallback_family(),
@@ -756,7 +767,7 @@ mod tests {
                 TypeRole::DisplayHeading | TypeRole::PageTitle => {
                     assert_eq!(
                         role.fallback_family(),
-                        iced::font::Family::Name(ARCHIVO_SEMI_CONDENSED)
+                        iced::font::Family::Name(ARIAL_NARROW)
                     );
                 }
                 TypeRole::SectionTitle
@@ -766,16 +777,13 @@ mod tests {
                 | TypeRole::ButtonLabel
                 | TypeRole::SupportingText
                 | TypeRole::Metadata => {
-                    assert_eq!(
-                        role.fallback_family(),
-                        iced::font::Family::Name(IBM_PLEX_SANS)
-                    );
+                    assert_eq!(role.fallback_family(), iced::font::Family::SansSerif);
                 }
                 TypeRole::ChatMessage
                 | TypeRole::ChatSender
                 | TypeRole::ChatMetadata
                 | TypeRole::ComposerText => {
-                    assert_eq!(role.fallback_family(), iced::font::Family::Name(FIGTREE));
+                    assert_eq!(role.fallback_family(), iced::font::Family::SansSerif);
                 }
                 TypeRole::TechnicalValue => {
                     assert_eq!(role.fallback_family(), iced::font::Family::Monospace);
@@ -784,6 +792,11 @@ mod tests {
                     assert_eq!(role.fallback_family(), iced::font::Family::Name(RALEWAY));
                 }
             }
+            assert_ne!(
+                role.fallback_family(),
+                iced::font::Family::Name(SOURCE_SANS),
+                "Source Sans 3 must not remain a fallback for {role:?}"
+            );
             let fw = role.fallback_weight();
             assert!(
                 matches!(
