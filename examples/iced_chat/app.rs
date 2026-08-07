@@ -6521,15 +6521,20 @@ fn view_local_profile_block(
     };
 
     // ── Display name + status ──
-    // The name fills the remaining sidebar width and wraps naturally (glyph
-    // fallback for long peer-key labels) so a long display name stays inside
-    // the sidebar instead of overflowing it (UI-HOME-10).
+    // The name stays on ONE line: `Wrapping::None` prevents line breaks and
+    // the `.clip(true)` container truncates overflow at the available sidebar
+    // width (same pattern as the sidebar group-name rows, UI-18 long-value
+    // stress finding) so a long display name can never wrap onto multiple
+    // lines or widen the sidebar (UI-HOME-10).
     let name_col = Column::new()
         .push(
-            // FONTS-06: local display name in IBM Plex Sans Medium.
-            sidebar_name_text(display_name)
-                .width(Length::Fill)
-                .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+            container(
+                // FONTS-06: local display name in IBM Plex Sans Medium.
+                sidebar_name_text(display_name)
+                    .wrapping(iced::widget::text::Wrapping::None),
+            )
+            .width(Length::Fill)
+            .clip(true),
         )
         .push(
             crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, status_label)
@@ -40556,6 +40561,34 @@ mod tests {
         assert!(
             profile.contains("sidebar_name_text("),
             "local profile display name must use sidebar_name_text"
+        );
+    }
+
+    #[test]
+    fn sidebar_profile_name_is_single_line() {
+        // SIDEBAR-02: the local display name in the top-left sidebar header
+        // must stay on ONE line. The name text uses `Wrapping::None` (no
+        // line breaks) inside a `.clip(true)` container (overflow truncated
+        // at the available sidebar width) — never `WordOrGlyph` wrapping,
+        // which lets long names wrap onto multiple lines.
+        let src = include_str!("app.rs");
+        let profile = method_source(src, "fn view_local_profile_block(", "fn profile_identity_card(");
+        assert!(
+            profile.contains("Wrapping::None"),
+            "sidebar profile name must use Wrapping::None to stay single-line"
+        );
+        assert!(
+            profile.contains(".clip(true)"),
+            "sidebar profile name container must clip overflow (no wrap to multiple lines)"
+        );
+        assert!(
+            !profile.contains("Wrapping::WordOrGlyph"),
+            "sidebar profile name must not use WordOrGlyph (long names would wrap)"
+        );
+        // The status label still renders below the name inside the same column.
+        assert!(
+            profile.contains("status_label"),
+            "status label must still render below the display name"
         );
     }
 
