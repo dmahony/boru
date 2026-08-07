@@ -30794,23 +30794,42 @@ impl IcedChat {
             }
             .width(Length::Fill);
 
-            col = col.push(Column::new().push(label_el).push(msg_row).spacing(
-                if system_group_continues {
-                    // Consecutive system chips are grouped tightly: the gap
-                    // between chips is smaller than the spacing around user
-                    // message bubbles (normal spacing below).
-                    SPACE_2
-                } else if group_continues {
-                    // 6 px gap between bubbles inside one sender group (plan §4).
-                    SPACE_6
-                } else if matches!(entry.kind, ChatKind::System) {
-                    SPACE_4
-                } else {
-                    // 18 px group-to-group gap between different sender groups
-                    // (plan §4).
-                    SPACE_18
-                },
-            ));
+            // CHAT-02: anchor the sender name to the same side as the message
+            // body. The wrapping column defaults to align_x(Start), which
+            // pinned own-message usernames to the LEFT edge while their bubble
+            // hugged the right. Own messages anchor the label right (End),
+            // received/system entries keep it left (Start) — the same side as
+            // their bubble, regardless of message length.
+            let label_align = if matches!(entry.kind, ChatKind::Local) {
+                iced::Alignment::End
+            } else {
+                iced::Alignment::Start
+            };
+            col = col.push(
+                Column::new()
+                    .push(label_el)
+                    .push(msg_row)
+                    .align_x(label_align)
+                    .spacing(
+                        if system_group_continues {
+                            // Consecutive system chips are grouped tightly: the
+                            // gap between chips is smaller than the spacing
+                            // around user message bubbles (normal spacing
+                            // below).
+                            SPACE_2
+                        } else if group_continues {
+                            // 6 px gap between bubbles inside one sender group
+                            // (plan §4).
+                            SPACE_6
+                        } else if matches!(entry.kind, ChatKind::System) {
+                            SPACE_4
+                        } else {
+                            // 18 px group-to-group gap between different sender
+                            // groups (plan §4).
+                            SPACE_18
+                        },
+                    ),
+            );
 
             // ── Image card header (PAPIRUS-10) ────────────────────────────
             // Image messages carry the central Papirus image-type icon beside
@@ -40721,6 +40740,40 @@ mod tests {
         assert!(
             !peer_profile.contains("TypeRole::TechnicalValue"),
             "peer profile display name must NOT use JetBrains Mono"
+        );
+    }
+
+    #[test]
+    fn chat_log_sender_labels_anchor_to_bubble_side() {
+        // CHAT-02: sender names must stay on the same side as the message
+        // bubble regardless of message length. The wrapping column that holds
+        // `label_el` + `msg_row` must anchor the label End for own messages
+        // and Start for received/system entries — never the default Start for
+        // own messages (which pushed usernames to the LEFT while the bubble
+        // hugged the right).
+        let src = include_str!("app.rs");
+        let chat_log = method_source(src, "fn view_chat_log(", "fn view_composer(");
+        assert!(
+            chat_log.contains("let label_align = if matches!(entry.kind, ChatKind::Local)"),
+            "view_chat_log must compute label_align from entry.kind (CHAT-02)"
+        );
+        assert!(
+            chat_log.contains("iced::Alignment::End"),
+            "own-message sender labels must anchor right (CHAT-02)"
+        );
+        assert!(
+            chat_log.contains("iced::Alignment::Start"),
+            "received/system sender labels must anchor left (CHAT-02)"
+        );
+        assert!(
+            chat_log.contains(".align_x(label_align)"),
+            "the label_el + msg_row column must apply label_align (CHAT-02)"
+        );
+        // Sanity: the label column still sits ABOVE the avatar/bubble row and
+        // keeps the chat-message-format preference (no brackets, Semibold).
+        assert!(
+            chat_log.contains(".push(label_el)\n                    .push(msg_row)"),
+            "label_el must be pushed above msg_row in the aligned column (CHAT-02)"
         );
     }
 
