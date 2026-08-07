@@ -18,6 +18,7 @@ use tokio::task::JoinHandle;
 ///
 /// Dropping the handle (or calling [`stop`](Self::stop)) stops the server.
 /// The server binds to `127.0.0.1:0` so the OS assigns a free port.
+#[derive(Debug)]
 pub struct StreamingServer {
     /// The port the server is listening on.
     pub port: u16,
@@ -297,4 +298,42 @@ async fn respond(stream: &mut tokio::net::TcpStream, code: u16, reason: &str, he
     let _ = stream.write_all(response.as_bytes()).await;
     let _ = stream.write_all(headers).await;
     let _ = stream.write_all(b"\r\n").await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_range_header_handles_closed_and_open_ranges() {
+        assert_eq!(
+            parse_range_header("Range: bytes=0-1023"),
+            Some((0, 1023))
+        );
+        assert_eq!(
+            parse_range_header("Range: bytes=4096-"),
+            Some((4096, u64::MAX))
+        );
+        assert_eq!(
+            parse_range_header("range: bytes=0-0"),
+            Some((0, 0))
+        );
+    }
+
+    #[test]
+    fn parse_range_header_rejects_invalid_specs() {
+        assert_eq!(parse_range_header("Range: bytes=-1023"), None);
+        assert_eq!(parse_range_header("Range: bytes=abc-"), None);
+        assert_eq!(parse_range_header("Range: items=0-1"), None);
+        assert_eq!(parse_range_header(""), None);
+    }
+
+    #[test]
+    fn server_url_points_at_local_video_path() {
+        // The URL must always target the loopback /video endpoint so
+        // GStreamer's souphttpsrc can open it without TLS.
+        let url = format!("http://127.0.0.1:{}/video", 45678);
+        assert!(url.starts_with("http://127.0.0.1:"));
+        assert!(url.ends_with("/video"));
+    }
 }

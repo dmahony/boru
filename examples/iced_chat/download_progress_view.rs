@@ -1108,6 +1108,23 @@ pub(crate) fn action_buttons<'a>(
                 secondary_button(Some(ICON_MESH), "Re-share", ReshareFile(entry_index)).into(),
             ]
         }
+        // ── Video: ready to download — Download or Stream ───────────────
+        (Video, DownloadState::Ready { .. }) => {
+            vec![
+                primary_button(Some(ICON_RETRY), "Download", ExecuteDownloadAt(entry_index))
+                    .into(),
+                secondary_button(Some(ICON_PLAY), "Stream", StreamInlineVideo(entry_index)).into(),
+            ]
+        }
+        // ── Video: download in progress — Stream now, Pause, Cancel ──────
+        (Video, DownloadState::Active { .. }) => {
+            vec![
+                secondary_button(Some(ICON_PLAY), "Stream", StreamInlineVideo(entry_index))
+                    .into(),
+                secondary_button(None, "Pause", PauseDownloadAt(entry_index)).into(),
+                text_button("Cancel", CancelDownloadAt(entry_index)).into(),
+            ]
+        }
         // ── Ready / not yet downloaded ──────────────────────────────────
         (_, DownloadState::Ready { .. }) => {
             vec![primary_button(Some(ICON_RETRY), "Download", ExecuteDownloadAt(entry_index)).into()]

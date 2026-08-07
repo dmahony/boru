@@ -93,6 +93,8 @@ use boru_core::video_playback::{
 };
 use boru_core::video_poster;
 #[cfg(feature = "video-playback")]
+use boru_core::streaming_server::StreamingServer;
+#[cfg(feature = "video-playback")]
 use boru_core::video_runtime::VideoRuntimeCapability;
 use boru_core::whisper::{WhisperEvent, WhisperHandle};
 use iroh::{
@@ -146,6 +148,11 @@ struct InlineVideoSession {
     resume_position: Duration,
     /// Keeps a paused decoder warm briefly while the user scrolls nearby.
     last_near_viewport: Instant,
+    /// Local HTTP streaming server backing this player when the video is
+    /// being streamed from a still-growing download. `None` for normal
+    /// file-backed playback. Dropped (server stopped) when the session is
+    /// dropped, i.e. when playback ends or the card is removed.
+    streaming_server: Option<Arc<StreamingServer>>,
 }
 
 #[cfg(feature = "video-playback")]
@@ -5338,6 +5345,23 @@ pub enum AppMessage {
     OpenDownloadedFile(String),
     /// Start verified inline playback for a completed video attachment.
     PlayInlineVideo(usize),
+    /// Start progressive inline playback for a video that is still being
+    /// downloaded: starts a local HTTP streaming server over the growing
+    /// blob-store file and opens the inline player at its URL.
+    StreamInlineVideo(usize),
+    #[cfg(feature = "video-playback")]
+    /// The streaming HTTP server is ready; open the inline player at the URL.
+    StreamingServerReady {
+        entry_index: usize,
+        url: String,
+        server: Arc<StreamingServer>,
+    },
+    #[cfg(feature = "video-playback")]
+    /// The streaming HTTP server failed to start.
+    StreamingServerFailed {
+        entry_index: usize,
+        error: String,
+    },
     #[cfg(feature = "video-playback")]
     InlineVideoTick,
     #[cfg(feature = "video-playback")]
@@ -8972,6 +8996,11 @@ impl IcedChat {
             AppMessage::DownloadFailed(_) => "DownloadFailed",
             AppMessage::OpenDownloadedFile(_) => "OpenDownloadedFile",
             AppMessage::PlayInlineVideo(_) => "PlayInlineVideo",
+            AppMessage::StreamInlineVideo(_) => "StreamInlineVideo",
+            #[cfg(feature = "video-playback")]
+            AppMessage::StreamingServerReady { .. } => "StreamingServerReady",
+            #[cfg(feature = "video-playback")]
+            AppMessage::StreamingServerFailed { .. } => "StreamingServerFailed",
             #[cfg(feature = "video-playback")]
             AppMessage::InlineVideoTick => "InlineVideoTick",
             #[cfg(feature = "video-playback")]
@@ -16189,6 +16218,7 @@ impl IcedChat {
                             .map(|(_, position)| *position)
                             .unwrap_or_default(),
                         last_near_viewport: Instant::now(),
+                        streaming_server: None,
                     });
                     self.inline_video_resume = None;
                     self.layout_cache.borrow_mut().invalidate_from(entry_index);
@@ -16248,6 +16278,268 @@ impl IcedChat {
                     }
                     self.push_system("Video is not ready to play yet.");
                 }
+                iced::Task::none()
+            }
+            AppMessage::StreamInlineVideo(entry_index) => {
+                #[cfg(feature = "video-playback")]
+                {
+                    tracing::info!(entry_index, "StreamInlineVideo called");
+                    if !self.video_runtime.available {
+                        tracing::warn!("StreamInlineVideo: video runtime unavailable");
+                        self.push_system(self.video_runtime.unavailable_message());
+                        return iced::Task::none();
+                    }
+                    let Some(entry) = self.entries.get(entry_index) else {
+                        tracing::warn!("StreamInlineVideo: entry not found");
+                        return iced::Task::none();
+                    };
+                    let Some(download) = entry.download.as_ref() else {
+                        tracing::warn!("StreamInlineVideo: no download attached");
+                        return iced::Task::none();
+                    };
+                    tracing::info!(
+                        state=?download.state,
+                        name=%download.name,
+                        has_ticket=!download.ticket.is_empty(),
+                        has_hash=download.expected_content_hash.is_some(),
+                        "StreamInlineVideo: download state",
+                    );
+                    // If the video is already fully downloaded, progressive
+                    // streaming adds nothing — just play the local file.
+                    let fully_downloaded = match &download.state {
+                        DownloadState::Completed {
+                            saved_path: Some(path),
+                            ..
+                        } => path.exists(),
+                        DownloadState::Shared { path, .. } => path.exists(),
+                        _ => false,
+                    };
+                    if fully_downloaded {
+                        return self.update(AppMessage::PlayInlineVideo(entry_index));
+                    }
+                    // A known total size is required for Content-Length.
+                    let total_size = match &download.state {
+                        DownloadState::Ready { total } => total.unwrap_or(0),
+                        DownloadState::Active { total, .. } => total.unwrap_or(0),
+                        DownloadState::Paused { total, .. } => total.unwrap_or(0),
+                        DownloadState::Completed { total_size, .. } => total_size.unwrap_or(0),
+                        _ => 0,
+                    };
+                    if total_size == 0 {
+                        self.push_system("Cannot stream video: unknown file size.");
+                        return iced::Task::none();
+                    }
+                    let content_hash = match download.expected_content_hash.clone() {
+                        Some(hash) => hash,
+                        None => {
+                            self.push_system(
+                                "Cannot stream video: missing content identity.",
+                            );
+                            return iced::Task::none();
+                        }
+                    };
+                    let name = download.name.clone();
+                    let kind = download.kind;
+                    let ticket_str = download.ticket.clone();
+                    let is_folder = download.is_folder;
+                    let data_dir = self.data_dir.clone();
+                    let blob_store = self.blob_store.clone();
+                    let endpoint = self.endpoint.clone();
+                    let neighbors = self.neighbors.clone();
+                    let progress_queue = self.download_progress_queue.clone();
+
+                    // If the download hasn't started yet, begin it now so the
+                    // blob-store file (which the streaming server serves)
+                    // starts growing immediately.
+                    if matches!(download.state, DownloadState::Ready { .. }) {
+                        if let Some(e) = self.entries.get_mut(entry_index) {
+                            if let Some(ref mut d) = e.download {
+                                let total = match &d.state {
+                                    DownloadState::Ready { total } => *total,
+                                    _ => None,
+                                };
+                                d.state = DownloadState::Active { bytes: 0, total };
+                            }
+                        }
+                        self.layout_cache.borrow_mut().invalidate_from(entry_index);
+                        self.download_entry_index = Some(entry_index);
+                        let task_data_dir = data_dir.clone();
+                        let task_name = name.clone();
+                        tokio::spawn(async move {
+                            let ticket: iroh_blobs::ticket::BlobTicket = match ticket_str
+                                .parse()
+                            {
+                                Ok(t) => t,
+                                Err(e) => {
+                                    tracing::error!("Stream: invalid ticket: {e}");
+                                    return;
+                                }
+                            };
+                            let (addr, hash, _format) = ticket.into_parts();
+                            let candidates = download_candidates(addr.id, &neighbors);
+                            let dl_dir = task_data_dir.join("downloads");
+                            let _ = tokio::fs::create_dir_all(&dl_dir).await;
+                            if is_folder {
+                                let _ = boru_core::collection_transfer::download_collection_to_dir(
+                                    &blob_store,
+                                    &endpoint,
+                                    hash,
+                                    candidates,
+                                    &task_name,
+                                    &dl_dir,
+                                )
+                                .await;
+                                return;
+                            }
+                            let save_path = dl_dir.join(&task_name);
+                            let _ = download_blob_to_file(
+                                &blob_store,
+                                &endpoint,
+                                hash,
+                                candidates,
+                                task_name,
+                                kind,
+                                &save_path,
+                                move |ev| {
+                                    if let Ok(mut q) = progress_queue.lock() {
+                                        q.push_back(ev);
+                                    }
+                                },
+                                None,
+                            )
+                            .await;
+                        });
+                    }
+
+                    // The growing file lives in the FsStore data directory:
+                    // <data_dir>/blobs/data/<hex>.data. The downloader writes
+                    // into this file progressively as chunks arrive, so a
+                    // Range-capable HTTP server can serve playback before the
+                    // download completes.
+                    let store_data_path = data_dir
+                        .join("blobs")
+                        .join("data")
+                        .join(format!("{content_hash}.data"));
+                    let content_type = Self::content_type_for_filename(&name);
+                    iced::Task::perform(
+                        async move {
+                            StreamingServer::start(store_data_path, total_size, content_type)
+                                .await
+                                .map(|server| (server.url(), Arc::new(server)))
+                                .map_err(|e| e.to_string())
+                        },
+                        move |result| match result {
+                            Ok((url, server)) => AppMessage::StreamingServerReady {
+                                entry_index,
+                                url,
+                                server,
+                            },
+                            Err(error) => AppMessage::StreamingServerFailed {
+                                entry_index,
+                                error,
+                            },
+                        },
+                    )
+                }
+                #[cfg(not(feature = "video-playback"))]
+                {
+                    // No inline runtime: fall back to download + external open.
+                    let Some(entry) = self.entries.get(entry_index) else {
+                        return iced::Task::none();
+                    };
+                    let Some(download) = entry.download.as_ref() else {
+                        return iced::Task::none();
+                    };
+                    if !download.ticket.is_empty() {
+                        if let Some(task) = self.stream_for_external_play(entry_index, download) {
+                            return task;
+                        }
+                    }
+                    self.push_system("Video is not ready to play yet.");
+                    iced::Task::none()
+                }
+            }
+            #[cfg(feature = "video-playback")]
+            AppMessage::StreamingServerReady {
+                entry_index,
+                url,
+                server,
+            } => {
+                let Some(entry) = self.entries.get(entry_index) else {
+                    tracing::warn!("StreamingServerReady: entry not found");
+                    return iced::Task::none();
+                };
+                let Some(download) = entry.download.as_ref() else {
+                    tracing::warn!("StreamingServerReady: no download attached");
+                    return iced::Task::none();
+                };
+                tracing::info!(entry_index, url = %url, "StreamingServerReady: opening player");
+                let message_id = entry.event_id;
+                let attachment_id = download.name.clone();
+                // The stream is intentionally NOT content-verified: the file
+                // is still growing by design. Clear any stale error state.
+                if let Some(download) = self
+                    .entries
+                    .get_mut(entry_index)
+                    .and_then(|entry| entry.download.as_mut())
+                {
+                    download.playback_error = None;
+                }
+                let key = VideoInstanceKey::new(self.topic, message_id, attachment_id);
+                let _previous = self.playback_coordinator.request_play(key.clone());
+                self.inline_video = Some(InlineVideoSession {
+                    key: key.clone(),
+                    video: None,
+                    error: None,
+                    // Fresh talkspurt: the first observed frame anchors
+                    // playout after the default jitter delay.
+                    jitter: VideoJitterBuffer::default(),
+                    resume_position: self
+                        .inline_video_resume
+                        .as_ref()
+                        .filter(|(resume_key, _)| resume_key == &key)
+                        .map(|(_, position)| *position)
+                        .unwrap_or_default(),
+                    last_near_viewport: Instant::now(),
+                    streaming_server: Some(server),
+                });
+                self.inline_video_resume = None;
+                self.layout_cache.borrow_mut().invalidate_from(entry_index);
+                iced::Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            let uri = match url::Url::parse(&url) {
+                                Ok(uri) => uri,
+                                Err(e) => return Err(format!("invalid stream URL: {e}")),
+                            };
+                            Video::new(&uri).map_err(|e| e.to_string())
+                        })
+                        .await
+                        .map_err(|e| e.to_string())
+                        .and_then(|result| result)
+                    },
+                    move |result| match result {
+                        Ok(mut video) => {
+                            video.set_paused(false);
+                            AppMessage::InlineVideoEvent(InlineVideoEvent::Loaded {
+                                key,
+                                video: Arc::new(video),
+                            })
+                        }
+                        Err(error) => AppMessage::InlineVideoEvent(InlineVideoEvent::Failed {
+                            key,
+                            error,
+                        }),
+                    },
+                )
+            }
+            #[cfg(feature = "video-playback")]
+            AppMessage::StreamingServerFailed {
+                entry_index,
+                error,
+            } => {
+                tracing::warn!(entry_index, %error, "StreamingServerFailed");
+                self.push_system(format!("Could not start video stream: {error}"));
                 iced::Task::none()
             }
             AppMessage::StreamUrl(url) => {
