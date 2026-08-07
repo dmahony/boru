@@ -10,7 +10,7 @@ use crate::app::AppMessage;
 use crate::boru_dialog::BoruDialog;
 use crate::card_shell::{CardShell, CARD_ROW_HEIGHT};
 use crate::design_tokens;
-use crate::fonts::{TypeRole, Typography};
+use crate::fonts::TypeRole;
 use crate::icon_system::{Icon, IconSize};
 use crate::ui_components::{
     self, badge, card_header, date_separator, divider, elevated_card, empty_state,
@@ -110,8 +110,8 @@ pub fn view_gallery() -> Element<'static, AppMessage> {
 fn gallery_heading(label: &str) -> Element<'static, AppMessage> {
     let owned = label.to_string();
     text(owned)
-        .font(Typography::PageTitle.font())
-        .size(Typography::PageTitle.size_px())
+        .font(TypeRole::PageTitle.font())
+        .size(TypeRole::PageTitle.size_px())
         .color(design_tokens::text_primary(&Theme::Light))
         .into()
 }
@@ -119,8 +119,8 @@ fn gallery_heading(label: &str) -> Element<'static, AppMessage> {
 fn gallery_section(label: &str) -> Element<'static, AppMessage> {
     let label_str = label.to_string();
     let label_el: Element<'_, AppMessage> = text(label_str)
-        .font(Typography::SectionHeading.font())
-        .size(Typography::SectionHeading.size_px())
+        .font(TypeRole::SectionTitle.font())
+        .size(TypeRole::SectionTitle.size_px())
         .color(design_tokens::primary(&Theme::Light))
         .into();
     Column::new()
@@ -133,7 +133,7 @@ fn gallery_section(label: &str) -> Element<'static, AppMessage> {
 fn state_label(label: &str) -> Element<'static, AppMessage> {
     let owned = label.to_string();
     text(owned)
-        .size(Typography::SecondaryText.size_px())
+        .size(TypeRole::Metadata.size_px())
         .color(design_tokens::text_muted(&Theme::Light))
         .into()
 }
@@ -257,14 +257,14 @@ fn button_pair(label: &str, btn: Element<'static, AppMessage>) -> Element<'stati
 fn card_gallery() -> Element<'static, AppMessage> {
     let card_content: Vec<Element<'static, AppMessage>> = vec![
         text("This is a card with some content.")
-            .size(Typography::Body.size_px())
+            .size(TypeRole::Body.size_px())
             .into(),
         primary_button("Action", None, false),
     ];
 
     let clickable_content: Vec<Element<'static, AppMessage>> =
         vec![text("Click me — I'm interactive!")
-            .size(Typography::Body.size_px())
+            .size(TypeRole::Body.size_px())
             .into()];
 
     let card_noop: AppMessage = AppMessage::Noop;
@@ -330,15 +330,15 @@ fn card_shell_row(label: &str, meta: &str) -> Element<'static, AppMessage> {
         Row::new()
             .push(
                 text(label.to_string())
-                    .font(Typography::Body.font())
-                    .size(Typography::Body.size_px())
+                    .font(TypeRole::Body.font())
+                    .size(TypeRole::Body.size_px())
                     .color(design_tokens::text_primary(&Theme::Light)),
             )
             .push(Space::new().width(Length::Fill))
             .push(
                 text(meta.to_string())
-                    .font(Typography::SecondaryText.font())
-                    .size(Typography::SecondaryText.size_px())
+                    .font(TypeRole::Metadata.font())
+                    .size(TypeRole::Metadata.size_px())
                     .color(design_tokens::text_muted(&Theme::Light)),
             )
             .spacing(design_tokens::SPACE_8)
@@ -382,8 +382,8 @@ fn card_shell_gallery() -> Element<'static, AppMessage> {
         Column::new()
             .push(
                 text("Connected — 3 direct · 2 relayed · 5 neighbors")
-                    .font(Typography::Body.font())
-                    .size(Typography::Body.size_px())
+                    .font(TypeRole::Body.font())
+                    .size(TypeRole::Body.size_px())
                     .color(design_tokens::text_primary(&Theme::Light)),
             )
             .push(
@@ -393,8 +393,8 @@ fn card_shell_gallery() -> Element<'static, AppMessage> {
             )
             .push(
                 text("QUIC encrypted · connected 12m")
-                    .font(Typography::SecondaryText.font())
-                    .size(Typography::SecondaryText.size_px())
+                    .font(TypeRole::Metadata.font())
+                    .size(TypeRole::Metadata.size_px())
                     .color(design_tokens::text_muted(&Theme::Light)),
             )
             .spacing(0)
@@ -403,8 +403,8 @@ fn card_shell_gallery() -> Element<'static, AppMessage> {
     .width(Length::Fill)
     .into();
     let footer_line: Element<'static, AppMessage> = text("Mesh Healthy · 3 peers")
-        .font(Typography::SecondaryText.font())
-        .size(Typography::SecondaryText.size_px())
+        .font(TypeRole::Metadata.font())
+        .size(TypeRole::Metadata.size_px())
         .color(design_tokens::text_muted(&Theme::Light))
         .into();
     let full_shell = CardShell::new("Mesh Health", vec![])
@@ -867,9 +867,9 @@ fn header_gallery() -> Element<'static, AppMessage> {
 
 fn divider_gallery() -> Element<'static, AppMessage> {
     Column::new()
-        .push(text("Above divider").size(Typography::Body.size_px()))
+        .push(text("Above divider").size(TypeRole::Body.size_px()))
         .push(divider::<AppMessage>())
-        .push(text("Below divider").size(Typography::Body.size_px()))
+        .push(text("Below divider").size(TypeRole::Body.size_px()))
         .push(
             Space::new()
                 .width(Length::Shrink)
@@ -1021,8 +1021,8 @@ fn dialog_example() -> Element<'static, AppMessage> {
     let content = Column::new()
         .push(
             text("Elevated Card / Dialog")
-                .font(Typography::SectionHeading.font())
-                .size(Typography::SectionHeading.size_px()),
+                .font(TypeRole::SectionTitle.font())
+                .size(TypeRole::SectionTitle.size_px()),
         )
         .push(
             Space::new()
@@ -1031,7 +1031,7 @@ fn dialog_example() -> Element<'static, AppMessage> {
         )
         .push(
             text("This is an elevated card with a higher drop shadow. Use for modals, dialogs, and popovers that need to float above other content.")
-                .size(Typography::Body.size_px()),
+                .size(TypeRole::Body.size_px()),
         )
         .push(
             Space::new()
@@ -1062,7 +1062,7 @@ fn boru_dialog_gallery() -> Element<'static, AppMessage> {
     let theme = Theme::Light;
 
     let state_label = text("The reusable BoruDialog shell: header (title + subtitle + close), body, and footer (Cancel + primary). It is generic over Message and styled entirely from design_tokens.")
-        .size(Typography::SecondaryText.size_px())
+        .size(TypeRole::Metadata.size_px())
         .style(move |_| iced::widget::text::Style {
             color: Some(design_tokens::text_secondary(&Theme::Light)),
         });
@@ -1081,7 +1081,7 @@ fn boru_dialog_gallery() -> Element<'static, AppMessage> {
         ))
         .push_body(
             text("Long form content scrolls internally inside the dialog instead of growing the panel.")
-                .size(Typography::SecondaryText.size_px())
+                .size(TypeRole::Metadata.size_px())
                 .into(),
         )
         .scroll_body(120.0)
@@ -1627,7 +1627,7 @@ fn typography_gallery() -> Element<'static, AppMessage> {
             TypeRole::PageTitle => "Boru Settings",
             TypeRole::SectionTitle => "Connection Overview",
             TypeRole::CardTitle => "Mesh Health",
-            TypeRole::Body => "Body copy and descriptions use Source Sans 3 at fifteen pixels.",
+            TypeRole::Body => "Body copy and descriptions use IBM Plex Sans at fifteen pixels.",
             TypeRole::BodyEmphasised => {
                 "Emphasised body copy stands out without synthetic bolding."
             }
@@ -1642,15 +1642,15 @@ fn typography_gallery() -> Element<'static, AppMessage> {
             TypeRole::BrandWordmark => "BORU",
         };
         let family_weight = match role {
-            TypeRole::DisplayHeading => "Manrope Bold 700",
-            TypeRole::PageTitle => "Source Sans 3 SemiBold 600",
-            TypeRole::SectionTitle => "Source Sans 3 SemiBold 600",
-            TypeRole::CardTitle => "Source Sans 3 SemiBold 600",
-            TypeRole::Body => "Source Sans 3 Regular 400",
-            TypeRole::BodyEmphasised => "Source Sans 3 SemiBold 600",
-            TypeRole::ButtonLabel => "Source Sans 3 SemiBold 600",
-            TypeRole::SupportingText => "Source Sans 3 Regular 400",
-            TypeRole::Metadata => "Source Sans 3 Regular 400",
+            TypeRole::DisplayHeading => "Archivo SemiCondensed Bold 700",
+            TypeRole::PageTitle => "Archivo SemiCondensed Bold 700",
+            TypeRole::SectionTitle => "IBM Plex Sans SemiBold 600",
+            TypeRole::CardTitle => "IBM Plex Sans SemiBold 600",
+            TypeRole::Body => "IBM Plex Sans Regular 400",
+            TypeRole::BodyEmphasised => "IBM Plex Sans SemiBold 600",
+            TypeRole::ButtonLabel => "IBM Plex Sans SemiBold 600",
+            TypeRole::SupportingText => "IBM Plex Sans Regular 400",
+            TypeRole::Metadata => "IBM Plex Sans Regular 400",
             TypeRole::ChatMessage => "Figtree Regular 400",
             TypeRole::ChatSender => "Figtree SemiBold 600",
             TypeRole::ChatMetadata => "Figtree Regular 400",
@@ -1672,7 +1672,7 @@ fn typography_gallery() -> Element<'static, AppMessage> {
             )
             .push(
                 text(caption)
-                    .size(Typography::SecondaryText.size_px())
+                    .size(TypeRole::Metadata.size_px())
                     .color(design_tokens::text_muted(&Theme::Light)),
             )
             .spacing(design_tokens::SPACE_2)
@@ -1704,7 +1704,7 @@ fn typography_gallery() -> Element<'static, AppMessage> {
     };
     let family_row = |name: &'static str| -> Element<'static, AppMessage> {
         text(name)
-            .size(Typography::SecondaryText.size_px())
+            .size(TypeRole::Metadata.size_px())
             .color(design_tokens::text_muted(&Theme::Light))
             .into()
     };
@@ -1746,13 +1746,36 @@ fn typography_gallery() -> Element<'static, AppMessage> {
                 .spacing(design_tokens::SPACE_12)
                 .push(weight_sample("JetBrains Mono", iced::font::Weight::Normal, "400"))
                 .push(weight_sample("JetBrains Mono", iced::font::Weight::Medium, "500")),
+        )
+        .push(family_row("Archivo SemiCondensed (FONTS-04)"))
+        .push(
+            Row::new()
+                .spacing(design_tokens::SPACE_12)
+                .push(weight_sample(
+                    "Archivo SemiCondensed",
+                    iced::font::Weight::Semibold,
+                    "600",
+                ))
+                .push(weight_sample(
+                    "Archivo SemiCondensed",
+                    iced::font::Weight::Bold,
+                    "700",
+                )),
+        )
+        .push(family_row("IBM Plex Sans (FONTS-04)"))
+        .push(
+            Row::new()
+                .spacing(design_tokens::SPACE_12)
+                .push(weight_sample("IBM Plex Sans", iced::font::Weight::Normal, "400"))
+                .push(weight_sample("IBM Plex Sans", iced::font::Weight::Medium, "500"))
+                .push(weight_sample("IBM Plex Sans", iced::font::Weight::Semibold, "600")),
         );
 
     let fallback_note = text(format!(
-        "Fallbacks: {} → Source Sans 3 (same weight); {} → platform monospace.",
-        "all roles except technical_value", "technical_value"
+        "Fallbacks: display/page → Archivo SemiCondensed; UI → IBM Plex Sans; chat → Figtree; {} → platform monospace; brand → Raleway.",
+        "technical_value"
     ))
-    .size(Typography::SecondaryText.size_px())
+    .size(TypeRole::Metadata.size_px())
     .color(design_tokens::text_muted(&Theme::Light));
 
     let fallback_sample = |role: TypeRole, label: &'static str| -> Element<'static, AppMessage> {
@@ -1766,7 +1789,7 @@ fn typography_gallery() -> Element<'static, AppMessage> {
         .spacing(design_tokens::SPACE_16)
         .push(fallback_sample(
             TypeRole::DisplayHeading,
-            "Fallback display_heading → Source Sans 3",
+            "Fallback display_heading → Archivo SemiCondensed",
         ))
         .push(fallback_sample(
             TypeRole::TechnicalValue,
