@@ -156,6 +156,25 @@ impl SharedGif {
         self.first_renderable_url().is_some()
     }
 
+    /// First rendition URL the chat's static-image renderer can decode.
+    ///
+    /// The chat card path renders images only (GIF, WebP, PNG, JPEG — see
+    /// the app's `gif_preview_download_tasks`, which skips MP4 previews for
+    /// the same reason).  The provider prefers MP4 for playback, so when
+    /// the playback rendition is MP4 this skips it in favour of the
+    /// fallback/preview renditions.  Covers payloads created before the
+    /// sender-side fix in [`SharedGif::from_search_result`].
+    pub fn first_image_renderable_url(&self) -> Option<&str> {
+        if self.format != GifMediaFormat::Mp4 {
+            return self.first_renderable_url();
+        }
+        [self.fallback_url.as_deref(), self.preview_url.as_deref()]
+            .into_iter()
+            .flatten()
+            .find(|url| !url.is_empty())
+            .or_else(|| self.first_renderable_url())
+    }
+
     /// Build a chat payload from a provider-neutral search result.
     ///
     /// Selects the rendition that best serves each role: the playback
@@ -163,8 +182,29 @@ impl SharedGif {
     /// `fallback_url`, and the preview the `preview_url`.  Keeps the
     /// provider and provider_id so the payload stays provider-neutral and
     /// extensible, and copies dimensions + alt text when known.
+    ///
+    /// The chat card render path decodes images only — it cannot play MP4.
+    /// The provider prefers MP4 for playback, so when the playback rendition
+    /// is MP4 the primary URL falls back to a renderable GIF/WebP rendition
+    /// (preview first: smallest, then the original) so the shared GIF
+    /// actually displays instead of a blank card.
     pub fn from_search_result(result: &GifSearchResult) -> Self {
-        let playback = &result.playback;
+        let playback = if result.playback.format != GifMediaFormat::Mp4 {
+            &result.playback
+        } else {
+            let candidates = [Some(&result.preview), result.original.as_ref()];
+            candidates
+                .into_iter()
+                .flatten()
+                .find(|s| s.format == GifMediaFormat::Gif)
+                .or_else(|| {
+                    candidates
+                        .into_iter()
+                        .flatten()
+                        .find(|s| s.format != GifMediaFormat::Mp4)
+                })
+                .unwrap_or(&result.playback)
+        };
         let fallback = result.original.as_ref().map(|source| source.url.clone());
         let preview = result.preview.url.clone();
         Self {
@@ -499,20 +539,85 @@ mod tests {
 
     #[test]
     fn shared_gif_from_search_result_maps_renditions() {
+        // The provider prefers MP4 for playback, but the chat card render
+        // path is images-only: the primary URL must fall back to the
+        // renderable preview/fallback rendition (here: the preview GIF).
         let page = sample_page();
         let result = &page.items[0];
         let gif = SharedGif::from_search_result(result);
         assert_eq!(gif.provider, "klipy");
         assert_eq!(gif.provider_id, "abc123");
-        assert_eq!(gif.playback_url, "https://media.example/playback.mp4");
-        assert_eq!(gif.format, GifMediaFormat::Mp4);
-        assert_eq!(gif.width, Some(480));
-        assert_eq!(gif.height, Some(360));
+        assert_eq!(gif.playback_url, "https://media.example/preview.gif");
+        assert_eq!(gif.format, GifMediaFormat::Gif);
+        assert_eq!(gif.width, Some(100));
+        assert_eq!(gif.height, Some(75));
         assert_eq!(
             gif.preview_url.as_deref(),
             Some("https://media.example/preview.gif")
         );
         // original is None in the sample page → no fallback_url.
         assert_eq!(gif.fallback_url, None);
+    }
+
+    #[test]
+    fn from_search_result_keeps_renderable_playback_unchanged() {
+        // When the playback rendition is already image-renderable (GIF),
+        // it stays the primary URL — no rendition downgrade.
+        let result = GifSearchResult {
+            provider: "klipy".to_string(),
+            provider_id: "abc123".to_string(),
+            title: None,
+            alt_text: None,
+            preview: GifMediaSource {
+                url: "https://media.example/preview.gif".to_string(),
+                format: GifMediaFormat::Gif,
+                width: Some(100),
+                height: Some(75),
+                file_size: Some(1024),
+            },
+            playback: GifMediaSource {
+                url: "https://media.example/playback.gif".to_string(),
+                format: GifMediaFormat::Gif,
+                width: Some(320),
+                height: Some(180),
+                file_size: Some(200000),
+            },
+            original: Some(GifMediaSource {
+                url: "https://media.example/original.gif".to_string(),
+                format: GifMediaFormat::Gif,
+                width: Some(480),
+                height: Some(270),
+                file_size: Some(1200000),
+            }),
+        };
+        let gif = SharedGif::from_search_result(&result);
+        assert_eq!(gif.playback_url, "https://media.example/playback.gif");
+        assert_eq!(gif.format, GifMediaFormat::Gif);
+        assert_eq!(gif.width, Some(320));
+        assert_eq!(gif.height, Some(180));
+    }
+
+    #[test]
+    fn first_image_renderable_url_skips_mp4_playback() {
+        // Old payloads (created before the from_search_result fix) may
+        // still carry an MP4 playback rendition; the image-only renderer
+        // must skip it and use the fallback/preview instead.
+        let gif = sample_shared_gif();
+        assert_eq!(gif.format, GifMediaFormat::Mp4);
+        assert_eq!(gif.first_renderable_url(), Some("https://media.example/playback.mp4"));
+        assert_eq!(
+            gif.first_image_renderable_url(),
+            Some("https://media.example/original.gif")
+        );
+
+        // Non-MP4 payloads behave exactly like first_renderable_url.
+        let webp = SharedGif {
+            format: GifMediaFormat::AnimatedWebP,
+            ..sample_shared_gif()
+        };
+        assert_eq!(
+            webp.first_image_renderable_url(),
+            Some("https://media.example/playback.mp4")
+        );
     }
 }

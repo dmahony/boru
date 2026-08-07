@@ -88,6 +88,11 @@ run_instance() {
             app_args=("$relay_flag" "${app_args[@]}")
         fi
     fi
+    # Optional extra app args (e.g. BORU_EXTRA_ARGS='--enable-gui-test-actions').
+    if [[ -n "${BORU_EXTRA_ARGS:-}" ]]; then
+        read -r -a extra_args <<< "$BORU_EXTRA_ARGS"
+        app_args+=("${extra_args[@]}")
+    fi
     trap 'kill "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; exit 143' TERM INT
     # Keep xvfb-run in the foreground so it owns and reaps Xvfb on shutdown.
     DISPLAY=":${display}" xvfb-run -a -n "$display" -s '-screen 0 1280x720x24' \
@@ -120,6 +125,11 @@ run_desktop() {
         else
             app_args=("$relay_flag" "${app_args[@]}")
         fi
+    fi
+    # Optional extra app args (e.g. BORU_EXTRA_ARGS='--enable-gui-test-actions').
+    if [[ -n "${BORU_EXTRA_ARGS:-}" ]]; then
+        read -r -a extra_args <<< "$BORU_EXTRA_ARGS"
+        app_args+=("${extra_args[@]}")
     fi
     # Use the user's Xauthority if available, fall back to the display manager's.
     local xauth=""

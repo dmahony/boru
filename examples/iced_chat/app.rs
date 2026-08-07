@@ -8525,9 +8525,10 @@ impl IcedChat {
             return iced::Task::none();
         };
         let generation = self.conversation_generation;
-        // Prefer the playback rendition, then the fallback, then the preview —
-        // matching SharedGif::render_candidates() priority.
-        let url = gif.first_renderable_url().map(|s| s.to_string());
+        // Prefer a rendition the static-image renderer can decode. The
+        // playback rendition may be MP4 (provider preference) which the
+        // image path cannot display — skip it in that case.
+        let url = gif.first_image_renderable_url().map(|s| s.to_string());
         iced::Task::perform(
             async move {
                 let url = match url {
@@ -40919,6 +40920,10 @@ mod tests {
         // KLIPY-06's SharedGif conversion keeps the provider-neutral
         // identity and rendition URLs; the picker's SendGif handler builds
         // this payload and broadcasts it (no full-size download on send).
+        // The playback rendition is MP4 (provider preference) but the chat
+        // render path is images-only, so the primary URL must fall back to
+        // a renderable GIF/WebP rendition — otherwise the card renders
+        // blank.
         let gif = result_with(Some(media_source(
             "https://media.test/original.gif",
             GifMediaFormat::Gif,
@@ -40926,7 +40931,7 @@ mod tests {
         let shared = boru_core::gif_provider::SharedGif::from_search_result(&gif);
         assert_eq!(shared.provider, "test");
         assert_eq!(shared.provider_id, "gif-1");
-        assert_eq!(shared.playback_url, "https://media.test/playback.mp4");
+        assert_eq!(shared.playback_url, "https://media.test/preview.gif");
         assert_eq!(
             shared.preview_url.as_deref(),
             Some("https://media.test/preview.gif")
@@ -40935,7 +40940,7 @@ mod tests {
             shared.fallback_url.as_deref(),
             Some("https://media.test/original.gif")
         );
-        assert_eq!(shared.format, GifMediaFormat::Mp4);
+        assert_eq!(shared.format, GifMediaFormat::Gif);
         assert!(shared.is_renderable());
     }
 
