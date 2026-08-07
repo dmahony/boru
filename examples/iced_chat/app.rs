@@ -1918,6 +1918,35 @@ fn download_restartable(state: &DownloadState) -> bool {
         || matches!(state, DownloadState::Completed { saved_path: Some(path), .. } if !path.exists())
 }
 
+/// Resolve the chat entry index for a completed local upload card.
+///
+/// Prefers a name match on a live (Active/Shared) download card — the same
+/// resolution `DownloadDone` uses — and falls back to the shared
+/// `download_entry_index` only when no name match exists. The shared index
+/// is a single mutable slot that a concurrent remote `set_pending_file`
+/// (incoming FileShare), a user-initiated `ExecuteDownload`, or a room
+/// switch can overwrite while the async upload task is in flight; binding
+/// the uploader's own card by name keeps the sender's thumbnail from being
+/// attached to the wrong entry (VID-02).
+fn resolve_upload_card_index(
+    entries: &[ChatEntry],
+    name: &str,
+    fallback: Option<usize>,
+) -> Option<usize> {
+    entries
+        .iter()
+        .position(|entry| {
+            entry.download.as_ref().is_some_and(|download| {
+                download.name == name
+                    && matches!(
+                        download.state,
+                        DownloadState::Active { .. } | DownloadState::Shared { .. }
+                    )
+            })
+        })
+        .or(fallback)
+}
+
 /// Download state tracked per file in the peer catalogue view.
 #[derive(Clone, Debug)]
 pub(crate) enum CatalogueDownloadState {
@@ -16632,13 +16661,37 @@ impl IcedChat {
                     "FileDownloaded"
                 );
                 // Update the upload-progress entry to Completed.
-                if let Some(idx) = self.download_entry_index {
+                //
+                // Resolve the uploader's own card by NAME first (same
+                // pattern as DownloadDone): the shared download_entry_index
+                // can be clobbered while the async upload task is in flight
+                // by a remote FileShare (set_pending_file), a user-initiated
+                // ExecuteDownload, or a room switch — any of which would
+                // otherwise leave the uploader's own card without its
+                // thumbnail (VID-02).
+                let upload_idx = resolve_upload_card_index(
+                    &self.entries,
+                    &name,
+                    self.download_entry_index,
+                );
+                if let Some(idx) = upload_idx {
                     if let Some(entry) = self.entries.get_mut(idx) {
                         if let Some(dl) = entry.download.as_mut() {
                             dl.ticket = ticket.clone();
                             dl.thumbnail = thumbnail.clone();
                             dl.thumbnail_handle = thumbnail.as_deref().map(|bytes| {
                                 iced::widget::image::Handle::from_bytes(bytes.to_vec())
+                            });
+                            // The uploader card was created with `None`
+                            // thumbnail, so poster_dimensions is still unset.
+                            // Decode it from the returned poster bytes so the
+                            // sender's own card gets the same ratio-exact
+                            // frame as the receiver's ThumbnailFetched path.
+                            dl.poster_dimensions = thumbnail.as_deref().and_then(|bytes| {
+                                image::ImageReader::new(std::io::Cursor::new(bytes))
+                                    .with_guessed_format()
+                                    .ok()
+                                    .and_then(|reader| reader.into_dimensions().ok())
                             });
                             dl.state = DownloadState::Shared {
                                 name: name.clone(),
@@ -42039,6 +42092,67 @@ mod tests {
         assert!(!download_restartable(&DownloadState::Failed {
             failure: DownloadFailure::PermissionDenied,
         }));
+    }
+
+    /// VID-02: the uploader's own card must be resolved by NAME when the
+    /// shared `download_entry_index` was clobbered while the upload was in
+    /// flight (remote FileShare arriving mid-upload, ExecuteDownload on
+    /// another card, or a room switch).
+    #[test]
+    fn resolve_upload_card_index_finds_uploader_card_by_name_after_index_clobber() {
+        // The uploader's own card: Video kind, Active while uploading.
+        let mut uploader_card = ChatEntry::system_download(
+            "Uploading: clip.mp4",
+            TransferKind::Video,
+            "clip.mp4",
+            "",
+            "Me",
+            None,
+        );
+        uploader_card.download.as_mut().unwrap().state = DownloadState::Active {
+            bytes: 0,
+            total: Some(1000),
+        };
+
+        // A remote peer shared the same-named file while the upload was in
+        // flight; set_pending_file moved download_entry_index to THIS card.
+        let mut remote_card = ChatEntry::system_download(
+            "File received: clip.mp4",
+            TransferKind::Video,
+            "clip.mp4",
+            "ticket-remote",
+            "Bob",
+            None,
+        );
+        remote_card.download.as_mut().unwrap().state = DownloadState::Ready { total: Some(1000) };
+
+        let entries = vec![uploader_card, remote_card];
+        // The shared index now points at the REMOTE card (index 1).
+        let resolved = resolve_upload_card_index(&entries, "clip.mp4", Some(1));
+        // Name match wins — the uploader's own card (index 0) gets the
+        // thumbnail, not the remote card.
+        assert_eq!(resolved, Some(0));
+    }
+
+    #[test]
+    fn resolve_upload_card_index_falls_back_to_shared_index_when_no_name_match() {
+        let mut uploader_card = ChatEntry::system_download(
+            "Uploading: clip.mp4",
+            TransferKind::Video,
+            "clip.mp4",
+            "",
+            "Me",
+            None,
+        );
+        uploader_card.download.as_mut().unwrap().state = DownloadState::Active {
+            bytes: 0,
+            total: Some(1000),
+        };
+        let entries = vec![uploader_card];
+        // No name match (different file) → the recorded index is used.
+        assert_eq!(resolve_upload_card_index(&entries, "other.mp4", Some(0)), Some(0));
+        // No match and no fallback → None.
+        assert_eq!(resolve_upload_card_index(&entries, "other.mp4", None), None);
     }
 
     /// Stale progress after a terminal state (Completed) must be ignored.
