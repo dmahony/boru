@@ -253,60 +253,42 @@ pub fn ibm_plex_sans(weight: Weight) -> Font {
 
 // ── Type scale tokens ─────────────────────────────────────────────────
 //
-// Updated per Boru Modern UI spec, section 4:
-//   Page title      28 px  Semibold   ~34 px line-height
-//   Conversation    18 px  Semibold
-//   Sidebar identity 16 px  Semibold
-//   Body / labels   14 px  Regular
-//   Chat messages   15 px  Regular
-//   Secondary meta  12 px  Regular
-//   Sidebar labels  12 px  Semibold  (uppercase, subtle letter spacing)
+// The canonical sizes live in `TypeRole::size_px()` (FONTS Task 16
+// baseline — all roles are within the approved ranges):
+//   display_heading  32 · page_title 28 · section_title 20 · card_title 18
+//   body 15 · body_emphasised 15 · button_label 14 · supporting_text 13
+//   metadata 12 · chat_message 15 · chat_sender 14 · chat_metadata 12
+//   composer_text 15 · technical_value 12 · brand_wordmark 28
+//
+// The `sizes` module below keeps only the constants still referenced by
+// app code (`HOME_SUBTITLE` and the legacy `TYPO_*` aliases). The former
+// named scale constants (PAGE_TITLE, CONVERSATION_TITLE, SIDEBAR_IDENTITY,
+// CHAT_MESSAGE, BODY, SECONDARY) were removed in FONTS-16 — no token or
+// call site referenced them; `TypeRole::size_px()` is the single source.
 
 mod sizes {
     //! Type-size constants (pixels).  Boru Modern spec scale.
     //!
-    //! `TypeRole::size_px()` uses its own approved literals; these named
-    //! constants remain as the documented scale (the legacy aliases below
-    //! are still re-exported as `TYPO_*` for app.rs). The named constants
-    //! are no longer referenced since the `Typography` token set was
-    //! removed in FONTS-04 — kept for docs/scale reference until FONTS-12.
+    //! `TypeRole::size_px()` owns the canonical sizes (FONTS Task 16
+    //! baseline). This module keeps the constants app.rs still references
+    //! directly: `HOME_SUBTITLE` (home subtitle) and the legacy aliases
+    //! re-exported as `TYPO_*`.
 
-    /// Page title — 28 px.
-    #[expect(dead_code)]
-    pub const PAGE_TITLE: f32 = 28.0;
-    /// Home greeting (UI-HOME-02) — 32 px (approved mockup range 30–34 px).
-    #[expect(dead_code)]
-    pub const HOME_GREETING: f32 = 32.0;
     /// Home subtitle (UI-HOME-02) — 16 px (approved mockup range 15–17 px).
     pub const HOME_SUBTITLE: f32 = 16.0;
-    /// Conversation / section heading — 18 px.
-    #[expect(dead_code)]
-    pub const CONVERSATION_TITLE: f32 = 18.0;
-    /// Sidebar identity name — 16 px.
-    #[expect(dead_code)]
-    pub const SIDEBAR_IDENTITY: f32 = 16.0;
-    /// Chat message body — 15 px.
-    #[expect(dead_code)]
-    pub const CHAT_MESSAGE: f32 = 15.0;
-    /// Body text / labels — 14 px.
-    #[expect(dead_code)]
-    pub const BODY: f32 = 14.0;
-    /// Secondary metadata / labels — 12 px.
-    #[expect(dead_code)]
-    pub const SECONDARY: f32 = 12.0;
 
     // ── Legacy size aliases (kept for gradual migration in app.rs) ────
-    /// @deprecated use `PAGE_TITLE` (28 px) instead.
+    /// @deprecated use `TypeRole::PageTitle` (28 px) instead.
     pub const XL: f32 = 28.0;
-    /// @deprecated use `CONVERSATION_TITLE` (18 px) instead.
+    /// @deprecated use `TypeRole::CardTitle` (18 px) instead.
     pub const LG: f32 = 18.0;
-    /// @deprecated use `CHAT_MESSAGE` or `BODY` instead.
+    /// @deprecated use `TypeRole::ChatMessage` (15 px) instead.
     pub const MD: f32 = 15.0;
-    /// @deprecated use `BODY` (14 px) instead.
+    /// @deprecated use `TypeRole::ButtonLabel` (14 px) instead.
     pub const SM: f32 = 14.0;
-    /// @deprecated use `SECONDARY` (12 px) instead.
+    /// @deprecated use `TypeRole::Metadata` (12 px) instead.
     pub const XS: f32 = 12.0;
-    /// @deprecated use `SECONDARY` (12 px) instead.
+    /// @deprecated use `TypeRole::Metadata` (12 px) instead.
     pub const XXS: f32 = 12.0;
 }
 pub use sizes::*;
