@@ -3711,6 +3711,11 @@ pub struct IcedChat {
     dashboard_shared_by_me_filter: Vec<crate::shared_by_me_table::SharedByMeRow>,
     /// FS-05 live transfer projection store (source of the outbound panel).
     transfer_store: Arc<TransferStateStore>,
+    /// Broadcast receiver for live FS-05 projection updates, fed into the
+    /// combined subscription so `TransferProjectionUpdate` / resync messages
+    /// reach `update()` without polling. Created once in `new()` so the
+    /// Arc identity (and therefore the iced subscription) is stable.
+    pub transfer_update_rx: Arc<Mutex<TransferUpdateReceiver>>,
     /// item_id (content hash) → display name, filled by the outbound
     /// provider consumer; never a local path.
     outbound_item_labels: Arc<StdMutex<HashMap<String, String>>>,
@@ -4434,21 +4439,25 @@ impl std::hash::Hash for SharedByMeCardDependency {
     }
 }
 
-/// Dependency for the "Peers Downloading from Me" card. Today the card is a
-/// placeholder, so `peers_count` is reserved for the live outbound-transfer
-/// projection and stays 0 until that projection lands.
+/// Dependency for the "Peers Downloading from Me" card. The card is driven
+/// by the live FS-05 outbound projection: rows are projected (with display
+/// labels resolved) in `peers_card_dependency()`, and the static renderer
+/// draws them. An empty `rows` renders the truthful empty state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PeersCardDependency {
     pub(crate) dark_mode: bool,
-    /// Reserved for the live outbound-transfer projection; the placeholder
-    /// renders no rows, so this stays 0.
-    pub(crate) peers_count: usize,
+    /// Live outbound rows, newest first, with peer display labels and online
+    /// state resolved by the application layer.
+    pub(crate) rows: Vec<crate::dashboard_view_model::PeerDownload>,
 }
 
 impl std::hash::Hash for PeersCardDependency {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        use std::hash::Hash;
         self.dark_mode.hash(state);
-        self.peers_count.hash(state);
+        for row in &self.rows {
+            row.hash_live(state);
+        }
     }
 }
 
@@ -7466,6 +7475,7 @@ impl IcedChat {
             dashboard_downloaded_sort: crate::dashboard_filters::DownloadedSort::default(),
             dashboard_activity_sort: crate::dashboard_filters::ActivitySort::default(),
             dashboard_shared_by_me_filter: Vec::new(),
+            transfer_update_rx: Arc::new(Mutex::new(transfer_store.subscribe())),
             transfer_store,
             outbound_item_labels,
             outbound_active,
@@ -32775,6 +32785,17 @@ impl std::hash::Hash for GuiActionHandle {
     }
 }
 
+/// Wrapper for the FS-05 transfer projection broadcast channel.
+/// The broadcast receiver is not `Hash`, so the handle hashes by Arc
+/// pointer (stable identity → the subscription is not recreated each frame).
+struct TransferProjectionHandle(Arc<Mutex<TransferUpdateReceiver>>);
+
+impl std::hash::Hash for TransferProjectionHandle {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (Arc::as_ptr(&self.0) as usize).hash(state);
+    }
+}
+
 /// Convert one channel item into an Iced message without performing any
 /// application work. Validation and handling remain in `update`.
 fn map_gui_action(action: GuiActionRequest) -> AppMessage {
@@ -32788,6 +32809,7 @@ fn subscription_stream(
     inbox_rx: &InboxRxHandle,
     discovered_rx: &DiscoveredPeersRxHandle,
     gui_action_rx: &GuiActionHandle,
+    transfer_rx: &TransferProjectionHandle,
 ) -> Pin<Box<dyn Stream<Item = AppMessage> + Send>> {
     let rx = Arc::clone(&rx.0);
     let friend_rx = Arc::clone(&friend_rx.0);
@@ -32795,6 +32817,7 @@ fn subscription_stream(
     let inbox_rx = Arc::clone(&inbox_rx.0);
     let discovered_rx = Arc::clone(&discovered_rx.0);
     let gui_action_rx = Arc::clone(&gui_action_rx.0);
+    let transfer_rx = Arc::clone(&transfer_rx.0);
     Box::pin(n0_future::stream::unfold(
         (
             rx,
@@ -32803,8 +32826,9 @@ fn subscription_stream(
             inbox_rx,
             discovered_rx,
             gui_action_rx,
+            transfer_rx,
         ),
-        |(rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx)| async move {
+        |(rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx, transfer_rx)| async move {
             // A closed GUI-action sender is a normal shutdown condition.  Do
             // not let it terminate this combined subscription: the network
             // and friend streams still belong to the application and must
@@ -32823,6 +32847,7 @@ fn subscription_stream(
             let mut inbox_open = true;
             let mut discovered_open = true;
             let mut gui_action_open = true;
+            let mut transfer_open = true;
             loop {
                 let mut rx_guard = rx.lock().await;
                 let mut friend_guard = friend_rx.lock().await;
@@ -32830,6 +32855,7 @@ fn subscription_stream(
                 let mut inbox_guard = inbox_rx.lock().await;
                 let mut discovered_guard = discovered_rx.lock().await;
                 let mut gui_action_guard = gui_action_rx.lock().await;
+                let mut transfer_guard = transfer_rx.lock().await;
                 tokio::select! {
                     event = rx_guard.recv(), if rx_open => {
                         drop(whisper_guard);
@@ -32837,9 +32863,10 @@ fn subscription_stream(
                         drop(inbox_guard);
                         drop(discovered_guard);
                         drop(gui_action_guard);
+                        drop(transfer_guard);
                         drop(rx_guard);
                         match event {
-                            Some(e) => return Some((AppMessage::NetEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx))),
+                            Some(e) => return Some((AppMessage::NetEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx, transfer_rx))),
                             None => { rx_open = false; continue; }
                         }
                     }
@@ -32849,9 +32876,10 @@ fn subscription_stream(
                         drop(inbox_guard);
                         drop(discovered_guard);
                         drop(gui_action_guard);
+                        drop(transfer_guard);
                         drop(friend_guard);
                         match event {
-                            Some(e) => return Some((AppMessage::FriendEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx))),
+                            Some(e) => return Some((AppMessage::FriendEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx, transfer_rx))),
                             None => { friend_open = false; continue; }
                         }
                     }
@@ -32861,9 +32889,10 @@ fn subscription_stream(
                         drop(inbox_guard);
                         drop(discovered_guard);
                         drop(gui_action_guard);
+                        drop(transfer_guard);
                         drop(whisper_guard);
                         match event {
-                            Some(e) => return Some((AppMessage::WhisperEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx))),
+                            Some(e) => return Some((AppMessage::WhisperEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx, transfer_rx))),
                             None => { whisper_open = false; continue; }
                         }
                     }
@@ -32873,9 +32902,10 @@ fn subscription_stream(
                         drop(whisper_guard);
                         drop(discovered_guard);
                         drop(gui_action_guard);
+                        drop(transfer_guard);
                         drop(inbox_guard);
                         match event {
-                            Some(e) => return Some((AppMessage::InboxEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx))),
+                            Some(e) => return Some((AppMessage::InboxEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx, transfer_rx))),
                             None => { inbox_open = false; continue; }
                         }
                     }
@@ -32885,9 +32915,10 @@ fn subscription_stream(
                         drop(whisper_guard);
                         drop(inbox_guard);
                         drop(gui_action_guard);
+                        drop(transfer_guard);
                         drop(discovered_guard);
                         match peers {
-                            Some(peers) => return Some((AppMessage::NewDiscoveredPeers(peers), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx))),
+                            Some(peers) => return Some((AppMessage::NewDiscoveredPeers(peers), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx, transfer_rx))),
                             None => { discovered_open = false; continue; }
                         }
                     }
@@ -32897,17 +32928,43 @@ fn subscription_stream(
                         drop(whisper_guard);
                         drop(inbox_guard);
                         drop(discovered_guard);
+                        drop(transfer_guard);
                         drop(gui_action_guard);
                         match action {
                             Some(a) => return Some((
                                 map_gui_action(a),
-                                (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx),
+                                (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx, transfer_rx),
                             )),
                             None => {
                                 // The MCP/GUI sender was dropped.  Disable only
                                 // this branch and keep waiting on application
                                 // event channels.
                                 gui_action_open = false;
+                                continue;
+                            }
+                        }
+                    }
+                    transfer_update = transfer_guard.recv(), if transfer_open => {
+                        drop(friend_guard);
+                        drop(rx_guard);
+                        drop(whisper_guard);
+                        drop(inbox_guard);
+                        drop(discovered_guard);
+                        drop(gui_action_guard);
+                        drop(transfer_guard);
+                        match transfer_update {
+                            Ok(update) => return Some((AppMessage::TransferProjectionUpdate(update), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx, transfer_rx))),
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                // The broadcast receiver fell behind (progress is
+                                // coalesced to 250 ms but a long UI stall can still
+                                // drop messages). The snapshot is authoritative, so
+                                // rebuild the panel maps instead of replaying.
+                                return Some((AppMessage::TransferSnapshotResync, (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx, transfer_rx)));
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                // The projection store was dropped (shutdown). Keep
+                                // the other channels alive.
+                                transfer_open = false;
                                 continue;
                             }
                         }
@@ -32926,6 +32983,7 @@ impl IcedChat {
         inbox_rx: Arc<Mutex<Receiver<InboxEvent>>>,
         discovered_peers_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<DiscoveredPeersUpdate>>>,
         gui_action_rx: Option<Arc<Mutex<tokio::sync::mpsc::Receiver<GuiActionRequest>>>>,
+        transfer_rx: Arc<Mutex<TransferUpdateReceiver>>,
     ) -> iced::Subscription<AppMessage> {
         let mut subs: Vec<iced::Subscription<AppMessage>> = vec![
             iced::time::every(std::time::Duration::from_secs(1))
@@ -32997,8 +33055,9 @@ impl IcedChat {
                 InboxRxHandle(inbox_rx),
                 DiscoveredPeersRxHandle(discovered_peers_rx),
                 GuiActionHandle(gui_action_inner),
+                TransferProjectionHandle(transfer_rx),
             ),
-            |(rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx)| {
+            |(rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx, transfer_rx)| {
                 subscription_stream(
                     rx,
                     friend_rx,
@@ -33006,6 +33065,7 @@ impl IcedChat {
                     inbox_rx,
                     discovered_rx,
                     gui_action_rx,
+                    transfer_rx,
                 )
             },
         ));
@@ -34757,26 +34817,78 @@ impl IcedChat {
     }
 
     /// Apply one FS-05 projection update to the OUTBOUND panel state.
+    ///
+    /// New active records push a Recent Activity "started downloading" event
+    /// (deduped: only when the transfer id is not already live or archived);
+    /// terminal `Completed` records push a "finished downloading" event the
+    /// single time they are archived. Progress updates never emit activity.
     fn apply_outbound_update(&mut self, record: TransferRecord) {
         if record.direction != TransferDirection::Outbound {
             return;
         }
         if record.state.is_terminal() {
-            if self.outbound_active.remove(&record.transfer_id).is_some()
+            let was_active = self.outbound_active.remove(&record.transfer_id).is_some();
+            let is_new = was_active
                 || !self
                     .outbound_history
                     .iter()
-                    .any(|existing| existing.transfer_id == record.transfer_id)
-            {
+                    .any(|existing| existing.transfer_id == record.transfer_id);
+            if is_new {
+                if record.state == TransferState::Completed {
+                    self.push_outbound_activity(&record, true);
+                }
                 self.outbound_history.push_front(record);
                 self.outbound_history.truncate(MAX_OUTBOUND_HISTORY);
             }
         } else {
+            let is_new = !self.outbound_active.contains_key(&record.transfer_id)
+                && !self
+                    .outbound_history
+                    .iter()
+                    .any(|existing| existing.transfer_id == record.transfer_id);
             self.outbound_history
                 .retain(|existing| existing.transfer_id != record.transfer_id);
+            if is_new {
+                self.push_outbound_activity(&record, false);
+            }
             self.outbound_active
                 .insert(record.transfer_id.clone(), record);
         }
+    }
+
+    /// Push a Recent Activity entry for an outbound transfer transition.
+    ///
+    /// `completed=false` emits "started downloading", `completed=true` emits
+    /// "finished downloading". The peer is resolved to a verified display
+    /// name from the authenticated peer id (never an untrusted string); the
+    /// file label comes from the outbound item-label enrichment and falls
+    /// back to a short hash prefix rather than a fabricated name.
+    fn push_outbound_activity(&mut self, record: &TransferRecord, completed: bool) {
+        let peer_display = record
+            .peer_id
+            .as_deref()
+            .and_then(|id| id.parse::<PublicKey>().ok())
+            .map(|pk| self.resolve_name(&pk))
+            .unwrap_or_else(|| "A peer".to_string());
+        let file_label = self
+            .outbound_item_labels
+            .lock()
+            .map(|guard| {
+                guard
+                    .get(&record.item_id)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        let prefix: String = record.item_id.chars().take(12).collect();
+                        format!("file {prefix}…")
+                    })
+            })
+            .unwrap_or_else(|_| "a file".to_string());
+        let description = if completed {
+            format!("{peer_display} finished downloading {file_label} from you")
+        } else {
+            format!("{peer_display} started downloading {file_label} from you")
+        };
+        self.push_activity(description, ActivityKind::FileShared);
     }
 
     /// Rebuild the outbound panel maps from a projection snapshot.
@@ -34950,236 +35062,6 @@ impl IcedChat {
                 "Download cancelled — partial bytes were discarded; nothing was saved.".to_string(),
             );
         }
-    }
-
-    /// Live "Peers Downloading from Me" panel — the FS-08 upper-right card.
-    ///
-    /// Rows come from the FS-05 outbound projection (stable transfer ids);
-    /// peer labels are resolved from the authenticated peer id, never from a
-    /// display string. Unknown totals render an indeterminate bar plus byte
-    /// count; no percentage is fabricated.
-    fn view_peers_downloading_from_me(&self, theme: &iced::Theme) -> iced::Element<'_, AppMessage> {
-        use crate::card_shell::CardShell;
-        use crate::dashboard_view_model::{outbound_row, sort_outbound_rows, PeerDownload};
-
-        let labels = self
-            .outbound_item_labels
-            .lock()
-            .map(|guard| guard.clone())
-            .unwrap_or_default();
-        let mut rows: Vec<PeerDownload> = self
-            .outbound_active
-            .values()
-            .map(|record| outbound_row(record, &labels))
-            .collect();
-        sort_outbound_rows(&mut rows);
-        let active_count = rows.len();
-
-        let children: Vec<iced::Element<'_, AppMessage>> = rows
-            .into_iter()
-            .map(|row| self.peer_download_row(row, theme))
-            .collect();
-
-        CardShell::new("Peers Downloading from Me", children)
-            .count(active_count)
-            .on_view_all(AppMessage::DashboardTabSelected(
-                crate::dashboard_view_model::DashboardTab::Downloading,
-            ))
-            .empty_message("No one is downloading from you right now.")
-            .max_height(240.0)
-            .build(theme)
-    }
-
-    /// One compact outbound transfer row. Consumes the row so the returned
-    /// element owns its labels (the caller's row vector does not outlive the
-    /// view).
-    fn peer_download_row<'a>(
-        &'a self,
-        row: crate::dashboard_view_model::PeerDownload,
-        theme: &iced::Theme,
-    ) -> iced::Element<'a, AppMessage> {
-        use crate::dashboard_view_model::{format_bytes, Progress as VMProgress};
-        use crate::ui_components::ProgressBar;
-        use iced::widget::{container, Column, Row, Space};
-        use iced::{Alignment, Border, Length};
-
-        // Authenticated identity is the only source of the peer label; the
-        // projection never carries an untrusted display string for peers.
-        let peer_display = row
-            .peer_label
-            .parse::<PublicKey>()
-            .ok()
-            .map(|pk| self.resolve_name(&pk))
-            .unwrap_or_else(|| "Unknown peer".to_string());
-        let online = row
-            .peer_label
-            .parse::<PublicKey>()
-            .ok()
-            .map(|pk| matches!(self.peer_presence(&pk), PeerPresence::Online))
-            .unwrap_or(false);
-
-        let (state_label, state_color) = match row.state {
-            crate::dashboard_view_model::OutboundState::Transferring => {
-                ("Transferring", crate::design_tokens::primary(theme))
-            }
-            crate::dashboard_view_model::OutboundState::Retrying => {
-                ("Retrying", crate::design_tokens::color_warning(theme))
-            }
-            crate::dashboard_view_model::OutboundState::Verifying => {
-                ("Verifying", crate::design_tokens::color_warning(theme))
-            }
-            crate::dashboard_view_model::OutboundState::Completed => {
-                ("Completed", crate::design_tokens::color_success(theme))
-            }
-            crate::dashboard_view_model::OutboundState::Failed => {
-                ("Failed", crate::design_tokens::color_danger(theme))
-            }
-            crate::dashboard_view_model::OutboundState::Cancelled => {
-                ("Cancelled", crate::design_tokens::text_muted(theme))
-            }
-            crate::dashboard_view_model::OutboundState::Disconnected => {
-                ("Disconnected", crate::design_tokens::color_danger(theme))
-            }
-        };
-
-        let (bar, progress_text) = match &row.progress {
-            VMProgress::Determinate { bytes, total } if *total > 0 => {
-                let pct = ((*bytes as f64 / *total as f64) * 100.0).min(100.0) as u8;
-                (
-                    ProgressBar::<AppMessage>::new(pct as f32 / 100.0)
-                        .show_label(false)
-                        .bold()
-                        .build(theme),
-                    format!("{}%", pct),
-                )
-            }
-            VMProgress::Determinate { bytes, .. } => (
-                ProgressBar::<AppMessage>::new(0.0)
-                    .indeterminate(true)
-                    .bold()
-                    .build(theme),
-                format!("{} received", format_bytes(*bytes)),
-            ),
-            VMProgress::Indeterminate { bytes } => (
-                ProgressBar::<AppMessage>::new(0.0)
-                    .indeterminate(true)
-                    .bold()
-                    .build(theme),
-                format!("{} received", format_bytes(*bytes)),
-            ),
-            VMProgress::Unknown => (
-                ProgressBar::<AppMessage>::new(0.0)
-                    .show_label(false)
-                    .bold()
-                    .build(theme),
-                "—".to_string(),
-            ),
-        };
-
-        let avatar: iced::Element<'_, AppMessage> = Avatar::<AppMessage>::new(&peer_display)
-            .size(28.0)
-            .online_dot(online)
-            .dark_mode(self.dark_mode)
-            .build();
-
-        let name_line = Row::new()
-            .push(
-                crate::fonts::type_role_text(
-                    crate::fonts::TypeRole::BodyEmphasised,
-                    peer_display,
-                )
-                .color(crate::design_tokens::text_primary(theme))
-                .width(Length::Shrink)
-                .wrapping(iced::widget::text::Wrapping::None),
-            )
-            .push(Space::new().width(Length::Fill))
-            .push(
-                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, state_label)
-                    .color(state_color)
-                    .width(Length::Shrink),
-            )
-            .align_y(Alignment::Center);
-
-        // PAPIRUS-11: the transferred file leads with the same central
-        // FileTypeIcon component/resolver as chat cards — the icon answers
-        // "what type of file is this?", the state label + progress answer
-        // "what is happening to it".
-        let type_icon = crate::download_progress_view::file_type_icon_element(
-            &row.display_name,
-            None,
-            None,
-            crate::file_type_icon::FileTypeIconSize::Compact,
-            theme,
-        );
-
-        let file_line = Row::new()
-            .push(type_icon)
-            .push(
-                crate::fonts::type_role_text(
-                    crate::fonts::TypeRole::Metadata,
-                    row.display_name,
-                )
-                .style(text_muted_style)
-                .width(Length::Fill)
-                .wrapping(iced::widget::text::Wrapping::None),
-            )
-            .spacing(SPACE_4)
-            .align_y(Alignment::Center);
-
-        let progress_line = Row::new()
-            .push(bar)
-            .push(
-                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, progress_text)
-                    .style(text_muted_style)
-                    .width(Length::Shrink),
-            )
-            .spacing(SPACE_4)
-            .align_y(Alignment::Center);
-
-        let text_col = Column::new()
-            .push(name_line)
-            .push(file_line)
-            .push(progress_line)
-            .spacing(SPACE_2)
-            .width(Length::Fill);
-
-        let mut row_el = Row::new()
-            .push(avatar)
-            .push(Space::new().width(Length::Fixed(SPACE_8)))
-            .push(text_col)
-            .spacing(0)
-            .align_y(Alignment::Center)
-            .width(Length::Fill);
-
-        if let Some(error) = row.error {
-            let error_line = Row::new()
-                .push(
-                    crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, error)
-                        .color(crate::design_tokens::color_danger(theme))
-                        .width(Length::Fill)
-                        .wrapping(iced::widget::text::Wrapping::None),
-                )
-                .spacing(0);
-            row_el = Row::new()
-                .push(row_el)
-                .push(Space::new().width(Length::Fixed(SPACE_4)))
-                .push(error_line)
-                .spacing(0)
-                .align_y(Alignment::Center);
-        }
-
-        container(row_el)
-            .width(Length::Fill)
-            .padding([SPACE_6, SPACE_4])
-            .style(move |t| container::Style {
-                background: None,
-                border: Border {
-                    radius: crate::design_tokens::RADIUS_MD.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            })
-            .into()
     }
 
     /// Render the Downloaded tab: durable completed-download history with
@@ -36462,45 +36344,209 @@ impl IcedChat {
     }
 
     /// PERF-2: snapshot selector for the "Peers Downloading from Me" card.
+    /// Projects the live FS-05 outbound records (already enriched with item
+    /// labels by the provider consumer) into UI rows and resolves the peer
+    /// display label and online state so the static renderer can draw them
+    /// without touching application state.
     fn peers_card_dependency(&self) -> PeersCardDependency {
+        use crate::dashboard_view_model::{outbound_row, sort_outbound_rows};
+        let labels = self
+            .outbound_item_labels
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+        let mut rows: Vec<crate::dashboard_view_model::PeerDownload> = self
+            .outbound_active
+            .values()
+            .map(|record| outbound_row(record, &labels))
+            .collect();
+        sort_outbound_rows(&mut rows);
+        // Resolve the authenticated peer id to a verified display identity
+        // and presence-derived online flag so the static renderer can draw
+        // rows without touching application state.
+        for row in &mut rows {
+            if let Ok(pk) = row.peer_label.parse::<PublicKey>() {
+                row.peer_display = self.resolve_name(&pk);
+                row.online = matches!(self.peer_presence(&pk), PeerPresence::Online);
+            }
+        }
         PeersCardDependency {
             dark_mode: self.dark_mode,
-            peers_count: 0,
+            rows,
         }
     }
 
-    /// PERF-2: static renderer for the "Peers Downloading from Me" card. The
-    /// card is still a placeholder, so its dependency is constant and the lazy
-    /// subtree is built only when the theme changes.
-    fn view_peers_card(_dep: &PeersCardDependency) -> iced::Element<'static, AppMessage> {
-        use iced::widget::{container, Column, Space};
-        use iced::{Alignment, Length};
+    /// PERF-2: static renderer for the "Peers Downloading from Me" card.
+    /// The dependency carries live outbound rows with resolved peer display
+    /// labels; the lazy subtree is rebuilt only when the rows or theme change.
+    fn view_peers_card(dep: &PeersCardDependency) -> iced::Element<'static, AppMessage> {
+        use crate::card_shell::CardShell;
+        use crate::dashboard_view_model::format_bytes;
+        use crate::ui_components::ProgressBar;
+        use iced::widget::{container, Column, Row, Space};
+        use iced::{Alignment, Border, Length};
 
-        container(
-            Column::new()
-                .push(
-                    crate::fonts::type_role_text(
-                        crate::fonts::TypeRole::CardTitle,
-                        "Peers Downloading from Me",
+        let theme = Self::theme_from_dark(dep.dark_mode);
+
+        let children: Vec<iced::Element<'static, AppMessage>> = dep
+            .rows
+            .iter()
+            .map(|row| {
+                let (state_label, state_color) = match row.state {
+                    crate::dashboard_view_model::OutboundState::Transferring => {
+                        ("Transferring", crate::design_tokens::primary(&theme))
+                    }
+                    crate::dashboard_view_model::OutboundState::Retrying => {
+                        ("Retrying", crate::design_tokens::color_warning(&theme))
+                    }
+                    crate::dashboard_view_model::OutboundState::Verifying => {
+                        ("Verifying", crate::design_tokens::color_warning(&theme))
+                    }
+                    crate::dashboard_view_model::OutboundState::Completed => {
+                        ("Completed", crate::design_tokens::color_success(&theme))
+                    }
+                    crate::dashboard_view_model::OutboundState::Failed => {
+                        ("Failed", crate::design_tokens::color_danger(&theme))
+                    }
+                    crate::dashboard_view_model::OutboundState::Cancelled => {
+                        ("Cancelled", crate::design_tokens::text_muted(&theme))
+                    }
+                    crate::dashboard_view_model::OutboundState::Disconnected => {
+                        ("Disconnected", crate::design_tokens::color_danger(&theme))
+                    }
+                };
+
+                let (bar, progress_text) = match &row.progress {
+                    crate::dashboard_view_model::Progress::Determinate { bytes, total }
+                        if *total > 0 =>
+                    {
+                        let pct = ((*bytes as f64 / *total as f64) * 100.0).min(100.0) as u8;
+                        (
+                            ProgressBar::<AppMessage>::new(pct as f32 / 100.0)
+                                .show_label(false)
+                                .bold()
+                                .build(&theme),
+                            format!("{pct}%"),
+                        )
+                    }
+                    crate::dashboard_view_model::Progress::Determinate { bytes, .. }
+                    | crate::dashboard_view_model::Progress::Indeterminate { bytes } => (
+                        ProgressBar::<AppMessage>::new(0.0)
+                            .indeterminate(true)
+                            .bold()
+                            .build(&theme),
+                        format!("{} received", format_bytes(*bytes)),
                     ),
-                )
-                .push(Space::new().height(Length::Fixed(SPACE_8)))
-                .push(
-                    crate::fonts::type_role_text(
-                        crate::fonts::TypeRole::SupportingText,
-                        "Live peer rows with progress bars and file names will appear here.",
+                    crate::dashboard_view_model::Progress::Unknown => (
+                        ProgressBar::<AppMessage>::new(0.0)
+                            .show_label(false)
+                            .bold()
+                            .build(&theme),
+                        "—".to_string(),
+                    ),
+                };
+
+                let avatar: iced::Element<'static, AppMessage> =
+                    Avatar::<AppMessage>::new(&row.peer_display)
+                        .size(28.0)
+                        .online_dot(row.online)
+                        .dark_mode(dep.dark_mode)
+                        .build();
+
+                let name_line = Row::new()
+                    .push(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::BodyEmphasised,
+                            row.peer_display.clone(),
+                        )
+                        .color(crate::design_tokens::text_primary(&theme))
+                        .width(Length::Shrink)
+                        .wrapping(iced::widget::text::Wrapping::None),
                     )
-                    .style(text_muted_style),
-                )
-                .push(Space::new().height(Length::Fill))
-                .align_x(Alignment::Start)
-                .spacing(SPACE_4),
-        )
-        .padding(SPACE_16)
-        .width(Length::Fill)
-        .height(Length::Fixed(120.0))
-        .style(|t| crate::design_tokens::card_style(t))
-        .into()
+                    .push(Space::new().width(Length::Fill))
+                    .push(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::Metadata,
+                            state_label,
+                        )
+                        .color(state_color)
+                        .width(Length::Shrink),
+                    )
+                    .align_y(Alignment::Center);
+
+                let type_icon = crate::download_progress_view::file_type_icon_element(
+                    &row.display_name,
+                    None,
+                    None,
+                    crate::file_type_icon::FileTypeIconSize::Compact,
+                    &theme,
+                );
+
+                let file_line = Row::new()
+                    .push(type_icon)
+                    .push(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::Metadata,
+                            row.display_name.clone(),
+                        )
+                        .style(text_muted_style)
+                        .width(Length::Fill)
+                        .wrapping(iced::widget::text::Wrapping::None),
+                    )
+                    .spacing(SPACE_4)
+                    .align_y(Alignment::Center);
+
+                let progress_line = Row::new()
+                    .push(bar)
+                    .push(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::Metadata,
+                            progress_text,
+                        )
+                        .style(text_muted_style)
+                        .width(Length::Shrink),
+                    )
+                    .spacing(SPACE_4)
+                    .align_y(Alignment::Center);
+
+                let text_col = Column::new()
+                    .push(name_line)
+                    .push(file_line)
+                    .push(progress_line)
+                    .spacing(SPACE_2)
+                    .width(Length::Fill);
+
+                let row_el = Row::new()
+                    .push(avatar)
+                    .push(Space::new().width(Length::Fixed(SPACE_8)))
+                    .push(text_col)
+                    .spacing(0)
+                    .align_y(Alignment::Center)
+                    .width(Length::Fill);
+
+                container(row_el)
+                    .width(Length::Fill)
+                    .padding([SPACE_6, SPACE_4])
+                    .style(move |_t| container::Style {
+                        background: None,
+                        border: Border {
+                            radius: crate::design_tokens::RADIUS_MD.into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    })
+                    .into()
+            })
+            .collect();
+
+        CardShell::new("Peers Downloading from Me", children)
+            .count(dep.rows.len())
+            .on_view_all(AppMessage::DashboardTabSelected(
+                crate::dashboard_view_model::DashboardTab::Downloading,
+            ))
+            .empty_message("No one is downloading from you right now.")
+            .max_height(240.0)
+            .build(&theme)
     }
 
     fn view_file_sharing(&self) -> iced::Element<'_, AppMessage> {
@@ -43726,6 +43772,7 @@ mod tests {
         let (_inbox_tx, inbox_rx) = tokio::sync::mpsc::channel(64);
         let (_peers_tx, peers_rx) = tokio::sync::mpsc::channel(1);
         let (gui_tx, gui_rx) = tokio::sync::mpsc::channel(1);
+        let (_transfer_tx, transfer_rx) = tokio::sync::broadcast::channel(8);
         let request = GuiActionRequest {
             action_id: GuiActionId::new(),
             requested_at_ms: chrono::Utc::now().timestamp_millis(),
@@ -43738,6 +43785,7 @@ mod tests {
             &InboxRxHandle(Arc::new(Mutex::new(inbox_rx))),
             &DiscoveredPeersRxHandle(Arc::new(Mutex::new(peers_rx))),
             &GuiActionHandle(Arc::new(Mutex::new(gui_rx))),
+            &TransferProjectionHandle(Arc::new(Mutex::new(transfer_rx))),
         );
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
@@ -43769,6 +43817,7 @@ mod tests {
         let (_whisper_tx, whisper_rx) = tokio::sync::mpsc::channel(64);
         let (_inbox_tx, inbox_rx) = tokio::sync::mpsc::channel(64);
         let (_discovered_tx, discovered_rx) = tokio::sync::mpsc::channel(1);
+        let (_transfer_tx, transfer_rx) = tokio::sync::broadcast::channel(8);
         let (handle, gui_rx) =
             boru_core::diagnostics::GuiTestHandle::channel(PRODUCERS * PER_PRODUCER);
         let barrier = Arc::new(std::sync::Barrier::new(PRODUCERS));
@@ -43802,6 +43851,7 @@ mod tests {
             &InboxRxHandle(Arc::new(tokio::sync::Mutex::new(inbox_rx))),
             &DiscoveredPeersRxHandle(Arc::new(tokio::sync::Mutex::new(discovered_rx))),
             &GuiActionHandle(Arc::new(tokio::sync::Mutex::new(gui_rx))),
+            &TransferProjectionHandle(Arc::new(tokio::sync::Mutex::new(transfer_rx))),
         );
         let runtime = tokio::runtime::Runtime::new().expect("test runtime");
         let messages = runtime.block_on(async {
@@ -45668,6 +45718,164 @@ mod tests {
         let card = IcedChat::view_recent_activity_card(&data);
         let _ = card;
         let _ = app.view_main_empty_state();
+    }
+
+    /// FS-08/DLMGR: a newly-seen outbound transfer must push a Recent
+    /// Activity "started downloading" event exactly once (the first Active
+    /// record), and the terminal Completed record must push a "finished
+    /// downloading" event the single time it is archived. Progress updates
+    /// between start and completion must NOT emit more events.
+    #[test]
+    fn outbound_transfer_start_and_completion_push_recent_activity() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        if let Ok(mut labels) = app.outbound_item_labels.lock() {
+            labels.insert("item-1".to_string(), "report.pdf".to_string());
+        }
+
+        let start = TransferRecord {
+            transfer_id: "serve:1-1".to_string(),
+            item_id: "item-1".to_string(),
+            direction: TransferDirection::Outbound,
+            peer_id: Some("peer_abc".to_string()),
+            bytes: 0,
+            total_bytes: Some(1024),
+            state: TransferState::Active,
+            started_at_ms: 1,
+            updated_at_ms: 1,
+            error: None,
+            attempt: 1,
+        };
+        app.apply_outbound_update(start.clone());
+        assert_eq!(app.outbound_active.len(), 1, "active row present");
+        let descs: Vec<&str> = app
+            .recent_activity
+            .iter()
+            .map(|e| e.description.as_str())
+            .collect();
+        assert!(
+            descs.iter().any(|d| d.contains("started downloading report.pdf from you")),
+            "start event must be pushed: {descs:?}"
+        );
+
+        // Progress update: no new activity event.
+        let mut progress = start.clone();
+        progress.bytes = 512;
+        progress.updated_at_ms = 2;
+        app.apply_outbound_update(progress);
+        let descs: Vec<&str> = app
+            .recent_activity
+            .iter()
+            .map(|e| e.description.as_str())
+            .collect();
+        assert_eq!(
+            descs.iter().filter(|d| d.contains("report.pdf")).count(),
+            1,
+            "progress must not duplicate the start event"
+        );
+
+        let mut done = start;
+        done.state = TransferState::Completed;
+        done.bytes = 1024;
+        done.updated_at_ms = 3;
+        app.apply_outbound_update(done);
+        let descs: Vec<&str> = app
+            .recent_activity
+            .iter()
+            .map(|e| e.description.as_str())
+            .collect();
+        assert!(
+            descs.iter().any(|d| d.contains("finished downloading report.pdf from you")),
+            "completion event must be pushed: {descs:?}"
+        );
+        assert_eq!(
+            descs.iter().filter(|d| d.contains("report.pdf")).count(),
+            2,
+            "exactly start + completion, no duplicates"
+        );
+        assert!(
+            app.outbound_active.is_empty(),
+            "completed transfer leaves the active map"
+        );
+        assert_eq!(app.outbound_history.len(), 1, "archived exactly once");
+    }
+
+    /// FS-08/DLMGR: re-applying the same terminal record must not emit a
+    /// duplicate Recent Activity event (the projection replays on lag/resync,
+    /// and `apply_outbound_update` must stay idempotent).
+    #[test]
+    fn replayed_terminal_outbound_update_is_idempotent() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        if let Ok(mut labels) = app.outbound_item_labels.lock() {
+            labels.insert("item-x".to_string(), "archive.zip".to_string());
+        }
+
+        let record = TransferRecord {
+            transfer_id: "serve:9-9".to_string(),
+            item_id: "item-x".to_string(),
+            direction: TransferDirection::Outbound,
+            peer_id: None,
+            bytes: 100,
+            total_bytes: Some(100),
+            state: TransferState::Completed,
+            started_at_ms: 1,
+            updated_at_ms: 1,
+            error: None,
+            attempt: 1,
+        };
+        app.apply_outbound_update(record.clone());
+        app.apply_outbound_update(record);
+        let descs: Vec<&str> = app
+            .recent_activity
+            .iter()
+            .map(|e| e.description.as_str())
+            .collect();
+        assert_eq!(
+            descs.iter().filter(|d| d.contains("archive.zip")).count(),
+            1,
+            "replay must not duplicate the completion event"
+        );
+        assert_eq!(app.outbound_history.len(), 1);
+    }
+
+    /// FS-08/DLMGR: the Peers Downloading from Me card dependency carries the
+    /// live outbound projection rows (with the file display label resolved),
+    /// and the static renderer builds without panicking.
+    #[test]
+    fn peers_card_dependency_carries_live_outbound_rows() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        if let Ok(mut labels) = app.outbound_item_labels.lock() {
+            labels.insert("item-2".to_string(), "video.mp4".to_string());
+        }
+        let record = TransferRecord {
+            transfer_id: "serve:2-2".to_string(),
+            item_id: "item-2".to_string(),
+            direction: TransferDirection::Outbound,
+            peer_id: Some("peer_def".to_string()),
+            bytes: 250,
+            total_bytes: Some(1000),
+            state: TransferState::Active,
+            started_at_ms: 1,
+            updated_at_ms: 1,
+            error: None,
+            attempt: 1,
+        };
+        app.apply_outbound_update(record);
+
+        let dep = app.peers_card_dependency();
+        assert_eq!(dep.rows.len(), 1, "one live row projected");
+        assert_eq!(dep.rows[0].display_name, "video.mp4");
+        assert_eq!(
+            dep.rows[0].state,
+            crate::dashboard_view_model::OutboundState::Transferring
+        );
+        assert_eq!(
+            dep.rows[0].progress,
+            crate::dashboard_view_model::Progress::Determinate { bytes: 250, total: 1000 }
+        );
+        assert!(dep.rows[0].peer_display.contains("peer_def") || !dep.rows[0].peer_display.is_empty());
+
+        let card = IcedChat::view_peers_card(&dep);
+        let _ = card;
     }
 
     /// PUBLIC-02: a public-room announcement — whether from a local

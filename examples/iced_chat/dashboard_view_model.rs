@@ -62,7 +62,7 @@ impl StableId {
 }
 
 /// Progress is explicit about missing totals and missing observations.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub(crate) enum Progress {
     Determinate { bytes: u64, total: u64 },
     Indeterminate { bytes: u64 },
@@ -189,6 +189,13 @@ pub(crate) struct PeerDownload {
     pub(crate) id: StableId,
     pub(crate) peer_id: StableId,
     pub(crate) peer_label: String,
+    /// FS-08: resolved display identity (friendly name) for the peer. The
+    /// projection layer cannot resolve names, so this starts as the raw id
+    /// and the application layer overwrites it with a verified display label.
+    pub(crate) peer_display: String,
+    /// FS-08: presence-derived online flag for the avatar dot. Filled by the
+    /// application layer; defaults to false in pure-projection contexts.
+    pub(crate) online: bool,
     pub(crate) file_id: StableId,
     pub(crate) display_name: String,
     pub(crate) progress: Progress,
@@ -199,6 +206,25 @@ pub(crate) struct PeerDownload {
     pub(crate) error: Option<String>,
     /// FS-11: latest attempt number.
     pub(crate) attempt: u32,
+}
+
+impl PeerDownload {
+    /// Hash the live-relevant fields (including progress so the lazy card
+    /// re-renders as bytes transfer, but excluding the unstable presence
+    /// online flag which is derived and flickers).
+    pub(crate) fn hash_live<H: std::hash::Hasher>(&self, state: &mut H) {
+        use std::hash::Hash;
+        self.id.hash(state);
+        self.peer_id.hash(state);
+        self.peer_label.hash(state);
+        self.peer_display.hash(state);
+        self.file_id.hash(state);
+        self.display_name.hash(state);
+        self.updated_at_ms.hash(state);
+        self.progress.hash(state);
+        std::mem::discriminant(&self.state).hash(state);
+        self.attempt.hash(state);
+    }
 }
 
 /// Dashboard-visible outbound transfer state, derived from the projection.
@@ -258,7 +284,9 @@ pub(crate) fn outbound_row(
     PeerDownload {
         id: StableId::new(format!("transfer:{}", record.transfer_id)),
         peer_id: StableId::new(format!("peer:{peer_id}")),
-        peer_label: peer_id,
+        peer_label: peer_id.clone(),
+        peer_display: peer_id,
+        online: false,
         file_id: StableId::new(format!("item:{}", record.item_id)),
         display_name,
         progress: Progress::from_bytes(record.bytes, record.total_bytes),

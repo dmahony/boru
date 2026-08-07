@@ -1671,6 +1671,7 @@ fn main() -> Result<()> {
                 Arc::clone(&state.inbox_events_rx),
                 Arc::clone(&state.discovered_peers_rx),
                 state.gui_action_rx.clone(),
+                Arc::clone(&state.transfer_update_rx),
             ),
             app::keyboard_shortcuts_subscription(),
         ]);
