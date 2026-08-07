@@ -3838,6 +3838,20 @@ pub struct IcedChat {
     /// Whether the right-side details panel is open.
     details_panel_open: bool,
 
+    // ── Receive from ticket (SENDME-02 wormhole sharing) ──
+    /// Whether the "Receive from ticket" dialog is shown.
+    show_receive_ticket_dialog: bool,
+    /// The pasted BlobTicket string in the receive dialog.
+    receive_ticket_input: String,
+    /// Pre-flight result for the pasted ticket (size + format info).
+    receive_ticket_preflight: Option<ReceiveTicketPreflight>,
+    /// User-facing error from the pre-flight step, if any.
+    receive_ticket_error: Option<String>,
+    /// True while the pre-flight async task is in flight.
+    receive_ticket_preflight_busy: bool,
+    /// True while the confirmed download task is in flight.
+    receive_ticket_downloading: bool,
+
     // ── Room advertisement (public directory) ──
     /// Which rooms are being advertised into the directory topic.
     advertised_rooms: HashSet<TopicId>,
@@ -4966,6 +4980,27 @@ struct SharedTunnelState {
     is_http: bool,
 }
 
+/// Result of the "Receive from ticket" pre-flight check.
+///
+/// Carries the ticket string plus what the provider told us about the blob
+/// (format + total size) so the confirm step can start the download through
+/// the existing download machinery into a safe destination.
+#[derive(Debug, Clone)]
+pub(crate) struct ReceiveTicketPreflight {
+    /// The BlobTicket string the user pasted (kept for the download step).
+    pub(crate) ticket: String,
+    /// Content hash (hex) of the blob.
+    pub(crate) content_hash: String,
+    /// Node id of the provider (short form for display).
+    pub(crate) node_short: String,
+    /// Total payload size in bytes.
+    pub(crate) total_size: u64,
+    /// `true` when the ticket addresses a HashSeq collection (folder).
+    pub(crate) is_collection: bool,
+    /// Number of children (1 for a raw blob, N for a collection).
+    pub(crate) child_count: u64,
+}
+
 #[derive(Debug, Clone)]
 pub enum AppMessage {
     // ── Navigation ──
@@ -5538,6 +5573,24 @@ pub enum AppMessage {
     CopyFriendId,
     /// Clear the "Copied!" visual feedback after copy.
     FriendIdCopiedClear,
+    /// Copy the share ticket (BlobTicket string) of a sent/completed file to
+    /// the clipboard, like sendme's `sendme receive <ticket>` output.
+    CopyShareTicket(usize),
+    /// Open the "Receive from ticket" dialog (paste a BlobTicket to download
+    /// a file shared outside the friend graph).
+    OpenReceiveTicketDialog,
+    /// Close the "Receive from ticket" dialog.
+    CloseReceiveTicketDialog,
+    /// The pasted ticket text changed.
+    ReceiveTicketInputChanged(String),
+    /// Run the pre-flight check (parse ticket, connect, read size/name).
+    ReceiveTicketPreflight,
+    /// Pre-flight finished: Ok carries the display name + total size;
+    /// Err carries a user-facing error message.
+    ReceiveTicketPreflightDone(Result<ReceiveTicketPreflight, String>),
+    /// User confirmed the pre-flighted ticket — start the download through
+    /// the existing download machinery into a safe destination.
+    ConfirmReceiveTicket,
     /// Open a direct chat with an online friend.
     OpenFriendChat(PublicKey),
     /// Toggle notification sounds on/off.
@@ -7056,6 +7109,12 @@ impl IcedChat {
             file_upload_spinner_frame: 0,
             download_entry_index: None,
             active_download_transfer_id: None,
+            show_receive_ticket_dialog: false,
+            receive_ticket_input: String::new(),
+            receive_ticket_preflight: None,
+            receive_ticket_error: None,
+            receive_ticket_preflight_busy: false,
+            receive_ticket_downloading: false,
             #[cfg(feature = "video-playback")]
             inline_video: None,
             #[cfg(feature = "video-playback")]
@@ -8984,6 +9043,13 @@ impl IcedChat {
             AppMessage::GifSearchResults(_) => "GifSearchResults",
             AppMessage::CopyFriendId => "CopyFriendId",
             AppMessage::FriendIdCopiedClear => "FriendIdCopiedClear",
+            AppMessage::CopyShareTicket(_) => "CopyShareTicket",
+            AppMessage::OpenReceiveTicketDialog => "OpenReceiveTicketDialog",
+            AppMessage::CloseReceiveTicketDialog => "CloseReceiveTicketDialog",
+            AppMessage::ReceiveTicketInputChanged(_) => "ReceiveTicketInputChanged",
+            AppMessage::ReceiveTicketPreflight => "ReceiveTicketPreflight",
+            AppMessage::ReceiveTicketPreflightDone(_) => "ReceiveTicketPreflightDone",
+            AppMessage::ConfirmReceiveTicket => "ConfirmReceiveTicket",
             AppMessage::OpenFriendChat(_) => "OpenFriendChat",
             AppMessage::ToggleSound(_) => "ToggleSound",
             AppMessage::ToggleInviteAddressSharing(_) => "ToggleInviteAddressSharing",
@@ -20416,6 +20482,201 @@ impl IcedChat {
                 iced::Task::none()
             }
 
+            // ── SENDME-02: BlobTicket wormhole sharing ────────────────────
+            AppMessage::CopyShareTicket(entry_index) => {
+                self.video_card_menu_open = None;
+                if let Some(entry) = self.entries.get(entry_index) {
+                    if let Some(dl) = &entry.download {
+                        // Re-serialize the ticket from the local endpoint so
+                        // the recipient fetches from this node (which hosts
+                        // the blob after send or download).  If the stored
+                        // ticket cannot be parsed, fall back to copying the
+                        // raw string — it still grants access to the blob.
+                        let ticket_str = match dl.ticket.parse::<iroh_blobs::ticket::BlobTicket>() {
+                            Ok(t) => {
+                                let (_, hash, format) = t.into_parts();
+                                boru_core::ticket_share::make_share_ticket(
+                                    self.endpoint.addr(),
+                                    hash,
+                                    format,
+                                    boru_core::ticket_share::AddrInfoOptions::RelayAndAddresses,
+                                )
+                            }
+                            Err(_) => dl.ticket.clone(),
+                        };
+                        self.toast_message = Some("Share ticket copied to clipboard".to_string());
+                        return iced::clipboard::write(ticket_str);
+                    }
+                }
+                iced::Task::none()
+            }
+
+            AppMessage::OpenReceiveTicketDialog => {
+                self.show_receive_ticket_dialog = true;
+                self.receive_ticket_input = String::new();
+                self.receive_ticket_preflight = None;
+                self.receive_ticket_error = None;
+                self.receive_ticket_preflight_busy = false;
+                self.receive_ticket_downloading = false;
+                iced::Task::none()
+            }
+
+            AppMessage::CloseReceiveTicketDialog => {
+                self.show_receive_ticket_dialog = false;
+                self.receive_ticket_input = String::new();
+                self.receive_ticket_preflight = None;
+                self.receive_ticket_error = None;
+                self.receive_ticket_preflight_busy = false;
+                iced::Task::none()
+            }
+
+            AppMessage::ReceiveTicketInputChanged(text) => {
+                self.receive_ticket_input = text;
+                self.receive_ticket_preflight = None;
+                self.receive_ticket_error = None;
+                iced::Task::none()
+            }
+
+            AppMessage::ReceiveTicketPreflight => {
+                let input = self.receive_ticket_input.trim().to_string();
+                if input.is_empty() {
+                    self.receive_ticket_error = Some("Paste a share ticket first.".to_string());
+                    return iced::Task::none();
+                }
+                self.receive_ticket_preflight_busy = true;
+                self.receive_ticket_error = None;
+                let endpoint = self.endpoint.clone();
+                iced::Task::perform(
+                    async move {
+                        let ticket: iroh_blobs::ticket::BlobTicket = input
+                            .parse()
+                            .map_err(|e| format!("Invalid share ticket: {e}"))?;
+                        let preflight = boru_core::ticket_share::preflight_ticket(&endpoint, &ticket)
+                            .await
+                            .map_err(|e| format!("Pre-flight failed: {e}"))?;
+                        Ok::<_, String>(ReceiveTicketPreflight {
+                            ticket: input,
+                            content_hash: preflight.hash.to_hex().to_string(),
+                            node_short: preflight.node_id.fmt_short().to_string(),
+                            total_size: preflight.total_size,
+                            is_collection: preflight.format == iroh_blobs::BlobFormat::HashSeq,
+                            child_count: preflight.child_count,
+                        })
+                    },
+                    AppMessage::ReceiveTicketPreflightDone,
+                )
+            }
+
+            AppMessage::ReceiveTicketPreflightDone(result) => {
+                self.receive_ticket_preflight_busy = false;
+                match result {
+                    Ok(preflight) => {
+                        self.receive_ticket_preflight = Some(preflight);
+                        self.receive_ticket_error = None;
+                    }
+                    Err(e) => {
+                        self.receive_ticket_preflight = None;
+                        self.receive_ticket_error = Some(e);
+                    }
+                }
+                iced::Task::none()
+            }
+
+            AppMessage::ConfirmReceiveTicket => {
+                let Some(preflight) = self.receive_ticket_preflight.clone() else {
+                    return iced::Task::none();
+                };
+                if self.receive_ticket_downloading {
+                    return iced::Task::none();
+                }
+                if preflight.is_collection {
+                    self.receive_ticket_error = Some(
+                        "Folder tickets are not supported yet — use a single-file ticket.".to_string(),
+                    );
+                    return iced::Task::none();
+                }
+                // Close the dialog and start the download through the
+                // existing download machinery into a safe destination.
+                self.show_receive_ticket_dialog = false;
+                self.receive_ticket_downloading = true;
+                let name = format!("ticket-{}", &preflight.content_hash[..8]);
+                let ticket_str = preflight.ticket.clone();
+                let node_short = preflight.node_short.clone();
+                let total_size = preflight.total_size;
+
+                // Create the chat download card entry (same shape as a
+                // received FileShare card) so progress renders normally.
+                self.download_entry_index = Some(self.entries.len());
+                self.entries_push(ChatEntry::system_download(
+                    format!("Receiving from ticket: {name}"),
+                    TransferKind::File,
+                    name.clone(),
+                    ticket_str.clone(),
+                    &node_short,
+                    None,
+                ));
+                if let Some(idx) = self.download_entry_index {
+                    if let Some(entry) = self.entries.get_mut(idx) {
+                        if let Some(dl) = entry.download.as_mut() {
+                            dl.state = DownloadState::Active {
+                                bytes: 0,
+                                total: Some(total_size),
+                            };
+                        }
+                    }
+                }
+
+                let blob_store = self.blob_store.clone();
+                let endpoint = self.endpoint.clone();
+                let neighbors = self.neighbors.clone();
+                let dl_dir = self.boru_downloads_dir.clone();
+                let progress_queue = self.download_progress_queue.clone();
+                iced::Task::perform(
+                    async move {
+                        let ticket: iroh_blobs::ticket::BlobTicket = ticket_str
+                            .parse()
+                            .map_err(|e| format!("Invalid share ticket: {e}"))?;
+                        let (addr, hash, _format) = ticket.into_parts();
+                        let node_id = addr.id;
+                        let candidates = download_candidates(node_id, &neighbors);
+                        let _ = tokio::fs::create_dir_all(&dl_dir).await;
+                        let save_path = boru_core::safe_destination::safe_destination_path(
+                            &dl_dir,
+                            &name,
+                            &preflight.content_hash,
+                        )
+                        .map_err(|e| format!("Unsafe download name: {e}"))?;
+                        download_blob_to_file(
+                            &blob_store,
+                            &endpoint,
+                            hash,
+                            candidates,
+                            name.clone(),
+                            TransferKind::File,
+                            &save_path,
+                            {
+                                let queue = progress_queue.clone();
+                                move |ev| {
+                                    if let Ok(mut q) = queue.lock() {
+                                        q.push_back(ev);
+                                    }
+                                }
+                            },
+                            Some(total_size),
+                        )
+                        .await
+                        .map_err(|e| format!("Download failed: {e}"))?;
+                        Ok::<_, String>((name, save_path))
+                    },
+                    move |r| match r {
+                        Ok((name, path)) => {
+                            AppMessage::DownloadDone(name, path)
+                        }
+                        Err(e) => AppMessage::DownloadFailed(e),
+                    },
+                )
+            }
+
             AppMessage::ToggleSound(enabled) => {
                 self.sound_enabled = enabled;
                 let settings = AppSettings {
@@ -22868,6 +23129,8 @@ impl IcedChat {
             self.view_create_tunnel_dialog(base)
         } else if self.show_invite_member_dialog {
             self.view_invite_member_dialog(base)
+        } else if self.show_receive_ticket_dialog {
+            self.view_receive_ticket_dialog(base)
         } else if let Some(entry_index) = self.lightbox_image {
             self.view_image_lightbox(base, entry_index)
         } else {
@@ -23295,6 +23558,84 @@ impl IcedChat {
             .on_close(AppMessage::HideCreateGroupDialog)
             .on_backdrop(AppMessage::HideCreateGroupDialog)
             .scroll_body(520.0)
+            .build(&theme);
+
+        iced::widget::stack![base, overlay].into()
+    }
+
+    /// Dialog for receiving a file shared outside the friend graph: paste a
+    /// BlobTicket, run a pre-flight check (size + format), then download
+    /// through the existing download machinery into a safe destination.
+    fn view_receive_ticket_dialog<'a>(
+        &'a self,
+        base: iced::widget::Container<'a, AppMessage>,
+    ) -> iced::Element<'a, AppMessage> {
+        use crate::boru_dialog::{BoruDialog, BORU_DIALOG_WIDTH_STANDARD};
+        use crate::form_components::{FormSection, TextInput};
+
+        let theme = Self::theme_from_dark(self.dark_mode);
+
+        let mut ticket_field = TextInput::new(
+            "Share ticket",
+            "Paste a share ticket (starts with blob:…)",
+            &self.receive_ticket_input,
+            AppMessage::ReceiveTicketInputChanged,
+        )
+        .id("receive-ticket-input")
+        .helper("Anyone with this ticket can receive the file — no friend relationship required.");
+        if let Some(error) = &self.receive_ticket_error {
+            ticket_field = ticket_field.error(error.clone());
+        }
+
+        let ticket_section = FormSection::new("Ticket")
+            .push(ticket_field.build())
+            .build();
+
+        // Pre-flight result summary.
+        let preflight_section: Option<iced::Element<'a, AppMessage>> =
+            self.receive_ticket_preflight.as_ref().map(|pf| {
+                let kind_label = if pf.is_collection {
+                    format!("Folder · {} children", pf.child_count)
+                } else {
+                    "Single file".to_string()
+                };
+                let size = crate::dashboard_view_model::format_bytes(pf.total_size);
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::BodyEmphasised,
+                    format!("{kind_label} · {size} · from {}", pf.node_short),
+                )
+                .into()
+            });
+
+        let mut overlay = BoruDialog::new("Receive from Ticket")
+            .subtitle("Paste a share ticket to download a file shared outside the friend graph.")
+            .width(self.dialog_width(BORU_DIALOG_WIDTH_STANDARD))
+            .push_body(ticket_section);
+        if let Some(section) = preflight_section {
+            overlay = overlay.push_body(section);
+        }
+        overlay
+            .secondary("Cancel", AppMessage::CloseReceiveTicketDialog)
+            .secondary_enabled(!self.receive_ticket_preflight_busy)
+            .primary(
+                if self.receive_ticket_preflight.is_none() {
+                    "Inspect Ticket"
+                } else {
+                    "Download"
+                },
+                if self.receive_ticket_preflight.is_none() {
+                    AppMessage::ReceiveTicketPreflight
+                } else {
+                    AppMessage::ConfirmReceiveTicket
+                },
+            )
+            .primary_enabled(
+                !self.receive_ticket_preflight_busy
+                    && !self.receive_ticket_downloading
+                    && !self.receive_ticket_input.trim().is_empty(),
+            )
+            .on_close(AppMessage::CloseReceiveTicketDialog)
+            .on_backdrop(AppMessage::CloseReceiveTicketDialog)
             .build(&theme);
 
         iced::widget::stack![base, overlay].into()
@@ -35461,9 +35802,35 @@ impl IcedChat {
         .padding([SPACE_6, SPACE_16])
         .style(BUTTON_PRIMARY_GREEN);
 
+        // SENDME-02: receive a file shared outside the friend graph via a
+        // BlobTicket (copy a ticket string → paste here → pre-flight → download).
+        let receive_ticket_btn = button(
+            Row::new()
+                .push(
+                    Icon::Download
+                        .build()
+                        .size(crate::icon_system::IconSize::Xs)
+                        .color_fn(crate::design_tokens::text_muted)
+                        .build(),
+                )
+                .push(
+                    crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::ButtonLabel,
+                        "Receive from Ticket",
+                    ),
+                )
+                .spacing(SPACE_4)
+                .align_y(Alignment::Center),
+        )
+        .on_press(AppMessage::OpenReceiveTicketDialog)
+        .padding([SPACE_6, SPACE_16])
+        .style(BUTTON_OUTLINE);
+
         let header_actions = Row::new()
             .push(search_row)
             .push(Space::new().width(Length::Fixed(SPACE_16)))
+            .push(receive_ticket_btn)
+            .push(Space::new().width(Length::Fixed(SPACE_8)))
             .push(open_downloads_btn)
             .align_y(Alignment::Center);
 

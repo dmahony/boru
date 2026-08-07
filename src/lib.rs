@@ -383,6 +383,12 @@ pub mod file_access_client;
 /// path traversal and filename injection.
 pub mod safe_destination;
 
+/// BlobTicket wormhole sharing — copy a ticket string to share a file outside
+/// the friend graph; paste a ticket to receive.  Provides address-info
+/// trimming (Id-only vs RelayAndAddresses) and a connect-based preflight.
+#[cfg(feature = "net")]
+pub mod ticket_share;
+
 /// Text sanitisation for safe display in the UI and logs.
 ///
 /// Strips or replaces control characters, Unicode format characters

@@ -38,8 +38,8 @@ use iced::{Alignment, Color, Length};
 use iced_video_player::Video;
 
 use super::app::{
-    icon_svg, AppMessage, DownloadAttachment, DownloadState, ICON_FILES, ICON_FOLDER, ICON_MESH,
-    ICON_PLAY, ICON_RETRY,
+    icon_svg, AppMessage, DownloadAttachment, DownloadState, ICON_COPY, ICON_FILES, ICON_FOLDER,
+    ICON_MESH, ICON_PLAY, ICON_RETRY,
 };
 use crate::file_type_icon::{FileTypeIcon, FileTypeIconSize};
 
@@ -1110,6 +1110,8 @@ pub(crate) fn action_buttons<'a>(
                 primary_button(Some(ICON_FILES), "Open", OpenDownloadedFile(name.to_string()))
                     .into(),
                 secondary_button(Some(ICON_FOLDER), "Open Folder", OpenDownloadsFolder).into(),
+                secondary_button(Some(ICON_COPY), "Copy Ticket", CopyShareTicket(entry_index))
+                    .into(),
                 secondary_button(Some(ICON_MESH), "Re-share", ReshareFile(entry_index)).into(),
             ]
         }
@@ -1118,6 +1120,8 @@ pub(crate) fn action_buttons<'a>(
                 primary_button(Some(ICON_FILES), "Open", OpenDownloadedFile(name.to_string()))
                     .into(),
                 secondary_button(Some(ICON_FOLDER), "Open Folder", OpenDownloadsFolder).into(),
+                secondary_button(Some(ICON_COPY), "Copy Ticket", CopyShareTicket(entry_index))
+                    .into(),
                 secondary_button(Some(ICON_MESH), "Re-share", ReshareFile(entry_index)).into(),
             ]
         }

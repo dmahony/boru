@@ -52,6 +52,7 @@ const SVG_TERMINAL: &[u8] = include_bytes!("../../assets/icons/lucide/terminal.s
 const SVG_IMAGE: &[u8] = include_bytes!("../../assets/icons/lucide/image.svg");
 const SVG_USERS: &[u8] = include_bytes!("../../assets/icons/lucide/users.svg");
 const SVG_UPLOAD: &[u8] = include_bytes!("../../assets/icons/lucide/upload.svg");
+const SVG_DOWNLOAD: &[u8] = include_bytes!("../../assets/icons/lucide/download.svg");
 const SVG_CHEVRON_DOWN: &[u8] = include_bytes!("../../assets/icons/lucide/chevron-down.svg");
 const SVG_CHEVRON_RIGHT: &[u8] = include_bytes!("../../assets/icons/lucide/chevron-right.svg");
 const SVG_HOME: &[u8] = include_bytes!("../../assets/icons/lucide/home.svg");
@@ -109,6 +110,9 @@ pub enum Icon {
     Play,
     /// Upload / share-out arrow (Figure 3 share-files action).
     Upload,
+    /// Download / receive-in arrow — used for the "Receive from Ticket"
+    /// wormhole-sharing entry point.
+    Download,
 
     // Status / presence
     Online,
@@ -170,6 +174,7 @@ impl Icon {
             Icon::Video => SVG_FILM,
             Icon::Play => SVG_PLAY,
             Icon::Upload => SVG_UPLOAD,
+            Icon::Download => SVG_DOWNLOAD,
 
             // Status / presence
             Icon::Online => ICON_ONLINE,
@@ -436,6 +441,7 @@ mod tests {
             Icon::Users,
             Icon::Files,
             Icon::Upload,
+            Icon::Download,
             Icon::Paperclip,
             Icon::Image,
             Icon::Video,
