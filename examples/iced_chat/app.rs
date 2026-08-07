@@ -3051,16 +3051,42 @@ fn gif_provider_error_message(error: &GifProviderError) -> String {
             None => "GIF provider rate limited — try again shortly".to_string(),
         },
         GifProviderError::Timeout => "GIF search timed out — try again".to_string(),
-        GifProviderError::Network { details } => format!("GIF search network error: {details}"),
+        GifProviderError::Network { details } => {
+            format!("GIF search network error: {}", sanitize_gif_error_details(details))
+        }
         GifProviderError::InvalidResponse { details } => {
-            format!("GIF provider returned an invalid response: {details}")
+            format!("GIF provider returned an invalid response: {}", sanitize_gif_error_details(details))
         }
         GifProviderError::MediaUnavailable { details } => {
-            format!("GIF media unavailable: {details}")
+            format!("GIF media unavailable: {}", sanitize_gif_error_details(details))
         }
         GifProviderError::Cancelled => "GIF search cancelled".to_string(),
-        GifProviderError::Other { details } => format!("GIF search failed: {details}"),
+        GifProviderError::Other { details } => {
+            format!("GIF search failed: {}", sanitize_gif_error_details(details))
+        }
     }
+}
+
+/// Strip URL-looking substrings from provider error details as a defensive
+/// measure.  The KLIPY provider already redacts its request URL (and the
+/// app-level message should never echo a search query or API key), but a
+/// future provider might embed a URL in its `details`; never surface that
+/// to the user or logs.
+fn sanitize_gif_error_details(details: &str) -> String {
+    let mut out = String::with_capacity(details.len());
+    let mut rest = details;
+    while let Some(start) = rest.find("http://").or_else(|| rest.find("https://")) {
+        out.push_str(&rest[..start]);
+        // Skip the URL token (up to whitespace).
+        let after = &rest[start..];
+        let end = after
+            .find(char::is_whitespace)
+            .unwrap_or(after.len());
+        out.push_str("[redacted URL]");
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 // ── Pre-warm (PERF-4R-B) ─────────────────────────────────────────────
@@ -4215,6 +4241,10 @@ pub struct IcedChat {
     /// Whether the next results message should append to (paginate) rather
     /// than replace the current `gif_results`.
     gif_appending: bool,
+    /// Compact error shown under the grid when a load-more (pagination)
+    /// request fails.  Keeps already-loaded results visible instead of
+    /// replacing them with the full-screen error state.
+    gif_append_error: Option<String>,
     /// Monotonic request id; responses carrying an older id are stale and
     /// must be ignored (prevents out-of-order completions overwriting newer
     /// results).
@@ -6037,6 +6067,11 @@ pub enum AppMessage {
     SendGif(GifSearchResult),
     /// Trigger a GIF search through the configured external provider.
     GifSearchSubmit,
+    /// Retry the last failed GIF request (trending when the query is empty,
+    /// otherwise the current search).  Unlike `GifSearchSubmit`, this works
+    /// even when the failure happened before any query was entered (e.g. a
+    /// trending request failed on picker open).
+    GifRetry,
     /// Debounce timer fired with the debounce seq; only the latest fires.
     GifSearchDebounced(u64),
     /// GIF search results arrived (provider-neutral page + request seq).
@@ -7657,6 +7692,7 @@ impl IcedChat {
             gif_error: None,
             gif_next_cursor: None,
             gif_appending: false,
+            gif_append_error: None,
             gif_request_seq: 0,
             gif_debounce_seq: 0,
             gif_spinner_frame: 0,
@@ -9707,6 +9743,7 @@ impl IcedChat {
             AppMessage::GifSearchChanged(_) => "GifSearchChanged",
             AppMessage::SendGif(_) => "SendGif",
             AppMessage::GifSearchSubmit => "GifSearchSubmit",
+            AppMessage::GifRetry => "GifRetry",
             AppMessage::GifSearchDebounced(_) => "GifSearchDebounced",
             AppMessage::GifSearchResults { .. } => "GifSearchResults",
             AppMessage::GifTrendingResults { .. } => "GifTrendingResults",
@@ -21931,6 +21968,7 @@ impl IcedChat {
                     self.gif_results.clear();
                     self.gif_preview_cache.clear();
                     self.gif_error = None;
+                    self.gif_append_error = None;
                     self.gif_has_searched = false;
                     self.gif_next_cursor = None;
                     if self.gif_not_configured {
@@ -21942,6 +21980,12 @@ impl IcedChat {
                     return self.start_gif_trending(None);
                 }
                 self.gif_loading = false;
+                // User closed the picker while a request was in flight:
+                // invalidate the request sequence so the late response is
+                // dropped by the stale-guard instead of mutating hidden
+                // state (results, errors, or preview-download tasks) after
+                // the panel closed.
+                self.gif_request_seq = self.gif_request_seq.wrapping_add(1);
                 iced::Task::none()
             }
 
@@ -21952,6 +21996,8 @@ impl IcedChat {
                     self.gif_has_searched = false;
                     self.gif_results.clear();
                     self.gif_preview_cache.clear();
+                    self.gif_error = None;
+                    self.gif_append_error = None;
                     self.gif_next_cursor = None;
                     if self.gif_not_configured {
                         return iced::Task::none();
@@ -21997,6 +22043,26 @@ impl IcedChat {
                 return self.start_gif_search(query, None);
             }
 
+            AppMessage::GifRetry => {
+                // Re-run the request that failed.  `GifSearchSubmit` is a
+                // no-op for empty queries, so a dedicated retry is needed
+                // when a trending request failed before any query existed.
+                if self.gif_not_configured {
+                    return iced::Task::none();
+                }
+                self.gif_error = None;
+                self.gif_append_error = None;
+                self.gif_loading = false;
+                let query = self.gif_search_text.trim().to_string();
+                if query.is_empty() || self.gif_showing_trending {
+                    self.gif_showing_trending = true;
+                    return self.start_gif_trending(None);
+                }
+                self.gif_showing_trending = false;
+                self.gif_has_searched = true;
+                return self.start_gif_search(query, None);
+            }
+
             AppMessage::GifSearchResults { seq, page } => {
                 // Stale-response guard: an older request completing late must
                 // not replace newer results.
@@ -22005,6 +22071,7 @@ impl IcedChat {
                 }
                 self.gif_loading = false;
                 self.gif_error = None;
+                self.gif_append_error = None;
                 self.gif_showing_trending = false;
                 self.gif_has_searched = true;
                 if self.gif_appending {
@@ -22030,6 +22097,7 @@ impl IcedChat {
                 }
                 self.gif_loading = false;
                 self.gif_error = None;
+                self.gif_append_error = None;
                 self.gif_showing_trending = true;
                 if self.gif_appending {
                     let mut seen: HashSet<String> =
@@ -22052,8 +22120,16 @@ impl IcedChat {
                     return iced::Task::none();
                 }
                 self.gif_loading = false;
+                let was_appending = self.gif_appending;
                 self.gif_appending = false;
-                self.gif_error = Some(message);
+                if was_appending {
+                    // Load-more failure: keep the already-loaded grid and
+                    // surface a compact note under it instead of replacing
+                    // results with the full-screen error state.
+                    self.gif_append_error = Some(message);
+                } else {
+                    self.gif_error = Some(message);
+                }
                 iced::Task::none()
             }
 
@@ -29453,6 +29529,7 @@ impl IcedChat {
         self.gif_request_seq = seq;
         self.gif_loading = true;
         self.gif_error = None;
+        self.gif_append_error = None;
         let task = iced::Task::perform(
             async move {
                 let result = provider
@@ -29487,6 +29564,7 @@ impl IcedChat {
         self.gif_request_seq = seq;
         self.gif_loading = true;
         self.gif_error = None;
+        self.gif_append_error = None;
         let task = iced::Task::perform(
             async move {
                 let result = provider
@@ -29526,9 +29604,21 @@ impl IcedChat {
             let provider_id = result.provider_id.clone();
             tasks.push(iced::Task::perform(
                 async move {
-                    let client = reqwest::Client::new();
+                    // Bound every preview fetch: an 8s timeout and a 5 MiB
+                    // cap so a dead or oversized media URL degrades to the
+                    // placeholder instead of hanging or exhausting memory.
+                    let client = reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(8))
+                        .build()
+                        .ok()?;
                     let resp = client.get(&url).send().await.ok()?;
+                    if !resp.status().is_success() {
+                        return None;
+                    }
                     let bytes = resp.bytes().await.ok()?;
+                    if bytes.len() > 5 * 1024 * 1024 {
+                        return None;
+                    }
                     Some((provider_id, bytes.to_vec()))
                 },
                 |opt| match opt {
@@ -29662,7 +29752,7 @@ impl IcedChat {
                             "Retry",
                         )
                     )
-                    .on_press(AppMessage::GifSearchSubmit)
+                    .on_press(AppMessage::GifRetry)
                     .padding([SPACE_4, SPACE_8]),
                 ]
                 .spacing(SPACE_2),
@@ -29754,6 +29844,18 @@ impl IcedChat {
                         Some(AppMessage::GifLoadMore)
                     })
                     .padding([SPACE_4, SPACE_8]),
+                );
+            }
+            // A failed load-more keeps the already-loaded grid visible; show
+            // the error as a compact note so the user can retry without
+            // losing results.
+            if let Some(append_error) = &self.gif_append_error {
+                results_col = results_col.push(
+                    crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::Metadata,
+                        append_error.as_str(),
+                    )
+                    .color(text_muted(&theme)),
                 );
             }
         }
@@ -40578,6 +40680,20 @@ mod tests {
             retry_after: Some(42),
         });
         assert!(msg.contains("42"), "retry hint surfaced");
+    }
+
+    #[test]
+    fn provider_error_message_redacts_urls_in_details() {
+        // KLIPY-10/KLIPY-09: even if a provider embeds a URL in `details`
+        // (which could carry the API key in the path or the query), the
+        // user-facing message must never surface it.
+        let msg = gif_provider_error_message(&GifProviderError::Network {
+            details: "connection refused: https://api.klipy.com/api/v1/secret-key-abc/gifs/search?q=cats in hats".to_string(),
+        });
+        assert!(!msg.contains("secret-key-abc"), "API key leaked: {msg}");
+        assert!(!msg.contains("api.klipy.com"), "URL leaked: {msg}");
+        assert!(!msg.contains("cats in hats"), "query leaked: {msg}");
+        assert!(msg.contains("GIF search network error"), "{msg}");
     }
 
     #[test]

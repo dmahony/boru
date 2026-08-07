@@ -939,6 +939,46 @@ mod tests {
         assert!(matches!(err, GifProviderError::Timeout), "{err:?}");
     }
 
+    #[tokio::test]
+    async fn network_error_details_never_leak_key_or_query_klipy10() {
+        // KLIPY-10 resilience: a connection-refused error produces a reqwest
+        // error whose Display would embed the full request URL (API key in
+        // the path, query in the query string).  The neutral `Network`
+        // details must not contain either — `map_reqwest_error` classifies
+        // the failure instead of propagating the URL text.
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        // Drop the listener so the port refuses connections.
+        drop(listener);
+        let provider = KlipyGifProvider::new(
+            "super-secret-klipy-key-777",
+            Url::parse(&format!("http://{addr}")).expect("url"),
+        )
+        .with_timeout(Duration::from_secs(5));
+        let err = provider
+            .search(GifSearchRequest {
+                query: "cats in hats".to_string(),
+                cursor: None,
+                limit: 24,
+                content_rating: None,
+            })
+            .await
+            .expect_err("should fail to connect");
+        match &err {
+            GifProviderError::Network { details } => {
+                assert!(
+                    !details.contains("super-secret-klipy-key-777"),
+                    "API key leaked in network details: {details}"
+                );
+                assert!(
+                    !details.contains("cats in hats") && !details.contains("cats%20in%20hats"),
+                    "search query leaked in network details: {details}"
+                );
+            }
+            other => panic!("expected Network error, got {other:?}"),
+        }
+    }
+
     #[test]
     fn from_env_missing_key_returns_not_configured() {
         // Save and restore the env var so other tests are unaffected.
