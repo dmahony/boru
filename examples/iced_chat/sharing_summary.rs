@@ -203,6 +203,11 @@ pub(crate) fn view_sharing_summary_card(
 
 /// One metric cell: large value, small label — matching the mockup's
 /// two-column summary layout.
+///
+/// FONTS-10: the metric VALUE uses `TypeRole::SectionTitle` (IBM Plex Sans
+/// SemiBold 20) — the largest IBM Plex Sans heading role. Archivo
+/// SemiCondensed is reserved for the File Sharing page title only; a stat
+/// number inside a dashboard card is UI text, not a page heading.
 fn metric_cell<'a>(
     label: &'a str,
     value: Option<u64>,
@@ -211,8 +216,8 @@ fn metric_cell<'a>(
     Column::new()
         .push(
             text(format_value(value))
-                .font(TypeRole::PageTitle.font())
-                .size(TypeRole::PageTitle.size_px())
+                .font(TypeRole::SectionTitle.font())
+                .size(TypeRole::SectionTitle.size_px())
                 .color(design_tokens::text_primary(theme)),
         )
         .push(

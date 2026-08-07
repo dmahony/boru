@@ -31,14 +31,14 @@
 //! and outgoing shared file.
 
 use iced::widget::text::Wrapping;
-use iced::widget::{self, button, container, row, text, tooltip, Column, Row};
+use iced::widget::{self, button, container, row, tooltip, Column, Row};
 use iced::{Alignment, Color, Length};
 #[cfg(feature = "video-playback")]
 use iced_video_player::{Video, VideoPlayer};
 
 use super::app::{
     accent_green, border_muted, color_error, text_system, SPACE_10, SPACE_12, SPACE_16, SPACE_2,
-    SPACE_20, SPACE_24, SPACE_4, SPACE_6, SPACE_8, TYPO_SM, TYPO_XS, TYPO_XXS,
+    SPACE_20, SPACE_24, SPACE_4, SPACE_6, SPACE_8,
 };
 use super::app::{AppMessage, DownloadAttachment, DownloadState};
 use super::download_progress_view::{
@@ -314,7 +314,10 @@ fn loading_indicator<'a>(
                 FileTypeIconSize::List,
                 &resolve_theme(dark_mode),
             ))
-            .push(text("Preparing…").size(TYPO_XS).color(ON_MEDIA_TEXT))
+            .push(
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, "Preparing…")
+                    .color(ON_MEDIA_TEXT),
+            )
             .spacing(SPACE_4)
             .align_x(Alignment::Center),
     )
@@ -988,7 +991,13 @@ impl<'a> BoruVideoFileCard<'a> {
                             FileTypeIconSize::Large,
                             &resolve_theme(self.dark_mode),
                         ))
-                        .push(text(subtitle).size(TYPO_XS).color(ON_MEDIA_TEXT))
+                        .push(
+                            crate::fonts::type_role_text(
+                                crate::fonts::TypeRole::Metadata,
+                                subtitle,
+                            )
+                            .color(ON_MEDIA_TEXT),
+                        )
                         .spacing(SPACE_4)
                         .align_x(Alignment::Center),
                 )
@@ -1052,12 +1061,26 @@ impl<'a> BoruVideoFileCard<'a> {
         let error_preview = attachment.playback_error.as_ref().map(|error| {
             container(
                 Column::new()
-                    .push(text(error.title()).size(TYPO_SM).color(error_color))
-                    .push(text(error.message()).size(TYPO_XS).color(ON_MEDIA_TEXT))
                     .push(
-                        text("The original attachment is still available below.")
-                            .size(TYPO_XXS)
-                            .color(ON_MEDIA_TEXT),
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::BodyEmphasised,
+                            error.title(),
+                        )
+                        .color(error_color),
+                    )
+                    .push(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::Metadata,
+                            error.message(),
+                        )
+                        .color(ON_MEDIA_TEXT),
+                    )
+                    .push(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::Metadata,
+                            "The original attachment is still available below.",
+                        )
+                        .color(ON_MEDIA_TEXT),
                     )
                     .spacing(SPACE_4)
                     .align_x(Alignment::Center),
@@ -1117,12 +1140,14 @@ impl<'a> BoruVideoFileCard<'a> {
                             AppMessage::PlayInlineVideo(self.entry_index),
                         ))
                         .push(
-                            text(format!(
-                                "{} / {}",
-                                format_media_time(position),
-                                format_media_time(duration),
-                            ))
-                            .size(TYPO_XS)
+                            crate::fonts::type_role_text(
+                                crate::fonts::TypeRole::Metadata,
+                                format!(
+                                    "{} / {}",
+                                    format_media_time(position),
+                                    format_media_time(duration),
+                                ),
+                            )
                             .color(Color::WHITE),
                         )
                         .push(action_button(

@@ -38908,11 +38908,28 @@ mod tests {
 
     #[test]
     fn file_sharing_dashboard_uses_type_role_roles() {
-        // UI-HOME-14: every file-sharing dashboard tab/view resolves through
-        // TypeRole — titles as CardTitle/SectionTitle, rows as Body, table
-        // metadata as Metadata, buttons as ButtonLabel. The peer catalogue
-        // (per-peer Shared with Me) and its row renderer are included.
+        // UI-HOME-14 + FONTS-10: every file-sharing dashboard tab/view
+        // resolves through TypeRole — titles as CardTitle/SectionTitle, rows
+        // as Body, table metadata as Metadata, buttons as ButtonLabel. The
+        // peer catalogue (per-peer Shared with Me) and its row renderer are
+        // included. FONTS-10: the File Sharing page heading is the ONLY
+        // Archivo SemiCondensed (PageTitle) in the file-sharing surfaces —
+        // the sharing summary metric values, file cards, and icon labels are
+        // IBM Plex Sans.
         let src = include_str!("app.rs");
+        // FONTS-10: main screen heading "File Sharing" uses the Archivo
+        // PageTitle role; the subtitle beneath it is IBM Plex supporting text.
+        let fs_heading =
+            method_source(src, "fn view_file_sharing_content(", "fn view_discover(");
+        assert!(
+            fs_heading.contains("TypeRole::PageTitle, \"File Sharing\""),
+            "File Sharing heading must use TypeRole::PageTitle (Archivo SemiCondensed)"
+        );
+        assert!(
+            fs_heading.contains("TypeRole::PageTitle.font()")
+                || fs_heading.contains("TypeRole::PageTitle"),
+            "File Sharing heading must resolve through the PageTitle role"
+        );
         let catalogue = method_source(
             src,
             "fn view_peer_catalogue_content(",
@@ -38933,11 +38950,39 @@ mod tests {
             summary_src.contains("TypeRole::CardTitle"),
             "sharing summary card title must use TypeRole::CardTitle"
         );
+        // FONTS-10: the summary metric VALUES must be IBM Plex Sans — never
+        // the Archivo PageTitle role (Archivo is reserved for the page title).
+        assert!(
+            !summary_src.contains("TypeRole::PageTitle"),
+            "sharing summary metric values must not use Archivo PageTitle (FONTS-10)"
+        );
+        assert!(
+            summary_src.contains("TypeRole::SectionTitle"),
+            "sharing summary metric values must use an IBM Plex Sans heading role (FONTS-10)"
+        );
         let shared =
             method_source(src, "fn view_shared_with_me(", "fn view_recent_download_activity_card(");
         assert!(
             shared.contains("TypeRole::SectionTitle"),
             "Shared with Me title must use TypeRole::SectionTitle"
+        );
+        // FONTS-10: the video file card's on-media labels must render through
+        // TypeRole (IBM Plex Sans), never raw `text()` with the legacy default
+        // font. The card body already used type_role_text everywhere except the
+        // on-media overlay labels fixed in FONTS-10.
+        let video_card_src = include_str!("video_file_card.rs");
+        let video_prod = video_card_src.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            video_prod.contains("TypeRole::Metadata"),
+            "video file card metadata must use TypeRole::Metadata"
+        );
+        assert!(
+            video_prod.contains("TypeRole::BodyEmphasised"),
+            "video file card error title must use TypeRole::BodyEmphasised"
+        );
+        assert!(
+            video_prod.contains("type_role_text"),
+            "video file card text must render through type_role_text"
         );
     }
 
