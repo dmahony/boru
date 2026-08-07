@@ -2002,6 +2002,12 @@ fn download_restartable(state: &DownloadState) -> bool {
 /// switch can overwrite while the async upload task is in flight; binding
 /// the uploader's own card by name keeps the sender's thumbnail from being
 /// attached to the wrong entry (VID-02).
+///
+/// A `Completed { saved_path: None }` card is also a valid uploader target:
+/// a same-named download's `TransferProgress` can hijack the uploader's
+/// card before the upload finishes (VID-01), leaving it in the transient
+/// "Verifying" placeholder; `FileDownloaded` must still resolve it and
+/// promote it to `Shared` so the sender's own card becomes playable.
 fn resolve_upload_card_index(
     entries: &[ChatEntry],
     name: &str,
@@ -2014,11 +2020,80 @@ fn resolve_upload_card_index(
                 download.name == name
                     && matches!(
                         download.state,
-                        DownloadState::Active { .. } | DownloadState::Shared { .. }
+                        DownloadState::Active { .. }
+                            | DownloadState::Shared { .. }
+                            | DownloadState::Completed { saved_path: None, .. }
                     )
             })
         })
         .or(fallback)
+}
+
+/// Whether a `DownloadDone` / `DownloadDonePeerFile` completion event may
+/// upgrade this card to `Completed { saved_path: Some(path) }`.
+///
+/// The VIDCARD-20 terminal-state guard exists to keep a user-initiated
+/// Cancel (or another genuinely user terminal state) from being
+/// overwritten by a late background completion. But `Completed {
+/// saved_path: None }` is NOT a user terminal state — it is the transient
+/// "Verifying" placeholder set by the queued `TransferProgress::Completed`
+/// event when it beats `DownloadDone` to the UI (VID-01). The placeholder
+/// must be upgraded with the real path, otherwise the video card is stuck
+/// at "Verifying…" forever even though the file exists on disk.
+fn download_done_can_complete(state: &DownloadState) -> bool {
+    match state {
+        DownloadState::Completed {
+            saved_path: Some(_),
+            ..
+        }
+        | DownloadState::Shared { .. }
+        | DownloadState::Failed { .. }
+        | DownloadState::Cancelled => false,
+        DownloadState::Completed {
+            saved_path: None, ..
+        }
+        | DownloadState::Active { .. }
+        | DownloadState::Paused { .. }
+        | DownloadState::Ready { .. } => true,
+    }
+}
+
+/// Choose the chat entry a `TransferProgress::Started` event binds to.
+///
+/// `ExecuteDownloadAt` records the card the user actually initiated in
+/// `download_entry_index`, so that card is the preferred target. When no
+/// index is recorded (or it points at an unrelated card), fall back to the
+/// first matching card by name+kind (the historic behaviour that supports
+/// whisper/background downloads).
+///
+/// VID-01: the name-only scan is dangerous when the uploader's own
+/// `Active` upload card shares a name with an incoming download. The scan
+/// can bind the download's transfer id to the UPLOADER card (it is first in
+/// the entries list), so the download's `TransferProgress::Completed` then
+/// flips the uploader's card to the transient Verifying placeholder and it
+/// never leaves Verifying after the upload completes.
+fn started_target_index(
+    entries: &[ChatEntry],
+    kind: TransferKind,
+    name: &str,
+    download_entry_index: Option<usize>,
+) -> Option<usize> {
+    if let Some(idx) = download_entry_index {
+        if entries.get(idx).is_some_and(|entry| {
+            entry.download.as_ref().is_some_and(|download| {
+                download.kind == kind
+                    && download.name == name
+                    && download.transfer_id.is_none()
+            })
+        }) {
+            return Some(idx);
+        }
+    }
+    entries.iter().position(|entry| {
+        entry.download.as_ref().is_some_and(|download| {
+            download.kind == kind && download.name == name && download.transfer_id.is_none()
+        })
+    })
 }
 
 /// Download state tracked per file in the peer catalogue view.
@@ -8193,14 +8268,19 @@ impl IcedChat {
                 ..
             } if matches!(kind, TransferKind::File | TransferKind::Video) => {
                 self.active_download_transfer_id = Some(id);
-                let row_for_name = self.entries.iter().position(|entry| {
-                    entry.download.as_ref().is_some_and(|download| {
-                        download.kind == kind
-                            && download.name == name
-                            && download.transfer_id.is_none()
-                    })
-                });
-                if let Some(idx) = row_for_name.or_else(|| self.current_download_entry_index(None))
+                // VID-01: bind the transfer to the card the user actually
+                // initiated (`download_entry_index`) when it matches, not a
+                // same-named card earlier in the entries list (which can be
+                // the uploader's own Active upload card). The name-only scan
+                // remains as a fallback for whisper/background downloads that
+                // never set the shared index.
+                if let Some(idx) = started_target_index(
+                    &self.entries,
+                    kind,
+                    &name,
+                    self.download_entry_index,
+                )
+                .or_else(|| self.current_download_entry_index(None))
                 {
                     if let Some(entry) = self.entries.get_mut(idx) {
                         if let Some(download) = entry.download.as_mut() {
@@ -15988,22 +16068,33 @@ impl IcedChat {
                                 "DownloadDone: before setting Completed"
                             );
                             is_video = download.kind == TransferKind::Video;
-                            // VIDCARD-20: a user-initiated Cancel (or another
-                            // terminal state) must not be overwritten by the
-                            // late completion of the transfer that was still
-                            // running in the background — the card would
-                            // otherwise snap back to "Ready to play" after
-                            // the user cancelled it.
-                            if download.state.is_terminal() {
+                            // VIDCARD-20: a user-initiated Cancel (or
+                            // another genuinely user terminal state) must
+                            // not be overwritten by the late completion of
+                            // the transfer that was still running in the
+                            // background — the card would otherwise snap
+                            // back to "Ready to play" after the user
+                            // cancelled it.
+                            //
+                            // VID-01: `Completed { saved_path: None }` is
+                            // NOT such a state — it is the transient
+                            // "Verifying" placeholder set by the queued
+                            // TransferProgress::Completed event when it
+                            // beats this DownloadDone to the UI. It MUST
+                            // be upgraded with the real path, otherwise the
+                            // video card stays at "Verifying…" forever even
+                            // though the file exists on disk.
+                            if !download_done_can_complete(&download.state) {
                                 tracing::info!(
                                     idx,
                                     state=?download.state,
-                                    "DownloadDone: ignoring completion for terminal state"
+                                    "DownloadDone: ignoring completion for user terminal state"
                                 );
                                 return iced::Task::none();
                             }
                             let total_size = match &download.state {
                                 DownloadState::Active { total, .. } => *total,
+                                DownloadState::Completed { total_size, .. } => *total_size,
                                 _ => None,
                             };
                             download.state = DownloadState::Completed {
@@ -16091,17 +16182,21 @@ impl IcedChat {
                             // VIDCARD-20: same terminal-state guard as
                             // DownloadDone — a user-initiated cancel must not
                             // be flipped back to Completed by a late peer-file
-                            // completion.
-                            if download.state.is_terminal() {
+                            // completion. VID-01: the transient
+                            // `Completed { saved_path: None }` "Verifying"
+                            // placeholder is NOT a user terminal state and
+                            // must still be upgraded with the real path.
+                            if !download_done_can_complete(&download.state) {
                                 tracing::info!(
                                     idx,
                                     state=?download.state,
-                                    "DownloadDonePeerFile: ignoring completion for terminal state"
+                                    "DownloadDonePeerFile: ignoring completion for user terminal state"
                                 );
                                 return iced::Task::none();
                             }
                             let total_size = match &download.state {
                                 DownloadState::Active { total, .. } => *total,
+                                DownloadState::Completed { total_size, .. } => *total_size,
                                 _ => None,
                             };
                             download.state = DownloadState::Completed {
@@ -44317,6 +44412,190 @@ mod tests {
         assert_eq!(resolve_upload_card_index(&entries, "other.mp4", Some(0)), Some(0));
         // No match and no fallback → None.
         assert_eq!(resolve_upload_card_index(&entries, "other.mp4", None), None);
+    }
+
+    /// VID-01 uploader path: when a same-named download's progress events
+    /// have already flipped the uploader's own card to the transient
+    /// `Completed { saved_path: None }` "Verifying" placeholder, the
+    /// FileDownloaded handler must STILL resolve the uploader card by name
+    /// and promote it to Shared — otherwise the sender's own card never
+    /// leaves Verifying.
+    #[test]
+    fn resolve_upload_card_index_finds_uploader_card_in_verifying_placeholder() {
+        // The uploader's own card was hijacked by a same-named download's
+        // TransferProgress: it is now in the Verifying placeholder.
+        let mut uploader_card = ChatEntry::system_download(
+            "clip.mp4",
+            TransferKind::Video,
+            "clip.mp4",
+            "",
+            "Me",
+            None,
+        );
+        uploader_card.download.as_mut().unwrap().state = DownloadState::Completed {
+            saved_name: "clip.mp4".into(),
+            saved_path: None,
+            total_size: Some(1000),
+        };
+
+        // A remote card with the same name sits later in the list; the
+        // shared index points at it (stale / clobbered).
+        let mut remote_card = ChatEntry::system_download(
+            "File received: clip.mp4",
+            TransferKind::Video,
+            "clip.mp4",
+            "ticket-remote",
+            "Bob",
+            None,
+        );
+        remote_card.download.as_mut().unwrap().state = DownloadState::Ready { total: Some(1000) };
+
+        let entries = vec![uploader_card, remote_card];
+        let resolved = resolve_upload_card_index(&entries, "clip.mp4", Some(1));
+        assert_eq!(
+            resolved,
+            Some(0),
+            "uploader's own Verifying card must be resolved by name"
+        );
+    }
+
+    /// VID-01 downloader path guard: `Completed { saved_path: None }` is
+    /// the transient Verifying placeholder, NOT a user terminal state —
+    /// DownloadDone must be allowed to upgrade it with the real path.
+    #[test]
+    fn download_done_can_complete_accepts_verifying_placeholder() {
+        let verifying = DownloadState::Completed {
+            saved_name: "clip.mp4".into(),
+            saved_path: None,
+            total_size: Some(1000),
+        };
+        assert!(
+            download_done_can_complete(&verifying),
+            "Verifying placeholder must be upgradable by DownloadDone"
+        );
+        // Active / Ready / Paused are also still completable.
+        assert!(download_done_can_complete(&DownloadState::Active {
+            bytes: 100,
+            total: Some(1000),
+        }));
+        assert!(download_done_can_complete(&DownloadState::Ready { total: Some(1000) }));
+        assert!(download_done_can_complete(&DownloadState::Paused {
+            bytes: 100,
+            total: Some(1000),
+        }));
+    }
+
+    /// VIDCARD-20: genuinely user terminal states and already-resolved
+    /// cards must still block a late DownloadDone.
+    #[test]
+    fn download_done_can_complete_rejects_user_terminal_states() {
+        assert!(!download_done_can_complete(&DownloadState::Cancelled));
+        assert!(!download_done_can_complete(&DownloadState::Shared {
+            name: "clip.mp4".into(),
+            path: PathBuf::from("/tmp/clip.mp4"),
+            size: Some(1000),
+        }));
+        assert!(!download_done_can_complete(&DownloadState::Failed {
+            failure: DownloadFailure::PeerOffline { detail: None },
+        }));
+        // Already resolved with a real path — no need to re-set.
+        let resolved = DownloadState::Completed {
+            saved_name: "clip.mp4".into(),
+            saved_path: Some(PathBuf::from("/tmp/clip.mp4")),
+            total_size: Some(1000),
+        };
+        assert!(!download_done_can_complete(&resolved));
+    }
+
+    /// VID-01 downloader path end-to-end: queued `TransferProgress::Completed`
+    /// first puts the video card in the Verifying placeholder, then
+    /// DownloadDone upgrades it to a playable `Completed { saved_path:
+    /// Some(path) }` — the state that `video_presentation_state` maps to
+    /// `Ready`.
+    #[test]
+    fn video_download_verifying_placeholder_upgrades_to_playable() {
+        let mut attachment =
+            DownloadAttachment::new(TransferKind::Video, "clip.mp4", "ticket", "peer", None);
+
+        // Step 1: TransferProgress::Completed drained before DownloadDone.
+        attachment.state = DownloadState::Completed {
+            saved_name: "clip.mp4".into(),
+            saved_path: None,
+            total_size: Some(1000),
+        };
+        assert_eq!(
+            crate::video_file_card::video_presentation_state(&attachment),
+            crate::video_file_card::VideoPresentationState::Verifying
+        );
+        assert!(download_done_can_complete(&attachment.state));
+
+        // Step 2: DownloadDone applies the real path.
+        let total_size = match &attachment.state {
+            DownloadState::Completed { total_size, .. } => *total_size,
+            _ => None,
+        };
+        attachment.state = DownloadState::Completed {
+            saved_name: "clip.mp4".into(),
+            saved_path: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("examples/iced_chat/app.rs")),
+            total_size,
+        };
+        assert_eq!(
+            crate::video_file_card::video_presentation_state(&attachment),
+            crate::video_file_card::VideoPresentationState::Ready,
+            "video card must become playable after DownloadDone upgrades the Verifying placeholder"
+        );
+    }
+
+    /// VID-01 uploader hijack prevention: `started_target_index` prefers the
+    /// card recorded in `download_entry_index` (the card the user actually
+    /// clicked Download on) over a same-named card earlier in the entries
+    /// list — the uploader's own Active upload card must not be hijacked.
+    #[test]
+    fn started_target_index_prefers_download_entry_index_over_name_scan() {
+        // Uploader's own card (Active, uploading) sits FIRST in the list.
+        let mut uploader_card = ChatEntry::system_download(
+            "Uploading: clip.mp4",
+            TransferKind::Video,
+            "clip.mp4",
+            "",
+            "Me",
+            None,
+        );
+        uploader_card.download.as_mut().unwrap().state = DownloadState::Active {
+            bytes: 0,
+            total: Some(1000),
+        };
+        // The actual download card (Ready, same name) is SECOND and is the
+        // one the user clicked (download_entry_index = 1).
+        let mut download_card = ChatEntry::system_download(
+            "File received: clip.mp4",
+            TransferKind::Video,
+            "clip.mp4",
+            "ticket",
+            "Bob",
+            None,
+        );
+        download_card.download.as_mut().unwrap().state = DownloadState::Ready { total: Some(1000) };
+
+        let entries = vec![uploader_card, download_card];
+        // With a valid index, the initiated download card wins.
+        assert_eq!(
+            started_target_index(&entries, TransferKind::Video, "clip.mp4", Some(1)),
+            Some(1),
+            "download_entry_index card must be preferred over the name scan"
+        );
+        // Without an index (whisper/background download), the name scan
+        // still finds the first matching card.
+        assert_eq!(
+            started_target_index(&entries, TransferKind::Video, "clip.mp4", None),
+            Some(0)
+        );
+        // Non-matching index falls back to the name scan.
+        assert_eq!(
+            started_target_index(&entries, TransferKind::Video, "clip.mp4", Some(7)),
+            Some(0)
+        );
     }
 
     /// Stale progress after a terminal state (Completed) must be ignored.
