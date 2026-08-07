@@ -12609,9 +12609,9 @@ impl IcedChat {
                     .unwrap_or_default();
                 let record = self.friends.ensure_friend(fid.clone());
                 record.set_direct_conversation(topic, DirectConversationState::Active);
-                // An explicit Chat click is a mutual friendship signal — set the
-                // relationship so the peer appears in the FRIENDS sidebar immediately.
-                record.relationship = FriendRelationship::Friends;
+                // Opening a chat is NOT a friendship signal.  The peer stays in
+                // the Discover section until a friend request is explicitly
+                // accepted by both sides.  Do NOT set relationship=Friends here.
                 self.conversation_store.upsert(ConversationEntry::new(
                     topic,
                     peer.to_string(),
@@ -12668,8 +12668,13 @@ impl IcedChat {
                         topic,
                         self.discovered_peers.clone(),
                     )),
-                    // Navigate the sender straight into the chat room.
-                    iced::Task::done(AppMessage::OpenRoom(topic)),
+                    // Do NOT also dispatch OpenRoom here: the slow-path
+                    // subscription replays the gossip WAL for this topic,
+                    // and combined with the BackgroundSubscribe above it
+                    // double-subscribes the direct topic (WAL-replay storm,
+                    // pending-events cap reached).  The conversation is
+                    // already in the sidebar via conversation_store.upsert;
+                    // the user opens it with a click, using the fast path.
                 ];
                 if let Some(t) = mailbox_task {
                     tasks.push(t);
@@ -14019,18 +14024,22 @@ impl IcedChat {
                     _ => {}
                 }
                 if is_inactive {
-                    // Only count user-visible messages as unread.  Gossip
-                    // protocol events (AboutMe, Presence, Heartbeat,
-                    // NeighborUp/Down) are filtered from the chat log and
-                    // should not increment the badge counter.
+                    // Only queue user-visible messages (chat text, file shares)
+                    // into the pending replay buffer.  Gossip protocol events
+                    // (AboutMe, Presence, Heartbeat, NeighborUp/Down,
+                    // announcements) are not renderable chat history — queueing
+                    // them fills the 256-event cap and triggers a warning storm
+                    // on dense public topics like the shared lobby.  They are
+                    // also excluded from the unread counter below.
                     let should_count = Self::_is_user_visible_event(&event);
+                    if !should_count {
+                        return iced::Task::none();
+                    }
                     // Emit a notification for user-visible messages on inactive
                     // conversations — includes group-aware rendering.
-                    if should_count {
-                        if let NetEvent::Message { .. } = &event {
-                            // Notification emit deferred — requires refactor to avoid
-                            // double-borrow with conversation entry above.
-                        }
+                    if let NetEvent::Message { .. } = &event {
+                        // Notification emit deferred — requires refactor to avoid
+                        // double-borrow with conversation entry above.
                     }
                     conversation.pending_events.push_back(event);
                     // Cap the pending queue to prevent unbounded memory growth
@@ -14049,10 +14058,8 @@ impl IcedChat {
                             "pending events cap reached, oldest event dropped"
                         );
                     }
-                    if should_count {
-                        conversation.unread = conversation.unread.saturating_add(1);
-                        tracing::info!(topic=%topic, unread=conversation.unread, "queued event for inactive room");
-                    }
+                    conversation.unread = conversation.unread.saturating_add(1);
+                    tracing::info!(topic=%topic, unread=conversation.unread, "queued event for inactive room");
                     return iced::Task::none();
                 }
                 conversation.unread = 0;
@@ -14224,7 +14231,23 @@ impl IcedChat {
                                     topic,
                                     DirectConversationState::Active,
                                 );
-                                record.relationship = FriendRelationship::Friends;
+                                // Only establish the friendship when this invite is
+                                // the acceptance reply to a friend request WE sent
+                                // (pending outgoing request to this sender).  A bare
+                                // Chat click invite from a non-friend must NOT
+                                // auto-friend — the sender stays in Discover until
+                                // both sides explicitly accept a friend request.
+                                let is_acceptance_reply = self
+                                    .friend_request_store
+                                    .list_outgoing_by_status(
+                                        &self.local_public.to_string(),
+                                        FriendRequestStatus::Pending,
+                                    )
+                                    .into_iter()
+                                    .any(|r| r.recipient == sender.to_string());
+                                if is_acceptance_reply {
+                                    record.relationship = FriendRelationship::Friends;
+                                }
                                 self.conversation_store.upsert(ConversationEntry::new(
                                     topic,
                                     sender.to_string(),
