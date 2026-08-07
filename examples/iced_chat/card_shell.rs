@@ -138,6 +138,10 @@ pub struct CardShell<'a, Message> {
     /// title (and subtitle) on line one, badges and the action link on
     /// line two. Keeps headers readable without squeezing the title.
     compact_header: bool,
+    /// Optional opacity (0.0–1.0) applied to the card background so the
+    /// card can sit translucently over a home-screen background image.
+    /// `None` keeps the default fully-opaque `card_style` surface.
+    background_opacity: Option<f32>,
 }
 
 impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
@@ -164,6 +168,7 @@ impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
             footer: None,
             children,
             compact_header: false,
+            background_opacity: None,
         }
     }
 
@@ -263,6 +268,16 @@ impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
     /// look); disable for sentence-case titles such as "Mesh Activity".
     pub fn title_case(mut self, enabled: bool) -> Self {
         self.title_case = enabled;
+        self
+    }
+
+    /// Make the card background translucent over a background image.
+    ///
+    /// HOME-01: multiplies the alpha channel of the card surface colour
+    /// (from `card_style`) by `opacity` (0.0–1.0). Used on the home screen
+    /// only; other screens leave the default `None`.
+    pub fn background_opacity(mut self, opacity: f32) -> Self {
+        self.background_opacity = Some(opacity.clamp(0.0, 1.0));
         self
     }
 
@@ -456,11 +471,20 @@ impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
                 .push(footer_el);
         }
 
+        let background_opacity = self.background_opacity;
         container(content_col)
             // ~24 px internal padding on all sides (plan: 22–28 px band).
             .padding([design_tokens::SPACE_24, design_tokens::SPACE_24])
             .width(Length::Fill)
-            .style(|t| design_tokens::card_style(t))
+            .style(move |t| {
+                let mut style = design_tokens::card_style(t);
+                if let Some(opacity) = background_opacity {
+                    if let Some(Background::Color(c)) = &mut style.background {
+                        c.a *= opacity;
+                    }
+                }
+                style
+            })
             .into()
     }
 }

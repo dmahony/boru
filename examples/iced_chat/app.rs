@@ -249,6 +249,10 @@ pub struct AppSettings {
     pub display_name: Option<String>,
     /// Absolute path to the home-screen background image (None = default).
     pub home_background_image: Option<String>,
+    /// Opacity (0.0–1.0) of the home-screen menu/action item card
+    /// backgrounds when a home background image is set. 1.0 = fully
+    /// opaque; lower values let the background image show through.
+    pub home_menu_item_opacity: f32,
 }
 
 impl Default for AppSettings {
@@ -260,9 +264,14 @@ impl Default for AppSettings {
             share_direct_addresses: false,
             display_name: None,
             home_background_image: None,
+            home_menu_item_opacity: HOME_MENU_ITEM_OPACITY_DEFAULT,
         }
     }
 }
+
+/// Default opacity of home-screen menu/action card backgrounds (0.85 =
+/// 85% opaque) used when no explicit value is persisted in settings.json.
+pub(crate) const HOME_MENU_ITEM_OPACITY_DEFAULT: f32 = 0.85;
 
 impl AppSettings {
     const FILE_NAME: &'static str = "settings.json";
@@ -3532,6 +3541,9 @@ pub struct IcedChat {
     /// decoded once at startup and whenever the user picks a new image.
     home_background_path: Option<String>,
     home_background_handle: Option<iced::widget::image::Handle>,
+    /// Opacity (0.0–1.0) applied to home-screen menu/action card backgrounds
+    /// when a home background image is set. Persisted in AppSettings.
+    home_menu_item_opacity: f32,
     /// Ticket for the locally selected profile image, for broadcasting to peers.
     profile_image_ticket: Option<String>,
     /// ImageStore identifier for the locally selected profile image.
@@ -4302,6 +4314,9 @@ pub(crate) struct ChatListDependency {
     pub(crate) online: OnlinePeersCardData,
     pub(crate) activity: RecentActivityCardData,
     pub(crate) tunnels: TunnelsCardData,
+    /// f32 bit pattern of the home menu item background opacity — included
+    /// so the lazy home screen re-renders when the setting changes.
+    pub(crate) home_menu_item_opacity_bits: u32,
 }
 
 /// One mesh event log row, snapshot for the home dependency.
@@ -4910,6 +4925,9 @@ pub(crate) struct OnlinePeersCardData {
     pub(crate) rows: Vec<OnlinePeerRow>,
     /// UI-HOME-15: two-line compact header on narrow content widths.
     pub(crate) compact_header: bool,
+    /// Home menu item background opacity (f32 bit pattern) so the lazy
+    /// card rebuilds when the transparency setting changes.
+    pub(crate) home_menu_item_opacity_bits: u32,
 }
 
 /// One Online Peers row: the peer key (for the open-chat action), the
@@ -4949,6 +4967,9 @@ pub(crate) struct RecentActivityCardData {
     pub(crate) rows: Vec<ActivityRow>,
     /// UI-HOME-15: two-line compact header on narrow content widths.
     pub(crate) compact_header: bool,
+    /// Home menu item background opacity (f32 bit pattern) so the lazy
+    /// card rebuilds when the transparency setting changes.
+    pub(crate) home_menu_item_opacity_bits: u32,
 }
 
 /// Empty-state copy for the Online Peers rail card (UI-HOME-16 spec copy).
@@ -4988,6 +5009,9 @@ pub(crate) struct TunnelsCardData {
     pub(crate) rows: Vec<TunnelRow>,
     /// UI-HOME-15: two-line compact header on narrow content widths.
     pub(crate) compact_header: bool,
+    /// Home menu item background opacity (f32 bit pattern) so the lazy
+    /// card rebuilds when the transparency setting changes.
+    pub(crate) home_menu_item_opacity_bits: u32,
 }
 
 /// One Tunnels row. `expired` is resolved against the wall clock at selector
@@ -5807,6 +5831,9 @@ pub enum AppMessage {
     HomeBackgroundImageReady { path: String, image_bytes: Vec<u8> },
     /// Remove the currently configured home-screen background image.
     RemoveHomeBackgroundImage,
+    /// Set the opacity (0.0–1.0) of home-screen menu item backgrounds
+    /// over the home background image (HOME-01).
+    SetHomeMenuItemOpacity(f32),
     /// The profile image was uploaded to the local blob store; carries the
     /// BlobTicket string peers use to download it.
     ProfileImageUploaded(String),
@@ -6504,6 +6531,9 @@ struct SettingsCachedKey {
     local_public_key: String,
     /// Path of the configured home-screen background image, if any.
     home_background_image: Option<String>,
+    /// f32 bit pattern of the home menu item background opacity, so the
+    /// lazy settings screen re-renders when the slider moves.
+    home_menu_item_opacity_bits: u32,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -7481,6 +7511,7 @@ impl IcedChat {
             home_background_handle: load_home_background_handle(
                 app_settings.home_background_image.as_deref(),
             ),
+            home_menu_item_opacity: app_settings.home_menu_item_opacity,
             profile_image_ticket,
             profile_image_identifier,
             local_mailbox_key,
@@ -7760,6 +7791,7 @@ impl IcedChat {
             chat_text_size: self.chat_text_size,
             display_name: Some(self.local_label.clone()),
             home_background_image: self.home_background_path.clone(),
+            home_menu_item_opacity: self.home_menu_item_opacity,
         };
         settings.save(&self.data_dir);
     }
@@ -7774,6 +7806,7 @@ impl IcedChat {
         chat_text_size: f32,
         display_name: String,
         home_background_image: Option<String>,
+        home_menu_item_opacity: f32,
     ) -> iced::Task<AppMessage> {
         let settings = AppSettings {
             dark_mode,
@@ -7782,6 +7815,7 @@ impl IcedChat {
             chat_text_size,
             display_name: Some(display_name),
             home_background_image,
+            home_menu_item_opacity,
         };
         let data_dir = data_dir.to_path_buf();
         iced::Task::perform(
@@ -7871,6 +7905,7 @@ impl IcedChat {
             chat_text_size: self.chat_text_size,
             display_name: Some(self.local_label.clone()),
             home_background_image: self.home_background_path.clone(),
+            home_menu_item_opacity: self.home_menu_item_opacity,
         };
         settings.save(&self.data_dir);
     }
@@ -9327,6 +9362,7 @@ impl IcedChat {
             AppMessage::HomeBackgroundImagePicked(_) => "HomeBackgroundImagePicked",
             AppMessage::HomeBackgroundImageReady { .. } => "HomeBackgroundImageReady",
             AppMessage::RemoveHomeBackgroundImage => "RemoveHomeBackgroundImage",
+            AppMessage::SetHomeMenuItemOpacity(_) => "SetHomeMenuItemOpacity",
             AppMessage::ProfileImageUploaded(_) => "ProfileImageUploaded",
             AppMessage::RemoveProfileImage => "RemoveProfileImage",
             AppMessage::ProfileImageDownloaded(..) => "ProfileImageDownloaded",
@@ -20243,6 +20279,7 @@ impl IcedChat {
                     chat_text_size: self.chat_text_size,
                     display_name: Some(self.local_label.clone()),
                     home_background_image: self.home_background_path.clone(),
+                    home_menu_item_opacity: self.home_menu_item_opacity,
                 };
                 let data_dir = self.data_dir.clone();
                 let _progress_queue = self.download_progress_queue.clone();
@@ -20266,6 +20303,7 @@ impl IcedChat {
                     chat_text_size: self.chat_text_size,
                     display_name: Some(self.local_label.clone()),
                     home_background_image: self.home_background_path.clone(),
+                    home_menu_item_opacity: self.home_menu_item_opacity,
                 };
                 let data_dir = self.data_dir.clone();
                 iced::Task::perform(
@@ -20286,6 +20324,7 @@ impl IcedChat {
                     chat_text_size: self.chat_text_size,
                     display_name: Some(self.local_label.clone()),
                     home_background_image: self.home_background_path.clone(),
+                    home_menu_item_opacity: self.home_menu_item_opacity,
                 };
                 let data_dir = self.data_dir.clone();
                 let _progress_queue = self.download_progress_queue.clone();
@@ -21553,6 +21592,7 @@ impl IcedChat {
                     chat_text_size: self.chat_text_size,
                     display_name: Some(self.local_label.clone()),
                     home_background_image: self.home_background_path.clone(),
+                    home_menu_item_opacity: self.home_menu_item_opacity,
                 };
                 let data_dir = self.data_dir.clone();
                 let _progress_queue = self.download_progress_queue.clone();
@@ -21573,6 +21613,7 @@ impl IcedChat {
                     chat_text_size: self.chat_text_size,
                     display_name: Some(self.local_label.clone()),
                     home_background_image: self.home_background_path.clone(),
+                    home_menu_item_opacity: self.home_menu_item_opacity,
                 };
                 let data_dir = self.data_dir.clone();
                 iced::Task::perform(
@@ -21696,6 +21737,7 @@ impl IcedChat {
                             chat_text_size: self.chat_text_size,
                             display_name: Some(self.local_label.clone()),
                             home_background_image: Some(path.clone()),
+                            home_menu_item_opacity: self.home_menu_item_opacity,
                         };
                         iced::Task::perform(
                             async move {
@@ -21753,6 +21795,29 @@ impl IcedChat {
                     self.chat_text_size,
                     self.local_label.clone(),
                     None,
+                    self.home_menu_item_opacity,
+                )
+            }
+
+            AppMessage::SetHomeMenuItemOpacity(opacity) => {
+                self.home_menu_item_opacity = opacity.clamp(0.0, 1.0);
+                self.invalidate_prewarm(&[Screen::Settings]);
+                // Persist so the value survives restarts (HOME-01).
+                let settings = AppSettings {
+                    dark_mode: self.dark_mode,
+                    sound_enabled: self.sound_enabled,
+                    share_direct_addresses: self.share_direct_addresses,
+                    chat_text_size: self.chat_text_size,
+                    display_name: Some(self.local_label.clone()),
+                    home_background_image: self.home_background_path.clone(),
+                    home_menu_item_opacity: self.home_menu_item_opacity,
+                };
+                let data_dir = self.data_dir.clone();
+                iced::Task::perform(
+                    tokio::task::spawn_blocking(move || {
+                        settings.save(&data_dir);
+                    }),
+                    |_| AppMessage::Noop,
                 )
             }
 
@@ -26725,6 +26790,7 @@ impl IcedChat {
             total_friends,
             rows,
             compact_header: self.home_compact_headers(),
+            home_menu_item_opacity_bits: self.home_menu_item_opacity.to_bits(),
         }
     }
 
@@ -26748,6 +26814,7 @@ impl IcedChat {
             total: self.recent_activity.len(),
             rows,
             compact_header: self.home_compact_headers(),
+            home_menu_item_opacity_bits: self.home_menu_item_opacity.to_bits(),
         }
     }
 
@@ -26791,6 +26858,7 @@ impl IcedChat {
             tick: self.activity_tick,
             rows,
             compact_header: self.home_compact_headers(),
+            home_menu_item_opacity_bits: self.home_menu_item_opacity.to_bits(),
         }
     }
 
@@ -26934,6 +27002,7 @@ impl IcedChat {
             .on_view_all(AppMessage::OpenFriendRequests)
             .compact_header(dep.compact_header)
             .body(body)
+            .background_opacity(f32::from_bits(dep.home_menu_item_opacity_bits))
             .build(&theme)
     }
 
@@ -27033,6 +27102,7 @@ impl IcedChat {
             .empty_message(RECENT_ACTIVITY_EMPTY_MESSAGE)
             .compact_header(dep.compact_header)
             .max_height(180.0)
+            .background_opacity(f32::from_bits(dep.home_menu_item_opacity_bits))
             .build(&theme)
     }
 
@@ -27144,6 +27214,7 @@ impl IcedChat {
             .empty_message(TUNNELS_EMPTY_MESSAGE)
             .compact_header(dep.compact_header)
             .max_height(120.0)
+            .background_opacity(f32::from_bits(dep.home_menu_item_opacity_bits))
             .build(&theme)
     }
 
@@ -27209,6 +27280,7 @@ impl IcedChat {
             online: self.online_peers_card_data(),
             activity: self.recent_activity_card_data(),
             tunnels: self.tunnels_card_data(),
+            home_menu_item_opacity_bits: self.home_menu_item_opacity.to_bits(),
         }
     }
 
@@ -27228,6 +27300,10 @@ impl IcedChat {
         let content_width = crate::design_tokens::home_content_width(window_width);
         let compact_header =
             content_width < crate::design_tokens::HOME_COMPACT_HEADER_CONTENT;
+
+        // HOME-01: opacity of home menu/action card backgrounds over the
+        // home background image (1.0 = fully opaque; lower = translucent).
+        let home_menu_opacity = f32::from_bits(dep.home_menu_item_opacity_bits);
 
         // ── Connection state (single source of truth) ──
         let has_peer_connections = dep.has_peer_connections;
@@ -27340,14 +27416,18 @@ impl IcedChat {
             .align_y(Alignment::Center),
         )
         .padding([SPACE_12, SPACE_12])
-        .style(move |t| iced::widget::container::Style {
-            background: Some(iced::Background::Color(bg_surface(t))),
-            border: iced::Border {
-                color: hero_color(t),
-                width: 1.0,
-                radius: SPACE_16.into(),
-            },
-            ..Default::default()
+        .style(move |t| {
+            let mut bg = bg_surface(t);
+            bg.a *= home_menu_opacity;
+            iced::widget::container::Style {
+                background: Some(iced::Background::Color(bg)),
+                border: iced::Border {
+                    color: hero_color(t),
+                    width: 1.0,
+                    radius: SPACE_16.into(),
+                },
+                ..Default::default()
+            }
         });
 
         // ── Large connection hero card (Figure 3) ──
@@ -27503,13 +27583,13 @@ impl IcedChat {
             // mesh is Ready.
             .style(move |t| {
                 let mut style = crate::design_tokens::card_style(t);
-                style.background = Some(iced::Background::Color(
-                    if matches!(variant, HomeConnectionVariant::Ready) {
-                        crate::design_tokens::primary_soft(t)
-                    } else {
-                        bg_surface(t)
-                    },
-                ));
+                let mut bg = if matches!(variant, HomeConnectionVariant::Ready) {
+                    crate::design_tokens::primary_soft(t)
+                } else {
+                    bg_surface(t)
+                };
+                bg.a *= home_menu_opacity;
+                style.background = Some(iced::Background::Color(bg));
                 style
             });
 
@@ -27836,10 +27916,12 @@ impl IcedChat {
             .header_action("View details", AppMessage::OpenConnectionDetails)
             .compact_header(compact_header)
             .body(mesh_body.into())
+            .background_opacity(home_menu_opacity)
             .build(&theme);
 
         // ── Quick actions: four equal, full-card targets (Figure 3) ──
-        let action_grid = crate::quick_actions::quick_action_grid(content_width, &theme);
+        let action_grid =
+            crate::quick_actions::quick_action_grid(content_width, &theme, home_menu_opacity);
 
         // DLMGR-01: home entry point — a compact outline button beside the
         // status pill opens the Download Manager (all active transfers in
@@ -31655,6 +31737,7 @@ impl IcedChat {
             history_clear_feedback_is_error: self.history_clear_feedback_is_error,
             local_public_key: self.local_public.to_string(),
             home_background_image: self.home_background_path.clone(),
+            home_menu_item_opacity_bits: self.home_menu_item_opacity.to_bits(),
         }
     }
 
@@ -32280,16 +32363,55 @@ impl IcedChat {
             .spacing(SPACE_12)
             .align_y(Alignment::Center);
 
-        let appearance_card = section_card(
-            "APPEARANCE",
-            vec![
-                appearance_row.into(),
-                Space::new().height(Length::Fixed(SPACE_8)).into(),
-                text_size_row.into(),
-                Space::new().height(Length::Fixed(SPACE_8)).into(),
-                home_background_row.into(),
-            ],
-        );
+        // ── Home menu item transparency (HOME-01) ──
+        // Shown only when a home background image is set: controls the
+        // opacity of the home-screen menu/action card backgrounds that sit
+        // over the image.
+        let mut appearance_children: Vec<iced::Element<'static, AppMessage>> = vec![
+            appearance_row.into(),
+            Space::new().height(Length::Fixed(SPACE_8)).into(),
+            text_size_row.into(),
+            Space::new().height(Length::Fixed(SPACE_8)).into(),
+            home_background_row.into(),
+        ];
+        if key.home_background_image.is_some() {
+            let opacity = f32::from_bits(key.home_menu_item_opacity_bits);
+            let pct = (opacity * 100.0).round() as u32;
+            appearance_children.push(Space::new().height(Length::Fixed(SPACE_8)).into());
+            appearance_children.push(
+                Row::new()
+                    .push(
+                        Column::new()
+                            .push(crate::fonts::type_role_text(
+                                crate::fonts::TypeRole::Body,
+                                format!("Menu item opacity: {pct}%"),
+                            ))
+                            .push(
+                                crate::fonts::type_role_text(
+                                    crate::fonts::TypeRole::SupportingText,
+                                    "Set the transparency of home menu item backgrounds over the image.",
+                                )
+                                .style(text_muted_style),
+                            )
+                            .spacing(SPACE_2)
+                            .width(Length::Fill)
+                            .align_x(Alignment::Start),
+                    )
+                    .push(
+                        iced::widget::slider(
+                            0.20..=1.0,
+                            opacity,
+                            AppMessage::SetHomeMenuItemOpacity,
+                        )
+                        .step(0.05)
+                        .width(Length::Fixed(160.0)),
+                    )
+                    .spacing(SPACE_12)
+                    .align_y(Alignment::Center)
+                    .into(),
+            );
+        }
+        let appearance_card = section_card("APPEARANCE", appearance_children);
 
         // ── Notifications section ──
         let sound_label = if key.sound_enabled {
@@ -40043,6 +40165,7 @@ mod tests {
             share_direct_addresses: false,
             display_name: None,
             home_background_image: None,
+            home_menu_item_opacity: HOME_MENU_ITEM_OPACITY_DEFAULT,
         };
         let toggled = AppSettings {
             dark_mode: true,
@@ -40051,12 +40174,43 @@ mod tests {
             share_direct_addresses: original.share_direct_addresses,
             display_name: None,
             home_background_image: None,
+            home_menu_item_opacity: HOME_MENU_ITEM_OPACITY_DEFAULT,
         };
         toggled.save(&data_dir);
         let loaded = AppSettings::load(&data_dir);
 
         assert!(loaded.dark_mode);
         assert!(!loaded.sound_enabled);
+        assert_eq!(loaded.chat_text_size, 17.0);
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[test]
+    fn home_menu_item_opacity_persists_across_settings_roundtrip() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "boru-gui-home-opacity-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        std::fs::create_dir_all(&data_dir).expect("test settings directory should be created");
+
+        // HOME-01: absent key defaults to the shared 0.85 default.
+        let defaults = AppSettings::load(&data_dir);
+        assert_eq!(defaults.home_menu_item_opacity, HOME_MENU_ITEM_OPACITY_DEFAULT);
+
+        // Saving an explicit value round-trips without disturbing siblings.
+        let settings = AppSettings {
+            dark_mode: false,
+            sound_enabled: true,
+            chat_text_size: 17.0,
+            share_direct_addresses: false,
+            display_name: None,
+            home_background_image: None,
+            home_menu_item_opacity: 0.55,
+        };
+        settings.save(&data_dir);
+        let loaded = AppSettings::load(&data_dir);
+        assert_eq!(loaded.home_menu_item_opacity, 0.55);
         assert_eq!(loaded.chat_text_size, 17.0);
         let _ = std::fs::remove_dir_all(&data_dir);
     }

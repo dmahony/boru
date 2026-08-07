@@ -126,7 +126,11 @@ fn action_indicator<'a>() -> Element<'a, AppMessage> {
 /// the primary actions on the home screen are still keyboard-reachable via
 /// the global shortcuts (Ctrl+N new room, Ctrl+Backspace back, Escape,
 /// `/` focus composer) which the app subscribes to globally.
-pub fn quick_action_card<'a>(action: &'a QuickAction, theme: &Theme) -> Element<'a, AppMessage> {
+pub fn quick_action_card<'a>(
+    action: &'a QuickAction,
+    theme: &Theme,
+    opacity: f32,
+) -> Element<'a, AppMessage> {
     let content = Column::new()
         .push(quick_action_icon(action.icon))
         // HOME-02: icon→title gap tightened from SPACE_16 to SPACE_8 so the
@@ -176,7 +180,7 @@ pub fn quick_action_card<'a>(action: &'a QuickAction, theme: &Theme) -> Element<
         // Content-driven height: no fixed box, no hidden overflow — the
         // card grows to contain icon + title + full description.
         .width(Length::Fill)
-        .style(quick_action_card_style)
+        .style(move |t, s| quick_action_card_style(t, s, opacity))
         .into()
 }
 
@@ -186,7 +190,11 @@ pub fn quick_action_card<'a>(action: &'a QuickAction, theme: &Theme) -> Element<
 /// surface (RADIUS_CARD + low-opacity shadow) so the action cards match
 /// the home rail cards. Hover adds an accent border and a 1–2 px elevation
 /// shadow; the default state keeps the subtle card shadow.
-fn quick_action_card_style(theme: &Theme, status: button::Status) -> iced::widget::button::Style {
+fn quick_action_card_style(
+    theme: &Theme,
+    status: button::Status,
+    opacity: f32,
+) -> iced::widget::button::Style {
     let surface = design_tokens::surface(theme);
     let hover = design_tokens::surface_hover(theme);
     let accent = design_tokens::primary(theme);
@@ -211,6 +219,12 @@ fn quick_action_card_style(theme: &Theme, status: button::Status) -> iced::widge
             c
         }
         _ => design_tokens::border_muted(theme),
+    };
+    // HOME-01: make the card surface translucent so the home background
+    // image shows through at the user-configured menu item opacity.
+    let background = Color {
+        a: background.a * opacity.clamp(0.0, 1.0),
+        ..background
     };
     // 1–2 px hover elevation: subtle lift over the resting card shadow.
     let shadow = match status {
@@ -265,7 +279,11 @@ pub fn grid_columns_for(content_width: f32) -> usize {
 }
 
 /// Build the responsive quick-action grid used by the home screen.
-pub fn quick_action_grid<'a>(content_width: f32, theme: &Theme) -> Element<'a, AppMessage> {
+pub fn quick_action_grid<'a>(
+    content_width: f32,
+    theme: &Theme,
+    opacity: f32,
+) -> Element<'a, AppMessage> {
     let columns = grid_columns_for(content_width);
 
     let mut rows: Vec<Element<'a, AppMessage>> = Vec::new();
@@ -278,7 +296,7 @@ pub fn quick_action_grid<'a>(content_width: f32, theme: &Theme) -> Element<'a, A
             .align_y(Alignment::Start)
             .width(Length::Fill);
         for action in actions {
-            row = row.push(quick_action_card(action, theme));
+            row = row.push(quick_action_card(action, theme, opacity));
         }
         rows.push(row.into());
     }
