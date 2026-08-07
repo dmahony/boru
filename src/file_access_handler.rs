@@ -23,6 +23,7 @@ use iroh::{
     protocol::{AcceptError, ProtocolHandler},
     PublicKey,
 };
+use iroh_blobs::api::blobs::{AddPathOptions, ImportMode};
 use n0_error::Result;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::{debug, error, info, warn};
@@ -1580,10 +1581,15 @@ pub async fn prepare_imported_file(
 /// 2. **Path validation** — confirm the `source_path` exists, is a
 ///    regular file (not a directory, not a symlink), and has the
 ///    expected size.
-/// 3. **Content verification** — read the file from disk and verify
-///    its blake3 content hash matches the expected value.
-/// 4. **Import** — add the file data to the iroh-blobs store so it can
-///    be served by content hash.
+/// 3. **Content verification (optional)** — when `verify_hash` is
+///    provided, read the file from disk and verify its blake3 content
+///    hash matches the expected value.  The live file-access path
+///    defers hash verification to descriptor verification and passes
+///    `None`, so the common case skips the read entirely.
+/// 4. **Import by reference** — import the on-disk file via
+///    `add_path_with_opts` with [`ImportMode::TryReference`] so the
+///    store references the file in place instead of copying its bytes
+///    (no double storage for files that already live on disk).
 /// 5. **Return** a [`PreparedFile`] with safe metadata (no local paths).
 ///
 /// # Errors
@@ -1650,27 +1656,30 @@ pub async fn prepare_referenced_file(
         }
     }
 
-    // ── 4. Read and hash the file content on a blocking worker ───────
-    // `fs::read` and `blake3::hash` are CPU-bound file I/O; run them
-    // on a blocking thread so they don't block the async runtime.
-    let src_for_worker = src.clone();
-    let (file_data, file_blake3_bytes) = tokio::task::spawn_blocking(move || {
-        let data = fs::read(&src_for_worker).map_err(|e| {
-            if e.kind() == io::ErrorKind::PermissionDenied {
-                anyhow::anyhow!("permission denied reading referenced source: {src_for_worker}")
-            } else {
-                anyhow::anyhow!("failed to read referenced source {src_for_worker}: {e:#}")
-            }
-        })?;
-        let hash = blake3::hash(&data);
-        Ok::<_, anyhow::Error>((data, *hash.as_bytes()))
-    })
-    .await
-    .map_err(|join_err| anyhow::anyhow!("referenced-file read task panicked: {join_err}"))??;
-
-    // Optional hash verification.
+    // ── 4. Content verification (only when explicitly requested) ─────
+    // The live file-access path defers hash verification to descriptor
+    // verification (passes `None` here), so the common case does not
+    // read the file at all — `add_path_with_opts` below reads and hashes
+    // it internally during import. When a caller *does* request hash
+    // verification, read the file on a blocking worker and compare the
+    // blake3 hash before importing, so a mismatched file is never
+    // imported into the blob store.
     if let Some(expected_hash) = verify_hash {
-        let actual_hex = hex::encode(file_blake3_bytes);
+        let src_for_worker = src.clone();
+        let actual_hex = tokio::task::spawn_blocking(move || {
+            let data = fs::read(&src_for_worker).map_err(|e| {
+                if e.kind() == io::ErrorKind::PermissionDenied {
+                    anyhow::anyhow!("permission denied reading referenced source: {src_for_worker}")
+                } else {
+                    anyhow::anyhow!("failed to read referenced source {src_for_worker}: {e:#}")
+                }
+            })?;
+            let hash = blake3::hash(&data);
+            Ok::<_, anyhow::Error>(hex::encode(hash.as_bytes()))
+        })
+        .await
+        .map_err(|join_err| anyhow::anyhow!("referenced-file read task panicked: {join_err}"))??;
+
         let expected = expected_hash.to_ascii_lowercase();
         if actual_hex != expected {
             return Err(anyhow::anyhow!(
@@ -1679,26 +1688,28 @@ pub async fn prepare_referenced_file(
         }
     }
 
-    // ── 5. Import into iroh-blobs store ─────────────────────────────
-    // Check if already present to avoid re-import.
-    let blob_hash = iroh_blobs::Hash::from(file_blake3_bytes);
-    let already_present = blob_store
-        .blobs()
-        .has(blob_hash)
+    // ── 5. Import into iroh-blobs store by reference ────────────────
+    // The source is a real file on disk — import it with
+    // `ImportMode::TryReference` so the store references the file in
+    // place instead of copying its bytes (avoids double-storing files
+    // that already live on disk). Stores that cannot reference files
+    // (e.g. the in-memory store) fall back to copying internally.
+    // `add_path_with_opts` requires an absolute path, so canonicalise.
+    let abs_path = fs::canonicalize(&src)
+        .map_err(|e| anyhow::anyhow!("failed to resolve referenced source {src}: {e:#}"))?;
+    let progress = blob_store.blobs().add_path_with_opts(AddPathOptions {
+        path: abs_path,
+        mode: ImportMode::TryReference,
+        format: iroh_blobs::BlobFormat::Raw,
+    });
+    let _tag = progress
         .await
-        .map_err(|e| anyhow::anyhow!("blob_store.has failed: {e:#}"))?;
-
-    if !already_present {
-        let progress = blob_store.blobs().add_slice(&file_data);
-        let _tag = progress
-            .await
-            .map_err(|e| anyhow::anyhow!("add_slice failed: {e:#}"))?;
-    }
+        .map_err(|e| anyhow::anyhow!("add_path failed: {e:#}"))?;
 
     // ── 6. Return safe transfer metadata ─────────────────────────────
     Ok(PreparedFile {
         content_hash: file_obj.content_hash,
-        size_bytes: file_data.len() as u64,
+        size_bytes: metadata.len(),
         blob_format: BlobFormat::Raw,
         mime_type: file_obj.mime_type,
         filename: file_obj.filename,
