@@ -2380,6 +2380,53 @@ mod tests {
     }
 
     #[test]
+    fn play_action_routes_to_inline_player_for_ready_videos() {
+        // VID-03: clicking Play on a ready video must dispatch the inline
+        // player message — never silently fall back to opening the OS
+        // player. The feature-gated inline route is the primary path; the
+        // OS-open fallback must be explicitly confined to the non-feature
+        // build (and only reachable for non-ready states).
+        let src = include_str!("video_file_card.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let media_frame_fns = prod
+            .split("fn media_frame(")
+            .nth(1)
+            .expect("media_frame must exist");
+
+        // The inline route is chosen whenever the `video-playback` feature
+        // is compiled in.
+        let play_message_block = media_frame_fns
+            .split("let play_message = {")
+            .nth(1)
+            .and_then(|s| s.split("};").next())
+            .expect("play_message block must exist");
+        assert!(
+            play_message_block.contains("#[cfg(feature = \"video-playback\")]")
+                && play_message_block.contains("AppMessage::PlayInlineVideo(self.entry_index)"),
+            "with video-playback enabled the play overlay must dispatch PlayInlineVideo"
+        );
+        // The OS-open fallback exists only under the explicit non-feature
+        // cfg — it must not be the default route.
+        assert!(
+            play_message_block.contains("#[cfg(not(feature = \"video-playback\"))]")
+                && play_message_block.contains("AppMessage::OpenDownloadedFile(attachment.name.clone())"),
+            "OS-open fallback must be confined to the non-feature build"
+        );
+
+        // The play overlay is only enabled for Ready videos (and not while
+        // the player is still preparing), so an external player can never be
+        // spawned for a video that is still downloading/verifying.
+        assert!(
+            media_frame_fns.contains("presentation == VideoPresentationState::Ready && !self.preparing"),
+            "play overlay must be enabled only when the video is Ready and not preparing"
+        );
+        assert!(
+            media_frame_fns.contains(".on_press_maybe(play_enabled.then_some(play_message.clone()))"),
+            "play overlay must dispatch the play message only when enabled"
+        );
+    }
+
+    #[test]
     fn header_filename_is_flexible_at_narrow_band() {
         // Task 15: "Filenames truncate safely" at narrow widths — the
         // filename fills the space left by the other header items (still
