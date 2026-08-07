@@ -34624,7 +34624,11 @@ impl IcedChat {
                 )
                 .color(crate::design_tokens::text_secondary(theme))
                 .width(Length::Fixed(120.0))
-                .wrapping(iced::widget::text::Wrapping::None),
+                // FONTS-15: wrap long friend display names inside the fixed
+                // Source column instead of letting them spill into the
+                // Completed column (a 25+ char name is ~150 px at 12 px IBM
+                // Plex Sans, wider than the 120 px column).
+                .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
             )
             .push(
                 crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, ago)
@@ -36275,23 +36279,34 @@ impl IcedChat {
 
         // ── Toast overlay ──
         if let Some(msg) = &self.toast_message {
-            let toast = container(text(msg).size(TYPO_SM).color(Color::WHITE))
-                .padding(iced::Padding {
-                    top: SPACE_8,
-                    right: SPACE_16,
-                    bottom: SPACE_8,
-                    left: SPACE_16,
-                })
-                .style(move |t| iced::widget::container::Style {
-                    background: Some(iced::Background::Color(iced::Color::from_rgba(
-                        0.1, 0.1, 0.1, 0.85,
-                    ))),
-                    border: iced::Border {
-                        radius: SPACE_8.into(),
-                        ..Default::default()
-                    },
+            // FONTS-15: the toast text now renders in the wider IBM Plex Sans
+            // default font, so long messages (e.g. "Alice shared a very long
+            // tunnel service name with you (2h)") can exceed the window on
+            // narrow layouts. Cap the toast width and let the text wrap
+            // instead of spilling past the window edge.
+            let toast = container(
+                text(msg)
+                    .size(TYPO_SM)
+                    .color(Color::WHITE)
+                    .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+            )
+            .max_width(480.0)
+            .padding(iced::Padding {
+                top: SPACE_8,
+                right: SPACE_16,
+                bottom: SPACE_8,
+                left: SPACE_16,
+            })
+            .style(move |t| iced::widget::container::Style {
+                background: Some(iced::Background::Color(iced::Color::from_rgba(
+                    0.1, 0.1, 0.1, 0.85,
+                ))),
+                border: iced::Border {
+                    radius: SPACE_8.into(),
                     ..Default::default()
-                });
+                },
+                ..Default::default()
+            });
 
             return iced::widget::stack![
                 base,

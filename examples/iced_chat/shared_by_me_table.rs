@@ -354,10 +354,19 @@ use crate::app::{text_muted_style, AppMessage, BUTTON_PRIMARY_GREEN};
 
 /// Fixed visual widths for the table columns (px). Kept as constants so the
 /// column header and every row share identical geometry.
-const COL_SHARED_WITH: f32 = 168.0;
+///
+/// FONTS-15: widths are sized for the *IBM Plex Sans* metadata labels (the
+/// current TypeRole::Metadata family) at 12 px. The "DOWNLOADS" header
+/// measures ~72 px at 12 px IBM Plex Sans (it was ~66 px under the legacy
+/// Source Sans 3, already near the old 56 px limit), so the column must be
+/// at least ~72 px to avoid wrapping/overflowing the header. Width is taken
+/// from COL_SHARED_WITH ("SHARED WITH" header is only ~79 px and chips are
+/// character-capped), keeping the fixed-column total — and therefore the
+/// NAME fill column — unchanged.
+const COL_SHARED_WITH: f32 = 144.0;
 const COL_SIZE: f32 = 64.0;
 const COL_SHARED_ON: f32 = 122.0;
-const COL_DOWNLOADS: f32 = 56.0;
+const COL_DOWNLOADS: f32 = 80.0;
 const COL_ACTIONS: f32 = 36.0;
 
 /// Maximum recipient chips shown inline before the "+N more" overflow chip.
@@ -1815,5 +1824,41 @@ mod tests {
         assert_eq!(ui.sharing_status, None);
         assert!(!ui.share_menu_open);
         assert_eq!(ui, SharedByMeUiState::default());
+    }
+
+    #[test]
+    fn column_widths_keep_header_labels_on_one_line_after_font_swap() {
+        // FONTS-15: after the IBM Plex Sans swap, header labels are wider
+        // than the legacy Source Sans 3 metrics. Measured at 12 px IBM Plex
+        // Sans (TypeRole::Metadata): "SHARED WITH" ≈ 79 px, "SIZE" ≈ 26 px,
+        // "SHARED ON" ≈ 66 px, "DOWNLOADS" ≈ 72 px. Each fixed column must
+        // be at least its label width or the header wraps/overflows the
+        // next column. The DOWNLOADS column was 56 px (old value fitted
+        // nothing); FONTS-15 raised it to 80 px and rebalanced SHARED_WITH
+        // (168 → 144) so the fixed-column total is unchanged and the NAME
+        // fill column keeps its width.
+        assert!(
+            COL_DOWNLOADS >= 72.0,
+            "DOWNLOADS header (~72 px @12 px IBM Plex Sans) must fit in COL_DOWNLOADS ({COL_DOWNLOADS} px)"
+        );
+        assert!(
+            COL_SHARED_WITH >= 79.0,
+            "SHARED WITH header (~79 px @12 px IBM Plex Sans) must fit in COL_SHARED_WITH ({COL_SHARED_WITH} px)"
+        );
+        assert!(
+            COL_SHARED_ON >= 66.0,
+            "SHARED ON header (~66 px @12 px IBM Plex Sans) must fit in COL_SHARED_ON ({COL_SHARED_ON} px)"
+        );
+        assert!(
+            COL_SIZE >= 26.0,
+            "SIZE header (~26 px @12 px IBM Plex Sans) must fit in COL_SIZE ({COL_SIZE} px)"
+        );
+        // Width-neutral rebalance: the fixed-column total must not grow, so
+        // the NAME fill column keeps its share of the row width.
+        const FIXED_TOTAL: f32 = COL_SHARED_WITH + COL_SIZE + COL_SHARED_ON + COL_DOWNLOADS + COL_ACTIONS;
+        assert!(
+            (FIXED_TOTAL - (144.0 + 64.0 + 122.0 + 80.0 + 36.0)).abs() < f32::EPSILON,
+            "fixed column total must stay width-neutral ({FIXED_TOTAL} px)"
+        );
     }
 }
