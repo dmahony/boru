@@ -28962,7 +28962,13 @@ impl IcedChat {
                     container(
                         Column::new()
                             .push(text(spinner).size(28.0).color(accent_primary(&theme)))
-                            .push(text("Connecting…").size(TYPO_MD).color(self.color_muted()))
+                            .push(
+                                crate::fonts::type_role_text(
+                                    crate::fonts::TypeRole::Body,
+                                    "Connecting…",
+                                )
+                                .color(self.color_muted()),
+                            )
                             .spacing(SPACE_8)
                             .align_x(iced::Alignment::Center),
                     )
@@ -28972,9 +28978,15 @@ impl IcedChat {
                 )
             } else {
                 Column::new().push(
-                    container(text("No messages yet.").color(self.color_muted()))
-                        .padding([0.0, SPACE_8])
-                        .width(Length::Fill),
+                    container(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::Body,
+                            "No messages yet.",
+                        )
+                        .color(self.color_muted()),
+                    )
+                    .padding([0.0, SPACE_8])
+                    .width(Length::Fill),
                 )
             };
             self.total_content_height.set(0.0);
@@ -29699,15 +29711,19 @@ impl IcedChat {
                         &theme,
                     ))
                     .push(
-                        text("Image unavailable")
-                            .size(TYPO_SM)
-                            .color(text_system(&theme)),
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::SupportingText,
+                            "Image unavailable",
+                        )
+                        .color(text_system(&theme)),
                     )
                     .push(
-                        text(error_text)
-                            .size(TYPO_XS)
-                            .color(color_error(&theme))
-                            .wrapping(Wrapping::WordOrGlyph),
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::Metadata,
+                            error_text,
+                        )
+                        .color(color_error(&theme))
+                        .wrapping(Wrapping::WordOrGlyph),
                     )
                     .spacing(SPACE_2);
                 col = col.push(
@@ -29744,10 +29760,11 @@ impl IcedChat {
                     Row::new()
                         .push(text(spinner).size(TYPO_LG).color(text_muted(&theme)))
                         .push(
-                            text(format!("Processing {filename}…"))
-                                .size(TYPO_SM)
-                                .font(crate::fonts::TypeRole::ChatMessage.font())
-                                .color(text_muted(&theme)),
+                            crate::fonts::type_role_text(
+                                crate::fonts::TypeRole::SupportingText,
+                                format!("Processing {filename}…"),
+                            )
+                            .color(text_muted(&theme)),
                         )
                         .spacing(SPACE_8)
                         .align_y(iced::Alignment::Center),
@@ -29780,10 +29797,11 @@ impl IcedChat {
                     Row::new()
                         .push(text(spinner).size(TYPO_LG).color(text_muted(&theme)))
                         .push(
-                            text(format!("Uploading {filename} ({size_label})…"))
-                                .size(TYPO_SM)
-                                .font(crate::fonts::TypeRole::ChatMessage.font())
-                                .color(text_muted(&theme)),
+                            crate::fonts::type_role_text(
+                                crate::fonts::TypeRole::SupportingText,
+                                format!("Uploading {filename} ({size_label})…"),
+                            )
+                            .color(text_muted(&theme)),
                         )
                         .spacing(SPACE_8)
                         .align_y(iced::Alignment::Center),
@@ -38389,6 +38407,39 @@ mod tests {
         assert!(
             composer.contains(".size(self.chat_text_size)"),
             "composer must keep the user-configurable chat text size"
+        );
+    }
+
+    #[test]
+    fn chat_chrome_uses_plex_roles_not_source_sans() {
+        // FONTS-08: chat chrome (empty state, connecting spinner label,
+        // image-unavailable placeholder, pending upload status, header,
+        // search, menus, footer) must resolve through IBM Plex Sans roles —
+        // never the Source Sans app default or a raw source_sans call.
+        let src = include_str!("app.rs");
+        let log = method_source(src, "fn view_chat_log(", "fn view_composer(");
+        assert!(
+            log.contains("TypeRole::Body"),
+            "chat empty state / connecting label must use TypeRole::Body (IBM Plex Sans)"
+        );
+        assert!(
+            log.contains("TypeRole::SupportingText"),
+            "chat image placeholder / upload status must use TypeRole::SupportingText (IBM Plex Sans)"
+        );
+        assert!(
+            log.contains("TypeRole::Metadata"),
+            "chat image-unavailable error line must use TypeRole::Metadata (IBM Plex Sans)"
+        );
+        assert!(
+            !log.contains("source_sans("),
+            "chat chrome must not use Source Sans directly"
+        );
+        // The chat message body itself stays Figtree (guarded separately);
+        // make sure the chrome-only call sites above did not displace the
+        // message body roles.
+        assert!(
+            log.contains("TypeRole::ChatMessage.font()"),
+            "chat message body must keep TypeRole::ChatMessage.font() (Figtree)"
         );
     }
 

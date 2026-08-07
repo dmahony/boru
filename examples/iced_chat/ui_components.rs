@@ -157,8 +157,7 @@ pub fn chat_status_footer<'a>(
     let mut row = Row::new()
         .push(route_icon)
         .push(
-            text(route_label)
-                .size(crate::fonts::XS)
+            crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, route_label)
                 .style(move |theme| iced::widget::text::Style {
                     color: Some(route_color(theme)),
                 }),
@@ -167,17 +166,20 @@ pub fn chat_status_footer<'a>(
         .align_y(Alignment::Center);
     match peer_label {
         Some(peer) => {
-            row =
-                row.push(Space::new().width(Length::Fill))
-                    .push(text("·").style(|theme| iced::widget::text::Style {
+            row = row
+                .push(Space::new().width(Length::Fill))
+                .push(text("·").font(TypeRole::Metadata.font()).style(|theme| {
+                    iced::widget::text::Style {
                         color: Some(design_tokens::text_muted(theme)),
-                    }))
-                    .push(text(peer).size(crate::fonts::XS).style(|theme| {
-                        iced::widget::text::Style {
+                    }
+                }))
+                .push(
+                    crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, peer)
+                        .style(|theme| iced::widget::text::Style {
                             color: Some(design_tokens::text_muted(theme)),
-                        }
-                    }))
-                    .spacing(design_tokens::SPACE_8);
+                        }),
+                )
+                .spacing(design_tokens::SPACE_8);
         }
         None => {
             row = row.push(Space::new().width(Length::Fill));
@@ -1625,6 +1627,7 @@ pub fn date_separator<'a, Message: 'a>(
 ) -> Element<'a, Message> {
     container(
         text(label)
+            .font(TypeRole::Metadata.font())
             .size(TypeRole::Metadata.size_px())
             .color(design_tokens::text_muted(theme)),
     )
@@ -2712,6 +2715,19 @@ pub(crate) fn file_thumbnail(
 mod tests {
     use super::*;
 
+    /// Extract the production (non-test) source of one method body.
+    fn method_source<'a>(src: &'a str, start_marker: &str, end_marker: &str) -> &'a str {
+        let start = src
+            .find(start_marker)
+            .unwrap_or_else(|| panic!("{start_marker} must exist"));
+        let tests_start = src.find("#[cfg(test)]").unwrap_or(src.len());
+        let end = src[start..tests_start]
+            .find(end_marker)
+            .map(|off| start + off)
+            .unwrap_or(tests_start);
+        &src[start..end]
+    }
+
     #[test]
     fn chat_status_footer_connected_with_peer() {
         let el: Element<'static, AppMessage> = chat_status_footer(
@@ -2733,6 +2749,35 @@ mod tests {
         let el: Element<'static, AppMessage> =
             chat_status_footer("Not connected".to_string(), false, None);
         let _ = el;
+    }
+
+    #[test]
+    fn chat_status_footer_uses_plex_metadata_role() {
+        // FONTS-08: the chat footer status line is chrome — it must resolve
+        // through the central TypeRole::Metadata role (IBM Plex Sans), not
+        // the Source Sans app default or a raw size literal.
+        let src = include_str!("ui_components.rs");
+        let footer = method_source(src, "fn chat_status_footer<'a>(", "fn white_color(");
+        assert!(
+            footer.contains("TypeRole::Metadata"),
+            "chat footer status text must use TypeRole::Metadata (IBM Plex Sans)"
+        );
+        assert!(
+            !footer.contains("source_sans("),
+            "chat footer must not use Source Sans directly"
+        );
+    }
+
+    #[test]
+    fn date_separator_uses_plex_metadata_font() {
+        // FONTS-08: date dividers in the chat timeline are chrome — they must
+        // render in IBM Plex Sans via TypeRole::Metadata, not the app default.
+        let src = include_str!("ui_components.rs");
+        let sep = method_source(src, "fn date_separator<'a,", "fn system_event_chip(");
+        assert!(
+            sep.contains("TypeRole::Metadata.font()"),
+            "date separator must use TypeRole::Metadata.font() (IBM Plex Sans)"
+        );
     }
 
     #[test]
