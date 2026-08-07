@@ -15,6 +15,7 @@ License texts:
 | Manrope       | `Manrope-OFL.txt`       | 4384  |
 | Raleway       | `Raleway-OFL.txt`       | 4497  |
 | Source Sans 3 | `SourceSans3-OFL.txt`   | 4579  |
+| Archivo SemiCondensed | `Archivo-OFL.txt` | 4388  |
 | Combined      | `OFL.txt`               | 4985  (multi-family notice kept for legacy) |
 
 ---
@@ -77,6 +78,22 @@ License texts:
   instancer-generated static fixes family naming and weight class. `JetBrainsMono.ttf`
   (variable) and `JetBrainsMono-Italic.ttf` remain bundled for legacy compatibility but are
   not loaded at startup.
+
+## Archivo SemiCondensed — OFL-1.1
+
+- Version: **2.001**
+- Copyright: Copyright 2020 The Archivo Project Authors (https://github.com/Omnibus-Type/Archivo)
+- Source: Google Fonts — `https://github.com/google/fonts` (`ofl/archivo/Archivo[wdth,wght].ttf`),
+  variable font (wght 100–900 × wdth 62–125). Static instances generated with fontTools
+  `varLib.instancer` from the official variable font above, pinning wdth=87.5 (SemiCondensed)
+  — permitted under OFL-1.1.
+- Bundled weights (static): `ArchivoSemiCondensed-SemiBold.ttf` (600),
+  `ArchivoSemiCondensed-Bold.ttf` (700)
+- License: `Archivo-OFL.txt`
+- Note: SemiCondensed is the wdth=87.5 named instance per the font's STAT table
+  (wdth 62.5=ExtraCondensed, 75=Condensed, 87.5=SemiCondensed, 100=Normal, 112.5=SemiExpanded,
+  125=Expanded). OS/2 usWidthClass in the bundled statics is 4 (SemiCondensed). Registered in
+  FONTS-02 for major display headings; no UI usage yet (token remap is FONTS-04).
 
 ## Inter — OFL-1.1 (legacy, superseded)
 

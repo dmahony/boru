@@ -14,15 +14,16 @@
 //! | Raleway         | 800 (ExtraBold)               | BORU wordmark / branding only   |
 //! | JetBrains Mono  | 400 · 500                     | Technical/code values           |
 //! | Inter           | 400 · 500 · 600 · 700         | Legacy fallback (bundled, not loaded) |
+//! | Archivo SemiCondensed | 600 (SemiBold) · 700 (Bold) | Major display headings (registered only) |
 //!
 //! ## Licence
 //!
-//! Source Sans 3, Inter, Manrope, Figtree, Raleway, and JetBrains Mono are
-//! licensed under the SIL Open Font License 1.1. See fonts/OFL.txt and the
-//! per-family OFL records (fonts/Figtree-OFL.txt, fonts/Manrope-OFL.txt,
-//! fonts/JetBrainsMono-OFL.txt, fonts/Raleway-OFL.txt,
-//! fonts/SourceSans3-OFL.txt) plus fonts/THIRD_PARTY_NOTICES.md for exact
-//! sources and versions.
+//! Source Sans 3, Inter, Manrope, Figtree, Raleway, JetBrains Mono, and
+//! Archivo SemiCondensed are licensed under the SIL Open Font License 1.1.
+//! See fonts/OFL.txt and the per-family OFL records (fonts/Figtree-OFL.txt,
+//! fonts/Manrope-OFL.txt, fonts/JetBrainsMono-OFL.txt, fonts/Raleway-OFL.txt,
+//! fonts/SourceSans3-OFL.txt, fonts/Archivo-OFL.txt) plus
+//! fonts/THIRD_PARTY_NOTICES.md for exact sources and versions.
 
 use iced::font::{self, Family, Weight};
 use iced::widget::text;
@@ -94,6 +95,14 @@ const JETBRAINS_MONO_REGULAR_BYTES: &[u8] = include_bytes!("fonts/JetBrainsMono-
 /// JetBrains Mono Medium (500) — emphasised technical values.
 const JETBRAINS_MONO_MEDIUM_BYTES: &[u8] = include_bytes!("fonts/JetBrainsMono-Medium.ttf");
 
+/// Archivo SemiCondensed SemiBold (600) — display headings (width axis 87.5).
+const ARCHIVO_SEMI_CONDENSED_SEMI_BOLD_BYTES: &[u8] =
+    include_bytes!("fonts/ArchivoSemiCondensed-SemiBold.ttf");
+
+/// Archivo SemiCondensed Bold (700) — major display headings (width axis 87.5).
+const ARCHIVO_SEMI_CONDENSED_BOLD_BYTES: &[u8] =
+    include_bytes!("fonts/ArchivoSemiCondensed-Bold.ttf");
+
 // ── Font family names ────────────────────────────────────────────────
 
 /// Internal family name for Source Sans 3.
@@ -114,6 +123,9 @@ pub const RALEWAY: &str = "Raleway";
 
 /// Internal family name for JetBrains Mono.
 pub const JETBRAINS_MONO: &str = "JetBrains Mono";
+
+/// Internal family name for Archivo SemiCondensed (display headings).
+pub const ARCHIVO_SEMI_CONDENSED: &str = "Archivo SemiCondensed";
 
 // ── Font constructors ────────────────────────────────────────────────
 
@@ -172,6 +184,19 @@ pub fn raleway_extra_bold() -> Font {
 pub fn jetbrains_mono(weight: Weight) -> Font {
     Font {
         family: Family::Name(JETBRAINS_MONO),
+        weight,
+        stretch: iced::font::Stretch::Normal,
+        style: iced::font::Style::Normal,
+    }
+}
+
+/// Return a `Font` for Archivo SemiCondensed at the given weight.
+///
+/// Registered weights: 600 (SemiBold) and 700 (Bold). The family's width
+/// axis is pinned at 87.5 (SemiCondensed) in the bundled static instances.
+pub fn archivo_semi_condensed(weight: Weight) -> Font {
+    Font {
+        family: Family::Name(ARCHIVO_SEMI_CONDENSED),
         weight,
         stretch: iced::font::Stretch::Normal,
         style: iced::font::Style::Normal,
@@ -613,6 +638,9 @@ pub fn load_fonts() -> iced::Task<crate::app::AppMessage> {
         // JetBrains Mono — 400 · 500 (technical values).
         font::load(JETBRAINS_MONO_REGULAR_BYTES).map(|_| crate::app::AppMessage::Noop),
         font::load(JETBRAINS_MONO_MEDIUM_BYTES).map(|_| crate::app::AppMessage::Noop),
+        // Archivo SemiCondensed — 600 · 700 (display headings).
+        font::load(ARCHIVO_SEMI_CONDENSED_SEMI_BOLD_BYTES).map(|_| crate::app::AppMessage::Noop),
+        font::load(ARCHIVO_SEMI_CONDENSED_BOLD_BYTES).map(|_| crate::app::AppMessage::Noop),
     ])
 }
 
@@ -651,6 +679,9 @@ mod tests {
         assert!(!JETBRAINS_MONO_MEDIUM_BYTES.is_empty());
         // Source Sans 3 Medium
         assert!(!SOURCE_SANS_MEDIUM_BYTES.is_empty());
+        // Archivo SemiCondensed statics
+        assert!(!ARCHIVO_SEMI_CONDENSED_SEMI_BOLD_BYTES.is_empty());
+        assert!(!ARCHIVO_SEMI_CONDENSED_BOLD_BYTES.is_empty());
     }
 
     #[test]
@@ -668,6 +699,8 @@ mod tests {
             (RALEWAY, Weight::ExtraBold),  // 800
             (JETBRAINS_MONO, Weight::Normal), // 400
             (JETBRAINS_MONO, Weight::Medium), // 500
+            (ARCHIVO_SEMI_CONDENSED, Weight::Semibold), // 600
+            (ARCHIVO_SEMI_CONDENSED, Weight::Bold),     // 700
         ];
         let loaded: &[(&str, Weight)] = &[
             (SOURCE_SANS, Weight::Normal),
@@ -681,6 +714,8 @@ mod tests {
             (RALEWAY, Weight::ExtraBold),
             (JETBRAINS_MONO, Weight::Normal),
             (JETBRAINS_MONO, Weight::Medium),
+            (ARCHIVO_SEMI_CONDENSED, Weight::Semibold),
+            (ARCHIVO_SEMI_CONDENSED, Weight::Bold),
         ];
         for (family, weight) in expectations {
             assert!(
