@@ -58,7 +58,7 @@ use boru_core::download_limits::DownloadLimitsConfig;
 use boru_core::download_manager::DownloadManager;
 use boru_core::file_indexer::FileIndexer;
 use boru_core::gif_provider::{
-    GifContentRating, GifMediaFormat, GifProvider, GifProviderError,
+    GifContentRating, GifMediaFormat, GifProviderError,
     GifSearchPage, GifSearchRequest, GifSearchResult, GifTrendingRequest,
 };
 use boru_core::friend_request::{
