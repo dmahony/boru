@@ -16,6 +16,7 @@ License texts:
 | Raleway       | `Raleway-OFL.txt`       | 4497  |
 | Source Sans 3 | `SourceSans3-OFL.txt`   | 4579  |
 | Archivo SemiCondensed | `Archivo-OFL.txt` | 4388  |
+| IBM Plex Sans | `IBMPlexSans-OFL.txt` | 4456  |
 | Combined      | `OFL.txt`               | 4985  (multi-family notice kept for legacy) |
 
 ---
@@ -101,6 +102,24 @@ License texts:
 - Source: Google Fonts (`ofl/inter`); static weights 400/500/600/700.
 - Status: legacy fallback. Still bundled and licensed; **not loaded at startup** and will be
   removed as screens migrate off it (UI-HOME-12/13/14 cleanup).
+
+## IBM Plex Sans — OFL-1.1
+
+- Version: **3.201** (2025-01-10 update; first added to Google Fonts 2018-03-12)
+- Copyright: © 2017 IBM Corp., with Reserved Font Name "Plex"
+- Source: Google Fonts — `https://github.com/google/fonts` (`ofl/ibmplexsans/IBMPlexSans[wdth,wght].ttf`),
+  variable font (wght 100–700 × wdth 75–100), upstream `https://github.com/googlefonts/plex`
+  at commit 3e312890b3b9e47378b30dedfe4196a42151243c. Static instances generated with fontTools
+  `varLib.instancer` from the official variable font above, pinning wdth=100 (Normal) and the
+  named wght instances — permitted under OFL-1.1.
+- Bundled weights (static): `IBMPlexSans-Regular.ttf` (400), `IBMPlexSans-Medium.ttf` (500),
+  `IBMPlexSans-SemiBold.ttf` (600)
+- License: `IBMPlexSans-OFL.txt`
+- Note: Bold (700) is not bundled because no semantic role in the FONTS-04 token mapping
+  requests weight 700 for IBM Plex Sans (SectionTitle/CardTitle/ButtonLabel use 600, Navigation
+  uses 500, Body/Metadata use 400). Registered in FONTS-03 for general app UI; no UI usage yet
+  (token remap is FONTS-04). Static instances are normal-width (wdth=100, usWidthClass 5) with
+  clean family/subfamily naming so iced/fontdb resolves "IBM Plex Sans" + exact weight.
 
 ---
 

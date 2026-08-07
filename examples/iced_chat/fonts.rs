@@ -15,15 +15,18 @@
 //! | JetBrains Mono  | 400 · 500                     | Technical/code values           |
 //! | Inter           | 400 · 500 · 600 · 700         | Legacy fallback (bundled, not loaded) |
 //! | Archivo SemiCondensed | 600 (SemiBold) · 700 (Bold) | Major display headings (registered only) |
+//! | IBM Plex Sans  | 400 (Regular) · 500 (Medium) · 600 (SemiBold) | General app UI (registered only) |
 //!
 //! ## Licence
 //!
-//! Source Sans 3, Inter, Manrope, Figtree, Raleway, JetBrains Mono, and
-//! Archivo SemiCondensed are licensed under the SIL Open Font License 1.1.
-//! See fonts/OFL.txt and the per-family OFL records (fonts/Figtree-OFL.txt,
-//! fonts/Manrope-OFL.txt, fonts/JetBrainsMono-OFL.txt, fonts/Raleway-OFL.txt,
-//! fonts/SourceSans3-OFL.txt, fonts/Archivo-OFL.txt) plus
-//! fonts/THIRD_PARTY_NOTICES.md for exact sources and versions.
+//! Source Sans 3, Inter, Manrope, Figtree, Raleway, JetBrains Mono,
+//! Archivo SemiCondensed, and IBM Plex Sans are licensed under the SIL
+//! Open Font License 1.1. See fonts/OFL.txt and the per-family OFL
+//! records (fonts/Figtree-OFL.txt, fonts/Manrope-OFL.txt,
+//! fonts/JetBrainsMono-OFL.txt, fonts/Raleway-OFL.txt,
+//! fonts/SourceSans3-OFL.txt, fonts/Archivo-OFL.txt,
+//! fonts/IBMPlexSans-OFL.txt) plus fonts/THIRD_PARTY_NOTICES.md for
+//! exact sources and versions.
 
 use iced::font::{self, Family, Weight};
 use iced::widget::text;
@@ -103,6 +106,15 @@ const ARCHIVO_SEMI_CONDENSED_SEMI_BOLD_BYTES: &[u8] =
 const ARCHIVO_SEMI_CONDENSED_BOLD_BYTES: &[u8] =
     include_bytes!("fonts/ArchivoSemiCondensed-Bold.ttf");
 
+/// IBM Plex Sans Regular (400) — general app UI (static instance, wdth 100).
+const IBM_PLEX_SANS_REGULAR_BYTES: &[u8] = include_bytes!("fonts/IBMPlexSans-Regular.ttf");
+
+/// IBM Plex Sans Medium (500) — general app UI emphasis (static instance, wdth 100).
+const IBM_PLEX_SANS_MEDIUM_BYTES: &[u8] = include_bytes!("fonts/IBMPlexSans-Medium.ttf");
+
+/// IBM Plex Sans SemiBold (600) — general app UI headings/labels (static instance, wdth 100).
+const IBM_PLEX_SANS_SEMI_BOLD_BYTES: &[u8] = include_bytes!("fonts/IBMPlexSans-SemiBold.ttf");
+
 // ── Font family names ────────────────────────────────────────────────
 
 /// Internal family name for Source Sans 3.
@@ -126,6 +138,9 @@ pub const JETBRAINS_MONO: &str = "JetBrains Mono";
 
 /// Internal family name for Archivo SemiCondensed (display headings).
 pub const ARCHIVO_SEMI_CONDENSED: &str = "Archivo SemiCondensed";
+
+/// Internal family name for IBM Plex Sans (general app UI).
+pub const IBM_PLEX_SANS: &str = "IBM Plex Sans";
 
 // ── Font constructors ────────────────────────────────────────────────
 
@@ -197,6 +212,20 @@ pub fn jetbrains_mono(weight: Weight) -> Font {
 pub fn archivo_semi_condensed(weight: Weight) -> Font {
     Font {
         family: Family::Name(ARCHIVO_SEMI_CONDENSED),
+        weight,
+        stretch: iced::font::Stretch::Normal,
+        style: iced::font::Style::Normal,
+    }
+}
+
+/// Return a `Font` for IBM Plex Sans at the given weight.
+///
+/// Registered weights: 400 (Regular), 500 (Medium), and 600 (SemiBold).
+/// The bundled static instances are normal-width (wdth 100) statics
+/// generated from the official variable font.
+pub fn ibm_plex_sans(weight: Weight) -> Font {
+    Font {
+        family: Family::Name(IBM_PLEX_SANS),
         weight,
         stretch: iced::font::Stretch::Normal,
         style: iced::font::Style::Normal,
@@ -641,6 +670,10 @@ pub fn load_fonts() -> iced::Task<crate::app::AppMessage> {
         // Archivo SemiCondensed — 600 · 700 (display headings).
         font::load(ARCHIVO_SEMI_CONDENSED_SEMI_BOLD_BYTES).map(|_| crate::app::AppMessage::Noop),
         font::load(ARCHIVO_SEMI_CONDENSED_BOLD_BYTES).map(|_| crate::app::AppMessage::Noop),
+        // IBM Plex Sans — 400 · 500 · 600 (general app UI).
+        font::load(IBM_PLEX_SANS_REGULAR_BYTES).map(|_| crate::app::AppMessage::Noop),
+        font::load(IBM_PLEX_SANS_MEDIUM_BYTES).map(|_| crate::app::AppMessage::Noop),
+        font::load(IBM_PLEX_SANS_SEMI_BOLD_BYTES).map(|_| crate::app::AppMessage::Noop),
     ])
 }
 
@@ -682,6 +715,10 @@ mod tests {
         // Archivo SemiCondensed statics
         assert!(!ARCHIVO_SEMI_CONDENSED_SEMI_BOLD_BYTES.is_empty());
         assert!(!ARCHIVO_SEMI_CONDENSED_BOLD_BYTES.is_empty());
+        // IBM Plex Sans statics
+        assert!(!IBM_PLEX_SANS_REGULAR_BYTES.is_empty());
+        assert!(!IBM_PLEX_SANS_MEDIUM_BYTES.is_empty());
+        assert!(!IBM_PLEX_SANS_SEMI_BOLD_BYTES.is_empty());
     }
 
     #[test]
@@ -701,6 +738,9 @@ mod tests {
             (JETBRAINS_MONO, Weight::Medium), // 500
             (ARCHIVO_SEMI_CONDENSED, Weight::Semibold), // 600
             (ARCHIVO_SEMI_CONDENSED, Weight::Bold),     // 700
+            (IBM_PLEX_SANS, Weight::Normal),     // 400
+            (IBM_PLEX_SANS, Weight::Medium),     // 500
+            (IBM_PLEX_SANS, Weight::Semibold),   // 600
         ];
         let loaded: &[(&str, Weight)] = &[
             (SOURCE_SANS, Weight::Normal),
@@ -716,6 +756,9 @@ mod tests {
             (JETBRAINS_MONO, Weight::Medium),
             (ARCHIVO_SEMI_CONDENSED, Weight::Semibold),
             (ARCHIVO_SEMI_CONDENSED, Weight::Bold),
+            (IBM_PLEX_SANS, Weight::Normal),
+            (IBM_PLEX_SANS, Weight::Medium),
+            (IBM_PLEX_SANS, Weight::Semibold),
         ];
         for (family, weight) in expectations {
             assert!(
