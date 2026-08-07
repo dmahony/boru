@@ -23467,21 +23467,25 @@ impl IcedChat {
                 })
                 .unwrap_or(0);
 
+        // NOTE: array position must match the canonical sidebar section index
+        // used by `sidebar_section_count` and the render code — 4 = REQUESTS,
+        // 5 = PUBLIC ROOMS. Swapping these two makes the 0 → >0 auto-expand /
+        // fade transition fire on the wrong section (SIDEBAR-01 review fix).
         let old_counts = [
             self.cached_chat_count,
             self.cached_group_count,
             self.cached_friend_count,
             self.cached_discover_count,
-            self.cached_public_room_count,
             self.cached_request_count,
+            self.cached_public_room_count,
         ];
         let new_counts = [
             new_chat_count,
             new_group_count,
             new_friend_count,
             new_discover_count,
-            new_public_room_count,
             new_request_count,
+            new_public_room_count,
         ];
         let fade_frames = crate::ui_components::SIDEBAR_FADE_FRAMES;
         for (i, (&old, &new)) in old_counts.iter().zip(new_counts.iter()).enumerate() {
@@ -44431,6 +44435,103 @@ mod tests {
             app.sidebar_fade_frame[0],
             crate::ui_components::SIDEBAR_FADE_FRAMES,
             "manual expand does not replay the appearance animation"
+        );
+        assert!(!app.sidebar_fade_active());
+
+        drop(runtime);
+    }
+
+    #[test]
+    fn sidebar_first_item_fades_correct_section_requests_and_public_rooms() {
+        // SIDEBAR-01 regression: the 0 → >0 auto-expand/fade transition must
+        // fire on the section whose count actually changed. REQUESTS is index
+        // 4 and PUBLIC ROOMS index 5; a swapped count array used to fade the
+        // wrong sibling section and never fade the section that gained its
+        // first item.
+        let (runtime, mut app) = build_prewarm_test_app();
+        app.reduced_motion = false;
+
+        app.refresh_sidebar_counts();
+        assert_eq!(app.cached_public_room_count, 0);
+        assert_eq!(app.cached_request_count, 0);
+        assert_eq!(
+            app.sidebar_fade_frame,
+            [crate::ui_components::SIDEBAR_FADE_FRAMES; 6],
+            "no fade before any item arrives"
+        );
+
+        // First PUBLIC ROOM arrives → PUBLIC ROOMS (index 5) must fade;
+        // REQUESTS (index 4) must stay idle.
+        let local_pk = app.endpoint.id();
+        {
+            let mut store = app.directory_store.lock().unwrap();
+            store.upsert(
+                RoomAdvertisement {
+                    room_name: "fade-room".to_string(),
+                    description: String::new(),
+                    topic: TopicId::from_bytes([7u8; 32]),
+                    ticket: "ticket".to_string(),
+                    member_count: 0,
+                    last_activity: 0,
+                },
+                local_pk,
+            );
+        }
+        app.refresh_sidebar_counts();
+        assert_eq!(app.cached_public_room_count, 1);
+        assert!(
+            !app.sidebar_section_collapsed[5],
+            "first public room auto-expands PUBLIC ROOMS (index 5)"
+        );
+        assert_eq!(
+            app.sidebar_fade_frame[5], 0,
+            "PUBLIC ROOMS fade starts on its first item"
+        );
+        assert_eq!(
+            app.sidebar_fade_frame[4],
+            crate::ui_components::SIDEBAR_FADE_FRAMES,
+            "REQUESTS (index 4) must NOT fade when a public room arrives"
+        );
+
+        // Now a first REQUEST arrives → REQUESTS (index 4) must fade; the
+        // already-populated PUBLIC ROOMS section must NOT restart its fade.
+        let task = app.update(AppMessage::SplashTick);
+        drop(task);
+        assert_eq!(
+            app.sidebar_fade_frame[5], 1,
+            "PUBLIC ROOMS fade advances normally"
+        );
+        app.friend_request_store
+            .send_request(
+                "remote-peer",
+                app.local_public.to_string(),
+                Some("hello".to_string()),
+            )
+            .expect("send request");
+        app.refresh_sidebar_counts();
+        assert_eq!(app.cached_request_count, 1);
+        assert!(
+            !app.sidebar_section_collapsed[4],
+            "first request auto-expands REQUESTS (index 4)"
+        );
+        assert_eq!(
+            app.sidebar_fade_frame[4], 0,
+            "REQUESTS fade starts on its first item"
+        );
+        assert_eq!(
+            app.sidebar_fade_frame[5], 1,
+            "PUBLIC ROOMS fade is not restarted by a REQUESTS arrival"
+        );
+
+        // Both sections eventually reach the cap together.
+        for _ in 0..(crate::ui_components::SIDEBAR_FADE_FRAMES + 2) {
+            let task = app.update(AppMessage::SplashTick);
+            drop(task);
+        }
+        assert_eq!(
+            app.sidebar_fade_frame,
+            [crate::ui_components::SIDEBAR_FADE_FRAMES; 6],
+            "all fades cap at SIDEBAR_FADE_FRAMES"
         );
         assert!(!app.sidebar_fade_active());
 
