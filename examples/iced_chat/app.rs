@@ -9344,6 +9344,45 @@ impl IcedChat {
         local_hex: &str,
     ) -> Option<ChatEntry> {
         use std::str::FromStr;
+        if row.kind == "file" {
+            let signed = row.signed_bytes.as_deref()?;
+            let (_, message, _) = SignedMessage::verify_and_decode(signed).ok()?;
+            let Message::FileShare {
+                name,
+                ticket,
+                size,
+                thumbnail_hash,
+                collection_hash: _,
+                collection_entries: _,
+            } = message else {
+                return None;
+            };
+            let sender = PublicKey::from_bytes(&row.sender).ok()?;
+            let transfer_kind = if classify_attachment(None, &name) == MediaKind::Video {
+                TransferKind::Video
+            } else {
+                TransferKind::File
+            };
+            let mut entry = ChatEntry::system_download(
+                format!("File received: {name}"),
+                transfer_kind,
+                name,
+                ticket,
+                sender.fmt_short().to_string(),
+                None,
+            );
+            if let Some(download) = entry.download.as_mut() {
+                download.state = DownloadState::Ready {
+                    total: (size > 0).then_some(size),
+                };
+                download.thumbnail_hash = thumbnail_hash;
+            }
+            entry.message_hash = Some(row.msg_hash);
+            entry.timestamp = Some(row.timestamp_ms);
+            entry.event_id = row.id as u64;
+            entry.sender_key = Some(sender);
+            return Some(entry);
+        }
         let kind = match row.kind.as_str() {
             "system" => ChatKind::System,
             "text" | "image" => {
@@ -25230,6 +25269,40 @@ impl ChatCallbacks for IcedChat {
             Ok(true) => trace!(peer = %peer.fmt_short(), "persisted received message"),
             Ok(false) => trace!(peer = %peer.fmt_short(), "received message already persisted"),
             Err(err) => warn!(error = %err, "failed to persist received message"),
+        }
+    }
+
+    fn persist_remote_file_share(
+        &mut self,
+        topic: Option<boru_core::proto::TopicId>,
+        peer: PublicKey,
+        hash: MessageHash,
+        sent_at: u64,
+        name: &str,
+        signed_bytes: Option<Vec<u8>>,
+    ) {
+        let Some(topic) = topic else {
+            warn!("received file share without topic; skipping durable persistence");
+            return;
+        };
+        let store_path = self.data_dir.join("message_store.db");
+        let result = MessageStore::open(&store_path).and_then(|store| {
+            store.insert_chat_message(
+                &hash,
+                topic.as_bytes(),
+                &peer.as_bytes(),
+                sent_at.saturating_mul(1000),
+                "file",
+                name,
+                signed_bytes.as_deref(),
+                None,
+                &self.local_public.as_bytes(),
+            )
+        });
+        match result {
+            Ok(true) => trace!(peer = %peer.fmt_short(), "persisted received file share"),
+            Ok(false) => trace!(peer = %peer.fmt_short(), "received file share already persisted"),
+            Err(err) => warn!(error = %err, "failed to persist received file share"),
         }
     }
 

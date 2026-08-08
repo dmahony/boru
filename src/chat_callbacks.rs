@@ -248,6 +248,19 @@ pub trait ChatCallbacks {
     ) {
     }
 
+    /// Persist an authenticated incoming file-share announcement. The signed
+    /// bytes retain the complete ticket and attachment metadata for replay.
+    fn persist_remote_file_share(
+        &mut self,
+        _topic: Option<crate::proto::TopicId>,
+        _peer: PublicKey,
+        _hash: MessageHash,
+        _sent_at: u64,
+        _name: &str,
+        _signed_bytes: Option<Vec<u8>>,
+    ) {
+    }
+
     /// Record a pending file download: `(filename, ticket_string, size_in_bytes, thumbnail_bytes)`.
     ///
     /// `sender_label` is the resolved display name of the peer that shared

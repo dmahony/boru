@@ -2023,6 +2023,14 @@ pub fn handle_net_event_for_topic(
                     collection_entries,
                 } => {
                     if from != cb.local_public() {
+                        cb.persist_remote_file_share(
+                            topic,
+                            from,
+                            incoming_hash,
+                            sent_at,
+                            &name,
+                            get_signed_message(from, incoming_hash, sent_at),
+                        );
                         let fid = FriendId::from_public_key(from);
                         if cb.is_friend(&from) || cb.accepts_group_peer(topic, &from) {
                             cb.friend_mark_online(fid);
