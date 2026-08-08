@@ -249,6 +249,11 @@ name = "call_audio_integration"
 path = "tests/call_audio_integration.rs"
 required-features = ["voice-calls"]
 
+[[test]]
+name = "voice_acceptance"
+path = "tests/voice_acceptance.rs"
+required-features = ["net", "voice-calls"]
+
 [[bin]]
 name = "sim"
 required-features = ["simulator"]
