@@ -12,6 +12,12 @@ pub mod device;
 /// Device-boundary PCM conversion and stateful resampling.
 #[cfg(feature = "voice-calls")]
 pub mod format;
+/// Fixed-size audio frame timing and wrapping media clock.
+#[cfg(feature = "voice-calls")]
+pub mod frame;
+
+#[cfg(feature = "voice-calls")]
+pub use frame::{AudioSeq, FRAME_DURATION, FRAME_MS, SAMPLES_PER_FRAME, SAMPLE_RATE};
 
 /// Call actor, handle, and Iroh protocol registration.
 #[cfg(feature = "net")]
