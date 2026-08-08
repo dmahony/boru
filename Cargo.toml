@@ -81,6 +81,7 @@ cpal = { version = "0.18", optional = true }
 rtrb = { version = "0.3", optional = true }
 opus = { version = "0.3", optional = true }
 rubato = { version = "3", optional = true }
+nnnoiseless = { version = "0.5.2", default-features = false, optional = true }
 
 # net dependencies (optional)
 futures-concurrency = { version = "7.6.1", optional = true }
@@ -216,7 +217,7 @@ net = [
 # Native microphone playback requires system audio libraries (cpal/ALSA) and
 # libopus development headers (the `opus` crate falls back to building its
 # vendored libopus from source when pkg-config cannot find the system library).
-voice-calls = ["dep:cpal", "dep:rtrb", "dep:opus", "dep:rubato"]
+voice-calls = ["dep:cpal", "dep:rtrb", "dep:opus", "dep:rubato", "dep:nnnoiseless"]
 test-utils = ["rand/chacha", "dep:humantime-serde"]
 simulator = [
     "test-utils",
