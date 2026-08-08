@@ -7,8 +7,9 @@
 
 use anyhow::Result;
 
-use super::codec::{DecodedVideoFrame, OpenH264Decoder, VideoDecoder};
-use super::packet::VideoPacket;
+use super::capture::{CaptureConfig, CaptureSource, CapturedFrame};
+use super::codec::{DecodedVideoFrame, OpenH264Decoder, RawVideoFrame, VideoDecoder, VideoEncoder};
+use super::packet::{VideoPacket, VideoPacketizer};
 use super::reassembly::{ReassemblyResult, VideoReassembler};
 use crate::call::media::{MediaDatagram, MediaKind};
 
@@ -125,9 +126,217 @@ impl LiveVideoPipeline {
     }
 }
 
+/// The local camera pipeline. A captured frame is copied into a mirrored
+/// preview slot, while the original (unmirrored) pixels are passed to the
+/// encoder and packetizer. No network I/O is performed by this type.
+#[allow(missing_debug_implementations)]
+pub struct LocalVideoPipeline {
+    config: CaptureConfig,
+    encoder: Box<dyn VideoEncoder>,
+    packetizer: VideoPacketizer,
+    call_id: crate::call::CallId,
+    track_id: u32,
+    max_datagram_size: usize,
+    latest_local_frame: Option<DecodedVideoFrame>,
+    preview_frames: u64,
+}
+
+impl LocalVideoPipeline {
+    /// Construct a local pipeline with an injected encoder.
+    pub fn with_encoder<E>(
+        config: CaptureConfig,
+        call_id: crate::call::CallId,
+        track_id: u32,
+        max_datagram_size: usize,
+        encoder: E,
+    ) -> Self
+    where
+        E: VideoEncoder + 'static,
+    {
+        Self {
+            config,
+            encoder: Box::new(encoder),
+            packetizer: VideoPacketizer::new(),
+            call_id,
+            track_id,
+            max_datagram_size,
+            latest_local_frame: None,
+            preview_frames: 0,
+        }
+    }
+
+    /// Process one captured frame and return encoded datagrams ready for the
+    /// caller's network sender. This method itself never sends them.
+    pub fn process_frame(
+        &mut self,
+        captured: CapturedFrame,
+    ) -> anyhow::Result<Vec<crate::call::media::MediaDatagram>> {
+        let raw = RawVideoFrame {
+            width: self.config.width,
+            height: self.config.height,
+            timestamp_us: captured.timestamp_us,
+            rgb: captured.data,
+        };
+        let preview = mirror_rgb(&raw.rgb, raw.width, raw.height)?;
+        self.latest_local_frame = Some(DecodedVideoFrame {
+            width: raw.width,
+            height: raw.height,
+            bytes: preview,
+        });
+        self.preview_frames = self.preview_frames.saturating_add(1);
+
+        let encoded = self.encoder.encode(&raw)?;
+        self.packetizer
+            .fragment_frame(
+                self.call_id,
+                self.track_id,
+                &encoded,
+                self.max_datagram_size,
+            )
+            .map_err(Into::into)
+    }
+
+    /// Pull and process one frame from a capture source. The returned
+    /// datagrams are still owned by the caller; submitting them is a separate
+    /// network concern.
+    pub fn process_next<S: CaptureSource>(
+        &mut self,
+        source: &mut S,
+    ) -> anyhow::Result<Option<Vec<crate::call::media::MediaDatagram>>> {
+        source
+            .next_frame()
+            .map(|frame| self.process_frame(frame))
+            .transpose()
+    }
+
+    /// Borrow the newest mirrored local preview frame.
+    pub fn latest_local_frame(&self) -> Option<&DecodedVideoFrame> {
+        self.latest_local_frame.as_ref()
+    }
+
+    /// Number of captured frames copied into the preview slot.
+    pub const fn preview_frames(&self) -> u64 {
+        self.preview_frames
+    }
+}
+
+fn mirror_rgb(rgb: &[u8], width: u32, height: u32) -> anyhow::Result<Vec<u8>> {
+    if width == 0 || height == 0 {
+        return Err(anyhow::anyhow!("RGB dimensions must be non-zero"));
+    }
+    let row_bytes = (width as usize)
+        .checked_mul(3)
+        .ok_or_else(|| anyhow::anyhow!("RGB row size overflow"))?;
+    let expected = row_bytes
+        .checked_mul(height as usize)
+        .ok_or_else(|| anyhow::anyhow!("RGB frame size overflow"))?;
+    if rgb.len() != expected {
+        return Err(anyhow::anyhow!(
+            "RGB frame has {} bytes, expected {expected}",
+            rgb.len()
+        ));
+    }
+    let mut mirrored = vec![0; rgb.len()];
+    for (source_row, destination_row) in rgb
+        .chunks_exact(row_bytes)
+        .zip(mirrored.chunks_exact_mut(row_bytes))
+    {
+        for pixel in 0..width as usize {
+            let source = (width as usize - 1 - pixel) * 3;
+            let destination = pixel * 3;
+            destination_row[destination..destination + 3]
+                .copy_from_slice(&source_row[source..source + 3]);
+        }
+    }
+    Ok(mirrored)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct RecordingEncoder {
+        seen: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl VideoEncoder for RecordingEncoder {
+        fn encode(
+            &mut self,
+            frame: &RawVideoFrame,
+        ) -> anyhow::Result<super::super::codec::EncodedVideoFrame> {
+            *self.seen.lock().expect("recording encoder lock") = frame.rgb.clone();
+            Ok(super::super::codec::EncodedVideoFrame {
+                codec: super::super::codec::VideoCodec::H264,
+                width: frame.width,
+                height: frame.height,
+                timestamp_us: frame.timestamp_us,
+                keyframe: true,
+                bytes: vec![1, 2, 3],
+            })
+        }
+
+        fn request_keyframe(&mut self) {}
+    }
+
+    #[test]
+    fn local_preview_is_mirrored_without_mutating_encoder_input() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let encoder = RecordingEncoder { seen: seen.clone() };
+        let config = CaptureConfig {
+            width: 2,
+            height: 1,
+            frame_interval: std::time::Duration::from_millis(33),
+        };
+        let original = vec![10, 11, 12, 20, 21, 22];
+        let mut pipeline = LocalVideoPipeline::with_encoder(
+            config,
+            crate::call::CallId::generate(),
+            1,
+            100,
+            encoder,
+        );
+
+        let datagrams = pipeline
+            .process_frame(CapturedFrame {
+                timestamp_us: 7,
+                data: original.clone(),
+            })
+            .expect("local frame processed");
+
+        assert!(!datagrams.is_empty());
+        assert_eq!(
+            pipeline.latest_local_frame().unwrap().bytes,
+            vec![20, 21, 22, 10, 11, 12]
+        );
+        assert_eq!(*seen.lock().expect("recording encoder lock"), original);
+        assert_eq!(pipeline.preview_frames(), 1);
+    }
+
+    #[test]
+    fn local_preview_does_not_require_network_submission() {
+        let config = CaptureConfig {
+            width: 2,
+            height: 1,
+            frame_interval: std::time::Duration::from_millis(33),
+        };
+        let mut pipeline = LocalVideoPipeline::with_encoder(
+            config,
+            crate::call::CallId::generate(),
+            1,
+            100,
+            RecordingEncoder::default(),
+        );
+        pipeline
+            .process_frame(CapturedFrame {
+                timestamp_us: 1,
+                data: vec![0; 6],
+            })
+            .expect("local frame processed");
+        assert!(pipeline.latest_local_frame().is_some());
+    }
+
     use crate::call::video::{
         OpenH264Encoder, RawVideoFrame, VideoCodec, VideoEncoder, VideoPacketizer,
     };

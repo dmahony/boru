@@ -22,4 +22,4 @@ pub use codec::{
     VIDEO_KEYFRAME_INTERVAL_FRAMES, VIDEO_TARGET_BITRATE_BPS, VIDEO_WIDTH,
 };
 pub use packet::{VideoPacket, VideoPacketizer, MAX_VIDEO_PAYLOAD_BYTES};
-pub use pipeline::LiveVideoPipeline;
+pub use pipeline::{LiveVideoPipeline, LocalVideoPipeline};
