@@ -8622,7 +8622,16 @@ impl IcedChat {
                     if let Some(entry) = self.entries.get_mut(idx) {
                         if let Some(download) = entry.download.as_mut() {
                             download.transfer_id = Some(id);
-                            download.state = DownloadState::Active { bytes: 0, total };
+                            // Same terminal-state guard as the Progress
+                            // branch: a late or restart-recovered Started
+                            // event must not revert a card that DownloadDone
+                            // already resolved to Completed{Some(path)} —
+                            // the queued Completed event would then downgrade
+                            // it to the "Verifying" placeholder
+                            // (saved_path: None) and strand it there.
+                            if !download.state.is_terminal() {
+                                download.state = DownloadState::Active { bytes: 0, total };
+                            }
                             self.transfer_id_to_index.insert(id, idx);
                             invalidate_from = Some(idx);
                         }
