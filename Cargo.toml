@@ -76,6 +76,12 @@ rand = { version = "0.10.1", features = ["std_rng"] }
 serde = { version = "1.0.164", features = ["derive"] }
 rfd = { version = "0.15", optional = true }
 
+# voice-calls dependencies (optional, native audio I/O)
+cpal = { version = "0.18", optional = true }
+rtrb = { version = "0.3", optional = true }
+opus = { version = "0.3", optional = true }
+rubato = { version = "3", optional = true }
+
 # net dependencies (optional)
 futures-concurrency = { version = "7.6.1", optional = true }
 
@@ -207,6 +213,10 @@ net = [
     "dep:futures-concurrency",
     "dep:serde_json",
 ]
+# Native microphone playback requires system audio libraries (cpal/ALSA) and
+# libopus development headers (the `opus` crate falls back to building its
+# vendored libopus from source when pkg-config cannot find the system library).
+voice-calls = ["dep:cpal", "dep:rtrb", "dep:opus", "dep:rubato"]
 test-utils = ["rand/chacha", "dep:humantime-serde"]
 simulator = [
     "test-utils",
