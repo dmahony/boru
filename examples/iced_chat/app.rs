@@ -2444,10 +2444,10 @@ impl DownloadAttachment {
         }
     }
 
-    fn estimated_height(&self) -> f32 {
+    fn estimated_height(&self, timeline_width: f32) -> f32 {
         // Rows: title + action + spacing. Active adds progress + source rows.
         // Error state adds a failure-title, action, and detail rows.
-        match self.state {
+        let base = match self.state {
             DownloadState::Ready { .. } => 84.0,
             DownloadState::Active { total: Some(_), .. } | DownloadState::Paused { .. } => 112.0,
             DownloadState::Active { total: None, .. } => 176.0,
@@ -2455,6 +2455,22 @@ impl DownloadAttachment {
             DownloadState::Shared { .. } => 92.0,
             DownloadState::Failed { .. } => 176.0,
             DownloadState::Cancelled => 84.0,
+        };
+
+        if self.kind == TransferKind::Video {
+            // Video cards replace the generic download body with a bounded
+            // poster/player plus stable header/status/action slots.  Keep the
+            // chrome conservative: an underestimate corrupts the virtualized
+            // prefix sums and causes overlap, while a small overestimate only
+            // adds harmless overscan space.
+            const VIDEO_CARD_CHROME_H: f32 = 320.0;
+            base + VIDEO_CARD_CHROME_H
+                + crate::video_file_card::estimated_media_frame_height(
+                    self.poster_dimensions,
+                    timeline_width,
+                )
+        } else {
+            base
         }
     }
 }
@@ -2841,7 +2857,7 @@ impl ChatEntry {
 
     #[expect(dead_code)]
     fn estimated_height(&self) -> f32 {
-        LayoutCache::compute_height(self, None, TYPO_SM)
+        LayoutCache::compute_height(self, None, TYPO_SM, 1024.0)
     }
 
     /// Override the timestamp with a specific Unix epoch millisecond value.
@@ -6723,6 +6739,8 @@ pub struct LayoutCache {
     dirty_from: Option<usize>,
     /// The text-size value with which heights were last computed.
     cached_text_size: f32,
+    /// Timeline width used for responsive video media-frame estimates.
+    cached_timeline_width: f32,
     /// Summed image bytes across all entries (maintained incrementally).
     total_image_bytes: usize,
     /// Count of entries that carry image data.
@@ -6754,13 +6772,19 @@ impl LayoutCache {
             total_height: 0.0,
             dirty_from: None,
             cached_text_size: text_size,
+            cached_timeline_width: 0.0,
             total_image_bytes: 0,
             image_entry_count: 0,
         }
     }
 
     /// Compute the estimated pixel height for a single entry.
-    fn compute_height(entry: &ChatEntry, prev_day: Option<i64>, _text_size: f32) -> f32 {
+    fn compute_height(
+        entry: &ChatEntry,
+        prev_day: Option<i64>,
+        _text_size: f32,
+        timeline_width: f32,
+    ) -> f32 {
         let mut h = 0.0;
         let day = entry.timestamp.map(|ts| ts / 86400000);
         if let Some(d) = day {
@@ -6772,7 +6796,7 @@ impl LayoutCache {
             ChatKind::System => {
                 h += Self::SYSTEM_H;
                 if let Some(download) = &entry.download {
-                    h += download.estimated_height();
+                    h += download.estimated_height(timeline_width);
                 }
             }
             _ => {
@@ -6801,7 +6825,7 @@ impl LayoutCache {
 
     /// Append one entry to the cache (O(1)).
     fn append(&mut self, entry: &ChatEntry, prev_day: Option<i64>, text_size: f32) {
-        let h = Self::compute_height(entry, prev_day, text_size);
+        let h = Self::compute_height(entry, prev_day, text_size, self.cached_timeline_width);
         self.heights.push(h);
         self.cum.push(self.total_height);
         self.total_height += h;
@@ -6852,7 +6876,7 @@ impl LayoutCache {
     }
 
     /// Rebuild the cache from a given index onward.
-    fn build(&mut self, entries: &[ChatEntry], text_size: f32, from: usize) {
+    fn build(&mut self, entries: &[ChatEntry], text_size: f32, from: usize, timeline_width: f32) {
         let total = entries.len();
         let from = from.min(total);
 
@@ -6901,7 +6925,7 @@ impl LayoutCache {
         for (offset, e) in entries[from..total].iter().enumerate() {
             let i = from + offset;
             let day = e.timestamp.map(|ts| ts / 86400000);
-            let h = Self::compute_height(e, prev_day, text_size);
+            let h = Self::compute_height(e, prev_day, text_size, timeline_width);
 
             if i < self.heights.len() {
                 self.heights[i] = h;
@@ -6919,18 +6943,20 @@ impl LayoutCache {
         self.total_height = running;
         self.dirty_from = None;
         self.cached_text_size = text_size;
+        self.cached_timeline_width = timeline_width;
     }
 
     /// Ensure the cache is fully valid. Rebuilds from the dirty point if needed.
-    fn ensure(&mut self, entries: &[ChatEntry], text_size: f32) {
+    fn ensure(&mut self, entries: &[ChatEntry], text_size: f32, timeline_width: f32) {
         let needs_full = self.dirty_from == Some(0)
             || self.cached_text_size != text_size
+            || self.cached_timeline_width != timeline_width
             || self.heights.len() != entries.len();
 
         if needs_full {
-            self.build(entries, text_size, 0);
+            self.build(entries, text_size, 0, timeline_width);
         } else if let Some(from) = self.dirty_from {
-            self.build(entries, text_size, from);
+            self.build(entries, text_size, from, timeline_width);
         }
     }
 
@@ -10135,7 +10161,7 @@ impl IcedChat {
             return false;
         };
         let layout = &mut *self.layout_cache.borrow_mut();
-        layout.ensure(&self.entries, self.chat_text_size);
+        layout.ensure(&self.entries, self.chat_text_size, 1024.0);
         let (first, last, _, _) = layout.window(self.scroll_offset, self.viewport_height);
         (first..=last).contains(&entry_index)
     }
@@ -16604,8 +16630,12 @@ impl IcedChat {
                 // virtualized layout immediately so the card and all later
                 // messages keep their correct positions before the first
                 // progress event arrives.
+                // This is a card reflow, not a new timeline entry.  Do not
+                // re-arm the bottom snap here: if the user has scrolled up,
+                // the Ready -> Active height change must preserve that reading
+                // position.  The append path already arms a single snap when
+                // a genuinely new entry arrives while following the latest.
                 self.layout_cache.borrow_mut().invalidate_from(entry_index);
-                self.keep_latest_visible();
                 self.download_entry_index = Some(entry_index);
                 let blob_store = self.blob_store.clone();
                 let endpoint = self.endpoint.clone();
@@ -32719,7 +32749,7 @@ impl IcedChat {
         // Uses the incrementally maintained cache so the height/cumulative passes
         // only run when entries or settings actually change, not on every frame.
         let lc = &mut *self.layout_cache.borrow_mut();
-        lc.ensure(&self.entries, self.chat_text_size);
+        lc.ensure(&self.entries, self.chat_text_size, timeline_width);
 
         let total_entries = self.entries.len();
         let total_image_bytes = lc.total_image_bytes;
@@ -48014,7 +48044,7 @@ mod tests {
             DownloadAttachment::new(TransferKind::File, "demo.bin", "ticket", "", None);
 
         // Ready
-        assert!((attachment.estimated_height() - 84.0).abs() < 1.0);
+        assert!((attachment.estimated_height(1024.0) - 84.0).abs() < 1.0);
 
         // Active with known total
         attachment.state = DownloadState::Active {
@@ -48022,9 +48052,9 @@ mod tests {
             total: Some(1000),
         };
         assert!(
-            (attachment.estimated_height() - 112.0).abs() < 1.0,
+            (attachment.estimated_height(1024.0) - 112.0).abs() < 1.0,
             "active+total height expected ~112, got {}",
-            attachment.estimated_height()
+            attachment.estimated_height(1024.0)
         );
 
         // Active with unknown total
@@ -48032,7 +48062,7 @@ mod tests {
             bytes: 500,
             total: None,
         };
-        assert!((attachment.estimated_height() - 176.0).abs() < 1.0);
+        assert!((attachment.estimated_height(1024.0) - 176.0).abs() < 1.0);
 
         // Completed
         attachment.state = DownloadState::Completed {
@@ -48040,7 +48070,7 @@ mod tests {
             saved_path: None,
             total_size: None,
         };
-        assert!((attachment.estimated_height() - 92.0).abs() < 1.0);
+        assert!((attachment.estimated_height(1024.0) - 92.0).abs() < 1.0);
 
         // Failed
         attachment.state = DownloadState::Failed {
@@ -48048,11 +48078,40 @@ mod tests {
                 detail: "err".into(),
             },
         };
-        assert!((attachment.estimated_height() - 176.0).abs() < 1.0);
+        assert!((attachment.estimated_height(1024.0) - 176.0).abs() < 1.0);
 
         // Cancelled
         attachment.state = DownloadState::Cancelled;
-        assert!((attachment.estimated_height() - 84.0).abs() < 1.0);
+        assert!((attachment.estimated_height(1024.0) - 84.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn video_estimated_height_reserves_bounded_media_frame() {
+        for (dimensions, timeline_width) in [
+            (Some((1920, 1080)), 1024.0),
+            (Some((1080, 1080)), 800.0),
+            (Some((1080, 1920)), 520.0),
+            (None, 1024.0),
+        ] {
+            let mut attachment =
+                DownloadAttachment::new(TransferKind::Video, "clip.mp4", "ticket", "", None);
+            attachment.poster_dimensions = dimensions;
+            attachment.state = DownloadState::Completed {
+                saved_name: "clip.mp4".into(),
+                saved_path: None,
+                total_size: None,
+            };
+
+            let frame_height = crate::video_file_card::estimated_media_frame_height(
+                dimensions,
+                timeline_width,
+            );
+            let estimated = attachment.estimated_height(timeline_width);
+            assert!(
+                estimated >= frame_height,
+                "video estimate {estimated} must reserve frame height {frame_height}"
+            );
+        }
     }
 
     // ── Performance baseline benchmarks ─────────────────────────────────
@@ -48222,10 +48281,10 @@ mod tests {
             ChatEntry::local("me", "first"),
             ChatEntry::local("me", "second"),
         ];
-        cache.ensure(&entries, TYPO_SM);
+        cache.ensure(&entries, TYPO_SM, 1024.0);
         let removed = entries.pop().expect("fixture has a last entry");
         cache.remove(entries.len(), &removed);
-        cache.ensure(&entries, TYPO_SM);
+        cache.ensure(&entries, TYPO_SM, 1024.0);
 
         assert_eq!(cache.heights.len(), 1);
         assert_eq!(cache.cum.len(), 1);
@@ -48241,10 +48300,10 @@ mod tests {
             ChatEntry::local("me", "second"),
             ChatEntry::local("me", "third"),
         ];
-        cache.ensure(&entries, TYPO_SM);
+        cache.ensure(&entries, TYPO_SM, 1024.0);
         let removed = entries.remove(1);
         cache.remove(1, &removed);
-        cache.ensure(&entries, TYPO_SM);
+        cache.ensure(&entries, TYPO_SM, 1024.0);
 
         assert_eq!(cache.heights.len(), entries.len());
         assert_eq!(cache.cum.len(), entries.len());
@@ -48257,10 +48316,10 @@ mod tests {
     fn layout_cache_unchanged_entries_keep_cached_geometry() {
         let mut cache = LayoutCache::new(TYPO_SM);
         let entries = vec![ChatEntry::local("me", "first")];
-        cache.ensure(&entries, TYPO_SM);
+        cache.ensure(&entries, TYPO_SM, 1024.0);
         let heights = cache.heights.clone();
         let cumulative = cache.cum.clone();
-        cache.ensure(&entries, TYPO_SM);
+        cache.ensure(&entries, TYPO_SM, 1024.0);
 
         assert_eq!(cache.heights, heights);
         assert_eq!(cache.cum, cumulative);
@@ -51806,7 +51865,7 @@ mod tests {
         img_entry.image_width = Some(800);
         img_entry.image_height = Some(600);
         let mut entries = vec![img_entry];
-        cache.ensure(&entries, TYPO_SM);
+        cache.ensure(&entries, TYPO_SM, 1024.0);
         let expected = LayoutCache::MSG_BASE_H
             + LayoutCache::IMAGE_HEADER_H
             + 270.0
@@ -51834,7 +51893,7 @@ mod tests {
         tall.image_width = Some(200);
         tall.image_height = Some(2000);
         let tall_entries = vec![tall];
-        cache.ensure(&tall_entries, TYPO_SM);
+        cache.ensure(&tall_entries, TYPO_SM, 1024.0);
         let tall_expected = LayoutCache::MSG_BASE_H
             + LayoutCache::IMAGE_HEADER_H
             + 400.0
@@ -51862,7 +51921,7 @@ mod tests {
         unknown.image_width = None;
         unknown.image_height = None;
         let unknown_entries = vec![unknown];
-        cache.ensure(&unknown_entries, TYPO_SM);
+        cache.ensure(&unknown_entries, TYPO_SM, 1024.0);
         assert!(
             (cache.heights[0] - tall_expected).abs() < 0.01,
             "unknown-dimension image height {} should match the max box (expected {tall_expected})",
@@ -52537,6 +52596,37 @@ fn vr_create_tunnel_picker_port_validation() {
     // fallback renderer (no Xvfb, no window, no network/peers) and saves PNGs
     // to ./captures/ (or $CAPTURE_DIR). Used by the FONTS-17 visual QA card.
     // Run: rb test --example boru --features gui,video-playback,terminal -- offscreen_capture --nocapture
+    /// A video state transition changes card height, but it is not a new
+    /// timeline entry.  Regression coverage for CHAT-SCROLL-03: the download
+    /// start path must rebuild the affected row without re-arming a pending
+    /// bottom snap that could steal a user's scrolled-up reading position.
+    #[test]
+    fn second_video_reflow_preserves_scrolled_up_position() {
+        let src = include_str!("app.rs");
+        let start = src
+            .find("AppMessage::ExecuteDownloadAt(entry_index)")
+            .expect("download-start handler must exist");
+        let end = src[start..]
+            .find("AppMessage::PauseDownloadAt(entry_index)")
+            .map(|offset| start + offset)
+            .expect("pause handler must follow download-start handler");
+        let handler = &src[start..end];
+
+        assert!(
+            handler.contains("invalidate_from(entry_index)"),
+            "Ready -> Active must still invalidate the affected virtualized row"
+        );
+        assert_eq!(
+            handler.matches("self.keep_latest_visible()").count(),
+            0,
+            "card reflow must not re-arm snap_to_end after the user scrolls up"
+        );
+        assert!(
+            src.contains("self.keep_latest_visible();\n        self.enforce_image_budget();"),
+            "new-entry append path must retain its one-time follow-latest snap"
+        );
+    }
+
     #[cfg(test)]
     mod offscreen_capture {
         use super::*;

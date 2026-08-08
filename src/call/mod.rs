@@ -17,7 +17,10 @@ pub mod format;
 pub mod frame;
 
 #[cfg(feature = "voice-calls")]
-pub use frame::{AudioSeq, FRAME_DURATION, FRAME_MS, SAMPLES_PER_FRAME, SAMPLE_RATE};
+pub use frame::{
+    sequence_newer_than, sequence_older_than, AudioSeq, FRAME_DURATION, FRAME_MS,
+    SAMPLES_PER_FRAME, SAMPLE_RATE,
+};
 
 /// Call actor, handle, and Iroh protocol registration.
 #[cfg(feature = "net")]
