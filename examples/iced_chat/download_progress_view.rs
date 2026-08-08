@@ -38,8 +38,8 @@ use iced::{Alignment, Color, Length};
 use iced_video_player::Video;
 
 use super::app::{
-    icon_svg, AppMessage, DownloadAttachment, DownloadState, ICON_COPY, ICON_FILES, ICON_FOLDER,
-    ICON_MESH, ICON_PLAY, ICON_RETRY,
+    icon_svg, AppMessage, DownloadAttachment, DownloadFailure, DownloadState, ICON_COPY, ICON_FILES,
+    ICON_FOLDER, ICON_MESH, ICON_PLAY, ICON_RETRY,
 };
 use boru_core::safe_destination::OverwritePolicy;
 use crate::file_type_icon::{FileTypeIcon, FileTypeIconSize};
@@ -59,6 +59,178 @@ const PROGRESS_BAR_GIRTH: f32 = 6.0;
 /// label width constant means the bar itself never re-measures as the value
 /// climbs 0% → 100% (no rapid layout changes).
 const PROGRESS_PCT_LABEL_WIDTH: f32 = 44.0;
+
+// ── Shape-stability geometry ───────────────────────────────────────────
+//
+// The download card must keep IDENTICAL outer dimensions (width, height,
+// border radius) across every `DownloadState`.  Two mechanisms guarantee
+// that (this task):
+//
+//   1. Fixed width — the card container uses `Length::Fixed(...)` derived
+//      from the measured chat timeline, never `Length::Shrink`, which
+//      re-measures the box whenever the state-dependent rows swap.
+//   2. Fixed-height row slots — every state renders the same set of row
+//      slots; a row that does not apply to the current state renders an
+//      empty spacer of the SAME height.  Content changes inside a slot; the
+//      card box never re-flows.
+//
+// The heights below are estimates of the tallest content each slot can
+// carry at the card's inner width.  They are deliberately conservative and
+// each slot clips (`clip(true)`) as a safety net so pathological text can
+// never grow the box.
+
+/// Reserved height (px) of the always-present progress-bar row slot.
+pub(crate) const PROGRESS_SLOT_HEIGHT: f32 = 20.0;
+
+/// Reserved height (px) of the always-present in-flight detail line slot.
+pub(crate) const DETAIL_SLOT_HEIGHT: f32 = 18.0;
+
+/// Reserved height (px) of the always-present FS-26 overwrite-policy slot.
+pub(crate) const POLICY_SLOT_HEIGHT: f32 = 30.0;
+
+/// Reserved height (px) of the always-present metadata line slot
+/// (video card status groups; one wrapped line).
+pub(crate) const METADATA_SLOT_HEIGHT: f32 = 36.0;
+
+/// Cap on the displayed failure diagnostics line.  The raw error text is
+/// unbounded; capping the on-card rendering keeps the failure block inside
+/// the card's fixed error slot (shape stability) while the full detail
+/// stays in the failure object and the app logs.
+const FAILURE_DIAGNOSTICS_MAX_CHARS: usize = 160;
+
+/// Fixed card width (px) for a given measured chat timeline width.
+///
+/// Matches the chat-bubble cap (`chat_bubble_max_width`), minus the
+/// `SPACE_12` right padding the parent timeline row adds for scrollbar
+/// clearance — so the card fills the bubble column exactly and can never
+/// overflow it.  A non-positive timeline (pre-layout frame) falls back to
+/// the bubble cap, never a zero-width card.
+pub(crate) fn download_card_width(timeline_width: f32) -> f32 {
+    let bubble = crate::presentation::chat_bubble_max_width(timeline_width);
+    (bubble - SPACE_12).max(0.0)
+}
+
+/// Estimated height (px) of the action-row slot: the 5-button worst case
+/// (Completed/Shared) wrapped at the card's inner width, capped at four
+/// lines so a pathological ultra-narrow card clips rather than growing
+/// unboundedly.  The 120px/button estimate is deliberately conservative
+/// (real labelled icon buttons measure ~96–120px); `clip(true)` on the
+/// slot is the ultimate safety net for platform font drift.
+pub(crate) fn action_slot_height(inner_width: f32) -> f32 {
+    const BUTTON_LINE: f32 = 30.0; // 14px label + 12px vertical padding + border
+    // Worst-case 5-button row: ~120px per labelled icon button + spacing.
+    let est_total = 5.0 * 120.0 + 4.0 * SPACE_8;
+    let lines = (est_total / inner_width.max(1.0)).ceil().clamp(1.0, 4.0);
+    lines * BUTTON_LINE + (lines - 1.0) * SPACE_8
+}
+
+/// Estimated height (px) of the failure-reason slot: title/stability row +
+/// wrapped message + recovery line + capped diagnostics, plus the bordered
+/// container's padding/border/spacing.
+pub(crate) fn error_slot_height(inner_width: f32) -> f32 {
+    // 12px metadata ≈ 6.5px/char; monospace diagnostics slightly wider.
+    let chars_per_line = (inner_width / 6.5).max(24.0);
+    let message_lines = (120.0 / chars_per_line).ceil().clamp(1.0, 4.0);
+    let diag_lines = (FAILURE_DIAGNOSTICS_MAX_CHARS as f32 / chars_per_line)
+        .ceil()
+        .clamp(1.0, 5.0);
+    let text_lines = 1.0 + message_lines + 1.0 + diag_lines;
+    text_lines * 15.0 + 12.0 + 2.0 + 18.0 // text + padding + border + spacing
+}
+
+/// Render a fixed-height row slot.  `content` is the slot's state-dependent
+/// content (top-aligned); when `None` the slot renders an empty spacer of
+/// the same height so the card box stays identical across states.
+pub(crate) fn fixed_slot<'a>(
+    height: f32,
+    content: Option<iced::Element<'a, AppMessage>>,
+) -> iced::Element<'a, AppMessage> {
+    container(
+        content.unwrap_or_else(|| iced::widget::Space::new().into()),
+    )
+    .width(Length::Fill)
+    .height(Length::Fixed(height))
+    .align_y(Alignment::Start)
+    .clip(true)
+    .into()
+}
+
+/// Build the bordered failure-reason block shared by the generic download
+/// card and the video card: title/stability row, message, recovery line and
+/// (when present) a capped diagnostics line.  The block is content-sized;
+/// callers place it inside a fixed-height slot so the card box never
+/// re-flows on failure.
+pub(crate) fn failure_block<'a>(
+    failure: &DownloadFailure,
+    theme: &iced::Theme,
+    tone: Color,
+    muted: Color,
+    error_color: Color,
+) -> iced::Element<'a, AppMessage> {
+    let mut column = Column::new()
+        .push(
+            row![
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::BodyEmphasised,
+                    failure.title(),
+                )
+                .color(error_color),
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::Metadata,
+                    failure.stability_label(),
+                )
+                .color(tone),
+            ]
+            .spacing(SPACE_8)
+            .align_y(Alignment::Center),
+        )
+        .push(
+            crate::fonts::type_role_text(
+                crate::fonts::TypeRole::Metadata,
+                failure.message(),
+            )
+            .color(muted)
+            .width(Length::Fill),
+        )
+        .push(
+            crate::fonts::type_role_text(
+                crate::fonts::TypeRole::Metadata,
+                format!("Recovery: {}", failure.recovery_action()),
+            )
+            .color(tone)
+            .width(Length::Fill),
+        );
+
+    if let Some(detail) = failure.diagnostics() {
+        if !detail.is_empty() {
+            let capped: String = detail.chars().take(FAILURE_DIAGNOSTICS_MAX_CHARS).collect();
+            column = column.push(
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::TechnicalValue,
+                    capped,
+                )
+                .color(muted)
+                .width(Length::Fill),
+            );
+        }
+    }
+
+    container(column)
+        .padding(SPACE_6)
+        .width(Length::Fill)
+        .style(|t| widget::container::Style {
+            border: iced::Border {
+                color: {
+                    let c = border_muted(t);
+                    Color::from_rgba(c.r, c.g, c.b, 0.3)
+                },
+                width: 1.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .into()
+}
 
 // ── Theme dispatch (light/dark) ──────────────────────────────────────────
 
@@ -733,6 +905,10 @@ fn view_download_progress_inner<'a>(
     let muted = text_system(&theme);
     let name_str = attachment.name.clone();
     let error_color = color_error(&theme);
+    // Inner content width available to the fixed-width card (card width
+    // minus the card's horizontal padding) — drives the reserved slot
+    // heights (shape stability).
+    let inner_width = (download_card_width(timeline_width) - 2.0 * SPACE_16).max(0.0);
 
     // ── Row 1: State badge + filename + total size ──────────────────────
     let size_text = match &state {
@@ -838,10 +1014,12 @@ fn view_download_progress_inner<'a>(
     // Real transfer data only: bytes of total, percentage and transfer
     // speed are included only when the transfer layer provides them; no
     // invented estimates (VIDCARD-14).
-    let progress_detail_row = active_download_detail(attachment).map(|detail| {
-        crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, detail)
-            .color(accent_green(&theme))
-    });
+    let progress_detail_row: Option<iced::Element<'a, AppMessage>> =
+        active_download_detail(attachment).map(|detail| {
+            crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, detail)
+                .color(accent_green(&theme))
+                .into()
+        });
 
     // ── Row 4: Action buttons ───────────────────────────────────────────
     let action_row = action_buttons(entry_index, attachment.kind, state, &name_str);
@@ -854,61 +1032,23 @@ fn view_download_progress_inner<'a>(
         });
 
     // ── Row 5: Failure reason (only in Failed state) ────────────────────
-    let error_row = match &state {
+    // Shape stability: this row occupies a FIXED-height slot in every state.
+    // Failed fills it with the bordered failure block; all other states
+    // render an empty spacer of the same height so the card box never
+    // re-flows when a download fails.
+    let error_row: Option<iced::Element<'a, AppMessage>> = match &state {
         DownloadState::Failed { failure } => {
-            let mut column = Column::new()
-                .push(
-                    row![
-                        crate::fonts::type_role_text(
-                            crate::fonts::TypeRole::BodyEmphasised,
-                            failure.title(),
-                        )
-                        .color(error_color),
-                        crate::fonts::type_role_text(
-                            crate::fonts::TypeRole::Metadata,
-                            failure.stability_label(),
-                        )
-                        .color(tone),
-                    ]
-                    .spacing(SPACE_8)
-                    .align_y(Alignment::Center),
-                )
-                .push(
-                    crate::fonts::type_role_text(
-                        crate::fonts::TypeRole::Metadata,
-                        failure.message(),
-                    )
-                    .color(muted)
-                    .width(Length::Fill),
-                )
-                .push(
-                    crate::fonts::type_role_text(
-                        crate::fonts::TypeRole::Metadata,
-                        format!("Recovery: {}", failure.recovery_action()),
-                    )
-                    .color(tone)
-                    .width(Length::Fill),
-                );
-
-            if let Some(detail) = failure.diagnostics() {
-                if !detail.is_empty() {
-                    column = column.push(
-                        crate::fonts::type_role_text(
-                            crate::fonts::TypeRole::TechnicalValue,
-                            detail,
-                        )
-                        .color(muted)
-                        .width(Length::Fill),
-                    );
-                }
-            }
-
-            Some(column)
+            Some(failure_block(failure, &theme, tone, muted, error_color))
         }
         _ => None,
     };
 
-    // ── Assemble the card ───────────────────────────────────────────────
+    // ── Assemble the card (shape-stable row slots) ─────────────────────
+    // Every DownloadState renders the SAME set of rows; state-dependent
+    // rows are fixed-height slots that either show their content or an
+    // empty spacer of the same height.  Combined with the fixed card width
+    // below, the card's outer box (width, height, border radius) is
+    // identical in every state — only the content inside a slot changes.
     let mut body = Column::new().push(title_row).spacing(SPACE_6);
 
     if let Some(src) = source_row {
@@ -917,48 +1057,36 @@ fn view_download_progress_inner<'a>(
     if let Some(folder_info) = folder_info_row {
         body = body.push(folder_info);
     }
-    if let Some(prog) = progress_row {
-        body = body.push(prog);
-    }
-    if let Some(progress_detail) = progress_detail_row {
-        body = body.push(progress_detail);
-    }
-    body = body.push(action_row);
+    // Progress bar row — reserved in every state; content only Active/Paused.
+    body = body.push(fixed_slot(PROGRESS_SLOT_HEIGHT, progress_row));
+    // In-flight detail line — reserved in every state.
+    body = body.push(fixed_slot(DETAIL_SLOT_HEIGHT, progress_detail_row));
+    // Action row — always present, fixed height so the button count per
+    // state (1-5 buttons) can never re-measure the card box.
+    let action_slot_h = action_slot_height(inner_width);
+    body = body.push(fixed_slot(action_slot_h, Some(action_row)));
     if let Some(playback_actions) = playback_action_row {
         body = body.push(playback_actions);
     }
     // FS-26 overwrite-conflict policy: while the download is ready to start,
     // surface the policy that decides what happens when the destination file
     // already exists. Default is Keep Both — never silently overwrite.
-    if matches!(state, DownloadState::Ready { .. }) {
-        body = body.push(policy_selector(entry_index, attachment.overwrite_policy));
-    }
-    // VIDCARD-13: "Open Folder" is now a light-bordered secondary action in
-    // the completed/shared action row (see action_buttons); the old
-    // default-styled blue "Open downloads folder" button is removed.
-    if let Some(err) = error_row {
-        // Extra visual separation for the error row
-        body = body.push(
-            container(err)
-                .padding(SPACE_6)
-                .style(|t| widget::container::Style {
-                    border: iced::Border {
-                        color: {
-                            let c = border_muted(t);
-                            Color::from_rgba(c.r, c.g, c.b, 0.3)
-                        },
-                        width: 1.0,
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }),
-        );
-    }
+    // Reserved in every state; content only Ready (visibility preserved).
+    let policy = if matches!(state, DownloadState::Ready { .. }) {
+        Some(policy_selector(entry_index, attachment.overwrite_policy))
+    } else {
+        None
+    };
+    body = body.push(fixed_slot(POLICY_SLOT_HEIGHT, policy));
+    // Failure reason — reserved in every state; content only Failed.
+    body = body.push(fixed_slot(error_slot_height(inner_width), error_row));
     body = body.spacing(SPACE_6);
 
-    // Card container with state-coloured border.
+    // Card container with state-coloured border.  Fixed width (derived from
+    // the measured chat timeline) so the card never re-measures when the
+    // state-dependent rows swap content.
     let card = container(body)
-        .width(Length::Shrink)
+        .width(Length::Fixed(download_card_width(timeline_width)))
         .padding([SPACE_12, SPACE_16])
         .style(move |t| widget::container::Style {
             background: Some(iced::Background::Color(bg_surface(t))),
@@ -1264,7 +1392,7 @@ pub(crate) fn action_buttons<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{DownloadAttachment, DownloadState, TransferKind};
+    use crate::app::{DownloadAttachment, DownloadFailure, DownloadState, TransferKind};
 
     fn attachment() -> DownloadAttachment {
         DownloadAttachment::new(TransferKind::Video, "clip.mp4", "ticket", "Duke", None)
@@ -1783,5 +1911,128 @@ mod tests {
             }
         }
         assert!(matches >= 3, "expected at least 3 surfaces, got {matches}");
+    }
+
+    // ── Shape stability (this task) ────────────────────────────────────
+
+    /// Lay out a card element offscreen (tiny-skia CPU renderer, no GPU,
+    /// no window) and return the outer node bounds.  This is the same
+    /// harness the FONTS-17 offscreen captures use; it makes text
+    /// measurement deterministic so the shape-stability assertions below
+    /// compare real rendered sizes, not source-level guesses.
+    fn measure_outer_bounds(
+        element: &mut iced::Element<'static, AppMessage>,
+        canvas: (f32, f32),
+    ) -> (f32, f32) {
+        use iced::advanced::layout;
+        use iced::advanced::widget::Tree;
+        use iced::{Font, Pixels, Size};
+
+        let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
+            Font::default(),
+            Pixels(16.0),
+        ));
+        let mut tree = Tree::new(element.as_widget());
+        let limits = layout::Limits::new(Size::ZERO, Size::new(canvas.0, canvas.1));
+        let node = element.as_widget_mut().layout(&mut tree, &renderer, &limits);
+        let bounds = node.bounds();
+        (bounds.width, bounds.height)
+    }
+
+    /// Build a generic (non-video) attachment in the given state for shape
+    /// measurement.  The generic card path is what this module owns; the
+    /// video card has its own shape-stability test in video_file_card.rs.
+    fn generic_attachment_in(state: DownloadState) -> DownloadAttachment {
+        let mut att = DownloadAttachment::new(TransferKind::File, "report.pdf", "ticket", "Duke", None);
+        att.state = state;
+        att
+    }
+
+    /// Assert the generic download card keeps IDENTICAL outer dimensions
+    /// (width, height) across every DownloadState — the Failed card must be
+    /// the same shape as the downloading card.
+    #[test]
+    fn card_outer_bounds_are_identical_across_all_states() {
+        let states = [
+            DownloadState::Ready { total: Some(44_000_000) },
+            DownloadState::Active {
+                bytes: 19_000_000,
+                total: Some(44_000_000),
+            },
+            DownloadState::Paused {
+                bytes: 19_000_000,
+                total: Some(44_000_000),
+            },
+            DownloadState::Completed {
+                saved_name: "report.pdf".into(),
+                saved_path: None,
+                total_size: Some(44_000_000),
+            },
+            DownloadState::Shared {
+                name: "report.pdf".into(),
+                path: std::path::PathBuf::from("/tmp/report.pdf"),
+                size: Some(44_000_000),
+            },
+            DownloadState::Failed {
+                failure: DownloadFailure::PeerOffline {
+                    detail: Some("peer is offline right now".into()),
+                },
+            },
+            DownloadState::Cancelled,
+        ];
+
+        let mut measured: Vec<(f32, f32)> = Vec::new();
+        for state in states {
+            let att = generic_attachment_in(state);
+            // Timeline width 800 → card fills the bubble column (fixed
+            // width) in every state.
+            let mut element = view_download_progress(0, &att, false, false, None, 800.0);
+            measured.push(measure_outer_bounds(&mut element, (900.0, 1600.0)));
+        }
+
+        let (w0, h0) = measured[0];
+        for (i, (w, h)) in measured.iter().enumerate() {
+            assert!(
+                (w - w0).abs() < 0.5,
+                "state {i}: width {w} differs from Ready width {w0}"
+            );
+            assert!(
+                (h - h0).abs() < 0.5,
+                "state {i}: height {h} differs from Ready height {h0}"
+            );
+        }
+        // Sanity: the shape is non-trivial (not a degenerate zero box).
+        assert!(w0 > 100.0 && h0 > 100.0, "card box implausibly small: {w0}x{h0}");
+    }
+
+    /// The fixed width helper is state-independent by construction (it only
+    /// takes the timeline width), and it maps non-positive pre-layout widths
+    /// to the bubble cap instead of a zero-width card.
+    #[test]
+    fn download_card_width_is_state_independent_and_falls_back_safely() {
+        // Pre-layout frame: 0 → bubble cap (560) minus the row's SPACE_12.
+        assert_eq!(download_card_width(0.0), 560.0 - SPACE_12);
+        // Wide timeline: the 560 px cap wins.
+        assert_eq!(download_card_width(1200.0), 560.0 - SPACE_12);
+        // Narrow timeline: 68 % of the column, minus the row padding.
+        let expected = (400.0 * 0.68) - SPACE_12;
+        assert!((download_card_width(400.0) - expected).abs() < 0.01);
+    }
+
+    /// The reserved slot heights are pure functions of the inner width
+    /// (never of DownloadState) and always yield a positive, bounded box so
+    /// a pathological narrow card clips rather than growing unboundedly.
+    #[test]
+    fn slot_heights_are_state_independent_and_bounded() {
+        for inner in [0.0_f32, 100.0, 300.0, 500.0, 900.0] {
+            let action = action_slot_height(inner);
+            let error = error_slot_height(inner);
+            assert!(action > 0.0, "action slot height must be positive at {inner}");
+            assert!(error > 0.0, "error slot height must be positive at {inner}");
+            // Bounded: cap at 4 button lines + spacing ≈ 4*30+3*8 = 144.
+            assert!(action <= 144.0, "action slot unbounded at {inner}: {action}");
+            // Error slot: 7 text lines + padding/border/spacing ≈ 7*15+32.
+            assert!(error <= 200.0, "error slot unbounded at {inner}: {error}");
+        }
     }
 }
