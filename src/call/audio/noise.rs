@@ -35,7 +35,7 @@ const I16_SCALE: f32 = 32_768.0;
 /// Processes one 20 ms frame (960 samples) at a time, internally feeding two
 /// 480-sample sub-frames to the stateful `nnnoiseless` model.
 pub struct NoiseSuppressor {
-    denoise: DenoiseState<'static>,
+    denoise: Box<DenoiseState<'static>>,
     enabled: bool,
     /// 480-sample working buffer used to scale between normalized f32 and the
     /// 16-bit scale expected by `nnnoiseless`.
@@ -108,9 +108,8 @@ impl NoiseSuppressor {
 
         // `nnnoiseless` is stateful and consumes 480-sample (10 ms) chunks at
         // 48 kHz. Our frame is 20 ms, so run the model twice per frame.
-        let chunks = frame.chunks_exact_mut(NNOISELESS_FRAME_SIZE);
-        debug_assert_eq!(chunks.remainder().len(), 0);
-        for chunk in chunks {
+        debug_assert_eq!(frame.len() % NNOISELESS_FRAME_SIZE, 0);
+        for chunk in frame.chunks_exact_mut(NNOISELESS_FRAME_SIZE) {
             self.process_sub_frame(chunk);
         }
     }
