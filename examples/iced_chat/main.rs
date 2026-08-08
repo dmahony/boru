@@ -734,6 +734,7 @@ fn main() -> Result<()> {
         whisper_events_rx,
         whisper_handle,
         call_handle,
+        call_events_rx,
         inbox_events_rx,
         discovered_peers_rx,
         directory_room_rx,
@@ -1019,7 +1020,7 @@ fn main() -> Result<()> {
             secret_key.clone(),
         );
         let call_handler = call_builder.protocol_handler();
-        let (call_handle, _call_events) = call_builder.spawn();
+        let (call_handle, call_events_rx) = call_builder.spawn();
 
         let router = iroh::protocol::Router::builder(endpoint.clone())
             .accept(GOSSIP_ALPN, gossip.clone())
@@ -1409,6 +1410,7 @@ fn main() -> Result<()> {
             whisper_events_rx,
             whisper_handle,
             call_handle,
+            call_events_rx,
             inbox_events_rx,
             discovered_peers_rx,
             directory_room_rx,
@@ -1563,6 +1565,7 @@ fn main() -> Result<()> {
                 inbox_events_rx,
                 whisper_handle.clone(),
                 call_handle.clone(),
+                Arc::new(tokio::sync::Mutex::new(call_events_rx)),
                 initial_room,
                 notice,
                 chat_history,
@@ -1696,6 +1699,7 @@ fn main() -> Result<()> {
                 Arc::clone(&state.discovered_peers_rx),
                 state.gui_action_rx.clone(),
                 Arc::clone(&state.transfer_update_rx),
+                Arc::clone(&state.call_events_rx),
             ),
             app::keyboard_shortcuts_subscription(),
         ]);
