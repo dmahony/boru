@@ -98,11 +98,25 @@ New tests (component): `asset_root_env_override_wins`,
   files at runtime. The only embedded asset remains the single 32px
   `application-x-generic.svg` fallback byte block that PAPIRUS-16 landed as the
   "never a broken icon" safety net.
-- **Windows**: a full Windows cross-build was impractical on this machine; per the
-  task spec, packaging paths/asset-embedding code were verified instead (symlink-free
-  bundle, PathBuf-based joins, assets included in the Windows artifact, runtime
-  exe-relative root resolution). The `x86_64-pc-windows-gnu` release build is
-  covered by the same `release.yaml` on GitHub Actions.
+- **Windows**: a Windows exe cross-compiled on Linux bakes the Linux
+  build-machine path into `CARGO_MANIFEST_DIR` (`env!`), which cannot exist on
+  the Windows host — a bare exe shipped without the assets tree renders only
+  the embedded generic icon (t_7c04a3ee). Fixed on three fronts:
+  1. `scripts/package-windows.sh` builds the exe and packages the
+     `assets/third_party/papirus` tree next to it (the `<exe_dir>/assets/...`
+     layout, matching the GitHub release artifact), so the loader's exe-relative
+     candidate resolves on the Windows host.
+  2. The resolver already prefers exe-relative candidates over the baked
+     manifest dir; a new unit test (`asset_root_exe_relative_wins_over_baked_manifest_dir`)
+     pins that priority, and `asset_root_cross_build_baked_manifest_nonexistent_falls_back_to_generic`
+     proves the cross-build failure mode degrades to the embedded generic icon
+     without panicking.
+  3. A one-time `WARN` diagnostic (`warn_once_asset_root_missing`) fires when
+     the asset root cannot be resolved anywhere, naming every probed location
+     and the fix — no more silent generic fallback.
+  The `x86_64-pc-windows-gnu` release build on GitHub Actions is covered by the
+  same `release.yaml` (which packages the assets into the Windows zip), and the
+  local cross-build is verified via `scripts/package-windows.sh`.
 - The manifest is embedded at build time (`include_str!`), so the catalog remains
   parseable even when the assets dir is missing at runtime — resolution still
   returns correct paths; only the actual SVG read falls back to the generic icon.

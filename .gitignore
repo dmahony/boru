@@ -19,3 +19,6 @@ src/*.bak
 start-testing.sh
 deploy-boru-test.sh
 examples/lan_test.rs
+# Windows cross-build packaging output (scripts/package-windows.sh)
+dist-windows/
+boru-windows-x86_64.zip

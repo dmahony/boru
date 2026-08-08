@@ -1,0 +1,47 @@
+# GStreamer plugin allowlist for the Windows runtime bundle
+#
+# Policy: docs/video-runtime-packaging.md — ship ONLY the reviewed
+# core/base/good/bad/libav plugin DLLs needed for the declared formats
+# (MP4/M4V/MOV, WebM, Matroska/MKV). Do NOT ship gst-plugins-ugly or
+# patent/format plugins without a separate legal review.
+#
+# Reviewed 2026-08-08 against GStreamer 1.24.13 MSVC runtime
+# (gstreamer-1.0-msvc-x86_64-1.24.13.msi).  Each entry is justified by the
+# declared container/codec matrix in docs/video-runtime-packaging.md:
+#
+#   MP4/M4V/MOV (qtdemux)       -> gstisomp4 (good)
+#   WebM (matroska demux)       -> gstmatroska (good)
+#   MKV  (matroskademux)        -> gstmatroska (good)
+#   H.264/AVC, AAC (libav)      -> gstlibav (libav), gstvideoparsersbad (h264parse),
+#                                  gstaudioparsers (aacparse)
+#   VP8/VP9 (good/bad families) -> gstvpx (bad), gstvideoparsersbad (vp8/vp9 parse)
+#   Opus, Vorbis                -> gstopus (base), gstopusparse (bad), gstvorbis (base)
+#   Core player elements        -> playbin/decodebin/videoconvert/videoscale/appsink
+#                                  (base), coreelements/typefind (core/base)
+#
+# Explicitly EXCLUDED (patent/format or un-reviewed): gstx264, gstopenh264,
+# gstamrnb, gstamrwbdec, gstdtsdec, gstmpeg2enc, gstmpg123, gstfaad,
+# gstlame, gstvoaacenc, gstlibde265, gstx265, gstdvdspu, gstdvbsub*,
+# gstdecklink, gstnvcodec, gstcuda, gstqsv, and everything else in the full
+# 245-plugin runtime that is not needed for the declared matrix.
+gstapp.dll
+gstaudioconvert.dll
+gstaudioparsers.dll
+gstaudiorate.dll
+gstaudioresample.dll
+gstautoconvert.dll
+gstautodetect.dll
+gstcoreelements.dll
+gstisomp4.dll
+gstlibav.dll
+gstmatroska.dll
+gstopus.dll
+gstopusparse.dll
+gstplayback.dll
+gsttypefindfunctions.dll
+gstvideoconvertscale.dll
+gstvideoparsersbad.dll
+gstvideorate.dll
+gstvolume.dll
+gstvorbis.dll
+gstvpx.dll

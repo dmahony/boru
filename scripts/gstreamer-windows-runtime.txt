@@ -1,0 +1,51 @@
+# GStreamer MSVC runtime DLL manifest (bin/*.dll) — reviewed subset
+#
+# Source: gstreamer-1.0-msvc-x86_64-1.24.13.msi (GStreamer 1.24.13 MSVC runtime)
+# Generated 2026-08-08 by scripts/gst_windows_manifest.py (dependency closure
+# over the curated plugin allowlist + the core libs the app links).
+#
+# Regenerate with:
+#   python3 scripts/gst_windows_manifest.py \
+#       --gst-root <extracted runtime root> \
+#       --plugins scripts/gstreamer-windows-plugins.txt \
+#       --out-bin scripts/gstreamer-windows-runtime.txt
+#
+# Every file here is part of the reviewed GStreamer MSVC runtime.  FFmpeg
+# libraries (avcodec/avformat/avutil/swresample) are pulled in transitively
+# by gst-libav and carry LGPL-2.1-or-later; see
+# THIRD_PARTY_NOTICES/gstreamer/ for the exact license texts and the
+# FFmpeg/libav codec-patent review note.
+avcodec-60.dll
+avfilter-9.dll
+avformat-60.dll
+avutil-58.dll
+bz2.dll
+ffi-7.dll
+gio-2.0-0.dll
+glib-2.0-0.dll
+gmodule-2.0-0.dll
+gobject-2.0-0.dll
+gstallocators-1.0-0.dll
+gstapp-1.0-0.dll
+gstaudio-1.0-0.dll
+gstbase-1.0-0.dll
+gstcodecparsers-1.0-0.dll
+gstcontroller-1.0-0.dll
+gstfft-1.0-0.dll
+gstnet-1.0-0.dll
+gstpbutils-1.0-0.dll
+gstreamer-1.0-0.dll
+gstriff-1.0-0.dll
+gstrtp-1.0-0.dll
+gsttag-1.0-0.dll
+gstvideo-1.0-0.dll
+gthread-2.0-0.dll
+intl-8.dll
+libvorbis-0.dll
+libvorbisenc-2.dll
+ogg-0.dll
+opus-0.dll
+orc-0.4-0.dll
+pcre2-8-0.dll
+swresample-4.dll
+z-1.dll

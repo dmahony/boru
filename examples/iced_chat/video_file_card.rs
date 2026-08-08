@@ -31,20 +31,21 @@
 //! and outgoing shared file.
 
 use iced::widget::text::Wrapping;
-use iced::widget::{self, button, container, row, tooltip, Column, Row};
+use iced::widget::{self, button, container, tooltip, Column, Row};
 use iced::{Alignment, Color, Length};
 #[cfg(feature = "video-playback")]
 use iced_video_player::{Video, VideoPlayer};
 
 use super::app::{
-    accent_green, border_muted, color_error, text_system, SPACE_10, SPACE_12, SPACE_16, SPACE_2,
-    SPACE_20, SPACE_24, SPACE_4, SPACE_6, SPACE_8,
+    accent_green, color_error, text_system, SPACE_10, SPACE_12, SPACE_16, SPACE_2, SPACE_20,
+    SPACE_24, SPACE_4, SPACE_6, SPACE_8,
 };
 use super::app::{AppMessage, DownloadAttachment, DownloadState};
 use super::download_progress_view::{
-    action_buttons, active_download_detail, file_type_icon_element,
-    file_type_icon_element_with_tooltip, human_size, progress_section, resolve_theme,
-    secondary_button, state_badge_color,
+    action_buttons, active_download_detail, error_slot_height, failure_block, file_type_icon_element,
+    file_type_icon_element_with_tooltip, fixed_slot, human_size, progress_section, resolve_theme,
+    secondary_button, state_badge_color, DETAIL_SLOT_HEIGHT, METADATA_SLOT_HEIGHT, POLICY_SLOT_HEIGHT,
+    PROGRESS_SLOT_HEIGHT,
 };
 use crate::design_tokens;
 use crate::file_type_icon::FileTypeIconSize;
@@ -254,45 +255,6 @@ struct MediaFrameSizing {
     height: f32,
 }
 
-#[cfg(feature = "video-playback")]
-fn media_icon_button<'a>(
-    icon: Icon,
-    label: &'static str,
-    message: AppMessage,
-) -> iced::Element<'a, AppMessage> {
-    let control = crate::focusable_button::focusable_button(
-        button(
-            icon.build()
-                .size(IconSize::Sm)
-                .color_fn(|_| Color::WHITE)
-                .interactive(true)
-                .build(),
-        )
-        .on_press(message.clone())
-        .padding(SPACE_6)
-        .style(|_theme, status| widget::button::Style {
-            background: (status != button::Status::Disabled)
-                .then_some(iced::Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.12))),
-            text_color: Color::WHITE,
-            border: iced::Border {
-                radius: 20.0.into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        }),
-        Some(message),
-    )
-    .on_focus_change(|focused| AppMessage::InlineVideoControlsFocused(focused))
-    .ring_radius(20.0);
-    tooltip::Tooltip::new(
-        control,
-        crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, label),
-        tooltip::Position::Top,
-    )
-    .gap(SPACE_4)
-    .into()
-}
-
 impl MediaFrameSizing {
     fn new(dimensions: Option<(u32, u32)>, band: CardBand, available_width: f32) -> Self {
         let (nominal_width, nominal_height) = media_frame_size(dimensions, band);
@@ -393,36 +355,53 @@ fn loading_indicator<'a>(
     .into()
 }
 
-/// Compact duration badge for the lower-right corner of the media frame
-/// (VIDCARD-11). Uses the live player's real duration metadata — there is
-/// no other honest duration source in the transfer protocol — and is only
-/// rendered when that duration is known and non-zero.
-#[cfg(feature = "video-playback")]
-fn duration_badge(duration: std::time::Duration) -> iced::Element<'static, AppMessage> {
-    container(
-        crate::fonts::type_role_text(
-            crate::fonts::TypeRole::Metadata,
-            format_media_time(duration),
-        )
-        .color(Color::WHITE),
-    )
-    .padding([SPACE_2, SPACE_6])
-    .style(|_t| widget::container::Style {
-        background: Some(iced::Background::Color(Color::from_rgba(
-            0.0, 0.0, 0.0, 0.72,
-        ))),
-        border: iced::Border {
-            radius: SPACE_6.into(),
-            ..Default::default()
-        },
-        ..Default::default()
-    })
-    .into()
-}
 #[cfg(feature = "video-playback")]
 fn format_media_time(duration: std::time::Duration) -> String {
     let seconds = duration.as_secs();
-    format!("{}:{:02}", seconds / 60, seconds % 60)
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{:02}", seconds % 60)
+    } else {
+        format!("{minutes}:{:02}", seconds % 60)
+    }
+}
+
+#[cfg(feature = "video-playback")]
+fn media_icon_button(
+    icon: Icon,
+    label: &'static str,
+    message: AppMessage,
+) -> iced::Element<'static, AppMessage> {
+    tooltip::Tooltip::new(
+        crate::focusable_button::focusable_button(
+            button(
+                icon.build()
+                    .size(IconSize::Sm)
+                    .color_fn(|_| Color::WHITE)
+                    .interactive(true)
+                    .build(),
+            )
+            .on_press(message.clone())
+            .padding(SPACE_6)
+            .style(|_theme, status| widget::button::Style {
+                background: matches!(status, widget::button::Status::Hovered | widget::button::Status::Pressed)
+                    .then_some(iced::Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.16))),
+                border: iced::Border {
+                    radius: 20.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            Some(message),
+        )
+        .on_focus_change(|focused| AppMessage::InlineVideoControlsFocused(focused))
+        .ring_radius(20.0),
+        crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, label),
+        tooltip::Position::Top,
+    )
+    .gap(SPACE_4)
+    .into()
 }
 
 /// Compact relative label for the card's received/shared time, e.g.
@@ -487,9 +466,6 @@ const MEDIA_FRAME_OVERLAY_BG: Color = Color::from_rgba(0.0, 0.0, 0.0, 0.62);
 /// restrained: clearly visible over the poster without dominating it.
 const PLAY_OVERLAY_SIZE: f32 = 64.0;
 
-/// Reserved width (px) on the right edge of the control bar so the
-/// lower-right duration badge never covers the Expand control.
-const DURATION_BADGE_ZONE: f32 = 64.0;
 
 /// Real transfer-state badge mapping for the card header.
 ///
@@ -766,7 +742,29 @@ impl<'a> BoruVideoFileCard<'a> {
         let media = self.media_frame(attachment, error_color);
         let status = self.status_metadata(attachment, &theme, tone, muted);
         let actions = self.actions(attachment);
-        let error_section = self.error_section(attachment, tone, muted, error_color);
+
+        // Shape stability: the state-conditional sections (progress rows,
+        // policy selector, failure block) render inside fixed-height slots,
+        // so the card's outer box never collapses/expands when the state
+        // changes.  The slot width is bounded to the media-frame width at
+        // wide/medium (the card is content-driven there) so a long failure
+        // message can never widen the card; at narrow the card fills the
+        // column and the slot wraps at the card width.
+        let media_sizing = MediaFrameSizing::new(
+            attachment.poster_dimensions,
+            self.band(),
+            self.inner_available_width(),
+        );
+        let slot_width = if self.band() == CardBand::Narrow {
+            Length::Fill
+        } else {
+            Length::Fixed(media_sizing.width)
+        };
+        let inner_width = if self.band() == CardBand::Narrow {
+            self.inner_available_width()
+        } else {
+            media_sizing.width
+        };
 
         let mut body = Column::new()
             .push(header)
@@ -778,23 +776,20 @@ impl<'a> BoruVideoFileCard<'a> {
             .push(status)
             .push(actions)
             .spacing(SPACE_12);
-        if let Some(err) = error_section {
-            body = body.push(
-                container(err)
-                    .padding(SPACE_6)
-                    .style(|t| widget::container::Style {
-                        border: iced::Border {
-                            color: {
-                                let c = border_muted(t);
-                                Color::from_rgba(c.r, c.g, c.b, 0.3)
-                            },
-                            width: 1.0,
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    }),
-            );
-        }
+        // Failure details — a fixed-height slot in EVERY state so the card
+        // box never re-flows on failure (this task).  Failed fills it with
+        // the bordered failure block; all other states reserve the same
+        // space.
+        let error_content: Option<iced::Element<'a, AppMessage>> = match &attachment.state {
+            DownloadState::Failed { failure } => {
+                Some(failure_block(failure, &theme, tone, muted, error_color))
+            }
+            _ => None,
+        };
+        body = body.push(
+            container(fixed_slot(error_slot_height(inner_width), error_content))
+                .width(slot_width),
+        );
         body = body.spacing(SPACE_12);
 
         // VIDCARD-03 card surface: reuse the shared Boru card style —
@@ -1193,49 +1188,86 @@ impl<'a> BoruVideoFileCard<'a> {
                 .unwrap_or((position.as_secs_f32() / duration_secs).clamp(0.0, 1.0));
             let layout = control_layout(attachment.poster_dimensions, sizing.width);
             let compact = layout == ControlLayout::Compact;
-            let play_icon = if video.paused() { Icon::Play } else { Icon::Pause };
-            let volume_icon = if video.muted() {
-                Icon::VolumeX
-            } else if video.volume() < 0.5 {
-                Icon::Volume1
-            } else {
-                Icon::Volume2
-            };
             let seek = iced::widget::slider(0.0..=1.0, fraction, AppMessage::InlineVideoSeekChanged)
                 .on_release(AppMessage::InlineVideoSeekReleased)
                 .step(0.001_f32)
+                .style(|theme, status| {
+                    let mut style = iced::widget::slider::default(theme, status);
+                    let green = accent_green(theme);
+                    style.rail.backgrounds.0 = green.into();
+                    style.handle.background = green.into();
+                    style.rail.width = match status {
+                        iced::widget::slider::Status::Active => 3.5,
+                        iced::widget::slider::Status::Hovered
+                        | iced::widget::slider::Status::Dragged => 5.5,
+                    };
+                    style.handle.shape = iced::widget::slider::HandleShape::Circle {
+                        radius: match status {
+                            iced::widget::slider::Status::Active => 5.0,
+                            iced::widget::slider::Status::Hovered
+                            | iced::widget::slider::Status::Dragged => 6.5,
+                        },
+                    };
+                    style
+                })
                 .width(Length::Fill);
-            let timing = crate::fonts::type_role_text(
-                crate::fonts::TypeRole::Metadata,
-                format!("{} / {}", format_media_time(position), format_media_time(duration)),
-            )
-            .color(Color::WHITE);
-            let play = media_icon_button(
-                play_icon,
-                if video.paused() { "Play video" } else { "Pause video" },
-                AppMessage::PlayInlineVideo(self.entry_index),
-            );
-            let mute = media_icon_button(
-                volume_icon,
-                if video.muted() { "Unmute" } else { "Mute" },
-                AppMessage::InlineVideoToggleMute,
-            );
-            let more = media_icon_button(
-                Icon::MoreVertical,
-                if self.expanded { "Collapse video" } else { "Expand video" },
-                AppMessage::InlineVideoToggleExpanded,
-            );
-            let mut control_row = Row::new().push(play).push(timing).push(mute);
-            if !compact {
-                control_row = control_row.push(
-                    iced::widget::slider(0.0..=1.0, video.volume() as f32, AppMessage::InlineVideoSetVolume)
-                        .step(0.01_f32)
-                        .width(Length::Fixed(72.0)),
-                );
-            }
             let controls = Column::new()
                 .push(seek)
-                .push(control_row.push(more).spacing(if compact { SPACE_2 } else { SPACE_6 }).align_y(Alignment::Center));
+                .push(
+                    Row::new()
+                        .push(media_icon_button(
+                            if video.paused() { Icon::Play } else { Icon::Pause },
+                            if video.paused() { "Play video" } else { "Pause video" },
+                            AppMessage::PlayInlineVideo(self.entry_index),
+                        ))
+                        .push(
+                            crate::fonts::type_role_text(
+                                crate::fonts::TypeRole::Metadata,
+                                format!(
+                                    "{} / {}",
+                                    format_media_time(position),
+                                    format_media_time(duration),
+                                ),
+                            )
+                            .color(Color::WHITE),
+                        )
+                        .push({
+                            let volume = video.volume() as f32;
+                            let icon = if video.muted() {
+                                Icon::VolumeX
+                            } else if volume <= 0.01 {
+                                Icon::VolumeX
+                            } else if volume < 0.5 {
+                                Icon::Volume1
+                            } else {
+                                Icon::Volume2
+                            };
+                            let volume_slider = iced::widget::slider(
+                                0.0..=1.0,
+                                volume,
+                                AppMessage::InlineVideoSetVolume,
+                            )
+                            .step(0.01_f32)
+                            .width(Length::Fixed(90.0));
+                            tooltip::Tooltip::new(
+                                media_icon_button(
+                                    icon,
+                                    if video.muted() { "Unmute" } else { "Mute" },
+                                    AppMessage::InlineVideoToggleMute,
+                                ),
+                                volume_slider,
+                                tooltip::Position::Top,
+                            )
+                            .gap(SPACE_4)
+                        })
+                        .push(media_icon_button(
+                            Icon::More,
+                            "More video actions",
+                            AppMessage::InlineVideoToggleExpanded,
+                        ))
+                        .spacing(if compact { SPACE_2 } else { SPACE_6 })
+                        .align_y(Alignment::Center),
+                );
             // Task 10: the playing element occupies the exact same media box
             // as the poster — no layout jump when Play is pressed. The video
             // is contained (never stretched or cropped) and the controls
@@ -1261,11 +1293,22 @@ impl<'a> BoruVideoFileCard<'a> {
             .on_move(|_| AppMessage::InlineVideoShowControls)
             .into();
 
-            let controls_bar = container(controls)
-                .padding([SPACE_6, SPACE_8])
+            let controls_bar = container(
+                Column::new()
+                    .push(controls)
+                    .width(Length::Fill)
+                    .spacing(SPACE_2),
+            )
+                .padding([SPACE_6, SPACE_12])
                 .style(|_theme| widget::container::Style {
-                    background: Some(iced::Background::Color(Color::from_rgba(
-                        0.0, 0.0, 0.0, 0.76,
+                    // The overlay is deliberately limited to the control
+                    // footprint: transparent at its top, readable black at
+                    // the bottom, never an opaque strip over the video.
+                    background: Some(iced::Background::Gradient(iced::Gradient::Linear(
+                        iced::gradient::Linear::new(iced::Radians(std::f32::consts::FRAC_PI_2))
+                            .add_stop(0.0, Color::from_rgba(0.0, 0.0, 0.0, 0.0))
+                            .add_stop(0.55, Color::from_rgba(0.0, 0.0, 0.0, 0.62))
+                            .add_stop(1.0, Color::from_rgba(0.0, 0.0, 0.0, 0.84)),
                     ))),
                     ..Default::default()
                 });
@@ -1418,35 +1461,47 @@ impl<'a> BoruVideoFileCard<'a> {
         if let Some(time) = time_label {
             groups.push(time);
         }
-        if !groups.is_empty() {
-            column = column.push(
+        // Shape stability: the metadata line is a FIXED-height slot.  The
+        // group list is partly state-dependent (size disappears on
+        // Failed/Cancelled), so reserving the space keeps the card box
+        // identical across every DownloadState.
+        let groups_el: Option<iced::Element<'a, AppMessage>> = if groups.is_empty() {
+            None
+        } else {
+            Some(
                 crate::fonts::type_role_text(
                     crate::fonts::TypeRole::Metadata,
                     groups.join("  ·  "),
                 )
                 .color(muted)
                 .wrapping(Wrapping::Word)
-                .width(Length::Fill),
-            );
-        }
+                .width(Length::Fill)
+                .into(),
+            )
+        };
+        column = column.push(fixed_slot(METADATA_SLOT_HEIGHT, groups_el));
 
-        if let Some(prog) = progress_section(state, self.dark_mode) {
-            column = column.push(prog);
-        }
+        // Progress bar + in-flight detail — fixed-height slots reserved in
+        // every state; content only Active/Paused (shape stability).
+        column = column.push(fixed_slot(
+            PROGRESS_SLOT_HEIGHT,
+            progress_section(state, self.dark_mode),
+        ));
         // VIDCARD-14: bytes of total, percentage and transfer speed — only
         // where the transfer layer provides them (no invented estimates).
         // Active uses the green progress accent; paused uses the muted tone.
-        if let Some(detail) = active_download_detail(attachment) {
-            let detail_color = if matches!(state, DownloadState::Paused { .. }) {
-                muted
-            } else {
-                accent_green(theme)
-            };
-            column = column.push(
+        let detail_el: Option<iced::Element<'a, AppMessage>> =
+            active_download_detail(attachment).map(|detail| {
+                let detail_color = if matches!(state, DownloadState::Paused { .. }) {
+                    muted
+                } else {
+                    accent_green(theme)
+                };
                 crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, detail)
-                    .color(detail_color),
-            );
-        }
+                    .color(detail_color)
+                    .into()
+            });
+        column = column.push(fixed_slot(DETAIL_SLOT_HEIGHT, detail_el));
 
         column.spacing(SPACE_6).into()
     }
@@ -1477,18 +1532,38 @@ impl<'a> BoruVideoFileCard<'a> {
         // the shared action_buttons helper (green filled primary, light
         // bordered secondary, destructive text for removal).
         let action_row = action_buttons(self.entry_index, attachment.kind, state, &name_str);
-        column = column.push(action_row);
+        // Shape stability: the action row is a fixed-height slot.  The
+        // button count changes per state (1-5 buttons, wrapping at narrow
+        // widths); reserving the space keeps the card box identical.
+        let inner_width = if self.band() == CardBand::Narrow {
+            self.inner_available_width()
+        } else {
+            MediaFrameSizing::new(
+                attachment.poster_dimensions,
+                self.band(),
+                self.inner_available_width(),
+            )
+            .width
+        };
+        column = column.push(fixed_slot(
+            super::download_progress_view::action_slot_height(inner_width),
+            Some(action_row),
+        ));
 
         // FS-26 overwrite-conflict policy: while the download is ready to
         // start, surface the policy that decides what happens when the
         // destination file already exists. Default is Keep Both — never
-        // silently overwrite.
-        if matches!(state, DownloadState::Ready { .. }) {
-            column = column.push(crate::download_progress_view::policy_selector(
+        // silently overwrite.  Reserved as a fixed slot in every state
+        // (visibility preserved in Ready; shape stability everywhere).
+        let policy = if matches!(state, DownloadState::Ready { .. }) {
+            Some(super::download_progress_view::policy_selector(
                 self.entry_index,
                 attachment.overwrite_policy,
-            ));
-        }
+            ))
+        } else {
+            None
+        };
+        column = column.push(fixed_slot(POLICY_SLOT_HEIGHT, policy));
 
         if let Some(error) = attachment.playback_error.as_ref() {
             if error.retry_available() {
@@ -1502,70 +1577,6 @@ impl<'a> BoruVideoFileCard<'a> {
 
         column.spacing(SPACE_6).into()
     }
-
-    // ── Failure details ───────────────────────────────────────────────
-
-    fn error_section(
-        &self,
-        attachment: &DownloadAttachment,
-        tone: Color,
-        muted: Color,
-        error_color: Color,
-    ) -> Option<iced::Element<'a, AppMessage>> {
-        match &attachment.state {
-            DownloadState::Failed { failure } => {
-                let mut column = Column::new()
-                    .push(
-                        row![
-                            crate::fonts::type_role_text(
-                                crate::fonts::TypeRole::BodyEmphasised,
-                                failure.title(),
-                            )
-                            .color(error_color),
-                            crate::fonts::type_role_text(
-                                crate::fonts::TypeRole::Metadata,
-                                failure.stability_label(),
-                            )
-                            .color(tone),
-                        ]
-                        .spacing(SPACE_8)
-                        .align_y(Alignment::Center),
-                    )
-                    .push(
-                        crate::fonts::type_role_text(
-                            crate::fonts::TypeRole::Metadata,
-                            failure.message(),
-                        )
-                        .color(muted)
-                        .width(Length::Fill),
-                    )
-                    .push(
-                        crate::fonts::type_role_text(
-                            crate::fonts::TypeRole::Metadata,
-                            format!("Recovery: {}", failure.recovery_action()),
-                        )
-                        .color(tone)
-                        .width(Length::Fill),
-                    );
-
-                if let Some(detail) = failure.diagnostics() {
-                    if !detail.is_empty() {
-                        column = column.push(
-                            crate::fonts::type_role_text(
-                                crate::fonts::TypeRole::TechnicalValue,
-                                detail,
-                            )
-                            .color(muted)
-                            .width(Length::Fill),
-                        );
-                    }
-                }
-
-                Some(column.into())
-            }
-            _ => None,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1573,9 +1584,11 @@ mod tests {
     use super::{
         aspect_ratio_class, file_format_label, format_relative_time, header_badge, intrinsic_ratio,
         media_frame_size, media_placeholder_text, truncate_filename, video_presentation_state,
-        control_layout, CardBand, ControlLayout, MediaAspectClass, MediaFrameSizing, VideoPresentationState,
+        BoruVideoFileCard, CardBand, ControlLayout, MediaAspectClass, MediaFrameSizing, VideoPresentationState,
+        control_layout,
         HEADER_FILENAME_MAX_CHARS, MEDIUM_CARD_BREAKPOINT, NARROW_CARD_BREAKPOINT,
     };
+    use super::super::app::AppMessage;
     use iced::Length;
     use crate::app::{DownloadAttachment, DownloadFailure, DownloadState, TransferKind};
     use std::path::PathBuf;
@@ -2542,11 +2555,9 @@ mod tests {
     }
 
     #[test]
-    #[test]
-    fn duration_badge_uses_real_metadata_only() {
-        // VIDCARD-11: the duration badge must come from real player
-        // metadata, appear only when the duration is known (non-zero), and
-        // sit in the lower-right corner of the media frame.
+    fn player_has_one_compact_timing_indicator() {
+        // PDF task 6: the duplicate lower-right duration badge was removed;
+        // timing is rendered once in the main control row from live metadata.
         let src = include_str!("video_file_card.rs");
         let prod = src.split("#[cfg(test)]").next().unwrap();
         let media_frame_fns = prod
@@ -2555,17 +2566,14 @@ mod tests {
             .expect("media_frame must exist");
 
         assert!(
-            media_frame_fns.contains("duration.as_secs() > 0"),
-            "duration badge must only appear when the duration is known"
+            media_frame_fns.contains("format_media_time(position)")
+                && media_frame_fns.contains("format_media_time(duration)"),
+            "timing must use live position and duration metadata"
         );
         assert!(
-            media_frame_fns.contains("duration_badge(duration)"),
-            "badge content must come from the real player duration"
-        );
-        assert!(
-            media_frame_fns.contains("align_x(Alignment::End)")
-                && media_frame_fns.contains("align_y(Alignment::End)"),
-            "duration badge must sit in the lower-right corner"
+            !media_frame_fns.contains("duration_badge")
+                && !media_frame_fns.contains("DURATION_BADGE_ZONE"),
+            "the duplicate duration badge must not be rendered"
         );
     }
 
@@ -2839,19 +2847,23 @@ mod tests {
     fn error_states_provide_text_not_only_icons() {
         // Task 17: "Error states provide text, not only icons." Both the
         // transfer-failure section and the playback-error panel render the
-        // real failure title/message/recovery text.
-        let src = include_str!("video_file_card.rs");
+        // real failure title/message/recovery text.  The transfer-failure
+        // block is the shared `failure_block` helper (download_progress_view),
+        // rendered by the video card inside its fixed error slot.
+        let src = include_str!("download_progress_view.rs");
         let prod = src.split("#[cfg(test)]").next().unwrap();
         let err = prod
-            .split("fn error_section")
+            .split("pub(crate) fn failure_block")
             .nth(1)
-            .expect("error_section must exist");
+            .expect("failure_block must exist");
         assert!(
             err.contains("failure.title()")
                 && err.contains("failure.message()")
                 && err.contains("failure.recovery_action()"),
             "transfer failure must render title/message/recovery as text"
         );
+        let src = include_str!("video_file_card.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
         let media = prod
             .split("fn media_frame(")
             .nth(1)
@@ -2863,12 +2875,9 @@ mod tests {
     }
 
     #[test]
-    fn player_control_buttons_have_text_labels_and_are_focusable() {
-        // Task 17: "Video controls remain accessible." The inline player's
-        // control buttons (Play/Pause, Mute/Unmute, Collapse/Expand) are
-        // text-labelled action_buttons — and action_button now wraps in the
-        // focusable wrapper, so they are Tab-reachable and Enter/Space
-        // activatable.
+    fn player_control_buttons_use_accessible_icon_controls() {
+        // PDF tasks 5/7 and Task 17: media controls use the established icon
+        // set but retain accessible tooltip names and focusable wrappers.
         let src = include_str!("video_file_card.rs");
         let prod = src.split("#[cfg(test)]").next().unwrap();
         let media = prod
@@ -2876,20 +2885,26 @@ mod tests {
             .nth(1)
             .expect("media_frame must exist");
         assert!(
-            media.contains("\"Play\"") && media.contains("\"Pause\""),
-            "play/pause control must carry a text label"
+            media.contains("Icon::Play") && media.contains("Icon::Pause"),
+            "play/pause control must use media icons"
         );
         assert!(
-            media.contains("\"Mute\"") && media.contains("\"Unmute\""),
-            "mute control must carry a text label"
+            media.contains("Icon::VolumeX")
+                && media.contains("Icon::Volume1")
+                && media.contains("Icon::Volume2"),
+            "volume control must represent muted, low and high states"
         );
         assert!(
-            media.contains("\"Collapse\"") && media.contains("\"Expand\""),
-            "expand control must carry a text label"
+            media.contains("\"Play video\"")
+                && media.contains("\"Pause video\"")
+                && media.contains("\"Mute\"")
+                && media.contains("\"Unmute\""),
+            "icon controls must retain accessible names"
         );
         assert!(
-            media.contains("action_button("),
-            "player controls must go through the focusable action_button helper"
+            media.contains("media_icon_button(")
+                && media.contains("focusable_button::focusable_button("),
+            "player controls must use the focusable icon-button helper"
         );
     }
 
@@ -2983,5 +2998,100 @@ mod tests {
             !loading.contains("animation") && !loading.contains("Animation"),
             "loading indicator must be a static icon + label (no animation)"
         );
+    }
+
+    // ── Shape stability (this task) ────────────────────────────────────
+
+    /// Lay out a video card element offscreen (tiny-skia CPU renderer) and
+    /// return the outer node bounds.  Same harness as the FONTS-17 captures.
+    #[cfg(feature = "video-playback")]
+    fn measure_outer_bounds(
+        element: &mut iced::Element<'static, AppMessage>,
+        canvas: (f32, f32),
+    ) -> (f32, f32) {
+        use iced::advanced::layout;
+        use iced::advanced::widget::Tree;
+        use iced::{Font, Pixels, Size};
+
+        let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
+            Font::default(),
+            Pixels(16.0),
+        ));
+        let mut tree = Tree::new(element.as_widget());
+        let limits = layout::Limits::new(Size::ZERO, Size::new(canvas.0, canvas.1));
+        let node = element.as_widget_mut().layout(&mut tree, &renderer, &limits);
+        let bounds = node.bounds();
+        (bounds.width, bounds.height)
+    }
+
+    /// Assert the video card keeps IDENTICAL outer dimensions (width,
+    /// height) across every DownloadState — the media frame is always
+    /// rendered and the state-conditional sections occupy fixed-height
+    /// slots, so failure (or completion, or cancellation) never re-flows
+    /// the card box.
+    #[cfg(feature = "video-playback")]
+    #[test]
+    fn video_card_outer_bounds_are_identical_across_all_states() {
+        let states = [
+            DownloadState::Ready { total: Some(44_000_000) },
+            DownloadState::Active {
+                bytes: 19_000_000,
+                total: Some(44_000_000),
+            },
+            DownloadState::Paused {
+                bytes: 19_000_000,
+                total: Some(44_000_000),
+            },
+            DownloadState::Completed {
+                saved_name: "clip.mp4".into(),
+                saved_path: None,
+                total_size: Some(44_000_000),
+            },
+            DownloadState::Shared {
+                name: "clip.mp4".into(),
+                path: std::path::PathBuf::from("/tmp/clip.mp4"),
+                size: Some(44_000_000),
+            },
+            DownloadState::Failed {
+                failure: DownloadFailure::PeerOffline {
+                    detail: Some("peer is offline right now".into()),
+                },
+            },
+            DownloadState::Cancelled,
+        ];
+
+        let mut measured: Vec<(f32, f32)> = Vec::new();
+        for state in states {
+            let mut att = DownloadAttachment::new(TransferKind::Video, "clip.mp4", "ticket", "Duke", None);
+            att.state = state;
+            let card = BoruVideoFileCard::new(
+                0,
+                false,
+                false,
+                None,
+                false,
+                None,
+                false,
+                false,
+                Some(1_800_000_000_000_i64),
+                720.0,
+            );
+            // player=None → the returned element is 'static-compatible.
+            let mut element: iced::Element<'static, AppMessage> = card.view(&att);
+            measured.push(measure_outer_bounds(&mut element, (900.0, 1600.0)));
+        }
+
+        let (w0, h0) = measured[0];
+        for (i, (w, h)) in measured.iter().enumerate() {
+            assert!(
+                (w - w0).abs() < 0.5,
+                "state {i}: width {w} differs from Ready width {w0}"
+            );
+            assert!(
+                (h - h0).abs() < 0.5,
+                "state {i}: height {h} differs from Ready height {h0}"
+            );
+        }
+        assert!(w0 > 200.0 && h0 > 200.0, "card box implausibly small: {w0}x{h0}");
     }
 }

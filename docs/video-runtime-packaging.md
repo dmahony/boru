@@ -58,9 +58,25 @@ The helper `scripts/check_video_runtime.sh` performs the Linux prerequisite and
 core-element checks; it intentionally exits non-zero when the runtime is absent
 so CI/package jobs cannot silently advertise inline playback.
 
-Current repository state: no Windows installer project/configuration file was
-discovered, so the Windows policy above remains documentation-only until a real
-installer is added.
+Current repository state: the Windows packaging pipeline is implemented
+(2026-08-08).  `.github/workflows/release.yaml` downloads the pinned
+GStreamer MSVC runtime MSI on the `windows-latest` runner and
+`scripts/package_windows.sh` assembles the self-contained artifact:
+`boru.exe`, the Papirus icon assets, the reviewed runtime subset under
+`gstreamer/1.0/msvc_x86_64/`, `THIRD_PARTY_NOTICES/gstreamer/`, and the
+toolchain runtime DLLs.  The curated plugin allowlist and the runtime DLL
+closure are checked in as `scripts/gstreamer-windows-plugins.txt` and
+`scripts/gstreamer-windows-runtime.txt`; regenerate with
+`scripts/gst_windows_manifest.py` when the pinned runtime version changes.
+
+The Windows release build still uses `--features gui` (no `video-playback`).
+gstreamer-sys links GStreamer through import libraries, so enabling the
+feature would make `boru.exe` fail to start whenever the runtime DLLs are
+not in the Windows loader search path — contradicting the clean-start
+guarantee above.  The bundled runtime is therefore ready for the next build
+that moves inline playback to dynamic loading or delay-load imports; until
+then it is shipped so the package is self-contained and the layout is
+stable.
 
 ## Licensing and notices
 
