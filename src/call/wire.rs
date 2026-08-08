@@ -393,7 +393,7 @@ mod tests {
 
     fn offer_with_sample_rates(count: usize) -> CallControl {
         let mut capabilities = capabilities();
-        capabilities.sample_rates = vec![0; count];
+        capabilities.audio.sample_rates = vec![0; count];
         CallControl::Offer {
             call_id: CallId::generate(),
             kind: CallKind::Video,
