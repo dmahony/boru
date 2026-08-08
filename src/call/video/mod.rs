@@ -15,6 +15,9 @@ pub mod packet;
 pub mod pipeline;
 pub mod reassembly;
 
-pub use codec::{EncodedFrame, VideoCodec};
+pub use codec::{
+    DecodedVideoFrame, EncodedVideoFrame, OpenH264Decoder, OpenH264Encoder, RawVideoFrame,
+    VideoCodec, VideoDecoder, VideoEncoder,
+};
 pub use packet::{VideoPacket, MAX_VIDEO_PAYLOAD_BYTES};
 pub use pipeline::LiveVideoPipeline;
