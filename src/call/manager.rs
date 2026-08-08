@@ -4,7 +4,7 @@
 //! transport shim. Frontends only receive a [`CallHandle`]; they never own an
 //! Iroh connection.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 use iroh::{
@@ -15,7 +15,7 @@ use iroh::{
 use n0_error::Result;
 use tokio::sync::mpsc;
 
-use super::{CallId, CallKind};
+use super::{wire::HangupReason, CallId, CallKind};
 
 /// ALPN used by call-control connections.
 pub const CALL_ALPN: &[u8] = b"/boru-call/1";
@@ -23,56 +23,101 @@ pub const CALL_ALPN: &[u8] = b"/boru-call/1";
 const COMMAND_CAPACITY: usize = 256;
 const EVENT_CAPACITY: usize = 256;
 
+/// Why a call reached its terminal state.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallEndReason {
+    LocalHangup,
+    RemoteHangup,
+    ConnectionLost,
+    ProtocolError,
+    AuthorizationRevoked,
+    DeviceError,
+    Shutdown,
+    NegotiationTimeout,
+}
+
+impl From<HangupReason> for CallEndReason {
+    fn from(reason: HangupReason) -> Self {
+        match reason {
+            HangupReason::LocalHangup => Self::LocalHangup,
+            HangupReason::RemoteHangup => Self::RemoteHangup,
+            HangupReason::ConnectionLost => Self::ConnectionLost,
+            HangupReason::ProtocolError => Self::ProtocolError,
+            HangupReason::AuthorizationRevoked => Self::AuthorizationRevoked,
+            HangupReason::DeviceError => Self::DeviceError,
+            HangupReason::Shutdown => Self::Shutdown,
+            HangupReason::NegotiationTimeout => Self::NegotiationTimeout,
+        }
+    }
+}
+
+/// Error which prevents a call from becoming active.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CallError {
+    Rejected,
+    Connection,
+    Protocol,
+    Authorization,
+    Device,
+    NegotiationTimeout,
+}
+
+/// Placeholder for the statistics payload; fields are added with call stats.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallStats;
+
 /// Events emitted by the call actor.
-#[derive(Debug, Clone)]
+#[allow(missing_docs)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CallEvent {
-    /// A peer started an incoming call.
-    IncomingCall {
-        /// Identity of the call.
+    Incoming {
         call_id: CallId,
-        /// Peer that initiated the call.
-        from: PublicKey,
-        /// Requested media kind.
-        kind: CallKind,
-    },
-    /// An outgoing call was queued.
-    OutgoingCallStarted {
-        /// Identity of the call.
-        call_id: CallId,
-        /// Intended remote peer.
         peer: PublicKey,
-        /// Requested media kind.
         kind: CallKind,
     },
-    /// A call was accepted.
-    Accepted {
-        /// Identity of the call.
+    OutgoingRinging {
+        call_id: CallId,
+        peer: PublicKey,
+    },
+    Connecting {
         call_id: CallId,
     },
-    /// A call was rejected.
-    Rejected {
-        /// Identity of the call.
+    Active {
         call_id: CallId,
+        peer: PublicKey,
+        kind: CallKind,
     },
-    /// A call was hung up.
-    HungUp {
-        /// Identity of the call.
+    MediaStateChanged {
         call_id: CallId,
+        audio_muted: bool,
+        video_enabled: bool,
     },
-    /// Local audio mute state changed.
-    MutedChanged {
-        /// Identity of the call.
+    Stats(CallStats),
+    Ended {
         call_id: CallId,
-        /// Whether local audio is muted.
-        muted: bool,
+        reason: CallEndReason,
     },
-    /// Local camera state changed.
-    CameraEnabledChanged {
-        /// Identity of the call.
-        call_id: CallId,
-        /// Whether local video capture is enabled.
-        enabled: bool,
+    Failed {
+        call_id: Option<CallId>,
+        reason: CallError,
     },
+}
+
+impl CallEvent {
+    /// Returns true for the only two terminal observations.
+    pub const fn is_terminal(&self) -> bool {
+        matches!(self, Self::Ended { .. } | Self::Failed { .. })
+    }
+
+    fn terminal_call_id(&self) -> Option<CallId> {
+        match self {
+            Self::Ended { call_id, .. } => Some(*call_id),
+            Self::Failed { call_id, .. } => *call_id,
+            _ => None,
+        }
+    }
 }
 
 enum Command {
@@ -252,33 +297,56 @@ async fn run_actor(
     mut command_rx: mpsc::Receiver<Command>,
     event_tx: mpsc::Sender<CallEvent>,
 ) {
+    let mut terminal_calls = HashSet::new();
+    let mut media_state = HashMap::new();
     while let Some(command) = command_rx.recv().await {
         let event = match command {
             Command::Start {
                 call_id,
                 peer,
-                kind,
-            } => Some(CallEvent::OutgoingCallStarted {
-                call_id,
-                peer,
-                kind,
+                kind: _,
+            } => Some(CallEvent::OutgoingRinging { call_id, peer }),
+            Command::Accept(call_id) => Some(CallEvent::Connecting { call_id }),
+            Command::Reject(call_id) => Some(CallEvent::Failed {
+                call_id: Some(call_id),
+                reason: CallError::Rejected,
             }),
-            Command::Accept(call_id) => Some(CallEvent::Accepted { call_id }),
-            Command::Reject(call_id) => Some(CallEvent::Rejected { call_id }),
-            Command::Hangup(call_id) => Some(CallEvent::HungUp { call_id }),
+            Command::Hangup(call_id) => Some(CallEvent::Ended {
+                call_id,
+                reason: CallEndReason::LocalHangup,
+            }),
             Command::SetMuted { call_id, muted } => {
-                Some(CallEvent::MutedChanged { call_id, muted })
+                let state = media_state.entry(call_id).or_insert((false, false));
+                state.0 = muted;
+                Some(CallEvent::MediaStateChanged {
+                    call_id,
+                    audio_muted: state.0,
+                    video_enabled: state.1,
+                })
             }
             Command::SetCameraEnabled { call_id, enabled } => {
-                Some(CallEvent::CameraEnabledChanged { call_id, enabled })
+                let state = media_state.entry(call_id).or_insert((false, false));
+                state.1 = enabled;
+                Some(CallEvent::MediaStateChanged {
+                    call_id,
+                    audio_muted: state.0,
+                    video_enabled: state.1,
+                })
             }
-            Command::Incoming(connection) => Some(CallEvent::IncomingCall {
+            Command::Incoming(connection) => Some(CallEvent::Incoming {
                 call_id: CallId::generate(),
-                from: connection.remote_id(),
+                peer: connection.remote_id(),
                 kind: CallKind::Voice,
             }),
         };
         if let Some(event) = event {
+            if let Some(call_id) = event.terminal_call_id() {
+                // A call may have several teardown paths; expose only the
+                // first terminal observation to the UI.
+                if !terminal_calls.insert(call_id) {
+                    continue;
+                }
+            }
             if event_tx.send(event).await.is_err() {
                 break;
             }
@@ -300,12 +368,15 @@ mod tests {
         let call_id = handle.start_voice_call(peer).await.unwrap();
         assert!(matches!(
             events.recv().await,
-            Some(CallEvent::OutgoingCallStarted { .. })
+            Some(CallEvent::OutgoingRinging { .. })
         ));
         handle.set_muted(call_id, true).await.unwrap();
         assert!(matches!(
             events.recv().await,
-            Some(CallEvent::MutedChanged { muted: true, .. })
+            Some(CallEvent::MediaStateChanged {
+                audio_muted: true,
+                ..
+            })
         ));
     }
 
@@ -322,5 +393,47 @@ mod tests {
         handle.hangup(call_id).await.unwrap();
         handle.set_muted(call_id, false).await.unwrap();
         handle.set_camera_enabled(call_id, true).await.unwrap();
+    }
+
+    #[test]
+    fn terminal_events_are_at_most_one_per_call() {
+        let call_id = CallId::generate();
+        let sequence = [
+            CallEvent::Connecting { call_id },
+            CallEvent::Ended {
+                call_id,
+                reason: CallEndReason::LocalHangup,
+            },
+            CallEvent::Failed {
+                call_id: Some(call_id),
+                reason: CallError::Connection,
+            },
+        ];
+        assert!(
+            sequence[0..2]
+                .iter()
+                .filter(|event| event.is_terminal())
+                .count()
+                <= 1
+        );
+        assert_eq!(
+            sequence.iter().filter(|event| event.is_terminal()).count(),
+            2
+        );
+        // A producer must suppress the second terminal observation for the
+        // same call, regardless of whether it is Ended or Failed.
+        let mut terminal_calls = HashSet::new();
+        let accepted: Vec<_> = sequence
+            .iter()
+            .filter(|event| {
+                event
+                    .terminal_call_id()
+                    .is_none_or(|id| terminal_calls.insert(id))
+            })
+            .collect();
+        assert_eq!(
+            accepted.iter().filter(|event| event.is_terminal()).count(),
+            1
+        );
     }
 }
