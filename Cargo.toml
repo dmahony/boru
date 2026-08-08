@@ -244,6 +244,11 @@ name = "room_e2e"
 path = "tests/room_e2e.rs"
 required-features = ["net", "test-utils"]
 
+[[test]]
+name = "call_audio_integration"
+path = "tests/call_audio_integration.rs"
+required-features = ["voice-calls"]
+
 [[bin]]
 name = "sim"
 required-features = ["simulator"]
