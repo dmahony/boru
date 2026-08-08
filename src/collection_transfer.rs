@@ -220,8 +220,21 @@ pub fn get_export_path(root: &Path, name: &str) -> anyhow::Result<PathBuf> {
         path.push(part);
     }
     // Belt-and-suspenders: the joined path must stay inside `root`.
-    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.clone());
+    //
+    // Both sides are canonicalised with [`crate::path_containment::
+    // canonicalize_allow_missing`] so the comparison is symmetric: the root
+    // exists and canonicalizes to its fully-resolved form (following any
+    // symlinked ancestry, and emitting the `\\?\` prefix on Windows), while
+    // the per-entry target typically does NOT exist yet (that is the point
+    // of the export).  A plain `path.canonicalize()` on the raw joined path
+    // would fail and fall back to the unresolved text, which never matches
+    // the resolved root when the two textual forms differ — the false
+    // "escapes root directory" rejection.  Walking up to the deepest
+    // existing ancestor still resolves any pre-existing symlink *inside*
+    // the root that points outside, so genuinely escaping entries are
+    // rejected.
+    let canonical_root = crate::path_containment::canonicalize_allow_missing(root);
+    let canonical_path = crate::path_containment::canonicalize_allow_missing(&path);
     ensure!(
         canonical_path.starts_with(&canonical_root),
         "export path escapes root directory: {}",
@@ -392,6 +405,70 @@ mod tests {
         let ok = test_collection_entry(&root, "sub/dir/file.txt").unwrap();
         assert!(ok.starts_with(&root));
         assert_eq!(ok, root.join("sub").join("dir").join("file.txt"));
+    }
+
+    /// Regression: a root whose *textual* form differs from its canonical
+    /// form (reached through a symlink) must still accept valid entries whose
+    /// targets do not exist yet.  This used to fail with "export path escapes
+    /// root directory" because the joined target path was compared raw
+    /// against the fully-resolved root.
+    #[cfg(unix)]
+    #[test]
+    fn get_export_path_accepts_symlinked_root_with_nonexistent_target() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TempDir::new().unwrap();
+        let real = tmp.path().join("real_downloads");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = tmp.path().join("downloads_link");
+        symlink(&real, &link).unwrap();
+        assert_ne!(link.canonicalize().unwrap(), link); // textual != canonical
+
+        // Valid nested target that does not exist yet — accepted.
+        let ok = test_collection_entry(&link, "sub/dir/file.txt").unwrap();
+        assert_eq!(ok, link.join("sub").join("dir").join("file.txt"));
+        assert!(ok.starts_with(&link));
+        let canon = crate::path_containment::canonicalize_allow_missing(&ok);
+        assert!(canon.starts_with(link.canonicalize().unwrap()));
+
+        // Deeply nested non-existent target under the symlinked root.
+        let deep = test_collection_entry(&link, "a/b/c/d/e.txt").unwrap();
+        assert_eq!(deep, link.join("a/b/c/d/e.txt"));
+        assert!(deep.starts_with(&link));
+    }
+
+    /// Regression: the containment guarantee must survive the fix.  A
+    /// pre-existing symlink *inside* the root that points outside is still
+    /// resolved (the deepest existing ancestor is canonicalized), so entries
+    /// that genuinely escape are rejected even when the final target does
+    /// not exist yet.
+    #[cfg(unix)]
+    #[test]
+    fn get_export_path_rejects_symlink_escaping_root() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        // A symlink inside the root pointing out.
+        symlink(&outside, root.join("evil")).unwrap();
+
+        // Non-existent target through the escaping symlink — rejected.
+        let err = test_collection_entry(&root, "evil/secret.txt").unwrap_err();
+        assert!(
+            err.to_string().contains("escapes root directory"),
+            "unexpected error: {err}"
+        );
+
+        // Existing target through the escaping symlink — also rejected.
+        std::fs::write(outside.join("secret.txt"), b"x").unwrap();
+        let err = test_collection_entry(&root, "evil/secret.txt").unwrap_err();
+        assert!(
+            err.to_string().contains("escapes root directory"),
+            "unexpected error: {err}"
+        );
     }
 
     #[tokio::test]

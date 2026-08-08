@@ -408,6 +408,9 @@ pub mod file_access_client;
 /// path traversal and filename injection.
 pub mod safe_destination;
 
+/// Path containment helpers shared by download/export safety checks.
+pub mod path_containment;
+
 /// BlobTicket wormhole sharing — copy a ticket string to share a file outside
 /// the friend graph; paste a ticket to receive.  Provides address-info
 /// trimming (Id-only vs RelayAndAddresses) and a connect-based preflight.

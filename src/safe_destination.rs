@@ -75,8 +75,20 @@ pub fn safe_destination_path(
 
     // Belt-and-suspenders: canonicalise and verify the path is inside the
     // download directory.
-    let candidate_safe = candidate.canonicalize().unwrap_or(candidate.clone());
-    if !candidate_safe.starts_with(download_dir) {
+    //
+    // Both sides use [`crate::path_containment::canonicalize_allow_missing`]
+    // so the comparison is symmetric.  The download directory exists (created
+    // by the caller), while the candidate may or may not exist yet: a plain
+    // `candidate.canonicalize()` on a non-existent candidate would fall back
+    // to the raw text while `download_dir` is left unresolved — the raw-vs-
+    // canonical mismatch that falsely rejects downloads when the download
+    // directory is reached through a symlink (or on Windows, where
+    // canonicalize emits the `\\?\` prefix).  Resolving both sides the same
+    // way keeps the check honest: a pre-existing symlink inside the download
+    // directory that points outside is still resolved and rejected.
+    let download_dir_canon = crate::path_containment::canonicalize_allow_missing(download_dir);
+    let candidate_safe = crate::path_containment::canonicalize_allow_missing(&candidate);
+    if !candidate_safe.starts_with(&download_dir_canon) {
         return Err(n0_error::anyerr!(
             "destination path escapes download directory: {}",
             candidate_safe.display()
@@ -379,8 +391,9 @@ fn safe_destination_path_no_dedup(
 
     let candidate = download_dir.join(&safe_name);
 
-    let candidate_safe = candidate.canonicalize().unwrap_or(candidate.clone());
-    if !candidate_safe.starts_with(download_dir) {
+    let download_dir_canon = crate::path_containment::canonicalize_allow_missing(download_dir);
+    let candidate_safe = crate::path_containment::canonicalize_allow_missing(&candidate);
+    if !candidate_safe.starts_with(&download_dir_canon) {
         return Err(n0_error::anyerr!(
             "destination path escapes download directory: {}",
             candidate_safe.display()
@@ -858,5 +871,112 @@ mod tests {
             }
             DestinationDecision::Skip => panic!("KeepBoth must never skip"),
         }
+    }
+
+    // ── Symlinked download directory (canonicalize asymmetry) ─────────
+    //
+    // The containment check must compare like with like.  A download
+    // directory whose *textual* form differs from its canonical form
+    // (reached through a symlink, or the Windows `\\?\` prefix) used to
+    // falsely reject valid downloads because the candidate side was
+    // canonicalized (when the file existed) while the directory side stayed
+    // raw — or vice versa for non-existent candidates.  Both sides are now
+    // canonicalized with the same allow-missing helper.
+
+    #[cfg(unix)]
+    #[test]
+    fn accepts_non_existent_candidate_in_symlinked_download_dir() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TempDir::new().unwrap();
+        let real = tmp.path().join("real_downloads");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = tmp.path().join("downloads_link");
+        symlink(&real, &link).unwrap();
+        assert_ne!(link.canonicalize().unwrap(), link); // textual != canonical
+
+        let dest = safe_destination_path(&link, "photo.jpg", "abc123").unwrap();
+        assert!(dest.starts_with(&link));
+        assert_eq!(dest.file_name().unwrap(), "photo.jpg");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn accepts_existing_candidate_in_symlinked_download_dir() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TempDir::new().unwrap();
+        let real = tmp.path().join("real_downloads");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = tmp.path().join("downloads_link");
+        symlink(&real, &link).unwrap();
+        assert_ne!(link.canonicalize().unwrap(), link); // textual != canonical
+
+        // Existing file: the old code canonicalized the candidate (resolving
+        // the symlink) but compared against the raw link path — false
+        // "escapes download directory".  Now both sides resolve the same way.
+        let existing = link.join("photo.jpg");
+        fs::write(&existing, b"data").unwrap();
+
+        let dest = safe_destination_path(&link, "photo.jpg", "abc123").unwrap();
+        assert!(dest.starts_with(&link));
+        assert_eq!(dest.file_name().unwrap(), "photo (1).jpg");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn policy_resolution_accepts_symlinked_download_dir_with_existing_file() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TempDir::new().unwrap();
+        let real = tmp.path().join("real_downloads");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = tmp.path().join("downloads_link");
+        symlink(&real, &link).unwrap();
+        assert_ne!(link.canonicalize().unwrap(), link); // textual != canonical
+
+        fs::write(link.join("report.pdf"), b"original").unwrap();
+
+        // KeepBoth: deduplicated inside the (symlinked) download directory.
+        let decision =
+            resolve_destination_with_policy(&link, "report.pdf", "hash", OverwritePolicy::KeepBoth)
+                .unwrap();
+        match decision {
+            DestinationDecision::Use(path) => {
+                assert!(path.starts_with(&link));
+                assert_eq!(path.file_name().unwrap(), "report (1).pdf");
+            }
+            DestinationDecision::Skip => panic!("KeepBoth must never skip"),
+        }
+
+        // Overwrite: exact path still inside the download directory.
+        let decision = resolve_destination_with_policy(
+            &link,
+            "report.pdf",
+            "hash",
+            OverwritePolicy::Overwrite,
+        )
+        .unwrap();
+        assert_eq!(decision, DestinationDecision::Use(link.join("report.pdf")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_candidate_symlink_escaping_download_dir() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("downloads");
+        std::fs::create_dir_all(&dir).unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        // A pre-existing symlink at the candidate path pointing outside.
+        symlink(&outside, dir.join("photo.jpg")).unwrap();
+
+        let err = safe_destination_path(&dir, "photo.jpg", "abc123").unwrap_err();
+        assert!(
+            err.to_string().contains("escapes download directory"),
+            "unexpected error: {err}"
+        );
     }
 }
