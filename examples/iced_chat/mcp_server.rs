@@ -1721,6 +1721,22 @@ async fn handle_run_local_gui_message_test(
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    // The entry-growth condition above can be satisfied by the OpenRoom
+    // history replay BEFORE the SubmitComposer's own update lands, so
+    // `current` may still show a populated composer (SendPressed clears it
+    // in that same update).  Settle-poll briefly for the cleared composer so
+    // the snapshot reflects the submit; a genuine rejection (composer never
+    // clears) still fails the check below.
+    let settle_deadline =
+        tokio::time::Instant::now() + Duration::from_millis(1500).min(deadline.saturating_duration_since(tokio::time::Instant::now()));
+    while tokio::time::Instant::now() < settle_deadline
+        && !current
+            .as_ref()
+            .is_some_and(|s| s.composer_text.is_empty())
+    {
+        current = state.gui_state_rx.as_ref().map(|rx| rx.borrow().clone());
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     let composer_cleared = current.as_ref().is_some_and(|s| s.composer_text.is_empty());
     let local_message_created = current
         .as_ref()

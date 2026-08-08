@@ -10799,18 +10799,17 @@ impl IcedChat {
                         "Composer is empty".to_string(),
                     ));
                 }
-                if self.sender.is_none() {
-                    return Err(error(
-                        GuiActionErrorCode::SendDisabled,
-                        "Sending is disabled until the room is subscribed".to_string(),
-                    ));
-                }
-                if !self.sender_ready {
-                    return Err(error(
-                        GuiActionErrorCode::RoomInactive,
-                        "The active room is inactive".to_string(),
-                    ));
-                }
+                // NOTE: a missing/unready sender must NOT reject the submit.
+                // The real Enter key never validates sender state: SendPressed
+                // clears the composer, persists the message, and
+                // `broadcast_or_queue` drops it into the outgoing queue for
+                // the periodic retry when the subscription/mesh becomes ready.
+                // Rejecting here (as it did before) silently dropped sends
+                // made right after a slow-path room open (sender arrives
+                // asynchronously via RoomOpened ~seconds later) — the
+                // composer stayed populated and the peer never received the
+                // message. Mirror the real flow: accept and let the queue
+                // absorb the not-ready window.
                 if blocking_dialog() {
                     return Err(error(
                         GuiActionErrorCode::BlockingDialogOpen,
