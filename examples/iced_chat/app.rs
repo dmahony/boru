@@ -17170,12 +17170,24 @@ impl IcedChat {
                     return iced::Task::perform(
                         async move {
                             tokio::task::spawn_blocking(move || {
-                                let canonical = verify_local_attachment(
-                                    &path,
-                                    &downloads_root,
-                                    &expected_hash,
-                                    expected_size,
-                                )?;
+                                // Same relaxed containment for the sender's
+                                // own Shared file as the pre-flight check
+                                // above; identity is still fully verified.
+                                let canonical = if shared_path {
+                                    verify_local_attachment_unmanaged(
+                                        &path,
+                                        &downloads_root,
+                                        &expected_hash,
+                                        expected_size,
+                                    )?
+                                } else {
+                                    verify_local_attachment(
+                                        &path,
+                                        &downloads_root,
+                                        &expected_hash,
+                                        expected_size,
+                                    )?
+                                };
                                 let uri = url::Url::from_file_path(&canonical)
                                     .map_err(|()| "cannot create file URI".to_string())?;
                                 Video::new(&uri).map_err(|e| e.to_string())
