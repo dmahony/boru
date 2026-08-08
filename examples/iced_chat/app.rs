@@ -47,7 +47,8 @@ use boru_core::chat_core::{
     seed_memory_lookup, MeshHealth, MessageHash, RoomInviteV2,
 };
 use boru_core::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
-use boru_core::call::manager::CallHandle;
+use boru_core::call::manager::{CallEvent, CallHandle};
+use boru_core::call::{CallId, CallKind};
 use boru_core::contact::{direct_topic, ContactAction, SignedContactMessage};
 use boru_core::conversations::{
     spawn_conversation_forwarder, ConversationEntry, ConversationKind, ConversationNetEvent,
@@ -3800,6 +3801,11 @@ pub struct IcedChat {
     whisper_handle: WhisperHandle,
     /// Handle for enforcing call authorization alongside friend state.
     call_handle: CallHandle,
+    /// Receiver for call actor events, consumed by the Iced subscription.
+    pub call_events_rx: Arc<Mutex<Receiver<CallEvent>>>,
+    active_call_id: Option<CallId>,
+    call_audio_muted: bool,
+    call_camera_enabled: bool,
     /// Receiver for incoming inbox events.
     pub inbox_events_rx: Arc<Mutex<Receiver<InboxEvent>>>,
     /// Receiver for incoming whisper events.
@@ -5686,6 +5692,22 @@ pub enum AppMessage {
     OpenGroupChat(TopicId),
 
     // ── Chat ──
+    /// Start a call through the actor without doing network work in `update`.
+    StartVoiceCall(PublicKey),
+    StartVideoCall(PublicKey),
+    /// Forward one event from the call actor subscription.
+    CallEventReceived(CallEvent),
+    AcceptIncomingCall(CallId),
+    RejectIncomingCall(CallId),
+    HangUp(CallId),
+    ToggleCallMute,
+    ToggleCallCamera,
+    SelectMicrophone(String),
+    SelectSpeaker(String),
+    SelectCamera(String),
+    CallUiTick,
+    CallStarted(Result<CallId, String>),
+    CallCommandFinished(Result<(), String>),
     InputChanged(String),
     SendPressed,
     AttachPressed,
@@ -7618,6 +7640,7 @@ impl IcedChat {
         inbox_events_rx: Arc<Mutex<Receiver<InboxEvent>>>,
         whisper_handle: WhisperHandle,
         call_handle: CallHandle,
+        call_events_rx: Arc<Mutex<Receiver<CallEvent>>>,
         initial_room: Option<(TopicId, Vec<EndpointAddr>)>,
         notice: String,
         chat_history: Arc<std::sync::Mutex<ChatHistoryStore>>,
@@ -8064,6 +8087,10 @@ impl IcedChat {
             return_to_chat_list_after_open,
             whisper_handle,
             call_handle,
+            call_events_rx,
+            active_call_id: None,
+            call_audio_muted: false,
+            call_camera_enabled: false,
             inbox_events_rx,
             whisper_events_rx,
             profile_image_handle,
@@ -9817,6 +9844,20 @@ impl IcedChat {
             AppMessage::NewChatCreated => "NewChatCreated",
             AppMessage::RoomSelected(_) => "RoomSelected",
             AppMessage::OpenGroupChat(_) => "OpenGroupChat",
+            AppMessage::StartVoiceCall(_) => "StartVoiceCall",
+            AppMessage::StartVideoCall(_) => "StartVideoCall",
+            AppMessage::CallEventReceived(_) => "CallEventReceived",
+            AppMessage::AcceptIncomingCall(_) => "AcceptIncomingCall",
+            AppMessage::RejectIncomingCall(_) => "RejectIncomingCall",
+            AppMessage::HangUp(_) => "HangUp",
+            AppMessage::ToggleCallMute => "ToggleCallMute",
+            AppMessage::ToggleCallCamera => "ToggleCallCamera",
+            AppMessage::SelectMicrophone(_) => "SelectMicrophone",
+            AppMessage::SelectSpeaker(_) => "SelectSpeaker",
+            AppMessage::SelectCamera(_) => "SelectCamera",
+            AppMessage::CallUiTick => "CallUiTick",
+            AppMessage::CallStarted(_) => "CallStarted",
+            AppMessage::CallCommandFinished(_) => "CallCommandFinished",
             AppMessage::InputChanged(_) => "InputChanged",
             AppMessage::SendPressed => "SendPressed",
             AppMessage::AttachPressed => "AttachPressed",
@@ -13974,6 +14015,75 @@ impl IcedChat {
             }
 
             // ── Chat ─────────────────────────────────────────────────
+            AppMessage::StartVoiceCall(peer) => {
+                let handle = self.call_handle.clone();
+                iced::Task::perform(
+                    async move { handle.start_voice_call(peer).await.map_err(|e| e.to_string()) },
+                    AppMessage::CallStarted,
+                )
+            }
+            AppMessage::StartVideoCall(peer) => {
+                let handle = self.call_handle.clone();
+                iced::Task::perform(
+                    async move { handle.start_video_call(peer).await.map_err(|e| e.to_string()) },
+                    AppMessage::CallStarted,
+                )
+            }
+            AppMessage::CallStarted(result) => {
+                match result {
+                    Ok(call_id) => self.active_call_id = Some(call_id),
+                    Err(error) => self.toast_message = Some(format!("Call failed: {error}")),
+                }
+                iced::Task::none()
+            }
+            AppMessage::CallEventReceived(event) => {
+                match &event {
+                    CallEvent::Incoming { call_id, .. }
+                    | CallEvent::OutgoingRinging { call_id, .. }
+                    | CallEvent::Connecting { call_id }
+                    | CallEvent::Active { call_id, .. } => self.active_call_id = Some(*call_id),
+                    CallEvent::MediaStateChanged { call_id, audio_muted, video_enabled } => {
+                        self.active_call_id = Some(*call_id);
+                        self.call_audio_muted = *audio_muted;
+                        self.call_camera_enabled = *video_enabled;
+                    }
+                    CallEvent::Ended { call_id, .. } => {
+                        if self.active_call_id == Some(*call_id) { self.active_call_id = None; }
+                    }
+                    CallEvent::Failed { call_id: Some(call_id), .. } => {
+                        if self.active_call_id == Some(*call_id) { self.active_call_id = None; }
+                    }
+                    _ => {}
+                }
+                iced::Task::none()
+            }
+            AppMessage::AcceptIncomingCall(call_id) => {
+                let handle = self.call_handle.clone();
+                iced::Task::perform(async move { handle.accept(call_id).await.map_err(|e| e.to_string()) }, AppMessage::CallCommandFinished)
+            }
+            AppMessage::RejectIncomingCall(call_id) | AppMessage::HangUp(call_id) => {
+                let handle = self.call_handle.clone();
+                iced::Task::perform(async move { handle.hangup(call_id).await.map_err(|e| e.to_string()) }, AppMessage::CallCommandFinished)
+            }
+            AppMessage::ToggleCallMute => {
+                if let Some(call_id) = self.active_call_id {
+                    self.call_audio_muted = !self.call_audio_muted;
+                    let handle = self.call_handle.clone();
+                    let muted = self.call_audio_muted;
+                    iced::Task::perform(async move { handle.set_muted(call_id, muted).await.map_err(|e| e.to_string()) }, AppMessage::CallCommandFinished)
+                } else { iced::Task::none() }
+            }
+            AppMessage::ToggleCallCamera => {
+                if let Some(call_id) = self.active_call_id {
+                    self.call_camera_enabled = !self.call_camera_enabled;
+                    let handle = self.call_handle.clone();
+                    let enabled = self.call_camera_enabled;
+                    iced::Task::perform(async move { handle.set_camera_enabled(call_id, enabled).await.map_err(|e| e.to_string()) }, AppMessage::CallCommandFinished)
+                } else { iced::Task::none() }
+            }
+            AppMessage::SelectMicrophone(_) | AppMessage::SelectSpeaker(_) | AppMessage::SelectCamera(_) | AppMessage::CallUiTick => iced::Task::none(),
+            AppMessage::CallCommandFinished(Err(error)) => { self.toast_message = Some(format!("Call command failed: {error}")); iced::Task::none() }
+            AppMessage::CallCommandFinished(Ok(())) => iced::Task::none(),
             AppMessage::InputChanged(text) => {
                 self.composer_text = text;
 
@@ -35626,6 +35736,24 @@ impl std::hash::Hash for InboxRxHandle {
     }
 }
 
+struct CallRxHandle(Arc<Mutex<Receiver<CallEvent>>>);
+
+impl std::hash::Hash for CallRxHandle {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (Arc::as_ptr(&self.0) as usize).hash(state);
+    }
+}
+
+fn call_subscription(rx: Arc<Mutex<Receiver<CallEvent>>>) -> iced::Subscription<AppMessage> {
+    iced::Subscription::run_with(CallRxHandle(rx), |handle| {
+        let rx = Arc::clone(&handle.0);
+        Box::pin(n0_future::stream::unfold(rx, |rx| async move {
+            let event = rx.lock().await.recv().await?;
+            Some((AppMessage::CallEventReceived(event), rx))
+        }))
+    })
+}
+
 /// Wrapper for the continuous tracker's discovered-peers channel.
 /// Uses a bounded mpsc receiver wrapped in Arc<Mutex<>>.
 struct DiscoveredPeersRxHandle(Arc<Mutex<tokio::sync::mpsc::Receiver<DiscoveredPeersUpdate>>>);
@@ -35855,6 +35983,7 @@ impl IcedChat {
         discovered_peers_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<DiscoveredPeersUpdate>>>,
         gui_action_rx: Option<Arc<Mutex<tokio::sync::mpsc::Receiver<GuiActionRequest>>>>,
         transfer_rx: Arc<Mutex<TransferUpdateReceiver>>,
+        call_events_rx: Arc<Mutex<Receiver<CallEvent>>>,
     ) -> iced::Subscription<AppMessage> {
         let mut subs: Vec<iced::Subscription<AppMessage>> = vec![
             iced::time::every(std::time::Duration::from_secs(1))
@@ -35940,6 +36069,7 @@ impl IcedChat {
                 )
             },
         ));
+        subs.push(call_subscription(call_events_rx));
         iced::Subscription::batch(subs)
     }
 
