@@ -18,6 +18,9 @@ pub mod jitter;
 /// Opus packet-loss concealment and in-band FEC playout.
 pub mod plc;
 
+/// Received audio decode, resampling, playback-ring, and output callback path.
+pub mod receive;
+
 /// Non-blocking, bounded Opus datagram sending.
 #[cfg(feature = "net")]
 pub mod send;
