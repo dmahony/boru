@@ -9,6 +9,9 @@ pub mod audio;
 /// Native audio device access, kept separate from call and Iroh protocol code.
 #[cfg(feature = "voice-calls")]
 pub mod device;
+/// Device-boundary PCM conversion and stateful resampling.
+#[cfg(feature = "voice-calls")]
+pub mod format;
 
 /// Call actor, handle, and Iroh protocol registration.
 #[cfg(feature = "net")]
