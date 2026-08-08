@@ -537,4 +537,133 @@ mod tests {
             assert_eq!(original, decoded);
         }
     }
+
+    #[test]
+    fn every_control_variant_round_trips_through_frame_functions() {
+        let id = CallId::generate();
+        let messages = vec![
+            CallControl::Hello {
+                version: CALL_CONTROL_VERSION,
+                call_id: id,
+            },
+            CallControl::Offer {
+                call_id: id,
+                kind: CallKind::Video,
+                capabilities: capabilities(),
+            },
+            CallControl::Ringing { call_id: id },
+            CallControl::Accept {
+                call_id: id,
+                selected: selected(),
+            },
+            CallControl::Reject {
+                call_id: id,
+                reason: RejectReason::Declined,
+            },
+            CallControl::Busy { call_id: id },
+            CallControl::MediaState {
+                call_id: id,
+                audio_muted: true,
+                video_enabled: false,
+            },
+            CallControl::RequestKeyframe {
+                call_id: id,
+                track_id: 7,
+            },
+            CallControl::KeepAlive { call_id: id },
+            CallControl::Hangup {
+                call_id: id,
+                reason: HangupReason::Shutdown,
+            },
+        ];
+
+        for original in messages {
+            let frame = encode_call_control(&original).expect("control message should encode");
+            let decoded = decode_call_control(&frame).expect("frame should decode");
+            assert_eq!(original, decoded);
+        }
+    }
+
+    #[test]
+    fn truncated_payload_is_rejected() {
+        // Declared length says 5 bytes, only 2 are present.
+        let frame = [0, 0, 0, 5, 0x01, 0x02];
+        assert_eq!(
+            decode_call_control(&frame).unwrap_err(),
+            CallControlFrameError::TruncatedPayload {
+                declared: 5,
+                actual: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn invalid_enum_discriminant_is_rejected_cleanly() {
+        // Encode a valid message, then corrupt the first payload byte so the
+        // postcard discriminant names a variant that does not exist.
+        let original = CallControl::KeepAlive {
+            call_id: CallId::generate(),
+        };
+        let mut frame = encode_call_control(&original).expect("control message should encode");
+        frame[4] = 0xff;
+        assert!(matches!(
+            decode_call_control(&frame).unwrap_err(),
+            CallControlFrameError::Deserialize(_)
+        ));
+    }
+
+    #[test]
+    fn unsupported_version_hello_decodes_at_wire_layer_and_has_typed_semantic_reject() {
+        // The wire layer is deliberately version-agnostic: `Hello` carries the
+        // version as data and postcard decodes any u16. Version negotiation is
+        // a semantic check performed after decode; its typed rejection is
+        // `RejectReason::UnsupportedVersion`. This test pins that contract so
+        // a future wire-level version gate cannot silently change it.
+        let hello = CallControl::Hello {
+            version: CALL_CONTROL_VERSION + 1,
+            call_id: CallId::generate(),
+        };
+        let frame = encode_call_control(&hello).expect("unsupported-version Hello should encode");
+        let decoded = decode_call_control(&frame).expect("wire layer must decode any version");
+        assert_eq!(decoded, hello);
+        match decoded {
+            CallControl::Hello { version, .. } => {
+                assert_eq!(version, CALL_CONTROL_VERSION + 1);
+            }
+            other => panic!("expected Hello, got {other:?}"),
+        }
+
+        // The typed semantic rejection exists and round-trips on the wire.
+        let reject = CallControl::Reject {
+            call_id: CallId::generate(),
+            reason: RejectReason::UnsupportedVersion,
+        };
+        let frame = encode_call_control(&reject).expect("reject should encode");
+        assert_eq!(decode_call_control(&frame).unwrap(), reject);
+    }
+
+    #[test]
+    fn mismatched_call_ids_round_trip_independently() {
+        // Two messages carrying different call identities must decode without
+        // interference; each keeps its own id (semantic comparison is the
+        // caller's job after decode).
+        let first_id = CallId::generate();
+        let second_id = CallId::generate();
+        assert_ne!(first_id, second_id);
+
+        let first = CallControl::Ringing { call_id: first_id };
+        let second = CallControl::Ringing { call_id: second_id };
+        let first_decoded =
+            decode_call_control(&encode_call_control(&first).unwrap()).expect("first decodes");
+        let second_decoded =
+            decode_call_control(&encode_call_control(&second).unwrap()).expect("second decodes");
+        match (first_decoded, second_decoded) {
+            (CallControl::Ringing { call_id: a }, CallControl::Ringing { call_id: b }) => {
+                assert_eq!(a, first_id);
+                assert_eq!(b, second_id);
+                assert_ne!(a, b);
+            }
+            other => panic!("expected two Ringing messages, got {other:?}"),
+        }
+    }
 }
