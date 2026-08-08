@@ -5,24 +5,22 @@
 //!   cargo run --features gui --example boru open   # open new room
 //!   cargo run --features gui --example boru join <ticket>  # join room
 
+mod activity_log_view_model;
 mod app;
 mod boru_dialog;
 mod card_shell;
 mod component_gallery;
 mod connection_details;
-mod dashboard_view_model;
 mod dashboard_filters;
+mod dashboard_view_model;
 mod design_tokens;
 mod download_progress_view;
-mod video_file_card;
-mod focusable_button;
 mod downloaded_view_model;
 mod downloading_view_model;
 mod file_category;
 mod file_type_icon;
 mod file_type_resolver;
-mod peers_downloading_view_model;
-mod activity_log_view_model;
+mod focusable_button;
 mod fonts;
 mod form_components;
 mod gui_test_actions;
@@ -31,6 +29,7 @@ mod link_preview;
 mod log_viewer;
 mod mcp_server;
 mod notification;
+mod peers_downloading_view_model;
 mod perf_tracker;
 mod presentation;
 mod quick_actions;
@@ -40,6 +39,7 @@ mod sharing_summary;
 #[cfg(feature = "terminal")]
 mod terminal_view;
 mod ui_components;
+mod video_file_card;
 
 use mimalloc::MiMalloc;
 
@@ -701,22 +701,21 @@ fn main() -> Result<()> {
         });
     }
 
-        // ── FS-05/FS-11/FS-17 transfer projection ────────────────────
-        // Shared live projection store (broadcast channel + snapshot) plus
-        // item_id (content hash) → display-name enrichment maps. The blob
-        // provider consumer below feeds outbound events into the store AND
-        // records them durably (direction=outbound) so the Activity Log's
-        // "By others" view has real history. Created outside the async
-        // block because IcedChat::new (below) receives them.
-        let transfer_store = std::sync::Arc::new(
-            boru_core::transfer_state_projection::TransferStateStore::new(256),
-        );
-        let outbound_item_labels: std::sync::Arc<
-            std::sync::Mutex<std::collections::HashMap<String, String>>,
-        > = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-        let inbound_item_labels: std::sync::Arc<
-            std::sync::Mutex<std::collections::HashMap<String, String>>,
-        > = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    // ── FS-05/FS-11/FS-17 transfer projection ────────────────────
+    // Shared live projection store (broadcast channel + snapshot) plus
+    // item_id (content hash) → display-name enrichment maps. The blob
+    // provider consumer below feeds outbound events into the store AND
+    // records them durably (direction=outbound) so the Activity Log's
+    // "By others" view has real history. Created outside the async
+    // block because IcedChat::new (below) receives them.
+    let transfer_store =
+        std::sync::Arc::new(boru_core::transfer_state_projection::TransferStateStore::new(256));
+    let outbound_item_labels: std::sync::Arc<
+        std::sync::Mutex<std::collections::HashMap<String, String>>,
+    > = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let inbound_item_labels: std::sync::Arc<
+        std::sync::Mutex<std::collections::HashMap<String, String>>,
+    > = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     let (
         endpoint,
         memory_lookup,
@@ -1011,6 +1010,16 @@ fn main() -> Result<()> {
         ));
         let tunnel_handler = TunnelProtocol::with_service(Arc::clone(&tunnel_service), local_public);
 
+        // ── Call-control protocol ─────────────────────────────────────
+        // Signalling is deliberately independent of media; the actor only
+        // exchanges bounded CallControl frames and emits state events.
+        let call_builder = boru_core::call::manager::CallBuilder::new(
+            endpoint.clone(),
+            secret_key.clone(),
+        );
+        let call_handler = call_builder.protocol_handler();
+        let (_call_handle, _call_events) = call_builder.spawn();
+
         let router = iroh::protocol::Router::builder(endpoint.clone())
             .accept(GOSSIP_ALPN, gossip.clone())
             .accept(iroh_blobs::ALPN, blobs_protocol.clone())
@@ -1021,6 +1030,7 @@ fn main() -> Result<()> {
             .accept(CATALOGUE_ALPN, catalogue_handler)
             .accept(boru_core::net::FILE_ACCESS_ALPN, file_access_handler)
             .accept(BORU_TUNNEL_ALPN, tunnel_handler)
+            .accept(boru_core::call::manager::CALL_ALPN, call_handler)
             .spawn();
         splash_send("Protocol router ready");
 
@@ -1845,9 +1855,7 @@ fn spawn_outbound_provider_consumer(
                                 ),
                             };
                             let event = TransferEvent {
-                                event_id: format!(
-                                    "serve:{transfer_id}:{sequence}:{now_ms}"
-                                ),
+                                event_id: format!("serve:{transfer_id}:{sequence}:{now_ms}"),
                                 transfer_id: transfer_id.clone(),
                                 item_id: current_hash.clone().unwrap_or_default(),
                                 direction: TransferDirection::Outbound,
@@ -1984,9 +1992,7 @@ fn spawn_outbound_provider_consumer(
                                 ),
                             };
                             let event = TransferEvent {
-                                event_id: format!(
-                                    "serve:{transfer_id}:{sequence}:{now_ms}"
-                                ),
+                                event_id: format!("serve:{transfer_id}:{sequence}:{now_ms}"),
                                 transfer_id: transfer_id.clone(),
                                 item_id: current_hash.clone().unwrap_or_default(),
                                 direction: TransferDirection::Outbound,
