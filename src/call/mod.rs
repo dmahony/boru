@@ -1,5 +1,6 @@
 //! Identity and session types shared by Boru's call-control and media subsystems.
 
+pub mod media;
 pub mod wire;
 
 /// Call actor, handle, and Iroh protocol registration.
@@ -15,6 +16,11 @@ use serde::{Deserialize, Serialize};
 pub struct CallId([u8; 16]);
 
 impl CallId {
+    /// Construct a call identity from its wire representation.
+    pub const fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+
     /// Generate a fresh call identity using the operating system CSPRNG.
     pub fn generate() -> Self {
         Self::try_generate().expect("OS CSPRNG unavailable for CallId")
