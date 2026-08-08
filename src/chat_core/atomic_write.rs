@@ -20,6 +20,7 @@ use std::{
     fs,
     io::{BufWriter, Write},
     path::Path,
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use n0_error::{Result, StdResultExt};
@@ -64,7 +65,23 @@ where
     }
 
     // ── 2. Serialise ────────────────────────────────────────────────
-    let tmp_path = path.with_extension("json.tmp");
+    // Unique tmp name per invocation: the store saves run on spawned
+    // threads (send_save_friends etc.) and can overlap, so a fixed
+    // `<name>.json.tmp` lets two concurrent saves race — one truncates
+    // the other's tmp and the loser's rename fails with ENOENT, spamming
+    // "failed to replace file" warnings and occasionally committing a
+    // half-written file. A per-invocation suffix makes every rename
+    // succeed; the last writer wins, which is safe for whole-state JSON.
+    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let file_stem = path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "state".to_string());
+    let tmp_path = path.with_file_name(format!(
+        ".{file_stem}.{}.{seq}.tmp",
+        std::process::id()
+    ));
     let encoded =
         serde_json::to_vec_pretty(data).with_std_context(|_| format!("encode {label}"))?;
 
@@ -201,11 +218,59 @@ mod tests {
 
         atomic_write_json(&path, &data, "test").unwrap();
 
-        // The .json.tmp sibling should *not* exist after a successful write.
-        let tmp_path = path.with_extension("json.tmp");
+        // No dot-prefixed tmp sibling should remain after a successful write.
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n != "test.json" && n.contains(".tmp"))
+            .collect();
         assert!(
-            !tmp_path.exists(),
-            "temp file should not remain after successful write"
+            leftovers.is_empty(),
+            "temp files should not remain after successful write: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn test_concurrent_writes_do_not_race_the_tmp_file() {
+        // Reproduces the store-save race: two spawned save threads writing
+        // the same JSON store concurrently. With a fixed tmp name one
+        // thread's rename loses the file (ENOENT) and reports failure.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("friends.json");
+
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for round in 0..25 {
+                        let data = TestData {
+                            name: format!("writer-{i}"),
+                            value: round,
+                        };
+                        atomic_write_json(&path, &data, "concurrent").unwrap();
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // The final file must be one complete, valid write.
+        let raw = fs::read_to_string(&path).unwrap();
+        let decoded: TestData = serde_json::from_str(&raw).unwrap();
+        assert!(decoded.name.starts_with("writer-"));
+        // No tmp siblings left behind.
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains(".tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files should not remain after concurrent writes: {leftovers:?}"
         );
     }
 }

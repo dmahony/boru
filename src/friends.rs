@@ -460,9 +460,17 @@ impl FriendsStore {
 
     /// Load the friends store from SQLite, falling back to empty if not found.
     pub fn load_from_sqlite(storage: &Storage, data_dir: impl Into<PathBuf>) -> Self {
+        let data_dir = data_dir.into();
         match storage.kv_get("friends") {
             Ok(Some(value)) => match serde_json::from_str::<Self>(&value) {
-                Ok(store) => store,
+                Ok(mut store) => {
+                    // The serialised form has `data_dir` skipped, so the
+                    // deserialised store arrives unbound — rebind it or the
+                    // JSON fallback save reports "no data directory bound"
+                    // forever after the first SQLite write.
+                    store.data_dir = data_dir;
+                    store
+                }
                 Err(err) => {
                     tracing::warn!(
                         "failed to parse friends store from SQLite: {err}; \
