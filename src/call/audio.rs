@@ -12,6 +12,9 @@ use super::device::InputCallback;
 /// Worker-side Opus encoding for fixed-size voice frames.
 pub mod codec;
 
+/// Bounded deadline-driven buffering for received live audio.
+pub mod jitter;
+
 /// Non-blocking, bounded Opus datagram sending.
 #[cfg(feature = "net")]
 pub mod send;
