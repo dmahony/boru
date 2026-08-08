@@ -13,9 +13,93 @@ use crate::call::CallId;
 pub const DEFAULT_JITTER_DELAY: Duration = Duration::from_millis(75);
 /// Audio frame duration used by the initial voice profile.
 pub const AUDIO_FRAME_DURATION: Duration = Duration::from_millis(20);
+/// Minimum adaptive playout target.
+pub const MIN_JITTER_DELAY: Duration = Duration::from_millis(40);
+/// Maximum adaptive playout target.
+pub const MAX_JITTER_DELAY: Duration = Duration::from_millis(200);
+const JITTER_STEP: Duration = Duration::from_millis(5);
+const JITTER_HYSTERESIS_MS: u64 = 4;
 /// Hard upper bound on retained encoded packets.
 pub const MAX_BUFFERED_AUDIO_PACKETS: usize = 64;
 const MAX_DISCONTINUITY: u32 = MAX_BUFFERED_AUDIO_PACKETS as u32 * 4;
+
+/// Smoothed arrival-jitter estimator and bounded playout target controller.
+#[derive(Debug, Clone, Copy)]
+pub struct JitterAdaptation {
+    estimate_ms: u64,
+    target: Duration,
+    last_arrival: Option<Instant>,
+    last_sequence: Option<u32>,
+}
+
+impl Default for JitterAdaptation {
+    fn default() -> Self {
+        Self::new(DEFAULT_JITTER_DELAY)
+    }
+}
+
+impl JitterAdaptation {
+    /// Create an estimator with a target clamped to the supported range.
+    pub fn new(target: Duration) -> Self {
+        Self {
+            estimate_ms: 0,
+            target: target.clamp(MIN_JITTER_DELAY, MAX_JITTER_DELAY),
+            last_arrival: None,
+            last_sequence: None,
+        }
+    }
+
+    /// Observe an in-order packet. Reordered packets do not perturb the estimate.
+    pub fn observe(&mut self, sequence: u32, arrival: Instant, frame_duration: Duration) {
+        let in_order = self
+            .last_sequence
+            .is_none_or(|last| sequence.wrapping_sub(last) < 0x8000_0000);
+        if !in_order {
+            return;
+        }
+        if let Some(last) = self.last_sequence {
+            // Losses and discontinuities are not arrival-jitter samples.
+            if sequence.wrapping_sub(last) != 1 {
+                self.last_arrival = Some(arrival);
+                self.last_sequence = Some(sequence);
+                return;
+            }
+        }
+        if let Some(previous) = self.last_arrival {
+            let actual_ms = arrival.saturating_duration_since(previous).as_millis() as u64;
+            let expected_ms = frame_duration.as_millis() as u64;
+            let deviation = actual_ms.abs_diff(expected_ms);
+            // EWMA alpha=1/8: one late packet cannot cause a latency jump.
+            self.estimate_ms = (self.estimate_ms * 7 + deviation) / 8;
+            let desired = (MIN_JITTER_DELAY.as_millis() as u64)
+                .saturating_add(self.estimate_ms.saturating_mul(2))
+                .clamp(
+                    MIN_JITTER_DELAY.as_millis() as u64,
+                    MAX_JITTER_DELAY.as_millis() as u64,
+                );
+            let current = self.target.as_millis() as u64;
+            if desired.abs_diff(current) > JITTER_HYSTERESIS_MS {
+                let step = JITTER_STEP.as_millis() as u64;
+                self.target = Duration::from_millis(if desired > current {
+                    (current + step).min(desired)
+                } else {
+                    current.saturating_sub(step).max(desired)
+                });
+            }
+        }
+        self.last_arrival = Some(arrival);
+        self.last_sequence = Some(sequence);
+    }
+
+    /// Smoothed absolute arrival-jitter estimate in milliseconds.
+    pub const fn estimate_ms(&self) -> u64 {
+        self.estimate_ms
+    }
+    /// Current bounded playout target.
+    pub const fn target(&self) -> Duration {
+        self.target
+    }
+}
 
 /// A received encoded audio packet and its arrival metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +145,7 @@ pub struct AudioJitterBuffer {
     played_through: Option<u32>,
     next_deadline: Option<Instant>,
     jitter_delay: Duration,
+    adaptation: JitterAdaptation,
     frame_duration: Duration,
     dropped_packets: u64,
     missing_packets: u64,
@@ -82,6 +167,7 @@ impl AudioJitterBuffer {
             played_through: None,
             next_deadline: None,
             jitter_delay,
+            adaptation: JitterAdaptation::new(jitter_delay),
             frame_duration,
             dropped_packets: 0,
             missing_packets: 0,
@@ -113,6 +199,15 @@ impl AudioJitterBuffer {
         self.next_deadline
     }
 
+    /// Current adaptive target, bounded to 40–200 ms.
+    pub const fn jitter_target(&self) -> Duration {
+        self.adaptation.target()
+    }
+    /// Smoothed arrival-jitter estimate in milliseconds.
+    pub const fn jitter_estimate_ms(&self) -> u64 {
+        self.adaptation.estimate_ms()
+    }
+
     /// Borrow a packet by sequence without removing it from the playout queue.
     /// This lets Opus FEC inspect the following packet while preserving its
     /// normal deadline and decode order.
@@ -127,6 +222,7 @@ impl AudioJitterBuffer {
         self.expected_next = None;
         self.played_through = None;
         self.next_deadline = None;
+        self.adaptation = JitterAdaptation::new(self.jitter_delay);
     }
 
     /// Insert one packet without waiting. Returns false for stale, duplicate,
@@ -141,6 +237,10 @@ impl AudioJitterBuffer {
             }
         };
         debug_assert_eq!(call_id, packet.call_id);
+
+        self.adaptation
+            .observe(packet.sequence, packet.arrival, self.frame_duration);
+        self.jitter_delay = self.adaptation.target();
 
         if self.packets.contains_key(&packet.sequence) {
             return false;
@@ -235,6 +335,44 @@ mod tests {
 
     fn due(buffer: &mut AudioJitterBuffer, at: Instant) -> AudioPlayout {
         buffer.pop_due(at).expect("packet should be due")
+    }
+
+    #[test]
+    fn jitter_estimate_and_target_are_smoothed_and_bounded() {
+        let t = Instant::now();
+        let mut adaptation = JitterAdaptation::default();
+        adaptation.observe(1, t, AUDIO_FRAME_DURATION);
+        adaptation.observe(2, t + Duration::from_millis(80), AUDIO_FRAME_DURATION);
+        assert!(adaptation.estimate_ms() > 0);
+        assert!(adaptation.target() >= MIN_JITTER_DELAY);
+        assert!(adaptation.target() <= MAX_JITTER_DELAY);
+        assert!(adaptation.target() <= DEFAULT_JITTER_DELAY + JITTER_STEP);
+    }
+
+    #[test]
+    fn one_late_packet_does_not_jump_latency() {
+        let t = Instant::now();
+        let mut adaptation = JitterAdaptation::default();
+        adaptation.observe(1, t, AUDIO_FRAME_DURATION);
+        let before = adaptation.target();
+        adaptation.observe(2, t + Duration::from_millis(200), AUDIO_FRAME_DURATION);
+        assert!(adaptation.target() <= before + JITTER_STEP);
+    }
+
+    #[test]
+    fn target_respects_bounds_after_extreme_jitter() {
+        let t = Instant::now();
+        let mut adaptation = JitterAdaptation::new(Duration::from_secs(10));
+        adaptation.observe(1, t, AUDIO_FRAME_DURATION);
+        for sequence in 2..200 {
+            adaptation.observe(
+                sequence,
+                t + Duration::from_millis(sequence as u64 * 500),
+                AUDIO_FRAME_DURATION,
+            );
+        }
+        assert!(adaptation.target() >= MIN_JITTER_DELAY);
+        assert!(adaptation.target() <= MAX_JITTER_DELAY);
     }
 
     #[test]
