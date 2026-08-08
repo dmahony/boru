@@ -1,11 +1,72 @@
 //! Versioned, reliable control messages exchanged during a call.
 
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 use super::{CallId, CallKind};
 
 /// Current call-control protocol version.
 pub const CALL_CONTROL_VERSION: u16 = 1;
+
+/// Maximum postcard payload in one length-prefixed call-control frame.
+pub const MAX_CALL_CONTROL_FRAME_SIZE: usize = 64 * 1024;
+
+/// Errors returned while encoding or decoding a call-control frame.
+#[derive(Debug, PartialEq, Eq)]
+pub enum CallControlFrameError {
+    /// The declared payload is larger than the protocol limit.
+    FrameTooLarge {
+        /// Number of bytes declared by the peer.
+        declared: usize,
+        /// Maximum payload accepted by this protocol.
+        maximum: usize,
+    },
+    /// The input ended before the four-byte length prefix was complete.
+    TruncatedLength {
+        /// Number of prefix bytes received.
+        actual: usize,
+    },
+    /// The input ended before the declared payload was complete.
+    TruncatedPayload {
+        /// Number of bytes declared by the peer.
+        declared: usize,
+        /// Number of payload bytes received.
+        actual: usize,
+    },
+    /// The postcard payload could not be decoded.
+    Deserialize(postcard::Error),
+    /// The control message could not be encoded as postcard.
+    Serialize(postcard::Error),
+}
+
+impl fmt::Display for CallControlFrameError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::FrameTooLarge { declared, maximum } => {
+                write!(
+                    formatter,
+                    "call-control frame is {declared} bytes (maximum {maximum})"
+                )
+            }
+            Self::TruncatedLength { actual } => {
+                write!(
+                    formatter,
+                    "truncated call-control length prefix ({actual} bytes)"
+                )
+            }
+            Self::TruncatedPayload { declared, actual } => write!(
+                formatter,
+                "truncated call-control payload (declared {declared} bytes, got {actual})"
+            ),
+            Self::Deserialize(error) => write!(formatter, "invalid call-control postcard: {error}"),
+            Self::Serialize(error) => {
+                write!(formatter, "could not encode call-control postcard: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CallControlFrameError {}
 
 /// Audio codecs supported by the initial call protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,6 +215,54 @@ pub enum CallControl {
     },
 }
 
+/// Encode a call-control message as a big-endian length-prefixed frame.
+pub fn encode_call_control(control: &CallControl) -> Result<Vec<u8>, CallControlFrameError> {
+    let payload = postcard::to_stdvec(control).map_err(CallControlFrameError::Serialize)?;
+    if payload.len() > MAX_CALL_CONTROL_FRAME_SIZE {
+        return Err(CallControlFrameError::FrameTooLarge {
+            declared: payload.len(),
+            maximum: MAX_CALL_CONTROL_FRAME_SIZE,
+        });
+    }
+
+    let length = payload.len() as u32;
+    let mut frame = Vec::with_capacity(4 + payload.len());
+    frame.extend_from_slice(&length.to_be_bytes());
+    frame.extend_from_slice(&payload);
+    Ok(frame)
+}
+
+/// Decode one complete big-endian length-prefixed call-control frame.
+///
+/// The declared length is checked before the payload is sliced or deserialized;
+/// callers that read from a stream must perform the same check before allocating
+/// a payload buffer.
+pub fn decode_call_control(frame: &[u8]) -> Result<CallControl, CallControlFrameError> {
+    if frame.len() < 4 {
+        return Err(CallControlFrameError::TruncatedLength {
+            actual: frame.len(),
+        });
+    }
+
+    let declared = u32::from_be_bytes(frame[..4].try_into().expect("length checked")) as usize;
+    if declared > MAX_CALL_CONTROL_FRAME_SIZE {
+        return Err(CallControlFrameError::FrameTooLarge {
+            declared,
+            maximum: MAX_CALL_CONTROL_FRAME_SIZE,
+        });
+    }
+
+    let payload = &frame[4..];
+    if payload.len() != declared {
+        return Err(CallControlFrameError::TruncatedPayload {
+            declared,
+            actual: payload.len(),
+        });
+    }
+
+    postcard::from_bytes(payload).map_err(CallControlFrameError::Deserialize)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,6 +291,69 @@ mod tests {
             height: 720,
             fps: 30,
         }
+    }
+
+    fn offer_with_sample_rates(count: usize) -> CallControl {
+        let mut capabilities = capabilities();
+        capabilities.sample_rates = vec![0; count];
+        CallControl::Offer {
+            call_id: CallId::generate(),
+            kind: CallKind::Video,
+            capabilities,
+        }
+    }
+
+    #[test]
+    fn bounded_frame_at_limit_round_trips() {
+        let mut low = 0;
+        let mut high = MAX_CALL_CONTROL_FRAME_SIZE + 1;
+        while low + 1 < high {
+            let count = (low + high) / 2;
+            let candidate = offer_with_sample_rates(count);
+            let size = postcard::to_stdvec(&candidate).unwrap().len();
+            if size <= MAX_CALL_CONTROL_FRAME_SIZE {
+                low = count;
+            } else {
+                high = count;
+            }
+        }
+
+        let original = offer_with_sample_rates(low);
+        let frame = encode_call_control(&original).expect("frame at the limit should encode");
+        assert_eq!(
+            u32::from_be_bytes(frame[..4].try_into().unwrap()) as usize,
+            MAX_CALL_CONTROL_FRAME_SIZE
+        );
+        assert_eq!(frame.len(), 4 + MAX_CALL_CONTROL_FRAME_SIZE);
+        assert_eq!(decode_call_control(&frame).unwrap(), original);
+    }
+
+    #[test]
+    fn oversized_declared_length_is_rejected_before_payload_processing() {
+        let mut frame = vec![0; 4];
+        frame[..4].copy_from_slice(&((MAX_CALL_CONTROL_FRAME_SIZE as u32) + 1).to_be_bytes());
+        let error = decode_call_control(&frame).unwrap_err();
+        assert_eq!(
+            error,
+            CallControlFrameError::FrameTooLarge {
+                declared: MAX_CALL_CONTROL_FRAME_SIZE + 1,
+                maximum: MAX_CALL_CONTROL_FRAME_SIZE,
+            }
+        );
+    }
+
+    #[test]
+    fn truncated_length_prefix_is_rejected() {
+        assert_eq!(
+            decode_call_control(&[0, 0, 0]).unwrap_err(),
+            CallControlFrameError::TruncatedLength { actual: 3 }
+        );
+    }
+
+    #[test]
+    fn malformed_postcard_is_rejected_cleanly() {
+        let error = decode_call_control(&[0, 0, 0, 1, 0xff]).unwrap_err();
+        assert!(matches!(error, CallControlFrameError::Deserialize(_)));
     }
 
     #[test]
