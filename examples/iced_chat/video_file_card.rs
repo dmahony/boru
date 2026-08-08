@@ -286,6 +286,22 @@ impl MediaFrameSizing {
     }
 }
 
+/// Return the exact media-frame height used by the rendered video card.
+///
+/// The virtualized chat layout uses this same sizing path so its prefix sums
+/// reserve the poster/player footprint before the card enters the window.
+pub(crate) fn estimated_media_frame_height(
+    dimensions: Option<(u32, u32)>,
+    timeline_width: f32,
+) -> f32 {
+    MediaFrameSizing::new(
+        dimensions,
+        CardBand::of(timeline_width),
+        (timeline_width - 2.0 * SPACE_24).max(0.0),
+    )
+    .height
+}
+
 /// Neutral dark media background (VIDCARD-08 / spec Tasks 8 & 11).
 ///
 /// Video previews are framed on a fixed near-black neutral in BOTH themes so
