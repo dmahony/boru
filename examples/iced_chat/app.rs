@@ -2929,6 +2929,8 @@ pub enum Screen {
     Chat { topic: TopicId },
     /// Outgoing call ringing view.
     OutgoingCall,
+    /// Active audio-only call view.
+    ActiveCall,
     /// The friend request management screen.
     FriendRequests,
     /// Application settings screen.
@@ -2956,6 +2958,39 @@ enum OutgoingCallStatus {
     Declined,
     Busy,
     Failed,
+}
+
+/// User-facing call failure text; detailed variants remain diagnostic-only.
+fn friendly_call_error(error: &boru_core::call::manager::CallError) -> &'static str {
+    use boru_core::call::manager::CallError;
+    match error {
+        CallError::Rejected => "Call declined",
+        CallError::Busy => "User is busy",
+        CallError::Connection | CallError::Unauthorized | CallError::Authorization => "Could not reach user",
+        CallError::Device => "Microphone unavailable",
+        CallError::Protocol | CallError::NegotiationTimeout => "No compatible audio codec",
+    }
+}
+
+fn friendly_call_end(reason: &boru_core::call::manager::CallEndReason) -> &'static str {
+    use boru_core::call::manager::CallEndReason;
+    match reason {
+        CallEndReason::ConnectionLost => "Network connection lost",
+        CallEndReason::DeviceError => "Microphone unavailable",
+        _ => "Call ended",
+    }
+}
+
+fn friendly_call_error_text(error: &str) -> &'static str {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("busy") { "User is busy" }
+    else if lower.contains("reject") || lower.contains("declin") { "Call declined" }
+    else if lower.contains("microphone") || lower.contains("audio device") { "Microphone unavailable" }
+    else if lower.contains("camera") && lower.contains("permission") { "Camera permission denied" }
+    else if lower.contains("camera") { "Camera unavailable" }
+    else if lower.contains("codec") && lower.contains("video") { "No compatible video codec" }
+    else if lower.contains("codec") { "No compatible audio codec" }
+    else { "Could not reach user" }
 }
 
 // ── State-safety snapshots ─────────────────────────────────────────────
@@ -3830,6 +3865,8 @@ pub struct IcedChat {
     call_return_screen: Option<Screen>,
     call_audio_muted: bool,
     call_camera_enabled: bool,
+    /// Monotonic start time used for the in-call duration display.
+    call_started_at: Option<std::time::Instant>,
     /// Pending incoming call shown as an overlay; media is only activated
     /// when the user explicitly accepts.
     incoming_call: Option<IncomingCall>,
@@ -8123,6 +8160,7 @@ impl IcedChat {
             call_return_screen: None,
             call_audio_muted: false,
             call_camera_enabled: false,
+            call_started_at: None,
             incoming_call: None,
             inbox_events_rx,
             whisper_events_rx,
@@ -10990,6 +11028,7 @@ impl IcedChat {
         let room_state = match &self.screen {
             Screen::Chat { topic } => format!("Chat room active ({topic})"),
             Screen::OutgoingCall => "Outgoing call".to_string(),
+            Screen::ActiveCall => "Active call".to_string(),
             Screen::FriendProfile(_) => "Friend profile open".to_string(),
             Screen::PeerProfile(_) => "Peer profile open".to_string(),
             Screen::PeerCatalogue(_) => "Peer catalogue open".to_string(),
@@ -11241,6 +11280,7 @@ impl IcedChat {
         let (active_screen, active_room) = match &self.screen {
             Screen::Chat { topic } => ("Chat", Some(topic.to_string())),
             Screen::OutgoingCall => ("OutgoingCall", None),
+            Screen::ActiveCall => ("ActiveCall", None),
             Screen::ChatList => ("ChatList", None),
             Screen::FriendRequests => ("FriendRequests", None),
             Screen::FileSharing => ("FileSharing", None),
@@ -14079,8 +14119,9 @@ impl IcedChat {
                 match result {
                     Ok(call_id) => self.active_call_id = Some(call_id),
                     Err(error) => {
+                        tracing::warn!(error = %error, "call start failed");
                         self.outgoing_call_status = Some(OutgoingCallStatus::Failed);
-                        self.toast_message = Some(format!("Call failed: {error}"));
+                        self.toast_message = Some(friendly_call_error_text(&error).to_string());
                     }
                 }
                 iced::Task::none()
@@ -14098,8 +14139,11 @@ impl IcedChat {
                         self.screen = Screen::OutgoingCall;
                     }
                     CallEvent::Connecting { call_id } => self.active_call_id = Some(*call_id),
-                    CallEvent::Active { call_id, .. } => {
+                    CallEvent::Active { call_id, peer, .. } => {
                         self.active_call_id = Some(*call_id);
+                        self.outgoing_call_peer = Some(*peer);
+                        self.call_started_at = Some(Instant::now());
+                        self.screen = Screen::ActiveCall;
                         // The call is now in progress; the consent overlay is no longer needed.
                         if self.incoming_call.as_ref().is_some_and(|call| call.call_id == *call_id) {
                             self.incoming_call = None;
@@ -14112,9 +14156,13 @@ impl IcedChat {
                     }
                     CallEvent::Ended { call_id, .. } => {
                         if self.active_call_id == Some(*call_id) {
+                            if let CallEvent::Ended { reason, .. } = &event {
+                                self.toast_message = Some(friendly_call_end(reason).to_string());
+                            }
                             self.active_call_id = None;
                             self.outgoing_call_peer = None;
                             self.outgoing_call_status = None;
+                            self.call_started_at = None;
                             if let Some(screen) = self.call_return_screen.take() { self.screen = screen; }
                         }
                         if self.incoming_call.as_ref().is_some_and(|call| call.call_id == *call_id) {
@@ -14132,6 +14180,7 @@ impl IcedChat {
                                         boru_core::call::manager::CallError::Connection => OutgoingCallStatus::Failed,
                                         _ => OutgoingCallStatus::Failed,
                                     });
+                                    self.toast_message = Some(friendly_call_error(reason).to_string());
                                 }
                                 if self.incoming_call.as_ref().is_some_and(|call| call.call_id == *cid) {
                                     self.incoming_call = None;
@@ -14161,10 +14210,11 @@ impl IcedChat {
                 iced::Task::perform(async move { handle.reject(call_id).await.map_err(|e| e.to_string()) }, AppMessage::CallCommandFinished)
             }
             AppMessage::HangUp(call_id) => {
-                if self.active_call_id == Some(call_id) && matches!(self.screen, Screen::OutgoingCall) {
+                if self.active_call_id == Some(call_id) && matches!(self.screen, Screen::OutgoingCall | Screen::ActiveCall) {
                     self.active_call_id = None;
                     self.outgoing_call_peer = None;
                     self.outgoing_call_status = None;
+                    self.call_started_at = None;
                     if let Some(screen) = self.call_return_screen.take() { self.screen = screen; }
                 }
                 let handle = self.call_handle.clone();
@@ -14179,15 +14229,14 @@ impl IcedChat {
                 } else { iced::Task::none() }
             }
             AppMessage::ToggleCallCamera => {
-                if let Some(call_id) = self.active_call_id {
-                    self.call_camera_enabled = !self.call_camera_enabled;
-                    let handle = self.call_handle.clone();
-                    let enabled = self.call_camera_enabled;
-                    iced::Task::perform(async move { handle.set_camera_enabled(call_id, enabled).await.map_err(|e| e.to_string()) }, AppMessage::CallCommandFinished)
-                } else { iced::Task::none() }
+                iced::Task::none()
             }
             AppMessage::SelectMicrophone(_) | AppMessage::SelectSpeaker(_) | AppMessage::SelectCamera(_) | AppMessage::CallUiTick => iced::Task::none(),
-            AppMessage::CallCommandFinished(Err(error)) => { self.toast_message = Some(format!("Call command failed: {error}")); iced::Task::none() }
+            AppMessage::CallCommandFinished(Err(error)) => {
+                tracing::warn!(error = %error, "call command failed");
+                self.toast_message = Some(friendly_call_error_text(&error).to_string());
+                iced::Task::none()
+            }
             AppMessage::CallCommandFinished(Ok(())) => iced::Task::none(),
             AppMessage::InputChanged(text) => {
                 self.composer_text = text;
@@ -26334,6 +26383,7 @@ impl IcedChat {
             Screen::DownloadManager => self.view_download_manager(),
             Screen::Chat { .. } => self.view_chat_panel(),
             Screen::OutgoingCall => self.view_outgoing_call(),
+            Screen::ActiveCall => self.view_active_call(),
             Screen::FriendRequests => {
                 self.serve_prewarmed(Screen::FriendRequests, || self.view_friend_requests())
             }
@@ -30608,6 +30658,37 @@ impl IcedChat {
             .center_x(Length::Fill)
             .center_y(Length::Fill)
             .into()
+    }
+
+    fn view_active_call(&self) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{button, column, container, row, text};
+        use iced::{Alignment, Length};
+
+        let name = self.outgoing_call_peer.as_ref().map(|peer| self.resolve_name(peer)).unwrap_or_else(|| "Unknown contact".to_string());
+        let initials = crate::presentation::initials(&name);
+        let avatar_label = if initials.is_empty() { "?".to_string() } else { initials };
+        let avatar = container(text(avatar_label).size(44.0))
+            .width(Length::Fixed(128.0)).height(Length::Fixed(128.0))
+            .center_x(Length::Fixed(128.0)).center_y(Length::Fixed(128.0))
+            .style(|theme| iced::widget::container::Style {
+                background: Some(iced::Background::Color(bg_surface_secondary(theme))),
+                border: iced::Border { radius: 64.0.into(), ..Default::default() },
+                ..Default::default()
+            });
+        let elapsed = self.call_started_at.map(|start| start.elapsed().as_secs()).unwrap_or_default();
+        let duration = format!("{:02}:{:02}", elapsed / 60, elapsed % 60);
+        let status = if self.call_audio_muted { "Connected · Microphone muted" } else { "Connected · Audio" };
+        let mute_label = if self.call_audio_muted { "Unmute" } else { "Mute" };
+        let mute = button(text(mute_label)).on_press_maybe(self.active_call_id.map(|_| AppMessage::ToggleCallMute));
+        // Upgrade signalling is not implemented; disabled is safer than restarting the call.
+        let video = button(text("Video"));
+        let hang_up = button(text("Hang Up"))
+            .on_press_maybe(self.active_call_id.map(AppMessage::HangUp))
+            .style(BUTTON_DANGER);
+        container(column![avatar, text(name).size(26.0), text(duration).size(22.0), text(status).size(16.0), row![mute, video, hang_up].spacing(SPACE_12)]
+            .spacing(SPACE_16).align_x(Alignment::Center))
+            .width(Length::Fill).height(Length::Fill)
+            .center_x(Length::Fill).center_y(Length::Fill).into()
     }
 
     fn view_chat_panel(&self) -> iced::Element<'_, AppMessage> {
@@ -36193,6 +36274,8 @@ impl IcedChat {
         let mut subs: Vec<iced::Subscription<AppMessage>> = vec![
             iced::time::every(std::time::Duration::from_secs(1))
                 .map(|_| AppMessage::ConnMonitorTick),
+            iced::time::every(std::time::Duration::from_secs(1))
+                .map(|_| AppMessage::CallUiTick),
             iced::time::every(std::time::Duration::from_secs(30))
                 .map(|_| AppMessage::MeshWatchdogTick),
             iced::time::every(std::time::Duration::from_secs(30))
