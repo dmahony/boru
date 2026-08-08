@@ -75,10 +75,13 @@
 //! unlabeled.
 
 use std::collections::HashMap;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use iced::widget::{container, svg, tooltip};
 use iced::{alignment, Border, ContentFit, Element, Length, Theme};
+use tracing::warn;
 
 use crate::design_tokens;
 use crate::file_category::FileCategory;
@@ -563,6 +566,12 @@ fn resolve_asset_root(
 /// The returned root is the directory that directly contains the
 /// `16/24/32/48/64` size dirs.  `None` means no bundled assets were found
 /// anywhere; the component then renders the embedded generic icon.
+///
+/// When resolution fails, a one-time `WARN` diagnostic is emitted (never
+/// per-path spam) naming every probed location and the fix, so a silent
+/// degradation to the generic icon is visible in the logs — especially
+/// the Windows cross-build case where the baked `CARGO_MANIFEST_DIR` is
+/// the Linux build-machine path and cannot exist on the Windows host.
 fn papirus_asset_root() -> Option<std::path::PathBuf> {
     let env_override = std::env::var_os(PAPIRUS_ASSETS_ENV).map(std::path::PathBuf::from);
     let exe_dir = std::env::current_exe()
@@ -570,13 +579,83 @@ fn papirus_asset_root() -> Option<std::path::PathBuf> {
         .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf));
     let cwd = std::env::current_dir().ok();
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    resolve_asset_root(
+    let root = resolve_asset_root(
         env_override.as_deref(),
         exe_dir.as_deref(),
         cwd.as_deref(),
         manifest_dir,
-    )
+    );
+    if root.is_none() {
+        warn_once_asset_root_missing(
+            env_override.as_deref(),
+            exe_dir.as_deref(),
+            cwd.as_deref(),
+            manifest_dir,
+        );
+    }
+    root
 }
+
+/// One-time diagnostic for an unresolvable Papirus asset root.
+///
+/// The user dislikes silent failures: instead of quietly rendering the
+/// embedded generic icon for every file type, emit a single `WARN` (guarded
+/// by an `AtomicBool` so a packed GUI is not spammed) listing every
+/// location that was probed and the concrete fix.
+fn warn_once_asset_root_missing(
+    env_override: Option<&std::path::Path>,
+    exe_dir: Option<&std::path::Path>,
+    cwd: Option<&std::path::Path>,
+    manifest_dir: &std::path::Path,
+) {
+    if ASSET_ROOT_WARNED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let mut probed: Vec<String> = Vec::new();
+    if let Some(dir) = env_override {
+        probed.push(format!("BORU_PAPIRUS_ASSETS={}", dir.display()));
+    }
+    if let Some(dir) = exe_dir {
+        let exe_bundle = dir.join("assets").join("third_party").join("papirus");
+        probed.push(format!(
+            "<exe_dir>/assets/third_party/papirus={}",
+            exe_bundle.display()
+        ));
+        if let Some(parent) = dir.parent() {
+            let parent_bundle = parent.join("assets").join("third_party").join("papirus");
+            probed.push(format!(
+                "<exe_dir>/../assets/third_party/papirus={}",
+                parent_bundle.display()
+            ));
+        }
+    }
+    if let Some(dir) = cwd {
+        let cwd_bundle = dir.join("assets").join("third_party").join("papirus");
+        probed.push(format!(
+            "<cwd>/assets/third_party/papirus={}",
+            cwd_bundle.display()
+        ));
+    }
+    probed.push(format!(
+        "CARGO_MANIFEST_DIR={}",
+        manifest_dir
+            .join(crate::file_type_resolver::PAPIRUS_ASSET_ROOT)
+            .display()
+    ));
+    warn!(
+        "Boru file-type icons: bundled Papirus asset root could not be resolved \
+         (probed: {}). File-type icons will fall back to the embedded generic icon. \
+         Fix: set BORU_PAPIRUS_ASSETS to the bundle root, or ship the \
+         assets/third_party/papirus tree next to the executable (release package \
+         layout) — on Windows, a cross-built exe has no baked source path, so the \
+         assets must travel with the exe.",
+        probed.join("; ")
+    );
+}
+
+/// One-time warning guard: emit the asset-root diagnostic at most once per
+/// process, no matter how many distinct icon paths miss the cache.
+static ASSET_ROOT_WARNED: AtomicBool = AtomicBool::new(false);
 
 /// Icon ids whose **compact (16px)** bundled artwork is a `currentColor`
 /// design tuned for light surfaces (see `source_size_dir`).
@@ -621,11 +700,34 @@ const FALLBACK_SVG_BYTES: &[u8] =
 /// re-reads or re-parses the SVG — only the first use of a path pays.
 static SVG_HANDLE_CACHE: OnceLock<Mutex<HashMap<String, svg::Handle>>> = OnceLock::new();
 
+/// Pure core of [`cached_svg_handle`]: read the SVG bytes for a validated
+/// repo-relative asset path from an already-resolved root.
+///
+/// `root` is the resolved Papirus bundle root (the directory that directly
+/// contains the `16/24/32/48/64` size dirs).  `None` means no bundle was
+/// found anywhere — the cross-build delivery gap (a Windows exe
+/// cross-compiled on Linux bakes the Linux `CARGO_MANIFEST_DIR` path, which
+/// cannot exist on the Windows host; a bare exe shipped without the assets
+/// tree therefore resolves to `None`).  In that case the embedded generic
+/// icon bytes are returned, exactly like the missing-single-file fallback —
+/// never a panic and never a broken-image symbol.
+fn read_svg_bytes(root: Option<&std::path::Path>, asset_path: &str) -> Vec<u8> {
+    // `asset_path` is repo-relative (`assets/third_party/papirus/<size>/…`);
+    // strip the root prefix and join the remainder onto the resolved root.
+    let root_prefix = format!("{}/", crate::file_type_resolver::PAPIRUS_ASSET_ROOT);
+    let relative = asset_path
+        .strip_prefix(root_prefix.as_str())
+        .unwrap_or(asset_path);
+    root.map(|root| root.join(relative))
+        .and_then(|full_path| std::fs::read(&full_path).ok())
+        .unwrap_or_else(|| FALLBACK_SVG_BYTES.to_vec())
+}
+
 /// Fetch (and cache) the SVG handle for a repo-relative asset path such as
 /// `"assets/third_party/papirus/48/application-pdf.svg"`.
 ///
-/// Paths are resolved against `CARGO_MANIFEST_DIR` (compile-time absolute)
-/// so rendering does not depend on the process working directory.
+/// Paths are resolved against the runtime asset root (PAPIRUS-17) so
+/// rendering does not depend on the process working directory.
 ///
 /// ## Security (Task 16)
 ///
@@ -646,17 +748,10 @@ fn cached_svg_handle(asset_path: &str) -> svg::Handle {
     }
     // PAPIRUS-17: resolve the bundled asset root at runtime so the same
     // code works in a source checkout and in a release package (binary +
-    // assets shipped side by side, or BORU_PAPIRUS_ASSETS override).
-    // `asset_path` is repo-relative (`assets/third_party/papirus/<size>/…`);
-    // strip the root prefix and join the remainder onto the resolved root.
-    let root_prefix = format!("{}/", crate::file_type_resolver::PAPIRUS_ASSET_ROOT);
-    let relative = asset_path
-        .strip_prefix(root_prefix.as_str())
-        .unwrap_or(asset_path);
-    let bytes = papirus_asset_root()
-        .map(|root| root.join(relative))
-        .and_then(|full_path| std::fs::read(&full_path).ok())
-        .unwrap_or_else(|| FALLBACK_SVG_BYTES.to_vec());
+    // assets shipped side by side, or BORU_PAPIRUS_ASSETS override).  If
+    // the root cannot be resolved (Windows cross-built exe without the
+    // assets tree), `read_svg_bytes` falls back to the embedded generic.
+    let bytes = read_svg_bytes(papirus_asset_root().as_deref(), asset_path);
     let handle = svg::Handle::from_memory(bytes);
     cache
         .lock()
@@ -1654,5 +1749,87 @@ mod tests {
         std::fs::create_dir_all(&empty).expect("create empty dir");
         let root = resolve_asset_root(None, Some(&empty), None, &empty);
         assert!(root.is_none(), "no bundle → no asset root");
+    }
+
+    // ── Windows cross-build delivery (t_7c04a3ee) ─────────────────────
+
+    /// The exe-relative package layout MUST win over the baked
+    /// `CARGO_MANIFEST_DIR` candidate even when both exist.  This is the
+    /// priority order that makes a packaged Windows build work: a Windows
+    /// exe cross-compiled on Linux bakes the Linux build-machine path into
+    /// the binary, which cannot exist on the Windows host — so the resolver
+    /// must prefer the assets shipped next to the exe, never fall through
+    /// to a compile-time path that is only meaningful on the build machine.
+    #[test]
+    fn asset_root_exe_relative_wins_over_baked_manifest_dir() {
+        // Exe-relative release-package layout.
+        let exe_dir =
+            std::env::temp_dir().join(format!("boru-papirus-exe-{}-pkgwin", std::process::id()));
+        let bundle = exe_dir.join("assets").join("third_party").join("papirus");
+        std::fs::create_dir_all(bundle.join("32")).expect("create pkgwin 32 dir");
+        std::fs::write(
+            bundle.join("32").join("application-x-generic.svg"),
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+        )
+        .expect("write pkgwin generic icon");
+
+        // The real checkout ALSO has a bundle (dev-build manifest dir).
+        // When both are present, the exe-relative candidate must win.
+        let root = resolve_asset_root(
+            None,
+            Some(&exe_dir),
+            None,
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+        );
+        assert_eq!(
+            root.as_deref(),
+            Some(bundle.as_path()),
+            "exe-relative package layout must beat the baked CARGO_MANIFEST_DIR"
+        );
+    }
+
+    /// Cross-build-style behaviour: the baked manifest path does NOT exist
+    /// on the target machine (a Windows exe cross-compiled on Linux carries
+    /// the Linux build path `/home/...` baked via `env!`), and there is no
+    /// env override and no bundle anywhere else.  Resolution must return
+    /// `None` — never panic — and the handle loader must fall back to the
+    /// embedded generic icon bytes, exactly the production symptom described
+    /// in the bug report.
+    #[test]
+    fn asset_root_cross_build_baked_manifest_nonexistent_falls_back_to_generic() {
+        // Simulate the cross-build target: a manifest-dir path that exists
+        // on the Linux build machine but NOT on the Windows host.  Using a
+        // clearly nonexistent temp path stands in for the baked
+        // `/home/dan/iroh-gossip-chat/...` string.
+        let bogus_manifest = std::env::temp_dir().join(format!(
+            "boru-papirus-bogus-manifest-{}",
+            std::process::id()
+        ));
+        let exe_dir =
+            std::env::temp_dir().join(format!("boru-papirus-exe-{}-crosswin", std::process::id()));
+        std::fs::create_dir_all(&exe_dir).expect("create empty crosswin exe dir");
+        // No env override, no exe-relative bundle, no cwd bundle, bogus
+        // baked manifest path → resolution must be None (no panic).
+        let root = resolve_asset_root(None, Some(&exe_dir), None, &bogus_manifest);
+        assert!(
+            root.is_none(),
+            "cross-build with nonexistent baked manifest path must resolve to None, got {root:?}"
+        );
+
+        // The loader must fall back to the embedded generic icon bytes —
+        // the exact production behaviour (no type-specific icons on the
+        // Windows host, but also no crash and no broken-image symbol).
+        // `read_svg_bytes(None, …)` is the pure core of that fallback.
+        let bytes = read_svg_bytes(None, "assets/third_party/papirus/32/application-pdf.svg");
+        assert_eq!(
+            bytes, FALLBACK_SVG_BYTES,
+            "None root must yield the embedded generic icon bytes"
+        );
+        // A missing root never panics the loader; the handle path stays on
+        // embedded bytes (this asserts the pure fallback only — in a test
+        // run the full `cached_svg_handle` resolves the real dev bundle, so
+        // its data is the real icon, not the fallback).
+        let bytes_large = read_svg_bytes(None, "assets/third_party/papirus/64/application-pdf.svg");
+        assert_eq!(bytes_large, FALLBACK_SVG_BYTES);
     }
 }
