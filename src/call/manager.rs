@@ -161,18 +161,20 @@ impl CallHandle {
 #[derive(Debug, Clone)]
 pub struct CallProtocol {
     command_tx: mpsc::Sender<Command>,
+    local_id: PublicKey,
     denied_peers: Arc<RwLock<HashSet<PublicKey>>>,
 }
 
 impl ProtocolHandler for CallProtocol {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         let peer = connection.remote_id();
-        if self
-            .denied_peers
-            .read()
-            .expect("call authorization lock poisoned")
-            .contains(&peer)
-        {
+        if peer == self.local_id {
+            return Err(AcceptError::from_err(n0_error::anyerr!(
+                "call connection from local identity {} is not allowed",
+                peer.fmt_short()
+            )));
+        }
+        if self.is_denied(peer) {
             return Err(AcceptError::from_err(n0_error::anyerr!(
                 "call peer {} is not authorized",
                 peer.fmt_short()
@@ -183,6 +185,21 @@ impl ProtocolHandler for CallProtocol {
             .send(Command::Incoming(connection))
             .await
             .map_err(|_| AcceptError::from_err(n0_error::anyerr!("call actor dropped")))
+    }
+}
+
+impl CallProtocol {
+    /// Authorization hook used by the protocol boundary.
+    ///
+    /// The denied-peer set is intentionally only a stub until the call
+    /// authorization policy is connected in the next phase. Keeping the
+    /// check here ensures that an unauthorized connection never reaches the
+    /// call actor.
+    fn is_denied(&self, peer: PublicKey) -> bool {
+        self.denied_peers
+            .read()
+            .expect("call authorization lock poisoned")
+            .contains(&peer)
     }
 }
 
@@ -222,6 +239,7 @@ impl CallBuilder {
     pub fn protocol_handler(&self) -> CallProtocol {
         CallProtocol {
             command_tx: self.command_tx.clone(),
+            local_id: self.secret_key.public(),
             denied_peers: Arc::clone(&self.denied_peers),
         }
     }
@@ -322,5 +340,45 @@ mod tests {
         handle.hangup(call_id).await.unwrap();
         handle.set_muted(call_id, false).await.unwrap();
         handle.set_camera_enabled(call_id, true).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn protocol_rejects_local_and_denied_peers() {
+        let endpoint = Endpoint::bind(presets::Minimal).await.unwrap();
+        let local_key = SecretKey::generate();
+        let denied_key = SecretKey::generate();
+        let handler = CallBuilder::new(endpoint, local_key.clone())
+            .with_denied_peers([denied_key.public()])
+            .protocol_handler();
+
+        assert!(!handler.is_denied(local_key.public()));
+        assert!(handler.is_denied(denied_key.public()));
+        assert_eq!(handler.local_id, local_key.public());
+    }
+
+    #[tokio::test]
+    async fn protocol_forwards_allowed_connection_to_actor() {
+        let server = Endpoint::bind(presets::Minimal).await.unwrap();
+        let server_key = SecretKey::generate();
+        let builder = CallBuilder::new(server.clone(), server_key);
+        let handler = builder.protocol_handler();
+        let (_handle, mut events) = builder.spawn();
+        let router = iroh::protocol::Router::builder(server)
+            .accept(CALL_ALPN, handler)
+            .spawn();
+
+        let client = Endpoint::bind(presets::Minimal).await.unwrap();
+        client
+            .connect(router.endpoint().addr(), CALL_ALPN)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+                .await
+                .unwrap(),
+            Some(CallEvent::IncomingCall { .. })
+        ));
+        router.shutdown().await.unwrap();
     }
 }
