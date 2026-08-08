@@ -1,5 +1,6 @@
 //! Identity and session types shared by Boru's call-control and media subsystems.
 
+pub mod media;
 pub mod wire;
 
 /// Call actor, handle, and Iroh protocol registration.
