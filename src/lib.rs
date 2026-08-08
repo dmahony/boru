@@ -465,6 +465,14 @@ pub mod klipy_config;
 #[cfg(feature = "net")]
 pub mod group_encryption;
 
+/// SPAKE2 short-code pairing — a password-authenticated complement to the
+/// QR/URI peer-invitation flow.  Both peers agree on a short numeric code;
+/// the PAKE proves they share it, then each side authenticates its
+/// [`PeerInvitation`] with the derived key and feeds it into
+/// [`pairing_service::accept_peer_invitation`].
+#[cfg(feature = "net")]
+pub mod spake2_pairing;
+
 /// Bounded blocking file hasher — wraps blake3 hashing in
 /// [`tokio::task::spawn_blocking`] with configurable concurrency.
 ///

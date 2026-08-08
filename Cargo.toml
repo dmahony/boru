@@ -149,6 +149,11 @@ unicode-normalization = "0.1"
 p2panda-encryption = { version = "0.7", features = ["message_scheme"] }
 p2panda-core = "0.7"
 
+# SPAKE2 short-code pairing (complement to QR/URI peer invitations)
+spake2 = "0.4.0"
+hmac = "0.12"
+hkdf = "0.12"
+
 
 [dev-dependencies]
 tokio = { version = "1", features = [

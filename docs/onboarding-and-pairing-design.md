@@ -116,7 +116,7 @@ The `view_friend_requests()` screen shows:
 
 1. **30-second to first message**: A new user should be able to exchange a message with someone within 30 seconds.
 2. **No prior knowledge required**: The user should not need to understand public keys, DHT, relays, or gossip.
-3. **Paired devices**: Support device-to-device pairing via QR codes (showing and scanning).
+3. **Paired devices**: Support device-to-device pairing via QR codes (showing and scanning) **and** SPAKE2 short-code pairing (`src/spake2_pairing.rs`) for same-room pairing — both sides enter the same 6-digit code and the PAKE authenticates the invitation exchange.
 4. **Progressive disclosure**: Hide networking jargon; show it only in Settings/Advanced.
 5. **Backward compatible**: Existing friend-add-by-key flow and ticket joining must continue working.
 

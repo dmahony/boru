@@ -7,6 +7,56 @@ among a set of authenticated peers. The system is built on four core concepts
 that together provide stable identity, secure transport, private discovery, and
 membership lifecycle management.
 
+## Encryption-Layer Role Enforcement (Admin / Writer / Reader)
+
+The p2panda group encryption layer (`src/group_encryption/`) adds Kith-style
+role-based membership on top of the DCGKA ratchet protocol:
+
+- **Admin** — can add/remove members, change roles, and write messages.
+- **Writer** — can write (and read) messages.
+- **Reader** — can only read; writes are rejected.
+
+Enforcement happens **per message** at the `EncryptionState` boundary:
+
+- `send_message` refuses to encrypt for a local peer whose role is `Reader`,
+  or who is not a current member — even if the caller holds a leaked copy of
+  the group state.
+- `receive_message` refuses to surface plaintext from a sender that is not a
+  member or is a `Reader` (defense against a removed/unauthorized sender with
+  valid keys).
+- Only an Admin can add/remove members and change roles.
+
+**p2panda limitation:** p2panda-encryption 0.7's wire message scheme has no
+role field — `MessageGroup::send` only checks that a ratchet exists.  Roles
+are therefore enforced at the boru application layer, not inside the p2panda
+DGM.  A conforming client refuses to encrypt for a Reader and refuses to
+surface plaintext from a non-member/Reader; a malicious client with a leaked
+group key can still emit ciphertext, but honest receivers drop it.
+
+The role mirror (`EncryptionState.group_roles`) is persisted alongside group
+state in the `group_encryption_roles` SQLite table.
+
+## SPAKE2 Short-Code Pairing
+
+`src/spake2_pairing.rs` adds a password-authenticated short-code pairing
+option alongside the existing QR/URI invitation flow:
+
+1. Both peers agree on a 6-digit code out-of-band.
+2. Each side starts a SPAKE2 session (`Spake2::<Ed25519Group>::start_symmetric`)
+   with the code as the shared password and a fixed protocol identity.
+3. Outbound messages are exchanged (over whisper, clipboard, or any transport).
+4. Each side calls `finish` with the peer's outbound message; both derive the
+   same shared key iff they used the same code (SPAKE2 prevents offline
+   password guessing and impersonation without the code).
+5. Each side authenticates its `PeerInvitation` with the shared key
+   (HKDF-derived HMAC-SHA256) and sends it; each side verifies the peer's
+   authenticated invitation.
+6. The verified invitation is fed into the existing `accept_peer_invitation`
+   flow, which creates the friend record and persists a `PendingPairing` for
+   restart recovery.
+
+The URI/QR path is unchanged; SPAKE2 is an additive entry point.
+
 ## Core Concepts
 
 ### GroupId — Stable Conversation Identity

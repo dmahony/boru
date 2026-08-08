@@ -21,6 +21,8 @@ use rusqlite::{params, Connection};
 use crate::group_id::GroupId;
 
 use super::encryption_state::GroupEncryptionState;
+use super::membership::MemberRole;
+use super::types::PeerId;
 
 /// Save (insert or update) the encryption state for a group.
 ///
@@ -42,6 +44,86 @@ pub fn save_group_state(
     conn.execute(
         "INSERT OR REPLACE INTO group_encryption_state (group_id, state, updated_at) VALUES (?1, ?2, ?3)",
         params![group_id.as_bytes().as_slice(), blob, now],
+    )?;
+    Ok(())
+}
+
+// ── Role mirror persistence ─────────────────────────────────────────────
+//
+// The Kith-style role mirror (`group_roles`) and the local identity
+// (`self_ids`) live outside the p2panda GroupState blob, so they are
+// persisted in a companion table.  The table is created lazily on first use
+// (following the repo's sqlite-kv-store pattern) so no storage.rs migration
+// is required.
+
+const ROLES_TABLE_SQL: &str = "\
+CREATE TABLE IF NOT EXISTS group_encryption_roles (
+    group_id BLOB PRIMARY KEY,
+    roles    BLOB NOT NULL,
+    self_id  BLOB
+);";
+
+/// Save (insert or update) the role mirror for a group.
+pub fn save_group_roles(
+    conn: &Connection,
+    group_id: &GroupId,
+    roles: &std::collections::HashMap<PeerId, MemberRole>,
+    self_id: Option<PeerId>,
+) -> rusqlite::Result<()> {
+    conn.execute_batch(ROLES_TABLE_SQL)?;
+    let blob = postcard::to_stdvec(roles)
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+    conn.execute(
+        "INSERT OR REPLACE INTO group_encryption_roles (group_id, roles, self_id) VALUES (?1, ?2, ?3)",
+        params![
+            group_id.as_bytes().as_slice(),
+            blob,
+            self_id.map(|p| p.0.as_bytes().to_vec())
+        ],
+    )?;
+    Ok(())
+}
+
+/// Load the role mirror for a group, if one exists.
+pub fn load_group_roles(
+    conn: &Connection,
+    group_id: &GroupId,
+) -> rusqlite::Result<
+    Option<(
+        std::collections::HashMap<PeerId, MemberRole>,
+        Option<PeerId>,
+    )>,
+> {
+    let _ = conn.execute_batch(ROLES_TABLE_SQL)?;
+    let mut stmt =
+        conn.prepare("SELECT roles, self_id FROM group_encryption_roles WHERE group_id = ?1")?;
+    let mut rows = stmt.query(params![group_id.as_bytes().as_slice()])?;
+    match rows.next()? {
+        Some(row) => {
+            let blob: Vec<u8> = row.get(0)?;
+            let self_id_bytes: Option<Vec<u8>> = row.get(1)?;
+            let roles: std::collections::HashMap<PeerId, MemberRole> = postcard::from_bytes(&blob)
+                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            let self_id = self_id_bytes.map(|b| {
+                let arr: [u8; 32] = b
+                    .try_into()
+                    .expect("stored self_id must be exactly 32 bytes");
+                let vk = p2panda_core::VerifyingKey::from_bytes(&arr)
+                    .expect("stored self_id is a valid ed25519 key");
+                PeerId(vk)
+            });
+            Ok(Some((roles, self_id)))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Delete the role mirror for a group.
+pub fn delete_group_roles(conn: &Connection, group_id: &GroupId) -> rusqlite::Result<()> {
+    let _ = conn.execute_batch(ROLES_TABLE_SQL)?;
+    conn.execute(
+        "DELETE FROM group_encryption_roles WHERE group_id = ?1",
+        params![group_id.as_bytes().as_slice()],
     )?;
     Ok(())
 }
@@ -257,5 +339,62 @@ mod tests {
             .unwrap();
 
         assert!(updated_at > 0, "updated_at should be a positive timestamp");
+    }
+
+    // ── Role mirror persistence tests ──────────────────────────────────
+
+    /// Helper: build a roles map + self id for persistence tests.
+    fn make_roles() -> (std::collections::HashMap<PeerId, MemberRole>, PeerId) {
+        let owner = PeerId::from(iroh::SecretKey::generate().public());
+        let member = PeerId::from(iroh::SecretKey::generate().public());
+        let mut roles = std::collections::HashMap::new();
+        roles.insert(owner, MemberRole::Admin);
+        roles.insert(member, MemberRole::Reader);
+        (roles, owner)
+    }
+
+    #[test]
+    fn test_group_roles_roundtrip() {
+        let conn = Connection::open_in_memory().unwrap();
+        let group_id = GroupId::generate();
+        let (roles, self_id) = make_roles();
+
+        // Lazy table creation happens inside save_group_roles — no migration.
+        save_group_roles(&conn, &group_id, &roles, Some(self_id)).unwrap();
+
+        let loaded = load_group_roles(&conn, &group_id)
+            .unwrap()
+            .expect("roles should exist");
+        assert_eq!(loaded.0, roles, "roles round-trip");
+        assert_eq!(loaded.1, Some(self_id), "self id round-trips");
+    }
+
+    #[test]
+    fn test_group_roles_delete() {
+        let conn = Connection::open_in_memory().unwrap();
+        let group_id = GroupId::generate();
+        let (roles, self_id) = make_roles();
+
+        save_group_roles(&conn, &group_id, &roles, Some(self_id)).unwrap();
+        assert!(
+            load_group_roles(&conn, &group_id).unwrap().is_some(),
+            "roles exist after save"
+        );
+
+        delete_group_roles(&conn, &group_id).unwrap();
+        assert!(
+            load_group_roles(&conn, &group_id).unwrap().is_none(),
+            "roles gone after delete"
+        );
+    }
+
+    #[test]
+    fn test_group_roles_missing_returns_none() {
+        let conn = Connection::open_in_memory().unwrap();
+        let group_id = GroupId::generate();
+        assert!(
+            load_group_roles(&conn, &group_id).unwrap().is_none(),
+            "no roles for unknown group"
+        );
     }
 }

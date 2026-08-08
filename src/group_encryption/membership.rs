@@ -30,6 +30,48 @@ use serde::{Deserialize, Serialize};
 
 use super::types::{OpId, PeerId};
 
+// ── MemberRole ────────────────────────────────────────────────────────────
+
+/// Membership role of a peer in a group (Kith-style role-based membership).
+///
+/// Roles are enforced **per message** by [`super::encryption_state::EncryptionState`]:
+///
+/// - [`MemberRole::Admin`] — can add/remove members, change roles, and write.
+/// - [`MemberRole::Writer`] — can write (and therefore read) messages.
+/// - [`MemberRole::Reader`] — can only read; `send_message` is rejected.
+///
+/// # p2panda limitation
+///
+/// p2panda-encryption 0.7's wire message scheme has **no role field**:
+/// [`p2panda_encryption::message_scheme::group::MessageGroup::send`] only checks
+/// that a ratchet exists, never *who* is allowed to write.  Roles are therefore
+/// enforced at the boru application layer ([`EncryptionState`]), not inside the
+/// p2panda DGM.  A conforming client refuses to encrypt for a Reader and refuses
+/// to surface plaintext from a non-member/Reader; a malicious client with a
+/// leaked group key can still emit ciphertext, but honest receivers drop it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub enum MemberRole {
+    /// Group owner / administrator: manages membership and can write.
+    Admin,
+    /// Regular member: can write messages.
+    #[default]
+    Writer,
+    /// Read-only member: cannot write messages.
+    Reader,
+}
+
+impl MemberRole {
+    /// Whether this role is permitted to send (write) messages.
+    pub fn can_write(self) -> bool {
+        matches!(self, MemberRole::Admin | MemberRole::Writer)
+    }
+
+    /// Whether this role is permitted to manage membership (add/remove, roles).
+    pub fn can_manage(self) -> bool {
+        matches!(self, MemberRole::Admin)
+    }
+}
+
 // ── MembershipError ─────────────────────────────────────────────────────────
 
 /// Errors that can occur during membership operations.
@@ -43,6 +85,8 @@ pub enum MembershipError {
     NotMember,
     /// The operation ID was expected to be one kind but is another.
     OperationTypeMismatch,
+    /// The acting peer lacks the role required for this membership operation.
+    NotAuthorized(PeerId),
 }
 
 impl std::fmt::Display for MembershipError {
@@ -59,6 +103,12 @@ impl std::fmt::Display for MembershipError {
             }
             MembershipError::OperationTypeMismatch => {
                 write!(f, "operation type does not match expected kind")
+            }
+            MembershipError::NotAuthorized(peer) => {
+                write!(
+                    f,
+                    "peer {peer:?} is not authorized for this membership operation"
+                )
             }
         }
     }
@@ -97,14 +147,25 @@ pub enum OpKind {
 ///
 /// * `owner` — the peer that is the authority for membership changes.
 /// * `members` — the current set of active members (including the owner).
+/// * `roles` — per-member [`MemberRole`] policy (owner is `Admin`).
 /// * `operations` — sequenced log of all membership operations.
 /// * `add_ops` — quick lookup: operation ID → whether it was an add.
 /// * `remove_ops` — quick lookup: operation ID → whether it was a remove.
 /// * `acks` — for each operation ID, the set of peers that have acknowledged it.
+///
+/// # Role propagation
+///
+/// Roles ride inside the DGM state, so they are carried by welcome states
+/// (`from_welcome` merges them) and serialized together with the group state
+/// blob in `persistence.rs`.  p2panda-encryption 0.7 has no role field in the
+/// wire message scheme, so per-message enforcement happens in
+/// [`super::encryption_state::EncryptionState`] via its own mirror table;
+/// this state is the durable carrier.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MembershipState {
     owner: PeerId,
     members: HashSet<PeerId>,
+    roles: HashMap<PeerId, MemberRole>,
     operations: Vec<OperationEntry>,
     add_ops: HashSet<OpId>,
     remove_ops: HashSet<OpId>,
@@ -114,17 +175,22 @@ pub struct MembershipState {
 impl MembershipState {
     /// Create a new membership state with the given owner and initial members.
     ///
-    /// The owner is always an implicit member.  If `initial_members` does not
-    /// contain the owner, they are added automatically.
+    /// The owner is always an implicit member (and `Admin`).  If
+    /// `initial_members` does not contain the owner, they are added
+    /// automatically.  Initial members default to [`MemberRole::Writer`].
     pub fn new(owner: PeerId, initial_members: &[PeerId]) -> Self {
         let mut members = HashSet::with_capacity(initial_members.len() + 1);
         members.insert(owner);
+        let mut roles = HashMap::with_capacity(initial_members.len() + 1);
+        roles.insert(owner, MemberRole::Admin);
         for m in initial_members {
             members.insert(*m);
+            roles.entry(*m).or_insert(MemberRole::Writer);
         }
         Self {
             owner,
             members,
+            roles,
             operations: Vec::new(),
             add_ops: HashSet::new(),
             remove_ops: HashSet::new(),
@@ -145,6 +211,55 @@ impl MembershipState {
     /// Check whether a given peer is an active member.
     pub fn is_member(&self, peer: &PeerId) -> bool {
         self.members.contains(peer)
+    }
+
+    /// The role of a member, if they are a member.
+    ///
+    /// The owner is always `Admin`; every other member defaults to
+    /// [`MemberRole::Writer`] unless explicitly set via [`Self::set_role`].
+    pub fn role_of(&self, peer: &PeerId) -> Option<MemberRole> {
+        if !self.members.contains(peer) {
+            return None;
+        }
+        self.roles.get(peer).copied().or_else(|| {
+            if *peer == self.owner {
+                Some(MemberRole::Admin)
+            } else {
+                Some(MemberRole::Writer)
+            }
+        })
+    }
+
+    /// Whether a peer may send (write) messages.
+    pub fn can_write(&self, peer: &PeerId) -> bool {
+        self.role_of(peer).is_some_and(MemberRole::can_write)
+    }
+
+    /// Whether a peer may manage membership (add/remove members, roles).
+    pub fn can_manage(&self, peer: &PeerId) -> bool {
+        self.role_of(peer).is_some_and(MemberRole::can_manage)
+    }
+
+    /// Set (or change) the role of an existing member.
+    ///
+    /// Only a member with [`MemberRole::Admin`] (or the owner) may change
+    /// roles.  Returns [`MembershipError::NotMember`] if `target` is not a
+    /// member, and [`MembershipError::NotAuthorized`] if `actor` is not an
+    /// admin.
+    pub fn set_role(
+        &mut self,
+        actor: PeerId,
+        target: PeerId,
+        role: MemberRole,
+    ) -> Result<(), MembershipError> {
+        if !self.members.contains(&target) {
+            return Err(MembershipError::NotMember);
+        }
+        if !self.can_manage(&actor) {
+            return Err(MembershipError::NotAuthorized(actor));
+        }
+        self.roles.insert(target, role);
+        Ok(())
     }
 
     /// Number of operations in the sequenced log.
@@ -187,9 +302,22 @@ impl AckedGroupMembership<PeerId, OpId> for Membership {
     /// authoritative.  We take all members and operations from the remote
     /// state, retaining only our own ownership view.
     fn from_welcome(y: Self::State, y_welcome: Self::State) -> Result<Self::State, Self::Error> {
-        // Merge members from the welcome state into our own.
+        // The welcome state (sent by the owner/admin) is authoritative for
+        // ownership, roles, members, and operation history.
         let mut merged = y;
+        merged.owner = y_welcome.owner;
         merged.members.extend(&y_welcome.members);
+
+        // Merge roles: welcome state (from the owner/admin) is authoritative.
+        for (peer, role) in &y_welcome.roles {
+            merged.roles.insert(*peer, *role);
+        }
+        // The owner is always Admin.
+        merged.roles.insert(merged.owner, MemberRole::Admin);
+        // Any member without an explicit role defaults to Writer.
+        for member in &merged.members {
+            merged.roles.entry(*member).or_insert(MemberRole::Writer);
+        }
 
         // Merge operation history.
         let existing_ops: HashSet<OpId> = merged.operations.iter().map(|o| o.op_id).collect();
@@ -215,9 +343,16 @@ impl AckedGroupMembership<PeerId, OpId> for Membership {
 
     /// Adds a member to the group.
     ///
-    /// The `adder` should be the owner (or a delegate with authority).  The
-    /// operation is recorded with the given `operation_id` and takes effect
-    /// immediately.
+    /// The DGM is a mechanical mirror of boru's owner-centric membership; it
+    /// does **not** enforce actor authority here because p2panda's
+    /// `process_create` rebuilds each peer's DGM with *itself* as owner
+    /// (every peer would pass any role check, and legitimate owner ops would
+    /// be rejected by a peer whose local DGM lists the owner as a Writer).
+    /// Role enforcement (only an Admin may add) happens at the
+    /// [`EncryptionState`](super::encryption_state::EncryptionState) layer.
+    ///
+    /// The operation is recorded with the given `operation_id` and takes effect
+    /// immediately.  New members default to [`MemberRole::Writer`].
     ///
     /// Adding an already-present member is idempotent (no error): the DCGKA
     /// `process_welcome` flow calls `from_welcome` (which merges the welcome
@@ -238,14 +373,18 @@ impl AckedGroupMembership<PeerId, OpId> for Membership {
             });
         }
         y.members.insert(added);
+        y.roles.entry(added).or_insert(MemberRole::Writer);
         y.add_ops.insert(operation_id);
         Ok(y)
     }
 
     /// Removes a member from the group.
     ///
-    /// The `remover` should be the owner.  The operation is recorded with the
-    /// given `operation_id` and takes effect immediately.
+    /// Same authority model as [`Self::add`]: the DGM does not enforce actor
+    /// authority (p2panda rebuilds per-peer owner views); the
+    /// [`EncryptionState`](super::encryption_state::EncryptionState) layer
+    /// enforces that only an Admin removes.  The operation is recorded with
+    /// the given `operation_id` and takes effect immediately.
     fn remove(
         mut y: Self::State,
         _remover: PeerId,
@@ -256,6 +395,7 @@ impl AckedGroupMembership<PeerId, OpId> for Membership {
             return Err(MembershipError::NotMember);
         }
         y.members.remove(removed);
+        y.roles.remove(removed);
         y.operations.push(OperationEntry {
             op_id: operation_id,
             kind: OpKind::Remove,
@@ -589,5 +729,125 @@ mod tests {
         assert!(state.is_member(&owner), "owner is a member");
         assert!(state.is_member(&alice), "alice is a member");
         assert!(!state.is_member(&make_peer()), "stranger is not a member");
+    }
+
+    // ── role tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_owner_is_admin_and_initial_members_are_writers() {
+        let owner = make_peer();
+        let alice = make_peer();
+
+        let state = Membership::create(owner, &[alice]).expect("create");
+
+        assert_eq!(state.role_of(&owner), Some(MemberRole::Admin));
+        assert_eq!(state.role_of(&alice), Some(MemberRole::Writer));
+        assert_eq!(state.role_of(&make_peer()), None);
+        assert!(state.can_write(&owner), "admin can write");
+        assert!(state.can_write(&alice), "writer can write");
+        assert!(state.can_manage(&owner), "admin can manage");
+        assert!(!state.can_manage(&alice), "writer cannot manage");
+    }
+
+    #[test]
+    fn test_set_role_admin_can_change_reader() {
+        let owner = make_peer();
+        let alice = make_peer();
+
+        let mut state = Membership::create(owner, &[alice]).expect("create");
+        state
+            .set_role(owner, alice, MemberRole::Reader)
+            .expect("admin sets reader");
+
+        assert_eq!(state.role_of(&alice), Some(MemberRole::Reader));
+        assert!(!state.can_write(&alice), "reader cannot write");
+        assert!(!state.can_manage(&alice), "reader cannot manage");
+    }
+
+    #[test]
+    fn test_set_role_writer_not_authorized() {
+        let owner = make_peer();
+        let alice = make_peer();
+        let bob = make_peer();
+
+        let mut state = Membership::create(owner, &[alice, bob]).expect("create");
+        let err = state
+            .set_role(alice, bob, MemberRole::Reader)
+            .expect_err("writer cannot change roles");
+        assert_eq!(
+            err,
+            MembershipError::NotAuthorized(alice),
+            "non-admin role change refused"
+        );
+        // Role is unchanged.
+        assert_eq!(state.role_of(&bob), Some(MemberRole::Writer));
+    }
+
+    #[test]
+    fn test_set_role_non_member_target_errors() {
+        let owner = make_peer();
+        let stranger = make_peer();
+
+        let mut state = Membership::create(owner, &[]).expect("create");
+        let err = state
+            .set_role(owner, stranger, MemberRole::Writer)
+            .expect_err("non-member target refused");
+        assert_eq!(err, MembershipError::NotMember);
+    }
+
+    #[test]
+    fn test_add_defaults_to_writer() {
+        let owner = make_peer();
+        let alice = make_peer();
+        let bob = make_peer();
+
+        let state = Membership::create(owner, &[alice]).expect("create");
+        let state = Membership::add(state, owner, bob, make_op_id(1)).expect("admin add");
+
+        assert_eq!(state.role_of(&bob), Some(MemberRole::Writer));
+    }
+
+    #[test]
+    fn test_from_welcome_merges_roles() {
+        let owner = make_peer();
+        let alice = make_peer();
+
+        // Alice's local state (she just initialized, doesn't know roles yet).
+        let alice_local = Membership::create(alice, &[]).expect("alice create");
+
+        // Owner's welcome state: alice is a Reader in the group.
+        let mut owner_state = Membership::create(owner, &[alice]).expect("owner create");
+        owner_state
+            .set_role(owner, alice, MemberRole::Reader)
+            .expect("owner sets reader");
+
+        let merged = Membership::from_welcome(alice_local, owner_state).expect("from_welcome");
+        assert_eq!(
+            merged.role_of(&alice),
+            Some(MemberRole::Reader),
+            "welcome role merged"
+        );
+        assert_eq!(merged.role_of(&owner), Some(MemberRole::Admin));
+    }
+
+    #[test]
+    fn test_role_survives_serialize_roundtrip() {
+        let owner = make_peer();
+        let alice = make_peer();
+
+        let mut state = Membership::create(owner, &[alice]).expect("create");
+        state
+            .set_role(owner, alice, MemberRole::Reader)
+            .expect("set reader");
+
+        let bytes = postcard::to_allocvec(&state).expect("serialize");
+        let deserialized: MembershipState = postcard::from_bytes(&bytes).expect("deserialize");
+
+        assert_eq!(state, deserialized, "round-trip equality");
+        assert_eq!(
+            deserialized.role_of(&alice),
+            Some(MemberRole::Reader),
+            "role survives serialization"
+        );
     }
 }

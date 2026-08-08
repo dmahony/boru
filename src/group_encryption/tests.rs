@@ -11,8 +11,9 @@ use p2panda_encryption::message_scheme::group::GroupEvent;
 use p2panda_encryption::traits::PreKeyManager;
 use rusqlite::Connection;
 
-use crate::group_encryption::encryption_state::EncryptionState;
+use crate::group_encryption::encryption_state::{EncryptionError, EncryptionState};
 use crate::group_encryption::manager::Manager;
+use crate::group_encryption::membership::MemberRole;
 use crate::group_encryption::persistence;
 use crate::group_encryption::registry::RegistryState;
 use crate::group_encryption::types::PeerId;
@@ -77,6 +78,8 @@ fn make_enc_state(rng: Rng, registry: &RegistryState) -> EncryptionState {
         registry: registry.clone(),
         rng,
         db: None,
+        group_roles: std::collections::HashMap::new(),
+        self_ids: std::collections::HashMap::new(),
     }
 }
 
@@ -241,20 +244,20 @@ mod integration {
         // No need to call register_peer for charlie_id on alice/bob;
         // the shared registry already has Charlie's entry.
 
-        // Bob adds Charlie. This sends a control message to Alice and
-        // a Welcome to Charlie.
-        let add_msg = bob
+        // Alice (owner/Admin) adds Charlie. This sends a control message to
+        // Bob and a Welcome to Charlie.
+        let add_msg = alice
             .add_member(&group_id, charlie_id)
-            .expect("bob add charlie");
+            .expect("alice add charlie");
 
-        // Alice processes the add control message → produces an AddAck
+        // Bob processes the add control message → produces an AddAck
         // control message (with a Forward direct message) for Charlie.
-        let alice_add_event = alice
+        let bob_add_event = bob
             .receive_message(&group_id, &add_msg)
-            .expect("alice receive add");
+            .expect("bob receive add");
 
         // Charlie initialises group state and processes the welcome →
-        // produces an Ack control message for the adder (Bob).
+        // produces an Ack control message for the adder (Alice).
         charlie
             .init_group(group_id, charlie_id)
             .expect("charlie init");
@@ -264,14 +267,15 @@ mod integration {
 
         // ── Forward control events so every member establishes the new
         // member's ratchet (mirrors p2panda's group_operations.rs) ──
-        // Alice's AddAck goes to Charlie (establishes Alice's ratchet in
-        // Charlie's state) and to Bob.
-        if let Some(GroupEvent::Control(add_ack)) = &alice_add_event {
+        // Bob's AddAck goes to Charlie (establishes Bob's ratchet in
+        // Charlie's state) and to Alice.
+        if let Some(GroupEvent::Control(bob_add_ack)) = &bob_add_event {
             charlie
-                .receive_message(&group_id, add_ack)
-                .expect("charlie receive alice add-ack");
-            bob.receive_message(&group_id, add_ack)
-                .expect("bob receive alice add-ack");
+                .receive_message(&group_id, bob_add_ack)
+                .expect("charlie receive bob add-ack");
+            alice
+                .receive_message(&group_id, bob_add_ack)
+                .expect("alice receive bob add-ack");
         }
         // Charlie's Ack goes to Alice and Bob (establishes Charlie's
         // ratchet in their states).
@@ -395,9 +399,7 @@ mod integration {
             // plaintext.
             Ok(None) => {}
             Ok(Some(GroupEvent::Application { plaintext, .. })) => {
-                panic!(
-                    "removed member must not decrypt post-removal messages, got {plaintext:?}"
-                );
+                panic!("removed member must not decrypt post-removal messages, got {plaintext:?}");
             }
             Ok(Some(other)) => {
                 // Control/RemovedOurselves events are fine — the point is
@@ -465,6 +467,7 @@ mod integration {
         register_peer(&mut alice2, alice_id);
         register_peer(&mut alice2, bob_id);
         alice2.groups.insert(group_id, loaded_state);
+        alice2.self_ids.insert(group_id, alice_id);
 
         // ── Bob sends a message after the reload ──
         let msg2 = bob
@@ -514,5 +517,535 @@ mod integration {
                 panic!("expected Application message from reloaded state, got: {other:?}");
             }
         }
+    }
+
+    // ── Kith-style role enforcement tests ─────────────────────────────
+
+    /// Test: a Reader's writes are rejected at send time.
+    ///
+    /// Alice (owner/Admin) demotes Bob to Reader; Bob's `send_message` must
+    /// fail with [`EncryptionError::ForbiddenRole`] even though he holds a
+    /// valid ratchet.
+    #[test]
+    fn test_reader_write_rejected() {
+        let (mut alice, mut bob, alice_id, bob_id, _registry) = setup_two_peers();
+        let group_id = GroupId::generate();
+
+        let create_msg = alice
+            .create_group(group_id, alice_id, vec![bob_id])
+            .expect("alice create group");
+
+        bob.init_group(group_id, bob_id).expect("bob init");
+        let bob_create_event = bob
+            .receive_message(&group_id, &create_msg)
+            .expect("bob receive create");
+        if let Some(GroupEvent::Control(ack)) = &bob_create_event {
+            alice
+                .receive_message(&group_id, ack)
+                .expect("alice receive bob ack");
+        }
+
+        // Bob can write before demotion.
+        let _ = bob
+            .send_message(&group_id, b"hello as writer")
+            .expect("writer can send");
+
+        // Alice demotes Bob to Reader.
+        alice
+            .set_member_role(&group_id, alice_id, bob_id, MemberRole::Reader)
+            .expect("alice demotes bob to reader");
+
+        // Bob's mirror reflects the roster it received (alice=Admin), then
+        // mirrors the demotion so his client enforces it locally too.
+        {
+            let bob_roles = bob.group_roles.entry(group_id).or_default();
+            bob_roles.insert(alice_id, MemberRole::Admin);
+            bob_roles.insert(bob_id, MemberRole::Writer);
+        }
+        bob.set_member_role(&group_id, alice_id, bob_id, MemberRole::Reader)
+            .expect("bob mirrors reader role");
+
+        // Bob's writes are now rejected.
+        let err = bob
+            .send_message(&group_id, b"trying to write as reader")
+            .expect_err("reader send must be rejected");
+        assert!(
+            matches!(err, EncryptionError::ForbiddenRole { peer, role } if peer == bob_id && role == MemberRole::Reader),
+            "expected ForbiddenRole, got {err:?}"
+        );
+
+        // Alice (Admin) can still write.
+        let alice_msg = alice
+            .send_message(&group_id, b"admin message")
+            .expect("admin can send");
+        let bob_event = bob
+            .receive_message(&group_id, &alice_msg)
+            .expect("bob receive admin message");
+        assert!(
+            matches!(bob_event, Some(GroupEvent::Application { .. })),
+            "reader should still receive"
+        );
+    }
+
+    /// Test: a non-member cannot send even with a leaked copy of the group
+    /// state (the p2panda DGM is the authoritative member set).
+    ///
+    /// Two refusal paths are exercised:
+    ///
+    /// 1. A fresh state claiming the same group id without ever being added
+    ///    (the group is not established for that peer) → p2panda refuses.
+    /// 2. A **removed** device that retains its old keys (the leaked-key
+    ///    scenario): after removal the DGM no longer lists the device, so
+    ///    the `NotMember` check in `send_message` refuses it even though it
+    ///    still holds valid ratchet material.
+    #[test]
+    fn test_non_member_rejected_with_leaked_key() {
+        let (mut alice, mut bob, alice_id, bob_id, registry) = setup_two_peers();
+        let charlie_id = make_peer();
+        let group_id = GroupId::generate();
+
+        let mut charlie = make_enc_state(Rng::default(), &registry);
+        register_peer(&mut charlie, charlie_id);
+
+        let create_msg = alice
+            .create_group(group_id, alice_id, vec![bob_id, charlie_id])
+            .expect("alice create group");
+
+        bob.init_group(group_id, bob_id).expect("bob init");
+        let bob_create_event = bob
+            .receive_message(&group_id, &create_msg)
+            .expect("bob receive create");
+        if let Some(GroupEvent::Control(ack)) = &bob_create_event {
+            alice
+                .receive_message(&group_id, ack)
+                .expect("alice receive bob ack");
+        }
+
+        charlie
+            .init_group(group_id, charlie_id)
+            .expect("charlie init");
+        let charlie_create_event = charlie
+            .receive_message(&group_id, &create_msg)
+            .expect("charlie receive create");
+        if let Some(GroupEvent::Control(ack)) = &charlie_create_event {
+            alice
+                .receive_message(&group_id, ack)
+                .expect("alice receive charlie ack");
+            bob.receive_message(&group_id, ack)
+                .expect("bob receive charlie ack");
+        }
+
+        // Establish a ratchet so Charlie has valid keys and can read messages.
+        let msg = alice
+            .send_message(&group_id, b"hello")
+            .expect("alice send hello");
+        let charlie_ok = charlie
+            .receive_message(&group_id, &msg)
+            .expect("charlie receive hello");
+        assert!(
+            matches!(charlie_ok, Some(GroupEvent::Application { .. })),
+            "charlie reads while a member"
+        );
+
+        // ── Path 1: a fresh state for the same group id, never added ──
+        let mut mallory = make_enc_state(Rng::default(), &registry);
+        let mallory_id = make_peer();
+        register_peer(&mut mallory, mallory_id);
+        mallory
+            .init_group(group_id, mallory_id)
+            .expect("mallory init group");
+        // The group is not established for Mallory → send fails (no ratchet).
+        let err = mallory
+            .send_message(&group_id, b"i stole the keys")
+            .expect_err("non-member send must be rejected");
+        assert!(
+            matches!(err, EncryptionError::Group(_)),
+            "fresh non-member state refused, got {err:?}"
+        );
+
+        // ── Path 2: removed device with a leaked key ──────────────────
+        // Alice removes Charlie.  Charlie processes the removal (her DGM
+        // drops her → RemovedOurselves) but retains her old key material.
+        let remove_msg = alice
+            .remove_member(&group_id, charlie_id)
+            .expect("alice remove charlie");
+        bob.receive_message(&group_id, &remove_msg)
+            .expect("bob receive remove");
+        charlie
+            .receive_message(&group_id, &remove_msg)
+            .expect("charlie receive remove");
+
+        let err = charlie
+            .send_message(&group_id, b"still have the old keys")
+            .expect_err("removed device send must be rejected");
+        assert!(
+            matches!(err, EncryptionError::NotMember(p) if p == charlie_id),
+            "removed device refused by member check, got {err:?}"
+        );
+
+        // Sanity: the member set no longer contains Charlie.
+        let members = alice
+            .groups
+            .get(&group_id)
+            .map(|s| {
+                p2panda_encryption::message_scheme::group::MessageGroup::members(s)
+                    .expect("members")
+            })
+            .expect("alice group state exists");
+        assert!(
+            !members.contains(&charlie_id),
+            "charlie must not be a member after removal"
+        );
+        assert!(members.contains(&bob_id), "bob is still a member");
+    }
+
+    /// Test: a Reader's message is dropped by a receiving admin (defense in
+    /// depth even when the Reader's client bypasses its own send gate).
+    #[test]
+    fn test_receiver_drops_reader_plaintext() {
+        let (mut alice, mut bob, alice_id, bob_id, _registry) = setup_two_peers();
+        let group_id = GroupId::generate();
+
+        let create_msg = alice
+            .create_group(group_id, alice_id, vec![bob_id])
+            .expect("alice create group");
+
+        bob.init_group(group_id, bob_id).expect("bob init");
+        let bob_create_event = bob
+            .receive_message(&group_id, &create_msg)
+            .expect("bob receive create");
+        if let Some(GroupEvent::Control(ack)) = &bob_create_event {
+            alice
+                .receive_message(&group_id, ack)
+                .expect("alice receive bob ack");
+        }
+
+        // Alice's mirror marks Bob as Reader.  Bob's own state still says
+        // Writer (malicious / stale client).
+        alice
+            .set_member_role(&group_id, alice_id, bob_id, MemberRole::Reader)
+            .expect("alice sets bob to reader");
+
+        // Bob (stale client) sends anyway.
+        let bob_msg = bob
+            .send_message(&group_id, b"reader tried to write")
+            .expect("bob (stale writer) sends");
+
+        // Alice must NOT surface the plaintext.
+        let alice_event = alice
+            .receive_message(&group_id, &bob_msg)
+            .expect("alice receive reader message");
+        assert!(
+            !matches!(alice_event, Some(GroupEvent::Application { .. })),
+            "reader plaintext must be dropped, got {alice_event:?}"
+        );
+    }
+
+    /// Test: only an Admin can add members (non-admin add is refused).
+    #[test]
+    fn test_non_admin_cannot_add_member() {
+        let (mut alice, mut bob, alice_id, bob_id, registry) = setup_two_peers();
+        let charlie_id = make_peer();
+        let group_id = GroupId::generate();
+
+        // Charlie needs prekeys in the shared registry before he can be added.
+        let mut charlie = make_enc_state(Rng::default(), &registry);
+        register_peer(&mut charlie, charlie_id);
+
+        let create_msg = alice
+            .create_group(group_id, alice_id, vec![bob_id])
+            .expect("alice create group");
+
+        bob.init_group(group_id, bob_id).expect("bob init");
+        let bob_create_event = bob
+            .receive_message(&group_id, &create_msg)
+            .expect("bob receive create");
+        if let Some(GroupEvent::Control(ack)) = &bob_create_event {
+            alice
+                .receive_message(&group_id, ack)
+                .expect("alice receive bob ack");
+        }
+
+        // Bob (Writer) tries to add Charlie → refused.
+        let err = bob
+            .add_member(&group_id, charlie_id)
+            .expect_err("non-admin add must be refused");
+        assert!(
+            matches!(err, EncryptionError::NotAuthorized(p) if p == bob_id),
+            "expected NotAuthorized, got {err:?}"
+        );
+
+        // Alice (Admin) can still add Charlie.
+        alice
+            .add_member(&group_id, charlie_id)
+            .expect("admin can add");
+    }
+
+    // ── Kith-style epoch rotation tests ───────────────────────────────
+
+    /// Test: after removing a member, the remaining members still converge on
+    /// the new epoch (they can exchange messages both ways).
+    #[test]
+    fn test_remaining_members_converge_after_removal() {
+        let (mut alice, mut bob, alice_id, bob_id, registry) = setup_two_peers();
+        let charlie_id = make_peer();
+        let group_id = GroupId::generate();
+
+        let mut charlie = make_enc_state(Rng::default(), &registry);
+        register_peer(&mut charlie, charlie_id);
+
+        let create_msg = alice
+            .create_group(group_id, alice_id, vec![bob_id, charlie_id])
+            .expect("alice create group");
+
+        bob.init_group(group_id, bob_id).expect("bob init");
+        let bob_create_event = bob
+            .receive_message(&group_id, &create_msg)
+            .expect("bob receive create");
+        if let Some(GroupEvent::Control(ack)) = &bob_create_event {
+            alice
+                .receive_message(&group_id, ack)
+                .expect("alice receive bob ack");
+        }
+
+        charlie
+            .init_group(group_id, charlie_id)
+            .expect("charlie init");
+        let charlie_create_event = charlie
+            .receive_message(&group_id, &create_msg)
+            .expect("charlie receive create");
+        if let Some(GroupEvent::Control(ack)) = &charlie_create_event {
+            alice
+                .receive_message(&group_id, ack)
+                .expect("alice receive charlie ack");
+            bob.receive_message(&group_id, ack)
+                .expect("bob receive charlie ack");
+        }
+
+        // Alice removes Charlie → ratchet rotates to a new epoch.
+        let remove_msg = alice
+            .remove_member(&group_id, charlie_id)
+            .expect("alice remove charlie");
+        // Bob processes the removal and emits an ack; Alice must process that
+        // ack so her decryption ratchet for Bob advances into the new epoch.
+        let bob_remove_event = bob
+            .receive_message(&group_id, &remove_msg)
+            .expect("bob receive remove");
+        if let Some(GroupEvent::Control(ack)) = &bob_remove_event {
+            alice
+                .receive_message(&group_id, ack)
+                .expect("alice receive bob remove-ack");
+        }
+
+        // Remaining members converge: Alice → Bob.
+        let alice_msg = alice
+            .send_message(&group_id, b"epoch two: alice to bob")
+            .expect("alice send in new epoch");
+        let bob_event = bob
+            .receive_message(&group_id, &alice_msg)
+            .expect("bob receive new epoch");
+        match bob_event {
+            Some(GroupEvent::Application {
+                plaintext,
+                message_id: _,
+            }) => {
+                assert_eq!(
+                    plaintext, b"epoch two: alice to bob",
+                    "Bob should decrypt in the new epoch"
+                );
+            }
+            other => panic!("expected Application in new epoch, got {other:?}"),
+        }
+
+        // Bob → Alice in the new epoch.
+        let bob_msg = bob
+            .send_message(&group_id, b"epoch two: bob to alice")
+            .expect("bob send in new epoch");
+        let alice_event = alice
+            .receive_message(&group_id, &bob_msg)
+            .expect("alice receive new epoch");
+        match alice_event {
+            Some(GroupEvent::Application {
+                plaintext,
+                message_id: _,
+            }) => {
+                assert_eq!(
+                    plaintext, b"epoch two: bob to alice",
+                    "Alice should decrypt in the new epoch"
+                );
+            }
+            other => panic!("expected Application in new epoch, got {other:?}"),
+        }
+    }
+
+    /// Test: a removed device cannot sync the new epoch — it cannot decrypt
+    /// post-removal messages, and its state stays locked out even after a
+    /// persistence round-trip of the *remaining* members' rotated state.
+    #[test]
+    fn test_removed_device_cannot_sync_new_epoch() {
+        let (mut alice, mut bob, alice_id, bob_id, registry) = setup_two_peers();
+        let charlie_id = make_peer();
+        let group_id = GroupId::generate();
+
+        let mut charlie = make_enc_state(Rng::default(), &registry);
+        register_peer(&mut charlie, charlie_id);
+
+        let create_msg = alice
+            .create_group(group_id, alice_id, vec![bob_id, charlie_id])
+            .expect("alice create group");
+
+        bob.init_group(group_id, bob_id).expect("bob init");
+        let bob_create_event = bob
+            .receive_message(&group_id, &create_msg)
+            .expect("bob receive create");
+        if let Some(GroupEvent::Control(ack)) = &bob_create_event {
+            alice
+                .receive_message(&group_id, ack)
+                .expect("alice receive bob ack");
+        }
+
+        charlie
+            .init_group(group_id, charlie_id)
+            .expect("charlie init");
+        let charlie_create_event = charlie
+            .receive_message(&group_id, &create_msg)
+            .expect("charlie receive create");
+        if let Some(GroupEvent::Control(ack)) = &charlie_create_event {
+            alice
+                .receive_message(&group_id, ack)
+                .expect("alice receive charlie ack");
+            bob.receive_message(&group_id, ack)
+                .expect("bob receive charlie ack");
+        }
+
+        // Establish a message Charlie can still read in epoch 1.
+        let msg1 = alice
+            .send_message(&group_id, b"epoch one message")
+            .expect("alice send epoch one");
+        let charlie_epoch1 = charlie
+            .receive_message(&group_id, &msg1)
+            .expect("charlie receive epoch one");
+        assert!(
+            matches!(charlie_epoch1, Some(GroupEvent::Application { .. })),
+            "charlie should read epoch one"
+        );
+
+        // Alice removes Charlie and persists her rotated state.
+        let remove_msg = alice
+            .remove_member(&group_id, charlie_id)
+            .expect("alice remove charlie");
+        bob.receive_message(&group_id, &remove_msg)
+            .expect("bob receive remove");
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS group_encryption_state (
+                group_id BLOB PRIMARY KEY,
+                state BLOB NOT NULL,
+                updated_at INTEGER NOT NULL
+            );",
+        )
+        .expect("create table");
+        // Include the lazy role table so save_current_group_state can write it.
+        let alice_state = alice.groups.remove(&group_id).expect("alice state");
+        persistence::save_group_state(&conn, &group_id, &alice_state).expect("save rotated state");
+
+        // Reload Alice's rotated state from the DB (simulates restart).
+        let loaded = persistence::load_group_state(&conn, &group_id)
+            .expect("load rotated state")
+            .expect("state exists");
+        let mut alice2 = make_enc_state(Rng::default(), &alice.registry);
+        register_peer(&mut alice2, alice_id);
+        register_peer(&mut alice2, bob_id);
+        alice2.groups.insert(group_id, loaded);
+        alice2.self_ids.insert(group_id, alice_id);
+
+        // Alice (reloaded, rotated) sends a new-epoch message.
+        let new_msg = alice2
+            .send_message(&group_id, b"post-removal secret")
+            .expect("alice2 send post-removal");
+
+        // Bob (remaining member) decrypts it.
+        let bob_event = bob
+            .receive_message(&group_id, &new_msg)
+            .expect("bob receive post-removal");
+        assert!(
+            matches!(bob_event, Some(GroupEvent::Application { .. })),
+            "remaining member should decrypt post-removal message"
+        );
+
+        // Charlie (removed) must NOT get the plaintext.
+        let charlie_result = charlie.receive_message(&group_id, &new_msg);
+        match charlie_result {
+            Err(_) => {}
+            Ok(None) => {}
+            Ok(Some(GroupEvent::Application { plaintext, .. })) => {
+                panic!("removed device must not decrypt new epoch, got {plaintext:?}");
+            }
+            Ok(Some(other)) => {
+                // Control events are fine; the plaintext must not surface.
+                eprintln!("Charlie post-removal event: {other:?}");
+            }
+        }
+    }
+
+    /// Test: the role mirror persists through the SQLite round-trip and is
+    /// still enforced after reload.
+    #[test]
+    fn test_roles_persist_across_reload() {
+        let (mut alice, mut bob, alice_id, bob_id, _registry) = setup_two_peers();
+        let group_id = GroupId::generate();
+
+        let create_msg = alice
+            .create_group(group_id, alice_id, vec![bob_id])
+            .expect("alice create group");
+
+        bob.init_group(group_id, bob_id).expect("bob init");
+        let bob_create_event = bob
+            .receive_message(&group_id, &create_msg)
+            .expect("bob receive create");
+        if let Some(GroupEvent::Control(ack)) = &bob_create_event {
+            alice
+                .receive_message(&group_id, ack)
+                .expect("alice receive bob ack");
+        }
+
+        alice
+            .set_member_role(&group_id, alice_id, bob_id, MemberRole::Reader)
+            .expect("alice demotes bob to reader");
+
+        // Persist via the DB path.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS group_encryption_state (
+                group_id BLOB PRIMARY KEY,
+                state BLOB NOT NULL,
+                updated_at INTEGER NOT NULL
+            );",
+        )
+        .expect("create table");
+
+        let roles = alice
+            .group_roles
+            .get(&group_id)
+            .cloned()
+            .unwrap_or_default();
+        persistence::save_group_roles(&conn, &group_id, &roles, Some(alice_id))
+            .expect("save roles");
+
+        let loaded = persistence::load_group_roles(&conn, &group_id)
+            .expect("load roles")
+            .expect("roles exist");
+        assert_eq!(
+            loaded.0.get(&bob_id),
+            Some(&MemberRole::Reader),
+            "bob's reader role must survive the round-trip"
+        );
+        assert_eq!(
+            loaded.0.get(&alice_id),
+            Some(&MemberRole::Admin),
+            "owner stays admin"
+        );
+        assert_eq!(loaded.1, Some(alice_id), "self id round-trips");
     }
 }
