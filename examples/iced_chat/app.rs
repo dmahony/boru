@@ -8422,16 +8422,11 @@ impl IcedChat {
         });
     }
 
-    /// Persist chat history to JSON in a background thread.
+    /// Chat history is persisted at message creation and room lifecycle
+    /// boundaries. This hook is retained for callers from the old JSON
+    /// implementation, but deliberately does not write `chat_history.json`.
     fn send_save_chat_history(&self) {
-        let history = self.chat_history.clone();
-        std::thread::spawn(move || {
-            if let Ok(store) = history.lock() {
-                if let Err(err) = store.save() {
-                    tracing::warn!("failed to save chat history: {err}");
-                }
-            }
-        });
+        // SQLite is the only write target for chat messages.
     }
 
     /// Save AppSettings directly (not a legacy JSON store — still active).
@@ -9685,6 +9680,27 @@ impl IcedChat {
             drop(store);
             id
         };
+        // The message store is the single source of truth for conversation
+        // history. Keep the separate outgoing table for delivery retries and
+        // event-id compatibility, but never rely on it for replay.
+        let message_store_path = self.data_dir.join("message_store.db");
+        let message_hash = *blake3::hash(&encoded).as_bytes();
+        if let Err(error) = MessageStore::open(&message_store_path).and_then(|store| {
+            store.insert_chat_message(
+                &message_hash,
+                topic.as_bytes(),
+                self.local_public.as_bytes(),
+                now_ms() as u64,
+                "text",
+                text,
+                Some(&encoded),
+                None,
+                self.local_public.as_bytes(),
+            )
+            .map(|_| ())
+        }) {
+            warn!(%error, "failed to persist outgoing message history in SQLite");
+        }
         if let Some(storage) = &self.storage {
             let hash = boru_core::chat_history::blake3_hex(&encoded);
             match storage.insert_outgoing_message(event_id, &topic, &hash, &encoded) {
@@ -10551,49 +10567,49 @@ impl IcedChat {
         }
     }
 
-    /// Copy new entries into the active-session store without persistence.
+    /// Persist any newly observed room entries in SQLite.
+    ///
+    /// `chat_history.json` is intentionally not updated here. It remains a
+    /// read-only migration source for old data directories.
     fn save_room_to_history(&mut self) {
         let topic = self.topic;
         let current_count = self.entries.len();
         if self.history_saved_count >= current_count {
             return;
         }
-
-        // Keep chat messages available to the active session only.
+        let store_path = self.data_dir.join("message_store.db");
+        let Ok(store) = MessageStore::open(store_path) else {
+            warn!("failed to open SQLite message store while saving history");
+            return;
+        };
         for entry in &self.entries[self.history_saved_count..] {
             let kind = match entry.kind {
                 ChatKind::System => "system",
                 _ if entry.image_bytes.is_some() || entry.image_identifier.is_some() => "image",
                 _ => "text",
             };
-            let body_text = entry.body.clone();
             let sender = match entry.kind {
-                ChatKind::System => String::new(),
-                ChatKind::Local => entry.sender_key.unwrap_or(self.local_public).to_string(),
+                ChatKind::System => [0u8; 32],
+                ChatKind::Local => *entry.sender_key.unwrap_or(self.local_public).as_bytes(),
                 ChatKind::Remote => entry
                     .sender_key
-                    .map(|pk| pk.to_string())
-                    .unwrap_or_default(),
+                    .map(|pk| *pk.as_bytes())
+                    .unwrap_or([0u8; 32]),
             };
-            let mut history_entry = HistoryEntry::new(
-                topic,
-                sender,
-                Vec::new(), // signed bytes not available here
+            let hash = entry.message_hash.unwrap_or_else(|| *blake3::hash(entry.body.as_bytes()).as_bytes());
+            if let Err(error) = store.insert_chat_message(
+                &hash,
+                topic.as_bytes(),
+                &sender,
+                entry.timestamp.unwrap_or_else(now_ms) as u64,
                 kind,
-                body_text,
-            );
-            // Preserve the image storage identifier so the image can be
-            // reloaded from the per-user store if needed.  The
-            // identifier is a relative path within the store — never an
-            // absolute filesystem path.  We do NOT clone image_bytes
-            // here: it is #[serde(skip)] (never persisted to disk) and
-            // the primary ChatEntry already holds the bytes in entries.
-            // When switching back to this room, images are hydrated on
-            // demand from the ImageStore via image_identifier.
-            if let Some(ref id) = entry.image_identifier {
-                history_entry.image_identifier = Some(id.clone());
+                &entry.body,
+                None,
+                entry.image_identifier.as_deref(),
+                self.local_public.as_bytes(),
+            ) {
+                warn!(%error, "failed to persist room history in SQLite");
             }
-            self.chat_history.lock().unwrap().push(history_entry);
         }
         self.history_saved_count = current_count;
     }
@@ -12715,43 +12731,6 @@ impl IcedChat {
                 // and MCP room-membership checks reflect the active subscription.
                 DIAGNOSTICS.record(Some(topic), DiagnosticEventKind::RoomJoined);
 
-                // ── Replay local chat history for this topic ──────────
-                // Load entries persisted in chat_history.json so they
-                // appear immediately when the room opens, without waiting
-                // for a backfill request.
-                {
-                    let store = self.chat_history.lock().unwrap();
-                    let entries: Vec<_> = store
-                        .entries
-                        .iter()
-                        .filter(|e| e.topic == topic)
-                        .cloned()
-                        .collect();
-                    drop(store);
-                    for entry in &entries {
-                        // Skip entries that don't have a valid event_id
-                        if entry.event_id == 0 {
-                            continue;
-                        }
-                        if let Some(mut ui_entry) = self.history_entry_to_chat_entry(
-                            entry,
-                            &topic,
-                            &self.local_public.to_string(),
-                        ) {
-                            ui_entry.event_id = entry.event_id;
-                            ui_entry.delivery_state = entry.delivery_state.clone();
-                            self.entries_push(ui_entry);
-                        }
-                    }
-                    if !entries.is_empty() {
-                        info!(
-                            topic = %topic,
-                            count = entries.len(),
-                            "replayed chat history for topic"
-                        );
-                    }
-                }
-
                 self.screen = Screen::Chat { topic };
                 self.topic = topic;
                 self.ticket_str = ticket.clone();
@@ -12832,23 +12811,68 @@ impl IcedChat {
                     }
                 }
 
-                // Load persisted history and replay it into the UI.
-                // Entries are prepended (oldest first) so they appear before
-                // any current-session system messages.
-                // We load from the JSON store, which is the authoritative
-                // persistence mechanism for chat history.
+                // Load persisted history and replay it into the UI. SQLite's
+                // `messages` table is authoritative; the JSON store is only
+                // imported here for data directories created before the
+                // SQLite history migration.
                 {
                     let local_hex = self.local_public.to_string();
-                    // Load from JSON store
-                    {
-                        let chat_history = self.chat_history.lock().unwrap();
-                        let json_entries: Vec<HistoryEntry> = chat_history
-                            .for_topic(&topic)
-                            .into_iter()
-                            .cloned()
-                            .collect();
-                        drop(chat_history);
-                        for hist_entry in &json_entries {
+                    let legacy_entries: Vec<HistoryEntry> = self
+                        .chat_history
+                        .lock()
+                        .unwrap()
+                        .for_topic(&topic)
+                        .into_iter()
+                        .cloned()
+                        .collect();
+                    let store_path = self.data_dir.join("message_store.db");
+                    let mut sqlite_rows = MessageStore::open(&store_path)
+                        .and_then(|store| {
+                            let mut rows = store.get_messages_for_topic(topic.as_bytes(), 1_000_000, 0)?;
+                            if rows.is_empty() {
+                                // One-time, idempotent import of the legacy JSON
+                                // mirror. INSERT OR IGNORE makes retries safe.
+                                for entry in &legacy_entries {
+                                    let hash_vec = hex::decode(&entry.hash).unwrap_or_default();
+                                    let hash = if hash_vec.len() == 32 {
+                                        let mut value = [0u8; 32];
+                                        value.copy_from_slice(&hash_vec);
+                                        value
+                                    } else {
+                                        *blake3::hash(&entry.signed_bytes).as_bytes()
+                                    };
+                                    let sender = PublicKey::from_str(&entry.sender)
+                                        .map(|key| *key.as_bytes())
+                                        .unwrap_or([0u8; 32]);
+                                    store.insert_chat_message(
+                                        &hash,
+                                        entry.topic.as_bytes(),
+                                        &sender,
+                                        entry.timestamp,
+                                        &entry.kind,
+                                        &entry.text_preview,
+                                        Some(&entry.signed_bytes),
+                                        entry.image_identifier.as_deref(),
+                                        self.local_public.as_bytes(),
+                                    )?;
+                                }
+                                rows = store.get_messages_for_topic(topic.as_bytes(), 1_000_000, 0)?;
+                            }
+                            Ok(rows)
+                        })
+                        .unwrap_or_default();
+                    for row in &sqlite_rows {
+                        if let Some(chat_entry) =
+                            Self::chat_message_row_to_chat_entry(row, &local_hex)
+                        {
+                            self.entries_push(chat_entry);
+                        }
+                    }
+                    // Legacy rows with event_id == 0 are valid migration input,
+                    // but must not hide or replace successfully imported SQLite
+                    // history. They are used only if SQLite has no rows.
+                    if sqlite_rows.is_empty() {
+                        for hist_entry in &legacy_entries {
                             if let Some(chat_entry) =
                                 self.history_entry_to_chat_entry(hist_entry, &topic, &local_hex)
                             {
@@ -12856,69 +12880,33 @@ impl IcedChat {
                             }
                         }
                     }
-                    // Entries replayed from persisted history are already
-                    // saved — mark them so enforce_entry_cap does not try
-                    // to re-save them as new.
                     self.history_saved_count = self.entries.len();
 
-                    // ── SQLite message replay ──────────────────────────
-                    // Phase 22 deprecated JSON writes; new messages are only
-                    // in SQLite outgoing_messages.  Replay them into the
-                    // in-memory ChatHistoryStore so they survive restarts.
+                    // Overlay the durable event-id delivery state for locally
+                    // composed messages. The message-store row id is not the
+                    // outgoing_messages event id.
                     if let Some(storage) = &self.storage {
-                        if let Ok(rows) = storage.list_outgoing_for_topic(&topic) {
-                            for row in &rows {
-                                let mut store = self.chat_history.lock().unwrap();
-                                if store.get_by_event_id(row.event_id).is_some() {
-                                    continue; // already in JSON legacy store
-                                }
-                                // Decode the signed message to get kind + text
-                                if let Ok((pk, msg, _sent_at)) =
-                                    SignedMessage::verify_and_decode(&row.signed_bytes)
+                        if let Ok(outgoing) = storage.list_outgoing_for_topic(&topic) {
+                            for row in outgoing {
+                                if let Some(index) = self
+                                    .entries
+                                    .iter()
+                                    .position(|entry| entry.message_hash == hex::decode(&row.hash).ok().and_then(|bytes| bytes.try_into().ok()))
                                 {
-                                    let (kind, preview) = match &msg {
-                                        crate::Message::Message { text } => ("text", text.clone()),
-                                        crate::Message::FileShare { name, .. } => {
-                                            ("file", name.clone())
-                                        }
-                                        crate::Message::AboutMe { name, .. } => {
-                                            ("about_me", name.clone())
-                                        }
-                                        crate::Message::Leave => ("system", "Left".into()),
-                                        crate::Message::Presence
-                                        | crate::Message::PresenceWithTicket { .. } => {
-                                            continue; // skip heartbeats
-                                        }
-                                        crate::Message::ReadReceipt { .. } => {
-                                            continue; // skip receipts
-                                        }
-                                        _ => continue,
-                                    };
-                                    let entry = HistoryEntry::new(
-                                        row.topic,
-                                        pk.to_string(),
-                                        row.signed_bytes.clone(),
-                                        kind,
-                                        preview,
-                                    );
-                                    // Preserve the SQLite event_id so the
-                                    // entry can be found by event_id later.
-                                    let expected_id = row.event_id;
-                                    store.push_with_explicit_id(entry, expected_id);
-                                    // Find the entry we just stored
-                                    if let Some(saved) = store.get_by_event_id(expected_id) {
-                                        let saved = saved.clone();
-                                        drop(store);
-                                        if let Some(chat_entry) = self
-                                            .history_entry_to_chat_entry(&saved, &topic, &local_hex)
-                                        {
-                                            self.entries_push(chat_entry);
-                                        }
-                                    } else {
-                                        drop(store);
+                                    if let Some(entry) = self.entries.get_mut(index) {
+                                        entry.event_id = row.event_id;
+                                        entry.delivery_state = match row.delivery_state.as_str() {
+                                            "sent" => DeliveryState::Sent,
+                                            "delivered" => DeliveryState::Delivered,
+                                            "seen" => DeliveryState::Seen,
+                                            "failed" => DeliveryState::Failed,
+                                            _ => DeliveryState::Queued,
+                                        };
+                                        entry.bump_gen();
                                     }
                                 }
                             }
+                            self.rebuild_entry_indexes();
                         }
                     }
                 }
@@ -12941,11 +12929,8 @@ impl IcedChat {
                                         _ => DeliveryState::Queued,
                                     };
                                     if entry.delivery_state != state {
-                                        entry.delivery_state = state.clone();
+                                        entry.delivery_state = state;
                                         entry.bump_gen();
-                                        // Keep chat_history.json in sync
-                                        let mut store = self.chat_history.lock().unwrap();
-                                        let _ = store.update_delivery_state(row.event_id, state);
                                     }
                                 }
                             }
@@ -15974,23 +15959,7 @@ impl IcedChat {
                 if let Some(storage) = &self.storage {
                     let _ = storage.update_outgoing_delivery_state(event_id, "sent");
                 }
-                // Persist delivery state update in background so the UI thread
-                // is not blocked by disk I/O.
-                let history_arc = self.chat_history.clone();
-                iced::Task::perform(
-                    tokio::task::spawn_blocking(move || {
-                        let mut history = history_arc.lock().unwrap();
-                        let history_result = history
-                            .update_delivery_state(event_id, DeliveryState::Sent)
-                            .is_ok();
-                        info!(
-                            event_id,
-                            persistence_result = if history_result { "saved" } else { "failed" },
-                            "message delivery telemetry"
-                        );
-                    }),
-                    |_| AppMessage::Noop,
-                )
+                iced::Task::none()
             }
 
             AppMessage::RetryOutgoingMessage(event_id) => {
@@ -16009,9 +15978,6 @@ impl IcedChat {
                         }
                     }
                 }
-                // Update chat_history.json for backward compat
-                let mut store = self.chat_history.lock().unwrap();
-                let _ = store.update_delivery_state(event_id, DeliveryState::Queued);
                 iced::Task::none()
             }
 
