@@ -82,25 +82,52 @@ pub enum VideoCodec {
     H264,
 }
 
-/// Capabilities advertised by a call participant.
+/// Audio capabilities advertised by a call participant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MediaCapabilities {
+pub struct AudioCapabilities {
     /// Audio codecs supported in preference order.
-    pub audio_codecs: Vec<AudioCodec>,
+    pub codecs: Vec<AudioCodec>,
     /// Supported audio sample rates in Hz.
     pub sample_rates: Vec<u32>,
     /// Supported audio channel counts.
     pub channels: Vec<u8>,
     /// Supported audio frame durations in milliseconds.
     pub frame_ms: Vec<u16>,
+}
+
+/// Video capabilities advertised by a call participant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VideoCapabilities {
     /// Video codecs supported in preference order.
-    pub video_codecs: Vec<VideoCodec>,
+    pub codecs: Vec<VideoCodec>,
     /// Maximum video width in pixels.
     pub max_width: u32,
     /// Maximum video height in pixels.
     pub max_height: u32,
     /// Maximum video frame rate.
-    pub max_fps: u16,
+    pub max_fps: u32,
+}
+
+/// Capabilities advertised by a call participant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaCapabilities {
+    /// Audio capabilities for this participant.
+    pub audio: AudioCapabilities,
+    /// `None` advertises a voice-only call.
+    pub video: Option<VideoCapabilities>,
+}
+
+/// Video parameters selected for an established call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NegotiatedVideo {
+    /// Selected video codec.
+    pub codec: VideoCodec,
+    /// Selected video width in pixels.
+    pub width: u32,
+    /// Selected video height in pixels.
+    pub height: u32,
+    /// Selected video frame rate.
+    pub fps: u32,
 }
 
 /// Media parameters selected for an established call.
@@ -114,14 +141,79 @@ pub struct NegotiatedMedia {
     pub channels: u8,
     /// Selected audio frame duration in milliseconds.
     pub frame_ms: u16,
-    /// Selected video codec, when video is enabled.
-    pub video_codec: Option<VideoCodec>,
-    /// Selected video width in pixels.
-    pub width: u32,
-    /// Selected video height in pixels.
-    pub height: u32,
-    /// Selected video frame rate.
-    pub fps: u16,
+    /// Selected video parameters, when video is enabled.
+    pub video: Option<NegotiatedVideo>,
+}
+
+/// Return the deliberately small version-1 media capability set.
+pub fn v1_defaults() -> MediaCapabilities {
+    MediaCapabilities {
+        audio: AudioCapabilities {
+            codecs: vec![AudioCodec::Opus],
+            sample_rates: vec![48_000],
+            channels: vec![1],
+            frame_ms: vec![20],
+        },
+        video: Some(VideoCapabilities {
+            codecs: vec![VideoCodec::H264],
+            max_width: 1_920,
+            max_height: 1_080,
+            max_fps: 30,
+        }),
+    }
+}
+
+/// Select media common to both participants using local preference order.
+pub fn negotiate(local: &MediaCapabilities, remote: &MediaCapabilities) -> Option<NegotiatedMedia> {
+    let audio_codec = local
+        .audio
+        .codecs
+        .iter()
+        .find(|codec| remote.audio.codecs.contains(codec))
+        .copied()?;
+    let sample_rate = local
+        .audio
+        .sample_rates
+        .iter()
+        .find(|rate| remote.audio.sample_rates.contains(rate))
+        .copied()?;
+    let channels = local
+        .audio
+        .channels
+        .iter()
+        .find(|channels| remote.audio.channels.contains(channels))
+        .copied()?;
+    let frame_ms = local
+        .audio
+        .frame_ms
+        .iter()
+        .find(|frame_ms| remote.audio.frame_ms.contains(frame_ms))
+        .copied()?;
+
+    let video = match (&local.video, &remote.video) {
+        (None, _) | (_, None) => None,
+        (Some(local), Some(remote)) => {
+            let codec = local
+                .codecs
+                .iter()
+                .find(|codec| remote.codecs.contains(codec))
+                .copied()?;
+            Some(NegotiatedVideo {
+                codec,
+                width: local.max_width.min(remote.max_width),
+                height: local.max_height.min(remote.max_height),
+                fps: local.max_fps.min(remote.max_fps),
+            })
+        }
+    };
+
+    Some(NegotiatedMedia {
+        audio_codec,
+        sample_rate,
+        channels,
+        frame_ms,
+        video,
+    })
 }
 
 /// Safe, protocol-defined reason for rejecting a call.
@@ -269,14 +361,18 @@ mod tests {
 
     fn capabilities() -> MediaCapabilities {
         MediaCapabilities {
-            audio_codecs: vec![AudioCodec::Opus],
-            sample_rates: vec![48_000],
-            channels: vec![1],
-            frame_ms: vec![20],
-            video_codecs: vec![VideoCodec::H264],
-            max_width: 1920,
-            max_height: 1080,
-            max_fps: 30,
+            audio: AudioCapabilities {
+                codecs: vec![AudioCodec::Opus],
+                sample_rates: vec![48_000],
+                channels: vec![1],
+                frame_ms: vec![20],
+            },
+            video: Some(VideoCapabilities {
+                codecs: vec![VideoCodec::H264],
+                max_width: 1920,
+                max_height: 1080,
+                max_fps: 30,
+            }),
         }
     }
 
@@ -286,10 +382,12 @@ mod tests {
             sample_rate: 48_000,
             channels: 1,
             frame_ms: 20,
-            video_codec: Some(VideoCodec::H264),
-            width: 1280,
-            height: 720,
-            fps: 30,
+            video: Some(NegotiatedVideo {
+                codec: VideoCodec::H264,
+                width: 1280,
+                height: 720,
+                fps: 30,
+            }),
         }
     }
 
@@ -354,6 +452,43 @@ mod tests {
     fn malformed_postcard_is_rejected_cleanly() {
         let error = decode_call_control(&[0, 0, 0, 1, 0xff]).unwrap_err();
         assert!(matches!(error, CallControlFrameError::Deserialize(_)));
+    }
+
+    #[test]
+    fn v1_defaults_advertise_opus_and_h264() {
+        let defaults = v1_defaults();
+        assert_eq!(defaults.audio.codecs, vec![AudioCodec::Opus]);
+        assert_eq!(defaults.audio.sample_rates, vec![48_000]);
+        assert_eq!(defaults.audio.channels, vec![1]);
+        assert_eq!(defaults.audio.frame_ms, vec![20]);
+        assert_eq!(
+            defaults.video.as_ref().unwrap().codecs,
+            vec![VideoCodec::H264]
+        );
+    }
+
+    #[test]
+    fn negotiate_picks_v1_audio() {
+        let negotiated = negotiate(&v1_defaults(), &v1_defaults()).expect("v1 media must match");
+        assert_eq!(negotiated.audio_codec, AudioCodec::Opus);
+        assert_eq!(negotiated.sample_rate, 48_000);
+        assert_eq!(negotiated.channels, 1);
+        assert_eq!(negotiated.frame_ms, 20);
+    }
+
+    #[test]
+    fn negotiate_returns_none_without_common_audio_codec() {
+        let mut remote = v1_defaults();
+        remote.audio.codecs.clear();
+        assert!(negotiate(&v1_defaults(), &remote).is_none());
+    }
+
+    #[test]
+    fn negotiate_omits_video_for_voice_only_offer() {
+        let mut voice = v1_defaults();
+        voice.video = None;
+        let negotiated = negotiate(&voice, &v1_defaults()).expect("audio still matches");
+        assert_eq!(negotiated.video, None);
     }
 
     #[test]
