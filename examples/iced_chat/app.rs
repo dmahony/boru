@@ -51,6 +51,8 @@ use boru_core::call::manager::{CallEvent, CallHandle};
 use boru_core::call::{CallId, CallKind};
 #[cfg(feature = "video-calls")]
 use boru_core::call::video::VideoFrame;
+#[cfg(feature = "video-calls")]
+use boru_core::call::video::layout::contain_fit_rect;
 use boru_core::contact::{direct_topic, ContactAction, SignedContactMessage};
 use boru_core::conversations::{
     spawn_conversation_forwarder, ConversationEntry, ConversationKind, ConversationNetEvent,
@@ -30704,11 +30706,19 @@ impl IcedChat {
                 ..Default::default()
             });
         #[cfg(feature = "video-calls")]
-        let remote = self.latest_remote_frame.as_ref().map(|frame| {
+        let remote = self
+            .latest_remote_frame
+            .as_ref()
+            .filter(|frame| contain_fit_rect(frame.width as f32, frame.height as f32, 1.0, 1.0).is_some())
+            .map(|frame| {
+                // Iced performs the final dynamic viewport calculation;
+                // Contain is the rendering equivalent of contain_fit_rect
+                // and preserves the source ratio with letterboxing.
             iced::widget::image(iced::widget::image::Handle::from_rgba(
                 frame.width, frame.height, frame.rgba.to_vec()))
+                .content_fit(iced::ContentFit::Contain)
                 .width(Length::Fill).height(Length::Fill).into()
-        });
+            });
         #[cfg(not(feature = "video-calls"))]
         let remote: Option<iced::Element<'_, AppMessage>> = None;
         // The remote stage is the main area: show the latest remote frame
@@ -30718,10 +30728,14 @@ impl IcedChat {
         // your own camera only affects the local PiP.
         let remote_main: iced::Element<'_, AppMessage> = remote.unwrap_or_else(|| remote_fallback().into());
         #[cfg(feature = "video-calls")]
-        let local = self.latest_local_frame.as_ref().map(|frame| {
+        let local = self.latest_local_frame.as_ref().and_then(|frame| {
+            let fit = contain_fit_rect(frame.width as f32, frame.height as f32, 220.0, 150.0)?;
+            Some(
             iced::widget::image(iced::widget::image::Handle::from_rgba(
                 frame.width, frame.height, frame.rgba.to_vec()))
-                .width(Length::Fixed(220.0)).height(Length::Fixed(150.0)).into()
+                .content_fit(iced::ContentFit::Contain)
+                .width(Length::Fixed(fit.width)).height(Length::Fixed(fit.height)).into(),
+            )
         });
         #[cfg(not(feature = "video-calls"))]
         let local: Option<iced::Element<'_, AppMessage>> = None;
@@ -30748,7 +30762,12 @@ impl IcedChat {
         let stage = container(local_pip)
             .width(Length::Fixed(220.0)).height(Length::Fixed(150.0))
             .align_x(iced::alignment::Horizontal::Right)
-            .align_y(iced::alignment::Vertical::Bottom);
+            .align_y(iced::alignment::Vertical::Bottom)
+            .style(|theme| iced::widget::container::Style {
+                background: Some(iced::Background::Color(bg_surface_secondary(theme))),
+                border: iced::Border { radius: 12.0.into(), ..Default::default() },
+                ..Default::default()
+            });
         container(column![
             container(remote_main).width(Length::Fill).height(Length::Fill),
             stage,

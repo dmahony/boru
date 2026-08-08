@@ -100,6 +100,7 @@ impl VideoFrameSlots {
 
 pub mod capture;
 pub mod codec;
+pub mod layout;
 pub mod packet;
 pub mod pipeline;
 pub mod reassembly;
