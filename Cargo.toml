@@ -263,6 +263,11 @@ path = "tests/call_audio_integration.rs"
 required-features = ["voice-calls"]
 
 [[test]]
+name = "call_perf_measurement"
+path = "tests/call_perf_measurement.rs"
+required-features = ["voice-calls", "video-calls"]
+
+[[test]]
 name = "call_video_integration"
 path = "tests/call_video_integration.rs"
 required-features = ["video-calls"]
