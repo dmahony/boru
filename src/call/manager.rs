@@ -5,7 +5,7 @@
 //! Iroh connection.
 
 use std::collections::HashSet;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use iroh::{
     endpoint::Connection,
@@ -22,6 +22,32 @@ pub const CALL_ALPN: &[u8] = b"/boru-call/1";
 
 const COMMAND_CAPACITY: usize = 256;
 const EVENT_CAPACITY: usize = 256;
+
+/// Errors returned when a frontend command cannot be queued.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallError {
+    /// A call is already active on this handle.
+    Busy,
+    /// The peer is not authorized to receive calls.
+    Unauthorized,
+    /// The actor has stopped and cannot receive commands.
+    ActorDropped,
+    /// The actor queue is temporarily full.
+    QueueFull,
+}
+
+impl std::fmt::Display for CallError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Busy => "a call is already active",
+            Self::Unauthorized => "peer is not authorized for calls",
+            Self::ActorDropped => "call actor dropped",
+            Self::QueueFull => "call command queue is full",
+        })
+    }
+}
+
+impl std::error::Error for CallError {}
 
 /// Events emitted by the call actor.
 #[derive(Debug, Clone)]
@@ -99,61 +125,89 @@ enum Command {
 #[derive(Debug, Clone)]
 pub struct CallHandle {
     command_tx: mpsc::Sender<Command>,
+    denied_peers: Arc<RwLock<HashSet<PublicKey>>>,
+    active_call: Arc<Mutex<Option<CallId>>>,
 }
 
 impl CallHandle {
     /// Start an audio-only call and return its new identity.
-    pub async fn start_voice_call(&self, peer: PublicKey) -> Result<CallId> {
-        self.start_call(peer, CallKind::Voice).await
+    pub fn start_voice_call(&self, peer: PublicKey) -> std::result::Result<CallId, CallError> {
+        self.start_call(peer, CallKind::Voice)
     }
 
     /// Start an audio/video call and return its new identity.
-    pub async fn start_video_call(&self, peer: PublicKey) -> Result<CallId> {
-        self.start_call(peer, CallKind::Video).await
+    pub fn start_video_call(&self, peer: PublicKey) -> std::result::Result<CallId, CallError> {
+        self.start_call(peer, CallKind::Video)
     }
 
-    async fn start_call(&self, peer: PublicKey, kind: CallKind) -> Result<CallId> {
+    fn start_call(
+        &self,
+        peer: PublicKey,
+        kind: CallKind,
+    ) -> std::result::Result<CallId, CallError> {
+        if self
+            .denied_peers
+            .read()
+            .expect("call authorization lock poisoned")
+            .contains(&peer)
+        {
+            return Err(CallError::Unauthorized);
+        }
         let call_id = CallId::generate();
+        let mut active_call = self.active_call.lock().expect("call state lock poisoned");
+        if active_call.is_some() {
+            return Err(CallError::Busy);
+        }
         self.send(Command::Start {
             call_id,
             peer,
             kind,
-        })
-        .await?;
+        })?;
+        *active_call = Some(call_id);
         Ok(call_id)
     }
 
     /// Accept an incoming call.
-    pub async fn accept(&self, call_id: CallId) -> Result<()> {
-        self.send(Command::Accept(call_id)).await
+    pub fn accept(&self, call_id: CallId) -> std::result::Result<(), CallError> {
+        self.send(Command::Accept(call_id))
     }
 
     /// Reject an incoming call.
-    pub async fn reject(&self, call_id: CallId) -> Result<()> {
-        self.send(Command::Reject(call_id)).await
+    pub fn reject(&self, call_id: CallId) -> std::result::Result<(), CallError> {
+        self.send(Command::Reject(call_id))
     }
 
     /// Hang up an active or ringing call.
-    pub async fn hangup(&self, call_id: CallId) -> Result<()> {
-        self.send(Command::Hangup(call_id)).await
+    pub fn hangup(&self, call_id: CallId) -> std::result::Result<(), CallError> {
+        self.send(Command::Hangup(call_id))?;
+        let mut active_call = self.active_call.lock().expect("call state lock poisoned");
+        if *active_call == Some(call_id) {
+            *active_call = None;
+        }
+        Ok(())
     }
 
     /// Set the local audio mute state.
-    pub async fn set_muted(&self, call_id: CallId, muted: bool) -> Result<()> {
-        self.send(Command::SetMuted { call_id, muted }).await
+    pub fn set_muted(&self, call_id: CallId, muted: bool) -> std::result::Result<(), CallError> {
+        self.send(Command::SetMuted { call_id, muted })
     }
 
     /// Set whether the local camera is enabled.
-    pub async fn set_camera_enabled(&self, call_id: CallId, enabled: bool) -> Result<()> {
+    pub fn set_camera_enabled(
+        &self,
+        call_id: CallId,
+        enabled: bool,
+    ) -> std::result::Result<(), CallError> {
         self.send(Command::SetCameraEnabled { call_id, enabled })
-            .await
     }
 
-    async fn send(&self, command: Command) -> Result<()> {
+    fn send(&self, command: Command) -> std::result::Result<(), CallError> {
         self.command_tx
-            .send(command)
-            .await
-            .map_err(|_| n0_error::anyerr!("call actor dropped"))
+            .try_send(command)
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => CallError::QueueFull,
+                mpsc::error::TrySendError::Closed(_) => CallError::ActorDropped,
+            })
     }
 }
 
@@ -235,6 +289,8 @@ impl CallBuilder {
             .expect("CallBuilder::spawn called more than once");
         let handle = CallHandle {
             command_tx: self.command_tx,
+            denied_peers: Arc::clone(&self.denied_peers),
+            active_call: Arc::new(Mutex::new(None)),
         };
         tokio::spawn(run_actor(
             self.endpoint,
@@ -297,12 +353,12 @@ mod tests {
         let secret_key = SecretKey::generate();
         let (handle, mut events) = CallBuilder::new(endpoint, secret_key).spawn();
         let peer = SecretKey::generate().public();
-        let call_id = handle.start_voice_call(peer).await.unwrap();
+        let call_id = handle.start_voice_call(peer).unwrap();
         assert!(matches!(
             events.recv().await,
             Some(CallEvent::OutgoingCallStarted { .. })
         ));
-        handle.set_muted(call_id, true).await.unwrap();
+        handle.set_muted(call_id, true).unwrap();
         assert!(matches!(
             events.recv().await,
             Some(CallEvent::MutedChanged { muted: true, .. })
@@ -315,12 +371,42 @@ mod tests {
         let (handle, _events) = CallBuilder::new(endpoint, SecretKey::generate()).spawn();
         let call_id = handle
             .start_video_call(SecretKey::generate().public())
-            .await
             .unwrap();
-        handle.accept(call_id).await.unwrap();
-        handle.reject(call_id).await.unwrap();
-        handle.hangup(call_id).await.unwrap();
-        handle.set_muted(call_id, false).await.unwrap();
-        handle.set_camera_enabled(call_id, true).await.unwrap();
+        handle.accept(call_id).unwrap();
+        handle.reject(call_id).unwrap();
+        handle.hangup(call_id).unwrap();
+        handle.set_muted(call_id, false).unwrap();
+        handle.set_camera_enabled(call_id, true).unwrap();
+    }
+
+    #[tokio::test]
+    async fn starting_while_busy_returns_busy_without_enqueueing() {
+        let endpoint = Endpoint::bind(presets::Minimal).await.unwrap();
+        let (handle, mut events) = CallBuilder::new(endpoint, SecretKey::generate()).spawn();
+        let first = handle
+            .start_voice_call(SecretKey::generate().public())
+            .unwrap();
+
+        assert_eq!(
+            handle.start_video_call(SecretKey::generate().public()),
+            Err(CallError::Busy)
+        );
+        assert!(matches!(
+            events.recv().await,
+            Some(CallEvent::OutgoingCallStarted { call_id, .. }) if call_id == first
+        ));
+        assert!(events.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn denied_peer_is_rejected_before_enqueueing() {
+        let endpoint = Endpoint::bind(presets::Minimal).await.unwrap();
+        let peer = SecretKey::generate().public();
+        let (handle, mut events) = CallBuilder::new(endpoint, SecretKey::generate())
+            .with_denied_peers([peer])
+            .spawn();
+
+        assert_eq!(handle.start_voice_call(peer), Err(CallError::Unauthorized));
+        assert!(events.try_recv().is_err());
     }
 }
