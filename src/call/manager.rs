@@ -16,6 +16,8 @@ use iroh::{
 use n0_error::Result;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use super::media::{media_reader, MediaDatagram, MediaReaderEvent};
 use super::wire::{
@@ -48,6 +50,9 @@ const COMMAND_CAPACITY: usize = 256;
 const EVENT_CAPACITY: usize = 256;
 const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(5);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Monotonically increasing identity for a call incarnation.
+pub type CallGeneration = u64;
 
 /// Why a call reached its terminal state.
 #[allow(missing_docs)]
@@ -155,7 +160,7 @@ enum Command {
     },
     Accept(CallId),
     Reject(CallId),
-    Hangup(CallId),
+
     SetMuted {
         call_id: CallId,
         muted: bool,
@@ -169,6 +174,7 @@ enum Command {
         peer: PublicKey,
         control: CallControl,
         tx: WireTx,
+        connection: Connection,
     },
     ConnectionClosed {
         peer: PublicKey,
@@ -178,6 +184,12 @@ enum Command {
         event: MediaReaderEvent,
     },
     NegotiationTimeout(CallId),
+    Terminate {
+        call_id: CallId,
+        generation: CallGeneration,
+        reason: HangupReason,
+    },
+    Shutdown,
 }
 
 /// Handle for sending commands to a running call actor.
@@ -218,7 +230,31 @@ impl CallHandle {
     }
     /// Hang up an active or ringing call.
     pub async fn hangup(&self, call_id: CallId) -> Result<()> {
-        self.send(Command::Hangup(call_id)).await
+        self.terminate_call(call_id, 0, HangupReason::LocalHangup)
+            .await
+    }
+
+    /// Route any call-ending condition through the actor's single termination path.
+    ///
+    /// A generation of zero means "the current generation" and is intended for
+    /// frontend calls. Background tasks must pass the generation they captured.
+    pub async fn terminate_call(
+        &self,
+        call_id: CallId,
+        generation: CallGeneration,
+        reason: HangupReason,
+    ) -> Result<()> {
+        self.send(Command::Terminate {
+            call_id,
+            generation,
+            reason,
+        })
+        .await
+    }
+
+    /// Terminate every call during application shutdown.
+    pub async fn shutdown(&self) -> Result<()> {
+        self.send(Command::Shutdown).await
     }
     /// Set the local audio mute state.
     pub async fn set_muted(&self, call_id: CallId, muted: bool) -> Result<()> {
@@ -337,6 +373,51 @@ struct CallState {
     local_audio_muted: bool,
     remote_audio_muted: bool,
     video_enabled: bool,
+    generation: CallGeneration,
+    runtime: CallRuntime,
+}
+
+/// Owns all resources belonging to one call incarnation.
+///
+/// Keeping the cancellation token, transport, and task handles together makes
+/// it impossible for a stale media/control task to outlive the call state
+/// without also being cancelled by `terminate_call`.
+#[derive(Debug)]
+pub struct CallRuntime {
+    cancellation: CancellationToken,
+    connection: Connection,
+    control_reader_task: Option<JoinHandle<()>>,
+    control_writer_task: Option<JoinHandle<()>>,
+    media_reader_task: Option<JoinHandle<()>>,
+    audio_capture_task: Option<JoinHandle<()>>,
+    audio_send_task: Option<JoinHandle<()>>,
+    audio_receive_task: Option<JoinHandle<()>>,
+    video_capture_task: Option<JoinHandle<()>>,
+    video_send_task: Option<JoinHandle<()>>,
+    video_receive_task: Option<JoinHandle<()>>,
+}
+
+impl CallRuntime {
+    fn new(connection: Connection) -> Self {
+        Self {
+            cancellation: CancellationToken::new(),
+            connection,
+            control_reader_task: None,
+            control_writer_task: None,
+            media_reader_task: None,
+            audio_capture_task: None,
+            audio_send_task: None,
+            audio_receive_task: None,
+            video_capture_task: None,
+            video_send_task: None,
+            video_receive_task: None,
+        }
+    }
+
+    fn cancel(&self) {
+        self.cancellation.cancel();
+        self.connection.close(0u32.into(), b"call terminated");
+    }
 }
 
 async fn run_actor(
@@ -349,6 +430,7 @@ async fn run_actor(
     let mut calls = HashMap::<CallId, CallState>::new();
     let mut terminal_calls = HashSet::new();
     let mut media_state = HashMap::<CallId, (bool, bool)>::new();
+    let mut next_generation: CallGeneration = 1;
     while let Some(command) = command_rx.recv().await {
         match command {
             Command::Start {
@@ -384,8 +466,14 @@ async fn run_actor(
                             Ok((send, recv)) => {
                                 spawn_media_reader(media_connection, peer, command_tx.clone());
                                 let (tx, rx) = mpsc::channel(32);
-                                let reply_tx =
-                                    spawn_wire_session(peer, send, recv, rx, command_tx.clone());
+                                let reply_tx = spawn_wire_session(
+                                    peer,
+                                    connection.clone(),
+                                    send,
+                                    recv,
+                                    rx,
+                                    command_tx.clone(),
+                                );
                                 let state = CallState {
                                     peer,
                                     kind,
@@ -395,7 +483,10 @@ async fn run_actor(
                                     local_audio_muted: false,
                                     remote_audio_muted: false,
                                     video_enabled: false,
+                                    generation: next_generation,
+                                    runtime: CallRuntime::new(connection.clone()),
                                 };
+                                next_generation = next_generation.wrapping_add(1).max(1);
                                 calls.insert(call_id, state);
                                 let _ = tx
                                     .send(CallControl::Hello {
@@ -453,13 +544,19 @@ async fn run_actor(
                     };
                     spawn_media_reader(media_connection, peer, session_tx.clone());
                     let (_tx, rx) = mpsc::channel(32);
-                    let _ = spawn_wire_session(peer, send, recv, rx, session_tx);
+                    let _ =
+                        spawn_wire_session(peer, connection.clone(), send, recv, rx, session_tx);
                 });
                 // Accepting a bidirectional stream is isolated from the actor
                 // so a peer that connects without opening a stream cannot
                 // block later incoming calls.
             }
-            Command::Control { peer, control, tx } => {
+            Command::Control {
+                peer,
+                control,
+                tx,
+                connection,
+            } => {
                 handle_control(
                     &mut calls,
                     &mut terminal_calls,
@@ -467,6 +564,8 @@ async fn run_actor(
                     peer,
                     control,
                     tx,
+                    connection,
+                    &mut next_generation,
                 )
                 .await;
             }
@@ -476,17 +575,16 @@ async fn run_actor(
                     .filter_map(|(id, state)| (state.peer == peer).then_some(*id))
                     .collect();
                 for call_id in ended {
-                    calls.remove(&call_id);
-                    if terminal_calls.insert(call_id) {
-                        emit(
-                            &event_tx,
-                            CallEvent::Ended {
-                                call_id,
-                                reason: CallEndReason::ConnectionLost,
-                            },
-                        )
-                        .await;
-                    }
+                    let generation = calls.get(&call_id).map(|call| call.generation).unwrap_or(0);
+                    terminate_call(
+                        &mut calls,
+                        &mut terminal_calls,
+                        &event_tx,
+                        call_id,
+                        generation,
+                        HangupReason::ConnectionLost,
+                    )
+                    .await;
                 }
             }
             Command::Media { peer, event } => match event {
@@ -517,7 +615,7 @@ async fn run_actor(
                 }
             }
             Command::Reject(call_id) => {
-                if let Some(state) = calls.remove(&call_id) {
+                if let Some(state) = calls.get(&call_id) {
                     let _ = state
                         .tx
                         .send(CallControl::Reject {
@@ -525,59 +623,65 @@ async fn run_actor(
                             reason: RejectReason::Declined,
                         })
                         .await;
-                    if terminal_calls.insert(call_id) {
-                        emit(
-                            &event_tx,
-                            CallEvent::Ended {
-                                call_id,
-                                reason: CallEndReason::LocalHangup,
-                            },
-                        )
-                        .await;
-                    }
                 }
+                let generation = calls.get(&call_id).map(|call| call.generation).unwrap_or(0);
+                terminate_call(
+                    &mut calls,
+                    &mut terminal_calls,
+                    &event_tx,
+                    call_id,
+                    generation,
+                    HangupReason::LocalHangup,
+                )
+                .await;
             }
-            Command::Hangup(call_id) => {
-                if let Some(state) = calls.remove(&call_id) {
-                    let _ = state
-                        .tx
-                        .send(CallControl::Hangup {
-                            call_id,
-                            reason: HangupReason::LocalHangup,
-                        })
-                        .await;
-                    if terminal_calls.insert(call_id) {
-                        emit(
-                            &event_tx,
-                            CallEvent::Ended {
-                                call_id,
-                                reason: CallEndReason::LocalHangup,
-                            },
-                        )
-                        .await;
-                    }
-                }
-            }
+
             Command::NegotiationTimeout(call_id) => {
-                if let Some(state) = calls.remove(&call_id) {
-                    if !state.active && terminal_calls.insert(call_id) {
-                        let _ = state
-                            .tx
-                            .send(CallControl::Hangup {
-                                call_id,
-                                reason: HangupReason::NegotiationTimeout,
-                            })
-                            .await;
-                        emit(
-                            &event_tx,
-                            CallEvent::Ended {
-                                call_id,
-                                reason: CallEndReason::NegotiationTimeout,
-                            },
-                        )
-                        .await;
-                    }
+                if calls.get(&call_id).is_some_and(|state| !state.active) {
+                    let generation = calls.get(&call_id).map(|call| call.generation).unwrap_or(0);
+                    terminate_call(
+                        &mut calls,
+                        &mut terminal_calls,
+                        &event_tx,
+                        call_id,
+                        generation,
+                        HangupReason::NegotiationTimeout,
+                    )
+                    .await;
                 }
+            }
+            Command::Terminate {
+                call_id,
+                generation,
+                reason,
+            } => {
+                terminate_call(
+                    &mut calls,
+                    &mut terminal_calls,
+                    &event_tx,
+                    call_id,
+                    generation,
+                    reason,
+                )
+                .await;
+            }
+            Command::Shutdown => {
+                let active: Vec<_> = calls
+                    .iter()
+                    .map(|(id, state)| (*id, state.generation))
+                    .collect();
+                for (call_id, generation) in active {
+                    terminate_call(
+                        &mut calls,
+                        &mut terminal_calls,
+                        &event_tx,
+                        call_id,
+                        generation,
+                        HangupReason::Shutdown,
+                    )
+                    .await;
+                }
+                break;
             }
             Command::SetMuted { call_id, muted } => {
                 let state = media_state.entry(call_id).or_insert((false, false));
@@ -641,6 +745,8 @@ async fn handle_control(
     peer: PublicKey,
     control: CallControl,
     tx: WireTx,
+    connection: Connection,
+    next_generation: &mut CallGeneration,
 ) {
     match control {
         CallControl::Hello { .. } => {}
@@ -686,8 +792,11 @@ async fn handle_control(
                     local_audio_muted: false,
                     remote_audio_muted: false,
                     video_enabled: false,
+                    generation: *next_generation,
+                    runtime: CallRuntime::new(connection),
                 },
             );
+            *next_generation = next_generation.wrapping_add(1).max(1);
             emit(
                 events,
                 CallEvent::Incoming {
@@ -715,16 +824,16 @@ async fn handle_control(
             }
         }
         CallControl::Reject { call_id, .. } | CallControl::Busy { call_id } => {
-            if calls.remove(&call_id).is_some() && terminal_calls.insert(call_id) {
-                emit(
-                    events,
-                    CallEvent::Failed {
-                        call_id: Some(call_id),
-                        reason: CallError::Rejected,
-                    },
-                )
-                .await;
-            }
+            let generation = calls.get(&call_id).map(|call| call.generation).unwrap_or(0);
+            terminate_call(
+                calls,
+                terminal_calls,
+                events,
+                call_id,
+                generation,
+                HangupReason::RemoteHangup,
+            )
+            .await;
         }
         CallControl::MediaState {
             call_id,
@@ -747,19 +856,50 @@ async fn handle_control(
         }
         CallControl::RequestKeyframe { .. } | CallControl::KeepAlive { .. } => {}
         CallControl::Hangup { call_id, reason } => {
-            calls.remove(&call_id);
-            if terminal_calls.insert(call_id) {
-                emit(
-                    events,
-                    CallEvent::Ended {
-                        call_id,
-                        reason: reason.into(),
-                    },
-                )
-                .await;
-            }
+            let generation = calls.get(&call_id).map(|call| call.generation).unwrap_or(0);
+            terminate_call(calls, terminal_calls, events, call_id, generation, reason).await;
         }
     }
+}
+
+/// The only function allowed to remove a live call.
+async fn terminate_call(
+    calls: &mut HashMap<CallId, CallState>,
+    terminal_calls: &mut HashSet<CallId>,
+    events: &mpsc::Sender<CallEvent>,
+    call_id: CallId,
+    generation: CallGeneration,
+    reason: HangupReason,
+) {
+    let Some(current_generation) = calls.get(&call_id).map(|call| call.generation) else {
+        return;
+    };
+    // Zero is the frontend shorthand for the current incarnation. Every
+    // background task supplies its captured non-zero generation.
+    if !generation_matches(current_generation, generation) {
+        return;
+    }
+    let Some(state) = calls.remove(&call_id) else {
+        return;
+    };
+    state.runtime.cancel();
+    if terminal_calls.insert(call_id) {
+        if !matches!(reason, HangupReason::RemoteHangup) {
+            let _ = state.tx.send(CallControl::Hangup { call_id, reason }).await;
+        }
+        emit(
+            events,
+            CallEvent::Ended {
+                call_id,
+                reason: reason.into(),
+            },
+        )
+        .await;
+    }
+}
+
+fn generation_matches(current: CallGeneration, requested: CallGeneration) -> bool {
+    requested == 0 || requested == current
 }
 
 fn call_capabilities(kind: CallKind) -> super::wire::MediaCapabilities {
@@ -806,6 +946,7 @@ fn spawn_media_reader(connection: Connection, peer: PublicKey, command_tx: mpsc:
 
 fn spawn_wire_session<R, W>(
     peer: PublicKey,
+    connection: Connection,
     mut send: W,
     mut recv: R,
     outbound: mpsc::Receiver<CallControl>,
@@ -826,7 +967,7 @@ where
                 result = read_call_control(&mut recv) => match result {
                     Ok(Some(control)) => {
                         call_ids.insert(control_call_id(&control));
-                        if command_tx.send(Command::Control { peer, control, tx: command_reply_tx.clone() }).await.is_err() { break; }
+                        if command_tx.send(Command::Control { peer, control, tx: command_reply_tx.clone(), connection: connection.clone() }).await.is_err() { break; }
                     }
                     Ok(None) | Err(_) => break,
                 },
@@ -933,6 +1074,14 @@ mod tests {
         let local_keeps = resolve_collision(&local, &remote) == CollisionWinner::LocalWins;
         let remote_keeps = resolve_collision(&remote, &local) == CollisionWinner::LocalWins;
         assert_eq!(local_keeps as u8 + remote_keeps as u8, 1);
+    }
+
+    #[test]
+    fn stale_generation_cannot_terminate_new_incarnation() {
+        assert!(generation_matches(13, 0));
+        assert!(generation_matches(13, 13));
+        assert!(!generation_matches(13, 12));
+        assert!(!generation_matches(13, 14));
     }
 
     #[tokio::test]
