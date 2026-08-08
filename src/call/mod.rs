@@ -1,10 +1,10 @@
 //! Identity and session types shared by Boru's call-control and media subsystems.
 
 pub mod media;
-pub mod wire;
 /// Consent-gated native camera enumeration and capture.
 #[cfg(feature = "video-calls")]
 pub mod video;
+pub mod wire;
 
 /// Lock-free bounded capture buffering for the CPAL real-time callback.
 #[cfg(feature = "voice-calls")]
