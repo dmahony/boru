@@ -32,10 +32,12 @@ use iced::advanced::{Clipboard, Layout, Renderer, Shell};
 use iced::{Event, Length, Rectangle, Size, Theme};
 
 /// Tree state for [`FocusableButton`]: remembers whether the wrapped
-/// button currently holds keyboard focus.
+/// button currently holds keyboard focus, plus the last focus value that
+/// was reported to the app so transitions publish exactly once.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct State {
     is_focused: bool,
+    last_reported_focus: bool,
 }
 
 impl widget::operation::Focusable for State {
@@ -62,6 +64,7 @@ impl widget::operation::Focusable for State {
 pub struct FocusableButton<'a, Message> {
     content: iced::Element<'a, Message, Theme, iced::Renderer>,
     on_press: Option<Message>,
+    on_focus_change: Option<Box<dyn Fn(bool) -> Message + 'a>>,
     ring_radius: f32,
 }
 
@@ -74,8 +77,18 @@ impl<'a, Message> FocusableButton<'a, Message> {
         Self {
             content: content.into(),
             on_press,
+            on_focus_change: None,
             ring_radius: crate::design_tokens::RADIUS_SM,
         }
+    }
+
+    /// Report focus transitions: `on_focus_change(focused)` is published
+    /// whenever this button gains or loses keyboard focus (mirrors the
+    /// focus-tracking pattern iced's own `Stack` widget uses to keep its
+    /// top layer visible).
+    pub fn on_focus_change(mut self, on_focus_change: impl Fn(bool) -> Message + 'a) -> Self {
+        self.on_focus_change = Some(Box::new(on_focus_change));
+        self
     }
 
     /// Set the focus-ring corner radius (matches the wrapped button's
@@ -187,6 +200,26 @@ where
             viewport,
         );
 
+        // Focus-change reporting. Focus is mutated by the app's Tab
+        // traversal operations (`operation::focus_next` / `focus_previous`)
+        // between event passes, so detect the transition on the next
+        // redraw — the same trigger iced's own `Stack` widget uses for its
+        // `is_top_focused` tracking. Publishing on a transition lets the
+        // app keep overlays (e.g. inline video controls) visible while
+        // keyboard focus is inside them.
+        if matches!(
+            event,
+            Event::Window(iced::window::Event::RedrawRequested(_))
+        ) {
+            let state = tree.state.downcast_mut::<State>();
+            if state.is_focused != state.last_reported_focus {
+                state.last_reported_focus = state.is_focused;
+                if let Some(on_focus_change) = &self.on_focus_change {
+                    shell.publish(on_focus_change(state.is_focused));
+                }
+            }
+        }
+
         if shell.is_event_captured() {
             return;
         }
@@ -294,10 +327,30 @@ mod tests {
     fn state_focusable_follows_focus_and_unfocus() {
         let mut state = State::default();
         assert!(!state.is_focused(), "fresh button is not focused");
+        assert!(
+            !state.last_reported_focus,
+            "fresh button has not reported focus yet"
+        );
         state.focus();
         assert!(state.is_focused(), "focus() marks the button focused");
         state.unfocus();
         assert!(!state.is_focused(), "unfocus() clears the focused flag");
+    }
+
+    #[test]
+    fn last_reported_focus_tracks_is_focused() {
+        // The `update` focus-transition block publishes only when the
+        // reported value differs from the current focus, so after a
+        // transition the stored value must equal `is_focused`.
+        let mut state = State::default();
+        state.focus();
+        assert_ne!(state.is_focused, state.last_reported_focus);
+        state.last_reported_focus = state.is_focused;
+        assert_eq!(state.is_focused, state.last_reported_focus);
+        state.unfocus();
+        assert_ne!(state.is_focused, state.last_reported_focus);
+        state.last_reported_focus = state.is_focused;
+        assert_eq!(state.is_focused, state.last_reported_focus);
     }
 
     #[test]

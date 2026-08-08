@@ -634,6 +634,7 @@ pub fn view_download_progress(
             false,
             None,
             false,
+            false,
             received_at_ms,
             timeline_width,
         )
@@ -663,6 +664,7 @@ pub fn view_download_progress_with_player<'a>(
     preparing: bool,
     seek_position: Option<f32>,
     expanded: bool,
+    controls_visible: bool,
     received_at_ms: Option<i64>,
     timeline_width: f32,
 ) -> iced::Element<'a, AppMessage> {
@@ -675,6 +677,7 @@ pub fn view_download_progress_with_player<'a>(
         preparing,
         seek_position,
         expanded,
+        controls_visible,
         received_at_ms,
         timeline_width,
     )
@@ -690,6 +693,7 @@ fn view_download_progress_inner<'a>(
     preparing: bool,
     #[cfg(feature = "video-playback")] seek_position: Option<f32>,
     #[cfg(feature = "video-playback")] expanded: bool,
+    #[cfg(feature = "video-playback")] controls_visible: bool,
     received_at_ms: Option<i64>,
     timeline_width: f32,
 ) -> iced::Element<'a, AppMessage> {
@@ -707,6 +711,7 @@ fn view_download_progress_inner<'a>(
                 preparing,
                 seek_position,
                 expanded,
+                controls_visible,
                 received_at_ms,
                 timeline_width,
             )

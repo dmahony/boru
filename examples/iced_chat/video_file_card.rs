@@ -282,6 +282,7 @@ fn media_icon_button<'a>(
         }),
         Some(message),
     )
+    .on_focus_change(|focused| AppMessage::InlineVideoControlsFocused(focused))
     .ring_radius(20.0);
     tooltip::Tooltip::new(
         control,
@@ -695,6 +696,8 @@ pub(crate) struct BoruVideoFileCard<'a> {
     seek_position: Option<f32>,
     #[cfg(feature = "video-playback")]
     expanded: bool,
+    #[cfg(feature = "video-playback")]
+    controls_visible: bool,
     /// Keeps the lifetime parameter live in builds without the
     /// `video-playback` feature (where no field borrows `'a`).
     #[cfg(not(feature = "video-playback"))]
@@ -714,6 +717,7 @@ impl<'a> BoruVideoFileCard<'a> {
         preparing: bool,
         #[cfg(feature = "video-playback")] seek_position: Option<f32>,
         #[cfg(feature = "video-playback")] expanded: bool,
+        #[cfg(feature = "video-playback")] controls_visible: bool,
         received_at_ms: Option<i64>,
         timeline_width: f32,
     ) -> Self {
@@ -730,6 +734,8 @@ impl<'a> BoruVideoFileCard<'a> {
             seek_position,
             #[cfg(feature = "video-playback")]
             expanded,
+            #[cfg(feature = "video-playback")]
+            controls_visible,
             #[cfg(not(feature = "video-playback"))]
             _marker: std::marker::PhantomData,
         }
@@ -1238,16 +1244,21 @@ impl<'a> BoruVideoFileCard<'a> {
             // ratio, border radius and position. Both use the same bounded
             // Task 15 sizing, so the player shrinks proportionally with the
             // measured chat width exactly like the poster.
-            let video_element: iced::Element<'a, AppMessage> = container(
-                VideoPlayer::new(&video)
-                    .content_fit(iced::ContentFit::Contain)
-                    .on_end_of_stream(AppMessage::CloseInlineVideo)
-                    .on_error(|_error| AppMessage::CloseInlineVideo),
+            let video_element: iced::Element<'a, AppMessage> = iced::widget::mouse_area(
+                container(
+                    VideoPlayer::new(&video)
+                        .content_fit(iced::ContentFit::Contain)
+                        .on_end_of_stream(AppMessage::CloseInlineVideo)
+                        .on_error(|_error| AppMessage::CloseInlineVideo),
+                )
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill),
             )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x(Length::Fill)
-            .center_y(Length::Fill)
+            .on_press(AppMessage::PlayInlineVideo(self.entry_index))
+            .on_enter(AppMessage::InlineVideoShowControls)
+            .on_move(|_| AppMessage::InlineVideoShowControls)
             .into();
 
             let controls_bar = container(controls)
@@ -1259,12 +1270,21 @@ impl<'a> BoruVideoFileCard<'a> {
                     ..Default::default()
                 });
 
-            container(widget::stack![
-                video_element,
+            let controls_overlay: iced::Element<'a, AppMessage> = if self.controls_visible {
                 container(controls_bar)
                     .width(Length::Fill)
                     .height(Length::Fill)
-                    .align_y(Alignment::End),
+                    .align_y(Alignment::End)
+                    .into()
+            } else {
+                container(iced::widget::Space::new())
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .into()
+            };
+            container(widget::stack![
+                video_element,
+                controls_overlay,
             ])
             .width(sizing.width())
             .height(sizing.height())

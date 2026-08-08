@@ -158,6 +158,13 @@ struct InlineVideoSession {
     /// file-backed playback. Dropped (server stopped) when the session is
     /// dropped, i.e. when playback ends or the card is removed.
     streaming_server: Option<Arc<StreamingServer>>,
+    /// Visibility and idle deadline for the on-media controls.
+    controls_visible: bool,
+    controls_last_interaction: Instant,
+    /// Keyboard focus is currently inside the on-media controls. While
+    /// true, auto-hide is suppressed (PDF task 18 / AC9: never remove
+    /// keyboard-focused controls).
+    controls_focused: bool,
 }
 
 #[cfg(feature = "video-playback")]
@@ -5857,6 +5864,11 @@ pub enum AppMessage {
     },
     #[cfg(feature = "video-playback")]
     InlineVideoTick,
+    InlineVideoShowControls,
+    #[cfg(feature = "video-playback")]
+    /// Keyboard focus entered or left the inline video controls
+    /// (`true` = inside controls, `false` = left them).
+    InlineVideoControlsFocused(bool),
     #[cfg(feature = "video-playback")]
     InlineVideoSeekChanged(f32),
     #[cfg(feature = "video-playback")]
@@ -9106,6 +9118,8 @@ impl IcedChat {
         #[cfg(feature = "video-playback")]
         let expanded = self.inline_video_expanded;
         #[cfg(feature = "video-playback")]
+        let controls_visible = active_player.is_none_or(|session| session.controls_visible);
+        #[cfg(feature = "video-playback")]
         return crate::download_progress_view::view_download_progress_with_player(
             entry_index,
             attachment,
@@ -9115,6 +9129,7 @@ impl IcedChat {
             preparing,
             seek_position,
             expanded,
+            controls_visible,
             received_at_ms,
             timeline_width,
         );
@@ -9790,6 +9805,10 @@ impl IcedChat {
             AppMessage::StreamingServerFailed { .. } => "StreamingServerFailed",
             #[cfg(feature = "video-playback")]
             AppMessage::InlineVideoTick => "InlineVideoTick",
+            #[cfg(feature = "video-playback")]
+            AppMessage::InlineVideoShowControls => "InlineVideoShowControls",
+            #[cfg(feature = "video-playback")]
+            AppMessage::InlineVideoControlsFocused(_) => "InlineVideoControlsFocused",
             #[cfg(feature = "video-playback")]
             AppMessage::InlineVideoSeekChanged(_) => "InlineVideoSeekChanged",
             #[cfg(feature = "video-playback")]
@@ -17363,6 +17382,9 @@ impl IcedChat {
                             .unwrap_or_default(),
                         last_near_viewport: Instant::now(),
                         streaming_server: None,
+                        controls_visible: true,
+                        controls_last_interaction: Instant::now(),
+                        controls_focused: false,
                     });
                     self.inline_video_resume = None;
                     self.layout_cache.borrow_mut().invalidate_from(entry_index);
@@ -17673,6 +17695,9 @@ impl IcedChat {
                     // Fresh talkspurt: the first observed frame anchors
                     // playout after the default jitter delay.
                     jitter: VideoJitterBuffer::default(),
+                    controls_visible: true,
+                    controls_last_interaction: Instant::now(),
+                    controls_focused: false,
                     resume_position: self
                         .inline_video_resume
                         .as_ref()
@@ -17744,6 +17769,12 @@ impl IcedChat {
                         // already raised the keepalive floor, so there is
                         // nothing to schedule until playback resumes.
                         if !video.paused() {
+                            if !session.controls_focused
+                                && now.duration_since(session.controls_last_interaction)
+                                    >= Duration::from_millis(2800)
+                            {
+                                session.controls_visible = false;
+                            }
                             // Feed the playhead into the deadline-driven
                             // jitter buffer.  The first frame of a talkspurt
                             // (start, resume, or seek) anchors playout after
@@ -17782,8 +17813,36 @@ impl IcedChat {
                 iced::Task::none()
             }
             #[cfg(feature = "video-playback")]
+            AppMessage::InlineVideoShowControls => {
+                if let Some(session) = self.inline_video.as_mut() {
+                    session.controls_visible = true;
+                    session.controls_last_interaction = Instant::now();
+                    self.layout_cache.borrow_mut().clear();
+                }
+                iced::Task::none()
+            }
+            #[cfg(feature = "video-playback")]
+            AppMessage::InlineVideoControlsFocused(focused) => {
+                if let Some(session) = self.inline_video.as_mut() {
+                    session.controls_focused = focused;
+                    if focused {
+                        // Keyboard focus entered the controls: show them
+                        // and reset the idle deadline so they stay visible
+                        // (PDF task 18 / AC9).
+                        session.controls_visible = true;
+                        session.controls_last_interaction = Instant::now();
+                    }
+                    self.layout_cache.borrow_mut().clear();
+                }
+                iced::Task::none()
+            }
+            #[cfg(feature = "video-playback")]
             AppMessage::InlineVideoSeekChanged(value) => {
                 self.inline_video_seek = Some(value.clamp(0.0, 1.0));
+                if let Some(session) = self.inline_video.as_mut() {
+                    session.controls_visible = true;
+                    session.controls_last_interaction = Instant::now();
+                }
                 iced::Task::none()
             }
             #[cfg(feature = "video-playback")]
@@ -17791,6 +17850,8 @@ impl IcedChat {
                 if let (Some(position), Some(session)) =
                     (self.inline_video_seek.take(), self.inline_video.as_mut())
                 {
+                    session.controls_visible = true;
+                    session.controls_last_interaction = Instant::now();
                     if let Some(video) = session.video.as_mut().and_then(Arc::get_mut) {
                         let duration = video.duration();
                         let target = duration.mul_f32(position.clamp(0.0, 1.0));
@@ -17812,6 +17873,10 @@ impl IcedChat {
                     .and_then(Arc::get_mut)
                 {
                     video.set_muted(!video.muted());
+                    if let Some(session) = self.inline_video.as_mut() {
+                        session.controls_visible = true;
+                        session.controls_last_interaction = Instant::now();
+                    }
                     self.layout_cache.borrow_mut().clear();
                 }
                 iced::Task::none()
@@ -17825,6 +17890,10 @@ impl IcedChat {
                     .and_then(Arc::get_mut)
                 {
                     video.set_volume(value.clamp(0.0, 1.0) as f64);
+                    if let Some(session) = self.inline_video.as_mut() {
+                        session.controls_visible = true;
+                        session.controls_last_interaction = Instant::now();
+                    }
                     self.layout_cache.borrow_mut().clear();
                 }
                 iced::Task::none()
@@ -17832,6 +17901,10 @@ impl IcedChat {
             #[cfg(feature = "video-playback")]
             AppMessage::InlineVideoToggleExpanded => {
                 self.inline_video_expanded = !self.inline_video_expanded;
+                if let Some(session) = self.inline_video.as_mut() {
+                    session.controls_visible = true;
+                    session.controls_last_interaction = Instant::now();
+                }
                 self.layout_cache.borrow_mut().clear();
                 iced::Task::none()
             }
@@ -26000,6 +26073,7 @@ impl IcedChat {
             Some(video.as_ref()),
             false,
             self.inline_video_seek,
+            true,
             true,
             entry.timestamp,
             // The expanded overlay fills the whole window, so the card sizes
@@ -52764,6 +52838,7 @@ fn vr_create_tunnel_picker_port_validation() {
                 false,
                 None,
                 false,
+                true,
                 Some(now_ms() as i64),
                 720.0,
             );
