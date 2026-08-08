@@ -496,19 +496,21 @@ impl CallRuntime {
 
         // A wedged device/codec must not hold the actor forever.  Abort only
         // after the bounded grace period so normal cancellation can clean up.
-        let wait = async {
-            for mut task in tasks {
-                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                if remaining.is_zero() {
-                    task.abort();
-                    continue;
-                }
-                if tokio::time::timeout(remaining, &mut task).await.is_err() {
-                    task.abort();
-                }
+        // Each iteration waits at most the time remaining until `deadline`
+        // (zero remaining -> abort immediately), so the loop as a whole is
+        // already bounded by CALL_SHUTDOWN_TIMEOUT.  Do NOT wrap it in another
+        // timeout: dropping the join loop early would detach the remaining
+        // JoinHandles instead of aborting them, leaking their tasks.
+        for mut task in tasks {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                task.abort();
+                continue;
             }
-        };
-        tokio::time::timeout(CALL_SHUTDOWN_TIMEOUT, wait).await.ok();
+            if tokio::time::timeout(remaining, &mut task).await.is_err() {
+                task.abort();
+            }
+        }
     }
 }
 
@@ -1394,6 +1396,69 @@ mod tests {
         );
         // The wedged task must have been aborted by the bounded join.
         abort_tx.send(()).ok();
+        let _ = router.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_releases_every_resource_slot_and_closes_connection() {
+        let (connection, router, _client) = live_connection().await;
+        let observer = connection.clone();
+        let mut runtime = CallRuntime::new(connection);
+
+        // Populate every resource slot with a task that blocks forever on a
+        // oneshot.  After shutdown each must be stopped (bounded-join aborts
+        // it) — proven by the sender observing a dropped receiver.
+        let mut signals = Vec::new();
+        let mut add_task = |slot: &mut Option<JoinHandle<()>>| {
+            let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+            signals.push(tx);
+            *slot = Some(tokio::spawn(async move {
+                let _ = rx.await;
+            }));
+        };
+        add_task(&mut runtime.control_reader_task);
+        add_task(&mut runtime.control_writer_task);
+        add_task(&mut runtime.media_reader_task);
+        add_task(&mut runtime.audio_capture_task);
+        add_task(&mut runtime.audio_send_task);
+        add_task(&mut runtime.audio_receive_task);
+        add_task(&mut runtime.video_capture_task);
+        add_task(&mut runtime.video_send_task);
+        add_task(&mut runtime.video_receive_task);
+        assert_eq!(signals.len(), 9, "expected one task per resource slot");
+
+        let started = tokio::time::Instant::now();
+        runtime.shutdown().await;
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < CALL_SHUTDOWN_TIMEOUT * 2,
+            "shutdown took {elapsed:?}, bounded await violated"
+        );
+
+        // Aborts land asynchronously (the runtime drops the cancelled future
+        // on a later poll), so wait a bounded window for every task to
+        // terminate before asserting.  A leaked task would never close.
+        let settle = tokio::time::Instant::now() + Duration::from_secs(2);
+        while !signals.iter().all(|tx| tx.is_closed()) {
+            assert!(
+                tokio::time::Instant::now() < settle,
+                "resource tasks did not terminate within the settle window"
+            );
+            tokio::task::yield_now().await;
+        }
+
+        // Every task was stopped: each sender sees its receiver dropped.
+        for (i, tx) in signals.into_iter().enumerate() {
+            assert!(
+                tx.send(()).is_err(),
+                "resource slot {i} task still alive after shutdown"
+            );
+        }
+        // The call connection was closed by shutdown.
+        assert!(
+            observer.close_reason().is_some(),
+            "connection must be closed after runtime shutdown"
+        );
         let _ = router.shutdown().await;
     }
 
