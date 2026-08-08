@@ -3,6 +3,13 @@
 pub mod media;
 pub mod wire;
 
+/// Lock-free bounded capture buffering for the CPAL real-time callback.
+#[cfg(feature = "voice-calls")]
+pub mod audio;
+/// Native audio device access, kept separate from call and Iroh protocol code.
+#[cfg(feature = "voice-calls")]
+pub mod device;
+
 /// Call actor, handle, and Iroh protocol registration.
 #[cfg(feature = "net")]
 pub mod manager;
