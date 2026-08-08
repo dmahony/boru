@@ -65,6 +65,8 @@ pub struct FocusableButton<'a, Message> {
     content: iced::Element<'a, Message, Theme, iced::Renderer>,
     on_press: Option<Message>,
     on_focus_change: Option<Box<dyn Fn(bool) -> Message + 'a>>,
+    on_key_press:
+        Option<Box<dyn Fn(&iced::keyboard::key::Key, iced::keyboard::Modifiers) -> Option<Message> + 'a>>,
     ring_radius: f32,
 }
 
@@ -78,6 +80,7 @@ impl<'a, Message> FocusableButton<'a, Message> {
             content: content.into(),
             on_press,
             on_focus_change: None,
+            on_key_press: None,
             ring_radius: crate::design_tokens::RADIUS_SM,
         }
     }
@@ -88,6 +91,17 @@ impl<'a, Message> FocusableButton<'a, Message> {
     /// top layer visible).
     pub fn on_focus_change(mut self, on_focus_change: impl Fn(bool) -> Message + 'a) -> Self {
         self.on_focus_change = Some(Box::new(on_focus_change));
+        self
+    }
+
+    /// Handle additional keys while this control owns keyboard focus. The
+    /// callback is local to the widget, so it cannot consume composer input.
+    pub fn on_key_press(
+        mut self,
+        on_key_press: impl Fn(&iced::keyboard::key::Key, iced::keyboard::Modifiers) -> Option<Message>
+            + 'a,
+    ) -> Self {
+        self.on_key_press = Some(Box::new(on_key_press));
         self
     }
 
@@ -237,6 +251,21 @@ where
                 {
                     shell.publish(on_press.clone());
                     shell.capture_event();
+                }
+            }
+        }
+
+        let state = tree.state.downcast_ref::<State>();
+        if state.is_focused {
+            if let Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                key, modifiers, ..
+            }) = event
+            {
+                if let Some(on_key_press) = &self.on_key_press {
+                    if let Some(message) = on_key_press(key, *modifiers) {
+                        shell.publish(message);
+                        shell.capture_event();
+                    }
                 }
             }
         }

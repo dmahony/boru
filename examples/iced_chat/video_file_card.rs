@@ -395,6 +395,22 @@ fn media_icon_button(
             }),
             Some(message),
         )
+        .on_key_press(|key, modifiers| {
+            if modifiers.control() || modifiers.alt() || modifiers.logo() {
+                return None;
+            }
+            use iced::keyboard::key::{Key, Named};
+            match key {
+                Key::Named(Named::ArrowLeft) => Some(AppMessage::InlineVideoSeekRelative(-5.0)),
+                Key::Named(Named::ArrowRight) => Some(AppMessage::InlineVideoSeekRelative(5.0)),
+                Key::Named(Named::ArrowUp) => Some(AppMessage::InlineVideoAdjustVolume(0.1)),
+                Key::Named(Named::ArrowDown) => Some(AppMessage::InlineVideoAdjustVolume(-0.1)),
+                Key::Character(value) if value.eq_ignore_ascii_case("m") => {
+                    Some(AppMessage::InlineVideoToggleMute)
+                }
+                _ => None,
+            }
+        })
         .on_focus_change(|focused| AppMessage::InlineVideoControlsFocused(focused))
         .ring_radius(20.0),
         crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, label),
