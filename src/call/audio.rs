@@ -20,6 +20,9 @@ pub mod codec;
 /// Bounded deadline-driven buffering for received live audio.
 pub mod jitter;
 
+/// Optional RNNoise-based noise suppression for the send pipeline.
+pub mod noise;
+
 /// Opus packet-loss concealment and in-band FEC playout.
 pub mod plc;
 
