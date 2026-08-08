@@ -80,12 +80,12 @@ impl LiveVideoPipeline {
             self.dropped_frames = self.dropped_frames.saturating_add(1);
         }
         self.latest_frame = Some(decoded.clone());
-        self.frames.replace_remote(VideoFrame {
-            width: decoded.width,
-            height: decoded.height,
-            rgba: decoded.bytes.clone().into(),
-            timestamp: datagram.timestamp as u64,
-        });
+        self.frames.replace_remote(VideoFrame::from_rgb(
+            decoded.width,
+            decoded.height,
+            &decoded.bytes,
+            datagram.timestamp as u64,
+        )?);
         Ok(Some(decoded))
     }
 

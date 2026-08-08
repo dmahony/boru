@@ -16,7 +16,11 @@ pub const MAX_AUDIO_CHANNELS: u8 = 8;
 /// Maximum audio frame duration accepted from a peer, in milliseconds.
 pub const MAX_AUDIO_FRAME_MS: u16 = 120;
 /// Maximum frame rate accepted from a peer.
-pub const MAX_VIDEO_FPS: u32 = 120;
+pub const MAX_VIDEO_FPS: u32 = 60;
+/// Maximum negotiated video width in version 1, in pixels.
+pub const MAX_VIDEO_WIDTH: u32 = 1_920;
+/// Maximum negotiated video height in version 1, in pixels.
+pub const MAX_VIDEO_HEIGHT: u32 = 1_080;
 
 /// Validate an advertised audio capability set without allocating.
 pub fn validate_audio_capabilities(value: &AudioCapabilities) -> Result<(), &'static str> {
@@ -66,6 +70,9 @@ pub fn validate_capabilities(value: &MediaCapabilities) -> Result<(), &'static s
         if video.max_width == 0 || video.max_height == 0 {
             return Err("video dimensions must be non-zero");
         }
+        if video.max_width > MAX_VIDEO_WIDTH || video.max_height > MAX_VIDEO_HEIGHT {
+            return Err("video resolution out of bounds");
+        }
         if video.max_fps == 0 || video.max_fps > MAX_VIDEO_FPS {
             return Err("video frame rate out of bounds");
         }
@@ -93,6 +100,9 @@ pub fn validate_negotiated_media(value: &NegotiatedMedia) -> Result<(), &'static
 fn validate_negotiated_video(value: &NegotiatedVideo) -> Result<(), &'static str> {
     if value.width == 0 || value.height == 0 {
         return Err("negotiated video dimensions must be non-zero");
+    }
+    if value.width > MAX_VIDEO_WIDTH || value.height > MAX_VIDEO_HEIGHT {
+        return Err("negotiated video resolution out of bounds");
     }
     if value.fps == 0 || value.fps > MAX_VIDEO_FPS {
         return Err("negotiated video frame rate out of bounds");
@@ -148,6 +158,24 @@ mod tests {
         assert_eq!(
             validate_capabilities(&value),
             Err("video frame rate out of bounds")
+        );
+    }
+
+    #[test]
+    fn video_resolution_above_cap_is_rejected() {
+        let value = audio();
+        let capabilities = MediaCapabilities {
+            audio: value,
+            video: Some(VideoCapabilities {
+                codecs: vec![VideoCodec::H264],
+                max_width: MAX_VIDEO_WIDTH + 1,
+                max_height: MAX_VIDEO_HEIGHT,
+                max_fps: 60,
+            }),
+        };
+        assert_eq!(
+            validate_capabilities(&capabilities),
+            Err("video resolution out of bounds")
         );
     }
 }

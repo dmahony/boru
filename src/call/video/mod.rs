@@ -8,6 +8,10 @@
 
 use std::sync::Arc;
 
+use anyhow::Result;
+
+use crate::call::bounds::{MAX_VIDEO_HEIGHT, MAX_VIDEO_WIDTH};
+
 /// A decoded video frame ready for presentation.
 ///
 /// The pixel buffer is reference counted deliberately: Iced messages and
@@ -23,6 +27,51 @@ pub struct VideoFrame {
     pub rgba: Arc<[u8]>,
     /// Media timestamp in the negotiated timestamp units.
     pub timestamp: u64,
+}
+
+impl VideoFrame {
+    /// Return the checked byte size of an RGBA8 frame.
+    pub fn checked_rgba_len(width: u32, height: u32) -> Result<usize> {
+        (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or_else(|| anyhow::anyhow!("RGBA frame size overflow"))
+    }
+
+    /// Convert an RGB8 frame into the presentation format without unchecked
+    /// allocation arithmetic. Dimensions are bounded before any allocation.
+    pub fn from_rgb(width: u32, height: u32, rgb: &[u8], timestamp: u64) -> Result<Self> {
+        if width == 0 || height == 0 {
+            return Err(anyhow::anyhow!("RGBA dimensions must be non-zero"));
+        }
+        if width > MAX_VIDEO_WIDTH || height > MAX_VIDEO_HEIGHT {
+            return Err(anyhow::anyhow!("RGBA resolution exceeds protocol bounds"));
+        }
+        let pixel_count = (width as usize)
+            .checked_mul(height as usize)
+            .ok_or_else(|| anyhow::anyhow!("RGBA frame size overflow"))?;
+        let expected_rgb = pixel_count
+            .checked_mul(3)
+            .ok_or_else(|| anyhow::anyhow!("RGB frame size overflow"))?;
+        if rgb.len() != expected_rgb {
+            return Err(anyhow::anyhow!(
+                "RGB frame has {} bytes, expected {expected_rgb}",
+                rgb.len()
+            ));
+        }
+        let rgba_len = Self::checked_rgba_len(width, height)?;
+        let mut rgba = Vec::with_capacity(rgba_len);
+        for pixel in rgb.chunks_exact(3) {
+            rgba.extend_from_slice(pixel);
+            rgba.push(255);
+        }
+        Ok(Self {
+            width,
+            height,
+            rgba: rgba.into(),
+            timestamp,
+        })
+    }
 }
 
 /// The presentation state for live-call video.
@@ -94,6 +143,18 @@ mod tests {
         let frame = frame(3, 9);
         let clone = frame.clone();
         assert!(Arc::ptr_eq(&frame.rgba, &clone.rgba));
+    }
+
+    #[test]
+    fn rgba_size_overflow_is_reported_without_allocation() {
+        assert!(VideoFrame::checked_rgba_len(u32::MAX, u32::MAX).is_err());
+    }
+
+    #[test]
+    fn rgb_conversion_adds_opaque_alpha() {
+        let frame = VideoFrame::from_rgb(1, 1, &[1, 2, 3], 7).expect("RGB conversion");
+        assert_eq!(&*frame.rgba, &[1, 2, 3, 255]);
+        assert_eq!(frame.timestamp, 7);
     }
 
     #[test]
