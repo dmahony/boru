@@ -424,7 +424,8 @@ struct CallState {
     active: bool,
     local_audio_muted: bool,
     remote_audio_muted: bool,
-    video_enabled: bool,
+    local_video_enabled: bool,
+    remote_video_enabled: bool,
     generation: CallGeneration,
     ending: bool,
     runtime: CallRuntime,
@@ -576,7 +577,8 @@ async fn run_actor(
                                     active: false,
                                     local_audio_muted: false,
                                     remote_audio_muted: false,
-                                    video_enabled: false,
+                                    local_video_enabled: false,
+                                    remote_video_enabled: false,
                                     generation: next_generation,
                                     ending: false,
                                     runtime: CallRuntime::new(connection.clone()),
@@ -840,7 +842,7 @@ async fn run_actor(
                 let state = media_state.entry(call_id).or_insert((false, false));
                 state.1 = enabled;
                 if let Some(call) = calls.get_mut(&call_id) {
-                    call.video_enabled = enabled;
+                    call.local_video_enabled = enabled;
                     let _ = call
                         .tx
                         .send(CallControl::MediaState {
@@ -917,7 +919,8 @@ async fn handle_control(
                     active: false,
                     local_audio_muted: false,
                     remote_audio_muted: false,
-                    video_enabled: false,
+                    local_video_enabled: false,
+                    remote_video_enabled: false,
                     generation: *next_generation,
                     ending: false,
                     runtime: CallRuntime::new(connection),
@@ -971,7 +974,7 @@ async fn handle_control(
         } => {
             if let Some(call) = calls.get_mut(&call_id) {
                 call.remote_audio_muted = audio_muted;
-                call.video_enabled = video_enabled;
+                call.remote_video_enabled = video_enabled;
             }
             emit(
                 events,
@@ -1326,7 +1329,8 @@ mod tests {
                 active: true,
                 local_audio_muted: false,
                 remote_audio_muted: false,
-                video_enabled: false,
+                local_video_enabled: false,
+                remote_video_enabled: false,
                 generation: 9,
                 ending: false,
                 runtime: CallRuntime::new(connection),
@@ -1481,7 +1485,8 @@ mod tests {
                 active: false,
                 local_audio_muted: false,
                 remote_audio_muted: false,
-                video_enabled: false,
+                local_video_enabled: false,
+                remote_video_enabled: false,
                 generation: 7,
                 ending: false,
                 runtime: CallRuntime::new(connection),

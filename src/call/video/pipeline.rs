@@ -163,6 +163,7 @@ pub struct LocalVideoPipeline {
     max_datagram_size: usize,
     latest_local_frame: Option<DecodedVideoFrame>,
     preview_frames: u64,
+    video_enabled: bool,
 }
 
 impl LocalVideoPipeline {
@@ -186,7 +187,26 @@ impl LocalVideoPipeline {
             max_datagram_size,
             latest_local_frame: None,
             preview_frames: 0,
+            video_enabled: true,
         }
+    }
+
+    /// Enable or disable the camera track without tearing down the call.
+    ///
+    /// Disabled tracks do not poll the capture source and produce no media
+    /// datagrams. Resuming requests an intra frame before the next frame is
+    /// encoded, so the receiver can decode immediately rather than waiting for
+    /// the periodic keyframe interval.
+    pub fn set_video_enabled(&mut self, enabled: bool) {
+        if enabled && !self.video_enabled {
+            self.encoder.request_keyframe();
+        }
+        self.video_enabled = enabled;
+    }
+
+    /// Whether this pipeline currently accepts camera frames for sending.
+    pub const fn video_enabled(&self) -> bool {
+        self.video_enabled
     }
 
     /// Process one captured frame and return encoded datagrams ready for the
@@ -195,6 +215,9 @@ impl LocalVideoPipeline {
         &mut self,
         captured: CapturedFrame,
     ) -> anyhow::Result<Vec<crate::call::media::MediaDatagram>> {
+        if !self.video_enabled {
+            return Ok(Vec::new());
+        }
         let raw = RawVideoFrame {
             width: self.config.width,
             height: self.config.height,
@@ -227,6 +250,9 @@ impl LocalVideoPipeline {
         &mut self,
         source: &mut S,
     ) -> anyhow::Result<Option<Vec<crate::call::media::MediaDatagram>>> {
+        if !self.video_enabled {
+            return Ok(None);
+        }
         source
             .next_frame()
             .map(|frame| self.process_frame(frame))
@@ -359,6 +385,87 @@ mod tests {
             })
             .expect("local frame processed");
         assert!(pipeline.latest_local_frame().is_some());
+    }
+
+    #[derive(Clone, Default)]
+    struct ToggleEncoder {
+        keyframe_requests: Arc<Mutex<usize>>,
+    }
+
+    impl VideoEncoder for ToggleEncoder {
+        fn encode(
+            &mut self,
+            frame: &RawVideoFrame,
+        ) -> anyhow::Result<super::super::codec::EncodedVideoFrame> {
+            Ok(super::super::codec::EncodedVideoFrame {
+                codec: super::super::codec::VideoCodec::H264,
+                width: frame.width,
+                height: frame.height,
+                timestamp_us: frame.timestamp_us,
+                keyframe: true,
+                bytes: vec![1, 2, 3],
+            })
+        }
+
+        fn request_keyframe(&mut self) {
+            *self.keyframe_requests.lock().expect("keyframe lock") += 1;
+        }
+    }
+
+    #[derive(Default)]
+    struct CountingSource {
+        polls: usize,
+    }
+
+    impl CaptureSource for CountingSource {
+        fn next_frame(&mut self) -> Option<CapturedFrame> {
+            self.polls += 1;
+            Some(CapturedFrame {
+                timestamp_us: self.polls as u64,
+                data: vec![0; 6],
+            })
+        }
+    }
+
+    #[test]
+    fn disabling_camera_stops_frames_and_resume_requests_keyframe() {
+        let requests = Arc::new(Mutex::new(0));
+        let encoder = ToggleEncoder {
+            keyframe_requests: requests.clone(),
+        };
+        let config = CaptureConfig {
+            width: 2,
+            height: 1,
+            frame_interval: std::time::Duration::from_millis(33),
+        };
+        let mut pipeline = LocalVideoPipeline::with_encoder(
+            config,
+            crate::call::CallId::generate(),
+            1,
+            100,
+            encoder,
+        );
+        let mut source = CountingSource::default();
+
+        assert!(pipeline.process_next(&mut source).unwrap().is_some());
+        assert_eq!(source.polls, 1);
+        pipeline.set_video_enabled(false);
+        assert!(!pipeline.video_enabled());
+        assert!(pipeline.process_next(&mut source).unwrap().is_none());
+        assert_eq!(source.polls, 1, "disabled camera must not poll capture");
+        assert!(pipeline
+            .process_frame(CapturedFrame {
+                timestamp_us: 2,
+                data: vec![0; 6],
+            })
+            .unwrap()
+            .is_empty());
+
+        pipeline.set_video_enabled(true);
+        assert!(pipeline.video_enabled());
+        assert_eq!(*requests.lock().expect("keyframe lock"), 1);
+        assert!(pipeline.process_next(&mut source).unwrap().is_some());
+        assert_eq!(source.polls, 2);
     }
 
     use crate::call::video::{
