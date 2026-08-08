@@ -4,7 +4,7 @@
 //! transport shim. Frontends only receive a [`CallHandle`]; they never own an
 //! Iroh connection.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
 
 use iroh::{
@@ -85,6 +85,13 @@ pub enum CallEvent {
         /// Identity of the call.
         call_id: CallId,
     },
+    /// A call was terminated because peer authorization was revoked.
+    Terminated {
+        /// Identity of the call.
+        call_id: CallId,
+        /// Peer whose authorization was revoked.
+        peer: PublicKey,
+    },
     /// Local audio mute state changed.
     MutedChanged {
         /// Identity of the call.
@@ -119,13 +126,14 @@ enum Command {
         enabled: bool,
     },
     Incoming(Connection),
+    RevokePeer(PublicKey),
 }
 
 /// Handle for sending commands to a running call actor.
 #[derive(Debug, Clone)]
 pub struct CallHandle {
     command_tx: mpsc::Sender<Command>,
-    denied_peers: Arc<RwLock<HashSet<PublicKey>>>,
+    authorized_peers: Arc<RwLock<HashSet<PublicKey>>>,
     active_call: Arc<Mutex<Option<CallId>>>,
 }
 
@@ -145,12 +153,7 @@ impl CallHandle {
         peer: PublicKey,
         kind: CallKind,
     ) -> std::result::Result<CallId, CallError> {
-        if self
-            .denied_peers
-            .read()
-            .expect("call authorization lock poisoned")
-            .contains(&peer)
-        {
+        if !self.is_authorized(peer) {
             return Err(CallError::Unauthorized);
         }
         let call_id = CallId::generate();
@@ -201,6 +204,32 @@ impl CallHandle {
         self.send(Command::SetCameraEnabled { call_id, enabled })
     }
 
+    /// Allow or deny a peer for call setup and active calls. Authorization is
+    /// deny-by-default; revocation terminates active calls with this peer.
+    pub fn set_peer_authorized(&self, peer: PublicKey, authorized: bool) {
+        let changed = {
+            let mut peers = self
+                .authorized_peers
+                .write()
+                .expect("call authorization lock poisoned");
+            if authorized {
+                peers.insert(peer)
+            } else {
+                peers.remove(&peer)
+            }
+        };
+        if changed && !authorized {
+            let _ = self.command_tx.try_send(Command::RevokePeer(peer));
+        }
+    }
+
+    fn is_authorized(&self, peer: PublicKey) -> bool {
+        self.authorized_peers
+            .read()
+            .expect("call authorization lock poisoned")
+            .contains(&peer)
+    }
+
     fn send(&self, command: Command) -> std::result::Result<(), CallError> {
         self.command_tx
             .try_send(command)
@@ -216,7 +245,7 @@ impl CallHandle {
 pub struct CallProtocol {
     command_tx: mpsc::Sender<Command>,
     local_id: PublicKey,
-    denied_peers: Arc<RwLock<HashSet<PublicKey>>>,
+    authorized_peers: Arc<RwLock<HashSet<PublicKey>>>,
 }
 
 impl ProtocolHandler for CallProtocol {
@@ -228,7 +257,7 @@ impl ProtocolHandler for CallProtocol {
                 peer.fmt_short()
             )));
         }
-        if self.is_denied(peer) {
+        if !self.is_authorized(peer) {
             return Err(AcceptError::from_err(n0_error::anyerr!(
                 "call peer {} is not authorized",
                 peer.fmt_short()
@@ -243,14 +272,10 @@ impl ProtocolHandler for CallProtocol {
 }
 
 impl CallProtocol {
-    /// Authorization hook used by the protocol boundary.
-    ///
-    /// The denied-peer set is intentionally only a stub until the call
-    /// authorization policy is connected in the next phase. Keeping the
-    /// check here ensures that an unauthorized connection never reaches the
-    /// call actor.
-    fn is_denied(&self, peer: PublicKey) -> bool {
-        self.denied_peers
+    /// Authorization hook used by the protocol boundary. Only established
+    /// friends (peers in the authorized set) may open a call connection.
+    fn is_authorized(&self, peer: PublicKey) -> bool {
+        self.authorized_peers
             .read()
             .expect("call authorization lock poisoned")
             .contains(&peer)
@@ -264,7 +289,7 @@ pub struct CallBuilder {
     secret_key: SecretKey,
     command_tx: mpsc::Sender<Command>,
     command_rx: Option<mpsc::Receiver<Command>>,
-    denied_peers: Arc<RwLock<HashSet<PublicKey>>>,
+    authorized_peers: Arc<RwLock<HashSet<PublicKey>>>,
 }
 
 impl CallBuilder {
@@ -276,13 +301,13 @@ impl CallBuilder {
             secret_key,
             command_tx,
             command_rx: Some(command_rx),
-            denied_peers: Arc::new(RwLock::new(HashSet::new())),
+            authorized_peers: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
-    /// Configure the initial set of peers denied from starting calls.
-    pub fn with_denied_peers(self, peers: impl IntoIterator<Item = PublicKey>) -> Self {
-        self.denied_peers
+    /// Configure the initial set of established friends allowed to call.
+    pub fn with_authorized_peers(self, peers: impl IntoIterator<Item = PublicKey>) -> Self {
+        self.authorized_peers
             .write()
             .expect("call authorization lock poisoned")
             .extend(peers);
@@ -294,7 +319,7 @@ impl CallBuilder {
         CallProtocol {
             command_tx: self.command_tx.clone(),
             local_id: self.secret_key.public(),
-            denied_peers: Arc::clone(&self.denied_peers),
+            authorized_peers: Arc::clone(&self.authorized_peers),
         }
     }
 
@@ -307,7 +332,7 @@ impl CallBuilder {
             .expect("CallBuilder::spawn called more than once");
         let handle = CallHandle {
             command_tx: self.command_tx,
-            denied_peers: Arc::clone(&self.denied_peers),
+            authorized_peers: Arc::clone(&self.authorized_peers),
             active_call: Arc::new(Mutex::new(None)),
         };
         tokio::spawn(run_actor(
@@ -326,31 +351,60 @@ async fn run_actor(
     mut command_rx: mpsc::Receiver<Command>,
     event_tx: mpsc::Sender<CallEvent>,
 ) {
+    let mut active_calls = HashMap::<CallId, PublicKey>::new();
     while let Some(command) = command_rx.recv().await {
         let event = match command {
             Command::Start {
                 call_id,
                 peer,
                 kind,
-            } => Some(CallEvent::OutgoingCallStarted {
-                call_id,
-                peer,
-                kind,
-            }),
+            } => {
+                active_calls.insert(call_id, peer);
+                Some(CallEvent::OutgoingCallStarted {
+                    call_id,
+                    peer,
+                    kind,
+                })
+            }
             Command::Accept(call_id) => Some(CallEvent::Accepted { call_id }),
             Command::Reject(call_id) => Some(CallEvent::Rejected { call_id }),
-            Command::Hangup(call_id) => Some(CallEvent::HungUp { call_id }),
+            Command::Hangup(call_id) => {
+                active_calls.remove(&call_id);
+                Some(CallEvent::HungUp { call_id })
+            }
             Command::SetMuted { call_id, muted } => {
                 Some(CallEvent::MutedChanged { call_id, muted })
             }
             Command::SetCameraEnabled { call_id, enabled } => {
                 Some(CallEvent::CameraEnabledChanged { call_id, enabled })
             }
-            Command::Incoming(connection) => Some(CallEvent::IncomingCall {
-                call_id: CallId::generate(),
-                from: connection.remote_id(),
-                kind: CallKind::Voice,
-            }),
+            Command::Incoming(connection) => {
+                let call_id = CallId::generate();
+                let peer = connection.remote_id();
+                active_calls.insert(call_id, peer);
+                Some(CallEvent::IncomingCall {
+                    call_id,
+                    from: peer,
+                    kind: CallKind::Voice,
+                })
+            }
+            Command::RevokePeer(peer) => {
+                let revoked: Vec<_> = active_calls
+                    .iter()
+                    .filter_map(|(call_id, active_peer)| (*active_peer == peer).then_some(*call_id))
+                    .collect();
+                for call_id in revoked {
+                    active_calls.remove(&call_id);
+                    if event_tx
+                        .send(CallEvent::Terminated { call_id, peer })
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                None
+            }
         };
         if let Some(event) = event {
             if event_tx.send(event).await.is_err() {
@@ -371,6 +425,7 @@ mod tests {
         let secret_key = SecretKey::generate();
         let (handle, mut events) = CallBuilder::new(endpoint, secret_key).spawn();
         let peer = SecretKey::generate().public();
+        handle.set_peer_authorized(peer, true);
         let call_id = handle.start_voice_call(peer).unwrap();
         assert!(matches!(
             events.recv().await,
@@ -387,9 +442,9 @@ mod tests {
     async fn all_handle_commands_enqueue_without_panic() {
         let endpoint = Endpoint::bind(presets::Minimal).await.unwrap();
         let (handle, _events) = CallBuilder::new(endpoint, SecretKey::generate()).spawn();
-        let call_id = handle
-            .start_video_call(SecretKey::generate().public())
-            .unwrap();
+        let peer = SecretKey::generate().public();
+        handle.set_peer_authorized(peer, true);
+        let call_id = handle.start_video_call(peer).unwrap();
         handle.accept(call_id).unwrap();
         handle.reject(call_id).unwrap();
         handle.hangup(call_id).unwrap();
@@ -401,12 +456,12 @@ mod tests {
     async fn starting_while_busy_returns_busy_without_enqueueing() {
         let endpoint = Endpoint::bind(presets::Minimal).await.unwrap();
         let (handle, mut events) = CallBuilder::new(endpoint, SecretKey::generate()).spawn();
-        let first = handle
-            .start_voice_call(SecretKey::generate().public())
-            .unwrap();
+        let peer = SecretKey::generate().public();
+        handle.set_peer_authorized(peer, true);
+        let first = handle.start_voice_call(peer).unwrap();
 
         assert_eq!(
-            handle.start_video_call(SecretKey::generate().public()),
+            handle.start_video_call(peer),
             Err(CallError::Busy)
         );
         assert!(matches!(
@@ -417,54 +472,61 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn denied_peer_is_rejected_before_enqueueing() {
+    async fn unauthorized_peer_is_rejected_before_enqueueing() {
         let endpoint = Endpoint::bind(presets::Minimal).await.unwrap();
         let peer = SecretKey::generate().public();
-        let (handle, mut events) = CallBuilder::new(endpoint, SecretKey::generate())
-            .with_denied_peers([peer])
-            .spawn();
+        let (handle, mut events) = CallBuilder::new(endpoint, SecretKey::generate()).spawn();
 
         assert_eq!(handle.start_voice_call(peer), Err(CallError::Unauthorized));
         assert!(events.try_recv().is_err());
     }
 
     #[tokio::test]
-    async fn protocol_rejects_local_and_denied_peers() {
+    async fn protocol_rejects_local_and_unauthorized_peers() {
         let endpoint = Endpoint::bind(presets::Minimal).await.unwrap();
         let local_key = SecretKey::generate();
         let denied_key = SecretKey::generate();
         let handler = CallBuilder::new(endpoint, local_key.clone())
-            .with_denied_peers([denied_key.public()])
+            .with_authorized_peers([denied_key.public()])
             .protocol_handler();
 
-        assert!(!handler.is_denied(local_key.public()));
-        assert!(handler.is_denied(denied_key.public()));
+        assert!(!handler.is_authorized(local_key.public()));
+        assert!(handler.is_authorized(denied_key.public()));
         assert_eq!(handler.local_id, local_key.public());
     }
 
     #[tokio::test]
-    async fn protocol_forwards_allowed_connection_to_actor() {
-        let server = Endpoint::bind(presets::Minimal).await.unwrap();
-        let server_key = SecretKey::generate();
-        let builder = CallBuilder::new(server.clone(), server_key);
-        let handler = builder.protocol_handler();
-        let (_handle, mut events) = builder.spawn();
-        let router = iroh::protocol::Router::builder(server)
-            .accept(CALL_ALPN, handler)
-            .spawn();
+    async fn unauthorized_outbound_call_is_rejected() {
+        let endpoint = Endpoint::bind(presets::Minimal).await.unwrap();
+        let (handle, _events) = CallBuilder::new(endpoint, SecretKey::generate()).spawn();
+        let peer = SecretKey::generate().public();
+        assert_eq!(handle.start_voice_call(peer), Err(CallError::Unauthorized));
+    }
 
-        let client = Endpoint::bind(presets::Minimal).await.unwrap();
-        client
-            .connect(router.endpoint().addr(), CALL_ALPN)
-            .await
-            .unwrap();
-
+    #[tokio::test]
+    async fn revoking_peer_terminates_active_call() {
+        let endpoint = Endpoint::bind(presets::Minimal).await.unwrap();
+        let (handle, mut events) = CallBuilder::new(endpoint, SecretKey::generate()).spawn();
+        let peer = SecretKey::generate().public();
+        handle.set_peer_authorized(peer, true);
+        let call_id = handle.start_voice_call(peer).unwrap();
+        assert!(matches!(events.recv().await, Some(CallEvent::OutgoingCallStarted { .. })));
+        handle.set_peer_authorized(peer, false);
         assert!(matches!(
-            tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
-                .await
-                .unwrap(),
-            Some(CallEvent::IncomingCall { .. })
+            tokio::time::timeout(std::time::Duration::from_secs(1), events.recv()).await.unwrap(),
+            Some(CallEvent::Terminated { call_id: id, peer: revoked }) if id == call_id && revoked == peer
         ));
-        router.shutdown().await.unwrap();
+        assert_eq!(handle.start_voice_call(peer), Err(CallError::Unauthorized));
+    }
+
+    #[tokio::test]
+    async fn protocol_forwards_allowed_connection_to_actor() {
+        let endpoint = Endpoint::bind(presets::Minimal).await.unwrap();
+        let local_key = SecretKey::generate();
+        let peer = SecretKey::generate().public();
+        let builder = CallBuilder::new(endpoint, local_key).with_authorized_peers([peer]);
+        let handler = builder.protocol_handler();
+        assert!(handler.is_authorized(peer));
+        let (_handle, _events) = builder.spawn();
     }
 }
