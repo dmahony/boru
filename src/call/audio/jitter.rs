@@ -108,6 +108,13 @@ impl AudioJitterBuffer {
         self.next_deadline
     }
 
+    /// Borrow a packet by sequence without removing it from the playout queue.
+    /// This lets Opus FEC inspect the following packet while preserving its
+    /// normal deadline and decode order.
+    pub(crate) fn peek(&self, sequence: u32) -> Option<&BufferedAudioPacket> {
+        self.packets.get(&sequence)
+    }
+
     /// Start accepting packets for a call, discarding every previous packet.
     pub fn reset_for_call(&mut self, call_id: CallId) {
         self.call_id = Some(call_id);
