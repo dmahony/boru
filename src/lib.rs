@@ -25,6 +25,8 @@ pub mod api;
 /// [`PooledBytes`](buffer_pool::PooledBytes) instead of re-allocating on every
 /// message.
 pub mod buffer_pool;
+/// Call identities and call-control state shared by frontends.
+pub mod call;
 #[cfg(feature = "net")]
 pub mod discovery_backend;
 #[cfg(feature = "net")]
