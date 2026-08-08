@@ -3,6 +3,10 @@
 pub mod media;
 pub mod wire;
 
+/// Native audio device access, kept separate from call and Iroh protocol code.
+#[cfg(feature = "voice-calls")]
+pub mod device;
+
 /// Call actor, handle, and Iroh protocol registration.
 #[cfg(feature = "net")]
 pub mod manager;
