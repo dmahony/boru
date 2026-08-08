@@ -48,24 +48,55 @@ jobs:
 
       - name: Build (release)
         run: |
+          # Windows ships the reviewed GStreamer runtime beside the exe (see
+          # scripts/package_windows.sh).  The app itself stays on --features
+          # gui so it starts cleanly without GStreamer: gstreamer-sys links
+          # import libraries, so enabling video-playback would make boru.exe
+          # fail to start when the runtime DLLs are missing.  The bundled
+          # runtime is ready for the next build that moves to dynamic
+          # loading / delay-load imports (docs/video-runtime-packaging.md).
           cargo build --release --target ${{ matrix.target }} --features gui --example boru
+
+      - name: Fetch GStreamer MSVC runtime (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          # Pin the reviewed GStreamer MSVC runtime.  scripts/package_windows.sh
+          # ships only the curated plugin subset + runtime DLL closure
+          # (scripts/gstreamer-windows-plugins.txt / -runtime.txt), and the
+          # bundled version must match the manifests.
+          curl -fL -o gstreamer-runtime.msi \
+            "https://gstreamer.freedesktop.org/data/pkg/windows/1.24.13/msvc/gstreamer-1.0-msvc-x86_64-1.24.13.msi"
+          echo "66915d82adda34189703c36a5d2ef145d2e3afb7afc12c66fcf2ea506e2466d2  gstreamer-runtime.msi" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/gstreamer-extract"
+          msiexec //a gstreamer-runtime.msi //qn TARGETDIR="C:\\gstreamer-extract"
+          echo "GSTREAMER_MSVC_ROOT=C:/gstreamer-extract/gstreamer/1.0/msvc_x86_64" >> "$GITHUB_ENV"
 
       - name: Package artifact
         shell: bash
         run: |
-          # Ship the bundled Papirus icon assets next to the binary so
-          # icons work in the release package, not just dev builds
-          # (PAPIRUS-17).  The runtime loader resolves the asset root from
-          # <exe_dir>/assets/third_party/papirus when BORU_PAPIRUS_ASSETS
-          # is unset.
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/examples/${{ matrix.binary }}" dist/
-          mkdir -p dist/assets/third_party
-          cp -r assets/third_party/papirus dist/assets/third_party/papirus
-          cd dist
           if [ "${{ runner.os }}" = "Windows" ]; then
-            7z a "../${{ matrix.artifact }}.zip" "${{ matrix.binary }}" assets/
+            # Self-contained Windows package: boru.exe + Papirus icons +
+            # reviewed GStreamer runtime + third-party notices + toolchain
+            # runtime DLLs.  Icons are bundled by the script so the
+            # exe-relative loader always resolves them (PAPIRUS-17).
+            bash scripts/package_windows.sh \
+              --exe "target/${{ matrix.target }}/release/examples/${{ matrix.binary }}" \
+              --gst-root "$GSTREAMER_MSVC_ROOT" \
+              --target "${{ matrix.target }}" \
+              --out dist
+            # package_windows.sh writes the zip + sha256 into --out; the
+            # artifact name already matches for x86_64.  Rename defensively.
+            for f in dist/boru-windows-*.zip*; do
+              base=$(basename "$f")
+              mv "$f" "$base"
+            done
           else
+            cp "target/${{ matrix.target }}/release/examples/${{ matrix.binary }}" dist/
+            mkdir -p dist/assets/third_party
+            cp -r assets/third_party/papirus dist/assets/third_party/papirus
+            cd dist
             tar -czf "../${{ matrix.artifact }}.tar.gz" "${{ matrix.binary }}" assets/
           fi
 
@@ -76,6 +107,7 @@ jobs:
           path: |
             ${{ matrix.artifact }}.tar.gz
             ${{ matrix.artifact }}.zip
+            ${{ matrix.artifact }}.zip.sha256
 
   release:
     needs: build
@@ -104,6 +136,7 @@ jobs:
           files: |
             boru-linux-x86_64/boru-linux-x86_64.tar.gz
             boru-windows-x86_64/boru-windows-x86_64.zip
+            boru-windows-x86_64/boru-windows-x86_64.zip.sha256
             boru-macos-aarch64/boru-macos-aarch64.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
