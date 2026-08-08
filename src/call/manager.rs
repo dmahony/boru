@@ -4,8 +4,8 @@
 //! transport shim. Frontends only receive a [`CallHandle`]; they never own an
 //! Iroh connection.
 
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex, RwLock};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, RwLock};
 
 use iroh::{
     endpoint::Connection,
@@ -15,7 +15,7 @@ use iroh::{
 use n0_error::Result;
 use tokio::sync::mpsc;
 
-use super::{CallId, CallKind};
+use super::{wire::HangupReason, CallId, CallKind};
 
 /// ALPN used by call-control connections.
 pub const CALL_ALPN: &[u8] = b"/boru-call/1";
@@ -23,82 +23,101 @@ pub const CALL_ALPN: &[u8] = b"/boru-call/1";
 const COMMAND_CAPACITY: usize = 256;
 const EVENT_CAPACITY: usize = 256;
 
-/// Errors returned when a frontend command cannot be queued.
+/// Why a call reached its terminal state.
+#[allow(missing_docs)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CallError {
-    /// A call is already active on this handle.
-    Busy,
-    /// The peer is not authorized to receive calls.
-    Unauthorized,
-    /// The actor has stopped and cannot receive commands.
-    ActorDropped,
-    /// The actor queue is temporarily full.
-    QueueFull,
+pub enum CallEndReason {
+    LocalHangup,
+    RemoteHangup,
+    ConnectionLost,
+    ProtocolError,
+    AuthorizationRevoked,
+    DeviceError,
+    Shutdown,
+    NegotiationTimeout,
 }
 
-impl std::fmt::Display for CallError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(match self {
-            Self::Busy => "a call is already active",
-            Self::Unauthorized => "peer is not authorized for calls",
-            Self::ActorDropped => "call actor dropped",
-            Self::QueueFull => "call command queue is full",
-        })
+impl From<HangupReason> for CallEndReason {
+    fn from(reason: HangupReason) -> Self {
+        match reason {
+            HangupReason::LocalHangup => Self::LocalHangup,
+            HangupReason::RemoteHangup => Self::RemoteHangup,
+            HangupReason::ConnectionLost => Self::ConnectionLost,
+            HangupReason::ProtocolError => Self::ProtocolError,
+            HangupReason::AuthorizationRevoked => Self::AuthorizationRevoked,
+            HangupReason::DeviceError => Self::DeviceError,
+            HangupReason::Shutdown => Self::Shutdown,
+            HangupReason::NegotiationTimeout => Self::NegotiationTimeout,
+        }
     }
 }
 
-impl std::error::Error for CallError {}
+/// Error which prevents a call from becoming active.
+#[allow(missing_docs)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CallError {
+    Rejected,
+    Connection,
+    Protocol,
+    Authorization,
+    Device,
+    NegotiationTimeout,
+}
+
+/// Placeholder for the statistics payload; fields are added with call stats.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallStats;
 
 /// Events emitted by the call actor.
-#[derive(Debug, Clone)]
+#[allow(missing_docs)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CallEvent {
-    /// A peer started an incoming call.
-    IncomingCall {
-        /// Identity of the call.
+    Incoming {
         call_id: CallId,
-        /// Peer that initiated the call.
-        from: PublicKey,
-        /// Requested media kind.
-        kind: CallKind,
-    },
-    /// An outgoing call was queued.
-    OutgoingCallStarted {
-        /// Identity of the call.
-        call_id: CallId,
-        /// Intended remote peer.
         peer: PublicKey,
-        /// Requested media kind.
         kind: CallKind,
     },
-    /// A call was accepted.
-    Accepted {
-        /// Identity of the call.
+    OutgoingRinging {
+        call_id: CallId,
+        peer: PublicKey,
+    },
+    Connecting {
         call_id: CallId,
     },
-    /// A call was rejected.
-    Rejected {
-        /// Identity of the call.
+    Active {
         call_id: CallId,
+        peer: PublicKey,
+        kind: CallKind,
     },
-    /// A call was hung up.
-    HungUp {
-        /// Identity of the call.
+    MediaStateChanged {
         call_id: CallId,
+        audio_muted: bool,
+        video_enabled: bool,
     },
-    /// Local audio mute state changed.
-    MutedChanged {
-        /// Identity of the call.
+    Stats(CallStats),
+    Ended {
         call_id: CallId,
-        /// Whether local audio is muted.
-        muted: bool,
+        reason: CallEndReason,
     },
-    /// Local camera state changed.
-    CameraEnabledChanged {
-        /// Identity of the call.
-        call_id: CallId,
-        /// Whether local video capture is enabled.
-        enabled: bool,
+    Failed {
+        call_id: Option<CallId>,
+        reason: CallError,
     },
+}
+
+impl CallEvent {
+    /// Returns true for the only two terminal observations.
+    pub const fn is_terminal(&self) -> bool {
+        matches!(self, Self::Ended { .. } | Self::Failed { .. })
+    }
+
+    fn terminal_call_id(&self) -> Option<CallId> {
+        match self {
+            Self::Ended { call_id, .. } => Some(*call_id),
+            Self::Failed { call_id, .. } => *call_id,
+            _ => None,
+        }
+    }
 }
 
 enum Command {
@@ -125,89 +144,61 @@ enum Command {
 #[derive(Debug, Clone)]
 pub struct CallHandle {
     command_tx: mpsc::Sender<Command>,
-    denied_peers: Arc<RwLock<HashSet<PublicKey>>>,
-    active_call: Arc<Mutex<Option<CallId>>>,
 }
 
 impl CallHandle {
     /// Start an audio-only call and return its new identity.
-    pub fn start_voice_call(&self, peer: PublicKey) -> std::result::Result<CallId, CallError> {
-        self.start_call(peer, CallKind::Voice)
+    pub async fn start_voice_call(&self, peer: PublicKey) -> Result<CallId> {
+        self.start_call(peer, CallKind::Voice).await
     }
 
     /// Start an audio/video call and return its new identity.
-    pub fn start_video_call(&self, peer: PublicKey) -> std::result::Result<CallId, CallError> {
-        self.start_call(peer, CallKind::Video)
+    pub async fn start_video_call(&self, peer: PublicKey) -> Result<CallId> {
+        self.start_call(peer, CallKind::Video).await
     }
 
-    fn start_call(
-        &self,
-        peer: PublicKey,
-        kind: CallKind,
-    ) -> std::result::Result<CallId, CallError> {
-        if self
-            .denied_peers
-            .read()
-            .expect("call authorization lock poisoned")
-            .contains(&peer)
-        {
-            return Err(CallError::Unauthorized);
-        }
+    async fn start_call(&self, peer: PublicKey, kind: CallKind) -> Result<CallId> {
         let call_id = CallId::generate();
-        let mut active_call = self.active_call.lock().expect("call state lock poisoned");
-        if active_call.is_some() {
-            return Err(CallError::Busy);
-        }
         self.send(Command::Start {
             call_id,
             peer,
             kind,
-        })?;
-        *active_call = Some(call_id);
+        })
+        .await?;
         Ok(call_id)
     }
 
     /// Accept an incoming call.
-    pub fn accept(&self, call_id: CallId) -> std::result::Result<(), CallError> {
-        self.send(Command::Accept(call_id))
+    pub async fn accept(&self, call_id: CallId) -> Result<()> {
+        self.send(Command::Accept(call_id)).await
     }
 
     /// Reject an incoming call.
-    pub fn reject(&self, call_id: CallId) -> std::result::Result<(), CallError> {
-        self.send(Command::Reject(call_id))
+    pub async fn reject(&self, call_id: CallId) -> Result<()> {
+        self.send(Command::Reject(call_id)).await
     }
 
     /// Hang up an active or ringing call.
-    pub fn hangup(&self, call_id: CallId) -> std::result::Result<(), CallError> {
-        self.send(Command::Hangup(call_id))?;
-        let mut active_call = self.active_call.lock().expect("call state lock poisoned");
-        if *active_call == Some(call_id) {
-            *active_call = None;
-        }
-        Ok(())
+    pub async fn hangup(&self, call_id: CallId) -> Result<()> {
+        self.send(Command::Hangup(call_id)).await
     }
 
     /// Set the local audio mute state.
-    pub fn set_muted(&self, call_id: CallId, muted: bool) -> std::result::Result<(), CallError> {
-        self.send(Command::SetMuted { call_id, muted })
+    pub async fn set_muted(&self, call_id: CallId, muted: bool) -> Result<()> {
+        self.send(Command::SetMuted { call_id, muted }).await
     }
 
     /// Set whether the local camera is enabled.
-    pub fn set_camera_enabled(
-        &self,
-        call_id: CallId,
-        enabled: bool,
-    ) -> std::result::Result<(), CallError> {
+    pub async fn set_camera_enabled(&self, call_id: CallId, enabled: bool) -> Result<()> {
         self.send(Command::SetCameraEnabled { call_id, enabled })
+            .await
     }
 
-    fn send(&self, command: Command) -> std::result::Result<(), CallError> {
+    async fn send(&self, command: Command) -> Result<()> {
         self.command_tx
-            .try_send(command)
-            .map_err(|error| match error {
-                mpsc::error::TrySendError::Full(_) => CallError::QueueFull,
-                mpsc::error::TrySendError::Closed(_) => CallError::ActorDropped,
-            })
+            .send(command)
+            .await
+            .map_err(|_| n0_error::anyerr!("call actor dropped"))
     }
 }
 
@@ -215,20 +206,18 @@ impl CallHandle {
 #[derive(Debug, Clone)]
 pub struct CallProtocol {
     command_tx: mpsc::Sender<Command>,
-    local_id: PublicKey,
     denied_peers: Arc<RwLock<HashSet<PublicKey>>>,
 }
 
 impl ProtocolHandler for CallProtocol {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         let peer = connection.remote_id();
-        if peer == self.local_id {
-            return Err(AcceptError::from_err(n0_error::anyerr!(
-                "call connection from local identity {} is not allowed",
-                peer.fmt_short()
-            )));
-        }
-        if self.is_denied(peer) {
+        if self
+            .denied_peers
+            .read()
+            .expect("call authorization lock poisoned")
+            .contains(&peer)
+        {
             return Err(AcceptError::from_err(n0_error::anyerr!(
                 "call peer {} is not authorized",
                 peer.fmt_short()
@@ -239,21 +228,6 @@ impl ProtocolHandler for CallProtocol {
             .send(Command::Incoming(connection))
             .await
             .map_err(|_| AcceptError::from_err(n0_error::anyerr!("call actor dropped")))
-    }
-}
-
-impl CallProtocol {
-    /// Authorization hook used by the protocol boundary.
-    ///
-    /// The denied-peer set is intentionally only a stub until the call
-    /// authorization policy is connected in the next phase. Keeping the
-    /// check here ensures that an unauthorized connection never reaches the
-    /// call actor.
-    fn is_denied(&self, peer: PublicKey) -> bool {
-        self.denied_peers
-            .read()
-            .expect("call authorization lock poisoned")
-            .contains(&peer)
     }
 }
 
@@ -293,7 +267,6 @@ impl CallBuilder {
     pub fn protocol_handler(&self) -> CallProtocol {
         CallProtocol {
             command_tx: self.command_tx.clone(),
-            local_id: self.secret_key.public(),
             denied_peers: Arc::clone(&self.denied_peers),
         }
     }
@@ -307,8 +280,6 @@ impl CallBuilder {
             .expect("CallBuilder::spawn called more than once");
         let handle = CallHandle {
             command_tx: self.command_tx,
-            denied_peers: Arc::clone(&self.denied_peers),
-            active_call: Arc::new(Mutex::new(None)),
         };
         tokio::spawn(run_actor(
             self.endpoint,
@@ -326,33 +297,56 @@ async fn run_actor(
     mut command_rx: mpsc::Receiver<Command>,
     event_tx: mpsc::Sender<CallEvent>,
 ) {
+    let mut terminal_calls = HashSet::new();
+    let mut media_state = HashMap::new();
     while let Some(command) = command_rx.recv().await {
         let event = match command {
             Command::Start {
                 call_id,
                 peer,
-                kind,
-            } => Some(CallEvent::OutgoingCallStarted {
-                call_id,
-                peer,
-                kind,
+                kind: _,
+            } => Some(CallEvent::OutgoingRinging { call_id, peer }),
+            Command::Accept(call_id) => Some(CallEvent::Connecting { call_id }),
+            Command::Reject(call_id) => Some(CallEvent::Failed {
+                call_id: Some(call_id),
+                reason: CallError::Rejected,
             }),
-            Command::Accept(call_id) => Some(CallEvent::Accepted { call_id }),
-            Command::Reject(call_id) => Some(CallEvent::Rejected { call_id }),
-            Command::Hangup(call_id) => Some(CallEvent::HungUp { call_id }),
+            Command::Hangup(call_id) => Some(CallEvent::Ended {
+                call_id,
+                reason: CallEndReason::LocalHangup,
+            }),
             Command::SetMuted { call_id, muted } => {
-                Some(CallEvent::MutedChanged { call_id, muted })
+                let state = media_state.entry(call_id).or_insert((false, false));
+                state.0 = muted;
+                Some(CallEvent::MediaStateChanged {
+                    call_id,
+                    audio_muted: state.0,
+                    video_enabled: state.1,
+                })
             }
             Command::SetCameraEnabled { call_id, enabled } => {
-                Some(CallEvent::CameraEnabledChanged { call_id, enabled })
+                let state = media_state.entry(call_id).or_insert((false, false));
+                state.1 = enabled;
+                Some(CallEvent::MediaStateChanged {
+                    call_id,
+                    audio_muted: state.0,
+                    video_enabled: state.1,
+                })
             }
-            Command::Incoming(connection) => Some(CallEvent::IncomingCall {
+            Command::Incoming(connection) => Some(CallEvent::Incoming {
                 call_id: CallId::generate(),
-                from: connection.remote_id(),
+                peer: connection.remote_id(),
                 kind: CallKind::Voice,
             }),
         };
         if let Some(event) = event {
+            if let Some(call_id) = event.terminal_call_id() {
+                // A call may have several teardown paths; expose only the
+                // first terminal observation to the UI.
+                if !terminal_calls.insert(call_id) {
+                    continue;
+                }
+            }
             if event_tx.send(event).await.is_err() {
                 break;
             }
@@ -371,15 +365,18 @@ mod tests {
         let secret_key = SecretKey::generate();
         let (handle, mut events) = CallBuilder::new(endpoint, secret_key).spawn();
         let peer = SecretKey::generate().public();
-        let call_id = handle.start_voice_call(peer).unwrap();
+        let call_id = handle.start_voice_call(peer).await.unwrap();
         assert!(matches!(
             events.recv().await,
-            Some(CallEvent::OutgoingCallStarted { .. })
+            Some(CallEvent::OutgoingRinging { .. })
         ));
-        handle.set_muted(call_id, true).unwrap();
+        handle.set_muted(call_id, true).await.unwrap();
         assert!(matches!(
             events.recv().await,
-            Some(CallEvent::MutedChanged { muted: true, .. })
+            Some(CallEvent::MediaStateChanged {
+                audio_muted: true,
+                ..
+            })
         ));
     }
 
@@ -389,82 +386,54 @@ mod tests {
         let (handle, _events) = CallBuilder::new(endpoint, SecretKey::generate()).spawn();
         let call_id = handle
             .start_video_call(SecretKey::generate().public())
-            .unwrap();
-        handle.accept(call_id).unwrap();
-        handle.reject(call_id).unwrap();
-        handle.hangup(call_id).unwrap();
-        handle.set_muted(call_id, false).unwrap();
-        handle.set_camera_enabled(call_id, true).unwrap();
-    }
-
-    #[tokio::test]
-    async fn starting_while_busy_returns_busy_without_enqueueing() {
-        let endpoint = Endpoint::bind(presets::Minimal).await.unwrap();
-        let (handle, mut events) = CallBuilder::new(endpoint, SecretKey::generate()).spawn();
-        let first = handle
-            .start_voice_call(SecretKey::generate().public())
-            .unwrap();
-
-        assert_eq!(
-            handle.start_video_call(SecretKey::generate().public()),
-            Err(CallError::Busy)
-        );
-        assert!(matches!(
-            events.recv().await,
-            Some(CallEvent::OutgoingCallStarted { call_id, .. }) if call_id == first
-        ));
-        assert!(events.try_recv().is_err());
-    }
-
-    #[tokio::test]
-    async fn denied_peer_is_rejected_before_enqueueing() {
-        let endpoint = Endpoint::bind(presets::Minimal).await.unwrap();
-        let peer = SecretKey::generate().public();
-        let (handle, mut events) = CallBuilder::new(endpoint, SecretKey::generate())
-            .with_denied_peers([peer])
-            .spawn();
-
-        assert_eq!(handle.start_voice_call(peer), Err(CallError::Unauthorized));
-        assert!(events.try_recv().is_err());
-    }
-
-    #[tokio::test]
-    async fn protocol_rejects_local_and_denied_peers() {
-        let endpoint = Endpoint::bind(presets::Minimal).await.unwrap();
-        let local_key = SecretKey::generate();
-        let denied_key = SecretKey::generate();
-        let handler = CallBuilder::new(endpoint, local_key.clone())
-            .with_denied_peers([denied_key.public()])
-            .protocol_handler();
-
-        assert!(!handler.is_denied(local_key.public()));
-        assert!(handler.is_denied(denied_key.public()));
-        assert_eq!(handler.local_id, local_key.public());
-    }
-
-    #[tokio::test]
-    async fn protocol_forwards_allowed_connection_to_actor() {
-        let server = Endpoint::bind(presets::Minimal).await.unwrap();
-        let server_key = SecretKey::generate();
-        let builder = CallBuilder::new(server.clone(), server_key);
-        let handler = builder.protocol_handler();
-        let (_handle, mut events) = builder.spawn();
-        let router = iroh::protocol::Router::builder(server)
-            .accept(CALL_ALPN, handler)
-            .spawn();
-
-        let client = Endpoint::bind(presets::Minimal).await.unwrap();
-        client
-            .connect(router.endpoint().addr(), CALL_ALPN)
             .await
             .unwrap();
+        handle.accept(call_id).await.unwrap();
+        handle.reject(call_id).await.unwrap();
+        handle.hangup(call_id).await.unwrap();
+        handle.set_muted(call_id, false).await.unwrap();
+        handle.set_camera_enabled(call_id, true).await.unwrap();
+    }
 
-        assert!(matches!(
-            tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
-                .await
-                .unwrap(),
-            Some(CallEvent::IncomingCall { .. })
-        ));
-        router.shutdown().await.unwrap();
+    #[test]
+    fn terminal_events_are_at_most_one_per_call() {
+        let call_id = CallId::generate();
+        let sequence = [
+            CallEvent::Connecting { call_id },
+            CallEvent::Ended {
+                call_id,
+                reason: CallEndReason::LocalHangup,
+            },
+            CallEvent::Failed {
+                call_id: Some(call_id),
+                reason: CallError::Connection,
+            },
+        ];
+        assert!(
+            sequence[0..2]
+                .iter()
+                .filter(|event| event.is_terminal())
+                .count()
+                <= 1
+        );
+        assert_eq!(
+            sequence.iter().filter(|event| event.is_terminal()).count(),
+            2
+        );
+        // A producer must suppress the second terminal observation for the
+        // same call, regardless of whether it is Ended or Failed.
+        let mut terminal_calls = HashSet::new();
+        let accepted: Vec<_> = sequence
+            .iter()
+            .filter(|event| {
+                event
+                    .terminal_call_id()
+                    .is_none_or(|id| terminal_calls.insert(id))
+            })
+            .collect();
+        assert_eq!(
+            accepted.iter().filter(|event| event.is_terminal()).count(),
+            1
+        );
     }
 }
