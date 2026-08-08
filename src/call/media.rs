@@ -182,9 +182,9 @@ pub async fn media_reader(
 
 /// Bytes reserved at the start of every media datagram.
 ///
-/// This is the media framing budget; fragmentation is deliberately handled by
-/// a later phase and is not part of this module.
-pub const MEDIA_HEADER_SIZE: usize = 16;
+/// Keep this alias tied to the wire header. Fragmentation must budget for the
+/// bytes that [`MediaDatagram::encode`] actually emits.
+pub const MEDIA_HEADER_SIZE: usize = MEDIA_HEADER_LEN;
 
 /// Convert a negotiated datagram size into room for an encoded media payload.
 ///
@@ -309,6 +309,10 @@ pub enum MediaDatagramError {
         /// Bytes required by the media header.
         header: usize,
     },
+    /// An encoded media frame contained no bytes to fragment.
+    EmptyPayload,
+    /// The frame would require more fragments than the wire field can carry.
+    FragmentCountOverflow,
 }
 
 impl fmt::Display for MediaDatagramError {
@@ -341,6 +345,10 @@ impl fmt::Display for MediaDatagramError {
                 formatter,
                 "datagram size {maximum} is smaller than media header {header}"
             ),
+            Self::EmptyPayload => formatter.write_str("encoded media frame has an empty payload"),
+            Self::FragmentCountOverflow => {
+                formatter.write_str("encoded media frame requires too many fragments")
+            }
         }
     }
 }
