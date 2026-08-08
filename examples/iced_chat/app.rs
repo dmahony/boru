@@ -49,6 +49,8 @@ use boru_core::chat_core::{
 use boru_core::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
 use boru_core::call::manager::{CallEvent, CallHandle};
 use boru_core::call::{CallId, CallKind};
+#[cfg(feature = "video-calls")]
+use boru_core::call::video::VideoFrame;
 use boru_core::contact::{direct_topic, ContactAction, SignedContactMessage};
 use boru_core::conversations::{
     spawn_conversation_forwarder, ConversationEntry, ConversationKind, ConversationNetEvent,
@@ -3865,6 +3867,14 @@ pub struct IcedChat {
     call_return_screen: Option<Screen>,
     call_audio_muted: bool,
     call_camera_enabled: bool,
+    /// Selected camera label shown by the call controls. The media actor owns
+    /// capture; keeping the UI selection here avoids pretending that a device
+    /// switch is complete before the actor acknowledges it.
+    call_camera_selection: String,
+    #[cfg(feature = "video-calls")]
+    latest_remote_frame: Option<VideoFrame>,
+    #[cfg(feature = "video-calls")]
+    latest_local_frame: Option<VideoFrame>,
     /// Monotonic start time used for the in-call duration display.
     call_started_at: Option<std::time::Instant>,
     /// Pending incoming call shown as an overlay; media is only activated
@@ -8160,6 +8170,11 @@ impl IcedChat {
             call_return_screen: None,
             call_audio_muted: false,
             call_camera_enabled: false,
+            call_camera_selection: "Front camera".to_string(),
+            #[cfg(feature = "video-calls")]
+            latest_remote_frame: None,
+            #[cfg(feature = "video-calls")]
+            latest_local_frame: None,
             call_started_at: None,
             incoming_call: None,
             inbox_events_rx,
@@ -14229,9 +14244,22 @@ impl IcedChat {
                 } else { iced::Task::none() }
             }
             AppMessage::ToggleCallCamera => {
+                if let Some(call_id) = self.active_call_id {
+                    self.call_camera_enabled = !self.call_camera_enabled;
+                    let handle = self.call_handle.clone();
+                    let enabled = self.call_camera_enabled;
+                    iced::Task::perform(async move {
+                        handle.set_camera_enabled(call_id, enabled).await.map_err(|e| e.to_string())
+                    }, AppMessage::CallCommandFinished)
+                } else { iced::Task::none() }
+            }
+            AppMessage::SelectCamera(selection) => {
+                self.call_camera_selection = if selection == "next" {
+                    if self.call_camera_selection == "Front camera" { "Back camera".to_string() } else { "Front camera".to_string() }
+                } else { selection };
                 iced::Task::none()
             }
-            AppMessage::SelectMicrophone(_) | AppMessage::SelectSpeaker(_) | AppMessage::SelectCamera(_) | AppMessage::CallUiTick => iced::Task::none(),
+            AppMessage::SelectMicrophone(_) | AppMessage::SelectSpeaker(_) | AppMessage::CallUiTick => iced::Task::none(),
             AppMessage::CallCommandFinished(Err(error)) => {
                 tracing::warn!(error = %error, "call command failed");
                 self.toast_message = Some(friendly_call_error_text(&error).to_string());
@@ -30667,28 +30695,65 @@ impl IcedChat {
         let name = self.outgoing_call_peer.as_ref().map(|peer| self.resolve_name(peer)).unwrap_or_else(|| "Unknown contact".to_string());
         let initials = crate::presentation::initials(&name);
         let avatar_label = if initials.is_empty() { "?".to_string() } else { initials };
-        let avatar = container(text(avatar_label).size(44.0))
-            .width(Length::Fixed(128.0)).height(Length::Fixed(128.0))
-            .center_x(Length::Fixed(128.0)).center_y(Length::Fixed(128.0))
+        let remote_fallback = || container(column![text(avatar_label.clone()).size(44.0), text(name.clone()).size(18.0)]
+            .spacing(SPACE_8).align_x(Alignment::Center))
+            .width(Length::Fill).height(Length::Fill)
+            .center_x(Length::Fill).center_y(Length::Fill)
             .style(|theme| iced::widget::container::Style {
                 background: Some(iced::Background::Color(bg_surface_secondary(theme))),
-                border: iced::Border { radius: 64.0.into(), ..Default::default() },
                 ..Default::default()
             });
+        #[cfg(feature = "video-calls")]
+        let remote = self.latest_remote_frame.as_ref().map(|frame| {
+            iced::widget::image(iced::widget::image::Handle::from_rgba(
+                frame.width, frame.height, frame.rgba.to_vec()))
+                .width(Length::Fill).height(Length::Fill).into()
+        });
+        #[cfg(not(feature = "video-calls"))]
+        let remote: Option<iced::Element<'_, AppMessage>> = None;
+        let remote_main: iced::Element<'_, AppMessage> = if self.call_camera_enabled {
+            remote.unwrap_or_else(|| remote_fallback().into())
+        } else { remote_fallback().into() };
+        #[cfg(feature = "video-calls")]
+        let local = self.latest_local_frame.as_ref().map(|frame| {
+            iced::widget::image(iced::widget::image::Handle::from_rgba(
+                frame.width, frame.height, frame.rgba.to_vec()))
+                .width(Length::Fixed(220.0)).height(Length::Fixed(150.0)).into()
+        });
+        #[cfg(not(feature = "video-calls"))]
+        let local: Option<iced::Element<'_, AppMessage>> = None;
+        let local_pip: iced::Element<'_, AppMessage> = local.unwrap_or_else(|| container(text("You").size(18.0))
+            .width(Length::Fixed(220.0)).height(Length::Fixed(150.0))
+            .center_x(Length::Fixed(220.0)).center_y(Length::Fixed(150.0))
+            .style(|theme| iced::widget::container::Style {
+                background: Some(iced::Background::Color(bg_surface_secondary(theme))),
+                border: iced::Border { radius: 12.0.into(), ..Default::default() },
+                ..Default::default()
+            }).into());
         let elapsed = self.call_started_at.map(|start| start.elapsed().as_secs()).unwrap_or_default();
         let duration = format!("{:02}:{:02}", elapsed / 60, elapsed % 60);
         let status = if self.call_audio_muted { "Connected · Microphone muted" } else { "Connected · Audio" };
         let mute_label = if self.call_audio_muted { "Unmute" } else { "Mute" };
         let mute = button(text(mute_label)).on_press_maybe(self.active_call_id.map(|_| AppMessage::ToggleCallMute));
-        // Upgrade signalling is not implemented; disabled is safer than restarting the call.
-        let video = button(text("Video"));
+        let camera_label = if self.call_camera_enabled { "Camera Off" } else { "Camera On" };
+        let camera = button(text(camera_label)).on_press_maybe(self.active_call_id.map(|_| AppMessage::ToggleCallCamera));
+        let switch_camera = button(text(format!("Switch Camera · {}", self.call_camera_selection)))
+            .on_press(AppMessage::SelectCamera("next".to_string()));
         let hang_up = button(text("Hang Up"))
             .on_press_maybe(self.active_call_id.map(AppMessage::HangUp))
             .style(BUTTON_DANGER);
-        container(column![avatar, text(name).size(26.0), text(duration).size(22.0), text(status).size(16.0), row![mute, video, hang_up].spacing(SPACE_12)]
-            .spacing(SPACE_16).align_x(Alignment::Center))
+        let stage = container(local_pip)
+            .width(Length::Fixed(220.0)).height(Length::Fixed(150.0))
+            .align_x(iced::alignment::Horizontal::Right)
+            .align_y(iced::alignment::Vertical::Bottom);
+        container(column![
+            container(remote_main).width(Length::Fill).height(Length::Fill),
+            stage,
+            text(name).size(26.0), text(duration).size(22.0), text(status).size(16.0),
+            row![mute, camera, switch_camera, hang_up].spacing(SPACE_12)
+        ].spacing(SPACE_12).align_x(Alignment::Center))
             .width(Length::Fill).height(Length::Fill)
-            .center_x(Length::Fill).center_y(Length::Fill).into()
+            .padding(SPACE_16).into()
     }
 
     fn view_chat_panel(&self) -> iced::Element<'_, AppMessage> {
