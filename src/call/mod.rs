@@ -7,6 +7,8 @@ pub mod media;
 #[cfg(feature = "video-calls")]
 pub mod video;
 pub mod wire;
+/// Formatting for local-only call history metadata.
+pub mod history;
 
 /// Lock-free bounded capture buffering for the CPAL real-time callback.
 #[cfg(feature = "voice-calls")]

@@ -48,6 +48,7 @@ use boru_core::chat_core::{
 };
 use boru_core::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
 use boru_core::call::manager::{CallEvent, CallHandle};
+use boru_core::call::history::{event_text as call_history_text, CallHistoryOutcome};
 use boru_core::call::{CallId, CallKind};
 #[cfg(feature = "video-calls")]
 use boru_core::call::video::VideoFrame;
@@ -3879,6 +3880,11 @@ pub struct IcedChat {
     latest_local_frame: Option<VideoFrame>,
     /// Monotonic start time used for the in-call duration display.
     call_started_at: Option<std::time::Instant>,
+    /// Kind and origin of the current call, retained until its terminal event
+    /// so local history can distinguish active, missed, and declined calls.
+    call_kind: Option<CallKind>,
+    call_was_incoming: bool,
+    call_declined: bool,
     /// Pending incoming call shown as an overlay; media is only activated
     /// when the user explicitly accepts.
     incoming_call: Option<IncomingCall>,
@@ -8178,6 +8184,9 @@ impl IcedChat {
             #[cfg(feature = "video-calls")]
             latest_local_frame: None,
             call_started_at: None,
+            call_kind: None,
+            call_was_incoming: false,
+            call_declined: false,
             incoming_call: None,
             inbox_events_rx,
             whisper_events_rx,
@@ -10766,6 +10775,50 @@ impl IcedChat {
             iced::Task::none()
         } else {
             iced::Task::batch(tasks)
+        }
+    }
+
+    /// Record local-only call metadata in the deterministic direct chat.
+    ///
+    /// Only the formatted text is stored. No call ID, peer address, media,
+    /// or signalling payload is written to the message store.
+    fn record_call_history(
+        &mut self,
+        peer: PublicKey,
+        kind: CallKind,
+        outcome: CallHistoryOutcome,
+        duration: Option<std::time::Duration>,
+    ) {
+        let Some(text) = call_history_text(kind, outcome, duration) else {
+            return;
+        };
+        let topic = direct_topic(&self.local_public, &peer);
+        if topic == self.topic {
+            self.push_system(text);
+            self.save_room_to_history();
+            return;
+        }
+
+        let timestamp = now_ms() as u64;
+        let mut hash_input = topic.as_bytes().to_vec();
+        hash_input.extend_from_slice(&timestamp.to_le_bytes());
+        hash_input.extend_from_slice(text.as_bytes());
+        let hash = *blake3::hash(&hash_input).as_bytes();
+        let store_path = self.data_dir.join("message_store.db");
+        if let Err(error) = MessageStore::open(store_path).and_then(|store| {
+            store.insert_chat_message(
+                &hash,
+                topic.as_bytes(),
+                self.local_public.as_bytes(),
+                timestamp,
+                "system",
+                &text,
+                None,
+                None,
+                self.local_public.as_bytes(),
+            )
+        }) {
+            warn!(%error, "failed to persist call history");
         }
     }
 
@@ -14113,6 +14166,9 @@ impl IcedChat {
             AppMessage::StartVoiceCall(peer) => {
                 self.call_return_screen = Some(self.screen.clone());
                 self.outgoing_call_peer = Some(peer);
+                self.call_kind = Some(CallKind::Voice);
+                self.call_was_incoming = false;
+                self.call_declined = false;
                 self.outgoing_call_status = Some(OutgoingCallStatus::Ringing);
                 self.screen = Screen::OutgoingCall;
                 let handle = self.call_handle.clone();
@@ -14124,6 +14180,9 @@ impl IcedChat {
             AppMessage::StartVideoCall(peer) => {
                 self.call_return_screen = Some(self.screen.clone());
                 self.outgoing_call_peer = Some(peer);
+                self.call_kind = Some(CallKind::Video);
+                self.call_was_incoming = false;
+                self.call_declined = false;
                 self.outgoing_call_status = Some(OutgoingCallStatus::Ringing);
                 self.screen = Screen::OutgoingCall;
                 let handle = self.call_handle.clone();
@@ -14147,6 +14206,10 @@ impl IcedChat {
                 match &event {
                     CallEvent::Incoming { call_id, peer, kind } => {
                         self.active_call_id = Some(*call_id);
+                        self.outgoing_call_peer = Some(*peer);
+                        self.call_kind = Some(*kind);
+                        self.call_was_incoming = true;
+                        self.call_declined = false;
                         self.incoming_call = Some(IncomingCall { call_id: *call_id, peer: *peer, kind: *kind });
                         self.emit_incoming_call_notification(peer);
                     }
@@ -14159,6 +14222,7 @@ impl IcedChat {
                     CallEvent::Active { call_id, peer, .. } => {
                         self.active_call_id = Some(*call_id);
                         self.outgoing_call_peer = Some(*peer);
+                        self.call_was_incoming = self.incoming_call.as_ref().is_some_and(|call| call.call_id == *call_id);
                         self.call_started_at = Some(Instant::now());
                         self.screen = Screen::ActiveCall;
                         // The call is now in progress; the consent overlay is no longer needed.
@@ -14176,10 +14240,26 @@ impl IcedChat {
                             if let CallEvent::Ended { reason, .. } = &event {
                                 self.toast_message = Some(friendly_call_end(reason).to_string());
                             }
+                            if let (Some(peer), Some(kind)) = (self.outgoing_call_peer, self.call_kind) {
+                                let duration = self.call_started_at.map(|started| started.elapsed());
+                                let outcome = if duration.is_some() {
+                                    CallHistoryOutcome::Completed
+                                } else if self.call_declined {
+                                    CallHistoryOutcome::Declined
+                                } else if self.call_was_incoming {
+                                    CallHistoryOutcome::Missed
+                                } else {
+                                    CallHistoryOutcome::Failed
+                                };
+                                self.record_call_history(peer, kind, outcome, duration);
+                            }
                             self.active_call_id = None;
                             self.outgoing_call_peer = None;
                             self.outgoing_call_status = None;
                             self.call_started_at = None;
+                            self.call_kind = None;
+                            self.call_was_incoming = false;
+                            self.call_declined = false;
                             if let Some(screen) = self.call_return_screen.take() { self.screen = screen; }
                         }
                         if self.incoming_call.as_ref().is_some_and(|call| call.call_id == *call_id) {
@@ -14190,6 +14270,11 @@ impl IcedChat {
                         match call_id {
                             Some(cid) => {
                                 if self.active_call_id == Some(*cid) {
+                                    if matches!(reason, boru_core::call::manager::CallError::Rejected) {
+                                        if let (Some(peer), Some(kind)) = (self.outgoing_call_peer, self.call_kind) {
+                                            self.record_call_history(peer, kind, CallHistoryOutcome::Declined, None);
+                                        }
+                                    }
                                     self.active_call_id = None;
                                     self.outgoing_call_status = Some(match reason {
                                         boru_core::call::manager::CallError::Rejected => OutgoingCallStatus::Declined,
@@ -14198,6 +14283,9 @@ impl IcedChat {
                                         _ => OutgoingCallStatus::Failed,
                                     });
                                     self.toast_message = Some(friendly_call_error(reason).to_string());
+                                    self.call_kind = None;
+                                    self.call_was_incoming = false;
+                                    self.call_declined = false;
                                 }
                                 if self.incoming_call.as_ref().is_some_and(|call| call.call_id == *cid) {
                                     self.incoming_call = None;
@@ -14223,17 +14311,11 @@ impl IcedChat {
                 iced::Task::perform(async move { handle.accept(call_id).await.map_err(|e| e.to_string()) }, AppMessage::CallCommandFinished)
             }
             AppMessage::RejectIncomingCall(call_id) => {
+                self.call_declined = true;
                 let handle = self.call_handle.clone();
                 iced::Task::perform(async move { handle.reject(call_id).await.map_err(|e| e.to_string()) }, AppMessage::CallCommandFinished)
             }
             AppMessage::HangUp(call_id) => {
-                if self.active_call_id == Some(call_id) && matches!(self.screen, Screen::OutgoingCall | Screen::ActiveCall) {
-                    self.active_call_id = None;
-                    self.outgoing_call_peer = None;
-                    self.outgoing_call_status = None;
-                    self.call_started_at = None;
-                    if let Some(screen) = self.call_return_screen.take() { self.screen = screen; }
-                }
                 let handle = self.call_handle.clone();
                 iced::Task::perform(async move { handle.hangup(call_id).await.map_err(|e| e.to_string()) }, AppMessage::CallCommandFinished)
             }
