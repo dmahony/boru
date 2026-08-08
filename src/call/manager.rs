@@ -5,7 +5,10 @@
 //! length-prefixed bidirectional stream per call.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, RwLock,
+};
 use std::time::Duration;
 
 use iroh::{
@@ -50,6 +53,7 @@ const COMMAND_CAPACITY: usize = 256;
 const EVENT_CAPACITY: usize = 256;
 const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(5);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+const CALL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Monotonically increasing identity for a call incarnation.
 pub type CallGeneration = u64;
@@ -374,6 +378,7 @@ struct CallState {
     remote_audio_muted: bool,
     video_enabled: bool,
     generation: CallGeneration,
+    ending: bool,
     runtime: CallRuntime,
 }
 
@@ -385,6 +390,7 @@ struct CallState {
 #[derive(Debug)]
 pub struct CallRuntime {
     cancellation: CancellationToken,
+    accepting_media: Arc<AtomicBool>,
     connection: Connection,
     control_reader_task: Option<JoinHandle<()>>,
     control_writer_task: Option<JoinHandle<()>>,
@@ -401,6 +407,7 @@ impl CallRuntime {
     fn new(connection: Connection) -> Self {
         Self {
             cancellation: CancellationToken::new(),
+            accepting_media: Arc::new(AtomicBool::new(true)),
             connection,
             control_reader_task: None,
             control_writer_task: None,
@@ -414,9 +421,46 @@ impl CallRuntime {
         }
     }
 
-    fn cancel(&self) {
+    /// Stop every resource owned by this call in the terminal-transition order.
+    async fn shutdown(mut self) {
+        // Cancellation is the common stop signal for capture, codecs, playback,
+        // and the control/media readers.  The explicit task groups below are
+        // intentionally kept separate: adding a task to the wrong group would
+        // otherwise make shutdown order invisible and regressible.
         self.cancellation.cancel();
+        // No new datagrams may enter the media pipeline after cancellation.
+        self.accepting_media.store(false, Ordering::Release);
+
+        // Closing the connection also closes the control and media streams.
         self.connection.close(0u32.into(), b"call terminated");
+
+        let deadline = tokio::time::Instant::now() + CALL_SHUTDOWN_TIMEOUT;
+        let mut tasks = Vec::new();
+        tasks.extend(self.video_capture_task.take());
+        tasks.extend(self.audio_capture_task.take());
+        tasks.extend(self.video_send_task.take());
+        tasks.extend(self.audio_send_task.take());
+        tasks.extend(self.video_receive_task.take());
+        tasks.extend(self.audio_receive_task.take());
+        tasks.extend(self.media_reader_task.take());
+        tasks.extend(self.control_reader_task.take());
+        tasks.extend(self.control_writer_task.take());
+
+        // A wedged device/codec must not hold the actor forever.  Abort only
+        // after the bounded grace period so normal cancellation can clean up.
+        let wait = async {
+            for mut task in tasks {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    task.abort();
+                    continue;
+                }
+                if tokio::time::timeout(remaining, &mut task).await.is_err() {
+                    task.abort();
+                }
+            }
+        };
+        tokio::time::timeout(CALL_SHUTDOWN_TIMEOUT, wait).await.ok();
     }
 }
 
@@ -484,6 +528,7 @@ async fn run_actor(
                                     remote_audio_muted: false,
                                     video_enabled: false,
                                     generation: next_generation,
+                                    ending: false,
                                     runtime: CallRuntime::new(connection.clone()),
                                 };
                                 next_generation = next_generation.wrapping_add(1).max(1);
@@ -803,6 +848,7 @@ async fn handle_control(
                     remote_audio_muted: false,
                     video_enabled: false,
                     generation: *next_generation,
+                    ending: false,
                     runtime: CallRuntime::new(connection),
                 },
             );
@@ -901,33 +947,59 @@ async fn terminate_call(
     if !generation_matches(current_generation, generation) {
         return;
     }
+    // Mark Ending before taking ownership of the resources.  This is the
+    // actor's atomic state transition: every command is serialized here, and
+    // a late task with another generation fails the check above.
+    if calls.get(&call_id).is_some_and(|state| state.ending) {
+        return;
+    }
+    if let Some(state) = calls.get_mut(&call_id) {
+        state.ending = true;
+    }
+    // Reserve the terminal notification before awaiting any shutdown work.
+    // This makes the single-event invariant explicit even if another caller
+    // queues a duplicate termination command.
+    if !terminal_calls.insert(call_id) {
+        return;
+    }
     let Some(state) = calls.remove(&call_id) else {
         return;
     };
-    state.runtime.cancel();
-    if terminal_calls.insert(call_id) {
-        if notify_peer {
-            let _ = state.tx.send(CallControl::Hangup { call_id, reason }).await;
-        }
-        if failed {
-            emit(
-                events,
-                CallEvent::Failed {
-                    call_id: Some(call_id),
-                    reason: CallError::Rejected,
-                },
-            )
-            .await;
-        } else {
-            emit(
-                events,
-                CallEvent::Ended {
-                    call_id,
-                    reason: reason.into(),
-                },
-            )
-            .await;
-        }
+
+    // 2. Best-effort Hangup while the control transport is still usable.
+    if notify_peer {
+        let _ = tokio::time::timeout(
+            Duration::from_millis(100),
+            state.tx.send(CallControl::Hangup { call_id, reason }),
+        )
+        .await;
+    }
+
+    // 3–12. Runtime owns the cancellation token, media admission gate,
+    // capture/codec/playback tasks, streams, connection, and bounded joins.
+    state.runtime.shutdown().await;
+
+    // 13. The state was removed only for this matching generation above; a
+    // stale task can therefore never transition a later incarnation to Idle.
+    // 14. Emit exactly one terminal event after all resources are quiescent.
+    if failed {
+        emit(
+            events,
+            CallEvent::Failed {
+                call_id: Some(call_id),
+                reason: CallError::Rejected,
+            },
+        )
+        .await;
+    } else {
+        emit(
+            events,
+            CallEvent::Ended {
+                call_id,
+                reason: reason.into(),
+            },
+        )
+        .await;
     }
 }
 
@@ -1088,6 +1160,7 @@ async fn write_call_control<W: AsyncWrite + Unpin>(
 mod tests {
     use super::*;
     use iroh::endpoint::presets;
+    use iroh::protocol::Router;
 
     #[test]
     fn collision_ordering_is_symmetric() {
@@ -1137,6 +1210,122 @@ mod tests {
             .to_vec();
         frame.extend_from_slice(&[0; 8]);
         assert!(read_declared_size(&frame).is_err());
+    }
+
+    /// Bind two minimal endpoints and return a live call connection plus the
+    /// router that keeps the server side alive (mirrors tests/call_e2e.rs).
+    async fn live_connection() -> (Connection, Router, Endpoint) {
+        let server = Endpoint::bind(presets::Minimal).await.unwrap();
+        let server_builder = CallBuilder::new(server.clone(), server.secret_key().clone());
+        let server_handler = server_builder.protocol_handler();
+        let (_server_handle, _server_events) = server_builder.spawn();
+        let server_router = Router::builder(server.clone())
+            .accept(CALL_ALPN, server_handler)
+            .spawn();
+        let client = Endpoint::bind(presets::Minimal).await.unwrap();
+        let connection = client
+            .connect(server.addr(), CALL_ALPN)
+            .await
+            .expect("probe connection should establish");
+        (connection, server_router, client)
+    }
+
+    #[tokio::test]
+    async fn runtime_shutdown_closes_media_gate_and_bounded_abort_wedged_task() {
+        let (connection, router, _client) = live_connection().await;
+        let mut runtime = CallRuntime::new(connection);
+        // A wedged device/codec task that never finishes on its own.
+        let (abort_tx, abort_rx) = tokio::sync::oneshot::channel::<()>();
+        runtime.audio_capture_task = Some(tokio::spawn(async move {
+            let _ = abort_rx.await;
+        }));
+
+        let started = tokio::time::Instant::now();
+        runtime.shutdown().await;
+        let elapsed = started.elapsed();
+
+        // Bounded shutdown: never wait longer than the timeout for a wedged task.
+        assert!(
+            elapsed < CALL_SHUTDOWN_TIMEOUT * 2,
+            "shutdown took {elapsed:?}, bounded await violated"
+        );
+        // The wedged task must have been aborted by the bounded join.
+        abort_tx.send(()).ok();
+        let _ = router.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn terminate_call_emits_exactly_one_ended_event() {
+        let (connection, router, _client) = live_connection().await;
+        let (event_tx, mut event_rx) = mpsc::channel(EVENT_CAPACITY);
+        let (control_tx, _control_rx) = mpsc::channel(32);
+        let mut calls = HashMap::new();
+        let mut terminal_calls = HashSet::new();
+        let call_id = CallId::generate();
+
+        calls.insert(
+            call_id,
+            CallState {
+                peer: SecretKey::generate().public(),
+                kind: CallKind::Voice,
+                tx: control_tx,
+                incoming: false,
+                active: false,
+                local_audio_muted: false,
+                remote_audio_muted: false,
+                video_enabled: false,
+                generation: 7,
+                ending: false,
+                runtime: CallRuntime::new(connection),
+            },
+        );
+
+        // First termination wins and emits exactly one Ended.
+        terminate_call(
+            &mut calls,
+            &mut terminal_calls,
+            &event_tx,
+            call_id,
+            0,
+            HangupReason::LocalHangup,
+            false,
+            false,
+        )
+        .await;
+        // A duplicate/stale termination (same call, now terminal) is a no-op.
+        terminate_call(
+            &mut calls,
+            &mut terminal_calls,
+            &event_tx,
+            call_id,
+            7,
+            HangupReason::ConnectionLost,
+            false,
+            false,
+        )
+        .await;
+        // A stale generation from a previous incarnation is ignored entirely.
+        terminate_call(
+            &mut calls,
+            &mut terminal_calls,
+            &event_tx,
+            call_id,
+            6,
+            HangupReason::LocalHangup,
+            false,
+            false,
+        )
+        .await;
+
+        let mut ended = 0;
+        while let Ok(event) = event_rx.try_recv() {
+            if matches!(event, CallEvent::Ended { call_id: id, .. } if id == call_id) {
+                ended += 1;
+            }
+        }
+        assert_eq!(ended, 1, "expected exactly one Ended event, got {ended}");
+        assert!(calls.is_empty(), "call state must be removed after termination");
+        let _ = router.shutdown().await;
     }
 
     fn read_declared_size(frame: &[u8]) -> std::io::Result<()> {
