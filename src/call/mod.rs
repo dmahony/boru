@@ -3,6 +3,10 @@
 pub mod media;
 pub mod wire;
 
+/// Independent live-call video media pipeline.
+#[cfg(feature = "video-calls")]
+pub mod video;
+
 /// Lock-free bounded capture buffering for the CPAL real-time callback.
 #[cfg(feature = "voice-calls")]
 pub mod audio;
