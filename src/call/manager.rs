@@ -17,6 +17,27 @@ use tokio::sync::mpsc;
 
 use super::{wire::HangupReason, CallId, CallKind};
 
+/// The side whose outgoing attempt survives a simultaneous call attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollisionWinner {
+    /// The local peer keeps its outgoing attempt.
+    LocalWins,
+    /// The remote peer keeps its outgoing attempt.
+    RemoteWins,
+}
+
+/// Resolve a simultaneous call attempt deterministically from peer identity.
+///
+/// Public keys are compared as their canonical byte representation, so both
+/// peers reach the same result without exchanging any extra state.
+pub fn resolve_collision(local: &PublicKey, remote: &PublicKey) -> CollisionWinner {
+    if local.as_bytes() <= remote.as_bytes() {
+        CollisionWinner::LocalWins
+    } else {
+        CollisionWinner::RemoteWins
+    }
+}
+
 /// ALPN used by call-control connections.
 pub const CALL_ALPN: &[u8] = b"/boru-call/1";
 
@@ -293,19 +314,24 @@ impl CallBuilder {
 
 async fn run_actor(
     _endpoint: Endpoint,
-    _secret_key: SecretKey,
+    secret_key: SecretKey,
     mut command_rx: mpsc::Receiver<Command>,
     event_tx: mpsc::Sender<CallEvent>,
 ) {
     let mut terminal_calls = HashSet::new();
     let mut media_state = HashMap::new();
+    let mut outgoing_ringing = HashMap::new();
     while let Some(command) = command_rx.recv().await {
+        let mut incoming_after_collision = None;
         let event = match command {
             Command::Start {
                 call_id,
                 peer,
-                kind: _,
-            } => Some(CallEvent::OutgoingRinging { call_id, peer }),
+                kind,
+            } => {
+                outgoing_ringing.insert(peer, (call_id, kind));
+                Some(CallEvent::OutgoingRinging { call_id, peer })
+            }
             Command::Accept(call_id) => Some(CallEvent::Connecting { call_id }),
             Command::Reject(call_id) => Some(CallEvent::Failed {
                 call_id: Some(call_id),
@@ -333,11 +359,33 @@ async fn run_actor(
                     video_enabled: state.1,
                 })
             }
-            Command::Incoming(connection) => Some(CallEvent::Incoming {
-                call_id: CallId::generate(),
-                peer: connection.remote_id(),
-                kind: CallKind::Voice,
-            }),
+            Command::Incoming(connection) => {
+                let peer = connection.remote_id();
+                match outgoing_ringing.remove(&peer) {
+                    Some((call_id, _kind))
+                        if resolve_collision(&secret_key.public(), &peer)
+                            == CollisionWinner::LocalWins =>
+                    {
+                        // The lower key owns the collision. Keep ringing and
+                        // reject this duplicate offer without creating a
+                        // second local call.
+                        outgoing_ringing.insert(peer, (call_id, _kind));
+                        None
+                    }
+                    Some((call_id, _kind)) => {
+                        incoming_after_collision = Some(peer);
+                        Some(CallEvent::Ended {
+                            call_id,
+                            reason: CallEndReason::RemoteHangup,
+                        })
+                    }
+                    None => Some(CallEvent::Incoming {
+                        call_id: CallId::generate(),
+                        peer,
+                        kind: CallKind::Voice,
+                    }),
+                }
+            }
         };
         if let Some(event) = event {
             if let Some(call_id) = event.terminal_call_id() {
@@ -347,8 +395,29 @@ async fn run_actor(
                     continue;
                 }
             }
-            if event_tx.send(event).await.is_err() {
+            if event_tx.send(event.clone()).await.is_err() {
                 break;
+            }
+            if let CallEvent::Ended { call_id, .. } = event {
+                if let Some((&peer, _)) = outgoing_ringing
+                    .iter()
+                    .find(|(_, (ringing_id, _))| *ringing_id == call_id)
+                {
+                    outgoing_ringing.remove(&peer);
+                }
+            }
+            if let Some(peer) = incoming_after_collision {
+                if event_tx
+                    .send(CallEvent::Incoming {
+                        call_id: CallId::generate(),
+                        peer,
+                        kind: CallKind::Voice,
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
             }
         }
     }
@@ -358,6 +427,36 @@ async fn run_actor(
 mod tests {
     use super::*;
     use iroh::endpoint::presets;
+
+    #[test]
+    fn collision_ordering_is_symmetric() {
+        let first = SecretKey::generate().public();
+        let second = SecretKey::generate().public();
+        assert_ne!(first, second);
+
+        let first_winner = resolve_collision(&first, &second);
+        let second_winner = resolve_collision(&second, &first);
+        assert_ne!(first_winner, second_winner);
+        assert!(matches!(
+            (first_winner, second_winner),
+            (CollisionWinner::LocalWins, CollisionWinner::RemoteWins)
+                | (CollisionWinner::RemoteWins, CollisionWinner::LocalWins)
+        ));
+    }
+
+    #[test]
+    fn simultaneous_voice_attempts_have_one_deterministic_winner() {
+        let local = SecretKey::generate().public();
+        let remote = SecretKey::generate().public();
+
+        // Both sides independently evaluate the same pair. Exactly one
+        // outgoing attempt survives, regardless of message arrival order.
+        let local_decision = resolve_collision(&local, &remote);
+        let remote_decision = resolve_collision(&remote, &local);
+        let local_keeps = local_decision == CollisionWinner::LocalWins;
+        let remote_keeps = remote_decision == CollisionWinner::LocalWins;
+        assert_eq!(local_keeps as u8 + remote_keeps as u8, 1);
+    }
 
     #[tokio::test]
     async fn spawn_returns_handle_and_receiver() {
@@ -393,6 +492,55 @@ mod tests {
         handle.hangup(call_id).await.unwrap();
         handle.set_muted(call_id, false).await.unwrap();
         handle.set_camera_enabled(call_id, true).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn incoming_offer_resolves_against_outgoing_ringing_call() {
+        let server = Endpoint::bind(presets::Minimal).await.unwrap();
+        let server_key = SecretKey::generate();
+        let builder = CallBuilder::new(server.clone(), server_key.clone());
+        let handler = builder.protocol_handler();
+        let (handle, mut events) = builder.spawn();
+        let router = iroh::protocol::Router::builder(server)
+            .accept(CALL_ALPN, handler)
+            .spawn();
+
+        let client = Endpoint::bind(presets::Minimal).await.unwrap();
+        let remote = client.secret_key().public();
+        let outgoing = handle.start_voice_call(remote).await.unwrap();
+        assert!(matches!(
+            events.recv().await,
+            Some(CallEvent::OutgoingRinging { call_id, peer })
+                if call_id == outgoing && peer == remote
+        ));
+
+        client
+            .connect(router.endpoint().addr(), CALL_ALPN)
+            .await
+            .unwrap();
+
+        match resolve_collision(&server_key.public(), &remote) {
+            CollisionWinner::LocalWins => {
+                // The lower key keeps ringing; the duplicate offer creates
+                // neither an incoming nor a second active call.
+                assert!(
+                    tokio::time::timeout(std::time::Duration::from_millis(200), events.recv())
+                        .await
+                        .is_err()
+                );
+            }
+            CollisionWinner::RemoteWins => {
+                assert!(matches!(
+                    events.recv().await,
+                    Some(CallEvent::Ended { call_id, .. }) if call_id == outgoing
+                ));
+                assert!(matches!(
+                    events.recv().await,
+                    Some(CallEvent::Incoming { peer, .. }) if peer == remote
+                ));
+            }
+        }
+        router.shutdown().await.unwrap();
     }
 
     #[test]
