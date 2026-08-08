@@ -458,3 +458,8 @@ name = "tunnel_reconnect"
 path = "tests/tunnel_reconnect.rs"
 required-features = ["net"]
 
+[[test]]
+name = "protocol_registration"
+path = "tests/protocol_registration.rs"
+required-features = ["net"]
+
