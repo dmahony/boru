@@ -733,6 +733,7 @@ fn main() -> Result<()> {
         backfill_handle,
         whisper_events_rx,
         whisper_handle,
+        call_handle,
         inbox_events_rx,
         discovered_peers_rx,
         directory_room_rx,
@@ -1018,7 +1019,7 @@ fn main() -> Result<()> {
             secret_key.clone(),
         );
         let call_handler = call_builder.protocol_handler();
-        let (_call_handle, _call_events) = call_builder.spawn();
+        let (call_handle, _call_events) = call_builder.spawn();
 
         let router = iroh::protocol::Router::builder(endpoint.clone())
             .accept(GOSSIP_ALPN, gossip.clone())
@@ -1381,6 +1382,15 @@ fn main() -> Result<()> {
             })))
             .await;
 
+        // Calls use the same durable friend allow-list as whisper/inbox.
+        for (id, record) in friends.iter() {
+            if record.relationship.can_message() {
+                if let Ok(peer) = id.parse_public_key() {
+                    call_handle.set_peer_authorized(peer, true);
+                }
+            }
+        }
+
         Result::<_>::Ok((
             endpoint,
             memory_lookup,
@@ -1398,6 +1408,7 @@ fn main() -> Result<()> {
             backfill_handle,
             whisper_events_rx,
             whisper_handle,
+            call_handle,
             inbox_events_rx,
             discovered_peers_rx,
             directory_room_rx,
@@ -1551,6 +1562,7 @@ fn main() -> Result<()> {
                 Arc::clone(&whisper_events_rx),
                 inbox_events_rx,
                 whisper_handle.clone(),
+                call_handle.clone(),
                 initial_room,
                 notice,
                 chat_history,

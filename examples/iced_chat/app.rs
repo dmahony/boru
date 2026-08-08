@@ -47,6 +47,7 @@ use boru_core::chat_core::{
     seed_memory_lookup, MeshHealth, MessageHash, RoomInviteV2,
 };
 use boru_core::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
+use boru_core::call::manager::CallHandle;
 use boru_core::contact::{direct_topic, ContactAction, SignedContactMessage};
 use boru_core::conversations::{
     spawn_conversation_forwarder, ConversationEntry, ConversationKind, ConversationNetEvent,
@@ -3797,6 +3798,8 @@ pub struct IcedChat {
     return_to_chat_list_after_open: bool,
     /// Handle for sending whisper/private messages.
     whisper_handle: WhisperHandle,
+    /// Handle for enforcing call authorization alongside friend state.
+    call_handle: CallHandle,
     /// Receiver for incoming inbox events.
     pub inbox_events_rx: Arc<Mutex<Receiver<InboxEvent>>>,
     /// Receiver for incoming whisper events.
@@ -7614,6 +7617,7 @@ impl IcedChat {
         whisper_events_rx: Arc<Mutex<Receiver<WhisperEvent>>>,
         inbox_events_rx: Arc<Mutex<Receiver<InboxEvent>>>,
         whisper_handle: WhisperHandle,
+        call_handle: CallHandle,
         initial_room: Option<(TopicId, Vec<EndpointAddr>)>,
         notice: String,
         chat_history: Arc<std::sync::Mutex<ChatHistoryStore>>,
@@ -8059,6 +8063,7 @@ impl IcedChat {
             initial_bootstrap_peers: initial_bootstrap,
             return_to_chat_list_after_open,
             whisper_handle,
+            call_handle,
             inbox_events_rx,
             whisper_events_rx,
             profile_image_handle,
@@ -13656,6 +13661,7 @@ impl IcedChat {
                     let record = self.friends.ensure_friend(fid);
                     record.set_direct_conversation(topic, DirectConversationState::Active);
                     record.relationship = FriendRelationship::Friends;
+                    self.call_handle.set_peer_authorized(peer, true);
                     let _room = RoomStore::with_peers(&self.data_dir, topic, known_addrs.clone());
                     self.try_save_friends();
 
@@ -15364,6 +15370,7 @@ impl IcedChat {
                                 let fid = FriendId::from_public_key(sender);
                                 let record = self.friends.ensure_friend(fid);
                                 record.relationship = FriendRelationship::Friends;
+                                self.call_handle.set_peer_authorized(sender, true);
                                 if let Some(conversation) = record.direct_conversation.as_mut() {
                                     conversation.state = DirectConversationState::Active;
                                 }
@@ -15435,6 +15442,7 @@ impl IcedChat {
                                     .any(|r| r.recipient == sender.to_string());
                                 if is_acceptance_reply {
                                     record.relationship = FriendRelationship::Friends;
+                                    self.call_handle.set_peer_authorized(sender, true);
                                 }
                                 self.conversation_store.upsert(ConversationEntry::new(
                                     topic,
@@ -20102,6 +20110,7 @@ impl IcedChat {
                         self.friends_sidebar_revision =
                             self.friends_sidebar_revision.wrapping_add(1);
                     }
+                    self.call_handle.set_peer_authorized(*peer, false);
                     self.toast_message = Some(format!("Blocked {}", self.resolve_name(peer)));
                     self.toast_counter = 120;
                 }
@@ -20881,6 +20890,13 @@ impl IcedChat {
                 self.first_run = false;
                 let friend_id = FriendId::new(fid);
                 self.friends.ensure_friend(friend_id.clone());
+                if let Ok(peer) = friend_id.parse_public_key() {
+                    let authorized = self
+                        .friends
+                        .get(&friend_id)
+                        .is_some_and(|record| record.relationship.can_message());
+                    self.call_handle.set_peer_authorized(peer, authorized);
+                }
                 if self
                     .friends
                     .get(&friend_id)
@@ -20902,6 +20918,7 @@ impl IcedChat {
             }
 
             AppMessage::RemoveFriend(peer) => {
+                self.call_handle.set_peer_authorized(peer, false);
                 let mgr = self.friend_mgr.clone();
                 iced::Task::perform(
                     async move {
@@ -46520,6 +46537,7 @@ mod tests {
             whisper_events_rx,
             inbox_events_rx,
             whisper_handle,
+            call_handle,
             backfill_handle,
             chat_history,
             net_rx,
@@ -46575,6 +46593,11 @@ mod tests {
                 boru_core::whisper::WhisperBuilder::new(endpoint.clone(), local_sk.clone());
             let _whisper_protocol = whisper_builder.protocol_handler();
             let (whisper_handle, whisper_events_rx_tmp) = whisper_builder.spawn();
+            let call_builder = boru_core::call::manager::CallBuilder::new(
+                endpoint.clone(),
+                local_sk.clone(),
+            );
+            let (call_handle, _call_events) = call_builder.spawn();
             let whisper_events_rx =
                 std::sync::Arc::new(tokio::sync::Mutex::new(whisper_events_rx_tmp));
             let (inbox_handle, inbox_events_rx_tmp) = boru_core::inbox::InboxHandle::new();
@@ -46605,6 +46628,7 @@ mod tests {
                 whisper_events_rx,
                 inbox_events_rx,
                 whisper_handle,
+                call_handle,
                 backfill_handle,
                 chat_history,
                 net_rx,
@@ -46641,6 +46665,7 @@ mod tests {
             whisper_events_rx,
             inbox_events_rx,
             whisper_handle,
+            call_handle,
             None,
             "join-request test".to_string(),
             chat_history,
@@ -46721,6 +46746,7 @@ mod tests {
             whisper_events_rx,
             inbox_events_rx,
             whisper_handle,
+            call_handle,
             backfill_handle,
             chat_history,
             net_rx,
@@ -46761,6 +46787,11 @@ mod tests {
                 boru_core::whisper::WhisperBuilder::new(endpoint.clone(), local_sk.clone());
             let _whisper_protocol = whisper_builder.protocol_handler();
             let (whisper_handle, whisper_events_rx_tmp) = whisper_builder.spawn();
+            let call_builder = boru_core::call::manager::CallBuilder::new(
+                endpoint.clone(),
+                local_sk.clone(),
+            );
+            let (call_handle, _call_events) = call_builder.spawn();
             let whisper_events_rx =
                 std::sync::Arc::new(tokio::sync::Mutex::new(whisper_events_rx_tmp));
             let (inbox_handle, inbox_events_rx_tmp) = boru_core::inbox::InboxHandle::new();
@@ -46791,6 +46822,7 @@ mod tests {
                 whisper_events_rx,
                 inbox_events_rx,
                 whisper_handle,
+                call_handle,
                 backfill_handle,
                 chat_history,
                 net_rx,
@@ -46827,6 +46859,7 @@ mod tests {
             whisper_events_rx,
             inbox_events_rx,
             whisper_handle,
+            call_handle,
             None,
             "prewarm test".to_string(),
             chat_history,
