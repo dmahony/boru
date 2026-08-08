@@ -64,6 +64,16 @@ impl OpusEncoder {
         Ok((!packet.is_empty()).then_some(packet))
     }
 
+    /// Change the target bitrate without rebuilding the stateful encoder.
+    /// Clamp as a second line of defence for callers outside the adaptation
+    /// controller's 16–40 kbps voice-safe range.
+    pub fn set_bitrate_kbps(&mut self, bitrate_kbps: u32) -> Result<()> {
+        let bitrate_kbps = bitrate_kbps.clamp(16, 40);
+        self.encoder
+            .set_bitrate(Bitrate::Bits((bitrate_kbps * 1_000) as i32))?;
+        Ok(())
+    }
+
     #[cfg(test)]
     fn inner_mut(&mut self) -> &mut Encoder {
         &mut self.encoder
@@ -113,6 +123,21 @@ mod tests {
         );
         assert_eq!(inner.get_complexity().unwrap(), DEFAULT_COMPLEXITY);
         assert_eq!(SAMPLE_RATE, 48_000);
+    }
+
+    #[test]
+    fn adaptive_bitrate_is_clamped_to_voice_safe_range() {
+        let mut encoder = OpusEncoder::new().expect("libopus encoder should initialize");
+        encoder.set_bitrate_kbps(8).unwrap();
+        assert_eq!(
+            encoder.inner_mut().get_bitrate().unwrap(),
+            Bitrate::Bits(16_000)
+        );
+        encoder.set_bitrate_kbps(80).unwrap();
+        assert_eq!(
+            encoder.inner_mut().get_bitrate().unwrap(),
+            Bitrate::Bits(40_000)
+        );
     }
 
     #[test]

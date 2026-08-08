@@ -22,6 +22,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use super::adaptation::{AdaptationController, AdaptationDecision};
 use super::media::{media_reader, MediaDatagram, MediaReaderEvent};
 use super::wire::{
     decode_call_control, encode_call_control, v1_defaults, CallControl, HangupReason, RejectReason,
@@ -262,6 +263,8 @@ pub enum CallEvent {
         peer: PublicKey,
     },
     Stats(CallStats),
+    /// A changed congestion decision, with audio taking priority over video.
+    AdaptationChanged(AdaptationDecision),
     Ended {
         call_id: CallId,
         reason: CallEndReason,
@@ -649,6 +652,7 @@ async fn run_actor(
     let mut terminal_calls = HashSet::new();
     let mut media_state = HashMap::<CallId, (bool, bool)>::new();
     let mut stats = CallStatsAccumulator::default();
+    let mut adaptation = AdaptationController::default();
     let mut stats_tick =
         tokio::time::interval_at(tokio::time::Instant::now() + STATS_INTERVAL, STATS_INTERVAL);
     stats_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -657,7 +661,13 @@ async fn run_actor(
         let command = tokio::select! {
             command = command_rx.recv() => command,
             _ = stats_tick.tick() => {
-                emit(&event_tx, CallEvent::Stats(stats.snapshot())).await;
+                let snapshot = stats.snapshot();
+                emit(&event_tx, CallEvent::Stats(snapshot)).await;
+                let previous_decision = adaptation.decision();
+                let decision = adaptation.update(snapshot);
+                if decision != previous_decision {
+                    emit(&event_tx, CallEvent::AdaptationChanged(decision)).await;
+                }
                 continue;
             }
         };

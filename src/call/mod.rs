@@ -29,6 +29,8 @@ pub use frame::{
 
 /// Call actor, handle, and Iroh protocol registration.
 #[cfg(feature = "net")]
+pub mod adaptation;
+#[cfg(feature = "net")]
 pub mod manager;
 
 use std::fmt;
