@@ -2,6 +2,10 @@
 
 pub mod wire;
 
+/// Call actor, handle, and Iroh protocol registration.
+#[cfg(feature = "net")]
+pub mod manager;
+
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
