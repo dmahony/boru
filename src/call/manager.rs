@@ -9,7 +9,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, RwLock,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use iroh::{
     endpoint::Connection,
@@ -176,15 +176,57 @@ struct CallStatsAccumulator {
     snapshot: CallStats,
     last_audio_sequence: Option<u32>,
     last_video_sequence: Option<u32>,
+    audio_jitter: AudioJitterStats,
+}
+
+#[derive(Debug, Default)]
+struct AudioJitterStats {
+    estimate_ms: u64,
+    target_ms: u64,
+    last_arrival: Option<Instant>,
+    last_sequence: Option<u32>,
+}
+
+impl AudioJitterStats {
+    fn observe(&mut self, sequence: u32, arrival: Instant) {
+        if self.target_ms == 0 {
+            self.target_ms = 75;
+        }
+        let in_order = self
+            .last_sequence
+            .is_none_or(|last| sequence.wrapping_sub(last) < 0x8000_0000);
+        if !in_order {
+            return;
+        }
+        if let Some(previous) = self.last_arrival {
+            let deviation = arrival
+                .saturating_duration_since(previous)
+                .as_millis()
+                .abs_diff(20) as u64;
+            self.estimate_ms = (self.estimate_ms * 7 + deviation) / 8;
+            let desired = (40 + self.estimate_ms.saturating_mul(2)).clamp(40, 200);
+            if desired.abs_diff(self.target_ms) > 4 {
+                self.target_ms = if desired > self.target_ms {
+                    (self.target_ms + 5).min(desired)
+                } else {
+                    self.target_ms.saturating_sub(5).max(desired)
+                };
+            }
+        }
+        self.last_arrival = Some(arrival);
+        self.last_sequence = Some(sequence);
+    }
 }
 
 impl CallStatsAccumulator {
-    fn observe_received(&mut self, packet: &MediaDatagram) {
+    fn observe_received(&mut self, packet: &MediaDatagram, arrival: Instant) {
         let (last, previous) = match packet.kind {
             super::media::MediaKind::Audio => {
                 self.snapshot.audio_packets_received =
                     self.snapshot.audio_packets_received.saturating_add(1);
                 let previous = self.last_audio_sequence;
+                self.audio_jitter.observe(packet.sequence, arrival);
+                self.snapshot.audio_jitter_ms = self.audio_jitter.target_ms;
                 (&mut self.last_audio_sequence, previous)
             }
             super::media::MediaKind::Video => {
@@ -843,8 +885,8 @@ async fn run_actor(
                 }
             }
             Command::Media { peer, event } => match event {
-                MediaReaderEvent::Packet(datagram) => {
-                    stats.observe_received(&datagram);
+                MediaReaderEvent::Packet { datagram, arrival } => {
+                    stats.observe_received(&datagram, arrival);
                     emit(&event_tx, CallEvent::MediaReceived { peer, datagram }).await;
                 }
                 MediaReaderEvent::Malformed(_) => {
@@ -1492,9 +1534,16 @@ mod tests {
     #[test]
     fn stats_accumulate_received_packets_and_audio_loss() {
         let mut stats = CallStatsAccumulator::default();
-        stats.observe_received(&media_packet(MediaKind::Audio, 10));
-        stats.observe_received(&media_packet(MediaKind::Audio, 12));
-        stats.observe_received(&media_packet(MediaKind::Audio, 11));
+        let now = Instant::now();
+        stats.observe_received(&media_packet(MediaKind::Audio, 10), now);
+        stats.observe_received(
+            &media_packet(MediaKind::Audio, 12),
+            now + Duration::from_millis(20),
+        );
+        stats.observe_received(
+            &media_packet(MediaKind::Audio, 11),
+            now + Duration::from_millis(40),
+        );
 
         let snapshot = stats.snapshot();
         assert_eq!(snapshot.audio_packets_received, 3);

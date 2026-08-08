@@ -192,7 +192,12 @@ impl MediaDatagram {
 #[derive(Debug)]
 pub enum MediaReaderEvent {
     /// A validated packet ready for routing to audio or video.
-    Packet(MediaDatagram),
+    Packet {
+        /// Parsed media datagram.
+        datagram: MediaDatagram,
+        /// Monotonic receive time used for arrival-jitter estimation.
+        arrival: Instant,
+    },
     /// A malformed packet. The reader remains alive for subsequent packets.
     Malformed(MediaDatagramError),
 }
@@ -209,7 +214,10 @@ pub async fn media_reader(
 ) {
     while let Ok(datagram) = connection.read_datagram().await {
         let event = match MediaDatagram::parse(datagram.as_ref()) {
-            Ok(packet) => MediaReaderEvent::Packet(packet),
+            Ok(packet) => MediaReaderEvent::Packet {
+                datagram: packet,
+                arrival: Instant::now(),
+            },
             Err(error) => MediaReaderEvent::Malformed(error),
         };
         if events.send(event).await.is_err() {
