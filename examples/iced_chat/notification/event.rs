@@ -44,6 +44,8 @@ pub enum NotificationEventKind {
     ConnectionLost,
     /// The network connection to the mesh was restored.
     ConnectionRestored,
+    /// An incoming voice or video call is waiting for user consent.
+    IncomingCall,
 }
 
 impl NotificationEventKind {
@@ -58,6 +60,7 @@ impl NotificationEventKind {
             Self::FileTransferFailed => "File transfer failed",
             Self::ConnectionLost => "Connection lost",
             Self::ConnectionRestored => "Connection restored",
+            Self::IncomingCall => "Incoming call",
         }
     }
 }

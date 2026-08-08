@@ -90,6 +90,7 @@ fn render_hidden_body(kind: NotificationEventKind) -> String {
         NotificationEventKind::FileTransferFailed => "File transfer failed".into(),
         NotificationEventKind::ConnectionLost => "is offline".into(),
         NotificationEventKind::ConnectionRestored => "is online again".into(),
+        NotificationEventKind::IncomingCall => "Incoming call".into(),
     }
 }
 
@@ -103,6 +104,7 @@ fn render_sender_only_body(kind: NotificationEventKind) -> String {
         NotificationEventKind::FileTransferFailed => "file transfer failed".into(),
         NotificationEventKind::ConnectionLost => "is offline".into(),
         NotificationEventKind::ConnectionRestored => "is online again".into(),
+        NotificationEventKind::IncomingCall => "Incoming call".into(),
     }
 }
 
