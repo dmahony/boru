@@ -30711,9 +30711,12 @@ impl IcedChat {
         });
         #[cfg(not(feature = "video-calls"))]
         let remote: Option<iced::Element<'_, AppMessage>> = None;
-        let remote_main: iced::Element<'_, AppMessage> = if self.call_camera_enabled {
-            remote.unwrap_or_else(|| remote_fallback().into())
-        } else { remote_fallback().into() };
+        // The remote stage is the main area: show the latest remote frame
+        // whenever one is available (remote camera on), and fall back to the
+        // avatar/name block when the remote camera is off (no frame yet).
+        // The LOCAL camera state must not gate the remote stage — turning off
+        // your own camera only affects the local PiP.
+        let remote_main: iced::Element<'_, AppMessage> = remote.unwrap_or_else(|| remote_fallback().into());
         #[cfg(feature = "video-calls")]
         let local = self.latest_local_frame.as_ref().map(|frame| {
             iced::widget::image(iced::widget::image::Handle::from_rgba(
@@ -30738,7 +30741,7 @@ impl IcedChat {
         let camera_label = if self.call_camera_enabled { "Camera Off" } else { "Camera On" };
         let camera = button(text(camera_label)).on_press_maybe(self.active_call_id.map(|_| AppMessage::ToggleCallCamera));
         let switch_camera = button(text(format!("Switch Camera · {}", self.call_camera_selection)))
-            .on_press(AppMessage::SelectCamera("next".to_string()));
+            .on_press_maybe(self.active_call_id.map(|_| AppMessage::SelectCamera("next".to_string())));
         let hang_up = button(text("Hang Up"))
             .on_press_maybe(self.active_call_id.map(AppMessage::HangUp))
             .style(BUTTON_DANGER);
@@ -46100,6 +46103,59 @@ mod tests {
             reason: CallError::Rejected,
         }));
         assert!(app.incoming_call.is_none(), "Failed for the same call must clear the overlay");
+    }
+
+    // ── Video call controls (BORU-CALL-6.6) ───────────────────────────
+    // Camera toggle/selection update local UI state and route the async
+    // set_camera_enabled command through the existing CallCommandFinished
+    // channel; the renderer (view_active_call) shows the remote stage from
+    // latest_remote_frame and falls back to the avatar/name block when the
+    // remote camera is off (no frame yet).
+
+    #[test]
+    fn video_call_camera_toggle_flips_state_only_with_active_call() {
+        let (_runtime, mut app, _local, peer) = build_join_request_test_app();
+        let call_id = CallId::new();
+
+        // With no active call the toggle must be a no-op (control is disabled).
+        app.update(AppMessage::ToggleCallCamera);
+        assert!(!app.call_camera_enabled, "toggle without active call must not change state");
+
+        // An active call enables the local camera toggle.
+        app.active_call_id = Some(call_id);
+        app.update(AppMessage::ToggleCallCamera);
+        assert!(app.call_camera_enabled, "toggle must enable camera on active call");
+        app.update(AppMessage::ToggleCallCamera);
+        assert!(!app.call_camera_enabled, "second toggle must disable camera");
+
+        // MediaStateChanged from the manager must stay authoritative for the
+        // local camera state.
+        app.update(AppMessage::CallEventReceived(CallEvent::MediaStateChanged {
+            call_id,
+            audio_muted: false,
+            video_enabled: true,
+        }));
+        assert!(app.call_camera_enabled, "MediaStateChanged must sync camera state");
+        app.update(AppMessage::CallEventReceived(CallEvent::MediaStateChanged {
+            call_id,
+            audio_muted: false,
+            video_enabled: false,
+        }));
+        assert!(!app.call_camera_enabled, "MediaStateChanged must sync camera off");
+    }
+
+    #[test]
+    fn video_call_camera_selection_cycles_front_and_back() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        // "next" cycles between the two supported labels; explicit labels
+        // (settings picker) are stored verbatim.
+        app.update(AppMessage::SelectCamera("next".to_string()));
+        assert_eq!(app.call_camera_selection, "Back camera");
+        app.update(AppMessage::SelectCamera("next".to_string()));
+        assert_eq!(app.call_camera_selection, "Front camera");
+        app.update(AppMessage::SelectCamera("External USB".to_string()));
+        assert_eq!(app.call_camera_selection, "External USB");
     }
 
     // ── Outgoing call ringing screen (BORU-CALL-6.4) ──────────────────
