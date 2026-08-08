@@ -444,4 +444,79 @@ mod tests {
         );
         assert_eq!(r.incomplete_frames(), 0);
     }
+
+    /// Deterministic xorshift PRNG so randomized trials reproduce on failure.
+    struct XorShift(u64);
+
+    impl XorShift {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() as usize) % n
+        }
+    }
+
+    #[test]
+    fn randomized_permutations_always_assembled_with_bounded_state() {
+        // Property-style: many trials, random fragment counts and random
+        // payloads, each delivered in a fresh random permutation. Every
+        // complete permutation must reassemble to exactly the original
+        // bytes, and the reassembler must retain no incomplete frames after
+        // each trial (bounded allocations).
+        let mut rng = XorShift(0xC0FFEE_0123_4567_89);
+        for trial in 0..64u32 {
+            let call = CallId::generate();
+            let frame_id = trial + 100;
+            // Fragment count varies 1..=8; payload length varies 1..=96 so
+            // both single- and multi-fragment frames are exercised. Cap the
+            // count at the payload length so every fragment is non-empty.
+            let payload: Vec<u8> = (0..(1 + rng.below(96))).map(|_| rng.next() as u8).collect();
+            let count = (1 + rng.below(8)).min(payload.len());
+            // Split the payload into `count` contiguous fragments with
+            // proportional boundaries so uneven splits stay in range.
+            let mut fragments: Vec<MediaDatagram> = (0..count)
+                .map(|i| {
+                    let start = i * payload.len() / count;
+                    let end = (i + 1) * payload.len() / count;
+                    frame(
+                        call,
+                        1,
+                        frame_id,
+                        &payload[start..end],
+                        i as u16,
+                        count as u16,
+                    )
+                })
+                .collect();
+            // Random permutation (Fisher-Yates).
+            for i in (1..fragments.len()).rev() {
+                let j = rng.below(i + 1);
+                fragments.swap(i, j);
+            }
+
+            let mut reassembler = VideoReassembler::new();
+            let mut result = ReassemblyResult::Pending;
+            for datagram in &fragments {
+                result = reassembler
+                    .push_datagram_at(datagram, Instant::now())
+                    .expect("randomized fragments must be admitted");
+            }
+            assert_eq!(
+                result,
+                ReassemblyResult::Complete(payload.clone()),
+                "trial {trial}: {count} fragments must reassemble to the original payload"
+            );
+            assert_eq!(
+                reassembler.incomplete_frames(),
+                0,
+                "trial {trial}: no incomplete frames may remain after a complete frame"
+            );
+        }
+    }
 }
