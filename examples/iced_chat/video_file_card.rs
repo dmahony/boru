@@ -2051,6 +2051,49 @@ mod tests {
     }
 
     #[test]
+    fn controls_overlay_cannot_change_media_frame_geometry() {
+        // The controls are deliberately a full-frame stack layer.  Keep this
+        // structural guard close to the ratio matrix: changing the overlay to
+        // an intrinsic-height sibling would reintroduce layout shift when the
+        // auto-hide state changes.
+        let src = include_str!("video_file_card.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let player = prod
+            .split("let controls_overlay: iced::Element<'a, AppMessage>")
+            .nth(1)
+            .and_then(|s| s.split(".style(media_frame_style)").next())
+            .expect("controls overlay block must exist");
+        assert!(
+            player.contains(".width(Length::Fill)")
+                && player.contains(".height(Length::Fill)"),
+            "visible and hidden controls must occupy the same full-frame layer"
+        );
+        let frame = prod
+            .split("container(widget::stack![\n                video_element,")
+            .nth(1)
+            .and_then(|s| s.split(".into()\n        } else").next())
+            .expect("player stack must exist");
+        assert!(
+            frame.contains(".width(sizing.width())")
+                && frame.contains(".height(sizing.height())"),
+            "player stack must use the same fixed sizing as the poster"
+        );
+    }
+
+    #[test]
+    fn media_container_meets_task16_subtle_surface_contract() {
+        let src = include_str!("video_file_card.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(prod.contains("const MEDIA_FRAME_RADIUS: f32 = 13.0"));
+        assert!(prod.contains("const MEDIA_FRAME_BACKGROUND: Color = Color::from_rgb"));
+        assert!(prod.contains(".clip(true)"));
+        assert!(
+            !prod.contains("shadow:") || prod.matches("shadow:").count() == 0,
+            "the inline media container must not add a heavy shadow"
+        );
+    }
+
+    #[test]
     fn video_state_mapping_requires_verified_local_path() {
         let mut attachment =
             DownloadAttachment::new(TransferKind::Video, "clip.mp4", "ticket", "peer", None);
