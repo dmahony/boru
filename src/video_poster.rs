@@ -114,7 +114,10 @@ fn generate_inner(
 
     std::fs::create_dir_all(cache_dir).map_err(|e| format!("create poster cache: {e}"))?;
     let output = std::process::Command::new("ffmpeg")
-        .args(["-ss", "0.5", "-i"])
+        // `-autorotate` is an INPUT option in ffmpeg >= 6: it must precede
+        // `-i`, otherwise ffmpeg exits 234 ("cannot be applied to output
+        // url") and the poster probe fails on every call.
+        .args([POSTER_AUTOROTATE, "-ss", "0.5", "-i"])
         .arg(path)
         .args([
             "-frames:v",
@@ -133,7 +136,6 @@ fn generate_inner(
             "10",
             "-v",
             "error",
-            POSTER_AUTOROTATE,
             "-",
         ])
         .output()

@@ -45,17 +45,46 @@ pub fn verify_local_attachment(
     expected_hash: &str,
     expected_size: Option<u64>,
 ) -> Result<PathBuf, String> {
+    verify_local_attachment_impl(path, managed_root, expected_hash, expected_size, true)
+}
+
+/// Like [`verify_local_attachment`] but with the managed-downloads-root
+/// containment check relaxed.
+///
+/// `require_managed_root=false` is for the SENDER's own shared cards
+/// (`DownloadState::Shared`): their path is the user-selected source file,
+/// which legitimately lives outside the downloads directory. Identity
+/// (size + BLAKE3 hash) is still fully verified — only the "must live under
+/// the managed root" rule is skipped.
+pub fn verify_local_attachment_unmanaged(
+    path: &Path,
+    managed_root: &Path,
+    expected_hash: &str,
+    expected_size: Option<u64>,
+) -> Result<PathBuf, String> {
+    verify_local_attachment_impl(path, managed_root, expected_hash, expected_size, false)
+}
+
+fn verify_local_attachment_impl(
+    path: &Path,
+    managed_root: &Path,
+    expected_hash: &str,
+    expected_size: Option<u64>,
+    require_managed_root: bool,
+) -> Result<PathBuf, String> {
     if expected_hash.len() != 64 || !expected_hash.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("attachment has no valid content identity".to_string());
     }
-    let canonical_root = managed_root
-        .canonicalize()
-        .map_err(|e| format!("managed downloads directory unavailable: {e}"))?;
     let canonical = path
         .canonicalize()
         .map_err(|e| format!("attachment file is missing: {e}"))?;
-    if !canonical.starts_with(&canonical_root) {
-        return Err("attachment path escapes the managed downloads directory".to_string());
+    if require_managed_root {
+        let canonical_root = managed_root
+            .canonicalize()
+            .map_err(|e| format!("managed downloads directory unavailable: {e}"))?;
+        if !canonical.starts_with(&canonical_root) {
+            return Err("attachment path escapes the managed downloads directory".to_string());
+        }
     }
     let metadata =
         std::fs::metadata(&canonical).map_err(|e| format!("cannot inspect attachment: {e}"))?;

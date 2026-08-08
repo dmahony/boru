@@ -92,8 +92,8 @@ use boru_core::store::MessageStore;
 use boru_core::tunnel::service::{TunnelDefinition, TunnelStatus};
 use boru_core::user_profile::{SharedFile, UserProfile, UserProfileStore};
 use boru_core::video_playback::{
-    validate_attachment_filename, verify_local_attachment, PlaybackCoordinator, VideoInstanceKey,
-    VideoJitterBuffer,
+    validate_attachment_filename, verify_local_attachment, verify_local_attachment_unmanaged,
+    PlaybackCoordinator, VideoInstanceKey, VideoJitterBuffer,
 };
 use boru_core::video_poster;
 #[cfg(feature = "video-playback")]
@@ -16961,21 +16961,26 @@ impl IcedChat {
                         "PlayInlineVideo: download state",
                     );
                     // Determine play source: only play from a fully downloaded file.
-                    let (play_path, play_total_size) = if let DownloadState::Completed {
-                        saved_path: Some(path),
-                        total_size,
-                        ..
-                    } = &download.state
-                    {
-                        (path.clone(), *total_size)
-                    } else if let DownloadState::Shared { path, .. } = &download.state {
-                        if path.exists() {
-                            (path.clone(), None)
-                        } else {
-                            self.push_system("Shared file is no longer available.");
-                            return iced::Task::none();
-                        }
-                    } else if !download.ticket.is_empty() {
+                    // `shared_path` marks the sender's own card
+                    // (DownloadState::Shared) whose path is the user-selected
+                    // source file outside the managed downloads directory —
+                    // identity is still verified, containment is relaxed.
+                    let (play_path, play_total_size, shared_path) =
+                        if let DownloadState::Completed {
+                            saved_path: Some(path),
+                            total_size,
+                            ..
+                        } = &download.state
+                        {
+                            (path.clone(), *total_size, false)
+                        } else if let DownloadState::Shared { path, .. } = &download.state {
+                            if path.exists() {
+                                (path.clone(), None, true)
+                            } else {
+                                self.push_system("Shared file is no longer available.");
+                                return iced::Task::none();
+                            }
+                        } else if !download.ticket.is_empty() {
                         // Not yet downloaded — start the download and
                         // inform the user to click play again when
                         // complete.  We intentionally avoid streaming
@@ -17090,12 +17095,25 @@ impl IcedChat {
                         self.push_system(format!("Video verification failed: {error}"));
                         return iced::Task::none();
                     }
-                    if let Err(error) = verify_local_attachment(
-                        &path,
-                        &downloads_root,
-                        &expected_hash,
-                        expected_size,
-                    ) {
+                    let verify_result = if shared_path {
+                        // Sender's own upload: the user-selected source file
+                        // lives outside the managed downloads directory.
+                        // Identity (hash + size) is still fully checked.
+                        verify_local_attachment_unmanaged(
+                            &path,
+                            &downloads_root,
+                            &expected_hash,
+                            expected_size,
+                        )
+                    } else {
+                        verify_local_attachment(
+                            &path,
+                            &downloads_root,
+                            &expected_hash,
+                            expected_size,
+                        )
+                    };
+                    if let Err(error) = verify_result {
                         self.push_system(format!("Video verification failed: {error}"));
                         return iced::Task::none();
                     }
@@ -17919,7 +17937,41 @@ impl IcedChat {
                                     );
                                 }
                             }
-                            self.entries_push(entry);
+                            let entry_index = self.entries_push(entry);
+                            // Fetch the Klipy preview rendition (GIF/WebP) as
+                            // the card thumbnail, mirroring the file-share
+                            // poster path. Best-effort: on failure the card
+                            // keeps its video placeholder.
+                            if saved {
+                                if let Some(preview_url) = gif.preview_url.as_ref() {
+                                    let url = preview_url.clone();
+                                    return iced::Task::batch(vec![
+                                        self.drain_pending_transfers(),
+                                        iced::Task::perform(
+                                            async move {
+                                                fetch_gif_media_bytes(&url)
+                                                    .await
+                                                    .map(|bytes| (entry_index, bytes))
+                                            },
+                                            |result| match result {
+                                                Ok((idx, bytes)) => {
+                                                    AppMessage::ThumbnailFetched {
+                                                        entry_index: idx,
+                                                        thumbnail_bytes: bytes,
+                                                    }
+                                                }
+                                                Err(error) => {
+                                                    warn!(
+                                                        %error,
+                                                        "klipy preview thumbnail fetch failed",
+                                                    );
+                                                    AppMessage::Noop
+                                                }
+                                            },
+                                        ),
+                                    ]);
+                                }
+                            }
                             return self.drain_pending_transfers();
                         }
                         // Reuse the standard image rendering path (GIF
