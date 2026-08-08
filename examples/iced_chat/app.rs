@@ -14061,7 +14061,11 @@ impl IcedChat {
                 let handle = self.call_handle.clone();
                 iced::Task::perform(async move { handle.accept(call_id).await.map_err(|e| e.to_string()) }, AppMessage::CallCommandFinished)
             }
-            AppMessage::RejectIncomingCall(call_id) | AppMessage::HangUp(call_id) => {
+            AppMessage::RejectIncomingCall(call_id) => {
+                let handle = self.call_handle.clone();
+                iced::Task::perform(async move { handle.reject(call_id).await.map_err(|e| e.to_string()) }, AppMessage::CallCommandFinished)
+            }
+            AppMessage::HangUp(call_id) => {
                 let handle = self.call_handle.clone();
                 iced::Task::perform(async move { handle.hangup(call_id).await.map_err(|e| e.to_string()) }, AppMessage::CallCommandFinished)
             }
