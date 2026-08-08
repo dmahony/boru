@@ -1,6 +1,6 @@
 [package]
 name = "boru-core"
-version = "0.155.1"
+version = "0.157.0"
 # ── EDITION ─────────────────────────────────────────────────────────
 # edition = "2021" ← correct.  If you see "Rust 2015" in an error message
 # from clippy-driver/rustc, you are running the linter directly on a
@@ -249,6 +249,11 @@ required-features = ["net", "test-utils"]
 name = "call_audio_integration"
 path = "tests/call_audio_integration.rs"
 required-features = ["voice-calls"]
+
+[[test]]
+name = "voice_acceptance"
+path = "tests/voice_acceptance.rs"
+required-features = ["net", "voice-calls"]
 
 [[bin]]
 name = "sim"
