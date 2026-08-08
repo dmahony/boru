@@ -12,6 +12,10 @@ use super::device::InputCallback;
 /// Worker-side Opus encoding for fixed-size voice frames.
 pub mod codec;
 
+/// Non-blocking, bounded Opus datagram sending.
+#[cfg(feature = "net")]
+pub mod send;
+
 /// A bounded producer for CPAL input samples.
 ///
 /// When the queue is full, samples at the end of the callback batch are
