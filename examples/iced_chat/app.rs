@@ -16638,8 +16638,12 @@ impl IcedChat {
                 // virtualized layout immediately so the card and all later
                 // messages keep their correct positions before the first
                 // progress event arrives.
+                // This is a card reflow, not a new timeline entry.  Do not
+                // re-arm the bottom snap here: if the user has scrolled up,
+                // the Ready -> Active height change must preserve that reading
+                // position.  The append path already arms a single snap when
+                // a genuinely new entry arrives while following the latest.
                 self.layout_cache.borrow_mut().invalidate_from(entry_index);
-                self.keep_latest_visible();
                 self.download_entry_index = Some(entry_index);
                 let blob_store = self.blob_store.clone();
                 let endpoint = self.endpoint.clone();
@@ -52571,6 +52575,37 @@ fn vr_create_tunnel_picker_port_validation() {
     // fallback renderer (no Xvfb, no window, no network/peers) and saves PNGs
     // to ./captures/ (or $CAPTURE_DIR). Used by the FONTS-17 visual QA card.
     // Run: rb test --example boru --features gui,video-playback,terminal -- offscreen_capture --nocapture
+    /// A video state transition changes card height, but it is not a new
+    /// timeline entry.  Regression coverage for CHAT-SCROLL-03: the download
+    /// start path must rebuild the affected row without re-arming a pending
+    /// bottom snap that could steal a user's scrolled-up reading position.
+    #[test]
+    fn second_video_reflow_preserves_scrolled_up_position() {
+        let src = include_str!("app.rs");
+        let start = src
+            .find("AppMessage::ExecuteDownloadAt(entry_index)")
+            .expect("download-start handler must exist");
+        let end = src[start..]
+            .find("AppMessage::PauseDownloadAt(entry_index)")
+            .map(|offset| start + offset)
+            .expect("pause handler must follow download-start handler");
+        let handler = &src[start..end];
+
+        assert!(
+            handler.contains("invalidate_from(entry_index)"),
+            "Ready -> Active must still invalidate the affected virtualized row"
+        );
+        assert_eq!(
+            handler.matches("self.keep_latest_visible()").count(),
+            0,
+            "card reflow must not re-arm snap_to_end after the user scrolls up"
+        );
+        assert!(
+            src.contains("self.keep_latest_visible();\n        self.enforce_image_budget();"),
+            "new-entry append path must retain its one-time follow-latest snap"
+        );
+    }
+
     #[cfg(test)]
     mod offscreen_capture {
         use super::*;
