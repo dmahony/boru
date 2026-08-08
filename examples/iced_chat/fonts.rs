@@ -457,6 +457,10 @@ pub fn type_role_text_lh<'a>(
 /// JetBrains Mono (technical values).
 pub fn load_fonts() -> iced::Task<crate::app::AppMessage> {
     iced::Task::batch(vec![
+        // iced_aw's embedded icon font (Modal/Card close glyph, ColorPicker
+        // OK/cancel glyphs). Must be registered under its family name
+        // "iced_aw" for iced_aw widgets to resolve it.
+        font::load(iced_aw::ICED_AW_FONT_BYTES).map(|_| crate::app::AppMessage::Noop),
         // Figtree — 400 · 500 · 600 (chat).
         font::load(FIGTREE_REGULAR_BYTES).map(|_| crate::app::AppMessage::Noop),
         font::load(FIGTREE_MEDIUM_BYTES).map(|_| crate::app::AppMessage::Noop),

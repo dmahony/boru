@@ -258,6 +258,9 @@ pub struct AppSettings {
     /// backgrounds when a home background image is set. 1.0 = fully
     /// opaque; lower values let the background image show through.
     pub home_menu_item_opacity: f32,
+    /// Optional user-selected accent color as RGB bytes (None = theme default).
+    /// Wired through the iced_aw ColorPicker in Settings → APPEARANCE.
+    pub accent_color: Option<[u8; 3]>,
 }
 
 impl Default for AppSettings {
@@ -270,6 +273,7 @@ impl Default for AppSettings {
             display_name: None,
             home_background_image: None,
             home_menu_item_opacity: HOME_MENU_ITEM_OPACITY_DEFAULT,
+            accent_color: None,
         }
     }
 }
@@ -824,8 +828,25 @@ pub(crate) fn border_muted(theme: &iced::Theme) -> Color {
     crate::design_tokens::border(theme)
 }
 
-/// Primary accent (blue).
+/// Optional user-configured accent color (RGB bytes). Consulted by
+/// [`accent_primary`] so a custom color picked in Settings applies app-wide.
+/// `None` restores the theme default.
+static ACCENT_OVERRIDE: StdMutex<Option<[u8; 3]>> = StdMutex::new(None);
+
+/// Set (or clear, with `None`) the user's custom accent color.
+pub(crate) fn set_accent_override(rgb: Option<[u8; 3]>) {
+    *ACCENT_OVERRIDE.lock().unwrap() = rgb;
+}
+
+/// Primary accent (blue), or the user's custom accent color when set.
 pub(crate) fn accent_primary(theme: &iced::Theme) -> Color {
+    if let Some([r, g, b]) = *ACCENT_OVERRIDE.lock().unwrap() {
+        return iced::Color::from_rgb(
+            r as f32 / 255.0,
+            g as f32 / 255.0,
+            b as f32 / 255.0,
+        );
+    }
     crate::design_tokens::primary(theme)
 }
 
@@ -3762,6 +3783,11 @@ pub struct IcedChat {
     /// Opacity (0.0–1.0) applied to home-screen menu/action card backgrounds
     /// when a home background image is set. Persisted in AppSettings.
     home_menu_item_opacity: f32,
+    /// Optional user-selected accent color (RGB bytes). Persisted in
+    /// AppSettings; drives `accent_primary` when set.
+    accent_color: Option<[u8; 3]>,
+    /// Whether the iced_aw ColorPicker overlay is open in Settings.
+    show_accent_picker: bool,
     /// Ticket for the locally selected profile image, for broadcasting to peers.
     profile_image_ticket: Option<String>,
     /// ImageStore identifier for the locally selected profile image.
@@ -6087,6 +6113,12 @@ pub enum AppMessage {
 
     /// Toggle dark mode on/off.
     ToggleDark(bool),
+    /// Open/close the iced_aw ColorPicker overlay in Settings (accent color).
+    ToggleAccentColorPicker,
+    /// The user confirmed a new accent color in the ColorPicker (RGB bytes).
+    AccentColorSelected([u8; 3]),
+    /// The user cancelled the ColorPicker overlay.
+    AccentColorCancelled,
     /// Update the local display name (nickname).
     SetNickname(String),
 
@@ -6962,6 +6994,10 @@ struct SettingsCachedKey {
     /// f32 bit pattern of the home menu item background opacity, so the
     /// lazy settings screen re-renders when the slider moves.
     home_menu_item_opacity_bits: u32,
+    /// Optional user-selected accent color (RGB bytes) for the ColorPicker.
+    accent_color: Option<[u8; 3]>,
+    /// Whether the iced_aw ColorPicker overlay is open.
+    show_accent_picker: bool,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -7646,6 +7682,9 @@ impl IcedChat {
         }
         let first_run = room_history.is_empty() && friends.is_empty();
         let app_settings = AppSettings::load(&data_dir);
+        // ICEDAW-01: restore any persisted custom accent color so
+        // `accent_primary` applies it app-wide from the first frame.
+        set_accent_override(app_settings.accent_color);
         // Restore the persisted display name.  The CLI --name flag always
         // takes priority; when no --name was given the constructor receives
         // the public-key short form (which looks like "90af827f0d").  If a
@@ -7976,6 +8015,8 @@ impl IcedChat {
                 app_settings.home_background_image.as_deref(),
             ),
             home_menu_item_opacity: app_settings.home_menu_item_opacity,
+            accent_color: app_settings.accent_color,
+            show_accent_picker: false,
             profile_image_ticket,
             profile_image_identifier,
             local_mailbox_key,
@@ -8261,6 +8302,7 @@ impl IcedChat {
             display_name: Some(self.local_label.clone()),
             home_background_image: self.home_background_path.clone(),
             home_menu_item_opacity: self.home_menu_item_opacity,
+            accent_color: self.accent_color,
         };
         settings.save(&self.data_dir);
     }
@@ -8276,6 +8318,7 @@ impl IcedChat {
         display_name: String,
         home_background_image: Option<String>,
         home_menu_item_opacity: f32,
+        accent_color: Option<[u8; 3]>,
     ) -> iced::Task<AppMessage> {
         let settings = AppSettings {
             dark_mode,
@@ -8285,6 +8328,7 @@ impl IcedChat {
             display_name: Some(display_name),
             home_background_image,
             home_menu_item_opacity,
+            accent_color,
         };
         let data_dir = data_dir.to_path_buf();
         iced::Task::perform(
@@ -8375,6 +8419,7 @@ impl IcedChat {
             display_name: Some(self.local_label.clone()),
             home_background_image: self.home_background_path.clone(),
             home_menu_item_opacity: self.home_menu_item_opacity,
+            accent_color: self.accent_color,
         };
         settings.save(&self.data_dir);
     }
@@ -9849,6 +9894,9 @@ impl IcedChat {
             AppMessage::UserActivity => "UserActivity",
 
             AppMessage::ToggleDark(_) => "ToggleDark",
+            AppMessage::ToggleAccentColorPicker => "ToggleAccentColorPicker",
+            AppMessage::AccentColorSelected(_) => "AccentColorSelected",
+            AppMessage::AccentColorCancelled => "AccentColorCancelled",
             AppMessage::SetNickname(_) => "SetNickname",
 
             AppMessage::WindowResized(_) => "WindowResized",
@@ -21718,6 +21766,7 @@ impl IcedChat {
                     display_name: Some(self.local_label.clone()),
                     home_background_image: self.home_background_path.clone(),
                     home_menu_item_opacity: self.home_menu_item_opacity,
+                    accent_color: self.accent_color,
                 };
                 let data_dir = self.data_dir.clone();
                 let _progress_queue = self.download_progress_queue.clone();
@@ -21727,6 +21776,47 @@ impl IcedChat {
                     }),
                     |_| AppMessage::Noop,
                 )
+            }
+
+            AppMessage::ToggleAccentColorPicker => {
+                self.show_accent_picker = !self.show_accent_picker;
+                // The ColorPicker renders as an overlay; while it is open the
+                // Settings screen must NOT be served from the prewarm cache
+                // (Prebuilt drops overlays), so invalidate so the next frame
+                // takes the live lazy path.
+                self.invalidate_prewarm(&[Screen::Settings]);
+                iced::Task::none()
+            }
+
+            AppMessage::AccentColorSelected(rgb) => {
+                self.accent_color = Some(rgb);
+                set_accent_override(Some(rgb));
+                self.show_accent_picker = false;
+                self.invalidate_prewarm(PREWARM_ORDER);
+                // Persist the accent color so it survives restarts.
+                let settings = AppSettings {
+                    dark_mode: self.dark_mode,
+                    sound_enabled: self.sound_enabled,
+                    share_direct_addresses: self.share_direct_addresses,
+                    chat_text_size: self.chat_text_size,
+                    display_name: Some(self.local_label.clone()),
+                    home_background_image: self.home_background_path.clone(),
+                    home_menu_item_opacity: self.home_menu_item_opacity,
+                    accent_color: self.accent_color,
+                };
+                let data_dir = self.data_dir.clone();
+                iced::Task::perform(
+                    tokio::task::spawn_blocking(move || {
+                        settings.save(&data_dir);
+                    }),
+                    |_| AppMessage::Noop,
+                )
+            }
+
+            AppMessage::AccentColorCancelled => {
+                self.show_accent_picker = false;
+                self.invalidate_prewarm(&[Screen::Settings]);
+                iced::Task::none()
             }
 
             AppMessage::SetNickname(name) => {
@@ -21742,6 +21832,7 @@ impl IcedChat {
                     display_name: Some(self.local_label.clone()),
                     home_background_image: self.home_background_path.clone(),
                     home_menu_item_opacity: self.home_menu_item_opacity,
+                    accent_color: self.accent_color,
                 };
                 let data_dir = self.data_dir.clone();
                 iced::Task::perform(
@@ -21763,6 +21854,7 @@ impl IcedChat {
                     display_name: Some(self.local_label.clone()),
                     home_background_image: self.home_background_path.clone(),
                     home_menu_item_opacity: self.home_menu_item_opacity,
+                    accent_color: self.accent_color,
                 };
                 let data_dir = self.data_dir.clone();
                 let _progress_queue = self.download_progress_queue.clone();
@@ -23186,6 +23278,7 @@ impl IcedChat {
                     display_name: Some(self.local_label.clone()),
                     home_background_image: self.home_background_path.clone(),
                     home_menu_item_opacity: self.home_menu_item_opacity,
+                    accent_color: self.accent_color,
                 };
                 let data_dir = self.data_dir.clone();
                 let _progress_queue = self.download_progress_queue.clone();
@@ -23207,6 +23300,7 @@ impl IcedChat {
                     display_name: Some(self.local_label.clone()),
                     home_background_image: self.home_background_path.clone(),
                     home_menu_item_opacity: self.home_menu_item_opacity,
+                    accent_color: self.accent_color,
                 };
                 let data_dir = self.data_dir.clone();
                 iced::Task::perform(
@@ -23331,6 +23425,7 @@ impl IcedChat {
                             display_name: Some(self.local_label.clone()),
                             home_background_image: Some(path.clone()),
                             home_menu_item_opacity: self.home_menu_item_opacity,
+                            accent_color: self.accent_color,
                         };
                         iced::Task::perform(
                             async move {
@@ -23389,6 +23484,7 @@ impl IcedChat {
                     self.local_label.clone(),
                     None,
                     self.home_menu_item_opacity,
+                    self.accent_color,
                 )
             }
 
@@ -23404,6 +23500,7 @@ impl IcedChat {
                     display_name: Some(self.local_label.clone()),
                     home_background_image: self.home_background_path.clone(),
                     home_menu_item_opacity: self.home_menu_item_opacity,
+                    accent_color: self.accent_color,
                 };
                 let data_dir = self.data_dir.clone();
                 iced::Task::perform(
@@ -27518,25 +27615,26 @@ impl IcedChat {
             } else {
                 unread.to_string()
             };
-            // ── Circular count badge (centered) ───────────────────
+            // ── Circular count badge (centered) — ICEDAW-01: iced_aw Badge
+            // replacing the hand-rolled 20×20 container. Styled to match the
+            // previous circled-unread look exactly: error-red fill, full
+            // circle (10px radius at 20×20), white text.
             preview_row = preview_row.push(
-                container(
+                iced_aw::Badge::new(
                     crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, count_str)
                         .color(Color::WHITE)
                         .width(Length::Shrink)
                         .height(Length::Shrink),
                 )
-                .center_x(Length::Fill)
-                .center_y(Length::Fill)
                 .width(20.0)
                 .height(20.0)
-                .style(move |t| container::Style {
-                    background: Some(Background::Color(color_error(t))),
-                    border: Border {
-                        radius: 10.0.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
+                .padding(0)
+                .style(move |t, _status| iced_aw::style::badge::Style {
+                    background: iced::Background::Color(color_error(t)),
+                    border_radius: Some(10.0),
+                    border_width: 0.0,
+                    border_color: None,
+                    text_color: Color::WHITE,
                 }),
             );
         }
@@ -30387,8 +30485,14 @@ impl IcedChat {
     }
 
     /// Render the emoji picker panel with commonly used emojis.
+    ///
+    /// ICEDAW-01: migrated from the hand-rolled `container` overlay panel to
+    /// `iced_aw::Card`. The Card provides the head row (title + built-in
+    /// close button via `on_close`) and the body (scrollable grid), matching
+    /// the previous layout exactly: 280px wide, `bg_surface` background,
+    /// 1px `border_muted` border, 8px corner radius.
     fn view_emoji_picker(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, column, container, row, text};
+        use iced::widget::{button, column, row, text};
 
         let theme = self.theme();
         const EMOJIS: &[&str] = &[
@@ -30397,19 +30501,8 @@ impl IcedChat {
             "💯", "✅", "❌", "⚠️", "💡", "📌", "🎵", "🌈", "🍕", "☕", "🕐", "💤",
         ];
 
-        let close_btn = button(Icon::Close.build().size(IconSize::Xs).build())
-            .on_press(AppMessage::ToggleEmojiPicker)
-            .padding([SPACE_2, SPACE_4])
-            .style(|_t, _s| iced::widget::button::Style::default());
-
-        let header = row![
-            crate::fonts::type_role_text(crate::fonts::TypeRole::CardTitle, "Emojis")
-                .color(text_muted(&theme)),
-            iced::widget::Space::new().width(iced::Length::Fill),
-            close_btn,
-        ]
-        .spacing(SPACE_4)
-        .align_y(iced::Alignment::Center);
+        let head = crate::fonts::type_role_text(crate::fonts::TypeRole::CardTitle, "Emojis")
+            .color(text_muted(&theme));
 
         let mut grid = column![].spacing(SPACE_2);
         for chunk in EMOJIS.chunks(8) {
@@ -30428,17 +30521,24 @@ impl IcedChat {
 
         let scroll = crate::ui_components::gutter_scrollable(grid).height(iced::Length::Fixed(160.0));
 
-        container(column![header, scroll].spacing(SPACE_4).padding(SPACE_8))
-            .style(move |t| iced::widget::container::Style {
-                background: Some(iced::Background::Color(bg_surface(t))),
-                border: iced::Border {
-                    color: border_muted(t),
-                    width: 1.0,
-                    radius: (8.0_f32).into(),
-                },
-                ..Default::default()
-            })
+        iced_aw::Card::new(head, scroll)
             .width(280.0)
+            .padding_head(iced::Padding::new(SPACE_8))
+            .padding_body(iced::Padding::new(SPACE_8))
+            .on_close(AppMessage::ToggleEmojiPicker)
+            .style(move |t, _status| iced_aw::style::card::Style {
+                background: iced::Background::Color(bg_surface(t)),
+                border_radius: 8.0,
+                border_width: 1.0,
+                border_color: border_muted(t),
+                head_background: iced::Background::Color(bg_surface(t)),
+                head_text_color: text_muted(t),
+                body_background: iced::Background::Color(iced::Color::TRANSPARENT),
+                body_text_color: text_muted(t),
+                foot_background: iced::Background::Color(iced::Color::TRANSPARENT),
+                foot_text_color: text_muted(t),
+                close_color: text_muted(t),
+            })
             .into()
     }
 
@@ -33802,6 +33902,8 @@ impl IcedChat {
             local_public_key: self.local_public.to_string(),
             home_background_image: self.home_background_path.clone(),
             home_menu_item_opacity_bits: self.home_menu_item_opacity.to_bits(),
+            accent_color: self.accent_color,
+            show_accent_picker: self.show_accent_picker,
         }
     }
 
@@ -34427,12 +34529,102 @@ impl IcedChat {
             .spacing(SPACE_12)
             .align_y(Alignment::Center);
 
+        // ── Accent color (ICEDAW-01) ──
+        // Optional accent-color customization via iced_aw ColorPicker. The
+        // picked RGB value is persisted in AppSettings and overrides
+        // `accent_primary` app-wide. The dark-mode toggle above is untouched.
+        let accent_theme = Self::theme_from_dark(key.dark_mode);
+        let accent_rgb = key.accent_color.unwrap_or_else(|| {
+            let c = accent_primary(&accent_theme);
+            [
+                (c.r * 255.0).round() as u8,
+                (c.g * 255.0).round() as u8,
+                (c.b * 255.0).round() as u8,
+            ]
+        });
+        let accent_color = iced::Color::from_rgb(
+            accent_rgb[0] as f32 / 255.0,
+            accent_rgb[1] as f32 / 255.0,
+            accent_rgb[2] as f32 / 255.0,
+        );
+        let accent_swatch = container(
+            crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, " "),
+        )
+        .width(24.0)
+        .height(24.0)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .style(move |_t| container::Style {
+            background: Some(iced::Background::Color(accent_color)),
+            border: iced::Border {
+                radius: SPACE_6.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let accent_button = button(
+            row![accent_swatch, crate::fonts::type_role_text(
+                crate::fonts::TypeRole::ButtonLabel,
+                if key.show_accent_picker { "Pick color…" } else { "Customize…" },
+            )]
+            .spacing(SPACE_6)
+            .align_y(Alignment::Center),
+        )
+        .on_press(AppMessage::ToggleAccentColorPicker)
+        .style(BUTTON_OUTLINE)
+        .padding([SPACE_4, SPACE_8]);
+        let accent_color_picker = iced_aw::ColorPicker::new(
+            key.show_accent_picker,
+            accent_color,
+            accent_button,
+            AppMessage::AccentColorCancelled,
+            |c| {
+                AppMessage::AccentColorSelected([
+                    (c.r * 255.0).round() as u8,
+                    (c.g * 255.0).round() as u8,
+                    (c.b * 255.0).round() as u8,
+                ])
+            },
+        )
+        .style(move |t, _status| iced_aw::style::color_picker::Style {
+            background: iced::Background::Color(bg_surface(t)),
+            border_radius: 8.0,
+            border_width: 1.0,
+            border_color: border_muted(t),
+            bar_border_radius: 4.0,
+            bar_border_width: 1.0,
+            bar_border_color: border_muted(t),
+        });
+        let accent_row = Row::new()
+            .push(
+                Column::new()
+                    .push(crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::Body,
+                        "Accent color",
+                    ))
+                    .push(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::SupportingText,
+                            "Customize the app's primary accent color.",
+                        )
+                        .style(text_muted_style),
+                    )
+                    .spacing(SPACE_2)
+                    .width(Length::Fill)
+                    .align_x(Alignment::Start),
+            )
+            .push(accent_color_picker)
+            .spacing(SPACE_12)
+            .align_y(Alignment::Center);
+
         // ── Home menu item transparency (HOME-01) ──
         // Shown only when a home background image is set: controls the
         // opacity of the home-screen menu/action card backgrounds that sit
         // over the image.
         let mut appearance_children: Vec<iced::Element<'static, AppMessage>> = vec![
             appearance_row.into(),
+            Space::new().height(Length::Fixed(SPACE_8)).into(),
+            accent_row.into(),
             Space::new().height(Length::Fixed(SPACE_8)).into(),
             text_size_row.into(),
             Space::new().height(Length::Fixed(SPACE_8)).into(),
@@ -35571,6 +35763,13 @@ impl IcedChat {
             && self.dashboard_active_tab
                 != crate::dashboard_view_model::DashboardTab::SharedByMe
         {
+            return;
+        }
+
+        // ICEDAW-01: Settings is only pre-warmed while the ColorPicker is
+        // closed. When it is open the live `lazy` path must render (Prebuilt
+        // drops overlays, which would make the picker invisible).
+        if screen == Screen::Settings && self.show_accent_picker {
             return;
         }
 
@@ -42911,6 +43110,7 @@ mod tests {
             display_name: None,
             home_background_image: None,
             home_menu_item_opacity: HOME_MENU_ITEM_OPACITY_DEFAULT,
+            accent_color: None,
         };
         let toggled = AppSettings {
             dark_mode: true,
@@ -42920,6 +43120,7 @@ mod tests {
             display_name: None,
             home_background_image: None,
             home_menu_item_opacity: HOME_MENU_ITEM_OPACITY_DEFAULT,
+            accent_color: None,
         };
         toggled.save(&data_dir);
         let loaded = AppSettings::load(&data_dir);
@@ -42952,6 +43153,7 @@ mod tests {
             display_name: None,
             home_background_image: None,
             home_menu_item_opacity: 0.55,
+            accent_color: None,
         };
         settings.save(&data_dir);
         let loaded = AppSettings::load(&data_dir);
