@@ -331,4 +331,124 @@ mod tests {
         assert!(buffer.push(packet(new, 1, t)));
         assert_eq!(buffer.len(), 1);
     }
+
+    #[test]
+    fn fully_ordered_four_frame_stream_plays_in_order() {
+        // Scenario: 1 2 3 4
+        let call = CallId::from_bytes([10; 16]);
+        let t = Instant::now();
+        let mut buffer = AudioJitterBuffer::default();
+        for seq in 1..=4 {
+            assert!(buffer.push(packet(call, seq, t)));
+        }
+        assert_eq!(buffer.len(), 4);
+        for seq in 1..=4 {
+            let offset = (seq - 1) as u32;
+            assert!(
+                matches!(
+                    due(&mut buffer, t + DEFAULT_JITTER_DELAY + AUDIO_FRAME_DURATION * offset),
+                    AudioPlayout::Packet(p) if p.sequence == seq
+                ),
+                "sequence {seq} should be due in order"
+            );
+        }
+        assert_eq!(buffer.missing_packets(), 0);
+        assert_eq!(buffer.dropped_packets(), 0);
+    }
+
+    #[test]
+    fn three_hop_reorder_plays_in_sequence_order() {
+        // Scenario: 1 3 2 4 (arrival order), playout must be 1 2 3 4.
+        let call = CallId::from_bytes([11; 16]);
+        let t = Instant::now();
+        let mut buffer = AudioJitterBuffer::default();
+        for seq in [1u32, 3, 2, 4] {
+            assert!(buffer.push(packet(call, seq, t)));
+        }
+        for seq in 1..=4 {
+            let offset = (seq - 1) as u32;
+            assert!(
+                matches!(
+                    due(&mut buffer, t + DEFAULT_JITTER_DELAY + AUDIO_FRAME_DURATION * offset),
+                    AudioPlayout::Packet(p) if p.sequence == seq
+                ),
+                "reordered stream must still play sequence {seq} in order"
+            );
+        }
+        assert_eq!(buffer.missing_packets(), 0);
+    }
+
+    #[test]
+    fn duplicate_mixed_stream_plays_each_sequence_once() {
+        // Scenario: 1 2 4 4 2 3 1 (duplicates arrive out of order).
+        let call = CallId::from_bytes([12; 16]);
+        let t = Instant::now();
+        let mut buffer = AudioJitterBuffer::default();
+        for seq in [1u32, 2, 4, 4, 2, 3, 1] {
+            let _ = buffer.push(packet(call, seq, t));
+        }
+        assert_eq!(buffer.len(), 4, "four unique sequences retained");
+        for seq in 1..=4 {
+            let offset = (seq - 1) as u32;
+            assert!(
+                matches!(
+                    due(&mut buffer, t + DEFAULT_JITTER_DELAY + AUDIO_FRAME_DURATION * offset),
+                    AudioPlayout::Packet(p) if p.sequence == seq
+                ),
+                "each unique sequence {seq} must be played exactly once, in order"
+            );
+        }
+        assert_eq!(buffer.len(), 0);
+        assert_eq!(buffer.missing_packets(), 0);
+    }
+
+    #[test]
+    fn late_packet_after_playout_advances_is_rejected() {
+        // A packet for an already-played sequence must not replay it.
+        let call = CallId::from_bytes([13; 16]);
+        let t = Instant::now();
+        let mut buffer = AudioJitterBuffer::default();
+        assert!(buffer.push(packet(call, 1, t)));
+        // Play seq 1 at its deadline.
+        assert!(matches!(
+            due(&mut buffer, t + DEFAULT_JITTER_DELAY),
+            AudioPlayout::Packet(p) if p.sequence == 1
+        ));
+        // A late duplicate of seq 1 arriving after playout must be rejected.
+        assert!(!buffer.push(packet(
+            call,
+            1,
+            t + DEFAULT_JITTER_DELAY + AUDIO_FRAME_DURATION
+        )));
+        assert_eq!(
+            buffer.len(),
+            0,
+            "late duplicate must not re-enter the buffer"
+        );
+        // Playback must advance to seq 2 (missing -> PLC hook).
+        assert!(matches!(
+            due(&mut buffer, t + DEFAULT_JITTER_DELAY + AUDIO_FRAME_DURATION),
+            AudioPlayout::Missing { sequence: 2 }
+        ));
+    }
+
+    #[test]
+    fn buffer_does_not_grow_unboundedly_over_many_inserts() {
+        // Feeding a long stream with periodic full-queue pressure must keep
+        // the retained set at the hard bound, never beyond it.
+        let call = CallId::from_bytes([14; 16]);
+        let t = Instant::now();
+        let mut buffer = AudioJitterBuffer::default();
+        for seq in 0..(MAX_BUFFERED_AUDIO_PACKETS as u32 * 5) {
+            let _ = buffer.push(packet(call, seq, t));
+            assert!(
+                buffer.len() <= MAX_BUFFERED_AUDIO_PACKETS,
+                "retained packets must never exceed the hard bound"
+            );
+        }
+        assert!(
+            buffer.dropped_packets() > 0,
+            "congestion must have dropped packets"
+        );
+    }
 }
