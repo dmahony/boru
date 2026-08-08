@@ -94,6 +94,8 @@ pub enum CallError {
     Rejected,
     Connection,
     Protocol,
+    /// The peer is not currently authorized for calls.
+    Unauthorized,
     Authorization,
     Device,
     NegotiationTimeout,
@@ -174,6 +176,7 @@ enum Command {
         enabled: bool,
     },
     Incoming(Connection),
+    RevokePeer(PublicKey),
     Control {
         peer: PublicKey,
         control: CallControl,
@@ -200,6 +203,7 @@ enum Command {
 #[derive(Debug, Clone)]
 pub struct CallHandle {
     command_tx: mpsc::Sender<Command>,
+    authorized_peers: Arc<RwLock<HashSet<PublicKey>>>,
 }
 
 impl CallHandle {
@@ -214,6 +218,13 @@ impl CallHandle {
     }
 
     async fn start_call(&self, peer: PublicKey, kind: CallKind) -> Result<CallId> {
+        if !self.is_peer_authorized(peer) {
+            return Err(n0_error::anyerr!(
+                "call peer {} is not authorized ({:?})",
+                peer.fmt_short(),
+                CallError::Unauthorized
+            ));
+        }
         let call_id = CallId::generate();
         self.send(Command::Start {
             call_id,
@@ -270,6 +281,34 @@ impl CallHandle {
             .await
     }
 
+    /// Authorize or revoke a peer for call setup and active calls.
+    ///
+    /// Revocation is routed through the actor's generation-aware termination
+    /// path, so stale cleanup cannot affect a later call incarnation.
+    pub fn set_peer_authorized(&self, peer: PublicKey, authorized: bool) {
+        let changed = {
+            let mut peers = self
+                .authorized_peers
+                .write()
+                .expect("call authorization lock poisoned");
+            if authorized {
+                peers.insert(peer)
+            } else {
+                peers.remove(&peer)
+            }
+        };
+        if changed && !authorized {
+            let _ = self.command_tx.try_send(Command::RevokePeer(peer));
+        }
+    }
+
+    fn is_peer_authorized(&self, peer: PublicKey) -> bool {
+        self.authorized_peers
+            .read()
+            .expect("call authorization lock poisoned")
+            .contains(&peer)
+    }
+
     async fn send(&self, command: Command) -> Result<()> {
         self.command_tx
             .send(command)
@@ -282,14 +321,21 @@ impl CallHandle {
 #[derive(Debug, Clone)]
 pub struct CallProtocol {
     command_tx: mpsc::Sender<Command>,
-    denied_peers: Arc<RwLock<HashSet<PublicKey>>>,
+    local_id: PublicKey,
+    authorized_peers: Arc<RwLock<HashSet<PublicKey>>>,
 }
 
 impl ProtocolHandler for CallProtocol {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         let peer = connection.remote_id();
-        if self
-            .denied_peers
+        if peer == self.local_id {
+            return Err(AcceptError::from_err(n0_error::anyerr!(
+                "call connection from local identity {} is not allowed",
+                peer.fmt_short()
+            )));
+        }
+        if !self
+            .authorized_peers
             .read()
             .expect("call authorization lock poisoned")
             .contains(&peer)
@@ -313,7 +359,7 @@ pub struct CallBuilder {
     secret_key: SecretKey,
     command_tx: mpsc::Sender<Command>,
     command_rx: Option<mpsc::Receiver<Command>>,
-    denied_peers: Arc<RwLock<HashSet<PublicKey>>>,
+    authorized_peers: Arc<RwLock<HashSet<PublicKey>>>,
 }
 
 impl CallBuilder {
@@ -325,13 +371,13 @@ impl CallBuilder {
             secret_key,
             command_tx,
             command_rx: Some(command_rx),
-            denied_peers: Arc::new(RwLock::new(HashSet::new())),
+            authorized_peers: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
     /// Configure the initial set of peers denied from starting calls.
-    pub fn with_denied_peers(self, peers: impl IntoIterator<Item = PublicKey>) -> Self {
-        self.denied_peers
+    pub fn with_authorized_peers(self, peers: impl IntoIterator<Item = PublicKey>) -> Self {
+        self.authorized_peers
             .write()
             .expect("call authorization lock poisoned")
             .extend(peers);
@@ -342,7 +388,8 @@ impl CallBuilder {
     pub fn protocol_handler(&self) -> CallProtocol {
         CallProtocol {
             command_tx: self.command_tx.clone(),
-            denied_peers: Arc::clone(&self.denied_peers),
+            local_id: self.secret_key.public(),
+            authorized_peers: Arc::clone(&self.authorized_peers),
         }
     }
 
@@ -355,6 +402,7 @@ impl CallBuilder {
             .expect("CallBuilder::spawn called more than once");
         let handle = CallHandle {
             command_tx: self.command_tx.clone(),
+            authorized_peers: Arc::clone(&self.authorized_peers),
         };
         tokio::spawn(run_actor(
             self.endpoint,
@@ -595,6 +643,27 @@ async fn run_actor(
                 // Accepting a bidirectional stream is isolated from the actor
                 // so a peer that connects without opening a stream cannot
                 // block later incoming calls.
+            }
+            Command::RevokePeer(peer) => {
+                let revoked: Vec<_> = calls
+                    .iter()
+                    .filter_map(|(call_id, state)| {
+                        (state.peer == peer).then_some((*call_id, state.generation))
+                    })
+                    .collect();
+                for (call_id, generation) in revoked {
+                    terminate_call(
+                        &mut calls,
+                        &mut terminal_calls,
+                        &event_tx,
+                        call_id,
+                        generation,
+                        HangupReason::AuthorizationRevoked,
+                        true,
+                        false,
+                    )
+                    .await;
+                }
             }
             Command::Control {
                 peer,
@@ -915,8 +984,17 @@ async fn handle_control(
         CallControl::RequestKeyframe { .. } | CallControl::KeepAlive { .. } => {}
         CallControl::Hangup { call_id, reason } => {
             let generation = calls.get(&call_id).map(|call| call.generation).unwrap_or(0);
-            terminate_call(calls, terminal_calls, events, call_id, generation, reason, false, false)
-                .await;
+            terminate_call(
+                calls,
+                terminal_calls,
+                events,
+                call_id,
+                generation,
+                reason,
+                false,
+                false,
+            )
+            .await;
         }
     }
 }
@@ -1193,14 +1271,79 @@ mod tests {
     #[tokio::test]
     async fn spawn_returns_handle_and_receiver() {
         let endpoint = Endpoint::bind(presets::Minimal).await.unwrap();
+        let peer = SecretKey::generate().public();
         let (handle, mut events) = CallBuilder::new(endpoint, SecretKey::generate()).spawn();
-        let call_id = handle
-            .start_voice_call(SecretKey::generate().public())
-            .await
-            .unwrap();
+        handle.set_peer_authorized(peer, true);
+        let call_id = handle.start_voice_call(peer).await.unwrap();
         assert!(
             matches!(events.recv().await, Some(CallEvent::Failed { call_id: Some(id), .. }) if id == call_id)
         );
+    }
+
+    #[tokio::test]
+    async fn unauthorized_outbound_call_is_rejected_before_connect() {
+        let endpoint = Endpoint::bind(presets::Minimal).await.unwrap();
+        let (handle, mut events) = CallBuilder::new(endpoint, SecretKey::generate()).spawn();
+        let peer = SecretKey::generate().public();
+
+        let error = handle.start_voice_call(peer).await.unwrap_err();
+        assert!(error.to_string().contains("not authorized"));
+        assert!(events.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn protocol_policy_is_allow_list_and_tracks_handle_updates() {
+        let endpoint = Endpoint::bind(presets::Minimal).await.unwrap();
+        let local = SecretKey::generate();
+        let peer = SecretKey::generate().public();
+        let builder = CallBuilder::new(endpoint, local).with_authorized_peers([peer]);
+        let handler = builder.protocol_handler();
+        assert!(handler.authorized_peers.read().unwrap().contains(&peer));
+        assert!(!handler
+            .authorized_peers
+            .read()
+            .unwrap()
+            .contains(&SecretKey::generate().public()));
+    }
+
+    #[tokio::test]
+    async fn authorization_revocation_uses_terminal_ended_event() {
+        let (connection, router, _client) = live_connection().await;
+        let (event_tx, mut event_rx) = mpsc::channel(EVENT_CAPACITY);
+        let (control_tx, _control_rx) = mpsc::channel(32);
+        let mut calls = HashMap::new();
+        let mut terminal_calls = HashSet::new();
+        let call_id = CallId::generate();
+        calls.insert(
+            call_id,
+            CallState {
+                peer: SecretKey::generate().public(),
+                kind: CallKind::Voice,
+                tx: control_tx,
+                incoming: false,
+                active: true,
+                local_audio_muted: false,
+                remote_audio_muted: false,
+                video_enabled: false,
+                generation: 9,
+                ending: false,
+                runtime: CallRuntime::new(connection),
+            },
+        );
+        terminate_call(
+            &mut calls,
+            &mut terminal_calls,
+            &event_tx,
+            call_id,
+            9,
+            HangupReason::AuthorizationRevoked,
+            true,
+            false,
+        )
+        .await;
+        assert!(matches!(event_rx.recv().await,
+            Some(CallEvent::Ended { call_id: id, reason: CallEndReason::AuthorizationRevoked }) if id == call_id));
+        let _ = router.shutdown().await;
     }
 
     #[test]
@@ -1324,7 +1467,10 @@ mod tests {
             }
         }
         assert_eq!(ended, 1, "expected exactly one Ended event, got {ended}");
-        assert!(calls.is_empty(), "call state must be removed after termination");
+        assert!(
+            calls.is_empty(),
+            "call state must be removed after termination"
+        );
         let _ = router.shutdown().await;
     }
 
