@@ -2172,6 +2172,10 @@ pub(crate) struct DownloadAttachment {
     /// Number of entries (files) in a folder share.  Meaningful only when
     /// [`is_folder`](Self::is_folder) is true; 0 for single-file shares.
     pub(crate) collection_entries: u64,
+    /// Overwrite-conflict policy applied when this download's destination
+    /// collides with an existing file (FS-26).  Defaults to KeepBoth — a
+    /// download never silently overwrites an existing file.
+    pub(crate) overwrite_policy: boru_core::safe_destination::OverwritePolicy,
 }
 
 impl std::hash::Hash for DownloadAttachment {
@@ -2193,6 +2197,7 @@ impl std::hash::Hash for DownloadAttachment {
         self.expected_content_hash.hash(state);
         self.is_folder.hash(state);
         self.collection_entries.hash(state);
+        self.overwrite_policy.hash(state);
     }
 }
 
@@ -2244,6 +2249,7 @@ impl DownloadAttachment {
             expected_content_hash,
             is_folder: false,
             collection_entries: 0,
+            overwrite_policy: boru_core::safe_destination::OverwritePolicy::KeepBoth,
         }
     }
 
@@ -4279,6 +4285,34 @@ pub struct IcedChat {
     /// True while the confirmed download task is in flight.
     receive_ticket_downloading: bool,
 
+    // ── Short-code file shares (FS-26) ──
+    /// Whether the sender-side "share via short code" dialog is shown.
+    show_short_code_dialog: bool,
+    /// The code being shared in the sender dialog (set after mint succeeds).
+    short_code_dialog_code: Option<String>,
+    /// Error from minting or broadcasting the short code, if any.
+    short_code_dialog_error: Option<String>,
+    /// True while the mint async task is in flight.
+    short_code_minting: bool,
+    /// Gossip sender for the active short-code rendezvous topic. Held while
+    /// the sender dialog is open so the code's topic stays subscribed (the
+    /// ephemeral subscribe-broadcast-drop pattern is broken — the mesh must
+    /// stay alive while the receiver subscribes).
+    short_code_sender: Option<GossipSender>,
+    /// Active short-code share state (code + ticket + topic) so the periodic
+    /// tick can re-broadcast the announcement.
+    short_code_active: Option<ShortCodeActiveShare>,
+    /// Whether the receiver-side "redeem a short code" dialog is shown.
+    show_redeem_code_dialog: bool,
+    /// The typed short code in the redeem dialog.
+    redeem_code_input: String,
+    /// Error from the redeem flow, if any.
+    redeem_code_error: Option<String>,
+    /// True while the redeem subscription task is in flight.
+    redeem_code_busy: bool,
+    /// Codes already redeemed in this session (in-session replay guard).
+    redeemed_codes: std::collections::HashSet<String>,
+
     // ── Room advertisement (public directory) ──
     /// Which rooms are being advertised into the directory topic.
     advertised_rooms: HashSet<TopicId>,
@@ -5445,6 +5479,36 @@ pub(crate) struct ReceiveTicketPreflight {
     pub(crate) child_count: u64,
 }
 
+/// State for an active short-code share (FS-26). Kept while the sender-side
+/// "share via code" dialog is open so the periodic tick can re-broadcast the
+/// signed announcement on the code-derived rendezvous topic.
+#[derive(Debug, Clone)]
+pub(crate) struct ShortCodeActiveShare {
+    /// The 7-character code being shared.
+    pub(crate) code: String,
+    /// Serialized blob ticket the code resolves to.
+    pub(crate) ticket: String,
+    /// Display file name.
+    pub(crate) name: String,
+    /// Expected total size in bytes.
+    pub(crate) size: u64,
+}
+
+/// Result of redeeming a short code over the rendezvous gossip topic.
+#[derive(Debug, Clone)]
+pub(crate) struct ShortCodeRedemption {
+    /// The code that was redeemed.
+    pub(crate) code: String,
+    /// Display file name from the announcement.
+    pub(crate) name: String,
+    /// Serialized blob ticket from the announcement.
+    pub(crate) ticket: String,
+    /// Expected total size in bytes.
+    pub(crate) size: u64,
+    /// Short form of the announcing peer's node id.
+    pub(crate) node_short: String,
+}
+
 #[derive(Debug, Clone)]
 pub enum AppMessage {
     // ── Navigation ──
@@ -5798,6 +5862,28 @@ pub enum AppMessage {
     CancelDownloadAt(usize),
     /// Re-share a completed download to the current room.
     ReshareFile(usize),
+    /// Open the sender-side "share via short code" dialog for a download card.
+    MintShortCode(usize),
+    /// Result of the mint + subscribe step for a short code share. Carries
+    /// the rendezvous-topic sender so the dialog can keep broadcasting.
+    ShortCodeMinted(std::result::Result<(String, GossipSender), String>),
+    /// Close the sender-side short-code dialog and stop broadcasting.
+    CloseShortCodeDialog,
+    /// Copy the short code shown in the sender dialog to the clipboard.
+    CopyShortCode(String),
+    /// Open the receiver-side "redeem a short code" dialog.
+    OpenRedeemCodeDialog,
+    /// Close the receiver-side redeem dialog.
+    CloseRedeemCodeDialog,
+    /// The typed code in the redeem dialog changed.
+    RedeemCodeInputChanged(String),
+    /// Start resolving the typed short code over the rendezvous gossip topic.
+    RedeemShortCode,
+    /// A short-code announcement was received and verified; create the
+    /// download card exactly like a pasted ticket.
+    ShortCodeRedeemed(std::result::Result<ShortCodeRedemption, String>),
+    /// Set the overwrite-conflict policy on a download card (FS-26).
+    SetOverwritePolicy(usize, boru_core::safe_destination::OverwritePolicy),
     /// A download initiated from a peer profile was created successfully.
     DownloadInitiated {
         /// Content hash of the file.
@@ -7729,6 +7815,17 @@ impl IcedChat {
             receive_ticket_error: None,
             receive_ticket_preflight_busy: false,
             receive_ticket_downloading: false,
+            show_short_code_dialog: false,
+            short_code_dialog_code: None,
+            short_code_dialog_error: None,
+            short_code_minting: false,
+            short_code_sender: None,
+            short_code_active: None,
+            show_redeem_code_dialog: false,
+            redeem_code_input: String::new(),
+            redeem_code_error: None,
+            redeem_code_busy: false,
+            redeemed_codes: std::collections::HashSet::new(),
             #[cfg(feature = "video-playback")]
             inline_video: None,
             #[cfg(feature = "video-playback")]
@@ -9669,6 +9766,16 @@ impl IcedChat {
             AppMessage::ResumeDownloadAt(_) => "ResumeDownloadAt",
             AppMessage::CancelDownloadAt(_) => "CancelDownloadAt",
             AppMessage::ReshareFile(_) => "ReshareFile",
+            AppMessage::MintShortCode(_) => "MintShortCode",
+            AppMessage::ShortCodeMinted(_) => "ShortCodeMinted",
+            AppMessage::CloseShortCodeDialog => "CloseShortCodeDialog",
+            AppMessage::CopyShortCode(_) => "CopyShortCode",
+            AppMessage::OpenRedeemCodeDialog => "OpenRedeemCodeDialog",
+            AppMessage::CloseRedeemCodeDialog => "CloseRedeemCodeDialog",
+            AppMessage::RedeemCodeInputChanged(_) => "RedeemCodeInputChanged",
+            AppMessage::RedeemShortCode => "RedeemShortCode",
+            AppMessage::ShortCodeRedeemed(_) => "ShortCodeRedeemed",
+            AppMessage::SetOverwritePolicy(..) => "SetOverwritePolicy",
             AppMessage::DownloadInitiated { .. } => "DownloadInitiated",
             AppMessage::DownloadInitiationFailed { .. } => "DownloadInitiationFailed",
             AppMessage::OpenPeerProfile(..) => "OpenPeerProfile",
@@ -16457,6 +16564,11 @@ impl IcedChat {
                 let name = dl.name.clone();
                 let kind = dl.kind;
                 let is_folder = dl.is_folder;
+                let overwrite_policy = dl.overwrite_policy;
+                let content_hash_fallback = dl
+                    .expected_content_hash
+                    .clone()
+                    .unwrap_or_else(|| "download".to_string());
                 let data_dir = self.data_dir.clone();
                 let progress_queue = self.download_progress_queue.clone();
                 iced::Task::perform(
@@ -16484,9 +16596,26 @@ impl IcedChat {
                             )
                             .await
                             .map_err(|e| format!("Folder download failed: {e}"))?;
-                            return Ok::<_, String>((name.clone(), save_dir));
+                            return Ok::<_, String>((name.clone(), save_dir, false));
                         }
-                        let save_path = dl_dir.join(&name);
+                        // FS-26 overwrite-conflict policy: resolve the
+                        // destination with the policy chosen on the card.
+                        // Skip returns without downloading when the file
+                        // already exists (never silently overwrite).
+                        let decision =
+                            boru_core::safe_destination::resolve_destination_with_policy(
+                                &dl_dir,
+                                &name,
+                                &content_hash_fallback,
+                                overwrite_policy,
+                            )
+                            .map_err(|e| format!("Unsafe download name: {e}"))?;
+                        let save_path = match decision {
+                            boru_core::safe_destination::DestinationDecision::Use(path) => path,
+                            boru_core::safe_destination::DestinationDecision::Skip => {
+                                return Ok::<_, String>((name.clone(), dl_dir.join(&name), true));
+                            }
+                        };
                         download_blob_to_file(
                             &blob_store,
                             &endpoint,
@@ -16507,10 +16636,15 @@ impl IcedChat {
                         )
                         .await
                         .map_err(|e| format!("Download failed: {e}"))?;
-                        Ok::<_, String>((name.clone(), save_path))
+                        Ok::<_, String>((name.clone(), save_path, false))
                     },
                     move |r| match r {
-                        Ok((name, path)) => AppMessage::DownloadDone(name, path),
+                        Ok((name, path, skipped)) if skipped => {
+                            AppMessage::ErrorMsg(format!(
+                                "Skipped — {name} already exists (overwrite policy is Skip)."
+                            ))
+                        }
+                        Ok((name, path, _)) => AppMessage::DownloadDone(name, path),
                         Err(e) => AppMessage::DownloadFailed(e),
                     },
                 )
@@ -17749,6 +17883,261 @@ impl IcedChat {
                                 return self.update(AppMessage::ExecuteFileSend(encoded));
                             }
                         }
+                    }
+                }
+                iced::Task::none()
+            }
+            AppMessage::MintShortCode(entry_index) => {
+                // Mint a short code for the download card's ticket, subscribe
+                // to the code-derived rendezvous topic, and open the dialog
+                // showing the code. The subscription is held (sender half
+                // stored) so the code's topic stays alive while the dialog is
+                // open — the ephemeral subscribe-broadcast-drop pattern is
+                // broken (the mesh must form before the receiver subscribes).
+                if self.short_code_minting {
+                    return iced::Task::none();
+                }
+                let Some(entry) = self.entries.get(entry_index) else {
+                    return iced::Task::none();
+                };
+                let Some(dl) = &entry.download else {
+                    return iced::Task::none();
+                };
+                let ticket = dl.ticket.clone();
+                let name = dl.name.clone();
+                let size = match &dl.state {
+                    DownloadState::Completed { total_size, .. } => total_size.unwrap_or(0),
+                    DownloadState::Shared { size, .. } => size.unwrap_or(0),
+                    DownloadState::Ready { total } | DownloadState::Active { total, .. } => {
+                        total.unwrap_or(0)
+                    }
+                    _ => 0,
+                };
+                if ticket.is_empty() {
+                    self.short_code_dialog_error =
+                        Some("This card has no share ticket yet.".to_string());
+                    self.show_short_code_dialog = true;
+                    return iced::Task::none();
+                }
+                self.short_code_minting = true;
+                self.short_code_dialog_error = None;
+                let data_dir = self.data_dir.clone();
+                let gossip = self.gossip.clone();
+                iced::Task::perform(
+                    async move {
+                        // Load the store (creating the file on first mint).
+                        let mut store =
+                            boru_core::short_code::ShortCodeStore::load_or_default(&data_dir)
+                                .map_err(|e| format!("failed to open short-code store: {e}"))?;
+                        let code = store
+                            .mint(
+                                &ticket,
+                                &name,
+                                size,
+                                boru_core::short_code::DEFAULT_SHORT_CODE_TTL,
+                            )
+                            .map_err(|e| format!("failed to mint short code: {e}"))?;
+                        let topic = boru_core::short_code::derive_shortcode_topic(&code);
+                        let sub = gossip
+                            .subscribe(topic, Vec::new())
+                            .await
+                            .map_err(|e| format!("failed to join short-code topic: {e}"))?;
+                        let (sender, _receiver) = sub.split();
+                        Ok::<_, String>((code, sender))
+                    },
+                    |result| match result {
+                        Ok((code, sender)) => AppMessage::ShortCodeMinted(Ok((code, sender))),
+                        Err(e) => AppMessage::ShortCodeMinted(Err(e)),
+                    },
+                )
+            }
+            AppMessage::ShortCodeMinted(result) => {
+                self.short_code_minting = false;
+                match result {
+                    Ok((code, sender)) => {
+                        let share = self
+                            .short_code_active
+                            .clone()
+                            .or_else(|| {
+                                self.entries
+                                    .iter()
+                                    .find_map(|entry| {
+                                        entry.download.as_ref().map(|dl| ShortCodeActiveShare {
+                                            code: code.clone(),
+                                            ticket: dl.ticket.clone(),
+                                            name: dl.name.clone(),
+                                            size: match &dl.state {
+                                                DownloadState::Completed { total_size, .. } => {
+                                                    total_size.unwrap_or(0)
+                                                }
+                                                DownloadState::Shared { size, .. } => {
+                                                    size.unwrap_or(0)
+                                                }
+                                                _ => 0,
+                                            },
+                                        })
+                                    })
+                            });
+                        self.short_code_active = share;
+                        self.short_code_sender = Some(sender);
+                        self.short_code_dialog_code = Some(code.clone());
+                        self.show_short_code_dialog = true;
+                        tracing::info!(code = %code, "short-code share minted");
+                    }
+                    Err(e) => {
+                        self.short_code_dialog_error = Some(e);
+                        self.show_short_code_dialog = true;
+                    }
+                }
+                iced::Task::none()
+            }
+            AppMessage::CloseShortCodeDialog => {
+                // Dropping the sender leaves the code's rendezvous topic,
+                // stopping the periodic re-broadcast.
+                self.short_code_sender = None;
+                self.short_code_active = None;
+                self.short_code_dialog_code = None;
+                self.short_code_dialog_error = None;
+                self.show_short_code_dialog = false;
+                iced::Task::none()
+            }
+            AppMessage::CopyShortCode(code) => {
+                self.toast_message = Some("Short code copied to clipboard".to_string());
+                iced::clipboard::write(code)
+            }
+            AppMessage::OpenRedeemCodeDialog => {
+                self.show_redeem_code_dialog = true;
+                self.redeem_code_input = String::new();
+                self.redeem_code_error = None;
+                self.redeem_code_busy = false;
+                iced::Task::none()
+            }
+            AppMessage::CloseRedeemCodeDialog => {
+                self.show_redeem_code_dialog = false;
+                self.redeem_code_input = String::new();
+                self.redeem_code_error = None;
+                self.redeem_code_busy = false;
+                iced::Task::none()
+            }
+            AppMessage::RedeemCodeInputChanged(text) => {
+                self.redeem_code_input = text;
+                self.redeem_code_error = None;
+                iced::Task::none()
+            }
+            AppMessage::RedeemShortCode => {
+                let input = self.redeem_code_input.trim().to_string();
+                let code = boru_core::short_code::normalise_code(&input);
+                if code.is_empty() {
+                    self.redeem_code_error = Some("Type a short code first.".to_string());
+                    return iced::Task::none();
+                }
+                if code.len() != boru_core::short_code::SHORT_CODE_LEN {
+                    self.redeem_code_error = Some(format!(
+                        "Short codes are {} characters.",
+                        boru_core::short_code::SHORT_CODE_LEN
+                    ));
+                    return iced::Task::none();
+                }
+                if self.redeemed_codes.contains(&code) {
+                    self.redeem_code_error =
+                        Some("This code was already redeemed in this session.".to_string());
+                    return iced::Task::none();
+                }
+                self.redeem_code_busy = true;
+                self.redeem_code_error = None;
+                let gossip = self.gossip.clone();
+                let topic = boru_core::short_code::derive_shortcode_topic(&code);
+                iced::Task::perform(
+                    async move {
+                        // Subscribe to the rendezvous topic and wait for a
+                        // signed announcement matching the code. The
+                        // subscription is held for the whole wait so the mesh
+                        // has time to form.
+                        let sub = gossip
+                            .subscribe(topic, Vec::new())
+                            .await
+                            .map_err(|e| format!("failed to join short-code topic: {e}"))?;
+                        let (mut _sender, mut receiver) = sub.split();
+                        use n0_future::StreamExt;
+                        let deadline = std::time::Instant::now()
+                            + std::time::Duration::from_secs(60);
+                        loop {
+                            if std::time::Instant::now() >= deadline {
+                                return Err(
+                                    "Timed out waiting for the sharing peer. Make sure \
+                                     both peers are on the same relay."
+                                        .to_string(),
+                                );
+                            }
+                            let remaining =
+                                deadline.saturating_duration_since(std::time::Instant::now());
+                            let item = tokio::time::timeout(remaining, receiver.next())
+                                .await
+                                .map_err(|_| {
+                                    "Timed out waiting for the sharing peer.".to_string()
+                                })?;
+                            let Some(Ok(boru_core::api::Event::Received(msg))) = item else {
+                                continue;
+                            };
+                            let Ok((from, announcement)) = boru_core::short_code::
+                                SignedShortCodeAnnouncement::verify(&msg.content, &code)
+                            else {
+                                continue;
+                            };
+                            let redemption = ShortCodeRedemption {
+                                code: announcement.code.clone(),
+                                name: announcement.name.clone(),
+                                ticket: announcement.ticket.clone(),
+                                size: announcement.size,
+                                node_short: from.fmt_short().to_string(),
+                            };
+                            return Ok(redemption);
+                        }
+                    },
+                    AppMessage::ShortCodeRedeemed,
+                )
+            }
+            AppMessage::ShortCodeRedeemed(result) => {
+                self.redeem_code_busy = false;
+                match result {
+                    Ok(redemption) => {
+                        self.redeemed_codes.insert(redemption.code.clone());
+                        self.show_redeem_code_dialog = false;
+                        // Create the same download card as pasting a ticket.
+                        self.download_entry_index = Some(self.entries.len());
+                        self.entries_push(ChatEntry::system_download(
+                            format!("Receiving via short code: {}", redemption.name),
+                            TransferKind::File,
+                            redemption.name.clone(),
+                            redemption.ticket.clone(),
+                            &redemption.node_short,
+                            None,
+                        ));
+                        if let Some(idx) = self.download_entry_index {
+                            if let Some(entry) = self.entries.get_mut(idx) {
+                                if let Some(dl) = entry.download.as_mut() {
+                                    dl.state = DownloadState::Ready {
+                                        total: Some(redemption.size),
+                                    };
+                                }
+                            }
+                        }
+                        self.toast_message = Some(format!(
+                            "Short code {} resolved — ready to download {}",
+                            redemption.code, redemption.name
+                        ));
+                    }
+                    Err(e) => {
+                        self.redeem_code_error = Some(e);
+                    }
+                }
+                iced::Task::none()
+            }
+            AppMessage::SetOverwritePolicy(entry_index, policy) => {
+                if let Some(entry) = self.entries.get_mut(entry_index) {
+                    if let Some(dl) = entry.download.as_mut() {
+                        dl.overwrite_policy = policy;
+                        self.layout_cache.borrow_mut().invalidate_from(entry_index);
                     }
                 }
                 iced::Task::none()
@@ -20419,6 +20808,41 @@ impl IcedChat {
                 }
                 self.save_directory_store();
                 self.refresh_missing_downloads();
+                // Re-broadcast an active short-code announcement so receivers
+                // that join the rendezvous topic late can still pick it up
+                // (the topic stays subscribed because short_code_sender is
+                // held while the dialog is open).
+                if let Some(share) = self.short_code_active.clone() {
+                    if let Some(sender) = self.short_code_sender.clone() {
+                        let sk = self.secret_key.clone();
+                        let announcement = boru_core::short_code::ShortCodeAnnouncement {
+                            code: share.code.clone(),
+                            name: share.name.clone(),
+                            ticket: share.ticket.clone(),
+                            size: share.size,
+                            created_at_ms: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as u64,
+                        };
+                        let encoded =
+                            match boru_core::short_code::SignedShortCodeAnnouncement::sign(
+                                &sk, &announcement,
+                            ) {
+                                Ok(bytes) => bytes,
+                                Err(e) => {
+                                    tracing::warn!("short-code: sign failed: {e}");
+                                    return iced::Task::none();
+                                }
+                            };
+                        let sender = sender.clone();
+                        tokio::task::spawn(async move {
+                            if let Err(e) = sender.broadcast(bytes::Bytes::from(encoded)).await {
+                                tracing::warn!("short-code: broadcast failed: {e}");
+                            }
+                        });
+                    }
+                }
                 if self.pending_image_upload.is_some() {
                     self.image_upload_spinner_frame = (self.image_upload_spinner_frame + 1) % 10;
                 }
@@ -25426,6 +25850,10 @@ impl IcedChat {
             self.view_invite_member_dialog(base)
         } else if self.show_receive_ticket_dialog {
             self.view_receive_ticket_dialog(base)
+        } else if self.show_short_code_dialog {
+            self.view_short_code_dialog(base)
+        } else if self.show_redeem_code_dialog {
+            self.view_redeem_code_dialog(base)
         } else if let Some(entry_index) = self.lightbox_image {
             self.view_image_lightbox(base, entry_index)
         } else {
@@ -25931,6 +26359,130 @@ impl IcedChat {
             )
             .on_close(AppMessage::CloseReceiveTicketDialog)
             .on_backdrop(AppMessage::CloseReceiveTicketDialog)
+            .build(&theme);
+
+        iced::widget::stack![base, overlay].into()
+    }
+
+    /// Dialog for sharing a file via a short code (FS-26). The minted code is
+    /// shown with a copy action; the rendezvous topic stays subscribed while
+    /// the dialog is open so receivers that join late still receive the
+    /// announcement.
+    fn view_short_code_dialog<'a>(
+        &'a self,
+        base: iced::widget::Container<'a, AppMessage>,
+    ) -> iced::Element<'a, AppMessage> {
+        use crate::boru_dialog::{BoruDialog, BORU_DIALOG_WIDTH_STANDARD};
+        use crate::form_components::FormSection;
+
+        let theme = Self::theme_from_dark(self.dark_mode);
+
+        let mut overlay = BoruDialog::new("Share via Short Code")
+            .subtitle(
+                "Anyone who types this code on a device on the same relay can \
+                 download the file — no friend relationship required.",
+            )
+            .width(self.dialog_width(BORU_DIALOG_WIDTH_STANDARD));
+
+        if let Some(code) = &self.short_code_dialog_code {
+            let code_text = crate::fonts::type_role_text(
+                crate::fonts::TypeRole::DisplayHeading,
+                format!("  {code}  "),
+            );
+            let copy = iced::widget::button("Copy")
+                .on_press(AppMessage::CopyShortCode(code.clone()))
+                .padding([6, 14]);
+            let code_row: iced::Element<'_, AppMessage> = iced::widget::row![code_text, copy]
+                .spacing(12)
+                .align_y(iced::Alignment::Center)
+                .into();
+            overlay = overlay.push_body(FormSection::new("Code").push(code_row).build());
+        } else if self.short_code_minting {
+            let minting: iced::Element<'_, AppMessage> = crate::fonts::type_role_text(
+                crate::fonts::TypeRole::Body,
+                "Minting…",
+            )
+            .into();
+            overlay = overlay.push_body(FormSection::new("Code").push(minting).build());
+        }
+        if let Some(error) = &self.short_code_dialog_error {
+            let err_text: iced::Element<'_, AppMessage> =
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Body, error.clone()).into();
+            overlay = overlay.push_body(err_text);
+        }
+        let share = self.short_code_active.clone();
+        if let Some(share) = &share {
+            let file_text: iced::Element<'_, AppMessage> = crate::fonts::type_role_text(
+                crate::fonts::TypeRole::Body,
+                format!(
+                    "{} — {}",
+                    share.name,
+                    crate::dashboard_view_model::format_bytes(share.size)
+                ),
+            )
+            .into();
+            overlay = overlay.push_body(FormSection::new("File").push(file_text).build());
+        }
+
+        let overlay = overlay
+            .primary("Done", AppMessage::CloseShortCodeDialog)
+            .on_close(AppMessage::CloseShortCodeDialog)
+            .on_backdrop(AppMessage::CloseShortCodeDialog)
+            .build(&theme);
+
+        iced::widget::stack![base, overlay].into()
+    }
+
+    /// Dialog for redeeming a short code (FS-26). Subscribes to the
+    /// code-derived rendezvous topic and waits for a signed announcement from
+    /// the sharing peer, then creates the same download card as pasting a
+    /// ticket.
+    fn view_redeem_code_dialog<'a>(
+        &'a self,
+        base: iced::widget::Container<'a, AppMessage>,
+    ) -> iced::Element<'a, AppMessage> {
+        use crate::boru_dialog::{BoruDialog, BORU_DIALOG_WIDTH_STANDARD};
+        use crate::form_components::{FormSection, TextInput};
+
+        let theme = Self::theme_from_dark(self.dark_mode);
+
+        let mut code_field = TextInput::new(
+            "Short code",
+            "e.g. 7 characters",
+            &self.redeem_code_input,
+            AppMessage::RedeemCodeInputChanged,
+        )
+        .id("redeem-code-input")
+        .helper("Type the code the sharing peer shows. Both peers must be on the same relay.");
+        if let Some(error) = &self.redeem_code_error {
+            code_field = code_field.error(error.clone());
+        }
+        let code_section = FormSection::new("Code")
+            .push(code_field.build())
+            .build();
+
+        let mut overlay = BoruDialog::new("Receive via Short Code")
+            .subtitle(
+                "Redeem a short code to download a file shared outside the friend graph.",
+            )
+            .width(self.dialog_width(BORU_DIALOG_WIDTH_STANDARD))
+            .push_body(code_section);
+        if self.redeem_code_busy {
+            let waiting: iced::Element<'_, AppMessage> = crate::fonts::type_role_text(
+                crate::fonts::TypeRole::Body,
+                "Waiting for the sharing peer…",
+            )
+            .into();
+            overlay = overlay.push_body(waiting);
+        }
+
+        let overlay = overlay
+            .secondary("Cancel", AppMessage::CloseRedeemCodeDialog)
+            .secondary_enabled(!self.redeem_code_busy)
+            .primary("Redeem", AppMessage::RedeemShortCode)
+            .primary_enabled(!self.redeem_code_busy && !self.redeem_code_input.trim().is_empty())
+            .on_close(AppMessage::CloseRedeemCodeDialog)
+            .on_backdrop(AppMessage::CloseRedeemCodeDialog)
             .build(&theme);
 
         iced::widget::stack![base, overlay].into()
@@ -39512,6 +40064,31 @@ impl IcedChat {
         .padding([SPACE_6, SPACE_16])
         .style(BUTTON_OUTLINE);
 
+        // FS-26: receive a file shared outside the friend graph via a short
+        // code (type the 7-character code the sharing peer shows, instead of
+        // pasting a long ticket).
+        let receive_short_code_btn = button(
+            Row::new()
+                .push(
+                    Icon::Download
+                        .build()
+                        .size(crate::icon_system::IconSize::Xs)
+                        .color_fn(crate::design_tokens::text_muted)
+                        .build(),
+                )
+                .push(
+                    crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::ButtonLabel,
+                        "Receive Short Code",
+                    ),
+                )
+                .spacing(SPACE_4)
+                .align_y(Alignment::Center),
+        )
+        .on_press(AppMessage::OpenRedeemCodeDialog)
+        .padding([SPACE_6, SPACE_16])
+        .style(BUTTON_OUTLINE);
+
         // DLMGR-01: entry point for the Download Manager screen — every
         // active transfer in both directions with pause/stop controls.
         let download_manager_btn = button(
@@ -39540,6 +40117,8 @@ impl IcedChat {
             .push(search_row)
             .push(Space::new().width(Length::Fixed(SPACE_16)))
             .push(receive_ticket_btn)
+            .push(Space::new().width(Length::Fixed(SPACE_8)))
+            .push(receive_short_code_btn)
             .push(Space::new().width(Length::Fixed(SPACE_8)))
             .push(download_manager_btn)
             .push(Space::new().width(Length::Fixed(SPACE_8)))

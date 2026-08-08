@@ -1422,6 +1422,17 @@ impl<'a> BoruVideoFileCard<'a> {
         let action_row = action_buttons(self.entry_index, attachment.kind, state, &name_str);
         column = column.push(action_row);
 
+        // FS-26 overwrite-conflict policy: while the download is ready to
+        // start, surface the policy that decides what happens when the
+        // destination file already exists. Default is Keep Both — never
+        // silently overwrite.
+        if matches!(state, DownloadState::Ready { .. }) {
+            column = column.push(crate::download_progress_view::policy_selector(
+                self.entry_index,
+                attachment.overwrite_policy,
+            ));
+        }
+
         if let Some(error) = attachment.playback_error.as_ref() {
             if error.retry_available() {
                 column = column.push(iced::Element::<'_, AppMessage>::from(secondary_button(

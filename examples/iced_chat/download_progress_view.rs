@@ -41,6 +41,7 @@ use super::app::{
     icon_svg, AppMessage, DownloadAttachment, DownloadState, ICON_COPY, ICON_FILES, ICON_FOLDER,
     ICON_MESH, ICON_PLAY, ICON_RETRY,
 };
+use boru_core::safe_destination::OverwritePolicy;
 use crate::file_type_icon::{FileTypeIcon, FileTypeIconSize};
 
 // Re-import the design-token helpers and constants from app.rs.
@@ -544,6 +545,69 @@ pub(crate) fn disabled_button<'a>(label: &'a str) -> iced::Element<'a, AppMessag
     .build()
 }
 
+/// FS-26 overwrite-conflict policy selector — a compact set of three
+/// toggle-style buttons shown while a download is ready to start.
+///
+/// The chosen policy decides what happens when the destination file already
+/// exists: Keep Both (default; never silently overwrite — saves under a
+/// numbered suffix), Overwrite (replace), or Skip (don't download).
+pub(crate) fn policy_selector<'a>(
+    entry_index: usize,
+    policy: OverwritePolicy,
+) -> iced::Element<'a, AppMessage> {
+    use crate::focusable_button::focusable_button;
+
+    let label = crate::fonts::type_role_text(
+        crate::fonts::TypeRole::Metadata,
+        "If a file with this name exists:",
+    );
+
+    let mut row = Row::new().push(label).spacing(SPACE_6).align_y(Alignment::Center);
+
+    for (candidate, label) in [
+        (OverwritePolicy::KeepBoth, "Keep Both"),
+        (OverwritePolicy::Overwrite, "Overwrite"),
+        (OverwritePolicy::Skip, "Skip"),
+    ] {
+        let selected = candidate == policy;
+        let msg = AppMessage::SetOverwritePolicy(entry_index, candidate);
+        let el = crate::focusable_button::focusable_button(
+            button(crate::fonts::type_role_text(
+                crate::fonts::TypeRole::ButtonLabel,
+                label,
+            ))
+            .on_press(msg.clone())
+            .padding([SPACE_4, SPACE_8])
+            .style(move |theme, status| {
+                let hovered = matches!(status, widget::button::Status::Hovered);
+                let (text_color, background, border_color) = if selected {
+                    (Color::WHITE, Some(iced::Background::Color(accent_primary(theme))), accent_primary(theme))
+                } else if hovered {
+                    (text_system(theme), None, accent_primary(theme))
+                } else {
+                    (text_muted(theme), None, border_muted(theme))
+                };
+                widget::button::Style {
+                    text_color,
+                    background,
+                    border: iced::Border {
+                        color: border_color,
+                        width: 1.0,
+                        radius: SPACE_6.into(),
+                    },
+                    ..Default::default()
+                }
+            }),
+            Some(msg),
+        )
+        .ring_radius(SPACE_6)
+        .build();
+        row = row.push(el);
+    }
+
+    row.into()
+}
+
 // ── Primary entry point ──────────────────────────────────────────────────
 
 /// Render a complete download progress card for a single download row.
@@ -863,6 +927,12 @@ fn view_download_progress_inner<'a>(
     if let Some(playback_actions) = playback_action_row {
         body = body.push(playback_actions);
     }
+    // FS-26 overwrite-conflict policy: while the download is ready to start,
+    // surface the policy that decides what happens when the destination file
+    // already exists. Default is Keep Both — never silently overwrite.
+    if matches!(state, DownloadState::Ready { .. }) {
+        body = body.push(policy_selector(entry_index, attachment.overwrite_policy));
+    }
     // VIDCARD-13: "Open Folder" is now a light-bordered secondary action in
     // the completed/shared action row (see action_buttons); the old
     // default-styled blue "Open downloads folder" button is removed.
@@ -1150,6 +1220,9 @@ pub(crate) fn action_buttons<'a>(
                 secondary_button(Some(ICON_FOLDER), "Open Folder", OpenDownloadsFolder).into(),
                 secondary_button(Some(ICON_COPY), "Copy Ticket", CopyShareTicket(entry_index))
                     .into(),
+                // FS-26: mint a 7-character short code that resolves to this
+                // card's ticket (additive — the full ticket stays available).
+                secondary_button(None, "Share Code", MintShortCode(entry_index)).into(),
                 secondary_button(Some(ICON_MESH), "Re-share", ReshareFile(entry_index)).into(),
             ]
         }
@@ -1160,6 +1233,7 @@ pub(crate) fn action_buttons<'a>(
                 secondary_button(Some(ICON_FOLDER), "Open Folder", OpenDownloadsFolder).into(),
                 secondary_button(Some(ICON_COPY), "Copy Ticket", CopyShareTicket(entry_index))
                     .into(),
+                secondary_button(None, "Share Code", MintShortCode(entry_index)).into(),
                 secondary_button(Some(ICON_MESH), "Re-share", ReshareFile(entry_index)).into(),
             ]
         }

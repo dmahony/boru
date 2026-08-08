@@ -414,6 +414,13 @@ pub mod safe_destination;
 #[cfg(feature = "net")]
 pub mod ticket_share;
 
+/// PAKE-style short-code file shares — a 7-character code that resolves to a
+/// blob ticket on the sharing peer, with expiry and single-use replay
+/// rejection, plus the signed announcement envelope broadcast over a
+/// code-derived rendezvous gossip topic.
+#[cfg(feature = "net")]
+pub mod short_code;
+
 /// Text sanitisation for safe display in the UI and logs.
 ///
 /// Strips or replaces control characters, Unicode format characters

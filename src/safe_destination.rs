@@ -267,6 +267,129 @@ pub fn prepare_download_destination(
     Ok(dest)
 }
 
+// ── Overwrite-conflict policy (FS-26) ────────────────────────────────────
+
+/// User-visible policy for what happens when an incoming download collides
+/// with an existing file at the destination.
+///
+/// The default is [`OverwritePolicy::KeepBoth`] — a download must never
+/// silently overwrite an existing file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub enum OverwritePolicy {
+    /// Keep both files: the incoming download is saved under a deduplicated
+    /// name (e.g. `report (1).pdf`) instead of replacing the existing file.
+    #[default]
+    KeepBoth,
+    /// Replace the existing file at the destination path.
+    Overwrite,
+    /// Do not download: the transfer is skipped because a file with the same
+    /// name already exists.
+    Skip,
+}
+
+impl OverwritePolicy {
+    /// Stable label for the policy (shown in the transfer card).
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::KeepBoth => "Keep Both",
+            Self::Overwrite => "Overwrite",
+            Self::Skip => "Skip",
+        }
+    }
+
+    /// Short helper text describing the policy.
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::KeepBoth => "Save as a new file with a numbered suffix",
+            Self::Overwrite => "Replace the existing file",
+            Self::Skip => "Do not download this file",
+        }
+    }
+}
+
+/// Outcome of resolving a destination under an [`OverwritePolicy`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DestinationDecision {
+    /// Download to this path.
+    Use(std::path::PathBuf),
+    /// The policy (Skip) prevents the download because the file exists.
+    Skip,
+}
+
+/// Resolve the destination path for a download under the given overwrite
+/// policy, applying the same sanitisation guarantees as
+/// [`safe_destination_path`].
+///
+/// - [`OverwritePolicy::KeepBoth`] (default) deduplicates an existing file
+///   with a numbered suffix.
+/// - [`OverwritePolicy::Overwrite`] returns the exact sanitised path even
+///   when a file already exists there.
+/// - [`OverwritePolicy::Skip`] returns [`DestinationDecision::Skip`] when
+///   the file already exists, and the exact path otherwise.
+///
+/// # Errors
+///
+/// Same error conditions as [`safe_destination_path`]: traversal attempts,
+/// path escape, and deduplication exhaustion.
+pub fn resolve_destination_with_policy(
+    download_dir: &Path,
+    display_name: &str,
+    fallback_stem: &str,
+    policy: OverwritePolicy,
+) -> Result<DestinationDecision> {
+    let exact = safe_destination_path_no_dedup(download_dir, display_name, fallback_stem)?;
+    match policy {
+        OverwritePolicy::KeepBoth => {
+            let final_path = deduplicate_path(&exact, MAX_DEDUP_ATTEMPTS)?;
+            Ok(DestinationDecision::Use(final_path))
+        }
+        OverwritePolicy::Overwrite => Ok(DestinationDecision::Use(exact)),
+        OverwritePolicy::Skip => {
+            if exact.exists() {
+                Ok(DestinationDecision::Skip)
+            } else {
+                Ok(DestinationDecision::Use(exact))
+            }
+        }
+    }
+}
+
+/// Compute the sanitised destination WITHOUT deduplication (used by
+/// [`resolve_destination_with_policy`] for the Overwrite and Skip branches).
+fn safe_destination_path_no_dedup(
+    download_dir: &Path,
+    display_name: &str,
+    fallback_stem: &str,
+) -> Result<PathBuf> {
+    if !download_dir.is_absolute() {
+        return Err(n0_error::anyerr!(
+            "download_dir must be absolute: {}",
+            download_dir.display()
+        ));
+    }
+
+    let stripped: String = display_name
+        .chars()
+        .filter(|&c| c != '/' && c != '\\')
+        .collect();
+
+    check_traversal(&stripped)?;
+
+    let safe_name = sanitise_filename(display_name, fallback_stem);
+
+    let candidate = download_dir.join(&safe_name);
+
+    let candidate_safe = candidate.canonicalize().unwrap_or(candidate.clone());
+    if !candidate_safe.starts_with(download_dir) {
+        return Err(n0_error::anyerr!(
+            "destination path escapes download directory: {}",
+            candidate_safe.display()
+        ));
+    }
+
+    Ok(candidate)
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -536,5 +659,204 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let dest = prepare_download_destination(dir.path(), "CON", "hash123").unwrap();
         assert_eq!(dest.file_name().unwrap(), "hash123");
+    }
+
+    // ── FS-26: overwrite-conflict policy ─────────────────────────────
+
+    #[test]
+    fn keep_both_deduplicates_existing_file() {
+        let dir = TempDir::new().unwrap();
+        let existing = dir.path().join("report.pdf");
+        fs::write(&existing, b"original").unwrap();
+
+        let decision = resolve_destination_with_policy(
+            dir.path(),
+            "report.pdf",
+            "hash",
+            OverwritePolicy::KeepBoth,
+        )
+        .unwrap();
+        match decision {
+            DestinationDecision::Use(path) => {
+                assert_eq!(path.file_name().unwrap(), "report (1).pdf");
+                // The original file is untouched.
+                assert_eq!(fs::read(&existing).unwrap(), b"original");
+            }
+            DestinationDecision::Skip => panic!("KeepBoth must never skip"),
+        }
+    }
+
+    #[test]
+    fn keep_both_returns_exact_path_when_no_conflict() {
+        let dir = TempDir::new().unwrap();
+        let decision = resolve_destination_with_policy(
+            dir.path(),
+            "fresh.pdf",
+            "hash",
+            OverwritePolicy::KeepBoth,
+        )
+        .unwrap();
+        assert_eq!(
+            decision,
+            DestinationDecision::Use(dir.path().join("fresh.pdf"))
+        );
+    }
+
+    #[test]
+    fn overwrite_returns_exact_path_even_when_file_exists() {
+        let dir = TempDir::new().unwrap();
+        let existing = dir.path().join("report.pdf");
+        fs::write(&existing, b"original").unwrap();
+
+        let decision = resolve_destination_with_policy(
+            dir.path(),
+            "report.pdf",
+            "hash",
+            OverwritePolicy::Overwrite,
+        )
+        .unwrap();
+        assert_eq!(decision, DestinationDecision::Use(existing.clone()));
+    }
+
+    #[test]
+    fn skip_prevents_download_when_file_exists() {
+        let dir = TempDir::new().unwrap();
+        let existing = dir.path().join("report.pdf");
+        fs::write(&existing, b"original").unwrap();
+
+        let decision = resolve_destination_with_policy(
+            dir.path(),
+            "report.pdf",
+            "hash",
+            OverwritePolicy::Skip,
+        )
+        .unwrap();
+        assert_eq!(decision, DestinationDecision::Skip);
+    }
+
+    #[test]
+    fn skip_allows_download_when_file_absent() {
+        let dir = TempDir::new().unwrap();
+        let decision = resolve_destination_with_policy(
+            dir.path(),
+            "newfile.pdf",
+            "hash",
+            OverwritePolicy::Skip,
+        )
+        .unwrap();
+        assert_eq!(
+            decision,
+            DestinationDecision::Use(dir.path().join("newfile.pdf"))
+        );
+    }
+
+    #[test]
+    fn policy_resolution_still_rejects_traversal() {
+        let dir = TempDir::new().unwrap();
+        for policy in [
+            OverwritePolicy::KeepBoth,
+            OverwritePolicy::Overwrite,
+            OverwritePolicy::Skip,
+        ] {
+            let err =
+                resolve_destination_with_policy(dir.path(), "..", "hash", policy).unwrap_err();
+            assert!(err.to_string().contains("directory reference"));
+        }
+    }
+
+    #[test]
+    fn policy_labels_are_stable() {
+        assert_eq!(OverwritePolicy::KeepBoth.label(), "Keep Both");
+        assert_eq!(OverwritePolicy::Overwrite.label(), "Overwrite");
+        assert_eq!(OverwritePolicy::Skip.label(), "Skip");
+        assert_eq!(OverwritePolicy::default(), OverwritePolicy::KeepBoth);
+    }
+
+    // ── Resume-after-conflict (FS-26) ────────────────────────────────
+    //
+    // An interrupted transfer leaves a partial file at the exact destination
+    // (e.g. download_blob_to_file wrote bytes then the app quit).  When the
+    // transfer is resumed the overwrite policy must still apply: KeepBoth
+    // saves the resumed copy under a numbered suffix (never clobbers the
+    // partial), Overwrite returns the exact path (replacing the partial),
+    // and Skip declines because the name is taken.
+
+    #[test]
+    fn resume_after_conflict_keep_both_never_clobbers_partial_file() {
+        let dir = TempDir::new().unwrap();
+        let partial = dir.path().join("movie.mp4");
+        fs::write(&partial, b"partial-bytes-from-interrupted-transfer").unwrap();
+
+        let decision = resolve_destination_with_policy(
+            dir.path(),
+            "movie.mp4",
+            "download",
+            OverwritePolicy::KeepBoth,
+        )
+        .unwrap();
+        match decision {
+            DestinationDecision::Use(path) => {
+                assert_eq!(path.file_name().unwrap(), "movie (1).mp4");
+                assert_eq!(
+                    fs::read(&partial).unwrap(),
+                    b"partial-bytes-from-interrupted-transfer",
+                    "KeepBoth must never overwrite the interrupted transfer's partial file"
+                );
+            }
+            DestinationDecision::Skip => panic!("KeepBoth must never skip"),
+        }
+    }
+
+    #[test]
+    fn resume_after_conflict_overwrite_replaces_partial_file_path() {
+        let dir = TempDir::new().unwrap();
+        let partial = dir.path().join("movie.mp4");
+        fs::write(&partial, b"partial").unwrap();
+
+        let decision = resolve_destination_with_policy(
+            dir.path(),
+            "movie.mp4",
+            "download",
+            OverwritePolicy::Overwrite,
+        )
+        .unwrap();
+        assert_eq!(decision, DestinationDecision::Use(partial));
+    }
+
+    #[test]
+    fn resume_after_conflict_skip_declines_when_partial_file_exists() {
+        let dir = TempDir::new().unwrap();
+        let partial = dir.path().join("movie.mp4");
+        fs::write(&partial, b"partial").unwrap();
+
+        let decision = resolve_destination_with_policy(
+            dir.path(),
+            "movie.mp4",
+            "download",
+            OverwritePolicy::Skip,
+        )
+        .unwrap();
+        assert_eq!(decision, DestinationDecision::Skip);
+    }
+
+    #[test]
+    fn resume_after_conflict_keep_both_escalates_suffix_for_multiple_partials() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("report.pdf"), b"partial-1").unwrap();
+        fs::write(dir.path().join("report (1).pdf"), b"partial-2").unwrap();
+
+        let decision = resolve_destination_with_policy(
+            dir.path(),
+            "report.pdf",
+            "download",
+            OverwritePolicy::KeepBoth,
+        )
+        .unwrap();
+        match decision {
+            DestinationDecision::Use(path) => {
+                assert_eq!(path.file_name().unwrap(), "report (2).pdf");
+            }
+            DestinationDecision::Skip => panic!("KeepBoth must never skip"),
+        }
     }
 }
