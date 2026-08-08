@@ -47,7 +47,7 @@ use boru_core::chat_core::{
     seed_memory_lookup, MeshHealth, MessageHash, RoomInviteV2,
 };
 use boru_core::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
-use boru_core::call::manager::{CallEndReason, CallError, CallEvent, CallHandle};
+use boru_core::call::manager::{CallEvent, CallHandle};
 use boru_core::call::{CallId, CallKind};
 use boru_core::contact::{direct_topic, ContactAction, SignedContactMessage};
 use boru_core::conversations::{
@@ -42222,6 +42222,7 @@ fn format_file_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use boru_core::call::manager::{CallEndReason, CallError};
     use boru_core::gif_provider::GifMediaSource;
     use chrono::{FixedOffset, TimeZone, Utc};
 
