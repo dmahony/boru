@@ -47,6 +47,8 @@ pub struct NotificationPreferences {
     pub file_transfers: bool,
     /// Notify on connection warnings.
     pub connection_warnings: bool,
+    /// Notify about incoming calls when the window is not focused.
+    pub incoming_calls: bool,
     /// How message previews are shown.
     pub preview_mode: PreviewMode,
     /// Notify when the app is focused.
@@ -63,6 +65,7 @@ impl Default for NotificationPreferences {
             friend_requests: true,
             file_transfers: true,
             connection_warnings: false, // off by default (PDF Step 15)
+            incoming_calls: true,
             preview_mode: PreviewMode::Full,
             notify_while_focused: false,
             sound: true,
@@ -404,6 +407,7 @@ impl NotificationService {
             NotificationEventKind::ConnectionLost | NotificationEventKind::ConnectionRestored => {
                 self.preferences.connection_warnings
             }
+            NotificationEventKind::IncomingCall => self.preferences.incoming_calls,
         }
     }
 
@@ -466,6 +470,10 @@ impl NotificationService {
             NotificationEventKind::ConnectionRestored => (
                 "Connection restored".to_string(),
                 "Boru Chat is online again".to_string(),
+            ),
+            NotificationEventKind::IncomingCall => (
+                "Incoming call".to_string(),
+                format!("Incoming call from {}", event.title_hint),
             ),
             _ => (title, body),
         };

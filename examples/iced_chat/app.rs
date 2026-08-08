@@ -5711,6 +5711,8 @@ pub enum AppMessage {
     StartVideoCall(PublicKey),
     /// Forward one event from the call actor subscription.
     CallEventReceived(CallEvent),
+    /// Update notification suppression state from the native window focus event.
+    WindowFocusChanged(bool),
     AcceptIncomingCall(CallId),
     RejectIncomingCall(CallId),
     HangUp(CallId),
@@ -9862,6 +9864,7 @@ impl IcedChat {
             AppMessage::StartVoiceCall(_) => "StartVoiceCall",
             AppMessage::StartVideoCall(_) => "StartVideoCall",
             AppMessage::CallEventReceived(_) => "CallEventReceived",
+            AppMessage::WindowFocusChanged(_) => "WindowFocusChanged",
             AppMessage::AcceptIncomingCall(_) => "AcceptIncomingCall",
             AppMessage::RejectIncomingCall(_) => "RejectIncomingCall",
             AppMessage::HangUp(_) => "HangUp",
@@ -10231,6 +10234,7 @@ impl IcedChat {
             AppMessage::DirectoryRoomUpdate(..) => "DirectoryRoomUpdate",
             AppMessage::ToggleDetailsPanel => "ToggleDetailsPanel",
             AppMessage::ToggleMemberList => "ToggleMemberList",
+            AppMessage::InlineVideoShowControls => "InlineVideoShowControls",
             #[cfg(feature = "terminal")]
             AppMessage::TerminalEvent(_) => "TerminalEvent",
             #[cfg(feature = "terminal")]
@@ -14056,6 +14060,7 @@ impl IcedChat {
                     CallEvent::Incoming { call_id, peer, kind } => {
                         self.active_call_id = Some(*call_id);
                         self.incoming_call = Some(IncomingCall { call_id: *call_id, peer: *peer, kind: *kind });
+                        self.emit_incoming_call_notification(peer);
                     }
                     CallEvent::OutgoingRinging { call_id, .. }
                     | CallEvent::Connecting { call_id } => self.active_call_id = Some(*call_id),
@@ -14089,6 +14094,14 @@ impl IcedChat {
                         }
                     }
                     _ => {}
+                }
+                iced::Task::none()
+            }
+            AppMessage::WindowFocusChanged(focused) => {
+                if focused {
+                    self.window_focus_tracker.on_focused();
+                } else {
+                    self.window_focus_tracker.on_unfocused();
                 }
                 iced::Task::none()
             }
@@ -18014,6 +18027,8 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
+            #[cfg(not(feature = "video-playback"))]
+            AppMessage::InlineVideoShowControls => iced::Task::none(),
             #[cfg(feature = "video-playback")]
             AppMessage::InlineVideoShowControls => {
                 if let Some(session) = self.inline_video.as_mut() {
@@ -24513,6 +24528,23 @@ impl IcedChat {
             body,
             Some(NotificationActionTarget::OpenConversation(*topic)),
         );
+        self.notification_service.handle_event(&event, &focus);
+    }
+
+    /// Emit an incoming-call notification through the existing notification
+    /// service. The service suppresses it while the window is focused, so the
+    /// overlay remains the only in-app affordance in that case.
+    fn emit_incoming_call_notification(&mut self, peer: &PublicKey) {
+        let mut event = NotificationEvent::new(
+            NotificationEventKind::IncomingCall,
+            Some(*peer),
+            None,
+            self.resolve_name(peer),
+            "Incoming call",
+            Some(NotificationActionTarget::OpenChatList),
+        );
+        event.priority = crate::notification::event::NotificationPriority::High;
+        let focus = self.window_focus_tracker.to_focus_state();
         self.notification_service.handle_event(&event, &focus);
     }
 
