@@ -2,6 +2,9 @@
 
 pub mod media;
 pub mod wire;
+/// Consent-gated native camera enumeration and capture.
+#[cfg(feature = "video-calls")]
+pub mod video;
 
 /// Lock-free bounded capture buffering for the CPAL real-time callback.
 #[cfg(feature = "voice-calls")]
