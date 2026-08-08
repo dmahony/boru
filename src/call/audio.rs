@@ -9,6 +9,9 @@ use rtrb::{Consumer, Producer, RingBuffer};
 
 use super::device::InputCallback;
 
+/// Worker-side Opus encoding for fixed-size voice frames.
+pub mod codec;
+
 /// A bounded producer for CPAL input samples.
 ///
 /// When the queue is full, samples at the end of the callback batch are
