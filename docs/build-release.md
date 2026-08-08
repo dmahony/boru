@@ -57,6 +57,28 @@ issue.
 | `test-utils` | rand/chacha, humantime-serde | Test helper utilities |
 | `simulator` | tracing-subscriber, toml, clap, rayon, comfy-table | Deterministic simulation binary (includes `test-utils`) |
 | `examples` | net | Setup example |
+| `voice-calls` | cpal, rtrb, opus, rubato | P2P voice/video call audio stack (not yet wired into `gui`) |
+
+### Native build requirements (`voice-calls`)
+
+The `voice-calls` feature adds native audio dependencies. It is **not**
+enabled by default; the core/networking build needs none of the following:
+
+- **cpal** — Linux builds need ALSA dev headers (`libasound2-dev`, or
+  `alsa-lib` on other distros). Other platforms use their built-in audio
+  APIs (CoreAudio on macOS, WASAPI on Windows).
+- **opus** — links against `libopus` via pkg-config (`libopus-dev` on
+  Debian/Ubuntu); if it is not installed, the `audiopus_sys` build script
+  falls back to compiling the vendored Opus source with CMake (`cmake`).
+- **rtrb** — pure Rust, no system libraries.
+- **rubato** — pure Rust, no system libraries.
+
+Verify pkg-config resolution before building with `voice-calls`:
+
+```sh
+pkg-config --exists alsa && echo alsa-OK
+pkg-config --exists opus && echo opus-OK   # optional: vendored CMake fallback
+```
 
 ### Example commands
 

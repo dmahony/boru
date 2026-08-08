@@ -1,8 +1,10 @@
-//! Media datagram framing and datagram capacity sizing for call media.
+//! Media datagrams for the call audio and video paths.
 //!
-//! The media packet header is deliberately encoded by hand: media packets are
-//! frequent and small, so serializing each one with postcard would add
-//! avoidable work and make the wire format less explicit.
+//! The on-wire format is a fixed 40-byte header encoded by hand. Media packets
+//! are frequent and small, so serializing each one with postcard would add
+//! avoidable work and make the wire format less explicit. The same module also
+//! sizes outbound media payloads from the QUIC connection's negotiated
+//! datagram capacity, which may change when the network path changes.
 
 use std::fmt;
 use std::time::{Duration, Instant};
@@ -11,8 +13,6 @@ use super::CallId;
 
 #[cfg(feature = "net")]
 use tokio::sync::mpsc;
-
-// ── Fixed media datagram header (BCL1) ─────────────────────────────────────
 
 /// Number of bytes in the fixed media datagram header.
 pub const MEDIA_HEADER_LEN: usize = 40;
@@ -144,44 +144,76 @@ impl MediaDatagram {
     }
 }
 
-/// Item emitted by the single media reader task for a call connection.
-#[cfg(feature = "net")]
-#[derive(Debug)]
-pub enum MediaReaderEvent {
-    /// A validated packet ready for routing to audio or video.
-    Packet(MediaDatagram),
-    /// A malformed packet. The reader remains alive for subsequent packets.
-    Malformed(MediaDatagramError),
+/// Validation and capacity errors for media datagrams.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MediaDatagramError {
+    /// The input was shorter than the fixed header.
+    TruncatedHeader {
+        /// Number of bytes received.
+        actual: usize,
+    },
+    /// The four-byte protocol marker did not match.
+    BadMagic,
+    /// The protocol version is not supported.
+    BadVersion(u8),
+    /// The media kind byte is not defined by this protocol.
+    UnknownKind(u8),
+    /// One or more reserved flag bits were set.
+    InvalidFlags(u16),
+    /// The call identity was all zeroes.
+    InvalidCallId,
+    /// A datagram must contain at least one fragment.
+    InvalidFragmentCount,
+    /// The fragment index must be less than the fragment count.
+    FragmentIndexOutOfBounds {
+        /// Zero-based fragment index received.
+        index: u16,
+        /// Number of fragments declared by the packet.
+        count: u16,
+    },
+    /// The peer or transport does not support QUIC datagrams.
+    DatagramsUnavailable,
+    /// The negotiated datagram is too small for the media framing header.
+    DatagramTooSmall {
+        /// Negotiated maximum datagram size.
+        maximum: usize,
+        /// Bytes required by the media header.
+        header: usize,
+    },
 }
 
-/// Read and parse every datagram on one call connection.
-///
-/// This is intentionally the only code path that calls
-/// `Connection::read_datagram`. Audio and video consumers receive parsed
-/// events from `events`; they must never read from the connection themselves.
-#[cfg(feature = "net")]
-pub async fn media_reader(
-    connection: iroh::endpoint::Connection,
-    events: mpsc::Sender<MediaReaderEvent>,
-) {
-    while let Ok(datagram) = connection.read_datagram().await {
-        let event = match MediaDatagram::parse(datagram.as_ref()) {
-            Ok(packet) => MediaReaderEvent::Packet(packet),
-            Err(error) => MediaReaderEvent::Malformed(error),
-        };
-        if events.send(event).await.is_err() {
-            break;
+impl fmt::Display for MediaDatagramError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TruncatedHeader { actual } => {
+                write!(formatter, "truncated media header ({actual} bytes)")
+            }
+            Self::BadMagic => formatter.write_str("invalid media datagram magic"),
+            Self::BadVersion(version) => {
+                write!(formatter, "unsupported media datagram version {version}")
+            }
+            Self::UnknownKind(kind) => write!(formatter, "unknown media kind {kind}"),
+            Self::InvalidFlags(flags) => write!(formatter, "unknown media flags 0x{flags:04x}"),
+            Self::InvalidCallId => formatter.write_str("media datagram has an all-zero call id"),
+            Self::InvalidFragmentCount => formatter.write_str("media datagram has zero fragments"),
+            Self::FragmentIndexOutOfBounds { index, count } => {
+                write!(
+                    formatter,
+                    "media fragment index {index} is outside count {count}"
+                )
+            }
+            Self::DatagramsUnavailable => {
+                formatter.write_str("connection does not support datagrams")
+            }
+            Self::DatagramTooSmall { maximum, header } => write!(
+                formatter,
+                "datagram size {maximum} is smaller than media header {header}"
+            ),
         }
     }
 }
 
-// ── Datagram capacity sizing ───────────────────────────────────────────────
-
-/// Bytes reserved at the start of every media datagram.
-///
-/// This is the media framing budget; fragmentation is deliberately handled by
-/// a later phase and is not part of this module.
-pub const MEDIA_HEADER_SIZE: usize = 16;
+impl std::error::Error for MediaDatagramError {}
 
 /// Convert a negotiated datagram size into room for an encoded media payload.
 ///
@@ -189,10 +221,10 @@ pub const MEDIA_HEADER_SIZE: usize = 16;
 /// negotiated value must become a typed error, never an integer underflow.
 pub fn payload_capacity(datagram_size: usize) -> Result<usize, MediaDatagramError> {
     datagram_size
-        .checked_sub(MEDIA_HEADER_SIZE)
+        .checked_sub(MEDIA_HEADER_LEN)
         .ok_or(MediaDatagramError::DatagramTooSmall {
             maximum: datagram_size,
-            header: MEDIA_HEADER_SIZE,
+            header: MEDIA_HEADER_LEN,
         })
 }
 
@@ -266,78 +298,36 @@ impl DatagramSizer {
     }
 }
 
-/// Errors encountered while framing or sizing media datagrams.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MediaDatagramError {
-    // Header validation errors.
-    /// The input was shorter than the fixed header.
-    TruncatedHeader {
-        /// Number of bytes received.
-        actual: usize,
-    },
-    /// The four-byte protocol marker did not match.
-    BadMagic,
-    /// The protocol version is not supported.
-    BadVersion(u8),
-    /// The media kind byte is not defined by this protocol.
-    UnknownKind(u8),
-    /// One or more reserved flag bits were set.
-    InvalidFlags(u16),
-    /// The call identity was all zeroes.
-    InvalidCallId,
-    /// A datagram must contain at least one fragment.
-    InvalidFragmentCount,
-    /// The fragment index must be less than the fragment count.
-    FragmentIndexOutOfBounds {
-        /// Zero-based fragment index received.
-        index: u16,
-        /// Number of fragments declared by the packet.
-        count: u16,
-    },
-    // Datagram capacity errors.
-    /// The peer or transport does not support QUIC datagrams.
-    DatagramsUnavailable,
-    /// The negotiated datagram is too small for the media framing header.
-    DatagramTooSmall {
-        /// Negotiated maximum datagram size.
-        maximum: usize,
-        /// Bytes required by the media header.
-        header: usize,
-    },
+/// Item emitted by the single media reader task for a call connection.
+#[cfg(feature = "net")]
+#[derive(Debug)]
+pub enum MediaReaderEvent {
+    /// A validated packet ready for routing to audio or video.
+    Packet(MediaDatagram),
+    /// A malformed packet. The reader remains alive for subsequent packets.
+    Malformed(MediaDatagramError),
 }
 
-impl fmt::Display for MediaDatagramError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::TruncatedHeader { actual } => {
-                write!(formatter, "truncated media header ({actual} bytes)")
-            }
-            Self::BadMagic => formatter.write_str("invalid media datagram magic"),
-            Self::BadVersion(version) => {
-                write!(formatter, "unsupported media datagram version {version}")
-            }
-            Self::UnknownKind(kind) => write!(formatter, "unknown media kind {kind}"),
-            Self::InvalidFlags(flags) => write!(formatter, "unknown media flags 0x{flags:04x}"),
-            Self::InvalidCallId => formatter.write_str("media datagram has an all-zero call id"),
-            Self::InvalidFragmentCount => formatter.write_str("media datagram has zero fragments"),
-            Self::FragmentIndexOutOfBounds { index, count } => {
-                write!(
-                    formatter,
-                    "media fragment index {index} is outside count {count}"
-                )
-            }
-            Self::DatagramsUnavailable => {
-                formatter.write_str("connection does not support datagrams")
-            }
-            Self::DatagramTooSmall { maximum, header } => write!(
-                formatter,
-                "datagram size {maximum} is smaller than media header {header}"
-            ),
+/// Read and parse every datagram on one call connection.
+///
+/// This is intentionally the only code path that calls
+/// `Connection::read_datagram`. Audio and video consumers receive parsed
+/// events from `events`; they must never read from the connection themselves.
+#[cfg(feature = "net")]
+pub async fn media_reader(
+    connection: iroh::endpoint::Connection,
+    events: mpsc::Sender<MediaReaderEvent>,
+) {
+    while let Ok(datagram) = connection.read_datagram().await {
+        let event = match MediaDatagram::parse(datagram.as_ref()) {
+            Ok(packet) => MediaReaderEvent::Packet(packet),
+            Err(error) => MediaReaderEvent::Malformed(error),
+        };
+        if events.send(event).await.is_err() {
+            break;
         }
     }
 }
-
-impl std::error::Error for MediaDatagramError {}
 
 #[cfg(test)]
 mod tests {
@@ -412,16 +402,16 @@ mod tests {
 
     #[test]
     fn payload_capacity_subtracts_media_header() {
-        assert_eq!(payload_capacity(1200), Ok(1200 - MEDIA_HEADER_SIZE));
+        assert_eq!(payload_capacity(1200), Ok(1200 - MEDIA_HEADER_LEN));
     }
 
     #[test]
     fn payload_capacity_rejects_datagrams_smaller_than_header() {
         assert_eq!(
-            payload_capacity(MEDIA_HEADER_SIZE - 1),
+            payload_capacity(MEDIA_HEADER_LEN - 1),
             Err(MediaDatagramError::DatagramTooSmall {
-                maximum: MEDIA_HEADER_SIZE - 1,
-                header: MEDIA_HEADER_SIZE,
+                maximum: MEDIA_HEADER_LEN - 1,
+                header: MEDIA_HEADER_LEN,
             })
         );
     }
@@ -440,18 +430,18 @@ mod tests {
         let mut sizer = DatagramSizer::new(Duration::from_secs(3600));
         assert_eq!(
             sizer.payload_capacity_from(Some(1200)),
-            Ok(1200 - MEDIA_HEADER_SIZE)
+            Ok(1200 - MEDIA_HEADER_LEN)
         );
         // The long interval means this request intentionally uses the cached
         // value, even though the provider reports a changed path MTU.
         assert_eq!(
             sizer.payload_capacity_from(Some(900)),
-            Ok(1200 - MEDIA_HEADER_SIZE)
+            Ok(1200 - MEDIA_HEADER_LEN)
         );
         sizer.refresh();
         assert_eq!(
             sizer.payload_capacity_from(Some(900)),
-            Ok(900 - MEDIA_HEADER_SIZE)
+            Ok(900 - MEDIA_HEADER_LEN)
         );
     }
 }

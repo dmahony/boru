@@ -110,6 +110,18 @@ notify = { version = "6", features = [] }
 # directory walking for whole-folder (HashSeq collection) imports
 walkdir = "2"
 
+# voice-calls: native audio capture/playback and resampling (optional)
+#
+# Native build requirements (Linux): cpal needs ALSA dev headers
+# (`libasound2-dev`); opus links libopus via pkg-config (`libopus-dev`) or
+# builds the vendored CMake fallback (`cmake`). rtrb and rubato are pure
+# Rust. Everything here is behind the `voice-calls` feature; the default
+# (`net`) build does not require any of these system libraries.
+cpal = { version = "0.18", optional = true }
+rtrb = { version = "0.3", optional = true }
+opus = { version = "0.3", optional = true }
+rubato = { version = "3", optional = true }
+
 # test-utils dependencies (optional)
 humantime-serde = { version = "1.1.1", optional = true }
 
@@ -219,6 +231,12 @@ simulator = [
 ]
 metrics = ["iroh-metrics/metrics"]
 examples = ["net"]
+# P2P voice/video calls: native audio capture/playback (cpal), lock-free
+# ring buffers (rtrb), Opus encoding/decoding, and sample-rate conversion
+# (rubato). Intentionally NOT part of `gui` yet — the call UI lands with the
+# device abstraction (Phase 3, 3.2) and will gate on this feature. The
+# core/networking build compiles without it.
+voice-calls = ["dep:cpal", "dep:rtrb", "dep:opus", "dep:rubato"]
 gui = ["net", "dep:iced", "dep:iced_aw", "dep:iced_moving_picture", "dep:tokio", "dep:rfd", "dep:tracing-subscriber", "dep:tracing-appender", "dep:mimalloc", "dep:rayon", "dep:profiling", "dep:rustc-hash", "dep:regex", "dep:open", "dep:url", "dep:reqwest", "dep:netstat2", "dep:sysinfo"]
 video-playback = ["gui", "dep:iced_video_player"]
 terminal = ["gui", "dep:iced_term"]
