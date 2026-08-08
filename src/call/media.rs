@@ -24,6 +24,11 @@ pub const FLAG_KEYFRAME: u16 = 1 << 0;
 pub const FLAG_DISCONTINUITY: u16 = 1 << 1;
 const KNOWN_FLAGS: u16 = FLAG_KEYFRAME | FLAG_DISCONTINUITY;
 
+/// Maximum encoded video access unit accepted by the live media path.
+pub const MAX_ENCODED_VIDEO_FRAME_BYTES: usize = 2 * 1024 * 1024;
+/// Maximum number of fragments permitted for one encoded video access unit.
+pub const MAX_VIDEO_FRAGMENTS_PER_FRAME: u16 = 2048;
+
 /// The media pipeline to which a datagram belongs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaKind {
@@ -71,6 +76,45 @@ pub struct MediaDatagram {
     pub fragment_count: u16,
     /// Encoded media bytes.
     pub payload: Vec<u8>,
+}
+
+/// Fragment metadata that can be checked without allocating a reassembly
+/// buffer. All fields originate in the peer-controlled datagram header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FragmentMeta {
+    /// Zero-based fragment index.
+    pub fragment_index: u16,
+    /// Peer-advertised number of fragments in the frame.
+    pub fragment_count: u16,
+    /// Size of this fragment payload in bytes.
+    pub payload_len: usize,
+}
+
+/// Validate hostile fragment metadata before copying the payload or allocating
+/// storage for a frame.
+pub fn validate_fragment_meta(meta: FragmentMeta) -> Result<(), MediaDatagramError> {
+    if meta.fragment_count == 0 {
+        return Err(MediaDatagramError::InvalidFragmentCount);
+    }
+    if meta.fragment_count > MAX_VIDEO_FRAGMENTS_PER_FRAME {
+        return Err(MediaDatagramError::TooManyFragments {
+            count: meta.fragment_count,
+            maximum: MAX_VIDEO_FRAGMENTS_PER_FRAME,
+        });
+    }
+    if meta.fragment_index >= meta.fragment_count {
+        return Err(MediaDatagramError::FragmentIndexOutOfBounds {
+            index: meta.fragment_index,
+            count: meta.fragment_count,
+        });
+    }
+    if meta.payload_len > MAX_ENCODED_VIDEO_FRAME_BYTES {
+        return Err(MediaDatagramError::EncodedFrameTooLarge {
+            advertised: meta.payload_len,
+            maximum: MAX_ENCODED_VIDEO_FRAME_BYTES,
+        });
+    }
+    Ok(())
 }
 
 impl MediaDatagram {
@@ -123,15 +167,11 @@ impl MediaDatagram {
         let timestamp = u32::from_be_bytes(input[32..36].try_into().unwrap());
         let fragment_index = u16::from_be_bytes(input[36..38].try_into().unwrap());
         let fragment_count = u16::from_be_bytes(input[38..40].try_into().unwrap());
-        if fragment_count == 0 {
-            return Err(MediaDatagramError::InvalidFragmentCount);
-        }
-        if fragment_index >= fragment_count {
-            return Err(MediaDatagramError::FragmentIndexOutOfBounds {
-                index: fragment_index,
-                count: fragment_count,
-            });
-        }
+        validate_fragment_meta(FragmentMeta {
+            fragment_index,
+            fragment_count,
+            payload_len: input.len() - MEDIA_HEADER_LEN,
+        })?;
 
         Ok(Self {
             kind,
@@ -313,6 +353,27 @@ pub enum MediaDatagramError {
     EmptyPayload,
     /// The frame would require more fragments than the wire field can carry.
     FragmentCountOverflow,
+    /// The peer advertised more fragments than the hard protocol limit.
+    TooManyFragments {
+        /// Peer-advertised fragment count.
+        count: u16,
+        /// Hard fragment-count limit.
+        maximum: u16,
+    },
+    /// The peer advertised a frame larger than the hard protocol limit.
+    EncodedFrameTooLarge {
+        /// Conservative size implied by peer metadata.
+        advertised: usize,
+        /// Hard encoded-frame limit.
+        maximum: usize,
+    },
+    /// The local reassembly budget is full of incomplete frames.
+    TooManyIncompleteFrames {
+        /// Hard concurrent-frame limit.
+        maximum: usize,
+    },
+    /// A fragment arrived after its frame's reassembly deadline.
+    FragmentExpired,
 }
 
 impl fmt::Display for MediaDatagramError {
@@ -328,9 +389,7 @@ impl fmt::Display for MediaDatagramError {
             Self::UnknownKind(kind) => write!(formatter, "unknown media kind {kind}"),
             Self::InvalidFlags(flags) => write!(formatter, "unknown media flags 0x{flags:04x}"),
             Self::InvalidCallId => formatter.write_str("media datagram has an all-zero call id"),
-            Self::InvalidTrackId => {
-                formatter.write_str("media datagram has an all-zero track id")
-            }
+            Self::InvalidTrackId => formatter.write_str("media datagram has an all-zero track id"),
             Self::InvalidFragmentCount => formatter.write_str("media datagram has zero fragments"),
             Self::FragmentIndexOutOfBounds { index, count } => {
                 write!(
@@ -348,6 +407,30 @@ impl fmt::Display for MediaDatagramError {
             Self::EmptyPayload => formatter.write_str("encoded media frame has an empty payload"),
             Self::FragmentCountOverflow => {
                 formatter.write_str("encoded media frame requires too many fragments")
+            }
+            Self::TooManyFragments { count, maximum } => {
+                write!(
+                    formatter,
+                    "media fragment count {count} exceeds maximum {maximum}"
+                )
+            }
+            Self::EncodedFrameTooLarge {
+                advertised,
+                maximum,
+            } => {
+                write!(
+                    formatter,
+                    "advertised encoded frame size {advertised} exceeds maximum {maximum}"
+                )
+            }
+            Self::TooManyIncompleteFrames { maximum } => {
+                write!(
+                    formatter,
+                    "too many incomplete video frames (maximum {maximum})"
+                )
+            }
+            Self::FragmentExpired => {
+                formatter.write_str("video fragment arrived after reassembly timeout")
             }
         }
     }
@@ -490,6 +573,27 @@ mod tests {
     #[test]
     fn payload_capacity_subtracts_media_header() {
         assert_eq!(payload_capacity(1200), Ok(1200 - MEDIA_HEADER_SIZE));
+    }
+
+    #[test]
+    fn parser_rejects_oversized_frame_before_payload_copy() {
+        let mut encoded = sample().encode();
+        encoded.resize(MEDIA_HEADER_LEN + MAX_ENCODED_VIDEO_FRAME_BYTES + 1, 0);
+        assert!(matches!(
+            MediaDatagram::parse(&encoded),
+            Err(MediaDatagramError::EncodedFrameTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn parser_rejects_excess_fragment_count_before_payload_copy() {
+        let mut encoded = sample().encode();
+        encoded[36..38].copy_from_slice(&0u16.to_be_bytes());
+        encoded[38..40].copy_from_slice(&(MAX_VIDEO_FRAGMENTS_PER_FRAME + 1).to_be_bytes());
+        assert!(matches!(
+            MediaDatagram::parse(&encoded),
+            Err(MediaDatagramError::TooManyFragments { .. })
+        ));
     }
 
     #[test]

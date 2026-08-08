@@ -23,7 +23,7 @@ impl Default for LiveVideoPipeline {
 
 impl LiveVideoPipeline {
     /// Create an empty live-call pipeline.
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             reassembler: VideoReassembler::new(),
             received_packets: 0,
