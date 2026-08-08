@@ -42,6 +42,10 @@ use crate::design_tokens;
 const SVG_ARROW_LEFT: &[u8] = include_bytes!("../../assets/icons/lucide/arrow-left.svg");
 const SVG_CHECK: &[u8] = include_bytes!("../../assets/icons/lucide/check.svg");
 const SVG_PLAY: &[u8] = include_bytes!("../../assets/icons/lucide/play.svg");
+const SVG_PAUSE: &[u8] = include_bytes!("../../assets/icons/lucide/pause.svg");
+const SVG_VOLUME_1: &[u8] = include_bytes!("../../assets/icons/lucide/volume-1.svg");
+const SVG_VOLUME_2: &[u8] = include_bytes!("../../assets/icons/lucide/volume-2.svg");
+const SVG_VOLUME_X: &[u8] = include_bytes!("../../assets/icons/lucide/volume-x.svg");
 const SVG_ELLIPSIS: &[u8] = include_bytes!("../../assets/icons/lucide/ellipsis.svg");
 const SVG_ELLIPSIS_VERTICAL: &[u8] =
     include_bytes!("../../assets/icons/lucide/ellipsis-vertical.svg");
@@ -108,6 +112,10 @@ pub enum Icon {
     /// A video file (film/clapperboard glyph) — used for video cards.
     Video,
     Play,
+    Pause,
+    Volume1,
+    Volume2,
+    VolumeX,
     /// Upload / share-out arrow (Figure 3 share-files action).
     Upload,
     /// Download / receive-in arrow — used for the "Receive from Ticket"
@@ -173,6 +181,10 @@ impl Icon {
             Icon::Image => SVG_IMAGE,
             Icon::Video => SVG_FILM,
             Icon::Play => SVG_PLAY,
+            Icon::Pause => SVG_PAUSE,
+            Icon::Volume1 => SVG_VOLUME_1,
+            Icon::Volume2 => SVG_VOLUME_2,
+            Icon::VolumeX => SVG_VOLUME_X,
             Icon::Upload => SVG_UPLOAD,
             Icon::Download => SVG_DOWNLOAD,
 

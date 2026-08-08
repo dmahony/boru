@@ -42,9 +42,9 @@ use super::app::{
 };
 use super::app::{AppMessage, DownloadAttachment, DownloadState};
 use super::download_progress_view::{
-    action_button, action_buttons, active_download_detail, file_type_icon_element,
+    action_buttons, active_download_detail, file_type_icon_element,
     file_type_icon_element_with_tooltip, human_size, progress_section, resolve_theme,
-    secondary_button, state_badge, state_badge_color,
+    secondary_button, state_badge_color,
 };
 use crate::design_tokens;
 use crate::file_type_icon::FileTypeIconSize;
@@ -164,6 +164,27 @@ impl CardBand {
     }
 }
 
+/// One control component serves every aspect ratio. Only its density changes:
+/// portrait (or very narrow) frames use the compact row so controls stay
+/// inside the media frame without changing that frame's dimensions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ControlLayout {
+    Compact,
+    Regular,
+}
+
+fn control_layout(dimensions: Option<(u32, u32)>, frame_width: f32) -> ControlLayout {
+    let portrait = dimensions
+        .filter(|(width, height)| *width > 0 && *height > 0)
+        .map(|(width, height)| width < height)
+        .unwrap_or(false);
+    if portrait || frame_width < 360.0 {
+        ControlLayout::Compact
+    } else {
+        ControlLayout::Regular
+    }
+}
+
 /// Exact intrinsic aspect ratio, falling back to the spec's safe 16:9
 /// default while video metadata is still unknown.
 fn intrinsic_ratio(dimensions: Option<(u32, u32)>) -> f32 {
@@ -231,6 +252,44 @@ fn media_frame_size(dimensions: Option<(u32, u32)>, band: CardBand) -> (f32, f32
 struct MediaFrameSizing {
     width: f32,
     height: f32,
+}
+
+#[cfg(feature = "video-playback")]
+fn media_icon_button<'a>(
+    icon: Icon,
+    label: &'static str,
+    message: AppMessage,
+) -> iced::Element<'a, AppMessage> {
+    let control = crate::focusable_button::focusable_button(
+        button(
+            icon.build()
+                .size(IconSize::Sm)
+                .color_fn(|_| Color::WHITE)
+                .interactive(true)
+                .build(),
+        )
+        .on_press(message.clone())
+        .padding(SPACE_6)
+        .style(|_theme, status| widget::button::Style {
+            background: (status != button::Status::Disabled)
+                .then_some(iced::Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.12))),
+            text_color: Color::WHITE,
+            border: iced::Border {
+                radius: 20.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+        Some(message),
+    )
+    .ring_radius(20.0);
+    tooltip::Tooltip::new(
+        control,
+        crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, label),
+        tooltip::Position::Top,
+    )
+    .gap(SPACE_4)
+    .into()
 }
 
 impl MediaFrameSizing {
@@ -1126,50 +1185,51 @@ impl<'a> BoruVideoFileCard<'a> {
             let fraction = self
                 .seek_position
                 .unwrap_or((position.as_secs_f32() / duration_secs).clamp(0.0, 1.0));
-            let controls = Column::new()
-                .push(
-                    iced::widget::slider(0.0..=1.0, fraction, AppMessage::InlineVideoSeekChanged)
-                        .on_release(AppMessage::InlineVideoSeekReleased)
-                        .step(0.001_f32)
-                        .width(Length::Fill),
-                )
-                .push(
-                    Row::new()
-                        .push(action_button(
-                            if video.paused() { "Play" } else { "Pause" },
-                            AppMessage::PlayInlineVideo(self.entry_index),
-                        ))
-                        .push(
-                            crate::fonts::type_role_text(
-                                crate::fonts::TypeRole::Metadata,
-                                format!(
-                                    "{} / {}",
-                                    format_media_time(position),
-                                    format_media_time(duration),
-                                ),
-                            )
-                            .color(Color::WHITE),
-                        )
-                        .push(action_button(
-                            if video.muted() { "Unmute" } else { "Mute" },
-                            AppMessage::InlineVideoToggleMute,
-                        ))
-                        .push(
-                            iced::widget::slider(
-                                0.0..=1.0,
-                                video.volume() as f32,
-                                AppMessage::InlineVideoSetVolume,
-                            )
-                            .step(0.01_f32)
-                            .width(Length::Fixed(90.0)),
-                        )
-                        .push(action_button(
-                            if self.expanded { "Collapse" } else { "Expand" },
-                            AppMessage::InlineVideoToggleExpanded,
-                        ))
-                        .spacing(SPACE_6)
-                        .align_y(Alignment::Center),
+            let layout = control_layout(attachment.poster_dimensions, sizing.width);
+            let compact = layout == ControlLayout::Compact;
+            let play_icon = if video.paused() { Icon::Play } else { Icon::Pause };
+            let volume_icon = if video.muted() {
+                Icon::VolumeX
+            } else if video.volume() < 0.5 {
+                Icon::Volume1
+            } else {
+                Icon::Volume2
+            };
+            let seek = iced::widget::slider(0.0..=1.0, fraction, AppMessage::InlineVideoSeekChanged)
+                .on_release(AppMessage::InlineVideoSeekReleased)
+                .step(0.001_f32)
+                .width(Length::Fill);
+            let timing = crate::fonts::type_role_text(
+                crate::fonts::TypeRole::Metadata,
+                format!("{} / {}", format_media_time(position), format_media_time(duration)),
+            )
+            .color(Color::WHITE);
+            let play = media_icon_button(
+                play_icon,
+                if video.paused() { "Play video" } else { "Pause video" },
+                AppMessage::PlayInlineVideo(self.entry_index),
+            );
+            let mute = media_icon_button(
+                volume_icon,
+                if video.muted() { "Unmute" } else { "Mute" },
+                AppMessage::InlineVideoToggleMute,
+            );
+            let more = media_icon_button(
+                Icon::MoreVertical,
+                if self.expanded { "Collapse video" } else { "Expand video" },
+                AppMessage::InlineVideoToggleExpanded,
+            );
+            let mut control_row = Row::new().push(play).push(timing).push(mute);
+            if !compact {
+                control_row = control_row.push(
+                    iced::widget::slider(0.0..=1.0, video.volume() as f32, AppMessage::InlineVideoSetVolume)
+                        .step(0.01_f32)
+                        .width(Length::Fixed(72.0)),
                 );
+            }
+            let controls = Column::new()
+                .push(seek)
+                .push(control_row.push(more).spacing(if compact { SPACE_2 } else { SPACE_6 }).align_y(Alignment::Center));
             // Task 10: the playing element occupies the exact same media box
             // as the poster — no layout jump when Play is pressed. The video
             // is contained (never stretched or cropped) and the controls
@@ -1199,35 +1259,12 @@ impl<'a> BoruVideoFileCard<'a> {
                     ..Default::default()
                 });
 
-            // VIDCARD-11 duration badge: lower-right corner of the media
-            // frame, real player metadata only, shown only when the duration
-            // is actually known (non-zero). The control bar's right zone is
-            // reserved so the badge never covers the Expand control.
-            let badge_known = duration.as_secs() > 0;
-            let badge_zone = if badge_known {
-                DURATION_BADGE_ZONE
-            } else {
-                0.0
-            };
-            let badge_layer: iced::Element<'static, AppMessage> = if badge_known {
-                duration_badge(duration)
-            } else {
-                iced::widget::Space::new().width(0.0).height(0.0).into()
-            };
-
             container(widget::stack![
                 video_element,
                 container(controls_bar)
                     .width(Length::Fill)
                     .height(Length::Fill)
-                    .align_y(Alignment::End)
-                    .padding(iced::Padding::new(0.0).right(badge_zone)),
-                container(badge_layer)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .align_x(Alignment::End)
-                    .align_y(Alignment::End)
-                    .padding(iced::Padding::new(0.0).right(SPACE_8).bottom(SPACE_8)),
+                    .align_y(Alignment::End),
             ])
             .width(sizing.width())
             .height(sizing.height())
@@ -1516,12 +1553,29 @@ mod tests {
     use super::{
         aspect_ratio_class, file_format_label, format_relative_time, header_badge, intrinsic_ratio,
         media_frame_size, media_placeholder_text, truncate_filename, video_presentation_state,
-        CardBand, MediaAspectClass, MediaFrameSizing, VideoPresentationState,
+        control_layout, CardBand, ControlLayout, MediaAspectClass, MediaFrameSizing, VideoPresentationState,
         HEADER_FILENAME_MAX_CHARS, MEDIUM_CARD_BREAKPOINT, NARROW_CARD_BREAKPOINT,
     };
     use iced::Length;
     use crate::app::{DownloadAttachment, DownloadFailure, DownloadState, TransferKind};
     use std::path::PathBuf;
+
+    #[test]
+    fn controls_use_one_responsive_component_for_all_shapes() {
+        assert_eq!(control_layout(Some((1920, 1080)), 720.0), ControlLayout::Regular);
+        assert_eq!(control_layout(Some((1080, 1080)), 480.0), ControlLayout::Regular);
+        assert_eq!(control_layout(Some((1080, 1920)), 292.5), ControlLayout::Compact);
+        assert_eq!(control_layout(Some((720, 1600)), 250.0), ControlLayout::Compact);
+        assert_eq!(control_layout(Some((1920, 1080)), 359.0), ControlLayout::Compact);
+    }
+
+    #[test]
+    fn control_density_does_not_change_media_geometry() {
+        let portrait = MediaFrameSizing::new(Some((1080, 1920)), CardBand::Wide, 720.0);
+        assert!((portrait.width / portrait.height - 1080.0 / 1920.0).abs() < 1e-6);
+        assert_eq!(portrait.width, 292.5);
+        assert_eq!(portrait.height, 520.0);
+    }
 
     #[test]
     fn aspect_ratio_class_uses_tolerant_spec_ranges() {
