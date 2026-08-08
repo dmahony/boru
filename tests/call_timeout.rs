@@ -10,7 +10,7 @@ async fn unanswered_offer_emits_negotiation_timeout() {
     let server = Endpoint::bind(presets::Minimal).await.unwrap();
     let server_builder = CallBuilder::new(server.clone(), server.secret_key().clone());
     let server_handler = server_builder.protocol_handler();
-    let (_server_handle, mut server_events) = server_builder.spawn();
+    let (server_handle, mut server_events) = server_builder.spawn();
     let server_router = Router::builder(server.clone())
         .accept(CALL_ALPN, server_handler)
         .spawn();
@@ -22,6 +22,11 @@ async fn unanswered_offer_emits_negotiation_timeout() {
     let client_router = Router::builder(client.clone())
         .accept(CALL_ALPN, client_handler)
         .spawn();
+
+    // Authorization is deny-by-default: each side must authorize the other
+    // before outbound start (CallHandle) or inbound accept (CallProtocol).
+    server_handle.set_peer_authorized(client.id(), true);
+    client_handle.set_peer_authorized(server.id(), true);
 
     let probe = client.connect(server.addr(), CALL_ALPN).await.unwrap();
     probe.close(0u32.into(), b"probe");

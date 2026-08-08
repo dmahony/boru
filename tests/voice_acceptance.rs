@@ -182,6 +182,11 @@ async fn voice_acceptance_full_flow_two_endpoints() {
     let mut caller = spawn_node().await;
     let mut callee = spawn_node().await;
 
+    // Authorization is deny-by-default: each side must authorize the other
+    // before outbound start (CallHandle) or inbound accept (CallProtocol).
+    caller.handle.set_peer_authorized(callee.endpoint.id(), true);
+    callee.handle.set_peer_authorized(caller.endpoint.id(), true);
+
     let probe = caller
         .endpoint
         .connect(callee.endpoint.addr(), CALL_ALPN)

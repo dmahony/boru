@@ -38,6 +38,11 @@ async fn two_endpoints_complete_call_and_reject_busy_second_call() {
         .accept(CALL_ALPN, client_handler)
         .spawn();
 
+    // Authorization is deny-by-default: each side must authorize the other
+    // before outbound start (CallHandle) or inbound accept (CallProtocol).
+    server_handle.set_peer_authorized(client.id(), true);
+    client_handle.set_peer_authorized(server.id(), true);
+
     // Populate the endpoint's address cache; production discovery does this
     // through mDNS/relay discovery before the user presses Call.
     connect_probe(&client, &server).await;
@@ -69,6 +74,8 @@ async fn two_endpoints_complete_call_and_reject_busy_second_call() {
     let busy_router = Router::builder(busy_client.clone())
         .accept(CALL_ALPN, busy_handler)
         .spawn();
+    busy_handle.set_peer_authorized(server.id(), true);
+    server_handle.set_peer_authorized(busy_client.id(), true);
     connect_probe(&busy_client, &server).await;
     let busy_id = busy_handle.start_voice_call(server.id()).await.unwrap();
     assert!(
