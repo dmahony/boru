@@ -47,7 +47,7 @@ use boru_core::chat_core::{
     seed_memory_lookup, MeshHealth, MessageHash, RoomInviteV2,
 };
 use boru_core::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
-use boru_core::call::manager::{CallEvent, CallHandle};
+use boru_core::call::manager::{CallEndReason, CallError, CallEvent, CallHandle};
 use boru_core::call::{CallId, CallKind};
 use boru_core::contact::{direct_topic, ContactAction, SignedContactMessage};
 use boru_core::conversations::{
@@ -3403,6 +3403,17 @@ impl iced::advanced::Widget<AppMessage, iced::Theme, iced::Renderer> for Prebuil
 
 // ── Application state ────────────────────────────────────────────
 
+/// A pending incoming call awaiting explicit user consent.
+///
+/// Rendered as a modal overlay; the microphone/camera are NOT activated
+/// until the user presses Accept (which maps to `AcceptIncomingCall`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IncomingCall {
+    call_id: CallId,
+    peer: PublicKey,
+    kind: CallKind,
+}
+
 pub struct IcedChat {
     // ── Navigation ──
     pub screen: Screen,
@@ -3806,6 +3817,9 @@ pub struct IcedChat {
     active_call_id: Option<CallId>,
     call_audio_muted: bool,
     call_camera_enabled: bool,
+    /// Pending incoming call shown as an overlay; media is only activated
+    /// when the user explicitly accepts.
+    incoming_call: Option<IncomingCall>,
     /// Receiver for incoming inbox events.
     pub inbox_events_rx: Arc<Mutex<Receiver<InboxEvent>>>,
     /// Receiver for incoming whisper events.
@@ -8091,6 +8105,7 @@ impl IcedChat {
             active_call_id: None,
             call_audio_muted: false,
             call_camera_enabled: false,
+            incoming_call: None,
             inbox_events_rx,
             whisper_events_rx,
             profile_image_handle,
@@ -14038,10 +14053,19 @@ impl IcedChat {
             }
             AppMessage::CallEventReceived(event) => {
                 match &event {
-                    CallEvent::Incoming { call_id, .. }
-                    | CallEvent::OutgoingRinging { call_id, .. }
-                    | CallEvent::Connecting { call_id }
-                    | CallEvent::Active { call_id, .. } => self.active_call_id = Some(*call_id),
+                    CallEvent::Incoming { call_id, peer, kind } => {
+                        self.active_call_id = Some(*call_id);
+                        self.incoming_call = Some(IncomingCall { call_id: *call_id, peer: *peer, kind: *kind });
+                    }
+                    CallEvent::OutgoingRinging { call_id, .. }
+                    | CallEvent::Connecting { call_id } => self.active_call_id = Some(*call_id),
+                    CallEvent::Active { call_id, .. } => {
+                        self.active_call_id = Some(*call_id);
+                        // The call is now in progress; the consent overlay is no longer needed.
+                        if self.incoming_call.as_ref().is_some_and(|call| call.call_id == *call_id) {
+                            self.incoming_call = None;
+                        }
+                    }
                     CallEvent::MediaStateChanged { call_id, audio_muted, video_enabled } => {
                         self.active_call_id = Some(*call_id);
                         self.call_audio_muted = *audio_muted;
@@ -14049,9 +14073,20 @@ impl IcedChat {
                     }
                     CallEvent::Ended { call_id, .. } => {
                         if self.active_call_id == Some(*call_id) { self.active_call_id = None; }
+                        if self.incoming_call.as_ref().is_some_and(|call| call.call_id == *call_id) {
+                            self.incoming_call = None;
+                        }
                     }
-                    CallEvent::Failed { call_id: Some(call_id), .. } => {
-                        if self.active_call_id == Some(*call_id) { self.active_call_id = None; }
+                    CallEvent::Failed { call_id, .. } => {
+                        match call_id {
+                            Some(cid) => {
+                                if self.active_call_id == Some(*cid) { self.active_call_id = None; }
+                                if self.incoming_call.as_ref().is_some_and(|call| call.call_id == *cid) {
+                                    self.incoming_call = None;
+                                }
+                            }
+                            None => { self.incoming_call = None; }
+                        }
                     }
                     _ => {}
                 }
@@ -26144,6 +26179,40 @@ impl IcedChat {
             .into()
     }
 
+    fn view_incoming_call_overlay<'a>(
+        &'a self,
+        base: iced::widget::Container<'a, AppMessage>,
+    ) -> iced::Element<'a, AppMessage> {
+        use iced::widget::{button, column, container, row, text};
+        use iced::{Alignment, Color, Length};
+        let Some(call) = self.incoming_call else { return base.into(); };
+        let name = self.resolve_name(&call.peer);
+        let kind = match call.kind {
+            CallKind::Voice => "Incoming voice call",
+            CallKind::Video => "Incoming video call",
+        };
+        let avatar: iced::Element<'a, AppMessage> = self.friend_image_handles.get(&call.peer).and_then(|h| h.clone())
+            .map(|h| iced::widget::image(h).width(Length::Fixed(72.0)).height(Length::Fixed(72.0)).into())
+            .unwrap_or_else(|| text("👤").size(48).into());
+        let card = container(column![avatar, text(name).size(22), text(kind).size(15), row![
+            button(text("Decline")).on_press(AppMessage::RejectIncomingCall(call.call_id)),
+            button(text("Accept")).on_press(AppMessage::AcceptIncomingCall(call.call_id)),
+        ].spacing(12)].spacing(12).align_x(Alignment::Center))
+            .padding(32)
+            .style(|_| iced::widget::container::Style {
+                background: Some(iced::Background::Color(Color::from_rgb(0.12, 0.13, 0.17))),
+                border: iced::Border { color: Color::from_rgb(0.35, 0.38, 0.45), width: 1.0, radius: 16.0.into() },
+                ..Default::default()
+            });
+        let overlay = container(card).width(Length::Fill).height(Length::Fill)
+            .center_x(Length::Fill).center_y(Length::Fill)
+            .style(|_| iced::widget::container::Style {
+                background: Some(iced::Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.72))),
+                ..Default::default()
+            });
+        iced::widget::stack![base, overlay].into()
+    }
+
     pub fn view(&self) -> iced::Element<'_, AppMessage> {
         let _timer = PerfTracker::timer("view", format!("{:?}", self.screen));
         use iced::widget::{container, row};
@@ -26265,7 +26334,9 @@ impl IcedChat {
             return self.view_expanded_inline_video(base);
         }
 
-        if self.connection_details_dialog.is_some() {
+        if self.incoming_call.is_some() {
+            self.view_incoming_call_overlay(base)
+        } else if self.connection_details_dialog.is_some() {
             self.view_connection_details_dialog(base)
         } else if self.show_create_room_dialog {
             self.view_create_room_dialog(base)
@@ -45686,6 +45757,72 @@ mod tests {
         assert!(!dep.group_invites[0].inviter_label.is_empty());
     }
 
+    // ── Incoming call overlay (BORU-CALL-6.3) ─────────────────────────
+    // The overlay is a pure function of `incoming_call` state which is
+    // driven exclusively by `CallEventReceived`; media consent is deferred
+    // until `AcceptIncomingCall` (the only path that calls `handle.accept`).
+
+    #[test]
+    fn incoming_call_overlay_state_from_incoming_event_and_consent_deferred() {
+        let (_runtime, mut app, _local, peer) = build_join_request_test_app();
+        let call_id = CallId::new();
+
+        // No overlay before any call event.
+        assert!(app.incoming_call.is_none());
+
+        // An Incoming voice event renders the overlay with caller identity.
+        app.update(AppMessage::CallEventReceived(CallEvent::Incoming {
+            call_id,
+            peer,
+            kind: CallKind::Voice,
+        }));
+        let incoming = app.incoming_call.expect("Incoming event must populate overlay state");
+        assert_eq!(incoming.call_id, call_id);
+        assert_eq!(incoming.peer, peer);
+        assert_eq!(incoming.kind, CallKind::Voice);
+        // Consent deferred: receiving the offer must NOT activate any media.
+        assert!(!app.call_audio_muted, "audio must not be activated by Incoming alone");
+        assert!(!app.call_camera_enabled, "camera must not be activated by Incoming alone");
+
+        // A terminal event for the same call clears the overlay.
+        app.update(AppMessage::CallEventReceived(CallEvent::Ended {
+            call_id,
+            reason: CallEndReason::RemoteHangup,
+        }));
+        assert!(app.incoming_call.is_none(), "Ended must clear the overlay");
+
+        // An unrelated terminal event for a different call must NOT clear it.
+        let other_id = CallId::new();
+        app.update(AppMessage::CallEventReceived(CallEvent::Incoming {
+            call_id: other_id,
+            peer,
+            kind: CallKind::Video,
+        }));
+        assert!(app.incoming_call.is_some());
+        app.update(AppMessage::CallEventReceived(CallEvent::Ended {
+            call_id,
+            reason: CallEndReason::RemoteHangup,
+        }));
+        assert!(app.incoming_call.is_some(), "Ended for a different call must not clear overlay");
+        app.update(AppMessage::CallEventReceived(CallEvent::Ended {
+            call_id: other_id,
+            reason: CallEndReason::RemoteHangup,
+        }));
+        assert!(app.incoming_call.is_none());
+
+        // Failed with a matching call id also clears the overlay.
+        app.update(AppMessage::CallEventReceived(CallEvent::Incoming {
+            call_id,
+            peer,
+            kind: CallKind::Voice,
+        }));
+        app.update(AppMessage::CallEventReceived(CallEvent::Failed {
+            call_id: Some(call_id),
+            reason: CallError::Rejected,
+        }));
+        assert!(app.incoming_call.is_none(), "Failed for the same call must clear the overlay");
+    }
+
     /// Test that the button text for each state can be read from the
     /// button label.  Uses debug formatting because iced::Element is
     /// opaque — we verify the button's label contains the expected text.
@@ -46775,6 +46912,8 @@ mod tests {
             tokio::sync::mpsc::channel::<DiscoveredPeersUpdate>(1);
         let (_, dummy_directory_rx) = tokio::sync::mpsc::channel::<DirectoryRoomUpdate>(1);
         let dummy_directory_rx = Arc::new(Mutex::new(dummy_directory_rx));
+        let (_, dummy_call_rx) = tokio::sync::mpsc::channel::<CallEvent>(1);
+        let dummy_call_rx = Arc::new(Mutex::new(dummy_call_rx));
         let (persist_tx, _persist_rx) = std::sync::mpsc::channel();
 
         let app = IcedChat::new(
@@ -46800,6 +46939,7 @@ mod tests {
             inbox_events_rx,
             whisper_handle,
             call_handle,
+            dummy_call_rx,
             None,
             "join-request test".to_string(),
             chat_history,
@@ -46969,6 +47109,8 @@ mod tests {
             tokio::sync::mpsc::channel::<DiscoveredPeersUpdate>(1);
         let (_, dummy_directory_rx) = tokio::sync::mpsc::channel::<DirectoryRoomUpdate>(1);
         let dummy_directory_rx = Arc::new(Mutex::new(dummy_directory_rx));
+        let (_, dummy_call_rx) = tokio::sync::mpsc::channel::<CallEvent>(1);
+        let dummy_call_rx = Arc::new(Mutex::new(dummy_call_rx));
         let (persist_tx, _persist_rx) = std::sync::mpsc::channel();
 
         let app = IcedChat::new(
@@ -46994,6 +47136,7 @@ mod tests {
             inbox_events_rx,
             whisper_handle,
             call_handle,
+            dummy_call_rx,
             None,
             "prewarm test".to_string(),
             chat_history,
