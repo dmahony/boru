@@ -21,5 +21,5 @@ pub use codec::{
     VideoCodec, VideoDecoder, VideoEncoder, VIDEO_FRAMES_PER_SECOND, VIDEO_HEIGHT,
     VIDEO_KEYFRAME_INTERVAL_FRAMES, VIDEO_TARGET_BITRATE_BPS, VIDEO_WIDTH,
 };
-pub use packet::{VideoPacket, MAX_VIDEO_PAYLOAD_BYTES};
+pub use packet::{VideoPacket, VideoPacketizer, MAX_VIDEO_PAYLOAD_BYTES};
 pub use pipeline::LiveVideoPipeline;
