@@ -28,10 +28,13 @@ use iroh::{
 };
 
 pub(crate) mod forwarding;
+pub mod enrollment;
 mod local_listener;
+pub mod reconnect;
 pub mod service;
 
 pub use local_listener::LocalTunnelListener;
+pub use reconnect::{TunnelLinkHandle, TunnelLinkStatus};
 
 pub use service::{TunnelConnectionInfo, TunnelLiveInfo, TunnelRoute};
 use service::{TunnelService, TunnelStatus, TunnelTarget};
@@ -249,6 +252,23 @@ pub enum TunnelRequest {
         /// Opaque, recipient-bound capability token.
         capability: TunnelCapability,
     },
+    /// One-time enrollment: a headless peer presents a short-lived token on
+    /// its first connection. On success the owner pins the peer's key for the
+    /// tunnel and the connection proceeds like an accepted [`Self::Open`].
+    /// Subsequent connections from the pinned peer use `token: None` — the
+    /// owner accepts them because the key is already pinned.
+    ///
+    /// This variant is additive: existing `Open` flows (signed capabilities)
+    /// keep working byte-for-byte unchanged.
+    Enroll {
+        /// Version of the tunnel handshake understood by the initiator.
+        protocol_version: u16,
+        /// Identifier of the tunnel being enrolled into.
+        tunnel_id: TunnelId,
+        /// One-time enrollment token. `None` means the peer was already pinned
+        /// on a previous connection and is reconnecting.
+        token: Option<String>,
+    },
 }
 
 impl TunnelRequest {
@@ -261,12 +281,31 @@ impl TunnelRequest {
         }
     }
 
+    /// Construct an enrollment request using the current protocol version.
+    pub fn enroll(tunnel_id: TunnelId, token: Option<String>) -> Self {
+        Self::Enroll {
+            protocol_version: TUNNEL_PROTOCOL_VERSION,
+            tunnel_id,
+            token,
+        }
+    }
+
     /// Return the protocol version advertised by this request.
     pub fn protocol_version(&self) -> u16 {
         match self {
             Self::Open {
                 protocol_version, ..
+            }
+            | Self::Enroll {
+                protocol_version, ..
             } => *protocol_version,
+        }
+    }
+
+    /// Return the tunnel this request targets.
+    pub fn tunnel_id(&self) -> TunnelId {
+        match self {
+            Self::Open { tunnel_id, .. } | Self::Enroll { tunnel_id, .. } => *tunnel_id,
         }
     }
 }
@@ -472,6 +511,38 @@ pub async fn open_tunnel(
     }
 }
 
+/// Enroll a headless peer into a tunnel using a one-time enrollment token.
+///
+/// Mirrors [`open_tunnel`] for the enrollment path: the initiator presents the
+/// token on its first connection; on success the owner pins the peer's key and
+/// the returned stream proceeds exactly like an accepted `Open`. Pinned peers
+/// may pass `token: None` on later connections — the owner recognises them by
+/// key instead of requiring a fresh token.
+pub async fn enroll_tunnel(
+    connection: &Connection,
+    tunnel_id: TunnelId,
+    token: Option<String>,
+) -> anyhow::Result<TunnelStream> {
+    let (mut send, mut recv) = connection.open_bi().await?;
+    write_frame(&mut send, &TunnelRequest::enroll(tunnel_id, token)).await?;
+    match timeout(
+        TUNNEL_HANDSHAKE_TIMEOUT,
+        read_frame::<TunnelResponse>(&mut recv),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("tunnel handshake timed out"))??
+    {
+        TunnelResponse::Accepted => {
+            tracing::info!(tunnel = %tunnel_id_label(tunnel_id), "tunnel enrollment accepted");
+            Ok((send, recv))
+        }
+        TunnelResponse::Rejected(reason) => {
+            tracing::warn!(tunnel = %tunnel_id_label(tunnel_id), reason = ?reason, "tunnel enrollment rejected");
+            anyhow::bail!("tunnel enrollment rejected: {reason:?}")
+        }
+    }
+}
+
 async fn handle_incoming_stream(
     connection: Connection,
     (mut send, mut recv): TunnelStream,
@@ -485,11 +556,8 @@ async fn handle_incoming_stream(
     )
     .await
     .map_err(|_| anyhow::anyhow!("tunnel handshake timed out"))??;
-    let TunnelRequest::Open {
-        protocol_version,
-        tunnel_id,
-        capability,
-    } = request;
+    let protocol_version = request.protocol_version();
+    let tunnel_id = request.tunnel_id();
     let tunnel_label = tunnel_id_label(tunnel_id);
     if protocol_version != TUNNEL_PROTOCOL_VERSION {
         tracing::warn!(peer = %requesting_peer.fmt_short(), tunnel = %tunnel_label, "tunnel rejected: protocol mismatch");
@@ -520,13 +588,41 @@ async fn handle_incoming_stream(
             anyhow::bail!("unknown tunnel");
         }
     };
-    if let Err(error) = capability.verify_for(
-        &owner,
-        &requesting_peer,
-        tunnel_id,
-        unix_epoch_ms(),
-        definition.status != TunnelStatus::Revoked,
-    ) {
+    // Authorize the request. The existing `Open` path validates a signed
+    // capability exactly as before; the additive `Enroll` path validates a
+    // one-time enrollment token (or the peer's previously pinned key).
+    let authorization = match request {
+        TunnelRequest::Open { capability, .. } => {
+            capability.verify_for(
+                &owner,
+                &requesting_peer,
+                tunnel_id,
+                unix_epoch_ms(),
+                definition.status != TunnelStatus::Revoked,
+            )
+        }
+        TunnelRequest::Enroll { token, .. } => {
+            match token {
+                Some(token) => service
+                    .enrollment()
+                    .redeem(&token, tunnel_id, &requesting_peer, unix_epoch_ms()),
+                None => {
+                    if service.enrollment().is_pinned(tunnel_id, &requesting_peer) {
+                        Ok(())
+                    } else {
+                        Err(crate::tunnel::enrollment::EnrollmentError::UnknownToken)
+                    }
+                }
+            }
+            .map_err(|error| match error {
+                crate::tunnel::enrollment::EnrollmentError::TokenExpired => {
+                    CapabilityVerificationError::Expired
+                }
+                _ => CapabilityVerificationError::InvalidSignature,
+            })
+        }
+    };
+    if let Err(error) = authorization {
         let reason = if error == CapabilityVerificationError::Expired {
             TunnelRejectReason::Expired
         } else {
@@ -534,7 +630,7 @@ async fn handle_incoming_stream(
         };
         write_frame(&mut send, &TunnelResponse::rejected(reason)).await?;
         send.finish()?;
-        anyhow::bail!("invalid tunnel capability: {error:?}");
+        anyhow::bail!("invalid tunnel authorization: {error:?}");
     }
     let _reservation = match service.try_acquire_connection(tunnel_id) {
         Ok(reservation) => reservation,

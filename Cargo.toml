@@ -453,3 +453,8 @@ name = "fs22_dashboard_coverage"
 path = "tests/fs22_dashboard_coverage.rs"
 required-features = ["net"]
 
+[[test]]
+name = "tunnel_reconnect"
+path = "tests/tunnel_reconnect.rs"
+required-features = ["net"]
+

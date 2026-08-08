@@ -3,16 +3,25 @@
 //! This service intentionally owns only tunnel metadata and lifecycle state. The
 //! shared Iroh endpoint and stream forwarding remain in the networking layer;
 //! this keeps GUI callers independent from the transport implementation.
+//!
+//! Reconnect policy lives here too: the transport layer reports drops/failures
+//! through [`TunnelStatus::Reconnecting`] plus [`TunnelService::mark_reconnecting`]
+//! and the caller (or the tunnel link loop) schedules the next attempt with
+//! [`ReconnectPolicy::delay_for`]. Expired tunnels never auto-reconnect —
+//! [`TunnelService::connect_tunnel`] and [`TunnelService::try_acquire_connection`]
+//! reject them first, so the reconnect loop naturally stops retrying.
 
 use std::{
     collections::{HashMap, VecDeque},
     net::IpAddr,
     sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc, RwLock,
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+use super::enrollment::EnrollmentTokenStore;
 
 use tokio_util::sync::CancellationToken;
 
@@ -71,6 +80,10 @@ pub enum TunnelStatus {
     Failed,
     /// The tunnel was disconnected by the user.
     Disconnected,
+    /// The transport dropped an established link and is waiting to retry
+    /// with exponential backoff. Expired tunnels never enter this state —
+    /// the reconnect loop stops as soon as the expiry check fails.
+    Reconnecting,
 }
 
 impl TunnelStatus {
@@ -83,8 +96,76 @@ impl TunnelStatus {
             Self::Revoked => "Revoked",
             Self::Failed => "Failed",
             Self::Disconnected => "Disconnected",
+            Self::Reconnecting => "Reconnecting",
         }
     }
+}
+
+/// Exponential backoff policy for automatic tunnel reconnection.
+///
+/// Delay for attempt `n` is `initial_delay * factor^n`, capped at
+/// [`Self::max_delay`], with uniform multiplicative jitter in the range
+/// `[1 - jitter, 1 + jitter]`. The defaults (1s → 2s → 4s … capped at 30s,
+/// 20% jitter) match the pai-sho borrow in the TUN-02 task.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReconnectPolicy {
+    /// Delay before the first retry (attempt 0).
+    pub initial_delay: Duration,
+    /// Upper bound on any single retry delay.
+    pub max_delay: Duration,
+    /// Multiplicative growth factor per retry.
+    pub factor: u32,
+    /// Jitter ratio in `[0, 1]`; `0` disables jitter.
+    pub jitter: f64,
+}
+
+impl Default for ReconnectPolicy {
+    fn default() -> Self {
+        Self {
+            initial_delay: Duration::from_secs(1),
+            max_delay: Duration::from_secs(30),
+            factor: 2,
+            jitter: 0.2,
+        }
+    }
+}
+
+impl ReconnectPolicy {
+    /// Delay before retry `attempt` (0-based), with jitter applied.
+    pub fn delay_for(&self, attempt: u32) -> Duration {
+        let raw = self.raw_delay_for(attempt);
+        if self.jitter <= 0.0 {
+            return raw;
+        }
+        let raw_ms = raw.as_millis().max(1) as f64;
+        // Uniform jitter multiplier in [1 - jitter, 1 + jitter].
+        let span = self.jitter.min(1.0);
+        let multiplier = 1.0 - span + rand::random::<f64>() * (2.0 * span);
+        Duration::from_millis((raw_ms * multiplier).max(1.0) as u64)
+    }
+
+    /// Delay before retry `attempt` without jitter (deterministic, for tests).
+    pub fn raw_delay_for(&self, attempt: u32) -> Duration {
+        let factor = self.factor.max(1) as u128;
+        let mut ms = self.initial_delay.as_millis() as u128;
+        for _ in 0..attempt {
+            ms = ms.saturating_mul(factor);
+            if ms >= self.max_delay.as_millis() as u128 {
+                break;
+            }
+        }
+        Duration::from_millis(ms.min(self.max_delay.as_millis() as u128) as u64)
+    }
+}
+
+/// Live state of the automatic reconnect loop for one tunnel, shown to the GUI
+/// while [`TunnelStatus::Reconnecting`] is active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReconnectInfo {
+    /// Zero-based attempt counter.
+    pub attempt: u32,
+    /// Delay before the next reconnect attempt.
+    pub next_delay: Duration,
 }
 
 /// Best-effort route classification for a live tunnel connection.
@@ -142,6 +223,8 @@ pub struct TunnelConnectionInfo {
     pub connected_at_ms: u64,
     /// Number of TCP connections currently using this tunnel.
     pub tcp_connections: usize,
+    /// Whether the tunnel link is currently reconnecting with backoff.
+    pub reconnecting: bool,
 }
 
 /// Live, best-effort connection metadata shared between the transport layer
@@ -154,12 +237,18 @@ pub struct TunnelLiveInfo {
     bytes_received: AtomicU64,
     connected_at_ms: AtomicU64,
     tcp_connections: AtomicUsize,
+    reconnecting: AtomicBool,
 }
 
 impl TunnelLiveInfo {
     /// Record the route observed from Iroh path data.
     pub fn set_route(&self, route: TunnelRoute) {
         *self.route.write().expect("tunnel live info lock poisoned") = route;
+    }
+
+    /// Record the start of the reconnect loop for a dropped tunnel link.
+    pub fn set_reconnecting(&self, reconnecting: bool) {
+        self.reconnecting.store(reconnecting, Ordering::Relaxed);
     }
 
     /// Record bytes forwarded in each direction.
@@ -193,6 +282,7 @@ impl TunnelLiveInfo {
             bytes_received: self.bytes_received.load(Ordering::Relaxed),
             connected_at_ms: self.connected_at_ms.load(Ordering::Relaxed),
             tcp_connections: self.tcp_connections.load(Ordering::Relaxed),
+            reconnecting: self.reconnecting.load(Ordering::Relaxed),
         }
     }
 }
@@ -288,18 +378,50 @@ pub enum TunnelServiceError {
 }
 
 /// In-memory owner of configured tunnel metadata.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct TunnelService {
     tunnels: RwLock<HashMap<TunnelId, TunnelDefinition>>,
     cancellation: RwLock<HashMap<TunnelId, CancellationToken>>,
     attempt_times: RwLock<HashMap<iroh::PublicKey, VecDeque<Instant>>>,
     live_info: RwLock<HashMap<TunnelId, Arc<TunnelLiveInfo>>>,
+    reconnect: RwLock<HashMap<TunnelId, ReconnectInfo>>,
+    enrollment: Arc<EnrollmentTokenStore>,
+}
+
+impl Default for TunnelService {
+    fn default() -> Self {
+        Self {
+            tunnels: RwLock::new(HashMap::new()),
+            cancellation: RwLock::new(HashMap::new()),
+            attempt_times: RwLock::new(HashMap::new()),
+            live_info: RwLock::new(HashMap::new()),
+            reconnect: RwLock::new(HashMap::new()),
+            enrollment: Arc::new(EnrollmentTokenStore::new()),
+        }
+    }
 }
 
 impl TunnelService {
     /// Construct an empty service.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Construct a service backed by a shared enrollment-token store.
+    ///
+    /// The store is used to redeem one-time enrollment tokens presented by
+    /// headless peers on their first tunnel connection, and to check whether
+    /// a peer's key has already been pinned for a tunnel.
+    pub fn with_enrollment_store(enrollment: Arc<EnrollmentTokenStore>) -> Self {
+        Self {
+            enrollment,
+            ..Self::default()
+        }
+    }
+
+    /// Return the shared enrollment-token store.
+    pub fn enrollment(&self) -> &Arc<EnrollmentTokenStore> {
+        &self.enrollment
     }
 
     /// Register a tunnel in the active state.
@@ -540,11 +662,17 @@ impl TunnelService {
         let definition = tunnels.get_mut(&id).ok_or(TunnelServiceError::NotFound)?;
         if !matches!(
             definition.status,
-            TunnelStatus::Connecting | TunnelStatus::Connected
+            TunnelStatus::Connecting
+                | TunnelStatus::Connected
+                | TunnelStatus::Reconnecting
         ) {
             return Err(TunnelServiceError::InvalidState);
         }
         definition.status = TunnelStatus::Connected;
+        self.reconnect
+            .write()
+            .expect("tunnel reconnect lock poisoned")
+            .remove(&id);
         tracing::info!(tunnel = %super::tunnel_id_label(id), "tunnel connected");
         Ok(definition.clone())
     }
@@ -572,8 +700,62 @@ impl TunnelService {
             return Err(TunnelServiceError::InvalidState);
         }
         definition.status = TunnelStatus::Disconnected;
+        self.reconnect
+            .write()
+            .expect("tunnel reconnect lock poisoned")
+            .remove(&id);
         tracing::info!(tunnel = %super::tunnel_id_label(id), "tunnel disconnected");
         Ok(definition.clone())
+    }
+
+    /// Mark a tunnel as waiting to retry its connection with backoff.
+    ///
+    /// The transport calls this when an established link drops or a connection
+    /// attempt fails and the tunnel is still within its expiry window. A
+    /// revoked or expired tunnel is left in its current state and returns
+    /// [`TunnelServiceError::InvalidState`] so the caller stops retrying.
+    pub fn mark_reconnecting(
+        &self,
+        id: TunnelId,
+        policy: ReconnectPolicy,
+    ) -> Result<ReconnectInfo, TunnelServiceError> {
+        let mut tunnels = self.tunnels.write().expect("tunnel service lock poisoned");
+        let definition = tunnels.get_mut(&id).ok_or(TunnelServiceError::NotFound)?;
+        if definition.status == TunnelStatus::Revoked {
+            return Err(TunnelServiceError::InvalidState);
+        }
+        if unix_epoch_ms() > definition.expires_at_ms {
+            return Err(TunnelServiceError::Expired);
+        }
+        let mut reconnect = self
+            .reconnect
+            .write()
+            .expect("tunnel reconnect lock poisoned");
+        let current = reconnect.get(&id).copied();
+        let attempt = current.map(|info| info.attempt + 1).unwrap_or(0);
+        let next_delay = policy.delay_for(attempt);
+        let info = ReconnectInfo { attempt, next_delay };
+        reconnect.insert(id, info);
+        if definition.status != TunnelStatus::Connecting {
+            definition.status = TunnelStatus::Reconnecting;
+        }
+        tracing::info!(
+            tunnel = %super::tunnel_id_label(id),
+            attempt,
+            next_delay_ms = next_delay.as_millis(),
+            "tunnel reconnecting with backoff"
+        );
+        Ok(info)
+    }
+
+    /// Return the current reconnect state for a tunnel, if the transport has
+    /// marked it as reconnecting.
+    pub fn reconnect_info(&self, id: TunnelId) -> Option<ReconnectInfo> {
+        self.reconnect
+            .read()
+            .expect("tunnel reconnect lock poisoned")
+            .get(&id)
+            .copied()
     }
 
     /// Reserve one connection slot, allowing multiple streams on one tunnel.
@@ -649,6 +831,7 @@ fn unix_epoch_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use std::net::IpAddr;
+    use std::time::Duration;
 
     use iroh::SecretKey;
 
@@ -1030,5 +1213,129 @@ mod tests {
 
         service.revoke_tunnel(id).unwrap();
         assert!(service.connection_info(id).is_none());
+    }
+
+    #[test]
+    fn reconnect_policy_grows_exponentially_and_caps() {
+        let policy = super::ReconnectPolicy {
+            initial_delay: Duration::from_secs(1),
+            max_delay: Duration::from_secs(30),
+            factor: 2,
+            jitter: 0.0,
+        };
+        assert_eq!(policy.raw_delay_for(0), Duration::from_secs(1));
+        assert_eq!(policy.raw_delay_for(1), Duration::from_secs(2));
+        assert_eq!(policy.raw_delay_for(2), Duration::from_secs(4));
+        assert_eq!(policy.raw_delay_for(3), Duration::from_secs(8));
+        assert_eq!(policy.raw_delay_for(4), Duration::from_secs(16));
+        // 32s would exceed the 30s cap.
+        assert_eq!(policy.raw_delay_for(5), Duration::from_secs(30));
+        assert_eq!(policy.raw_delay_for(100), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn reconnect_policy_jitter_stays_within_bounds() {
+        let policy = super::ReconnectPolicy {
+            initial_delay: Duration::from_secs(1),
+            max_delay: Duration::from_secs(30),
+            factor: 2,
+            jitter: 0.2,
+        };
+        for attempt in 0..8 {
+            let raw = policy.raw_delay_for(attempt).as_secs_f64();
+            for _ in 0..50 {
+                let delay = policy.delay_for(attempt).as_secs_f64();
+                assert!(delay >= raw * 0.8, "delay {delay} below jitter floor for {raw}");
+                assert!(delay <= raw * 1.2 + 0.001, "delay {delay} above jitter ceiling for {raw}");
+            }
+        }
+    }
+
+    #[test]
+    fn mark_reconnecting_enters_backoff_and_clears_on_connected() {
+        let (service, owner, peer, id) = fixture();
+        service
+            .create_tunnel(
+                id,
+                owner,
+                TunnelTarget::tcp("127.0.0.1".parse().unwrap(), 3000),
+                peer,
+                super::unix_epoch_ms(),
+                super::unix_epoch_ms() + 60_000,
+            )
+            .unwrap();
+        service.connect_tunnel(id).unwrap();
+        service.mark_connected(id).unwrap();
+
+        let policy = super::ReconnectPolicy::default();
+        let first = service.mark_reconnecting(id, policy).unwrap();
+        assert_eq!(first.attempt, 0);
+        assert_eq!(service.get_tunnel(id).unwrap().status, TunnelStatus::Reconnecting);
+        assert_eq!(service.reconnect_info(id), Some(first));
+
+        // A second drop advances the backoff.
+        let second = service.mark_reconnecting(id, policy).unwrap();
+        assert_eq!(second.attempt, 1);
+        assert!(second.next_delay >= first.next_delay);
+
+        // Reconnecting → Connected clears the backoff state.
+        service.mark_connected(id).unwrap();
+        assert_eq!(service.get_tunnel(id).unwrap().status, TunnelStatus::Connected);
+        assert_eq!(service.reconnect_info(id), None);
+    }
+
+    #[test]
+    fn mark_reconnecting_rejects_revoked_and_expired_tunnels() {
+        let (service, owner, peer, id) = fixture();
+        service
+            .create_tunnel(
+                id,
+                owner,
+                TunnelTarget::tcp("127.0.0.1".parse().unwrap(), 3000),
+                peer,
+                super::unix_epoch_ms(),
+                super::unix_epoch_ms() + 60_000,
+            )
+            .unwrap();
+        let policy = super::ReconnectPolicy::default();
+
+        // Expired tunnel must NOT auto-reconnect.
+        service
+            .create_tunnel(
+                TunnelId([10; 32]),
+                owner,
+                TunnelTarget::tcp("127.0.0.1".parse().unwrap(), 3000),
+                peer,
+                1,
+                2,
+            )
+            .unwrap();
+        assert_eq!(
+            service.mark_reconnecting(TunnelId([10; 32]), policy),
+            Err(TunnelServiceError::Expired)
+        );
+
+        // Revoked tunnel must NOT auto-reconnect (revocation removes the
+        // tunnel, so NotFound is the correct non-reconnect signal).
+        service.revoke_tunnel(id).unwrap();
+        assert_eq!(
+            service.mark_reconnecting(id, policy),
+            Err(TunnelServiceError::NotFound)
+        );
+    }
+
+    #[test]
+    fn reconnect_label_is_available_for_the_gui() {
+        assert_eq!(TunnelStatus::Reconnecting.label(), "Reconnecting");
+    }
+
+    #[test]
+    fn live_info_tracks_reconnecting_flag() {
+        let info = TunnelLiveInfo::default();
+        assert!(!info.snapshot().reconnecting);
+        info.set_reconnecting(true);
+        assert!(info.snapshot().reconnecting);
+        info.set_reconnecting(false);
+        assert!(!info.snapshot().reconnecting);
     }
 }

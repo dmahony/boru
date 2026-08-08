@@ -1006,7 +1006,9 @@ fn main() -> Result<()> {
             Arc::new(blob_store.clone().into()),
         );
 
-        let tunnel_service = Arc::new(boru_core::tunnel::service::TunnelService::new());
+        let tunnel_service = Arc::new(boru_core::tunnel::service::TunnelService::with_enrollment_store(
+            Arc::new(boru_core::tunnel::enrollment::EnrollmentTokenStore::load_or_default(&data_dir)),
+        ));
         let tunnel_handler = TunnelProtocol::with_service(Arc::clone(&tunnel_service), local_public);
 
         let router = iroh::protocol::Router::builder(endpoint.clone())

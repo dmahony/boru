@@ -9,11 +9,16 @@ use iroh::{endpoint::Connection, Endpoint, EndpointAddr};
 use tokio::{
     io::AsyncWriteExt,
     net::{TcpListener, TcpStream},
-    sync::{Mutex, OwnedSemaphorePermit, Semaphore},
+    sync::{watch, Mutex, OwnedSemaphorePermit, Semaphore},
 };
 use tokio_util::sync::CancellationToken;
 
-use super::{forwarding, open_tunnel, service::TunnelLiveInfo, TunnelCapability, TunnelId};
+use super::{
+    forwarding, open_tunnel,
+    reconnect::{run_reconnect_loop, TunnelLinkHandle, TunnelLinkStatus},
+    service::{ReconnectPolicy, TunnelLiveInfo},
+    TunnelCapability, TunnelId, BORU_TUNNEL_ALPN,
+};
 
 const DEFAULT_MAX_CONNECTIONS: usize = 16;
 
@@ -149,7 +154,30 @@ impl LocalTunnelListener {
 
     /// Run the listener until cancellation, routing each application
     /// connection in its own task.
+    ///
+    /// A link-keeper task is spawned alongside the accept loop: it dials the
+    /// owner and maintains the cached peer connection with exponential
+    /// backoff. When the tunnel link drops, the keeper re-establishes it
+    /// automatically instead of relying on the next local connection to
+    /// re-dial, and mirrors the reconnecting state into the shared live info
+    /// so the GUI can reflect it.
     pub async fn run(self, cancellation: CancellationToken) -> anyhow::Result<()> {
+        let keeper = spawn_link_keeper(
+            self.endpoint.clone(),
+            self.owner.clone(),
+            self.tunnel_id,
+            self.capability.clone(),
+            Arc::clone(&self.peer_connection),
+            Arc::clone(&self.live),
+            cancellation.clone(),
+        );
+        let result = self.run_accept_loop(cancellation).await;
+        keeper.abort();
+        result
+    }
+
+    /// Accept-and-route loop without the link keeper (used by `run`).
+    async fn run_accept_loop(self, cancellation: CancellationToken) -> anyhow::Result<()> {
         loop {
             let accepted = tokio::select! {
                 _ = cancellation.cancelled() => return Ok(()),
@@ -261,6 +289,67 @@ impl LocalTunnelListener {
         tracing::debug!(tunnel = %super::tunnel_id_label(tunnel_id), "tunnel local connection closed");
         Ok(())
     }
+}
+
+/// Spawn the link-keeper task for a [`LocalTunnelListener`].
+///
+/// The keeper dials the owner and maintains the cached peer connection with
+/// exponential backoff. When the link drops it re-dials automatically (a
+/// tunnel past its expiry is never re-dialed), and mirrors the reconnecting
+/// state into `live` so the GUI can display it.
+fn spawn_link_keeper(
+    endpoint: Endpoint,
+    owner: EndpointAddr,
+    tunnel_id: TunnelId,
+    capability: TunnelCapability,
+    peer_connection: Arc<Mutex<Option<Connection>>>,
+    live: Arc<TunnelLiveInfo>,
+    cancellation: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let policy = ReconnectPolicy::default();
+        let expires_at_ms = capability.expires_at_ms;
+        let (status_tx, status_rx) = watch::channel(TunnelLinkStatus::Idle);
+        let connect = {
+            let endpoint = endpoint.clone();
+            let owner = owner.clone();
+            let peer_connection = Arc::clone(&peer_connection);
+            move || -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = anyhow::Result<Arc<dyn TunnelLinkHandle>>> + Send>,
+            > {
+                let endpoint = endpoint.clone();
+                let owner = owner.clone();
+                let peer_connection = Arc::clone(&peer_connection);
+                Box::pin(async move {
+                    let connection = endpoint.connect(owner, BORU_TUNNEL_ALPN).await?;
+                    *peer_connection.lock().await = Some(connection.clone());
+                    Ok(Arc::new(connection) as Arc<dyn TunnelLinkHandle>)
+                })
+            }
+        };
+        // Mirror the keeper's status into the shared live info so the GUI can
+        // reflect the reconnecting state.
+        let live_mirror = Arc::clone(&live);
+        let mirror = tokio::spawn(async move {
+            let mut status_rx = status_rx;
+            while status_rx.changed().await.is_ok() {
+                let status = *status_rx.borrow();
+                live_mirror
+                    .set_reconnecting(matches!(status, TunnelLinkStatus::Reconnecting { .. }));
+            }
+        });
+        run_reconnect_loop(
+            connect,
+            move || super::unix_epoch_ms() > expires_at_ms,
+            policy,
+            cancellation,
+            status_tx,
+            None,
+        )
+        .await;
+        mirror.abort();
+        tracing::info!(tunnel = %super::tunnel_id_label(tunnel_id), "tunnel link keeper stopped");
+    })
 }
 
 #[cfg(test)]

@@ -1413,8 +1413,12 @@ fn tunnel_duration_label(connected_at_ms: u64) -> Option<String> {
 /// Compact one-line connection info for a tunnel row, e.g.
 /// "Direct · 12.4 MB transferred · 3m 12s". Metrics are only included when
 /// available; the route label is always shown once a connection exists.
+/// While the link is reconnecting, the label leads with "Reconnecting".
 fn tunnel_connection_info_label(info: boru_core::tunnel::service::TunnelConnectionInfo) -> String {
     let mut parts = vec![tunnel_route_label(info.route).to_string()];
+    if info.reconnecting {
+        parts.insert(0, "Reconnecting".to_string());
+    }
     if let Some(transfer) = tunnel_transfer_label(info) {
         parts.push(transfer);
     }
@@ -1454,6 +1458,7 @@ fn tunnel_status_color(
         TunnelStatus::Revoked => text_muted(theme),
         TunnelStatus::Failed => color_error(theme),
         TunnelStatus::Disconnected => text_muted(theme),
+        TunnelStatus::Reconnecting => color_warning(theme),
     }
 }
 
@@ -4988,7 +4993,8 @@ pub(crate) struct SettingsSharingTunnelRow {
     pub(crate) friend: String,
     pub(crate) target: String,
     /// 0 = expired, 1 = Active, 2 = Connecting, 3 = Connected, 4 = Revoked,
-    /// 5 = Failed, 6 = Disconnected. Mirrors `tunnel_status_color` ordering.
+    /// 5 = Failed, 6 = Disconnected, 7 = Reconnecting. Mirrors
+    /// `tunnel_status_color` ordering.
     pub(crate) status_kind: u8,
     /// Pre-rendered status label (e.g. "Expired", "Available", "Failed").
     pub(crate) status_label: String,
@@ -5038,6 +5044,7 @@ fn settings_tunnel_status_kind(
         TunnelStatus::Revoked => 4,
         TunnelStatus::Failed => 5,
         TunnelStatus::Disconnected => 6,
+        TunnelStatus::Reconnecting => 7,
     }
 }
 
@@ -5048,7 +5055,7 @@ fn settings_tunnel_status_color(theme: &iced::Theme, status_kind: u8) -> iced::C
     match status_kind {
         0 | 4 | 6 => text_muted(theme),
         1 => accent_primary(theme),
-        2 => color_warning(theme),
+        2 | 7 => color_warning(theme),
         3 => accent_green(theme),
         5 => color_error(theme),
         _ => text_muted(theme),
@@ -5067,6 +5074,7 @@ fn settings_tunnel_status_label(status_kind: u8) -> &'static str {
         4 => TunnelStatus::Revoked.label(),
         5 => TunnelStatus::Failed.label(),
         6 => TunnelStatus::Disconnected.label(),
+        7 => TunnelStatus::Reconnecting.label(),
         _ => "Unknown",
     }
 }
@@ -29059,6 +29067,7 @@ impl IcedChat {
                         TunnelStatus::Revoked => text_muted(&theme),
                         TunnelStatus::Failed => color_error(&theme),
                         TunnelStatus::Disconnected => text_muted(&theme),
+                        TunnelStatus::Reconnecting => color_warning(&theme),
                     }
                 };
                 container(
