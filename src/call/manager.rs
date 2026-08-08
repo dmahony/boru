@@ -1160,6 +1160,7 @@ async fn write_call_control<W: AsyncWrite + Unpin>(
 mod tests {
     use super::*;
     use iroh::endpoint::presets;
+    use iroh::protocol::Router;
 
     #[test]
     fn collision_ordering_is_symmetric() {
@@ -1209,6 +1210,122 @@ mod tests {
             .to_vec();
         frame.extend_from_slice(&[0; 8]);
         assert!(read_declared_size(&frame).is_err());
+    }
+
+    /// Bind two minimal endpoints and return a live call connection plus the
+    /// router that keeps the server side alive (mirrors tests/call_e2e.rs).
+    async fn live_connection() -> (Connection, Router, Endpoint) {
+        let server = Endpoint::bind(presets::Minimal).await.unwrap();
+        let server_builder = CallBuilder::new(server.clone(), server.secret_key().clone());
+        let server_handler = server_builder.protocol_handler();
+        let (_server_handle, _server_events) = server_builder.spawn();
+        let server_router = Router::builder(server.clone())
+            .accept(CALL_ALPN, server_handler)
+            .spawn();
+        let client = Endpoint::bind(presets::Minimal).await.unwrap();
+        let connection = client
+            .connect(server.addr(), CALL_ALPN)
+            .await
+            .expect("probe connection should establish");
+        (connection, server_router, client)
+    }
+
+    #[tokio::test]
+    async fn runtime_shutdown_closes_media_gate_and_bounded_abort_wedged_task() {
+        let (connection, router, _client) = live_connection().await;
+        let mut runtime = CallRuntime::new(connection);
+        // A wedged device/codec task that never finishes on its own.
+        let (abort_tx, abort_rx) = tokio::sync::oneshot::channel::<()>();
+        runtime.audio_capture_task = Some(tokio::spawn(async move {
+            let _ = abort_rx.await;
+        }));
+
+        let started = tokio::time::Instant::now();
+        runtime.shutdown().await;
+        let elapsed = started.elapsed();
+
+        // Bounded shutdown: never wait longer than the timeout for a wedged task.
+        assert!(
+            elapsed < CALL_SHUTDOWN_TIMEOUT * 2,
+            "shutdown took {elapsed:?}, bounded await violated"
+        );
+        // The wedged task must have been aborted by the bounded join.
+        abort_tx.send(()).ok();
+        let _ = router.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn terminate_call_emits_exactly_one_ended_event() {
+        let (connection, router, _client) = live_connection().await;
+        let (event_tx, mut event_rx) = mpsc::channel(EVENT_CAPACITY);
+        let (control_tx, _control_rx) = mpsc::channel(32);
+        let mut calls = HashMap::new();
+        let mut terminal_calls = HashSet::new();
+        let call_id = CallId::generate();
+
+        calls.insert(
+            call_id,
+            CallState {
+                peer: SecretKey::generate().public(),
+                kind: CallKind::Voice,
+                tx: control_tx,
+                incoming: false,
+                active: false,
+                local_audio_muted: false,
+                remote_audio_muted: false,
+                video_enabled: false,
+                generation: 7,
+                ending: false,
+                runtime: CallRuntime::new(connection),
+            },
+        );
+
+        // First termination wins and emits exactly one Ended.
+        terminate_call(
+            &mut calls,
+            &mut terminal_calls,
+            &event_tx,
+            call_id,
+            0,
+            HangupReason::LocalHangup,
+            false,
+            false,
+        )
+        .await;
+        // A duplicate/stale termination (same call, now terminal) is a no-op.
+        terminate_call(
+            &mut calls,
+            &mut terminal_calls,
+            &event_tx,
+            call_id,
+            7,
+            HangupReason::ConnectionLost,
+            false,
+            false,
+        )
+        .await;
+        // A stale generation from a previous incarnation is ignored entirely.
+        terminate_call(
+            &mut calls,
+            &mut terminal_calls,
+            &event_tx,
+            call_id,
+            6,
+            HangupReason::LocalHangup,
+            false,
+            false,
+        )
+        .await;
+
+        let mut ended = 0;
+        while let Ok(event) = event_rx.try_recv() {
+            if matches!(event, CallEvent::Ended { call_id: id, .. } if id == call_id) {
+                ended += 1;
+            }
+        }
+        assert_eq!(ended, 1, "expected exactly one Ended event, got {ended}");
+        assert!(calls.is_empty(), "call state must be removed after termination");
+        let _ = router.shutdown().await;
     }
 
     fn read_declared_size(frame: &[u8]) -> std::io::Result<()> {
