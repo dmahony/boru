@@ -2927,6 +2927,8 @@ pub enum Screen {
     DownloadManager,
     /// An individual chat room with a given topic.
     Chat { topic: TopicId },
+    /// Outgoing call ringing view.
+    OutgoingCall,
     /// The friend request management screen.
     FriendRequests,
     /// Application settings screen.
@@ -2946,6 +2948,14 @@ pub enum Screen {
     Terminal,
     /// Developer component gallery — excluded from release navigation.
     Gallery,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutgoingCallStatus {
+    Ringing,
+    Declined,
+    Busy,
+    Failed,
 }
 
 // ── State-safety snapshots ─────────────────────────────────────────────
@@ -3815,6 +3825,9 @@ pub struct IcedChat {
     /// Receiver for call actor events, consumed by the Iced subscription.
     pub call_events_rx: Arc<Mutex<Receiver<CallEvent>>>,
     active_call_id: Option<CallId>,
+    outgoing_call_peer: Option<PublicKey>,
+    outgoing_call_status: Option<OutgoingCallStatus>,
+    call_return_screen: Option<Screen>,
     call_audio_muted: bool,
     call_camera_enabled: bool,
     /// Pending incoming call shown as an overlay; media is only activated
@@ -8103,6 +8116,9 @@ impl IcedChat {
             call_handle,
             call_events_rx,
             active_call_id: None,
+            outgoing_call_peer: None,
+            outgoing_call_status: None,
+            call_return_screen: None,
             call_audio_muted: false,
             call_camera_enabled: false,
             incoming_call: None,
@@ -10968,6 +10984,7 @@ impl IcedChat {
     fn current_connection_details_dialog(&self) -> ConnectionDetailsDialogState {
         let room_state = match &self.screen {
             Screen::Chat { topic } => format!("Chat room active ({topic})"),
+            Screen::OutgoingCall => "Outgoing call".to_string(),
             Screen::FriendProfile(_) => "Friend profile open".to_string(),
             Screen::PeerProfile(_) => "Peer profile open".to_string(),
             Screen::PeerCatalogue(_) => "Peer catalogue open".to_string(),
@@ -11218,6 +11235,7 @@ impl IcedChat {
         // Step 3: Build the snapshot from current state.
         let (active_screen, active_room) = match &self.screen {
             Screen::Chat { topic } => ("Chat", Some(topic.to_string())),
+            Screen::OutgoingCall => ("OutgoingCall", None),
             Screen::ChatList => ("ChatList", None),
             Screen::FriendRequests => ("FriendRequests", None),
             Screen::FileSharing => ("FileSharing", None),
@@ -14031,6 +14049,10 @@ impl IcedChat {
 
             // ── Chat ─────────────────────────────────────────────────
             AppMessage::StartVoiceCall(peer) => {
+                self.call_return_screen = Some(self.screen.clone());
+                self.outgoing_call_peer = Some(peer);
+                self.outgoing_call_status = Some(OutgoingCallStatus::Ringing);
+                self.screen = Screen::OutgoingCall;
                 let handle = self.call_handle.clone();
                 iced::Task::perform(
                     async move { handle.start_voice_call(peer).await.map_err(|e| e.to_string()) },
@@ -14038,6 +14060,10 @@ impl IcedChat {
                 )
             }
             AppMessage::StartVideoCall(peer) => {
+                self.call_return_screen = Some(self.screen.clone());
+                self.outgoing_call_peer = Some(peer);
+                self.outgoing_call_status = Some(OutgoingCallStatus::Ringing);
+                self.screen = Screen::OutgoingCall;
                 let handle = self.call_handle.clone();
                 iced::Task::perform(
                     async move { handle.start_video_call(peer).await.map_err(|e| e.to_string()) },
@@ -14047,18 +14073,25 @@ impl IcedChat {
             AppMessage::CallStarted(result) => {
                 match result {
                     Ok(call_id) => self.active_call_id = Some(call_id),
-                    Err(error) => self.toast_message = Some(format!("Call failed: {error}")),
+                    Err(error) => {
+                        self.outgoing_call_status = Some(OutgoingCallStatus::Failed);
+                        self.toast_message = Some(format!("Call failed: {error}"));
+                    }
                 }
                 iced::Task::none()
             }
-            AppMessage::CallEventReceived(event) => {
+                        AppMessage::CallEventReceived(event) => {
                 match &event {
                     CallEvent::Incoming { call_id, peer, kind } => {
                         self.active_call_id = Some(*call_id);
                         self.incoming_call = Some(IncomingCall { call_id: *call_id, peer: *peer, kind: *kind });
                     }
-                    CallEvent::OutgoingRinging { call_id, .. }
-                    | CallEvent::Connecting { call_id } => self.active_call_id = Some(*call_id),
+                    CallEvent::OutgoingRinging { peer, .. } => {
+                        self.outgoing_call_peer = Some(*peer);
+                        self.outgoing_call_status = Some(OutgoingCallStatus::Ringing);
+                        self.screen = Screen::OutgoingCall;
+                    }
+                    CallEvent::Connecting { call_id } => self.active_call_id = Some(*call_id),
                     CallEvent::Active { call_id, .. } => {
                         self.active_call_id = Some(*call_id);
                         // The call is now in progress; the consent overlay is no longer needed.
@@ -14072,15 +14105,28 @@ impl IcedChat {
                         self.call_camera_enabled = *video_enabled;
                     }
                     CallEvent::Ended { call_id, .. } => {
-                        if self.active_call_id == Some(*call_id) { self.active_call_id = None; }
+                        if self.active_call_id == Some(*call_id) {
+                            self.active_call_id = None;
+                            self.outgoing_call_peer = None;
+                            self.outgoing_call_status = None;
+                            if let Some(screen) = self.call_return_screen.take() { self.screen = screen; }
+                        }
                         if self.incoming_call.as_ref().is_some_and(|call| call.call_id == *call_id) {
                             self.incoming_call = None;
                         }
                     }
-                    CallEvent::Failed { call_id, .. } => {
+                    CallEvent::Failed { call_id, reason } => {
                         match call_id {
                             Some(cid) => {
-                                if self.active_call_id == Some(*cid) { self.active_call_id = None; }
+                                if self.active_call_id == Some(*cid) {
+                                    self.active_call_id = None;
+                                    self.outgoing_call_status = Some(match reason {
+                                        boru_core::call::manager::CallError::Rejected => OutgoingCallStatus::Declined,
+                                        boru_core::call::manager::CallError::Busy => OutgoingCallStatus::Busy,
+                                        boru_core::call::manager::CallError::Connection => OutgoingCallStatus::Failed,
+                                        _ => OutgoingCallStatus::Failed,
+                                    });
+                                }
                                 if self.incoming_call.as_ref().is_some_and(|call| call.call_id == *cid) {
                                     self.incoming_call = None;
                                 }
@@ -14101,6 +14147,12 @@ impl IcedChat {
                 iced::Task::perform(async move { handle.reject(call_id).await.map_err(|e| e.to_string()) }, AppMessage::CallCommandFinished)
             }
             AppMessage::HangUp(call_id) => {
+                if self.active_call_id == Some(call_id) && matches!(self.screen, Screen::OutgoingCall) {
+                    self.active_call_id = None;
+                    self.outgoing_call_peer = None;
+                    self.outgoing_call_status = None;
+                    if let Some(screen) = self.call_return_screen.take() { self.screen = screen; }
+                }
                 let handle = self.call_handle.clone();
                 iced::Task::perform(async move { handle.hangup(call_id).await.map_err(|e| e.to_string()) }, AppMessage::CallCommandFinished)
             }
@@ -26248,6 +26300,7 @@ impl IcedChat {
             }
             Screen::DownloadManager => self.view_download_manager(),
             Screen::Chat { .. } => self.view_chat_panel(),
+            Screen::OutgoingCall => self.view_outgoing_call(),
             Screen::FriendRequests => {
                 self.serve_prewarmed(Screen::FriendRequests, || self.view_friend_requests())
             }
@@ -30478,8 +30531,52 @@ impl IcedChat {
 
     // ── Chat panel (main panel when a conversation is selected) ──────────
 
-    /// The chat panel shown in the main panel area when a conversation is active.
-    /// Contains header + message log + composer.
+    fn view_outgoing_call(&self) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{button, column, container, text};
+        use iced::{Alignment, Length};
+
+        let peer = self.outgoing_call_peer;
+        let name = peer
+            .as_ref()
+            .map(|key| self.resolve_name(key))
+            .unwrap_or_else(|| "Unknown contact".to_string());
+        let status = match self.outgoing_call_status {
+            Some(OutgoingCallStatus::Ringing) => "Ringing…",
+            Some(OutgoingCallStatus::Declined) => "Call declined",
+            Some(OutgoingCallStatus::Busy) => "User is busy",
+            Some(OutgoingCallStatus::Failed) => "Call failed",
+            None => "Calling…",
+        };
+        let initials = crate::presentation::initials(&name);
+        let avatar_label = if initials.is_empty() { "?".to_string() } else { initials };
+        let avatar = container(text(avatar_label).size(36.0))
+            .width(Length::Fixed(96.0))
+            .height(Length::Fixed(96.0))
+            .center_x(Length::Fixed(96.0))
+            .center_y(Length::Fixed(96.0))
+            .style(|theme| iced::widget::container::Style {
+                background: Some(iced::Background::Color(bg_surface_secondary(theme))),
+                border: iced::Border { radius: 48.0.into(), ..Default::default() },
+                ..Default::default()
+            });
+        let controls: iced::Element<'_, AppMessage> = match self.active_call_id {
+            Some(call_id) => button(text("Cancel"))
+                .on_press(AppMessage::HangUp(call_id))
+                .padding([SPACE_8, SPACE_24])
+                .style(BUTTON_DANGER)
+                .into(),
+            None => iced::widget::Space::new().height(Length::Fixed(40.0)).into(),
+        };
+        container(column![avatar, text(name).size(24.0), text(status).size(16.0), controls]
+            .spacing(SPACE_16)
+            .align_x(Alignment::Center))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
+            .into()
+    }
+
     fn view_chat_panel(&self) -> iced::Element<'_, AppMessage> {
         use iced::{widget, Length};
 
@@ -45822,6 +45919,62 @@ mod tests {
             reason: CallError::Rejected,
         }));
         assert!(app.incoming_call.is_none(), "Failed for the same call must clear the overlay");
+    }
+
+    // ── Outgoing call ringing screen (BORU-CALL-6.4) ──────────────────
+
+    #[test]
+    fn outgoing_call_ringing_state_from_event_and_decline_busy_mapping() {
+        let (_runtime, mut app, _local, peer) = build_join_request_test_app();
+        let start_screen = app.screen.clone();
+        let call_id = CallId::new();
+
+        // StartVoiceCall moves to the ringing screen and arms the return screen;
+        // the call id arrives via the CallStarted perform result.
+        app.update(AppMessage::StartVoiceCall(peer));
+        assert!(matches!(app.screen, Screen::OutgoingCall), "start must show OutgoingCall screen");
+        assert_eq!(app.outgoing_call_peer, Some(peer));
+        assert_eq!(app.outgoing_call_status, Some(OutgoingCallStatus::Ringing));
+        assert!(app.active_call_id.is_none(), "active id arrives with CallStarted");
+        app.update(AppMessage::CallStarted(Ok(call_id)));
+        assert_eq!(app.active_call_id, Some(call_id));
+
+        // OutgoingRinging (subscription event) keeps the ringing screen state.
+        app.update(AppMessage::CallEventReceived(CallEvent::OutgoingRinging { call_id, peer }));
+        assert!(matches!(app.screen, Screen::OutgoingCall));
+        assert_eq!(app.outgoing_call_status, Some(OutgoingCallStatus::Ringing));
+
+        // A peer rejection maps to Declined.
+        app.update(AppMessage::CallEventReceived(CallEvent::Failed {
+            call_id: Some(call_id),
+            reason: CallError::Rejected,
+        }));
+        assert_eq!(app.outgoing_call_status, Some(OutgoingCallStatus::Declined));
+        assert!(app.active_call_id.is_none());
+
+        // Busy maps to Busy via a fresh outgoing call.
+        let call_id2 = CallId::new();
+        app.update(AppMessage::StartVoiceCall(peer));
+        app.update(AppMessage::CallStarted(Ok(call_id2)));
+        app.update(AppMessage::CallEventReceived(CallEvent::Failed {
+            call_id: Some(call_id2),
+            reason: CallError::Busy,
+        }));
+        assert_eq!(app.outgoing_call_status, Some(OutgoingCallStatus::Busy));
+
+        // Cancel path: HangUp clears call state and returns to the prior screen.
+        // (After a declined/busy call the user is still on the ringing screen;
+        // navigating back to chat before re-calling gives a clean return.)
+        let call_id3 = CallId::new();
+        app.screen = start_screen.clone();
+        app.update(AppMessage::StartVoiceCall(peer));
+        app.update(AppMessage::CallStarted(Ok(call_id3)));
+        assert_eq!(app.active_call_id, Some(call_id3));
+        app.update(AppMessage::HangUp(call_id3));
+        assert!(app.active_call_id.is_none());
+        assert!(app.outgoing_call_peer.is_none());
+        assert!(app.outgoing_call_status.is_none());
+        assert_eq!(app.screen, start_screen, "Cancel must return to the prior screen");
     }
 
     /// Test that the button text for each state can be read from the

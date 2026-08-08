@@ -96,6 +96,7 @@ impl From<HangupReason> for CallEndReason {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CallError {
     Rejected,
+    Busy,
     Connection,
     Protocol,
     /// The peer is not currently authorized for calls.
@@ -965,7 +966,7 @@ async fn handle_control(
                 .await;
             }
         }
-        CallControl::Reject { call_id, .. } | CallControl::Busy { call_id } => {
+        CallControl::Reject { call_id, .. } => {
             let generation = calls.get(&call_id).map(|call| call.generation).unwrap_or(0);
             terminate_call(
                 calls,
@@ -976,6 +977,18 @@ async fn handle_control(
                 HangupReason::RemoteHangup,
                 false,
                 true,
+            )
+            .await;
+        }
+        CallControl::Busy { call_id } => {
+            let generation = calls.get(&call_id).map(|call| call.generation).unwrap_or(0);
+            terminate_call_with_error(
+                calls,
+                terminal_calls,
+                events,
+                call_id,
+                generation,
+                CallError::Busy,
             )
             .await;
         }
@@ -1034,6 +1047,50 @@ async fn terminate_call(
     notify_peer: bool,
     failed: bool,
 ) {
+    terminate_call_inner(
+        calls,
+        terminal_calls,
+        events,
+        call_id,
+        generation,
+        reason,
+        notify_peer,
+        failed.then_some(CallError::Rejected),
+    )
+    .await;
+}
+
+async fn terminate_call_with_error(
+    calls: &mut HashMap<CallId, CallState>,
+    terminal_calls: &mut HashSet<CallId>,
+    events: &mpsc::Sender<CallEvent>,
+    call_id: CallId,
+    generation: CallGeneration,
+    error: CallError,
+) {
+    terminate_call_inner(
+        calls,
+        terminal_calls,
+        events,
+        call_id,
+        generation,
+        HangupReason::RemoteHangup,
+        false,
+        Some(error),
+    )
+    .await;
+}
+
+async fn terminate_call_inner(
+    calls: &mut HashMap<CallId, CallState>,
+    terminal_calls: &mut HashSet<CallId>,
+    events: &mpsc::Sender<CallEvent>,
+    call_id: CallId,
+    generation: CallGeneration,
+    reason: HangupReason,
+    notify_peer: bool,
+    failed_reason: Option<CallError>,
+) {
     let Some(current_generation) = calls.get(&call_id).map(|call| call.generation) else {
         return;
     };
@@ -1077,12 +1134,12 @@ async fn terminate_call(
     // 13. The state was removed only for this matching generation above; a
     // stale task can therefore never transition a later incarnation to Idle.
     // 14. Emit exactly one terminal event after all resources are quiescent.
-    if failed {
+    if let Some(failed_reason) = failed_reason {
         emit(
             events,
             CallEvent::Failed {
                 call_id: Some(call_id),
-                reason: CallError::Rejected,
+                reason: failed_reason,
             },
         )
         .await;
