@@ -583,6 +583,8 @@ async fn run_actor(
                         call_id,
                         generation,
                         HangupReason::ConnectionLost,
+                        false,
+                        false,
                     )
                     .await;
                 }
@@ -632,6 +634,8 @@ async fn run_actor(
                     call_id,
                     generation,
                     HangupReason::LocalHangup,
+                    false,
+                    false,
                 )
                 .await;
             }
@@ -646,6 +650,8 @@ async fn run_actor(
                         call_id,
                         generation,
                         HangupReason::NegotiationTimeout,
+                        true,
+                        false,
                     )
                     .await;
                 }
@@ -662,6 +668,8 @@ async fn run_actor(
                     call_id,
                     generation,
                     reason,
+                    true,
+                    false,
                 )
                 .await;
             }
@@ -678,6 +686,8 @@ async fn run_actor(
                         call_id,
                         generation,
                         HangupReason::Shutdown,
+                        false,
+                        false,
                     )
                     .await;
                 }
@@ -832,6 +842,8 @@ async fn handle_control(
                 call_id,
                 generation,
                 HangupReason::RemoteHangup,
+                false,
+                true,
             )
             .await;
         }
@@ -857,12 +869,20 @@ async fn handle_control(
         CallControl::RequestKeyframe { .. } | CallControl::KeepAlive { .. } => {}
         CallControl::Hangup { call_id, reason } => {
             let generation = calls.get(&call_id).map(|call| call.generation).unwrap_or(0);
-            terminate_call(calls, terminal_calls, events, call_id, generation, reason).await;
+            terminate_call(calls, terminal_calls, events, call_id, generation, reason, false, false)
+                .await;
         }
     }
 }
 
 /// The only function allowed to remove a live call.
+///
+/// `notify_peer` controls whether a `CallControl::Hangup` is sent back to the
+/// peer (false for wire-initiated terminations like remote Hangup, Reject,
+/// Busy, and connection loss, where echoing a Hangup would be wrong or
+/// impossible). `failed` selects the terminal event shape: a rejected/busy
+/// call surfaces `CallEvent::Failed { Rejected }`, every other condition
+/// surfaces `CallEvent::Ended { reason }`.
 async fn terminate_call(
     calls: &mut HashMap<CallId, CallState>,
     terminal_calls: &mut HashSet<CallId>,
@@ -870,6 +890,8 @@ async fn terminate_call(
     call_id: CallId,
     generation: CallGeneration,
     reason: HangupReason,
+    notify_peer: bool,
+    failed: bool,
 ) {
     let Some(current_generation) = calls.get(&call_id).map(|call| call.generation) else {
         return;
@@ -884,17 +906,28 @@ async fn terminate_call(
     };
     state.runtime.cancel();
     if terminal_calls.insert(call_id) {
-        if !matches!(reason, HangupReason::RemoteHangup) {
+        if notify_peer {
             let _ = state.tx.send(CallControl::Hangup { call_id, reason }).await;
         }
-        emit(
-            events,
-            CallEvent::Ended {
-                call_id,
-                reason: reason.into(),
-            },
-        )
-        .await;
+        if failed {
+            emit(
+                events,
+                CallEvent::Failed {
+                    call_id: Some(call_id),
+                    reason: CallError::Rejected,
+                },
+            )
+            .await;
+        } else {
+            emit(
+                events,
+                CallEvent::Ended {
+                    call_id,
+                    reason: reason.into(),
+                },
+            )
+            .await;
+        }
     }
 }
 
