@@ -116,6 +116,9 @@ impl MediaDatagram {
         }
         let call_id = CallId::from_bytes(call_bytes);
         let track_id = u32::from_be_bytes(input[24..28].try_into().unwrap());
+        if track_id == 0 {
+            return Err(MediaDatagramError::InvalidTrackId);
+        }
         let sequence = u32::from_be_bytes(input[28..32].try_into().unwrap());
         let timestamp = u32::from_be_bytes(input[32..36].try_into().unwrap());
         let fragment_index = u16::from_be_bytes(input[36..38].try_into().unwrap());
@@ -285,6 +288,8 @@ pub enum MediaDatagramError {
     InvalidFlags(u16),
     /// The call identity was all zeroes.
     InvalidCallId,
+    /// The codec track identifier was all zeroes.
+    InvalidTrackId,
     /// A datagram must contain at least one fragment.
     InvalidFragmentCount,
     /// The fragment index must be less than the fragment count.
@@ -319,6 +324,9 @@ impl fmt::Display for MediaDatagramError {
             Self::UnknownKind(kind) => write!(formatter, "unknown media kind {kind}"),
             Self::InvalidFlags(flags) => write!(formatter, "unknown media flags 0x{flags:04x}"),
             Self::InvalidCallId => formatter.write_str("media datagram has an all-zero call id"),
+            Self::InvalidTrackId => {
+                formatter.write_str("media datagram has an all-zero track id")
+            }
             Self::InvalidFragmentCount => formatter.write_str("media datagram has zero fragments"),
             Self::FragmentIndexOutOfBounds { index, count } => {
                 write!(
@@ -367,6 +375,43 @@ mod tests {
     }
 
     #[test]
+    fn audio_packet_round_trip() {
+        let original = MediaDatagram {
+            kind: MediaKind::Audio,
+            flags: 0,
+            call_id: CallId::generate(),
+            track_id: 3,
+            sequence: 1,
+            timestamp: 48_000,
+            fragment_index: 0,
+            fragment_count: 1,
+            payload: vec![0x9c, 0x01, 0x02, 0x03],
+        };
+        let encoded = original.encode();
+        assert_eq!(encoded[5], 1, "audio kind byte");
+        assert_eq!(MediaDatagram::parse(&encoded), Ok(original));
+    }
+
+    #[test]
+    fn video_fragment_round_trip() {
+        // Explicitly exercise a video fragment with index/count fields set.
+        let original = MediaDatagram {
+            kind: MediaKind::Video,
+            flags: FLAG_KEYFRAME | FLAG_DISCONTINUITY,
+            call_id: CallId::generate(),
+            track_id: 9,
+            sequence: 0xCAFE_BABE,
+            timestamp: 90_000,
+            fragment_index: 2,
+            fragment_count: 5,
+            payload: vec![0x65, 0x88, 0x84],
+        };
+        let encoded = original.encode();
+        assert_eq!(encoded[5], 2, "video kind byte");
+        assert_eq!(MediaDatagram::parse(&encoded), Ok(original));
+    }
+
+    #[test]
     fn rejects_each_invalid_header_case() {
         let valid = sample().encode();
         let mut bad = valid.clone();
@@ -402,12 +447,36 @@ mod tests {
             Err(MediaDatagramError::InvalidFragmentCount)
         );
 
-        let mut bad = valid;
+        let mut bad = valid.clone();
         bad[36..38].copy_from_slice(&3u16.to_be_bytes());
         assert!(matches!(
             MediaDatagram::parse(&bad),
             Err(MediaDatagramError::FragmentIndexOutOfBounds { index: 3, count: 3 })
         ));
+
+        // Reserved flag bits must be rejected.
+        let mut bad = valid.clone();
+        bad[6..8].copy_from_slice(&0x00FFu16.to_be_bytes());
+        assert_eq!(
+            MediaDatagram::parse(&bad),
+            Err(MediaDatagramError::InvalidFlags(0x00FF))
+        );
+
+        // All-zero call id must be rejected.
+        let mut bad = valid.clone();
+        bad[8..24].fill(0);
+        assert_eq!(
+            MediaDatagram::parse(&bad),
+            Err(MediaDatagramError::InvalidCallId)
+        );
+
+        // All-zero track id must be rejected.
+        let mut bad = valid;
+        bad[24..28].fill(0);
+        assert_eq!(
+            MediaDatagram::parse(&bad),
+            Err(MediaDatagramError::InvalidTrackId)
+        );
     }
 
     #[test]
