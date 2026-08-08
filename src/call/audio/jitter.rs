@@ -454,8 +454,10 @@ mod tests {
             2,
             t + DEFAULT_JITTER_DELAY + AUDIO_FRAME_DURATION
         )));
+        // Seq 2's deadline is its arrival (t + 75 + 20) plus the 75 ms
+        // jitter delay = t + 170 ms.
         assert!(matches!(
-            due(&mut buffer, t + DEFAULT_JITTER_DELAY + 2 * AUDIO_FRAME_DURATION),
+            due(&mut buffer, t + 2 * DEFAULT_JITTER_DELAY + AUDIO_FRAME_DURATION),
             AudioPlayout::Packet(p) if p.sequence == 2
         ));
         assert_eq!(buffer.len(), 0);
