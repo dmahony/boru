@@ -1410,6 +1410,7 @@ fn main() -> Result<()> {
             whisper_events_rx,
             whisper_handle,
             call_handle,
+            call_events_rx,
             inbox_events_rx,
             discovered_peers_rx,
             directory_room_rx,
