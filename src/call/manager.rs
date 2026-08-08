@@ -53,6 +53,7 @@ const COMMAND_CAPACITY: usize = 256;
 const EVENT_CAPACITY: usize = 256;
 const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(5);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+const STATS_INTERVAL: Duration = Duration::from_secs(1);
 const CALL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 /// Maximum incoming offers retained while the user decides what to do.
 ///
@@ -106,9 +107,126 @@ pub enum CallError {
     NegotiationTimeout,
 }
 
-/// Placeholder for the statistics payload.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CallStats;
+/// A low-frequency snapshot of local call media health.
+///
+/// Counters are cumulative for the lifetime of the call actor.  The actor
+/// emits snapshots once per second; media paths must update the accumulator,
+/// rather than emitting an event for every packet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallStats {
+    /// Round-trip time measured by the control/transport path.
+    pub rtt: Duration,
+    /// Audio packets handed to the network.
+    pub audio_packets_sent: u64,
+    /// Audio packets accepted from the network.
+    pub audio_packets_received: u64,
+    /// Missing audio sequence numbers inferred from received packets.
+    pub audio_packets_lost: u64,
+    /// Audio packets arriving after the current receive sequence.
+    pub audio_packets_late: u64,
+    /// Estimated mean audio inter-arrival jitter in milliseconds.
+    pub audio_jitter_ms: u64,
+    /// Audio playback ticks that had no packet available.
+    pub audio_playback_underruns: u64,
+    /// Video packets handed to the network.
+    pub video_packets_sent: u64,
+    /// Video packets accepted from the network.
+    pub video_packets_received: u64,
+    /// Video packets dropped before decoding.
+    pub video_packets_dropped: u64,
+    /// Video frames handed to the encoder.
+    pub video_frames_encoded: u64,
+    /// Video frames successfully decoded.
+    pub video_frames_decoded: u64,
+    /// Decoded frames replaced before presentation.
+    pub video_frames_dropped: u64,
+    /// Requests sent to restart decoding from a keyframe.
+    pub keyframe_requests: u64,
+    /// Estimated send bitrate in bits per second.
+    pub estimated_send_bitrate: u64,
+    /// Estimated receive bitrate in bits per second.
+    pub estimated_receive_bitrate: u64,
+}
+
+impl Default for CallStats {
+    fn default() -> Self {
+        Self {
+            rtt: Duration::ZERO,
+            audio_packets_sent: 0,
+            audio_packets_received: 0,
+            audio_packets_lost: 0,
+            audio_packets_late: 0,
+            audio_jitter_ms: 0,
+            audio_playback_underruns: 0,
+            video_packets_sent: 0,
+            video_packets_received: 0,
+            video_packets_dropped: 0,
+            video_frames_encoded: 0,
+            video_frames_decoded: 0,
+            video_frames_dropped: 0,
+            keyframe_requests: 0,
+            estimated_send_bitrate: 0,
+            estimated_receive_bitrate: 0,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct CallStatsAccumulator {
+    snapshot: CallStats,
+    last_audio_sequence: Option<u32>,
+    last_video_sequence: Option<u32>,
+}
+
+impl CallStatsAccumulator {
+    fn observe_received(&mut self, packet: &MediaDatagram) {
+        let (last, previous) = match packet.kind {
+            super::media::MediaKind::Audio => {
+                self.snapshot.audio_packets_received =
+                    self.snapshot.audio_packets_received.saturating_add(1);
+                let previous = self.last_audio_sequence;
+                (&mut self.last_audio_sequence, previous)
+            }
+            super::media::MediaKind::Video => {
+                self.snapshot.video_packets_received =
+                    self.snapshot.video_packets_received.saturating_add(1);
+                let previous = self.last_video_sequence;
+                (&mut self.last_video_sequence, previous)
+            }
+        };
+        if let Some(previous) = previous {
+            let delta = packet.sequence.wrapping_sub(previous);
+            if delta == 0 || delta > 0x8000_0000 {
+                match packet.kind {
+                    super::media::MediaKind::Audio => {
+                        self.snapshot.audio_packets_late =
+                            self.snapshot.audio_packets_late.saturating_add(1)
+                    }
+                    super::media::MediaKind::Video => {
+                        self.snapshot.video_packets_dropped =
+                            self.snapshot.video_packets_dropped.saturating_add(1)
+                    }
+                }
+            } else if packet.kind == super::media::MediaKind::Audio && delta > 1 {
+                self.snapshot.audio_packets_lost = self
+                    .snapshot
+                    .audio_packets_lost
+                    .saturating_add((delta - 1) as u64);
+            }
+        }
+        if previous.is_none_or(|previous| packet.sequence.wrapping_sub(previous) < 0x8000_0000) {
+            *last = Some(packet.sequence);
+        }
+    }
+
+    fn observe_malformed(&mut self) {
+        self.snapshot.video_packets_dropped = self.snapshot.video_packets_dropped.saturating_add(1);
+    }
+
+    fn snapshot(&self) -> CallStats {
+        self.snapshot
+    }
+}
 
 /// Events emitted by the call actor.
 #[allow(missing_docs)]
@@ -530,8 +648,20 @@ async fn run_actor(
     let mut calls = HashMap::<CallId, CallState>::new();
     let mut terminal_calls = HashSet::new();
     let mut media_state = HashMap::<CallId, (bool, bool)>::new();
+    let mut stats = CallStatsAccumulator::default();
+    let mut stats_tick =
+        tokio::time::interval_at(tokio::time::Instant::now() + STATS_INTERVAL, STATS_INTERVAL);
+    stats_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut next_generation: CallGeneration = 1;
-    while let Some(command) = command_rx.recv().await {
+    loop {
+        let command = tokio::select! {
+            command = command_rx.recv() => command,
+            _ = stats_tick.tick() => {
+                emit(&event_tx, CallEvent::Stats(stats.snapshot())).await;
+                continue;
+            }
+        };
+        let Some(command) = command else { break };
         match command {
             Command::Start {
                 call_id,
@@ -714,9 +844,11 @@ async fn run_actor(
             }
             Command::Media { peer, event } => match event {
                 MediaReaderEvent::Packet(datagram) => {
+                    stats.observe_received(&datagram);
                     emit(&event_tx, CallEvent::MediaReceived { peer, datagram }).await;
                 }
                 MediaReaderEvent::Malformed(_) => {
+                    stats.observe_malformed();
                     emit(&event_tx, CallEvent::MediaMalformed { peer }).await;
                 }
             },
@@ -1311,6 +1443,7 @@ async fn write_call_control<W: AsyncWrite + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::call::media::MediaKind;
     use iroh::endpoint::presets;
     use iroh::protocol::Router;
 
@@ -1342,6 +1475,40 @@ mod tests {
         assert!(!generation_matches(13, 14));
     }
 
+    fn media_packet(kind: MediaKind, sequence: u32) -> MediaDatagram {
+        MediaDatagram {
+            kind,
+            flags: 0,
+            call_id: CallId::from_bytes([7; 16]),
+            track_id: 1,
+            sequence,
+            timestamp: sequence,
+            fragment_index: 0,
+            fragment_count: 1,
+            payload: vec![1],
+        }
+    }
+
+    #[test]
+    fn stats_accumulate_received_packets_and_audio_loss() {
+        let mut stats = CallStatsAccumulator::default();
+        stats.observe_received(&media_packet(MediaKind::Audio, 10));
+        stats.observe_received(&media_packet(MediaKind::Audio, 12));
+        stats.observe_received(&media_packet(MediaKind::Audio, 11));
+
+        let snapshot = stats.snapshot();
+        assert_eq!(snapshot.audio_packets_received, 3);
+        assert_eq!(snapshot.audio_packets_lost, 1);
+        assert_eq!(snapshot.audio_packets_late, 1);
+    }
+
+    #[test]
+    fn stats_event_has_complete_default_shape() {
+        let event = CallEvent::Stats(CallStats::default());
+        assert_eq!(event, CallEvent::Stats(CallStats::default()));
+        assert!(!event.is_terminal());
+    }
+
     #[tokio::test]
     async fn spawn_returns_handle_and_receiver() {
         let endpoint = Endpoint::bind(presets::Minimal).await.unwrap();
@@ -1352,6 +1519,29 @@ mod tests {
         assert!(
             matches!(events.recv().await, Some(CallEvent::Failed { call_id: Some(id), .. }) if id == call_id)
         );
+    }
+
+    #[tokio::test]
+    async fn stats_emit_approximately_once_per_second() {
+        let endpoint = Endpoint::bind(presets::Minimal).await.unwrap();
+        let (handle, mut events) = CallBuilder::new(endpoint, SecretKey::generate()).spawn();
+
+        let first = tokio::time::timeout(Duration::from_millis(1_500), async {
+            loop {
+                if let Some(event @ CallEvent::Stats(_)) = events.recv().await {
+                    break event;
+                }
+            }
+        })
+        .await
+        .expect("first stats event should arrive after one second");
+        assert!(matches!(first, CallEvent::Stats(stats) if stats == CallStats::default()));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), events.recv())
+                .await
+                .is_err()
+        );
+        handle.shutdown().await.unwrap();
     }
 
     #[tokio::test]
