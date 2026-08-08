@@ -5,7 +5,10 @@
 //! length-prefixed bidirectional stream per call.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, RwLock,
+};
 use std::time::Duration;
 
 use iroh::{
@@ -50,6 +53,7 @@ const COMMAND_CAPACITY: usize = 256;
 const EVENT_CAPACITY: usize = 256;
 const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(5);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+const CALL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Monotonically increasing identity for a call incarnation.
 pub type CallGeneration = u64;
@@ -374,6 +378,7 @@ struct CallState {
     remote_audio_muted: bool,
     video_enabled: bool,
     generation: CallGeneration,
+    ending: bool,
     runtime: CallRuntime,
 }
 
@@ -385,6 +390,7 @@ struct CallState {
 #[derive(Debug)]
 pub struct CallRuntime {
     cancellation: CancellationToken,
+    accepting_media: Arc<AtomicBool>,
     connection: Connection,
     control_reader_task: Option<JoinHandle<()>>,
     control_writer_task: Option<JoinHandle<()>>,
@@ -401,6 +407,7 @@ impl CallRuntime {
     fn new(connection: Connection) -> Self {
         Self {
             cancellation: CancellationToken::new(),
+            accepting_media: Arc::new(AtomicBool::new(true)),
             connection,
             control_reader_task: None,
             control_writer_task: None,
@@ -414,9 +421,46 @@ impl CallRuntime {
         }
     }
 
-    fn cancel(&self) {
+    /// Stop every resource owned by this call in the terminal-transition order.
+    async fn shutdown(mut self) {
+        // Cancellation is the common stop signal for capture, codecs, playback,
+        // and the control/media readers.  The explicit task groups below are
+        // intentionally kept separate: adding a task to the wrong group would
+        // otherwise make shutdown order invisible and regressible.
         self.cancellation.cancel();
+        // No new datagrams may enter the media pipeline after cancellation.
+        self.accepting_media.store(false, Ordering::Release);
+
+        // Closing the connection also closes the control and media streams.
         self.connection.close(0u32.into(), b"call terminated");
+
+        let deadline = tokio::time::Instant::now() + CALL_SHUTDOWN_TIMEOUT;
+        let mut tasks = Vec::new();
+        tasks.extend(self.video_capture_task.take());
+        tasks.extend(self.audio_capture_task.take());
+        tasks.extend(self.video_send_task.take());
+        tasks.extend(self.audio_send_task.take());
+        tasks.extend(self.video_receive_task.take());
+        tasks.extend(self.audio_receive_task.take());
+        tasks.extend(self.media_reader_task.take());
+        tasks.extend(self.control_reader_task.take());
+        tasks.extend(self.control_writer_task.take());
+
+        // A wedged device/codec must not hold the actor forever.  Abort only
+        // after the bounded grace period so normal cancellation can clean up.
+        let wait = async {
+            for mut task in tasks {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    task.abort();
+                    continue;
+                }
+                if tokio::time::timeout(remaining, &mut task).await.is_err() {
+                    task.abort();
+                }
+            }
+        };
+        tokio::time::timeout(CALL_SHUTDOWN_TIMEOUT, wait).await.ok();
     }
 }
 
@@ -484,6 +528,7 @@ async fn run_actor(
                                     remote_audio_muted: false,
                                     video_enabled: false,
                                     generation: next_generation,
+                                    ending: false,
                                     runtime: CallRuntime::new(connection.clone()),
                                 };
                                 next_generation = next_generation.wrapping_add(1).max(1);
@@ -803,6 +848,7 @@ async fn handle_control(
                     remote_audio_muted: false,
                     video_enabled: false,
                     generation: *next_generation,
+                    ending: false,
                     runtime: CallRuntime::new(connection),
                 },
             );
@@ -901,33 +947,59 @@ async fn terminate_call(
     if !generation_matches(current_generation, generation) {
         return;
     }
+    // Mark Ending before taking ownership of the resources.  This is the
+    // actor's atomic state transition: every command is serialized here, and
+    // a late task with another generation fails the check above.
+    if calls.get(&call_id).is_some_and(|state| state.ending) {
+        return;
+    }
+    if let Some(state) = calls.get_mut(&call_id) {
+        state.ending = true;
+    }
+    // Reserve the terminal notification before awaiting any shutdown work.
+    // This makes the single-event invariant explicit even if another caller
+    // queues a duplicate termination command.
+    if !terminal_calls.insert(call_id) {
+        return;
+    }
     let Some(state) = calls.remove(&call_id) else {
         return;
     };
-    state.runtime.cancel();
-    if terminal_calls.insert(call_id) {
-        if notify_peer {
-            let _ = state.tx.send(CallControl::Hangup { call_id, reason }).await;
-        }
-        if failed {
-            emit(
-                events,
-                CallEvent::Failed {
-                    call_id: Some(call_id),
-                    reason: CallError::Rejected,
-                },
-            )
-            .await;
-        } else {
-            emit(
-                events,
-                CallEvent::Ended {
-                    call_id,
-                    reason: reason.into(),
-                },
-            )
-            .await;
-        }
+
+    // 2. Best-effort Hangup while the control transport is still usable.
+    if notify_peer {
+        let _ = tokio::time::timeout(
+            Duration::from_millis(100),
+            state.tx.send(CallControl::Hangup { call_id, reason }),
+        )
+        .await;
+    }
+
+    // 3–12. Runtime owns the cancellation token, media admission gate,
+    // capture/codec/playback tasks, streams, connection, and bounded joins.
+    state.runtime.shutdown().await;
+
+    // 13. The state was removed only for this matching generation above; a
+    // stale task can therefore never transition a later incarnation to Idle.
+    // 14. Emit exactly one terminal event after all resources are quiescent.
+    if failed {
+        emit(
+            events,
+            CallEvent::Failed {
+                call_id: Some(call_id),
+                reason: CallError::Rejected,
+            },
+        )
+        .await;
+    } else {
+        emit(
+            events,
+            CallEvent::Ended {
+                call_id,
+                reason: reason.into(),
+            },
+        )
+        .await;
     }
 }
 
