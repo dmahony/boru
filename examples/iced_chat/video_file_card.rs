@@ -42,7 +42,7 @@ use super::app::{
 };
 use super::app::{AppMessage, DownloadAttachment, DownloadState};
 use super::download_progress_view::{
-    action_button, action_buttons, active_download_detail, error_slot_height, failure_block,
+    action_buttons, active_download_detail, error_slot_height, failure_block,
     file_type_icon_element, file_type_icon_element_with_tooltip, fixed_slot, human_size,
     progress_section, resolve_theme, secondary_button, state_badge_color, DETAIL_SLOT_HEIGHT,
     METADATA_SLOT_HEIGHT, POLICY_SLOT_HEIGHT, PROGRESS_SLOT_HEIGHT,
@@ -334,36 +334,52 @@ fn loading_indicator<'a>(
     .into()
 }
 
-/// Compact duration badge for the lower-right corner of the media frame
-/// (VIDCARD-11). Uses the live player's real duration metadata — there is
-/// no other honest duration source in the transfer protocol — and is only
-/// rendered when that duration is known and non-zero.
-#[cfg(feature = "video-playback")]
-fn duration_badge(duration: std::time::Duration) -> iced::Element<'static, AppMessage> {
-    container(
-        crate::fonts::type_role_text(
-            crate::fonts::TypeRole::Metadata,
-            format_media_time(duration),
-        )
-        .color(Color::WHITE),
-    )
-    .padding([SPACE_2, SPACE_6])
-    .style(|_t| widget::container::Style {
-        background: Some(iced::Background::Color(Color::from_rgba(
-            0.0, 0.0, 0.0, 0.72,
-        ))),
-        border: iced::Border {
-            radius: SPACE_6.into(),
-            ..Default::default()
-        },
-        ..Default::default()
-    })
-    .into()
-}
 #[cfg(feature = "video-playback")]
 fn format_media_time(duration: std::time::Duration) -> String {
     let seconds = duration.as_secs();
-    format!("{}:{:02}", seconds / 60, seconds % 60)
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{:02}", seconds % 60)
+    } else {
+        format!("{minutes}:{:02}", seconds % 60)
+    }
+}
+
+#[cfg(feature = "video-playback")]
+fn media_icon_button(
+    icon: Icon,
+    label: &'static str,
+    message: AppMessage,
+) -> iced::Element<'static, AppMessage> {
+    tooltip::Tooltip::new(
+        crate::focusable_button::focusable_button(
+            button(
+                icon.build()
+                    .size(IconSize::Sm)
+                    .color_fn(|_| Color::WHITE)
+                    .interactive(true)
+                    .build(),
+            )
+            .on_press(message.clone())
+            .padding(SPACE_6)
+            .style(|_theme, status| widget::button::Style {
+                background: matches!(status, widget::button::Status::Hovered | widget::button::Status::Pressed)
+                    .then_some(iced::Background::Color(Color::from_rgba(1.0, 1.0, 1.0, 0.16))),
+                border: iced::Border {
+                    radius: 20.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            Some(message),
+        )
+        .ring_radius(20.0),
+        crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, label),
+        tooltip::Position::Top,
+    )
+    .gap(SPACE_4)
+    .into()
 }
 
 /// Compact relative label for the card's received/shared time, e.g.
@@ -428,9 +444,6 @@ const MEDIA_FRAME_OVERLAY_BG: Color = Color::from_rgba(0.0, 0.0, 0.0, 0.62);
 /// restrained: clearly visible over the poster without dominating it.
 const PLAY_OVERLAY_SIZE: f32 = 64.0;
 
-/// Reserved width (px) on the right edge of the control bar so the
-/// lower-right duration badge never covers the Expand control.
-const DURATION_BADGE_ZONE: f32 = 64.0;
 
 /// Real transfer-state badge mapping for the card header.
 ///
@@ -1151,12 +1164,32 @@ impl<'a> BoruVideoFileCard<'a> {
                     iced::widget::slider(0.0..=1.0, fraction, AppMessage::InlineVideoSeekChanged)
                         .on_release(AppMessage::InlineVideoSeekReleased)
                         .step(0.001_f32)
+                        .style(|theme, status| {
+                            let mut style = iced::widget::slider::default(theme, status);
+                            let green = accent_green(theme);
+                            style.rail.backgrounds.0 = green.into();
+                            style.handle.background = green.into();
+                            style.rail.width = match status {
+                                iced::widget::slider::Status::Active => 3.5,
+                                iced::widget::slider::Status::Hovered
+                                | iced::widget::slider::Status::Dragged => 5.5,
+                            };
+                            style.handle.shape = iced::widget::slider::HandleShape::Circle {
+                                radius: match status {
+                                    iced::widget::slider::Status::Active => 5.0,
+                                    iced::widget::slider::Status::Hovered
+                                    | iced::widget::slider::Status::Dragged => 6.5,
+                                },
+                            };
+                            style
+                        })
                         .width(Length::Fill),
                 )
                 .push(
                     Row::new()
-                        .push(action_button(
-                            if video.paused() { "Play" } else { "Pause" },
+                        .push(media_icon_button(
+                            if video.paused() { Icon::Play } else { Icon::Pause },
+                            if video.paused() { "Play video" } else { "Pause video" },
                             AppMessage::PlayInlineVideo(self.entry_index),
                         ))
                         .push(
@@ -1170,21 +1203,38 @@ impl<'a> BoruVideoFileCard<'a> {
                             )
                             .color(Color::WHITE),
                         )
-                        .push(action_button(
-                            if video.muted() { "Unmute" } else { "Mute" },
-                            AppMessage::InlineVideoToggleMute,
-                        ))
-                        .push(
-                            iced::widget::slider(
+                        .push({
+                            let volume = video.volume() as f32;
+                            let icon = if video.muted() {
+                                Icon::VolumeX
+                            } else if volume <= 0.01 {
+                                Icon::VolumeX
+                            } else if volume < 0.5 {
+                                Icon::Volume1
+                            } else {
+                                Icon::Volume2
+                            };
+                            let volume_slider = iced::widget::slider(
                                 0.0..=1.0,
-                                video.volume() as f32,
+                                volume,
                                 AppMessage::InlineVideoSetVolume,
                             )
                             .step(0.01_f32)
-                            .width(Length::Fixed(90.0)),
-                        )
-                        .push(action_button(
-                            if self.expanded { "Collapse" } else { "Expand" },
+                            .width(Length::Fixed(90.0));
+                            tooltip::Tooltip::new(
+                                media_icon_button(
+                                    icon,
+                                    if video.muted() { "Unmute" } else { "Mute" },
+                                    AppMessage::InlineVideoToggleMute,
+                                ),
+                                volume_slider,
+                                tooltip::Position::Top,
+                            )
+                            .gap(SPACE_4)
+                        })
+                        .push(media_icon_button(
+                            Icon::More,
+                            "More video actions",
                             AppMessage::InlineVideoToggleExpanded,
                         ))
                         .spacing(SPACE_6)
@@ -1210,44 +1260,32 @@ impl<'a> BoruVideoFileCard<'a> {
             .center_y(Length::Fill)
             .into();
 
-            let controls_bar = container(controls)
-                .padding([SPACE_6, SPACE_8])
+            let controls_bar = container(
+                Column::new()
+                    .push(controls)
+                    .width(Length::Fill)
+                    .spacing(SPACE_2),
+            )
+                .padding([SPACE_6, SPACE_12])
                 .style(|_theme| widget::container::Style {
-                    background: Some(iced::Background::Color(Color::from_rgba(
-                        0.0, 0.0, 0.0, 0.76,
+                    // The overlay is deliberately limited to the control
+                    // footprint: transparent at its top, readable black at
+                    // the bottom, never an opaque strip over the video.
+                    background: Some(iced::Background::Gradient(iced::Gradient::Linear(
+                        iced::gradient::Linear::new(iced::Radians(std::f32::consts::FRAC_PI_2))
+                            .add_stop(0.0, Color::from_rgba(0.0, 0.0, 0.0, 0.0))
+                            .add_stop(0.55, Color::from_rgba(0.0, 0.0, 0.0, 0.62))
+                            .add_stop(1.0, Color::from_rgba(0.0, 0.0, 0.0, 0.84)),
                     ))),
                     ..Default::default()
                 });
-
-            // VIDCARD-11 duration badge: lower-right corner of the media
-            // frame, real player metadata only, shown only when the duration
-            // is actually known (non-zero). The control bar's right zone is
-            // reserved so the badge never covers the Expand control.
-            let badge_known = duration.as_secs() > 0;
-            let badge_zone = if badge_known {
-                DURATION_BADGE_ZONE
-            } else {
-                0.0
-            };
-            let badge_layer: iced::Element<'static, AppMessage> = if badge_known {
-                duration_badge(duration)
-            } else {
-                iced::widget::Space::new().width(0.0).height(0.0).into()
-            };
 
             container(widget::stack![
                 video_element,
                 container(controls_bar)
                     .width(Length::Fill)
                     .height(Length::Fill)
-                    .align_y(Alignment::End)
-                    .padding(iced::Padding::new(0.0).right(badge_zone)),
-                container(badge_layer)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .align_x(Alignment::End)
-                    .align_y(Alignment::End)
-                    .padding(iced::Padding::new(0.0).right(SPACE_8).bottom(SPACE_8)),
+                    .align_y(Alignment::End),
             ])
             .width(sizing.width())
             .height(sizing.height())
@@ -2457,11 +2495,9 @@ mod tests {
     }
 
     #[test]
-    #[test]
-    fn duration_badge_uses_real_metadata_only() {
-        // VIDCARD-11: the duration badge must come from real player
-        // metadata, appear only when the duration is known (non-zero), and
-        // sit in the lower-right corner of the media frame.
+    fn player_has_one_compact_timing_indicator() {
+        // PDF task 6: the duplicate lower-right duration badge was removed;
+        // timing is rendered once in the main control row from live metadata.
         let src = include_str!("video_file_card.rs");
         let prod = src.split("#[cfg(test)]").next().unwrap();
         let media_frame_fns = prod
@@ -2470,17 +2506,14 @@ mod tests {
             .expect("media_frame must exist");
 
         assert!(
-            media_frame_fns.contains("duration.as_secs() > 0"),
-            "duration badge must only appear when the duration is known"
+            media_frame_fns.contains("format_media_time(position)")
+                && media_frame_fns.contains("format_media_time(duration)"),
+            "timing must use live position and duration metadata"
         );
         assert!(
-            media_frame_fns.contains("duration_badge(duration)"),
-            "badge content must come from the real player duration"
-        );
-        assert!(
-            media_frame_fns.contains("align_x(Alignment::End)")
-                && media_frame_fns.contains("align_y(Alignment::End)"),
-            "duration badge must sit in the lower-right corner"
+            !media_frame_fns.contains("duration_badge")
+                && !media_frame_fns.contains("DURATION_BADGE_ZONE"),
+            "the duplicate duration badge must not be rendered"
         );
     }
 
@@ -2782,12 +2815,9 @@ mod tests {
     }
 
     #[test]
-    fn player_control_buttons_have_text_labels_and_are_focusable() {
-        // Task 17: "Video controls remain accessible." The inline player's
-        // control buttons (Play/Pause, Mute/Unmute, Collapse/Expand) are
-        // text-labelled action_buttons — and action_button now wraps in the
-        // focusable wrapper, so they are Tab-reachable and Enter/Space
-        // activatable.
+    fn player_control_buttons_use_accessible_icon_controls() {
+        // PDF tasks 5/7 and Task 17: media controls use the established icon
+        // set but retain accessible tooltip names and focusable wrappers.
         let src = include_str!("video_file_card.rs");
         let prod = src.split("#[cfg(test)]").next().unwrap();
         let media = prod
@@ -2795,20 +2825,26 @@ mod tests {
             .nth(1)
             .expect("media_frame must exist");
         assert!(
-            media.contains("\"Play\"") && media.contains("\"Pause\""),
-            "play/pause control must carry a text label"
+            media.contains("Icon::Play") && media.contains("Icon::Pause"),
+            "play/pause control must use media icons"
         );
         assert!(
-            media.contains("\"Mute\"") && media.contains("\"Unmute\""),
-            "mute control must carry a text label"
+            media.contains("Icon::VolumeX")
+                && media.contains("Icon::Volume1")
+                && media.contains("Icon::Volume2"),
+            "volume control must represent muted, low and high states"
         );
         assert!(
-            media.contains("\"Collapse\"") && media.contains("\"Expand\""),
-            "expand control must carry a text label"
+            media.contains("\"Play video\"")
+                && media.contains("\"Pause video\"")
+                && media.contains("\"Mute\"")
+                && media.contains("\"Unmute\""),
+            "icon controls must retain accessible names"
         );
         assert!(
-            media.contains("action_button("),
-            "player controls must go through the focusable action_button helper"
+            media.contains("media_icon_button(")
+                && media.contains("focusable_button::focusable_button("),
+            "player controls must use the focusable icon-button helper"
         );
     }
 
