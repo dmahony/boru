@@ -5,6 +5,11 @@
 //! network I/O. The consumer side is owned by an audio worker and can perform
 //! those operations in later pipeline stages.
 
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use super::device::InputCallback;
@@ -34,6 +39,7 @@ pub mod send;
 pub struct AudioCaptureProducer {
     producer: Producer<f32>,
     dropped_samples: u64,
+    muted: Arc<AtomicBool>,
 }
 
 impl AudioCaptureProducer {
@@ -41,6 +47,9 @@ impl AudioCaptureProducer {
     ///
     /// Returns the number accepted. The remainder is explicitly discarded.
     pub fn push_samples(&mut self, samples: &[f32]) -> usize {
+        if self.is_muted() {
+            return 0;
+        }
         let (accepted, remainder) = self.producer.push_partial_slice(samples);
         self.dropped_samples += remainder.len() as u64;
         accepted.len()
@@ -49,6 +58,16 @@ impl AudioCaptureProducer {
     /// Number of samples discarded because the queue was full.
     pub const fn dropped_samples(&self) -> u64 {
         self.dropped_samples
+    }
+
+    /// Suppress samples at the capture boundary without stopping the device.
+    pub fn set_muted(&self, muted: bool) {
+        self.muted.store(muted, Ordering::Release);
+    }
+
+    /// Return the current capture mute state.
+    pub fn is_muted(&self) -> bool {
+        self.muted.load(Ordering::Acquire)
     }
 
     /// Adapt this producer to the CPAL callback boundary.
@@ -87,6 +106,7 @@ pub fn new_capture_buffer(capacity: usize) -> (AudioCaptureProducer, AudioCaptur
         AudioCaptureProducer {
             producer,
             dropped_samples: 0,
+            muted: Arc::new(AtomicBool::new(false)),
         },
         AudioCaptureConsumer { consumer },
     )
@@ -119,5 +139,19 @@ mod tests {
         let mut output = [0.0; 4];
         assert_eq!(consumer.pop_samples(&mut output), 2);
         assert_eq!(&output[..2], &[10.0, 20.0]);
+    }
+
+    #[test]
+    fn muted_capture_drops_samples_and_unmute_resumes() {
+        let (mut producer, mut consumer) = new_capture_buffer(4);
+        producer.set_muted(true);
+        assert_eq!(producer.push_samples(&[1.0, 2.0]), 0);
+        let mut output = [0.0; 4];
+        assert_eq!(consumer.pop_samples(&mut output), 0);
+
+        producer.set_muted(false);
+        assert_eq!(producer.push_samples(&[3.0, 4.0]), 2);
+        assert_eq!(consumer.pop_samples(&mut output), 2);
+        assert_eq!(&output[..2], &[3.0, 4.0]);
     }
 }

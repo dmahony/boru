@@ -334,6 +334,9 @@ struct CallState {
     tx: WireTx,
     incoming: bool,
     active: bool,
+    local_audio_muted: bool,
+    remote_audio_muted: bool,
+    video_enabled: bool,
 }
 
 async fn run_actor(
@@ -389,6 +392,9 @@ async fn run_actor(
                                     tx: reply_tx,
                                     incoming: false,
                                     active: false,
+                                    local_audio_muted: false,
+                                    remote_audio_muted: false,
+                                    video_enabled: false,
                                 };
                                 calls.insert(call_id, state);
                                 let _ = tx
@@ -575,8 +581,12 @@ async fn run_actor(
             }
             Command::SetMuted { call_id, muted } => {
                 let state = media_state.entry(call_id).or_insert((false, false));
+                if state.0 == muted {
+                    continue;
+                }
                 state.0 = muted;
-                if let Some(call) = calls.get(&call_id) {
+                if let Some(call) = calls.get_mut(&call_id) {
+                    call.local_audio_muted = muted;
                     let _ = call
                         .tx
                         .send(CallControl::MediaState {
@@ -599,7 +609,8 @@ async fn run_actor(
             Command::SetCameraEnabled { call_id, enabled } => {
                 let state = media_state.entry(call_id).or_insert((false, false));
                 state.1 = enabled;
-                if let Some(call) = calls.get(&call_id) {
+                if let Some(call) = calls.get_mut(&call_id) {
+                    call.video_enabled = enabled;
                     let _ = call
                         .tx
                         .send(CallControl::MediaState {
@@ -672,6 +683,9 @@ async fn handle_control(
                     tx: tx.clone(),
                     incoming: true,
                     active: false,
+                    local_audio_muted: false,
+                    remote_audio_muted: false,
+                    video_enabled: false,
                 },
             );
             emit(
@@ -717,6 +731,10 @@ async fn handle_control(
             audio_muted,
             video_enabled,
         } => {
+            if let Some(call) = calls.get_mut(&call_id) {
+                call.remote_audio_muted = audio_muted;
+                call.video_enabled = video_enabled;
+            }
             emit(
                 events,
                 CallEvent::MediaStateChanged {
@@ -801,11 +819,13 @@ where
     let command_reply_tx = reply_tx.clone();
     tokio::spawn(async move {
         let mut keepalive = tokio::time::interval(KEEPALIVE_INTERVAL);
+        let mut call_ids = HashSet::<CallId>::new();
         let mut outbound = Some(outbound);
         loop {
             tokio::select! {
                 result = read_call_control(&mut recv) => match result {
                     Ok(Some(control)) => {
+                        call_ids.insert(control_call_id(&control));
                         if command_tx.send(Command::Control { peer, control, tx: command_reply_tx.clone() }).await.is_err() { break; }
                     }
                     Ok(None) | Err(_) => break,
@@ -817,22 +837,43 @@ where
                     }
                 } => match maybe {
                     Some(control) => {
+                        call_ids.insert(control_call_id(&control));
                         if write_call_control(&mut send, &control).await.is_err() { break; }
                     }
                     None => outbound = None,
                 },
                 maybe = reply_rx.recv() => match maybe {
                     Some(control) => {
+                        call_ids.insert(control_call_id(&control));
                         if write_call_control(&mut send, &control).await.is_err() { break; }
                     }
                     None => break,
                 },
-                _ = keepalive.tick() => {}
+                _ = keepalive.tick() => {
+                    for call_id in call_ids.iter().copied() {
+                        if write_call_control(&mut send, &CallControl::KeepAlive { call_id }).await.is_err() { break; }
+                    }
+                }
             }
         }
         let _ = command_tx.send(Command::ConnectionClosed { peer }).await;
     });
     reply_tx
+}
+
+fn control_call_id(control: &CallControl) -> CallId {
+    match control {
+        CallControl::Hello { call_id, .. }
+        | CallControl::Offer { call_id, .. }
+        | CallControl::Ringing { call_id }
+        | CallControl::Accept { call_id, .. }
+        | CallControl::Reject { call_id, .. }
+        | CallControl::Busy { call_id }
+        | CallControl::MediaState { call_id, .. }
+        | CallControl::RequestKeyframe { call_id, .. }
+        | CallControl::KeepAlive { call_id }
+        | CallControl::Hangup { call_id, .. } => *call_id,
+    }
 }
 
 async fn read_call_control<R: AsyncRead + Unpin>(
