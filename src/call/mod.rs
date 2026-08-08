@@ -1,5 +1,7 @@
 //! Identity and session types shared by Boru's call-control and media subsystems.
 
+/// Bounds for peer-controlled call negotiation values.
+pub mod bounds;
 pub mod media;
 /// Consent-gated native camera enumeration and capture.
 #[cfg(feature = "video-calls")]

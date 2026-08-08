@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use super::bounds::{validate_capabilities, validate_negotiated_media};
 use super::{CallId, CallKind};
 
 /// Current call-control protocol version.
@@ -37,6 +38,8 @@ pub enum CallControlFrameError {
     Deserialize(postcard::Error),
     /// The control message could not be encoded as postcard.
     Serialize(postcard::Error),
+    /// A decoded message contained a peer-controlled value outside protocol bounds.
+    InvalidValue(&'static str),
 }
 
 impl fmt::Display for CallControlFrameError {
@@ -62,6 +65,7 @@ impl fmt::Display for CallControlFrameError {
             Self::Serialize(error) => {
                 write!(formatter, "could not encode call-control postcard: {error}")
             }
+            Self::InvalidValue(reason) => write!(formatter, "invalid call-control value: {reason}"),
         }
     }
 }
@@ -165,6 +169,8 @@ pub fn v1_defaults() -> MediaCapabilities {
 
 /// Select media common to both participants using local preference order.
 pub fn negotiate(local: &MediaCapabilities, remote: &MediaCapabilities) -> Option<NegotiatedMedia> {
+    validate_capabilities(local).ok()?;
+    validate_capabilities(remote).ok()?;
     let audio_codec = local
         .audio
         .codecs
@@ -352,7 +358,17 @@ pub fn decode_call_control(frame: &[u8]) -> Result<CallControl, CallControlFrame
         });
     }
 
-    postcard::from_bytes(payload).map_err(CallControlFrameError::Deserialize)
+    let control = postcard::from_bytes(payload).map_err(CallControlFrameError::Deserialize)?;
+    match &control {
+        CallControl::Offer { capabilities, .. } => {
+            validate_capabilities(capabilities).map_err(CallControlFrameError::InvalidValue)?;
+        }
+        CallControl::Accept { selected, .. } => {
+            validate_negotiated_media(selected).map_err(CallControlFrameError::InvalidValue)?;
+        }
+        _ => {}
+    }
+    Ok(control)
 }
 
 #[cfg(test)]
@@ -402,7 +418,7 @@ mod tests {
     }
 
     #[test]
-    fn bounded_frame_at_limit_round_trips() {
+    fn control_frame_at_limit_is_encoded_but_pathological_list_is_rejected() {
         let mut low = 0;
         let mut high = MAX_CALL_CONTROL_FRAME_SIZE + 1;
         while low + 1 < high {
@@ -423,7 +439,12 @@ mod tests {
             MAX_CALL_CONTROL_FRAME_SIZE
         );
         assert_eq!(frame.len(), 4 + MAX_CALL_CONTROL_FRAME_SIZE);
-        assert_eq!(decode_call_control(&frame).unwrap(), original);
+        assert_eq!(
+            decode_call_control(&frame),
+            Err(CallControlFrameError::InvalidValue(
+                "too many audio sample rates"
+            ))
+        );
     }
 
     #[test]

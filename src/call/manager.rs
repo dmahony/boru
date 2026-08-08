@@ -54,6 +54,10 @@ const EVENT_CAPACITY: usize = 256;
 const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(5);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const CALL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+/// Maximum incoming offers retained while the user decides what to do.
+///
+/// This is checked before inserting a peer-controlled call id into `calls`.
+const MAX_PENDING_CALL_OFFERS: usize = 32;
 
 /// Monotonically increasing identity for a call incarnation.
 pub type CallGeneration = u64;
@@ -883,6 +887,14 @@ async fn handle_control(
             kind,
             capabilities,
         } => {
+            let pending_offers = calls
+                .values()
+                .filter(|call| call.incoming && !call.active)
+                .count();
+            if pending_offers >= MAX_PENDING_CALL_OFFERS {
+                let _ = tx.send(CallControl::Busy { call_id }).await;
+                return;
+            }
             if let Some(existing) = calls.values().find(|call| call.active || call.peer == peer) {
                 let _ = tx.send(CallControl::Busy { call_id }).await;
                 if existing.peer == peer {
