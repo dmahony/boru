@@ -45,12 +45,13 @@ use crate::diagnostics::TransferLifecycleEvent;
 use crate::friends::{FriendRelationship, FriendsStore};
 use crate::mailbox::{seal_for, MailboxAck, MailboxEnvelope, MailboxPublicKey};
 use crate::proto::TopicId;
+use crate::rings::{Ring, RingMember, RingPermission, RingResourcePermission};
 use crate::store::{DeliveryStatus, MessageId, OutboxRow, StoredEnvelope};
 
 // ── Current schema version ────────────────────────────────────────────────
 
 /// Bump every time a new migration is added.
-const CURRENT_SCHEMA_VERSION: u32 = 17;
+const CURRENT_SCHEMA_VERSION: u32 = 18;
 
 /// Maximum number of rows inspected by a single outbox claim query.
 pub const MAX_OUTBOX_CLAIM_LIMIT: u32 = 100;
@@ -879,6 +880,7 @@ impl Storage {
                 15 => self.migrate_v15(&conn)?,
                 16 => self.migrate_v16(&conn)?,
                 17 => self.migrate_v17(&conn)?,
+                18 => self.migrate_v18(&conn)?,
                 _ => unreachable!("unknown migration version {v}"),
             }
             let now = now_ms();
@@ -1355,6 +1357,63 @@ impl Storage {
             "direction",
             "TEXT NOT NULL DEFAULT 'inbound'",
         )
+    }
+
+    /// v18 adds named-ring permission groups (iroh-rings borrow).
+    ///
+    /// A ring is a named set of peers sharing typed Read/Write/Delete
+    /// permissions on file resources.  Three tables:
+    ///
+    /// - `rings` — the named ring definitions, owned by a profile.  The
+    ///   built-in open ring has `is_open = 1` and grants its associated
+    ///   permissions to any authenticated peer (no membership row).
+    /// - `ring_members` — which peers belong to which rings.
+    /// - `ring_resource_permissions` — typed permission associations
+    ///   between a ring and a file resource (by content hash).
+    ///
+    /// Ring grants are additive with the existing friend-relationship and
+    /// per-peer `shared_file_permissions` checks; a resource with no ring
+    /// association is implicitly denied by the ring model (rings only grant
+    /// what is explicitly associated).
+    fn migrate_v18(&self, conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS rings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_user_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                is_open INTEGER NOT NULL DEFAULT 0,
+                created_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                UNIQUE(owner_user_id, name)
+            );
+            CREATE INDEX IF NOT EXISTS idx_rings_owner
+                ON rings(owner_user_id);
+
+            CREATE TABLE IF NOT EXISTS ring_members (
+                ring_id INTEGER NOT NULL REFERENCES rings(id)
+                    ON DELETE CASCADE,
+                member_user_id TEXT NOT NULL,
+                joined_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (ring_id, member_user_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_ring_members_member
+                ON ring_members(member_user_id);
+
+            CREATE TABLE IF NOT EXISTS ring_resource_permissions (
+                ring_id INTEGER NOT NULL REFERENCES rings(id)
+                    ON DELETE CASCADE,
+                content_hash TEXT NOT NULL,
+                permission TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (ring_id, content_hash, permission)
+            );
+            CREATE INDEX IF NOT EXISTS idx_ring_resource_perms_hash
+                ON ring_resource_permissions(content_hash);
+            ",
+        )
+        .std_context("migrate v18 rings")?;
+        Ok(())
     }
 
     /// during repeat sync requests.  Every message id served via SyncResponse
@@ -3998,6 +4057,307 @@ impl Storage {
             .std_context("check file permissions")?
             .unwrap_or(false);
         Ok(has)
+    }
+
+    // ── Ring permission groups (v18) ─────────────────────────────────
+
+    /// Create a named ring owned by a profile.
+    ///
+    /// Returns the new ring's row id.  `is_open = true` creates the
+    /// built-in open ring, which grants its associated permissions to any
+    /// authenticated peer without a membership row.  By convention the open
+    /// ring is read-only: [`set_ring_permission`](Self::set_ring_permission)
+    /// rejects non-`Read` grants on it.
+    ///
+    /// The ring name must be unique per owner (`UNIQUE(owner_user_id, name)`).
+    pub fn create_ring(
+        &self,
+        owner_user_id: &str,
+        name: &str,
+        is_open: bool,
+    ) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        let now = now_ms() as i64;
+        conn.execute(
+            "INSERT INTO rings (owner_user_id, name, is_open, created_at_ms, updated_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?4)",
+            params![owner_user_id, name, is_open, now],
+        )
+        .std_context("create ring")?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Get a ring by id.
+    pub fn get_ring(&self, ring_id: i64) -> Result<Option<Ring>> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn
+            .query_row(
+                "SELECT id, owner_user_id, name, is_open, created_at_ms, updated_at_ms
+                 FROM rings WHERE id = ?1",
+                params![ring_id],
+                |row| {
+                    Ok(Ring {
+                        id: row.get(0)?,
+                        owner_user_id: row.get(1)?,
+                        name: row.get(2)?,
+                        is_open: row.get::<_, i64>(3)? != 0,
+                        created_at_ms: row.get::<_, i64>(4)? as u64,
+                        updated_at_ms: row.get::<_, i64>(5)? as u64,
+                    })
+                },
+            )
+            .optional()
+            .std_context("get ring")?;
+        Ok(row)
+    }
+
+    /// List all rings owned by a profile.
+    pub fn list_rings(&self, owner_user_id: &str) -> Result<Vec<Ring>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, owner_user_id, name, is_open, created_at_ms, updated_at_ms
+                 FROM rings WHERE owner_user_id = ?1 ORDER BY name",
+            )
+            .std_context("prepare list_rings")?;
+        let mut rows = stmt
+            .query(params![owner_user_id])
+            .std_context("query rings")?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().std_context("next ring")? {
+            out.push(Ring {
+                id: row.get(0).std_context("ring id")?,
+                owner_user_id: row.get(1).std_context("ring owner")?,
+                name: row.get(2).std_context("ring name")?,
+                is_open: row.get::<_, i64>(3).std_context("ring open")? != 0,
+                created_at_ms: row.get::<_, i64>(4).std_context("ring created")? as u64,
+                updated_at_ms: row.get::<_, i64>(5).std_context("ring updated")? as u64,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Rename a ring (bumping its `updated_at_ms`).
+    ///
+    /// The new name must be unique per owner.  Returns an error if the ring
+    /// does not exist.
+    pub fn rename_ring(&self, ring_id: i64, new_name: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = now_ms() as i64;
+        let rows = conn
+            .execute(
+                "UPDATE rings SET name = ?1, updated_at_ms = ?2 WHERE id = ?3",
+                params![new_name, now, ring_id],
+            )
+            .std_context("rename ring")?;
+        if rows == 0 {
+            return Err(anyhow!("ring {ring_id} not found").into());
+        }
+        Ok(())
+    }
+
+    /// Delete a ring and all its memberships and resource permissions
+    /// (cascaded by `ON DELETE CASCADE`).
+    pub fn delete_ring(&self, ring_id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM rings WHERE id = ?1", params![ring_id])
+            .std_context("delete ring")?;
+        Ok(())
+    }
+
+    /// Add a peer to a ring (idempotent).
+    pub fn add_ring_member(&self, ring_id: i64, member_user_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = now_ms() as i64;
+        conn.execute(
+            "INSERT OR IGNORE INTO ring_members (ring_id, member_user_id, joined_at_ms)
+             VALUES (?1, ?2, ?3)",
+            params![ring_id, member_user_id, now],
+        )
+        .std_context("add ring member")?;
+        Ok(())
+    }
+
+    /// Remove a peer from a ring.
+    pub fn remove_ring_member(&self, ring_id: i64, member_user_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM ring_members WHERE ring_id = ?1 AND member_user_id = ?2",
+            params![ring_id, member_user_id],
+        )
+        .std_context("remove ring member")?;
+        Ok(())
+    }
+
+    /// List the member ids of a ring.
+    pub fn list_ring_members(&self, ring_id: i64) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT member_user_id FROM ring_members
+                 WHERE ring_id = ?1 ORDER BY joined_at_ms",
+            )
+            .std_context("prepare list_ring_members")?;
+        let mut rows = stmt
+            .query(params![ring_id])
+            .std_context("query ring members")?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().std_context("next member")? {
+            out.push(row.get(0).std_context("member id")?);
+        }
+        Ok(out)
+    }
+
+    /// Associate a typed permission between a ring and a file resource.
+    ///
+    /// Upserts (replaces) an existing association for the same
+    /// (ring, resource, permission) triple.  Returns an error if the ring
+    /// does not exist, or if the ring is the open ring and the permission is
+    /// not [`RingPermission::Read`] (open rings are read-only by design).
+    pub fn set_ring_permission(
+        &self,
+        ring_id: i64,
+        content_hash: &str,
+        permission: RingPermission,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let is_open: bool = conn
+            .query_row(
+                "SELECT is_open FROM rings WHERE id = ?1",
+                params![ring_id],
+                |row| row.get::<_, i64>(0).map(|v| v != 0),
+            )
+            .optional()
+            .std_context("check ring open flag")?
+            .unwrap_or(false);
+        if is_open && permission != RingPermission::Read {
+            return Err(anyhow!(
+                "open ring {ring_id} is read-only: cannot grant {permission}"
+            )
+            .into());
+        }
+        let now = now_ms() as i64;
+        conn.execute(
+            "INSERT INTO ring_resource_permissions
+                (ring_id, content_hash, permission, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(ring_id, content_hash, permission)
+             DO UPDATE SET created_at_ms = excluded.created_at_ms",
+            params![ring_id, content_hash, permission.as_str(), now],
+        )
+        .std_context("set ring permission")?;
+        Ok(())
+    }
+
+    /// Remove a typed permission association between a ring and a resource.
+    pub fn remove_ring_permission(
+        &self,
+        ring_id: i64,
+        content_hash: &str,
+        permission: RingPermission,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM ring_resource_permissions
+             WHERE ring_id = ?1 AND content_hash = ?2 AND permission = ?3",
+            params![ring_id, content_hash, permission.as_str()],
+        )
+        .std_context("remove ring permission")?;
+        Ok(())
+    }
+
+    /// List all resource-permission associations for a ring.
+    pub fn list_ring_permissions(
+        &self,
+        ring_id: i64,
+    ) -> Result<Vec<RingResourcePermission>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT ring_id, content_hash, permission, created_at_ms
+                 FROM ring_resource_permissions
+                 WHERE ring_id = ?1 ORDER BY content_hash, permission",
+            )
+            .std_context("prepare list_ring_permissions")?;
+        let mut rows = stmt
+            .query(params![ring_id])
+            .std_context("query ring permissions")?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().std_context("next perm")? {
+            let perm_str: String = row.get(2).std_context("perm string")?;
+            let permission = RingPermission::from_str(&perm_str).ok_or_else(|| {
+                anyhow!("unknown ring permission {perm_str:?} for ring {ring_id}")
+            })?;
+            out.push(RingResourcePermission {
+                ring_id: row.get(0).std_context("ring id")?,
+                content_hash: row.get(1).std_context("content hash")?,
+                permission,
+                created_at_ms: row.get::<_, i64>(3).std_context("created")? as u64,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Request-time ring authorization check.
+    ///
+    /// Returns `true` if `requester_user_id` is authorized by a ring to
+    /// perform `permission` on the resource identified by `content_hash`.
+    /// A peer is authorized when they are a member of a ring that holds the
+    /// typed permission on that resource, or when the resource is associated
+    /// with the owner's open ring (`is_open = 1` — grants to any
+    /// authenticated peer).
+    ///
+    /// This is a **live** SQLite query — membership changes revoke access at
+    /// request time; there is no cached catalogue state that could grant
+    /// stale access.  Resources with no ring association are implicitly
+    /// denied by the ring model (returns `false`).
+    pub fn check_ring_access(
+        &self,
+        owner_user_id: &str,
+        requester_user_id: &str,
+        content_hash: &str,
+        permission: RingPermission,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let allowed: bool = conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1
+                    FROM ring_resource_permissions rp
+                    JOIN rings r ON r.id = rp.ring_id
+                    WHERE r.owner_user_id = ?1
+                      AND rp.content_hash = ?2
+                      AND rp.permission = ?3
+                      AND (r.is_open = 1 OR EXISTS(
+                          SELECT 1 FROM ring_members m
+                          WHERE m.ring_id = r.id
+                            AND m.member_user_id = ?4
+                      ))
+                )",
+                params![
+                    owner_user_id,
+                    content_hash,
+                    permission.as_str(),
+                    requester_user_id
+                ],
+                |row| row.get(0),
+            )
+            .std_context("check ring access")?;
+        Ok(allowed)
+    }
+
+    /// Return the row id of the owner's open ring, if one exists.
+    pub fn find_open_ring(&self, owner_user_id: &str) -> Result<Option<i64>> {
+        let conn = self.conn.lock().unwrap();
+        let id = conn
+            .query_row(
+                "SELECT id FROM rings WHERE owner_user_id = ?1 AND is_open = 1 LIMIT 1",
+                params![owner_user_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .std_context("find open ring")?;
+        Ok(id)
     }
 
     // ── Transfer activity projection (v16) ────────────────────────────

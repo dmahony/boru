@@ -33,6 +33,7 @@ use crate::file_access_protocol::{
     FileAccessResponse, FileAccessWireRequest, FileAccessWireResponse, PreparedFile,
 };
 use crate::friends::{FriendId, FriendRelationship, FriendsStore};
+use crate::rings::RingPermission;
 use crate::storage::Storage;
 use rusqlite::params;
 
@@ -824,6 +825,43 @@ impl FileAccessHandler {
             }
         }
 
+        // ── 4a. Ring-based authorization (iroh-rings borrow) ─────────
+        // A ring is a named set of peers sharing typed Read/Write/Delete
+        // permissions on file resources.  Ring grants are ADDITIVE to the
+        // friend-relationship checks below: a peer authorized by a ring may
+        // download even when they are not a friend and have no per-peer
+        // grant.  Explicit per-peer `deny` grants (checked below) still win
+        // over ring grants.
+        //
+        // The check is a LIVE SQLite query — membership changes revoke
+        // access at request time; no cached catalogue state is trusted.
+        // Resources with no ring association are implicitly denied by the
+        // ring model (`check_ring_access` returns false).
+        let ring_allows_read = match self.storage.check_ring_access(
+            &self.profile_user_id,
+            requester_id.as_str(),
+            &row.content_hash,
+            RingPermission::Read,
+        ) {
+            Ok(allowed) => allowed,
+            Err(e) => {
+                error!(
+                    peer = %requester.fmt_short(),
+                    "check_ring_access: {e:#}"
+                );
+                Self::access_diag(
+                    requester,
+                    &request.shared_file_id,
+                    "PermissionDenied",
+                    "internal",
+                    None,
+                    None,
+                    false,
+                );
+                return FileAccessResponse::from(FileAccessErrorCode::InternalError);
+            }
+        };
+
         // Authorization and catalogue-integrity checks must precede local
         // preparation.  A stale catalogue must produce the precise denial or
         // mismatch response even when the local object is unavailable.
@@ -862,12 +900,15 @@ impl FileAccessHandler {
             Ok(n) => n > 0,
             Err(_) => return FileAccessResponse::from(FileAccessErrorCode::InternalError),
         };
-        if (has_any_read_grants && !explicitly_granted)
-            || (!has_any_read_grants
-                && !self
-                    .friends
-                    .get(&requester_id)
-                    .is_some_and(|r| r.relationship == FriendRelationship::Friends))
+        // Ring grants bypass the friend/explicit-grant requirement (additive).
+        // Explicit `deny` grants above still win over ring grants.
+        if !ring_allows_read
+            && ((has_any_read_grants && !explicitly_granted)
+                || (!has_any_read_grants
+                    && !self
+                        .friends
+                        .get(&requester_id)
+                        .is_some_and(|r| r.relationship == FriendRelationship::Friends)))
         {
             return FileAccessResponse::PermissionDenied;
         }
@@ -1138,37 +1179,41 @@ impl FileAccessHandler {
             }
         };
 
-        if has_any_read_grants {
-            // Selected-peers mode: requester must have an explicit read grant.
-            if !explicitly_granted {
-                Self::access_diag(
-                    requester,
-                    &request.shared_file_id,
-                    "PermissionDenied",
-                    "permission",
-                    None,
-                    Some(true),
-                    false,
-                );
-                return FileAccessResponse::PermissionDenied;
-            }
-        } else {
-            // Contacts-only mode: requester must be a friend.
-            let is_friend = self
-                .friends
-                .get(&requester_id)
-                .is_some_and(|r| r.relationship == FriendRelationship::Friends);
-            if !is_friend {
-                Self::access_diag(
-                    requester,
-                    &request.shared_file_id,
-                    "PermissionDenied",
-                    "permission",
-                    None,
-                    Some(true),
-                    false,
-                );
-                return FileAccessResponse::PermissionDenied;
+        // Ring grants bypass the friend/explicit-grant requirement here too
+        // (additive).  Explicit `deny` grants above still win over rings.
+        if !ring_allows_read {
+            if has_any_read_grants {
+                // Selected-peers mode: requester must have an explicit read grant.
+                if !explicitly_granted {
+                    Self::access_diag(
+                        requester,
+                        &request.shared_file_id,
+                        "PermissionDenied",
+                        "permission",
+                        None,
+                        Some(true),
+                        false,
+                    );
+                    return FileAccessResponse::PermissionDenied;
+                }
+            } else {
+                // Contacts-only mode: requester must be a friend.
+                let is_friend = self
+                    .friends
+                    .get(&requester_id)
+                    .is_some_and(|r| r.relationship == FriendRelationship::Friends);
+                if !is_friend {
+                    Self::access_diag(
+                        requester,
+                        &request.shared_file_id,
+                        "PermissionDenied",
+                        "permission",
+                        None,
+                        Some(true),
+                        false,
+                    );
+                    return FileAccessResponse::PermissionDenied;
+                }
             }
         }
 
@@ -3072,6 +3117,198 @@ mod tests {
         assert_eq!(
             UploadError::VerificationBusy.to_string(),
             "verification concurrency limit reached"
+        );
+    }
+
+    // ── Ring-based authorization (FILE-01, requires `net` feature) ──
+
+    /// Helper: create a named ring for the profile, add the requester, and
+    /// grant a Read association on the given content hash.
+    fn grant_ring_read(
+        storage: &Storage,
+        requester_id: &FriendId,
+        content_hash: &str,
+    ) -> i64 {
+        let ring_id = storage
+            .create_ring("owner-profile-id", "friends-ring", false)
+            .expect("create ring");
+        storage
+            .add_ring_member(ring_id, requester_id.as_str())
+            .expect("add ring member");
+        storage
+            .set_ring_permission(ring_id, content_hash, RingPermission::Read)
+            .expect("set ring read");
+        ring_id
+    }
+
+    #[tokio::test]
+    async fn ring_member_in_ring_allowed_without_friendship() {
+        let metadata_id = "file-ring-1";
+        let content_hash = "11".repeat(32);
+        let (storage, friends) = setup_storage_with_file(metadata_id, &content_hash, true);
+        let requester = requester_pk();
+        let requester_id = FriendId::from_public_key(requester);
+
+        // Requester is NOT a friend, but belongs to a ring with Read on this file.
+        grant_ring_read(&storage, &requester_id, &content_hash);
+
+        let (handler, _blob_store) = test_handler(storage, friends);
+        let row = handler
+            .storage
+            .get_shared_file_by_metadata_id("owner-profile-id", metadata_id)
+            .expect("get shared file")
+            .expect("shared file exists");
+        let request = make_request(metadata_id, &content_hash, row.version);
+
+        let response = handler.check_permission(&requester, &request).await;
+        assert!(
+            matches!(response, FileAccessResponse::Granted(_)),
+            "ring member without friendship should be granted, got {response:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ring_stranger_denied() {
+        let metadata_id = "file-ring-2";
+        let content_hash = "22".repeat(32);
+        let (storage, friends) = setup_storage_with_file(metadata_id, &content_hash, true);
+        let member_pk = requester_pk();
+        let stranger_pk = requester_pk();
+        let member_id = FriendId::from_public_key(member_pk);
+        let stranger_id = FriendId::from_public_key(stranger_pk);
+
+        // Only the member is in the ring.
+        grant_ring_read(&storage, &member_id, &content_hash);
+
+        let (handler, _blob_store) = test_handler(storage, friends);
+        let row = handler
+            .storage
+            .get_shared_file_by_metadata_id("owner-profile-id", metadata_id)
+            .expect("get shared file")
+            .expect("shared file exists");
+        let request = make_request(metadata_id, &content_hash, row.version);
+
+        // Member in ring is allowed.
+        let member_resp = handler.check_permission(&member_pk, &request).await;
+        assert!(
+            matches!(member_resp, FileAccessResponse::Granted(_)),
+            "ring member should be granted, got {member_resp:?}"
+        );
+        // Stranger (not friend, not in ring) is denied.
+        let stranger_resp = handler.check_permission(&stranger_pk, &request).await;
+        assert_eq!(
+            stranger_resp,
+            FileAccessResponse::PermissionDenied,
+            "stranger should be denied"
+        );
+        let _ = stranger_id;
+    }
+
+    #[tokio::test]
+    async fn ring_membership_change_revokes_access_at_request_time() {
+        let metadata_id = "file-ring-3";
+        let content_hash = "33".repeat(32);
+        let (storage, friends) = setup_storage_with_file(metadata_id, &content_hash, true);
+        let requester = requester_pk();
+        let requester_id = FriendId::from_public_key(requester);
+
+        let ring_id = grant_ring_read(&storage, &requester_id, &content_hash);
+
+        let (handler, _blob_store) = test_handler(storage, friends);
+        let row = handler
+            .storage
+            .get_shared_file_by_metadata_id("owner-profile-id", metadata_id)
+            .expect("get shared file")
+            .expect("shared file exists");
+        let request = make_request(metadata_id, &content_hash, row.version);
+
+        // Allowed while a member.
+        let before = handler.check_permission(&requester, &request).await;
+        assert!(
+            matches!(before, FileAccessResponse::Granted(_)),
+            "member should be granted, got {before:?}"
+        );
+
+        // Remove membership — the next request-time check must deny
+        // (no stale catalogue state).
+        handler
+            .storage
+            .remove_ring_member(ring_id, requester_id.as_str())
+            .expect("remove ring member");
+        let after = handler.check_permission(&requester, &request).await;
+        assert_eq!(
+            after,
+            FileAccessResponse::PermissionDenied,
+            "removed member should be denied at request time"
+        );
+    }
+
+    #[tokio::test]
+    async fn open_ring_grants_read_to_any_peer() {
+        let metadata_id = "file-ring-4";
+        let content_hash = "44".repeat(32);
+        let (storage, friends) = setup_storage_with_file(metadata_id, &content_hash, true);
+        let anonymous = requester_pk();
+        let anonymous_id = FriendId::from_public_key(anonymous);
+
+        // Open ring with a Read association on the file — any peer may read.
+        let ring_id = storage
+            .create_ring("owner-profile-id", "open", true)
+            .expect("create open ring");
+        storage
+            .set_ring_permission(ring_id, &content_hash, RingPermission::Read)
+            .expect("set open ring read");
+
+        let (handler, _blob_store) = test_handler(storage, friends);
+        let row = handler
+            .storage
+            .get_shared_file_by_metadata_id("owner-profile-id", metadata_id)
+            .expect("get shared file")
+            .expect("shared file exists");
+        let request = make_request(metadata_id, &content_hash, row.version);
+
+        let response = handler.check_permission(&anonymous, &request).await;
+        assert!(
+            matches!(response, FileAccessResponse::Granted(_)),
+            "open ring should grant read to any peer, got {response:?}"
+        );
+        let _ = anonymous_id;
+    }
+
+    #[tokio::test]
+    async fn ring_deny_grant_still_wins_over_ring() {
+        let metadata_id = "file-ring-5";
+        let content_hash = "55".repeat(32);
+        let (storage, friends) = setup_storage_with_file(metadata_id, &content_hash, true);
+        let requester = requester_pk();
+        let requester_id = FriendId::from_public_key(requester);
+
+        // Ring grants Read, but an explicit per-peer deny exists for the
+        // same file.  The explicit deny must win.
+        grant_ring_read(&storage, &requester_id, &content_hash);
+        storage
+            .grant_permission(
+                &content_hash,
+                "owner-profile-id",
+                requester_id.as_str(),
+                "deny",
+                None,
+            )
+            .expect("grant explicit deny");
+
+        let (handler, _blob_store) = test_handler(storage, friends);
+        let row = handler
+            .storage
+            .get_shared_file_by_metadata_id("owner-profile-id", metadata_id)
+            .expect("get shared file")
+            .expect("shared file exists");
+        let request = make_request(metadata_id, &content_hash, row.version);
+
+        let response = handler.check_permission(&requester, &request).await;
+        assert_eq!(
+            response,
+            FileAccessResponse::PermissionDenied,
+            "explicit deny grant must win over ring read"
         );
     }
 }

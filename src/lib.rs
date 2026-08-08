@@ -332,6 +332,15 @@ pub mod diagnostics;
 
 /// Relational storage layer with managed migrations.
 pub mod storage;
+
+/// Named-ring permission groups for file resources (iroh-rings borrow).
+///
+/// A ring is a named set of peers sharing typed Read/Write/Delete
+/// permissions on file resources.  Persisted in SQLite via
+/// [`crate::storage::Storage`] and enforced request-time in the
+/// file-access handler.  Always available (no feature gate) so storage
+/// migrations can reference the types unconditionally.
+pub mod rings;
 /// Durable inbox/outbox storage.
 pub mod store;
 /// Durable offline delivery is owned by `outbox_delivery`; no second retry loop

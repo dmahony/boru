@@ -28,6 +28,7 @@ use iroh::{PublicKey, SecretKey};
 use rusqlite::{params, Connection};
 
 use boru_core::{
+    rings::{RingPermission, RingResourcePermission},
     storage::Storage,
     store::{DeliveryStatus, MessageId, StoredEnvelope},
 };
@@ -793,4 +794,356 @@ fn outbox_message_count_after_mixed_operations() {
             "7 msgs should be pending (3 acked out of 10; sent-but-unacked still due)"
         );
     }
+}
+
+// ── Ring permission groups (v18, FILE-01) ────────────────────────────────
+
+/// Helper: hash string that looks like a 64-char blake3 hex content hash.
+fn hash_of(seed: u8) -> String {
+    format!("{seed:02x}").repeat(32)
+}
+
+#[test]
+fn ring_crud_and_persistence() {
+    let dir = temp_dir("rings-crud");
+    let owner = "owner-profile";
+    let member_a = random_pk().to_string();
+    let member_b = random_pk().to_string();
+    let resource = hash_of(1);
+
+    let ring_id = {
+        let storage = Storage::open(&dir).expect("open storage");
+        let id = storage.create_ring(owner, "friends", false).expect("create ring");
+        storage.add_ring_member(id, &member_a).expect("add member a");
+        storage.add_ring_member(id, &member_b).expect("add member b");
+        storage
+            .set_ring_permission(id, &resource, RingPermission::Read)
+            .expect("set read");
+        storage
+            .set_ring_permission(id, &resource, RingPermission::Write)
+            .expect("set write");
+        id
+    };
+
+    // Reopen — rings, members, and permissions must survive.
+    {
+        let storage = Storage::open(&dir).expect("reopen storage");
+        let rings = storage.list_rings(owner).expect("list rings");
+        assert_eq!(rings.len(), 1, "one ring after reopen");
+        assert_eq!(rings[0].name, "friends");
+        assert!(!rings[0].is_open, "named ring is not open");
+
+        let members = storage.list_ring_members(ring_id).expect("list members");
+        assert_eq!(members.len(), 2, "two members after reopen");
+        assert!(members.contains(&member_a));
+        assert!(members.contains(&member_b));
+
+        let perms = storage
+            .list_ring_permissions(ring_id)
+            .expect("list perms");
+        assert_eq!(perms.len(), 2, "two permissions after reopen");
+        let kinds: Vec<RingPermission> = perms.iter().map(|p| p.permission).collect();
+        assert!(kinds.contains(&RingPermission::Read));
+        assert!(kinds.contains(&RingPermission::Write));
+
+        // rename works and is persisted
+        storage.rename_ring(ring_id, "crew").expect("rename ring");
+    }
+
+    let storage = Storage::open(&dir).expect("reopen again");
+    let rings = storage.list_rings(owner).expect("list rings");
+    assert_eq!(rings[0].name, "crew", "rename persisted");
+}
+
+#[test]
+fn ring_membership_change_revokes_access_at_request_time() {
+    let storage = Storage::memory().expect("memory storage");
+    let owner = "owner-profile";
+    let member = random_pk().to_string();
+    let stranger = random_pk().to_string();
+    let resource = hash_of(2);
+
+    let ring_id = storage.create_ring(owner, "team", false).expect("create ring");
+    storage.add_ring_member(ring_id, &member).expect("add member");
+    storage
+        .set_ring_permission(ring_id, &resource, RingPermission::Read)
+        .expect("set read");
+
+    // Member is allowed.
+    assert!(
+        storage
+            .check_ring_access(owner, &member, &resource, RingPermission::Read)
+            .expect("check member"),
+        "member should be allowed"
+    );
+    // Stranger is denied.
+    assert!(
+        !storage
+            .check_ring_access(owner, &stranger, &resource, RingPermission::Read)
+            .expect("check stranger"),
+        "stranger should be denied"
+    );
+
+    // Remove the member — the very next request-time check must deny.
+    storage.remove_ring_member(ring_id, &member).expect("remove member");
+    assert!(
+        !storage
+            .check_ring_access(owner, &member, &resource, RingPermission::Read)
+            .expect("check removed member"),
+        "removed member should lose access at request time"
+    );
+
+    // Re-add restores access.
+    storage.add_ring_member(ring_id, &member).expect("re-add member");
+    assert!(
+        storage
+            .check_ring_access(owner, &member, &resource, RingPermission::Read)
+            .expect("check re-added member"),
+        "re-added member regains access"
+    );
+}
+
+#[test]
+fn ring_permission_matrix_read_write_delete() {
+    let storage = Storage::memory().expect("memory storage");
+    let owner = "owner-profile";
+    let member = random_pk().to_string();
+    let resource = hash_of(3);
+
+    let ring_id = storage.create_ring(owner, "matrix", false).expect("create ring");
+    storage.add_ring_member(ring_id, &member).expect("add member");
+
+    // No associations → implicit deny for every permission.
+    for perm in RingPermission::ALL {
+        assert!(
+            !storage
+                .check_ring_access(owner, &member, &resource, perm)
+                .expect("check no grant"),
+            "{perm:?} should be denied with no association"
+        );
+    }
+
+    // Grant Read only.
+    storage
+        .set_ring_permission(ring_id, &resource, RingPermission::Read)
+        .expect("set read");
+    assert!(
+        storage
+            .check_ring_access(owner, &member, &resource, RingPermission::Read)
+            .expect("check read"),
+        "read should be allowed"
+    );
+    assert!(
+        !storage
+            .check_ring_access(owner, &member, &resource, RingPermission::Write)
+            .expect("check write"),
+        "write should be denied (only read granted)"
+    );
+    assert!(
+        !storage
+            .check_ring_access(owner, &member, &resource, RingPermission::Delete)
+            .expect("check delete"),
+        "delete should be denied (only read granted)"
+    );
+
+    // Grant Write + Delete too.
+    storage
+        .set_ring_permission(ring_id, &resource, RingPermission::Write)
+        .expect("set write");
+    storage
+        .set_ring_permission(ring_id, &resource, RingPermission::Delete)
+        .expect("set delete");
+    for perm in RingPermission::ALL {
+        assert!(
+            storage
+                .check_ring_access(owner, &member, &resource, perm)
+                .expect("check all"),
+            "{perm:?} should be allowed once granted"
+        );
+    }
+
+    // Removing one permission denies just that one.
+    storage
+        .remove_ring_permission(ring_id, &resource, RingPermission::Write)
+        .expect("remove write");
+    assert!(
+        !storage
+            .check_ring_access(owner, &member, &resource, RingPermission::Write)
+            .expect("check write after remove"),
+        "write should be denied after removal"
+    );
+    assert!(
+        storage
+            .check_ring_access(owner, &member, &resource, RingPermission::Read)
+            .expect("check read after remove"),
+        "read should still be allowed after write removal"
+    );
+
+    // A different resource has no association → denied.
+    let other_resource = hash_of(4);
+    assert!(
+        !storage
+            .check_ring_access(owner, &member, &other_resource, RingPermission::Read)
+            .expect("check other resource"),
+        "other resource should be implicitly denied"
+    );
+}
+
+#[test]
+fn open_ring_grants_read_to_any_peer_but_is_read_only() {
+    let storage = Storage::memory().expect("memory storage");
+    let owner = "owner-profile";
+    let anonymous = random_pk().to_string();
+    let resource = hash_of(5);
+
+    let ring_id = storage
+        .create_ring(owner, "open", true)
+        .expect("create open ring");
+    assert_eq!(
+        storage.find_open_ring(owner).expect("find open ring"),
+        Some(ring_id),
+        "find_open_ring locates the open ring"
+    );
+    let rings = storage.list_rings(owner).expect("list rings");
+    assert!(rings[0].is_open, "open ring flag persisted");
+
+    // Open ring with a Read association → any authenticated peer may read.
+    storage
+        .set_ring_permission(ring_id, &resource, RingPermission::Read)
+        .expect("set read on open ring");
+    assert!(
+        storage
+            .check_ring_access(owner, &anonymous, &resource, RingPermission::Read)
+            .expect("check anonymous read"),
+        "open ring should grant read to any peer"
+    );
+
+    // Open ring is read-only: Write/Delete grants are rejected.
+    let write_err = storage.set_ring_permission(ring_id, &resource, RingPermission::Write);
+    assert!(
+        write_err.is_err(),
+        "open ring must reject Write permission"
+    );
+    let delete_err = storage.set_ring_permission(ring_id, &resource, RingPermission::Delete);
+    assert!(
+        delete_err.is_err(),
+        "open ring must reject Delete permission"
+    );
+    assert!(
+        !storage
+            .check_ring_access(owner, &anonymous, &resource, RingPermission::Write)
+            .expect("check anonymous write"),
+        "open ring must not grant write"
+    );
+    assert!(
+        !storage
+            .check_ring_access(owner, &anonymous, &resource, RingPermission::Delete)
+            .expect("check anonymous delete"),
+        "open ring must not grant delete"
+    );
+
+    // No association on the open ring → even read is denied.
+    let other = hash_of(6);
+    assert!(
+        !storage
+            .check_ring_access(owner, &anonymous, &other, RingPermission::Read)
+            .expect("check unassociated read"),
+        "open ring grants nothing without an explicit association"
+    );
+}
+
+#[test]
+fn ring_resources_are_owner_scoped() {
+    let storage = Storage::memory().expect("memory storage");
+    let owner_a = "owner-a";
+    let owner_b = "owner-b";
+    let member = random_pk().to_string();
+    let resource = hash_of(7);
+
+    let ring_a = storage.create_ring(owner_a, "team", false).expect("create ring a");
+    storage.add_ring_member(ring_a, &member).expect("add member");
+    storage
+        .set_ring_permission(ring_a, &resource, RingPermission::Read)
+        .expect("set read");
+
+    // Owner A's ring authorizes the member.
+    assert!(
+        storage
+            .check_ring_access(owner_a, &member, &resource, RingPermission::Read)
+            .expect("check owner a"),
+        "owner a ring should authorize member"
+    );
+    // Owner B has no such ring — denied even for the same member+resource.
+    assert!(
+        !storage
+            .check_ring_access(owner_b, &member, &resource, RingPermission::Read)
+            .expect("check owner b"),
+        "owner b has no ring granting this resource"
+    );
+}
+
+#[test]
+fn ring_delete_cascades_members_and_permissions() {
+    let storage = Storage::memory().expect("memory storage");
+    let owner = "owner-profile";
+    let member = random_pk().to_string();
+    let resource = hash_of(8);
+
+    let ring_id = storage.create_ring(owner, "temp", false).expect("create ring");
+    storage.add_ring_member(ring_id, &member).expect("add member");
+    storage
+        .set_ring_permission(ring_id, &resource, RingPermission::Read)
+        .expect("set read");
+
+    storage.delete_ring(ring_id).expect("delete ring");
+
+    assert!(
+        storage.get_ring(ring_id).expect("get deleted").is_none(),
+        "deleted ring is gone"
+    );
+    assert!(
+        storage.list_ring_members(ring_id).expect("members").is_empty(),
+        "members cascade-deleted"
+    );
+    assert!(
+        storage
+            .list_ring_permissions(ring_id)
+            .expect("perms")
+            .is_empty(),
+        "permissions cascade-deleted"
+    );
+    assert!(
+        !storage
+            .check_ring_access(owner, &member, &resource, RingPermission::Read)
+            .expect("check after delete"),
+        "no access after ring deletion"
+    );
+}
+
+#[test]
+fn ring_permission_listing_roundtrip() {
+    let storage = Storage::memory().expect("memory storage");
+    let owner = "owner-profile";
+    let resource = hash_of(9);
+
+    let ring_id = storage.create_ring(owner, "listing", false).expect("create ring");
+    storage
+        .set_ring_permission(ring_id, &resource, RingPermission::Delete)
+        .expect("set delete");
+    storage
+        .set_ring_permission(ring_id, &resource, RingPermission::Read)
+        .expect("set read");
+
+    let perms = storage
+        .list_ring_permissions(ring_id)
+        .expect("list perms");
+    assert_eq!(perms.len(), 2);
+    let expected: Vec<RingResourcePermission> = perms
+        .iter()
+        .filter(|p| p.content_hash == resource)
+        .cloned()
+        .collect();
+    assert_eq!(expected.len(), 2, "both perms belong to the resource");
+    assert!(expected.iter().any(|p| p.permission == RingPermission::Read));
+    assert!(expected.iter().any(|p| p.permission == RingPermission::Delete));
 }
