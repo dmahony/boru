@@ -5874,7 +5874,13 @@ pub enum AppMessage {
     #[cfg(feature = "video-playback")]
     InlineVideoSeekReleased,
     #[cfg(feature = "video-playback")]
+    /// Seek by a relative number of seconds from a keyboard-focused player control.
+    InlineVideoSeekRelative(f32),
+    #[cfg(feature = "video-playback")]
     InlineVideoToggleMute,
+    #[cfg(feature = "video-playback")]
+    /// Adjust volume by a relative amount from a keyboard-focused player control.
+    InlineVideoAdjustVolume(f32),
     #[cfg(feature = "video-playback")]
     InlineVideoSetVolume(f32),
     #[cfg(feature = "video-playback")]
@@ -9814,7 +9820,11 @@ impl IcedChat {
             #[cfg(feature = "video-playback")]
             AppMessage::InlineVideoSeekReleased => "InlineVideoSeekReleased",
             #[cfg(feature = "video-playback")]
+            AppMessage::InlineVideoSeekRelative(_) => "InlineVideoSeekRelative",
+            #[cfg(feature = "video-playback")]
             AppMessage::InlineVideoToggleMute => "InlineVideoToggleMute",
+            #[cfg(feature = "video-playback")]
+            AppMessage::InlineVideoAdjustVolume(_) => "InlineVideoAdjustVolume",
             #[cfg(feature = "video-playback")]
             AppMessage::InlineVideoSetVolume(_) => "InlineVideoSetVolume",
             #[cfg(feature = "video-playback")]
@@ -17865,6 +17875,27 @@ impl IcedChat {
                 iced::Task::none()
             }
             #[cfg(feature = "video-playback")]
+            AppMessage::InlineVideoSeekRelative(delta_seconds) => {
+                if let Some(session) = self.inline_video.as_mut() {
+                    if let Some(video) = session.video.as_mut().and_then(Arc::get_mut) {
+                        let duration = video.duration();
+                        let position = video.position();
+                        let target = if delta_seconds.is_sign_negative() {
+                            position.saturating_sub(Duration::from_secs_f32(delta_seconds.abs()))
+                        } else {
+                            position.saturating_add(Duration::from_secs_f32(delta_seconds))
+                        }
+                        .min(duration);
+                        let _ = video.seek(target, false);
+                        session.jitter.reset();
+                        session.controls_visible = true;
+                        session.controls_last_interaction = Instant::now();
+                        self.layout_cache.borrow_mut().clear();
+                    }
+                }
+                iced::Task::none()
+            }
+            #[cfg(feature = "video-playback")]
             AppMessage::InlineVideoToggleMute => {
                 if let Some(video) = self
                     .inline_video
@@ -17873,6 +17904,24 @@ impl IcedChat {
                     .and_then(Arc::get_mut)
                 {
                     video.set_muted(!video.muted());
+                    if let Some(session) = self.inline_video.as_mut() {
+                        session.controls_visible = true;
+                        session.controls_last_interaction = Instant::now();
+                    }
+                    self.layout_cache.borrow_mut().clear();
+                }
+                iced::Task::none()
+            }
+            #[cfg(feature = "video-playback")]
+            AppMessage::InlineVideoAdjustVolume(delta) => {
+                if let Some(video) = self
+                    .inline_video
+                    .as_mut()
+                    .and_then(|s| s.video.as_mut())
+                    .and_then(Arc::get_mut)
+                {
+                    let value = (video.volume() as f32 + delta).clamp(0.0, 1.0);
+                    video.set_volume(value as f64);
                     if let Some(session) = self.inline_video.as_mut() {
                         session.controls_visible = true;
                         session.controls_last_interaction = Instant::now();
