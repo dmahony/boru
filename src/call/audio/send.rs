@@ -7,6 +7,7 @@
 //! per capture tick.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::Bytes;
 
@@ -60,6 +61,7 @@ pub struct AudioSender<T> {
     track_id: u32,
     queue: VecDeque<MediaDatagram>,
     dropped_outbound: u64,
+    muted: AtomicBool,
 }
 
 impl<T> AudioSender<T> {
@@ -75,6 +77,7 @@ impl<T> AudioSender<T> {
             track_id,
             queue: VecDeque::with_capacity(MAX_OUTBOUND_AUDIO_FRAMES),
             dropped_outbound: 0,
+            muted: AtomicBool::new(false),
         })
     }
 
@@ -88,12 +91,26 @@ impl<T> AudioSender<T> {
         self.queue.len()
     }
 
+    /// Change the local mute gate. Muting suppresses new network media while
+    /// leaving the reliable control stream and keepalive unaffected.
+    pub fn set_muted(&self, muted: bool) {
+        self.muted.store(muted, Ordering::Release);
+    }
+
+    /// Return whether this sender currently suppresses audio frames.
+    pub fn is_muted(&self) -> bool {
+        self.muted.load(Ordering::Acquire)
+    }
+
     /// Queue one Opus frame without waiting for network capacity.
     ///
     /// If the four-frame bound is reached, the new frame is dropped. Keeping
     /// older frames in this tiny queue preserves ordering while ensuring that
     /// the queue can never accumulate seconds of stale speech.
     pub fn enqueue(&mut self, frame: EncodedAudioFrame) -> bool {
+        if self.is_muted() {
+            return false;
+        }
         if self.queue.len() == MAX_OUTBOUND_AUDIO_FRAMES {
             self.dropped_outbound += 1;
             return false;
@@ -225,5 +242,18 @@ mod tests {
         assert_eq!(sender.dropped_outbound(), 1);
         assert_eq!(sender.flush(), 0);
         assert_eq!(sender.dropped_outbound(), 5);
+    }
+
+    #[test]
+    fn mute_suppresses_frames_and_unmute_resumes() {
+        let transport = MockTransport::default();
+        let sent = Rc::clone(&transport.sent);
+        let mut sender = sender(transport);
+        sender.set_muted(true);
+        assert!(!sender.try_send(frame(1)));
+        assert!(sent.borrow().is_empty());
+        sender.set_muted(false);
+        assert!(sender.try_send(frame(2)));
+        assert_eq!(sent.borrow().len(), 1);
     }
 }
