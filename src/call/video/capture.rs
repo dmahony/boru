@@ -1,16 +1,52 @@
 //! Consent-gated camera discovery and capture ownership.
 //!
-//! Enumerating devices uses Nokhwa's query API only.  Constructing a Nokhwa
+//! Enumerating devices uses Nokhwa's query API only. Constructing a Nokhwa
 //! [`Camera`] is deliberately deferred until [`CameraCapture::start`] is called
 //! by the consent-bearing video-call flow.
 
-use std::fmt;
+use std::{fmt, time::Duration};
 
 use nokhwa::{
     pixel_format::RgbFormat,
     utils::{ApiBackend, CameraIndex, RequestedFormat, RequestedFormatType},
     Camera,
 };
+
+/// Requested dimensions and cadence for a live camera track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CaptureConfig {
+    /// Requested frame width in pixels.
+    pub width: u32,
+    /// Requested frame height in pixels.
+    pub height: u32,
+    /// Requested capture interval.
+    pub frame_interval: Duration,
+}
+
+impl Default for CaptureConfig {
+    fn default() -> Self {
+        Self {
+            width: 640,
+            height: 480,
+            frame_interval: Duration::from_millis(33),
+        }
+    }
+}
+
+/// One raw frame leaving the live capture boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedFrame {
+    /// Monotonic capture timestamp in microseconds.
+    pub timestamp_us: u64,
+    /// Raw video bytes owned by the live pipeline.
+    pub data: Vec<u8>,
+}
+
+/// Capture source abstraction reserved for the camera implementation task.
+pub trait CaptureSource: Send {
+    /// Return the next captured frame, or `None` when the source is stopped.
+    fn next_frame(&mut self) -> Option<CapturedFrame>;
+}
 
 /// A camera exposed to the UI.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -67,7 +103,9 @@ impl fmt::Display for CameraError {
         match self {
             Self::NoCamera => formatter.write_str("no camera is available"),
             Self::Enumeration(error) => write!(formatter, "camera enumeration failed: {error}"),
-            Self::PermissionDenied(error) => write!(formatter, "camera permission denied: {error}"),
+            Self::PermissionDenied(error) => {
+                write!(formatter, "camera permission denied: {error}")
+            }
             Self::Open(error) => write!(formatter, "camera could not be opened: {error}"),
         }
     }
