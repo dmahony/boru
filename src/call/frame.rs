@@ -48,6 +48,25 @@ impl Default for AudioSeq {
     }
 }
 
+/// Whether `candidate` is newer than `reference` under wrapping serial-number
+/// arithmetic (RFC 1982 style for 32-bit counters).
+///
+/// Media clocks wrap at `u32::MAX`; a plain `>` comparison is wrong across the
+/// boundary (e.g. `0 > u32::MAX` is false even though `0` follows
+/// `u32::MAX`).  With serial-number arithmetic, `candidate` is newer iff the
+/// forward distance `candidate.wrapping_sub(reference)` is non-zero and less
+/// than half the counter range (2^31).  Distances of exactly half the range
+/// are ambiguous and report "not newer" to stay consistent.
+pub const fn sequence_newer_than(candidate: u32, reference: u32) -> bool {
+    candidate != reference && candidate.wrapping_sub(reference) < (1 << 31)
+}
+
+/// Whether `candidate` is older than `reference` (the inverse of
+/// [`sequence_newer_than`] for non-equal values).
+pub const fn sequence_older_than(candidate: u32, reference: u32) -> bool {
+    reference != candidate && reference.wrapping_sub(candidate) < (1 << 31)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{AudioSeq, FRAME_DURATION, FRAME_MS, SAMPLES_PER_FRAME, SAMPLE_RATE};
@@ -76,5 +95,80 @@ mod tests {
         assert_eq!(clock.next_frame(), (0, 1_920));
         assert_eq!(clock.next_frame(), (1, 2_880));
         assert_eq!(clock.next_frame(), (2, 3_840));
+    }
+
+    #[test]
+    fn sequence_increments_wrap_across_the_u32_boundary() {
+        let mut clock = AudioSeq::new(0xffff_fffd, 0);
+        let mut expected = 0xffff_fffdu32;
+        for _ in 0..6 {
+            let (seq, _) = clock.next_frame();
+            expected = expected.wrapping_add(1);
+            assert_eq!(seq, expected);
+        }
+        // The full progression around the boundary:
+        // fffffffd -> fffffffe -> ffffffff -> 0 -> 1 -> 2
+        let mut clock2 = AudioSeq::new(0xffff_fffd, 0);
+        assert_eq!(clock2.next_frame(), (0xffff_fffe, 960));
+        assert_eq!(clock2.next_frame(), (0xffff_ffff, 1_920));
+        assert_eq!(clock2.next_frame(), (0, 2_880));
+        assert_eq!(clock2.next_frame(), (1, 3_840));
+        assert_eq!(clock2.next_frame(), (2, 4_800));
+    }
+
+    #[test]
+    fn newer_than_orders_frames_across_the_wrap_boundary() {
+        use super::{sequence_newer_than, sequence_older_than};
+
+        // Normal ordering away from the boundary.
+        assert!(sequence_newer_than(10, 5));
+        assert!(!sequence_newer_than(5, 10));
+        assert!(sequence_older_than(5, 10));
+        assert!(!sequence_older_than(10, 5));
+
+        // Across the wrap: 0 follows u32::MAX, so 0 is newer than u32::MAX.
+        assert!(sequence_newer_than(0, u32::MAX));
+        assert!(sequence_newer_than(1, u32::MAX));
+        assert!(sequence_newer_than(1, 0xffff_fffd));
+        assert!(!sequence_newer_than(u32::MAX, 0));
+        assert!(sequence_older_than(u32::MAX, 0));
+
+        // Full boundary walk: each successor is newer than its predecessor
+        // around fffffffd -> fffffffe -> ffffffff -> 0 -> 1 -> 2.
+        let walk = [0xffff_fffd, 0xffff_fffe, 0xffff_ffff, 0, 1, 2];
+        for (i, a) in walk.iter().enumerate() {
+            for (j, b) in walk.iter().enumerate() {
+                if i > j {
+                    assert!(
+                        sequence_newer_than(*a, *b),
+                        "{a:#x} should be newer than {b:#x}"
+                    );
+                    assert!(sequence_older_than(*b, *a));
+                } else if i < j {
+                    assert!(
+                        !sequence_newer_than(*a, *b),
+                        "{a:#x} should be older than {b:#x}"
+                    );
+                } else {
+                    assert!(!sequence_newer_than(*a, *b), "equal values are never newer");
+                    assert!(!sequence_older_than(*a, *b), "equal values are never older");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn newer_than_handles_short_forward_arcs_after_wrap() {
+        use super::sequence_newer_than;
+
+        // A receiver that saw 0xfffffffd then receives 2 (a 5-step forward
+        // jump across the boundary) must treat 2 as newer.
+        assert!(sequence_newer_than(2, 0xffff_fffd));
+
+        // Half-range ambiguity: exactly 2^31 forward is neither newer nor
+        // older by design (RFC 1982).
+        let mid = u32::MAX / 2 + 1;
+        assert!(!sequence_newer_than(mid, 0));
+        assert!(!sequence_newer_than(0, mid));
     }
 }
