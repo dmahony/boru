@@ -11,6 +11,7 @@ use super::capture::{CaptureConfig, CaptureSource, CapturedFrame};
 use super::codec::{DecodedVideoFrame, OpenH264Decoder, RawVideoFrame, VideoDecoder, VideoEncoder};
 use super::packet::{VideoPacket, VideoPacketizer};
 use super::reassembly::{ReassemblyResult, VideoReassembler};
+use super::{VideoFrame, VideoFrameSlots};
 use crate::call::media::{MediaDatagram, MediaKind};
 
 /// The independent live-call video receive pipeline.
@@ -18,6 +19,7 @@ use crate::call::media::{MediaDatagram, MediaKind};
 pub struct LiveVideoPipeline {
     reassembler: VideoReassembler,
     decoder: Box<dyn VideoDecoder>,
+    frames: VideoFrameSlots,
     latest_frame: Option<DecodedVideoFrame>,
     received_packets: u64,
     decoded_frames: u64,
@@ -39,6 +41,7 @@ impl LiveVideoPipeline {
         Self {
             reassembler: VideoReassembler::new(),
             decoder: Box::new(decoder),
+            frames: VideoFrameSlots::default(),
             latest_frame: None,
             received_packets: 0,
             decoded_frames: 0,
@@ -77,7 +80,28 @@ impl LiveVideoPipeline {
             self.dropped_frames = self.dropped_frames.saturating_add(1);
         }
         self.latest_frame = Some(decoded.clone());
+        self.frames.replace_remote(VideoFrame {
+            width: decoded.width,
+            height: decoded.height,
+            rgba: decoded.bytes.clone().into(),
+            timestamp: datagram.timestamp as u64,
+        });
         Ok(Some(decoded))
+    }
+
+    /// Borrow the newest decoded frame in the presentation format.
+    pub fn latest_remote_frame(&self) -> Option<&VideoFrame> {
+        self.frames.latest_remote_frame.as_ref()
+    }
+
+    /// Publish a frame from the local preview/capture path.
+    pub fn publish_local_frame(&mut self, frame: VideoFrame) {
+        self.frames.replace_local(frame);
+    }
+
+    /// Borrow the newest local preview frame.
+    pub fn latest_local_frame(&self) -> Option<&VideoFrame> {
+        self.frames.latest_local_frame.as_ref()
     }
 
     /// Compatibility entry point for callers that still hold a legacy packet.
