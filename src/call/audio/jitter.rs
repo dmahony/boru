@@ -55,6 +55,10 @@ pub struct AudioJitterBuffer {
     call_id: Option<CallId>,
     packets: BTreeMap<u32, BufferedAudioPacket>,
     expected_next: Option<u32>,
+    /// Highest sequence already played or concealed (PLC). Used to reject
+    /// stale packets that arrive after playout has drained, so a late
+    /// duplicate cannot re-anchor the stream and replay old audio.
+    played_through: Option<u32>,
     next_deadline: Option<Instant>,
     jitter_delay: Duration,
     frame_duration: Duration,
@@ -75,6 +79,7 @@ impl AudioJitterBuffer {
             call_id: None,
             packets: BTreeMap::new(),
             expected_next: None,
+            played_through: None,
             next_deadline: None,
             jitter_delay,
             frame_duration,
@@ -120,6 +125,7 @@ impl AudioJitterBuffer {
         self.call_id = Some(call_id);
         self.packets.clear();
         self.expected_next = None;
+        self.played_through = None;
         self.next_deadline = None;
     }
 
@@ -162,6 +168,15 @@ impl AudioJitterBuffer {
                 self.next_deadline = Some(packet.arrival + self.jitter_delay);
             }
         } else {
+            // The buffer drained (expected_next was reset). Only a packet
+            // strictly newer than everything already played may restart
+            // playout; a stale or duplicate packet for an already-played
+            // sequence must be rejected.
+            if let Some(played) = self.played_through {
+                if !seq_before(played, packet.sequence) {
+                    return false;
+                }
+            }
             self.expected_next = Some(packet.sequence);
             self.next_deadline = Some(packet.arrival + self.jitter_delay);
         }
@@ -190,6 +205,7 @@ impl AudioJitterBuffer {
                 AudioPlayout::Missing { sequence: expected }
             }
         };
+        self.played_through = Some(expected);
         self.expected_next = Some(expected.wrapping_add(1));
         self.next_deadline = Some(deadline + self.frame_duration);
 
@@ -425,11 +441,24 @@ mod tests {
             0,
             "late duplicate must not re-enter the buffer"
         );
-        // Playback must advance to seq 2 (missing -> PLC hook).
+        // The drained buffer stays inactive (no endless PLC for silence);
+        // a genuinely newer packet restarts playout cleanly.
+        assert!(
+            buffer
+                .pop_due(t + DEFAULT_JITTER_DELAY + AUDIO_FRAME_DURATION)
+                .is_none(),
+            "playout stays inactive after drain until a newer packet arrives"
+        );
+        assert!(buffer.push(packet(
+            call,
+            2,
+            t + DEFAULT_JITTER_DELAY + AUDIO_FRAME_DURATION
+        )));
         assert!(matches!(
-            due(&mut buffer, t + DEFAULT_JITTER_DELAY + AUDIO_FRAME_DURATION),
-            AudioPlayout::Missing { sequence: 2 }
+            due(&mut buffer, t + DEFAULT_JITTER_DELAY + 2 * AUDIO_FRAME_DURATION),
+            AudioPlayout::Packet(p) if p.sequence == 2
         ));
+        assert_eq!(buffer.len(), 0);
     }
 
     #[test]
