@@ -10250,6 +10250,7 @@ impl IcedChat {
             AppMessage::DirectoryRoomUpdate(..) => "DirectoryRoomUpdate",
             AppMessage::ToggleDetailsPanel => "ToggleDetailsPanel",
             AppMessage::ToggleMemberList => "ToggleMemberList",
+            #[cfg(not(feature = "video-playback"))]
             AppMessage::InlineVideoShowControls => "InlineVideoShowControls",
             #[cfg(feature = "terminal")]
             AppMessage::TerminalEvent(_) => "TerminalEvent",
