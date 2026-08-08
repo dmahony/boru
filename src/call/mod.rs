@@ -1,27 +1,17 @@
-//! Identity types shared by Boru's call-control and media subsystems.
+//! Identity and session types shared by Boru's call-control and media subsystems.
+
+pub mod wire;
 
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
 /// A random identity for one voice/video call.
-///
-/// Call IDs are transmitted on the wire and are intentionally independent of
-/// a peer's long-lived identity.  The call state machine should keep its own
-/// local, monotonically increasing `generation: u64` alongside the active
-/// call.  Async tasks must capture and check that generation before mutating
-/// state, so work from an earlier call cannot affect a later call reusing the
-/// same manager.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CallId([u8; 16]);
 
 impl CallId {
     /// Generate a fresh call identity using the operating system CSPRNG.
-    ///
-    /// A failure to obtain random bytes means the process cannot safely create
-    /// a call identity, so this convenience API panics rather than producing a
-    /// predictable identifier.  [`Self::try_generate`] is available to callers
-    /// that need to handle that failure explicitly.
     pub fn generate() -> Self {
         Self::try_generate().expect("OS CSPRNG unavailable for CallId")
     }
@@ -33,8 +23,7 @@ impl CallId {
         Ok(Self(bytes))
     }
 
-    /// Alias for [`Self::generate`] for call sites that construct IDs as a
-    /// value without needing to distinguish the generation operation.
+    /// Alias for [`Self::generate`].
     pub fn new() -> Self {
         Self::generate()
     }
@@ -47,8 +36,6 @@ impl CallId {
 
 impl fmt::Display for CallId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Eight bytes (16 hex characters) are enough for diagnostics while
-        // avoiding the accidental exposure of the full wire identity in logs.
         for byte in &self.0[..8] {
             write!(formatter, "{byte:02x}")?;
         }
@@ -65,16 +52,42 @@ impl fmt::Debug for CallId {
     }
 }
 
+/// The media kind enabled for a call session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CallKind {
+    /// An audio-only call.
+    Voice,
+    /// An audio and video call.
+    Video,
+}
+
+impl CallKind {
+    /// Returns whether audio is enabled for this call.
+    pub const fn audio_enabled(&self) -> bool {
+        true
+    }
+
+    /// Returns whether video is enabled for this call.
+    pub const fn video_enabled(&self) -> bool {
+        matches!(self, Self::Video)
+    }
+
+    /// Returns the user-facing label for this call kind.
+    pub const fn label(&self) -> &'static str {
+        match self {
+            Self::Voice => "Voice",
+            Self::Video => "Video",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::CallId;
+    use super::{CallId, CallKind};
 
     #[test]
     fn generated_call_ids_are_distinct() {
-        let first = CallId::generate();
-        let second = CallId::generate();
-
-        assert_ne!(first, second);
+        assert_ne!(CallId::generate(), CallId::generate());
     }
 
     #[test]
@@ -82,7 +95,20 @@ mod tests {
         let original = CallId::generate();
         let encoded = postcard::to_stdvec(&original).expect("CallId should serialize");
         let decoded: CallId = postcard::from_bytes(&encoded).expect("CallId should deserialize");
-
         assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn voice_enables_audio_only() {
+        assert!(CallKind::Voice.audio_enabled());
+        assert!(!CallKind::Voice.video_enabled());
+        assert_eq!(CallKind::Voice.label(), "Voice");
+    }
+
+    #[test]
+    fn video_enables_audio_and_video() {
+        assert!(CallKind::Video.audio_enabled());
+        assert!(CallKind::Video.video_enabled());
+        assert_eq!(CallKind::Video.label(), "Video");
     }
 }
