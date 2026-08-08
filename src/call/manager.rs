@@ -17,6 +17,7 @@ use n0_error::Result;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 
+use super::media::{media_reader, MediaDatagram, MediaReaderEvent};
 use super::wire::{
     decode_call_control, encode_call_control, v1_defaults, CallControl, HangupReason, RejectReason,
     CALL_CONTROL_VERSION, MAX_CALL_CONTROL_FRAME_SIZE,
@@ -119,6 +120,13 @@ pub enum CallEvent {
         audio_muted: bool,
         video_enabled: bool,
     },
+    MediaReceived {
+        peer: PublicKey,
+        datagram: MediaDatagram,
+    },
+    MediaMalformed {
+        peer: PublicKey,
+    },
     Stats(CallStats),
     Ended {
         call_id: CallId,
@@ -164,6 +172,10 @@ enum Command {
     },
     ConnectionClosed {
         peer: PublicKey,
+    },
+    Media {
+        peer: PublicKey,
+        event: MediaReaderEvent,
     },
     NegotiationTimeout(CallId),
 }
@@ -363,50 +375,55 @@ async fn run_actor(
                     })
                     .unwrap_or_else(|| EndpointAddr::new(peer));
                 match endpoint.connect(addr, CALL_ALPN).await {
-                    Ok(connection) => match connection.open_bi().await {
-                        Ok((send, recv)) => {
-                            let (tx, rx) = mpsc::channel(32);
-                            let reply_tx =
-                                spawn_wire_session(peer, send, recv, rx, command_tx.clone());
-                            let state = CallState {
-                                peer,
-                                kind,
-                                tx: reply_tx,
-                                incoming: false,
-                                active: false,
-                            };
-                            calls.insert(call_id, state);
-                            let _ = tx
-                                .send(CallControl::Hello {
-                                    version: CALL_CONTROL_VERSION,
-                                    call_id,
-                                })
-                                .await;
-                            let _ = tx
-                                .send(CallControl::Offer {
-                                    call_id,
+                    Ok(connection) => {
+                        let media_connection = connection.clone();
+                        match connection.open_bi().await {
+                            Ok((send, recv)) => {
+                                spawn_media_reader(media_connection, peer, command_tx.clone());
+                                let (tx, rx) = mpsc::channel(32);
+                                let reply_tx =
+                                    spawn_wire_session(peer, send, recv, rx, command_tx.clone());
+                                let state = CallState {
+                                    peer,
                                     kind,
-                                    capabilities: call_capabilities(kind),
-                                })
-                                .await;
-                            emit(&event_tx, CallEvent::OutgoingRinging { call_id, peer }).await;
-                            let timeout_tx = command_tx.clone();
-                            tokio::spawn(async move {
-                                tokio::time::sleep(NEGOTIATION_TIMEOUT).await;
-                                let _ = timeout_tx.send(Command::NegotiationTimeout(call_id)).await;
-                            });
+                                    tx: reply_tx,
+                                    incoming: false,
+                                    active: false,
+                                };
+                                calls.insert(call_id, state);
+                                let _ = tx
+                                    .send(CallControl::Hello {
+                                        version: CALL_CONTROL_VERSION,
+                                        call_id,
+                                    })
+                                    .await;
+                                let _ = tx
+                                    .send(CallControl::Offer {
+                                        call_id,
+                                        kind,
+                                        capabilities: call_capabilities(kind),
+                                    })
+                                    .await;
+                                emit(&event_tx, CallEvent::OutgoingRinging { call_id, peer }).await;
+                                let timeout_tx = command_tx.clone();
+                                tokio::spawn(async move {
+                                    tokio::time::sleep(NEGOTIATION_TIMEOUT).await;
+                                    let _ =
+                                        timeout_tx.send(Command::NegotiationTimeout(call_id)).await;
+                                });
+                            }
+                            Err(_) => {
+                                emit(
+                                    &event_tx,
+                                    CallEvent::Failed {
+                                        call_id: Some(call_id),
+                                        reason: CallError::Connection,
+                                    },
+                                )
+                                .await
+                            }
                         }
-                        Err(_) => {
-                            emit(
-                                &event_tx,
-                                CallEvent::Failed {
-                                    call_id: Some(call_id),
-                                    reason: CallError::Connection,
-                                },
-                            )
-                            .await
-                        }
-                    },
+                    }
                     Err(_) => {
                         emit(
                             &event_tx,
@@ -423,10 +440,12 @@ async fn run_actor(
                 let peer = connection.remote_id();
                 let session_tx = command_tx.clone();
                 tokio::spawn(async move {
+                    let media_connection = connection.clone();
                     let (send, recv) = match connection.accept_bi().await {
                         Ok(streams) => streams,
                         Err(_) => return,
                     };
+                    spawn_media_reader(media_connection, peer, session_tx.clone());
                     let (_tx, rx) = mpsc::channel(32);
                     let _ = spawn_wire_session(peer, send, recv, rx, session_tx);
                 });
@@ -464,6 +483,14 @@ async fn run_actor(
                     }
                 }
             }
+            Command::Media { peer, event } => match event {
+                MediaReaderEvent::Packet(datagram) => {
+                    emit(&event_tx, CallEvent::MediaReceived { peer, datagram }).await;
+                }
+                MediaReaderEvent::Malformed(_) => {
+                    emit(&event_tx, CallEvent::MediaMalformed { peer }).await;
+                }
+            },
             Command::Accept(call_id) => {
                 if let Some(state) = calls.get_mut(&call_id) {
                     let selected = negotiate_for_kind(state.kind);
@@ -739,6 +766,24 @@ fn negotiate_for_capabilities(
 
 async fn emit(events: &mpsc::Sender<CallEvent>, event: CallEvent) {
     let _ = events.send(event).await;
+}
+
+fn spawn_media_reader(connection: Connection, peer: PublicKey, command_tx: mpsc::Sender<Command>) {
+    let (media_tx, mut media_rx) = mpsc::channel(64);
+    tokio::spawn(async move {
+        media_reader(connection, media_tx).await;
+    });
+    tokio::spawn(async move {
+        while let Some(event) = media_rx.recv().await {
+            if command_tx
+                .send(Command::Media { peer, event })
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
 }
 
 fn spawn_wire_session<R, W>(

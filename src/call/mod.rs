@@ -16,6 +16,11 @@ use serde::{Deserialize, Serialize};
 pub struct CallId([u8; 16]);
 
 impl CallId {
+    /// Construct a call identity from its wire representation.
+    pub const fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+
     /// Generate a fresh call identity using the operating system CSPRNG.
     pub fn generate() -> Self {
         Self::try_generate().expect("OS CSPRNG unavailable for CallId")
