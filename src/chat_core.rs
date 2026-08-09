@@ -3380,7 +3380,7 @@ mod tests {
                 assert_eq!(profile.display_name, "alice");
                 assert_eq!(profile.bio, "hello");
                 assert!(profile.file_sharing_enabled);
-                assert!(profile.is_download_allowed());
+                assert!(profile.allow_downloads);
             }
             _ => panic!("expected ProfileUpdate"),
         }

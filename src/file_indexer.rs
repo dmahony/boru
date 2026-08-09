@@ -483,11 +483,11 @@ fn process_event_batch(
                 };
 
                 // Safety: symlink must not escape the shared folder.
-                if !crate::user_profile::UserProfile::symlink_is_safe(p, root) {
+                if !crate::path_containment::symlink_is_safe(p, root) {
                     warn!("skipping changed path outside root: {}", p.display());
                     continue;
                 }
-                if !crate::user_profile::UserProfile::is_path_contained(p, root) {
+                if !crate::path_containment::is_path_contained(p, root) {
                     warn!(
                         "skipping changed path that resolves outside shared folder: {}",
                         p.display()
@@ -562,7 +562,7 @@ fn scan_dir(root: &Path, directory: &Path, files: &mut Vec<SharedFile>) -> Resul
             Some(name) if !name.starts_with('.') => name,
             _ => continue,
         };
-        if !crate::user_profile::UserProfile::symlink_is_safe(&path, root) {
+        if !crate::path_containment::symlink_is_safe(&path, root) {
             warn!(
                 "skipping shared-folder path outside root: {}",
                 path.display()
@@ -622,7 +622,7 @@ fn scan_dir_with_profile_checks(
             _ => continue,
         };
         // Security: symlink must not escape the shared folder.
-        if !crate::user_profile::UserProfile::symlink_is_safe(&path, root) {
+        if !crate::path_containment::symlink_is_safe(&path, root) {
             warn!(
                 "skipping shared-folder path outside root: {}",
                 path.display()
@@ -630,7 +630,7 @@ fn scan_dir_with_profile_checks(
             continue;
         }
         // Security: path must resolve inside the shared folder.
-        if !crate::user_profile::UserProfile::is_path_contained(&path, root) {
+        if !crate::path_containment::is_path_contained(&path, root) {
             warn!(
                 "skipping path that resolves outside shared folder: {}",
                 path.display()
@@ -657,20 +657,20 @@ fn scan_dir_with_profile_checks(
                 .unwrap_or_default()
                 .to_lowercase();
 
-            let over_limit = metadata.len() > profile.max_file_size;
-            let extension_blocked = if !profile.allowed_extensions.is_empty() {
-                !profile
-                    .allowed_extensions
-                    .iter()
-                    .any(|a| a.eq_ignore_ascii_case(&ext))
-            } else {
-                false
-            };
+            // Single canonical size + extension admission policy
+            // (BORU-AUDIT-20).  The indexer used to re-implement this rule
+            // inline; it now delegates to file_policy::admission.
+            let admission = crate::file_policy::admission(
+                metadata.len(),
+                &ext,
+                profile.max_file_size,
+                &profile.allowed_extensions,
+            );
 
             let mut file = SharedFile::new(name, metadata.len(), mime_type(&path), modified_time);
             file.path = path;
-            file.over_limit = over_limit;
-            file.extension_blocked = extension_blocked;
+            file.over_limit = admission.over_limit;
+            file.extension_blocked = admission.extension_blocked;
             files.push(file);
         }
     }
@@ -998,5 +998,69 @@ mod tests {
             ..Event::default()
         };
         assert!(affects_directories(&[rename_event]));
+    }
+
+    /// The indexer's size/extension flags must come from the single canonical
+    /// [`crate::file_policy::admission`] rule (BORU-AUDIT-20).  If someone
+    /// re-introduces an inline copy that disagrees with the canonical rule,
+    /// this test fails.
+    #[test]
+    fn profile_scan_flags_match_canonical_file_policy() {
+        use crate::user_profile::UserProfile;
+
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("ok.txt"), b"small").unwrap();
+        fs::write(dir.path().join("big.bin"), vec![0u8; 4096]).unwrap();
+        fs::write(dir.path().join("blocked.exe"), b"x").unwrap();
+        fs::write(dir.path().join("mixed.JPG"), vec![0u8; 4096]).unwrap();
+
+        let mut profile = UserProfile::new(
+            iroh::PublicKey::from_bytes(&[1u8; 32])
+                .expect("32 one-bytes is a valid ed25519 public key"),
+        );
+        profile.file_sharing_enabled = true;
+        profile.max_file_size = 1024;
+        profile.allowed_extensions = vec!["txt".into(), "jpg".into()];
+
+        let files = scan_folder_with_profile(dir.path(), &profile).unwrap();
+        assert_eq!(files.len(), 4);
+
+        for file in &files {
+            let ext = file
+                .path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or_default()
+                .to_lowercase();
+            let canonical = crate::file_policy::admission(
+                file.size,
+                &ext,
+                profile.max_file_size,
+                &profile.allowed_extensions,
+            );
+            assert_eq!(
+                file.over_limit, canonical.over_limit,
+                "over_limit mismatch for {}",
+                file.filename
+            );
+            assert_eq!(
+                file.extension_blocked, canonical.extension_blocked,
+                "extension_blocked mismatch for {}",
+                file.filename
+            );
+        }
+
+        // Spot-check each file:
+        // - ok.txt: in limits, allowed extension → announceable.
+        // - big.bin: over limit → not announceable.
+        // - blocked.exe: blocked extension → not announceable.
+        // - mixed.JPG: over limit AND extension allowed case-insensitively.
+        let by_name = |name: &str| files.iter().find(|f| f.filename == name).unwrap();
+        assert!(by_name("ok.txt").is_announceable());
+        assert!(!by_name("big.bin").is_announceable());
+        assert!(!by_name("blocked.exe").is_announceable());
+        assert!(!by_name("mixed.JPG").is_announceable());
+        assert!(by_name("mixed.JPG").over_limit);
+        assert!(!by_name("mixed.JPG").extension_blocked);
     }
 }

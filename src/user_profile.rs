@@ -156,105 +156,6 @@ impl UserProfile {
         }
     }
 
-    /// Check whether a file with the given size and extension may be
-    /// announced (published in a `ProfileUpdate`).
-    ///
-    /// Returns `Ok(())` if the file passes all filters, or `Err` with a
-    /// human-readable reason string describing the first violation.
-    ///
-    /// Checks performed:
-    /// - `file_sharing_enabled` must be `true`
-    /// - File size must be ≤ `max_file_size`
-    /// - If `allowed_extensions` is non-empty, the extension must be in it
-    pub fn is_file_announce_allowed(
-        &self,
-        size: u64,
-        extension: &str,
-    ) -> std::result::Result<(), String> {
-        if !self.file_sharing_enabled {
-            return Err("File sharing is disabled".into());
-        }
-        if size > self.max_file_size {
-            return Err(format!(
-                "File size ({} bytes) exceeds the maximum ({})",
-                size, self.max_file_size
-            ));
-        }
-        if !self.allowed_extensions.is_empty() {
-            let ext = extension.trim().trim_start_matches('.').to_lowercase();
-            let allowed: Vec<&str> = self.allowed_extensions.iter().map(|s| s.trim()).collect();
-            if !allowed.contains(&ext.as_str()) {
-                return Err(format!(
-                    "File extension '.{ext}' is not in the allowed list: {}",
-                    self.allowed_extensions.join(", ")
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    /// Validate that `path` is contained within `root` (after canonicalization).
-    ///
-    /// Returns `true` if the canonical path of `path` starts with the
-    /// canonical path of `root`, meaning the file is inside the shared folder.
-    pub fn is_path_contained(path: &Path, root: &Path) -> bool {
-        let canonical = match path.canonicalize() {
-            Ok(p) => p,
-            Err(_) => return false,
-        };
-        let root_canonical = match root.canonicalize() {
-            Ok(r) => r,
-            Err(_) => return false,
-        };
-        canonical.starts_with(&root_canonical)
-    }
-
-    /// Check that a symlink at `path` does not escape the shared `root` folder.
-    ///
-    /// If `path` is not a symlink, this returns `true` (allowed by default).
-    /// If it *is* a symlink, we resolve its target and check containment.
-    pub fn symlink_is_safe(path: &Path, root: &Path) -> bool {
-        let meta = match std::fs::symlink_metadata(path) {
-            Ok(m) => m,
-            Err(_) => return false,
-        };
-        if !meta.is_symlink() {
-            return true; // not a symlink — nothing to escape
-        }
-        let target = match std::fs::read_link(path) {
-            Ok(t) => t,
-            Err(_) => return false,
-        };
-        let resolved = if target.is_absolute() {
-            target
-        } else {
-            // Relative target: resolve against the symlink's parent directory
-            path.parent().unwrap_or(Path::new(".")).join(&target)
-        };
-        Self::is_path_contained(&resolved, root)
-    }
-
-    /// Validate a filename received from a peer.
-    ///
-    /// Rejects filenames that contain path separators (preventing path
-    /// traversal on the receiving side).
-    pub fn validate_received_filename(filename: &str) -> std::result::Result<(), String> {
-        if filename.is_empty() {
-            return Err("Received empty filename".into());
-        }
-        if filename.contains('/') || filename.contains('\\') {
-            return Err(format!(
-                "Received filename contains path separator: {filename:?}"
-            ));
-        }
-        if filename == "." || filename == ".." {
-            return Err(format!(
-                "Received filename is a directory reference: {filename:?}"
-            ));
-        }
-        Ok(())
-    }
-
     /// File name for the on-disk profile JSON.
     pub const FILE_NAME: &'static str = PROFILE_FILE_NAME;
 
@@ -279,31 +180,6 @@ impl UserProfile {
     /// attempting to announce or transfer files.
     pub fn is_sharing_enabled(&self) -> bool {
         self.file_sharing_enabled
-    }
-
-    /// Returns `true` if other peers are allowed to download our shared files.
-    pub fn is_download_allowed(&self) -> bool {
-        self.allow_downloads
-    }
-
-    /// Check whether a file at `path` is allowed by the current profile
-    /// sharing constraints (size ≤ `max_file_size` and extension in the
-    /// allowed list, or no list = all allowed).
-    ///
-    /// Reads the file's metadata from disk (size only — contents are not read).
-    /// Returns `Ok(())` if the file passes all checks, or `Err` with a
-    /// human-readable reason on the first violation.
-    pub fn is_file_allowed(&self, path: &Path) -> std::result::Result<(), String> {
-        let metadata = match std::fs::metadata(path) {
-            Ok(m) => m,
-            Err(e) => return Err(format!("Cannot read file metadata: {e}")),
-        };
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or_default()
-            .to_lowercase();
-        self.is_file_announce_allowed(metadata.len(), &ext)
     }
 
     /// Convenience: load the profile from a data directory, extracting just
@@ -738,17 +614,6 @@ impl UserProfileStore {
     }
 }
 
-/// Check whether a file can be announced given profile settings.
-///
-/// Delegates to [`UserProfile::is_file_announce_allowed`].
-pub fn check_file_announce_allowed(
-    profile: &UserProfile,
-    size: u64,
-    extension: &str,
-) -> std::result::Result<(), String> {
-    profile.is_file_announce_allowed(size, extension)
-}
-
 // ── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1039,66 +904,6 @@ mod tests {
     }
 
     #[test]
-    fn is_file_announce_allowed_returns_ok_when_enabled_and_in_limits() {
-        let mut profile = UserProfile::new(test_key());
-        profile.file_sharing_enabled = true;
-        profile.max_file_size = 1024;
-        profile.allowed_extensions = vec!["txt".into(), "jpg".into()];
-
-        assert!(profile.is_file_announce_allowed(512, "txt").is_ok());
-        assert!(profile.is_file_announce_allowed(512, ".txt").is_ok());
-        assert!(profile.is_file_announce_allowed(512, "jpg").is_ok());
-    }
-
-    #[test]
-    fn is_file_announce_allowed_rejects_when_disabled() {
-        let mut profile = UserProfile::new(test_key());
-        profile.file_sharing_enabled = false; // default is false
-        let err = profile.is_file_announce_allowed(100, "txt").unwrap_err();
-        assert!(err.contains("disabled"), "error: {err}");
-    }
-
-    #[test]
-    fn is_file_announce_allowed_rejects_over_max_size() {
-        let mut profile = UserProfile::new(test_key());
-        profile.file_sharing_enabled = true;
-        profile.max_file_size = 100;
-        let err = profile.is_file_announce_allowed(200, "txt").unwrap_err();
-        assert!(err.contains("exceeds"), "error: {err}");
-    }
-
-    #[test]
-    fn is_file_announce_allowed_rejects_blocked_extension() {
-        let mut profile = UserProfile::new(test_key());
-        profile.file_sharing_enabled = true;
-        profile.allowed_extensions = vec!["pdf".into()];
-        let err = profile.is_file_announce_allowed(100, "jpg").unwrap_err();
-        assert!(err.contains("not in the allowed list"), "error: {err}");
-    }
-
-    #[test]
-    fn is_file_announce_allowed_empty_extensions_allows_all() {
-        let mut profile = UserProfile::new(test_key());
-        profile.file_sharing_enabled = true;
-        profile.allowed_extensions = vec![]; // empty = all allowed
-        assert!(profile.is_file_announce_allowed(100, "exe").is_ok());
-        assert!(profile.is_file_announce_allowed(100, "zip").is_ok());
-    }
-
-    #[test]
-    fn validate_received_filename_rejects_path_separators() {
-        assert!(UserProfile::validate_received_filename("safe.txt").is_ok());
-        assert!(UserProfile::validate_received_filename("safe_file.name").is_ok());
-
-        assert!(UserProfile::validate_received_filename("../outside.txt").is_err());
-        assert!(UserProfile::validate_received_filename("sub/file.txt").is_err());
-        assert!(UserProfile::validate_received_filename("sub\\file.txt").is_err());
-        assert!(UserProfile::validate_received_filename(".").is_err());
-        assert!(UserProfile::validate_received_filename("..").is_err());
-        assert!(UserProfile::validate_received_filename("").is_err());
-    }
-
-    #[test]
     fn over_limit_and_extension_blocked_flags_on_shared_file() {
         let now = SystemTime::now();
         let mut over = SharedFile::new("big.txt", 999, "text/plain", now);
@@ -1113,167 +918,11 @@ mod tests {
     }
 
     #[test]
-    fn is_path_contained_accepts_same_directory() {
-        let dir = tempfile::tempdir().unwrap();
-        let file_path = dir.path().join("test.txt");
-        std::fs::write(&file_path, b"data").unwrap();
-        assert!(UserProfile::is_path_contained(&file_path, dir.path()));
-    }
-
-    #[test]
-    fn is_path_contained_rejects_outside_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let outside = std::env::temp_dir().join("outside.txt");
-        // The outside path doesn't exist, so canonicalize will fail
-        assert!(!UserProfile::is_path_contained(&outside, dir.path()));
-    }
-
-    #[test]
-    fn symlink_inside_shared_folder_is_safe() {
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("real.txt");
-        std::fs::write(&target, b"data").unwrap();
-        let link = dir.path().join("link.txt");
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&target, &link).unwrap();
-        let safe = UserProfile::symlink_is_safe(&link, dir.path());
-        assert!(safe);
-    }
-
-    #[test]
-    fn symlink_outside_shared_folder_is_unsafe() {
-        let dir = tempfile::tempdir().unwrap();
-        let outside = std::env::temp_dir().join("outside_ref.txt");
-        std::fs::write(&outside, b"data").unwrap_or(());
-        let link = dir.path().join("escape.txt");
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&outside, &link).unwrap();
-        let safe = UserProfile::symlink_is_safe(&link, dir.path());
-        // Only meaningful on unix where symlinks work
-        #[cfg(unix)]
-        assert!(!safe);
-    }
-
-    #[test]
     fn is_sharing_enabled_returns_file_sharing_enabled() {
         let mut profile = UserProfile::new(test_key());
         assert!(!profile.is_sharing_enabled());
         profile.file_sharing_enabled = true;
         assert!(profile.is_sharing_enabled());
-    }
-
-    #[test]
-    fn is_download_allowed_returns_allow_downloads() {
-        let mut profile = UserProfile::new(test_key());
-        assert!(!profile.is_download_allowed());
-        profile.allow_downloads = true;
-        assert!(profile.is_download_allowed());
-    }
-
-    #[test]
-    fn is_file_allowed_ok_when_sharing_enabled_and_in_limits() {
-        let dir = tempfile::tempdir().unwrap();
-        let file_path = dir.path().join("photo.jpg");
-        std::fs::write(&file_path, b"small jpeg data").unwrap();
-
-        let mut profile = UserProfile::new(test_key());
-        profile.file_sharing_enabled = true;
-        profile.max_file_size = 1024 * 1024; // 1 MB
-        profile.allowed_extensions = vec!["jpg".into(), "png".into()];
-
-        assert!(profile.is_file_allowed(&file_path).is_ok());
-    }
-
-    #[test]
-    fn is_file_allowed_rejects_when_disabled() {
-        let dir = tempfile::tempdir().unwrap();
-        let file_path = dir.path().join("photo.jpg");
-        std::fs::write(&file_path, b"data").unwrap();
-
-        let profile = UserProfile::new(test_key()); // file_sharing_enabled = false
-        let err = profile.is_file_allowed(&file_path).unwrap_err();
-        assert!(err.contains("disabled"), "error: {err}");
-    }
-
-    #[test]
-    fn is_file_allowed_rejects_over_max_size() {
-        let dir = tempfile::tempdir().unwrap();
-        let file_path = dir.path().join("data.bin");
-        std::fs::write(&file_path, vec![0u8; 1000]).unwrap();
-
-        let mut profile = UserProfile::new(test_key());
-        profile.file_sharing_enabled = true;
-        profile.max_file_size = 500;
-        let err = profile.is_file_allowed(&file_path).unwrap_err();
-        assert!(err.contains("exceeds"), "error: {err}");
-    }
-
-    #[test]
-    fn is_file_allowed_rejects_blocked_extension() {
-        let dir = tempfile::tempdir().unwrap();
-        let file_path = dir.path().join("script.exe");
-        std::fs::write(&file_path, b"fake exe").unwrap();
-
-        let mut profile = UserProfile::new(test_key());
-        profile.file_sharing_enabled = true;
-        profile.allowed_extensions = vec!["pdf".into(), "txt".into()];
-        let err = profile.is_file_allowed(&file_path).unwrap_err();
-        assert!(err.contains("not in the allowed list"), "error: {err}");
-    }
-
-    #[test]
-    fn is_file_allowed_empty_extensions_allows_all() {
-        let dir = tempfile::tempdir().unwrap();
-        let file_path = dir.path().join("some.unknown");
-        std::fs::write(&file_path, b"data").unwrap();
-
-        let mut profile = UserProfile::new(test_key());
-        profile.file_sharing_enabled = true;
-        profile.allowed_extensions = vec![]; // empty = all allowed
-        assert!(profile.is_file_allowed(&file_path).is_ok());
-    }
-
-    #[test]
-    fn is_file_allowed_nonexistent_path_returns_err() {
-        let profile = UserProfile::new(test_key());
-        let err = profile
-            .is_file_allowed(&PathBuf::from("/nonexistent/file.txt"))
-            .unwrap_err();
-        assert!(err.contains("Cannot read file metadata"), "error: {err}");
-    }
-
-    #[test]
-    fn is_file_allowed_empty_extension_allowed_when_list_empty() {
-        let dir = tempfile::tempdir().unwrap();
-        let file_path = dir.path().join("noext");
-        std::fs::write(&file_path, b"data").unwrap();
-
-        let mut profile = UserProfile::new(test_key());
-        profile.file_sharing_enabled = true;
-        profile.allowed_extensions = vec![]; // empty = all allowed
-        assert!(profile.is_file_allowed(&file_path).is_ok());
-    }
-
-    #[test]
-    fn is_file_allowed_empty_extension_blocked_when_list_nonempty() {
-        let dir = tempfile::tempdir().unwrap();
-        let file_path = dir.path().join("noext");
-        std::fs::write(&file_path, b"data").unwrap();
-
-        let mut profile = UserProfile::new(test_key());
-        profile.file_sharing_enabled = true;
-        profile.allowed_extensions = vec!["txt".into()];
-        let err = profile.is_file_allowed(&file_path).unwrap_err();
-        assert!(err.contains("not in the allowed list"), "error: {err}");
-    }
-
-    #[test]
-    fn check_file_announce_allowed_free_function() {
-        let mut profile = UserProfile::new(test_key());
-        profile.file_sharing_enabled = true;
-        profile.max_file_size = 1024;
-        assert!(check_file_announce_allowed(&profile, 512, "txt").is_ok());
-        assert!(check_file_announce_allowed(&profile, 2048, "txt").is_err());
     }
 
     #[test]

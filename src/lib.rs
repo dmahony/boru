@@ -276,6 +276,15 @@ pub mod local_service_scan;
 #[cfg(feature = "net")]
 pub mod user_profile;
 
+/// Canonical file-admission policy: size limits and extension allowlists.
+///
+/// The single authoritative implementation of the "may this file be
+/// shared/announced?" gate.  All intake boundaries must call
+/// [`file_policy::admission`] instead of re-implementing the rule inline
+/// (BORU-AUDIT-20).
+#[cfg(feature = "net")]
+pub mod file_policy;
+
 /// Remote-safe representation of shared file entries for wire transfer.
 #[cfg(feature = "net")]
 pub mod catalogue_model;
