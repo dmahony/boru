@@ -1,9 +1,23 @@
 # app.rs Module Map (BORU-AUDIT-22)
 
-Status: work in progress — this document is the module map produced before the
+Status: in progress — this document is the module map produced before the
 decomposition started (spec step 1). It records the pre-refactor structure of
 `examples/iced_chat/app.rs` (54,101 lines, ~2.4 MB) so extractions can be
 verified against a stable baseline.
+
+## Extraction progress (branch wt/t_08debaa8)
+
+| Commit | Extraction | app.rs before → after |
+|---|---|---|
+| 27893331 | home screen (rail cards + chat-list) → `app/home.rs` | 54,101 → 52,625 |
+| 12e87eff | sidebar (chats/groups/friends/discover/rooms/requests) → `app/sidebar.rs` | 52,625 → 50,532 |
+| 0888c101 | fix: sidebar snapshot fields pub(crate) + stale UI-HOME-10 test | — |
+| ce1e87c5 | settings screen → `app/settings.rs` | 50,532 → 49,320 |
+| 77dd716b | friend requests screen → `app/contacts.rs` | 49,320 → 48,980 |
+
+Remaining per plan: file sharing dashboard → `app/files.rs`, chat log/composer
+→ `app/chat.rs`, then feature state structs / feature-local messages
+(spec steps 4–6) and per-feature subscriptions (spec step 7).
 
 ## Overview
 
