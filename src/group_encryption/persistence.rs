@@ -33,7 +33,9 @@
 //!   missing or corrupt.
 //! - [`GroupStateLoadError::Io`] — an underlying database failure.
 
-use rusqlite::{params, Connection};
+use std::collections::HashMap;
+
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use p2panda_encryption::message_scheme::group::MessageGroup;
 use serde::{Deserialize, Serialize};
@@ -153,12 +155,16 @@ impl std::error::Error for GroupStateLoadError {
 ///
 /// Serialises `state` with postcard inside a versioned envelope and writes it
 /// into the `group_encryption_state` table.  Uses INSERT OR REPLACE so
-/// repeated saves for the same group are always idempotent.
+/// repeated saves for the same group are always idempotent.  The row's
+/// optimistic-concurrency `version` column (if present) is preserved on
+/// update; use [`save_group_state_and_roles`] for transactional writes that
+/// also bump the version.
 pub fn save_group_state(
     conn: &Connection,
     group_id: &GroupId,
     state: &GroupEncryptionState,
 ) -> rusqlite::Result<()> {
+    ensure_version_column(conn)?;
     let blob =
         encode_envelope(state).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
     let now = std::time::SystemTime::now()
@@ -167,10 +173,236 @@ pub fn save_group_state(
         .as_millis() as i64;
 
     conn.execute(
-        "INSERT OR REPLACE INTO group_encryption_state (group_id, state, updated_at) VALUES (?1, ?2, ?3)",
+        "INSERT INTO group_encryption_state (group_id, state, updated_at, version) VALUES (?1, ?2, ?3, 1) \
+         ON CONFLICT(group_id) DO UPDATE SET state=excluded.state, updated_at=excluded.updated_at",
         params![group_id.as_bytes().as_slice(), blob, now],
     )?;
     Ok(())
+}
+
+// ── Transactional group-state writes (BORU-AUDIT-09) ──────────────────
+//
+// Membership/role changes and the encrypted group state must commit as ONE
+// logical transaction.  `save_group_state_and_roles` owns that boundary:
+// it starts a single SQLite transaction, performs an optimistic-concurrency
+// version check against the caller's `expected_version` (so two concurrent
+// epoch operations cannot both commit from the same prior state), writes the
+// role mirror, writes the new encrypted state, and commits.  On any failure
+// the transaction rolls back completely — no partial membership/crypto state
+// can leak to disk.
+
+/// Deterministic failures used to verify group-auth transaction rollback.
+///
+/// Mirrors the [`crate::storage::OutgoingDmFault`] pattern: tests inject a
+/// fault at a precise point inside the transaction and assert that *nothing*
+/// was committed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupAuthFault {
+    /// Fail after the membership/roles row is written but before the
+    /// crypto-state row is written.
+    AfterMembershipWrite,
+    /// Fail after the crypto-state row is written but before commit.
+    AfterCryptoStateWrite,
+}
+
+/// Errors from a transactional group-auth write.
+#[derive(Debug)]
+pub enum GroupAuthTxError {
+    /// The stored version does not match the caller's expected version —
+    /// a concurrent operation committed first.  The caller must reload
+    /// authoritative state and retry (or surface the conflict).
+    VersionConflict {
+        /// The version the caller believed was current.
+        expected: u64,
+        /// The version actually stored when the transaction began.
+        current: u64,
+    },
+    /// Underlying database failure.
+    Io(rusqlite::Error),
+}
+
+impl std::fmt::Display for GroupAuthTxError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GroupAuthTxError::VersionConflict { expected, current } => write!(
+                f,
+                "group auth version conflict: expected {expected}, stored {current} (concurrent mutation)"
+            ),
+            GroupAuthTxError::Io(e) => write!(f, "group auth database error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for GroupAuthTxError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            GroupAuthTxError::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+/// Ensure the `group_encryption_state` table carries the optimistic-
+/// concurrency `version` column.  Older databases created by migration v13
+/// lack the column; adding it lazily (idempotently) keeps the transaction
+/// layer working without a full schema migration.  The column defaults to 0
+/// for pre-existing rows.
+fn ensure_version_column(conn: &Connection) -> rusqlite::Result<()> {
+    match conn.execute_batch(
+        "ALTER TABLE group_encryption_state ADD COLUMN version INTEGER NOT NULL DEFAULT 0;",
+    ) {
+        Ok(()) => Ok(()),
+        // Already present (new DBs or repeated calls) — harmless.
+        Err(e) if e.to_string().contains("duplicate column") => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Read the current optimistic-concurrency version for a group (0 when the
+/// group has no persisted state row yet).
+pub fn load_group_version(conn: &Connection, group_id: &GroupId) -> Result<u64, GroupAuthTxError> {
+    // Older DBs created by migration v13 lack the version column; add it
+    // lazily so the read is safe on both old and new schemas.
+    ensure_version_column(conn).map_err(GroupAuthTxError::Io)?;
+    let version: i64 = conn
+        .query_row(
+            "SELECT version FROM group_encryption_state WHERE group_id = ?1",
+            params![group_id.as_bytes().as_slice()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(GroupAuthTxError::Io)?
+        .unwrap_or(0);
+    Ok(version as u64)
+}
+
+/// Transactional write of membership/roles + encrypted group state.
+///
+/// One transaction: optimistic version check, role mirror upsert, encrypted
+/// state upsert (bumping `version`), commit.  On any error the transaction
+/// rolls back and the group's persisted state is untouched.
+///
+/// Returns the new version on success.
+pub fn save_group_state_and_roles(
+    conn: &mut Connection,
+    group_id: &GroupId,
+    state: &GroupEncryptionState,
+    roles: &HashMap<PeerId, MemberRole>,
+    self_id: Option<PeerId>,
+    expected_version: u64,
+) -> Result<u64, GroupAuthTxError> {
+    save_group_state_and_roles_inner(
+        conn,
+        group_id,
+        state,
+        roles,
+        self_id,
+        expected_version,
+        None,
+    )
+}
+
+/// Test-only fault-injecting variant of [`save_group_state_and_roles`].
+pub fn save_group_state_and_roles_with_fault(
+    conn: &mut Connection,
+    group_id: &GroupId,
+    state: &GroupEncryptionState,
+    roles: &HashMap<PeerId, MemberRole>,
+    self_id: Option<PeerId>,
+    expected_version: u64,
+    fault: GroupAuthFault,
+) -> Result<u64, GroupAuthTxError> {
+    save_group_state_and_roles_inner(
+        conn,
+        group_id,
+        state,
+        roles,
+        self_id,
+        expected_version,
+        Some(fault),
+    )
+}
+
+fn save_group_state_and_roles_inner(
+    conn: &mut Connection,
+    group_id: &GroupId,
+    state: &GroupEncryptionState,
+    roles: &HashMap<PeerId, MemberRole>,
+    self_id: Option<PeerId>,
+    expected_version: u64,
+    fault: Option<GroupAuthFault>,
+) -> Result<u64, GroupAuthTxError> {
+    // Ensure the version column exists (idempotent; older DBs lack it).
+    ensure_version_column(conn).map_err(GroupAuthTxError::Io)?;
+
+    // BEGIN — one transaction owns the whole mutation.
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(GroupAuthTxError::Io)?;
+
+    // Optimistic concurrency: the caller must be committing from the same
+    // version it loaded.  A concurrent epoch operation that already bumped
+    // the version makes this write fail instead of silently forking state.
+    let current: i64 = tx
+        .query_row(
+            "SELECT version FROM group_encryption_state WHERE group_id = ?1",
+            params![group_id.as_bytes().as_slice()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(GroupAuthTxError::Io)?
+        .unwrap_or(0);
+    if current as u64 != expected_version {
+        return Err(GroupAuthTxError::VersionConflict {
+            expected: expected_version,
+            current: current as u64,
+        });
+    }
+    let new_version = current + 1;
+
+    // 1. Membership/roles row (authorization state).
+    tx.execute_batch(ROLES_TABLE_SQL)
+        .map_err(GroupAuthTxError::Io)?;
+    let roles_blob = postcard::to_stdvec(roles)
+        .map_err(|e| GroupAuthTxError::Io(rusqlite::Error::ToSqlConversionFailure(Box::new(e))))?;
+    tx.execute(
+        "INSERT OR REPLACE INTO group_encryption_roles (group_id, roles, self_id) VALUES (?1, ?2, ?3)",
+        params![
+            group_id.as_bytes().as_slice(),
+            roles_blob,
+            self_id.map(|p| p.0.as_bytes().to_vec())
+        ],
+    )
+    .map_err(GroupAuthTxError::Io)?;
+
+    if fault == Some(GroupAuthFault::AfterMembershipWrite) {
+        return Err(GroupAuthTxError::Io(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(1),
+            Some("injected fault: after membership write".into()),
+        )));
+    }
+
+    // 2. Encrypted group state (crypto state), version bumped.
+    let blob = encode_envelope(state)
+        .map_err(|e| GroupAuthTxError::Io(rusqlite::Error::ToSqlConversionFailure(Box::new(e))))?;
+    let now = now_ms();
+    tx.execute(
+        "INSERT INTO group_encryption_state (group_id, state, updated_at, version) VALUES (?1, ?2, ?3, ?4) \
+         ON CONFLICT(group_id) DO UPDATE SET state=excluded.state, updated_at=excluded.updated_at, version=excluded.version",
+        params![group_id.as_bytes().as_slice(), blob, now, new_version],
+    )
+    .map_err(GroupAuthTxError::Io)?;
+
+    if fault == Some(GroupAuthFault::AfterCryptoStateWrite) {
+        return Err(GroupAuthTxError::Io(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(1),
+            Some("injected fault: after crypto-state write".into()),
+        )));
+    }
+
+    // COMMIT — only now is the new state visible.
+    tx.commit().map_err(GroupAuthTxError::Io)?;
+    Ok(new_version as u64)
 }
 
 // ── Role mirror persistence ─────────────────────────────────────────────
@@ -1015,5 +1247,200 @@ mod tests {
             load_group_roles(&conn, &group_id).unwrap().is_none(),
             "no roles for unknown group"
         );
+    }
+
+    // ── Transactional group-auth tests (BORU-AUDIT-09) ────────────────
+
+    /// Helper: create the state table exactly as migration v13 does (no
+    /// version column) and return a mutable connection for transactional
+    /// writes.
+    fn make_tx_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS group_encryption_state (
+                group_id BLOB PRIMARY KEY,
+                state BLOB NOT NULL,
+                updated_at INTEGER NOT NULL
+            );",
+        )
+        .unwrap();
+        conn
+    }
+
+    /// `save_group_state_and_roles` commits BOTH the role mirror and the
+    /// encrypted state in one transaction and bumps the version.
+    #[test]
+    fn test_tx_commits_state_and_roles_and_bumps_version() {
+        let mut conn = make_tx_conn();
+        let (group_id, state) = make_test_state();
+        let (roles, self_id) = make_roles();
+
+        let v1 = save_group_state_and_roles(&mut conn, &group_id, &state, &roles, Some(self_id), 0)
+            .expect("first transactional write");
+        assert_eq!(v1, 1, "fresh group commits at version 1");
+
+        let v2 =
+            save_group_state_and_roles(&mut conn, &group_id, &state, &roles, Some(self_id), v1)
+                .expect("second transactional write");
+        assert_eq!(v2, 2, "second write bumps to version 2");
+
+        assert_eq!(load_group_version(&conn, &group_id).unwrap(), 2);
+        let loaded_state = load_group_state(&conn, &group_id).expect("state persisted");
+        assert!(
+            MessageGroup::members(&loaded_state).is_ok(),
+            "persisted state still decodes"
+        );
+        let loaded_roles = load_group_roles(&conn, &group_id)
+            .unwrap()
+            .expect("roles persisted");
+        assert_eq!(loaded_roles.0, roles, "role mirror persisted");
+        assert_eq!(loaded_roles.1, Some(self_id), "self id persisted");
+    }
+
+    /// Injecting a failure after the membership write but before the
+    /// crypto-state write rolls the transaction back COMPLETELY: neither the
+    /// role mirror nor the encrypted state is persisted.
+    #[test]
+    fn test_tx_fault_after_membership_write_rolls_back_completely() {
+        let mut conn = make_tx_conn();
+        let (group_id, state) = make_test_state();
+        let (roles, self_id) = make_roles();
+
+        let err = save_group_state_and_roles_with_fault(
+            &mut conn,
+            &group_id,
+            &state,
+            &roles,
+            Some(self_id),
+            0,
+            GroupAuthFault::AfterMembershipWrite,
+        )
+        .expect_err("injected fault must fail the transaction");
+
+        assert!(
+            matches!(err, GroupAuthTxError::Io(_)),
+            "fault surfaces as Io error, got: {err:?}"
+        );
+
+        // No partial state: the group still loads as Missing and roles are
+        // absent — the membership write was rolled back.
+        assert!(
+            matches!(
+                load_group_state(&conn, &group_id),
+                Err(GroupStateLoadError::Missing)
+            ),
+            "crypto state must NOT exist after rollback"
+        );
+        assert!(
+            load_group_roles(&conn, &group_id).unwrap().is_none(),
+            "role mirror must NOT exist after rollback"
+        );
+    }
+
+    /// Injecting a failure after the crypto-state write but before commit
+    /// also rolls the transaction back completely.
+    #[test]
+    fn test_tx_fault_after_crypto_state_write_rolls_back_completely() {
+        let mut conn = make_tx_conn();
+        let (group_id, state) = make_test_state();
+        let (roles, self_id) = make_roles();
+
+        let err = save_group_state_and_roles_with_fault(
+            &mut conn,
+            &group_id,
+            &state,
+            &roles,
+            Some(self_id),
+            0,
+            GroupAuthFault::AfterCryptoStateWrite,
+        )
+        .expect_err("injected fault must fail the transaction");
+
+        assert!(
+            matches!(err, GroupAuthTxError::Io(_)),
+            "fault surfaces as Io error, got: {err:?}"
+        );
+
+        assert!(
+            matches!(
+                load_group_state(&conn, &group_id),
+                Err(GroupStateLoadError::Missing)
+            ),
+            "crypto state must NOT exist after rollback"
+        );
+        assert!(
+            load_group_roles(&conn, &group_id).unwrap().is_none(),
+            "role mirror must NOT exist after rollback"
+        );
+    }
+
+    /// A stale expected version (concurrent mutation already committed) is
+    /// rejected: no write happens and the stored version is untouched.
+    #[test]
+    fn test_tx_version_conflict_rejects_stale_writer() {
+        let mut conn = make_tx_conn();
+        let (group_id, state) = make_test_state();
+        let (roles, self_id) = make_roles();
+
+        save_group_state_and_roles(&mut conn, &group_id, &state, &roles, Some(self_id), 0)
+            .expect("first write at v0");
+
+        // Second writer still believes the base version is 0 → conflict.
+        let err =
+            save_group_state_and_roles(&mut conn, &group_id, &state, &roles, Some(self_id), 0)
+                .expect_err("stale expected version must conflict");
+        match err {
+            GroupAuthTxError::VersionConflict {
+                expected: 0,
+                current: 1,
+            } => {}
+            other => panic!("expected VersionConflict{{expected:0,current:1}}, got: {other:?}"),
+        }
+
+        assert_eq!(
+            load_group_version(&conn, &group_id).unwrap(),
+            1,
+            "stored version must remain at the committed value"
+        );
+    }
+
+    /// A failed transaction preserves the previously committed state: the
+    /// rollback leaves the old state + roles fully intact and loadable.
+    #[test]
+    fn test_tx_fault_preserves_prior_committed_state() {
+        let mut conn = make_tx_conn();
+        let (group_id, state) = make_test_state();
+        let (roles, self_id) = make_roles();
+
+        // Commit a base version.
+        save_group_state_and_roles(&mut conn, &group_id, &state, &roles, Some(self_id), 0)
+            .expect("base write");
+
+        // Attempt a mutation that fails after the membership write.
+        let (roles2, self_id2) = make_roles();
+        let err = save_group_state_and_roles_with_fault(
+            &mut conn,
+            &group_id,
+            &state,
+            &roles2,
+            Some(self_id2),
+            1,
+            GroupAuthFault::AfterMembershipWrite,
+        )
+        .expect_err("injected fault must fail");
+        assert!(matches!(err, GroupAuthTxError::Io(_)));
+
+        // The prior committed state is still fully intact.
+        assert_eq!(load_group_version(&conn, &group_id).unwrap(), 1);
+        let loaded_state = load_group_state(&conn, &group_id).expect("prior state preserved");
+        assert!(
+            MessageGroup::members(&loaded_state).is_ok(),
+            "prior crypto state still decodes"
+        );
+        let loaded_roles = load_group_roles(&conn, &group_id)
+            .unwrap()
+            .expect("prior roles preserved");
+        assert_eq!(loaded_roles.0, roles, "prior role mirror preserved");
+        assert_eq!(loaded_roles.1, Some(self_id), "prior self id preserved");
     }
 }

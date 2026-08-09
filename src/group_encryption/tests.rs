@@ -7,16 +7,18 @@ use p2panda_encryption::crypto::x25519::SecretKey as XSecretKey;
 use p2panda_encryption::crypto::xeddsa::xeddsa_sign;
 use p2panda_encryption::crypto::Rng;
 use p2panda_encryption::key_bundle::{Lifetime, OneTimeKeyBundle, PreKey};
-use p2panda_encryption::message_scheme::group::GroupEvent;
+use p2panda_encryption::message_scheme::group::{GroupEvent, MessageGroup};
 use p2panda_encryption::traits::PreKeyManager;
 use rusqlite::{params, Connection};
 
 use crate::group_encryption::encryption_state::{
-    EncryptionError, EncryptionState, GroupStateLoadOutcome,
+    EncryptionError, EncryptionState, GroupAuthEvent, GroupStateLoadOutcome,
 };
 use crate::group_encryption::manager::Manager;
 use crate::group_encryption::membership::MemberRole;
-use crate::group_encryption::persistence::{self, GroupStateLoadError};
+use crate::group_encryption::persistence::{
+    self, GroupAuthFault, GroupAuthTxError, GroupStateLoadError,
+};
 use crate::group_encryption::registry::RegistryState;
 use crate::group_encryption::types::PeerId;
 use crate::group_id::GroupId;
@@ -82,6 +84,7 @@ fn make_enc_state(rng: Rng, registry: &RegistryState) -> EncryptionState {
         db: None,
         group_roles: std::collections::HashMap::new(),
         self_ids: std::collections::HashMap::new(),
+        group_versions: std::collections::HashMap::new(),
     }
 }
 
@@ -1203,6 +1206,504 @@ mod integration {
         assert!(
             !alice2.self_ids.contains_key(&group_id),
             "no partial identity installed after corruption"
+        );
+    }
+
+    // ── Transactional group-auth repository tests (BORU-AUDIT-09) ─────
+    //
+    // These regression tests prove that membership/role changes and the
+    // encrypted group state commit as ONE logical transaction:
+    //
+    // 1. A fault injected after the membership write but before the
+    //    crypto-state write rolls the transaction back completely.
+    // 2. A fault injected after the crypto-state write but before commit
+    //    also rolls back.
+    // 3. Two concurrent epoch rotations from the same base version — only
+    //    one commits.
+    // 4. A removed member cannot receive post-removal epoch material.
+    // 5. A restart reconstructs the exact committed state.
+
+    /// Attach an in-memory SQLite DB (migration-v13 schema, without the
+    /// lazily-added version column) to an EncryptionState for transactional
+    /// tests.
+    fn attach_db(enc: &mut EncryptionState) -> std::sync::Arc<std::sync::Mutex<Connection>> {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS group_encryption_state (
+                group_id BLOB PRIMARY KEY,
+                state BLOB NOT NULL,
+                updated_at INTEGER NOT NULL
+            );",
+        )
+        .expect("create state table");
+        let db = std::sync::Arc::new(std::sync::Mutex::new(conn));
+        enc.db = Some(db.clone());
+        db
+    }
+
+    /// Helper: build an established two-member group (alice owner + bob),
+    /// with the full add handshake forwarded, and attach a DB to alice.
+    /// Returns `(alice, bob, group_id, alice_id, bob_id, db)`.
+    fn setup_persisted_group() -> (
+        EncryptionState,
+        EncryptionState,
+        GroupId,
+        PeerId,
+        PeerId,
+        std::sync::Arc<std::sync::Mutex<Connection>>,
+    ) {
+        let (mut alice, mut bob, alice_id, bob_id, _registry) = setup_two_peers();
+        let group_id = GroupId::generate();
+        let db = attach_db(&mut alice);
+
+        let create_msg = alice
+            .create_group(group_id, alice_id, vec![bob_id])
+            .expect("alice create group");
+        bob.init_group(group_id, bob_id).expect("bob init");
+        let bob_create_event = bob
+            .receive_message(&group_id, &create_msg)
+            .expect("bob receive create");
+        if let Some(GroupEvent::Control(ack)) = &bob_create_event {
+            alice
+                .receive_message(&group_id, ack)
+                .expect("alice receive bob ack");
+        }
+        (alice, bob, group_id, alice_id, bob_id, db)
+    }
+
+    /// Fault after membership write but before crypto-state write: the
+    /// transaction rolls back completely — no partial membership appears in
+    /// memory or in the DB, and the group keeps its prior committed state.
+    #[test]
+    fn test_apply_member_join_fault_after_membership_write_rolls_back() {
+        let (mut alice, _bob, group_id, alice_id, bob_id, db) = setup_persisted_group();
+        let charlie_id = make_peer();
+        // The p2panda add op looks up the new member's pre-keys in the
+        // shared registry — register Charlie's OWN keys there before joining.
+        let mut charlie = make_enc_state(Rng::default(), &alice.registry);
+        register_peer(&mut charlie, charlie_id);
+
+        let err = alice
+            .apply_member_join_with_fault(
+                &group_id,
+                charlie_id,
+                GroupAuthFault::AfterMembershipWrite,
+            )
+            .expect_err("injected fault must fail the join");
+
+        assert!(
+            matches!(
+                err,
+                EncryptionError::GroupStateWrite(GroupAuthTxError::Io(_))
+            ),
+            "expected GroupStateWrite(Io), got: {err:?}"
+        );
+
+        // In-memory: the group is rolled back to the committed state — no
+        // charlie in the crypto member view, no role, no version bump.
+        let members = MessageGroup::members(alice.groups.get(&group_id).expect("group present"))
+            .expect("member view");
+        assert!(
+            !members.contains(&charlie_id),
+            "charlie must NOT appear in the in-memory member view after rollback"
+        );
+        assert!(
+            alice.member_role(&group_id, &charlie_id).is_none(),
+            "charlie must NOT have a role after rollback"
+        );
+
+        // DB: neither the membership row nor a new crypto state leaked.
+        let conn = db.lock().unwrap();
+        let loaded_roles = persistence::load_group_roles(&conn, &group_id)
+            .unwrap()
+            .expect("roles row exists");
+        assert!(
+            !loaded_roles.0.contains_key(&charlie_id),
+            "charlie must NOT appear in the persisted role mirror after rollback"
+        );
+        let loaded = persistence::load_group_state(&conn, &group_id).expect("state row exists");
+        let loaded_members = MessageGroup::members(&loaded).expect("member view");
+        assert!(
+            !loaded_members.contains(&charlie_id),
+            "charlie must NOT appear in the persisted crypto state after rollback"
+        );
+        drop(conn);
+
+        // The DB is intact and the group remains loadable — no partial
+        // membership was committed.
+        let mut alice_fresh = make_enc_state(Rng::default(), &alice.registry);
+        register_peer(&mut alice_fresh, alice_id);
+        register_peer(&mut alice_fresh, bob_id);
+        register_peer(&mut alice_fresh, charlie_id);
+        alice_fresh.db = Some(db.clone());
+        match alice_fresh
+            .load_group_state_from_db(&group_id)
+            .expect("fresh instance loads committed state")
+        {
+            GroupStateLoadOutcome::Loaded => {}
+            other => panic!("expected Loaded, got: {other:?}"),
+        }
+        let members =
+            MessageGroup::members(alice_fresh.groups.get(&group_id).expect("group present"))
+                .expect("member view");
+        assert!(
+            !members.contains(&charlie_id),
+            "committed state has no charlie (rollback left no partial membership)"
+        );
+        // NOTE: we do NOT attempt another join from this reloaded instance —
+        // a DB-reloaded GroupState carries an empty embedded registry, so
+        // membership ops on it fail with MissingPreKeys.  That limitation is
+        // orthogonal to the rollback correctness proven above.
+    }
+
+    /// Fault after crypto-state write but before commit: same complete
+    /// rollback property.
+    #[test]
+    fn test_apply_member_join_fault_after_crypto_state_write_rolls_back() {
+        let (mut alice, _bob, group_id, _alice_id, _bob_id, db) = setup_persisted_group();
+        let charlie_id = make_peer();
+        let mut charlie = make_enc_state(Rng::default(), &alice.registry);
+        register_peer(&mut charlie, charlie_id);
+
+        let err = alice
+            .apply_member_join_with_fault(
+                &group_id,
+                charlie_id,
+                GroupAuthFault::AfterCryptoStateWrite,
+            )
+            .expect_err("injected fault must fail the join");
+        assert!(
+            matches!(
+                err,
+                EncryptionError::GroupStateWrite(GroupAuthTxError::Io(_))
+            ),
+            "expected GroupStateWrite(Io), got: {err:?}"
+        );
+
+        let members = MessageGroup::members(alice.groups.get(&group_id).expect("group present"))
+            .expect("member view");
+        assert!(
+            !members.contains(&charlie_id),
+            "charlie must NOT appear in memory after rollback"
+        );
+        let conn = db.lock().unwrap();
+        let loaded_roles = persistence::load_group_roles(&conn, &group_id)
+            .unwrap()
+            .expect("roles row exists");
+        assert!(!loaded_roles.0.contains_key(&charlie_id));
+        let loaded = persistence::load_group_state(&conn, &group_id).expect("state row exists");
+        let loaded_members = MessageGroup::members(&loaded).expect("member view");
+        assert!(!loaded_members.contains(&charlie_id));
+        drop(conn);
+    }
+
+    /// Two concurrent epoch rotations from the same base version: exactly one
+    /// commits, the other fails with a version conflict.
+    #[test]
+    fn test_concurrent_epoch_rotation_only_one_commits() {
+        let (mut alice, _bob, group_id, alice_id, bob_id, db) = setup_persisted_group();
+        let base_version = *alice
+            .group_versions
+            .get(&group_id)
+            .expect("version tracked");
+        assert!(base_version >= 1, "base committed version is tracked");
+
+        // Second EncryptionState sharing the same DB and the same live
+        // registry, reconstructed from the SAME base epoch.
+        //
+        // NOTE: we deliberately rebuild alice2 by replaying the owner's
+        // `create_group` rather than `load_group_state_from_db`.
+        // Deserializing a persisted GroupState yields a fresh EMPTY embedded
+        // registry (see `RegistryState::deserialize`), and epoch rotation
+        // needs recipient identity keys — so a DB-reloaded instance cannot
+        // rotate.  Replaying create gives alice2 a live registry sharing the
+        // same connection, while its committed version comes from the DB.
+        let mut alice2 = {
+            let registry = alice.registry.clone();
+            let mut a2 = make_enc_state(Rng::default(), &registry);
+            // alice_id and bob_id are already in the shared registry (from
+            // setup_two_peers); do NOT re-register them — that would
+            // overwrite their real identity/pre-keys with fresh ones.
+            // Build the in-memory group state by replaying the owner's
+            // create, WITHOUT persisting (db detached) — the first instance
+            // already committed the base epoch.
+            a2.create_group(group_id, alice_id, vec![bob_id])
+                .expect("alice2 create same group");
+            // Now attach the shared DB and adopt the committed base version
+            // so both instances start from the same epoch.
+            a2.db = Some(db.clone());
+            let conn = db.lock().unwrap();
+            let v = persistence::load_group_version(&conn, &group_id).unwrap();
+            drop(conn);
+            a2.group_versions.insert(group_id, v);
+            a2
+        };
+        assert_eq!(
+            *alice2
+                .group_versions
+                .get(&group_id)
+                .expect("version tracked"),
+            base_version,
+            "both instances start from the same base version"
+        );
+
+        // Both rotate from the same base.  One commits (version 2); the
+        // other must fail with VersionConflict — never silently fork.
+        let r1 = alice.rotate_epoch(&group_id, alice_id);
+        let r2 = alice2.rotate_epoch(&group_id, alice_id);
+
+        let (committed, conflicted) = match (r1, r2) {
+            (
+                Ok(_),
+                Err(EncryptionError::GroupStateWrite(GroupAuthTxError::VersionConflict { .. })),
+            ) => (1, 2),
+            (
+                Err(EncryptionError::GroupStateWrite(GroupAuthTxError::VersionConflict { .. })),
+                Ok(_),
+            ) => (2, 1),
+            other => panic!("expected one commit + one conflict, got: {other:?}"),
+        };
+        assert_eq!(committed, 1, "instance 1 wins");
+        assert_eq!(conflicted, 2, "instance 2 loses with VersionConflict");
+
+        // The DB reflects exactly one committed rotation.
+        let conn = db.lock().unwrap();
+        assert_eq!(
+            persistence::load_group_version(&conn, &group_id).unwrap(),
+            base_version + 1,
+            "exactly one epoch rotation committed"
+        );
+        drop(conn);
+    }
+
+    /// A removed member cannot receive post-removal epoch material, and the
+    /// removal is persisted atomically (role dropped + crypto state rotated
+    /// in the same committed transaction).
+    #[test]
+    fn test_removed_member_cannot_receive_post_removal_epoch() {
+        let (mut alice, mut bob, group_id, _alice_id, _bob_id, db) = setup_persisted_group();
+        let charlie_id = make_peer();
+        // Charlie's OWN keys must be in the shared registry before the join
+        // (the DCGKA add op consumes them).  Create Charlie's state first.
+        let mut charlie = make_enc_state(Rng::default(), &alice.registry);
+        register_peer(&mut charlie, charlie_id);
+
+        // Charlie joins via the transactional path (committed).
+        let join_msg = alice
+            .apply_member_join(&group_id, charlie_id)
+            .expect("charlie joins")
+            .0;
+        // Every existing member processes the add control message so their
+        // DGM learns Charlie is a member (mirrors p2panda's forwarding).
+        let bob_join_event = bob
+            .receive_message(&group_id, &join_msg)
+            .expect("bob receive join");
+        charlie
+            .init_group(group_id, charlie_id)
+            .expect("charlie init");
+        let ev = charlie
+            .receive_message(&group_id, &join_msg)
+            .expect("charlie receive join");
+        // Forward control events so every member establishes Charlie's ratchet.
+        if let Some(GroupEvent::Control(bob_ack)) = &bob_join_event {
+            charlie
+                .receive_message(&group_id, bob_ack)
+                .expect("charlie receive bob add-ack");
+            alice
+                .receive_message(&group_id, bob_ack)
+                .expect("alice receive bob add-ack");
+        }
+        if let Some(GroupEvent::Control(ack)) = &ev {
+            alice
+                .receive_message(&group_id, ack)
+                .expect("alice receive charlie ack");
+            bob.receive_message(&group_id, ack)
+                .expect("bob receive charlie ack");
+        }
+
+        // Alice removes Charlie via the transactional path.
+        let remove_msg = alice
+            .apply_member_remove(&group_id, charlie_id)
+            .expect("alice removes charlie")
+            .0;
+        bob.receive_message(&group_id, &remove_msg)
+            .expect("bob receive remove");
+        charlie
+            .receive_message(&group_id, &remove_msg)
+            .expect("charlie receive remove");
+
+        // The removal was persisted atomically: Charlie's role is gone from
+        // the DB mirror AND from the DB crypto state.
+        let conn = db.lock().unwrap();
+        let loaded_roles = persistence::load_group_roles(&conn, &group_id)
+            .unwrap()
+            .expect("roles row exists");
+        assert!(
+            !loaded_roles.0.contains_key(&charlie_id),
+            "removed member's role must not survive in the DB"
+        );
+        let loaded = persistence::load_group_state(&conn, &group_id).expect("state row exists");
+        let loaded_members = MessageGroup::members(&loaded).expect("member view");
+        assert!(
+            !loaded_members.contains(&charlie_id),
+            "removed member must not survive in the DB crypto state"
+        );
+        drop(conn);
+
+        // Post-removal epoch material: a message Alice sends after the
+        // rotation must NOT decrypt for Charlie.
+        let post_msg = alice
+            .send_message(&group_id, b"post-removal secret")
+            .expect("alice sends post-removal");
+        let bob_event = bob
+            .receive_message(&group_id, &post_msg)
+            .expect("bob receive post-removal");
+        assert!(
+            matches!(bob_event, Some(GroupEvent::Application { .. })),
+            "survivor decrypts post-removal material"
+        );
+        // A removed member cannot decrypt post-removal material.  The DCGKA
+        // may surface this either as an explicit AEAD error or as a dropped
+        // event (no Application plaintext) — both are acceptable; getting the
+        // plaintext is the failure.
+        let charlie_result = charlie.receive_message(&group_id, &post_msg);
+        match charlie_result {
+            Err(_) => { /* removed member cannot decrypt — correct */ }
+            Ok(None) => { /* silently dropped — correct */ }
+            Ok(Some(GroupEvent::Application { plaintext, .. })) => {
+                panic!("removed member must NOT decrypt post-removal material, got {plaintext:?}");
+            }
+            Ok(Some(_other)) => { /* control event — fine, no plaintext leaked */ }
+        }
+    }
+
+    /// A restart after a successful transaction reconstructs the EXACT
+    /// committed state: members, roles, self identity, and version all match.
+    #[test]
+    fn test_restart_reconstructs_exact_committed_state() {
+        let (mut alice, mut bob, group_id, alice_id, bob_id, db) = setup_persisted_group();
+        let charlie_id = make_peer();
+        // Charlie's OWN keys must be in the shared registry before the join.
+        let mut charlie = make_enc_state(Rng::default(), &alice.registry);
+        register_peer(&mut charlie, charlie_id);
+
+        // Run a series of transactional mutations: join charlie, demote bob,
+        // rotate the epoch.
+        let (join_msg, _event) = alice
+            .apply_member_join(&group_id, charlie_id)
+            .expect("charlie joins");
+        // Existing members must process the add control message so their
+        // ratchets stay in sync (mirrors p2panda's forwarding).
+        let bob_join_event = bob
+            .receive_message(&group_id, &join_msg)
+            .expect("bob receive join");
+        charlie
+            .init_group(group_id, charlie_id)
+            .expect("charlie init");
+        let charlie_join_event = charlie
+            .receive_message(&group_id, &join_msg)
+            .expect("charlie receive join");
+        if let Some(GroupEvent::Control(bob_ack)) = &bob_join_event {
+            charlie
+                .receive_message(&group_id, bob_ack)
+                .expect("charlie receive bob join-ack");
+            alice
+                .receive_message(&group_id, bob_ack)
+                .expect("alice receive bob join-ack");
+        }
+        if let Some(GroupEvent::Control(ack)) = &charlie_join_event {
+            alice
+                .receive_message(&group_id, ack)
+                .expect("alice receive charlie ack");
+            bob.receive_message(&group_id, ack)
+                .expect("bob receive charlie ack");
+        }
+        alice
+            .apply_role_change(&group_id, alice_id, bob_id, MemberRole::Reader)
+            .expect("bob demoted to reader");
+        let (rotate_msg, _event) = alice
+            .rotate_epoch(&group_id, alice_id)
+            .expect("epoch rotation");
+        // Survivors must process the rotation control message so their
+        // ratchets stay in sync with the new epoch.
+        bob.receive_message(&group_id, &rotate_msg)
+            .expect("bob receive rotation");
+        charlie
+            .receive_message(&group_id, &rotate_msg)
+            .expect("charlie receive rotation");
+
+        let committed_version = *alice
+            .group_versions
+            .get(&group_id)
+            .expect("version tracked");
+
+        // Fresh instance sharing the same DB — simulates a restart.
+        let mut alice2 = {
+            let registry = alice.registry.clone();
+            let mut a2 = make_enc_state(Rng::default(), &registry);
+            register_peer(&mut a2, alice_id);
+            register_peer(&mut a2, bob_id);
+            register_peer(&mut a2, charlie_id);
+            a2.db = Some(db.clone());
+            match a2
+                .load_group_state_from_db(&group_id)
+                .expect("load after restart")
+            {
+                GroupStateLoadOutcome::Loaded => {}
+                other => panic!("expected Loaded after restart, got: {other:?}"),
+            }
+            a2
+        };
+
+        // Exact committed state: members, roles, self identity, version.
+        let members = MessageGroup::members(alice2.groups.get(&group_id).expect("group loaded"))
+            .expect("member view");
+        assert_eq!(members.len(), 3, "all three members reconstructed");
+        assert!(
+            members.contains(&alice_id)
+                && members.contains(&bob_id)
+                && members.contains(&charlie_id)
+        );
+        assert_eq!(
+            alice2.member_role(&group_id, &alice_id),
+            Some(MemberRole::Admin),
+            "owner stays Admin"
+        );
+        assert_eq!(
+            alice2.member_role(&group_id, &bob_id),
+            Some(MemberRole::Reader),
+            "bob stays Reader after restart"
+        );
+        assert_eq!(
+            alice2.member_role(&group_id, &charlie_id),
+            Some(MemberRole::Writer),
+            "charlie stays Writer after restart"
+        );
+        assert_eq!(
+            alice2.self_ids.get(&group_id),
+            Some(&alice_id),
+            "self identity reconstructed"
+        );
+        assert_eq!(
+            *alice2
+                .group_versions
+                .get(&group_id)
+                .expect("version tracked"),
+            committed_version,
+            "committed version reconstructed exactly"
+        );
+
+        // The reloaded state is fully functional: the owner can still send
+        // and the survivors can still read.
+        let msg = alice2
+            .send_message(&group_id, b"after restart")
+            .expect("alice2 sends after restart");
+        let bob_event = bob
+            .receive_message(&group_id, &msg)
+            .expect("bob receive after restart");
+        assert!(
+            matches!(bob_event, Some(GroupEvent::Application { .. })),
+            "reloaded group remains functional"
         );
     }
 }

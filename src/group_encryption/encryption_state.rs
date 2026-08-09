@@ -25,7 +25,7 @@ use super::manager::{KmgState, Manager, ManagerError};
 use super::membership::{MemberRole, Membership};
 use super::message::EncryptedGroupEnvelope;
 use super::ordering::{LamportOrderer, OrderingState};
-use super::persistence::{self, GroupStateLoadError};
+use super::persistence::{self, GroupAuthFault, GroupAuthTxError, GroupStateLoadError};
 use super::registry::{Registry, RegistryState};
 use super::types::{OpId, PeerId};
 
@@ -79,6 +79,15 @@ pub struct EncryptionState {
     pub group_roles: HashMap<GroupId, HashMap<PeerId, MemberRole>>,
     /// Local peer id per group (set at create/init, used for send-side checks).
     pub self_ids: HashMap<GroupId, PeerId>,
+    /// Last committed optimistic-concurrency version per group (BORU-AUDIT-09).
+    ///
+    /// Mirrors the `version` column of `group_encryption_state`.  Every
+    /// transactional membership/role/epoch mutation bumps it; concurrent
+    /// mutations from the same base version are rejected by
+    /// [`persistence::save_group_state_and_roles`].  This map is NOT part of
+    /// the serialized state (it is derived from the DB and reloaded on
+    /// [`Self::load_group_state_from_db`]).
+    pub group_versions: HashMap<GroupId, u64>,
 }
 
 // ── Serialization workaround ──────────────────────────────────────────────
@@ -90,13 +99,14 @@ pub struct EncryptionState {
 impl Serialize for EncryptionState {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let mut s = serializer.serialize_struct("EncryptionState", 5)?;
+        let mut s = serializer.serialize_struct("EncryptionState", 6)?;
         s.serialize_field("groups", &self.groups)?;
         s.serialize_field("kmg_state", &self.kmg_state)?;
         // RegistryState serializes as unit (no-op).
         s.serialize_field("registry", &self.registry)?;
         s.serialize_field("group_roles", &self.group_roles)?;
         s.serialize_field("self_ids", &self.self_ids)?;
+        s.serialize_field("group_versions", &self.group_versions)?;
         s.end()
     }
 }
@@ -112,6 +122,8 @@ impl<'de> Deserialize<'de> for EncryptionState {
             group_roles: HashMap<GroupId, HashMap<PeerId, MemberRole>>,
             #[serde(default)]
             self_ids: HashMap<GroupId, PeerId>,
+            #[serde(default)]
+            group_versions: HashMap<GroupId, u64>,
         }
         let helper = EncryptionStateHelper::deserialize(deserializer)?;
         Ok(Self {
@@ -122,6 +134,7 @@ impl<'de> Deserialize<'de> for EncryptionState {
             db: None,
             group_roles: helper.group_roles,
             self_ids: helper.self_ids,
+            group_versions: helper.group_versions,
         })
     }
 }
@@ -174,6 +187,7 @@ impl EncryptionState {
             db: None,
             group_roles: HashMap::new(),
             self_ids: HashMap::new(),
+            group_versions: HashMap::new(),
         })
     }
 
@@ -183,21 +197,89 @@ impl EncryptionState {
         self
     }
 
-    /// Internal helper: persist the state for a single group to SQLite.
-    fn save_current_group_state(&self, group_id: &GroupId) {
-        let Some(ref conn) = self.db else { return };
-        let Some(state) = self.groups.get(group_id) else {
-            return;
+    /// Internal helper: persist the state + role mirror for a single group
+    /// as ONE logical transaction (BORU-AUDIT-09).
+    ///
+    /// Runs the optimistic-concurrency version check, writes the role mirror
+    /// and the encrypted group state, and commits.  On failure the
+    /// transaction rolls back completely and the error propagates — the
+    /// caller must not treat the mutation as applied.
+    ///
+    /// Returns the new committed version.
+    fn persist_group_mutation(
+        &self,
+        group_id: &GroupId,
+        state: &GroupEncryptionState,
+        roles: &HashMap<PeerId, MemberRole>,
+        expected_version: u64,
+        fault: Option<GroupAuthFault>,
+    ) -> Result<u64, EncryptionError> {
+        let Some(ref db) = self.db else {
+            // No persistence configured: nothing to commit; the version
+            // stays at its in-memory value (0 for never-persisted groups).
+            return Ok(expected_version);
         };
-        let conn = conn.lock().unwrap();
-        if let Err(e) = persistence::save_group_state(&conn, group_id, state) {
-            tracing::warn!("failed to save group encryption state for {group_id}: {e}");
-        }
-        // Persist the role mirror + local identity alongside the state.
-        let roles = self.group_roles.get(group_id).cloned().unwrap_or_default();
         let self_id = self.self_ids.get(group_id).copied();
-        if let Err(e) = persistence::save_group_roles(&conn, group_id, &roles, self_id) {
-            tracing::warn!("failed to save group role mirror for {group_id}: {e}");
+        let mut conn = db
+            .lock()
+            .map_err(|_| EncryptionError::Internal("db lock poisoned".into()))?;
+        let result = match fault {
+            Some(f) => persistence::save_group_state_and_roles_with_fault(
+                &mut conn,
+                group_id,
+                state,
+                roles,
+                self_id,
+                expected_version,
+                f,
+            ),
+            None => persistence::save_group_state_and_roles(
+                &mut conn,
+                group_id,
+                state,
+                roles,
+                self_id,
+                expected_version,
+            ),
+        };
+        result.map_err(EncryptionError::GroupStateWrite)
+    }
+
+    /// Persist the current in-memory state + role mirror for a group
+    /// atomically (message-plane path: send/receive ratchet advancement).
+    ///
+    /// This is best-effort durability for message traffic: the ratchet must
+    /// advance in memory to continue the protocol, so a persistence failure
+    /// is logged rather than failing the send.  The write itself is still
+    /// transactional — a partial state/roles commit can never occur.
+    fn persist_current_group_state(&mut self, group_id: &GroupId) -> Result<u64, EncryptionError> {
+        let Some(state) = self.groups.get(group_id) else {
+            return Ok(self.group_versions.get(group_id).copied().unwrap_or(0));
+        };
+        let roles = self.group_roles.get(group_id).cloned().unwrap_or_default();
+        let expected = self.group_versions.get(group_id).copied().unwrap_or(0);
+        let new_version = self.persist_group_mutation(group_id, state, &roles, expected, None)?;
+        self.group_versions.insert(*group_id, new_version);
+        Ok(new_version)
+    }
+
+    /// Roll back in-memory state for `group_id` to the last committed state.
+    ///
+    /// Used by the repository methods when a p2panda op or the persistence
+    /// transaction fails: the authoritative state lives in the DB (the failed
+    /// transaction rolled back, so the DB still holds the pre-mutation
+    /// state).  If no DB is configured, restore the serialised pre-mutation
+    /// backup.
+    fn rollback_group_state(&mut self, group_id: &GroupId, backup: &[u8]) {
+        if self.db.is_some() {
+            self.groups.remove(group_id);
+            self.group_roles.remove(group_id);
+            self.group_versions.remove(group_id);
+            let _ = self.load_group_state_from_db(group_id);
+            return;
+        }
+        if let Ok(old) = postcard::from_bytes::<GroupEncryptionState>(backup) {
+            self.groups.insert(*group_id, old);
         }
     }
 
@@ -245,6 +327,17 @@ impl EncryptionState {
         // bad record cannot leave a half-loaded group behind.
         validate_loaded_group_state(group_id, &state, &roles, self_id.as_ref())?;
 
+        // Restore the optimistic-concurrency version alongside the state so
+        // subsequent transactional mutations start from the committed base.
+        let version = persistence::load_group_version(&conn, group_id).map_err(|e| {
+            EncryptionError::GroupStateLoad(GroupStateLoadError::Io(match e {
+                GroupAuthTxError::Io(e) => e,
+                GroupAuthTxError::VersionConflict { .. } => {
+                    unreachable!("load has no version check")
+                }
+            }))
+        })?;
+
         self.groups.insert(*group_id, state);
         if !roles.is_empty() {
             self.group_roles.insert(*group_id, roles);
@@ -252,11 +345,12 @@ impl EncryptionState {
         if let Some(me) = self_id {
             self.self_ids.insert(*group_id, me);
         }
+        self.group_versions.insert(*group_id, version);
         Ok(GroupStateLoadOutcome::Loaded)
     }
 
     /// Remove a group's persisted encryption state from SQLite.
-    pub fn delete_group_state_from_db(&self, group_id: &GroupId) {
+    pub fn delete_group_state_from_db(&mut self, group_id: &GroupId) {
         let Some(ref conn) = self.db else { return };
         let conn = conn.lock().unwrap();
         if let Err(e) = persistence::delete_group_state(&conn, group_id) {
@@ -265,6 +359,7 @@ impl EncryptionState {
         if let Err(e) = persistence::delete_group_roles(&conn, group_id) {
             tracing::warn!("failed to delete group role mirror for {group_id}: {e}");
         }
+        self.group_versions.remove(group_id);
     }
 
     /// Initialise an empty group state for a group we expect to join.
@@ -335,27 +430,399 @@ impl EncryptionState {
         for member in &initial_members {
             roles.entry(*member).or_insert(MemberRole::Writer);
         }
-        self.group_roles.insert(group_id, roles);
 
         let (state, message) = MessageGroup::create(state, initial_members, &self.rng)
             .map_err(|e| EncryptionError::Group(Box::new(e)))?;
 
-        // Save the state and extract the message for broadcast.
-        self.groups.insert(group_id, state);
+        // Persist the newly-created group state + role mirror as ONE
+        // transaction (BORU-AUDIT-09).  A new group commits from version 0.
+        let new_version = self
+            .persist_group_mutation(&group_id, &state, &roles, 0, None)
+            .map_err(|e| {
+                self.group_roles.remove(&group_id);
+                self.self_ids.remove(&group_id);
+                e
+            })?;
 
-        // Persist the newly-created group state.
-        self.save_current_group_state(&group_id);
+        // Save the state and extract the message for broadcast.  In-memory
+        // state is installed only after the persistence transaction
+        // succeeded, so a failed create leaves no half-initialised group.
+        self.groups.insert(group_id, state);
+        self.group_roles.insert(group_id, roles);
+        self.group_versions.insert(group_id, new_version);
 
         // The message from create() is an EncryptedGroupEnvelope (via our
         // ForwardSecureOrdering impl).
         Ok(message)
     }
 
+    /// Apply a member-join as one atomic transaction (BORU-AUDIT-09).
+    ///
+    /// Validates actor authority, computes the new crypto state and role
+    /// mirror, then persists BOTH in a single SQLite transaction with an
+    /// optimistic-concurrency version check.  In-memory state is only
+    /// installed after the transaction commits; on failure the group is
+    /// rolled back to the last committed state.
+    ///
+    /// Returns the control message to broadcast and a domain event for the
+    /// UI/cache.
+    pub fn apply_member_join(
+        &mut self,
+        group_id: &GroupId,
+        member: PeerId,
+    ) -> Result<(EncryptedGroupEnvelope, GroupAuthEvent), EncryptionError> {
+        self.apply_member_join_inner(group_id, member, None)
+    }
+
+    /// Test-only fault-injecting variant of [`Self::apply_member_join`].
+    pub fn apply_member_join_with_fault(
+        &mut self,
+        group_id: &GroupId,
+        member: PeerId,
+        fault: GroupAuthFault,
+    ) -> Result<(EncryptedGroupEnvelope, GroupAuthEvent), EncryptionError> {
+        self.apply_member_join_inner(group_id, member, Some(fault))
+    }
+
+    fn apply_member_join_inner(
+        &mut self,
+        group_id: &GroupId,
+        member: PeerId,
+        fault: Option<GroupAuthFault>,
+    ) -> Result<(EncryptedGroupEnvelope, GroupAuthEvent), EncryptionError> {
+        // ── Role enforcement (actor = local peer must be admin) ────────
+        let my_id = self.self_ids.get(group_id).copied().ok_or_else(|| {
+            EncryptionError::Internal(format!("no local identity recorded for {group_id:?}"))
+        })?;
+        let actor_role = self
+            .member_role(group_id, &my_id)
+            .unwrap_or(MemberRole::Writer);
+        if !actor_role.can_manage() {
+            return Err(EncryptionError::NotAuthorized(my_id));
+        }
+        // Pre-validate so the consuming p2panda op cannot fail after we have
+        // already taken the state out of memory.
+        {
+            let state = self
+                .groups
+                .get(group_id)
+                .ok_or(EncryptionError::GroupNotFound(*group_id))?;
+            let members =
+                MessageGroup::members(state).map_err(|e| EncryptionError::Group(Box::new(e)))?;
+            if members.contains(&member) {
+                return Err(EncryptionError::Group(Box::new(std::io::Error::other(
+                    "member is already in the group",
+                ))));
+            }
+            if member == my_id {
+                return Err(EncryptionError::Group(Box::new(std::io::Error::other(
+                    "cannot add ourselves to the group",
+                ))));
+            }
+        }
+
+        // ── Compute the new crypto state WITHOUT committing to memory ──
+        // The p2panda op consumes the old state; keep a serialised backup so
+        // a failed transaction can restore it.
+        let state = self
+            .groups
+            .remove(group_id)
+            .ok_or(EncryptionError::GroupNotFound(*group_id))?;
+        let backup = postcard::to_stdvec(&state)
+            .map_err(|e| EncryptionError::Internal(format!("state backup failed: {e}")))?;
+        let (new_state, message) = match MessageGroup::add(state, member, &self.rng) {
+            Ok(v) => v,
+            Err(e) => {
+                // The op failed before any persistence: restore the old
+                // state so memory does not lose the group.
+                self.rollback_group_state(group_id, &backup);
+                return Err(EncryptionError::Group(Box::new(e)));
+            }
+        };
+
+        // New role mirror: the added member defaults to Writer.
+        let mut new_roles = self.group_roles.get(group_id).cloned().unwrap_or_default();
+        new_roles.insert(member, MemberRole::Writer);
+
+        // ── Persist atomically (roles + crypto state, ONE transaction) ──
+        let expected = self.group_versions.get(group_id).copied().unwrap_or(0);
+        let new_version =
+            match self.persist_group_mutation(group_id, &new_state, &new_roles, expected, fault) {
+                Ok(v) => v,
+                Err(e) => {
+                    // Roll back: reload authoritative state; do NOT keep the new
+                    // membership in memory.
+                    self.rollback_group_state(group_id, &backup);
+                    return Err(e);
+                }
+            };
+
+        // ── Commit to memory ONLY after the transaction succeeded ──
+        self.groups.insert(*group_id, new_state);
+        self.group_roles.insert(*group_id, new_roles);
+        self.group_versions.insert(*group_id, new_version);
+
+        Ok((
+            message,
+            GroupAuthEvent::MemberJoined {
+                group_id: *group_id,
+                member,
+                version: new_version,
+            },
+        ))
+    }
+
+    /// Apply a member-removal as one atomic transaction (BORU-AUDIT-09).
+    ///
+    /// Validates actor authority, computes the new crypto state (which
+    /// rotates the epoch keys for surviving members) and drops the removed
+    /// member from the role mirror, then persists BOTH in a single SQLite
+    /// transaction with an optimistic-concurrency version check.  In-memory
+    /// state is only installed after the transaction commits.
+    pub fn apply_member_remove(
+        &mut self,
+        group_id: &GroupId,
+        member: PeerId,
+    ) -> Result<(EncryptedGroupEnvelope, GroupAuthEvent), EncryptionError> {
+        self.apply_member_remove_inner(group_id, member, None)
+    }
+
+    /// Test-only fault-injecting variant of [`Self::apply_member_remove`].
+    pub fn apply_member_remove_with_fault(
+        &mut self,
+        group_id: &GroupId,
+        member: PeerId,
+        fault: GroupAuthFault,
+    ) -> Result<(EncryptedGroupEnvelope, GroupAuthEvent), EncryptionError> {
+        self.apply_member_remove_inner(group_id, member, Some(fault))
+    }
+
+    fn apply_member_remove_inner(
+        &mut self,
+        group_id: &GroupId,
+        member: PeerId,
+        fault: Option<GroupAuthFault>,
+    ) -> Result<(EncryptedGroupEnvelope, GroupAuthEvent), EncryptionError> {
+        // ── Role enforcement (actor = local peer must be admin) ────────
+        let my_id = self.self_ids.get(group_id).copied().ok_or_else(|| {
+            EncryptionError::Internal(format!("no local identity recorded for {group_id:?}"))
+        })?;
+        let actor_role = self
+            .member_role(group_id, &my_id)
+            .unwrap_or(MemberRole::Writer);
+        if !actor_role.can_manage() {
+            return Err(EncryptionError::NotAuthorized(my_id));
+        }
+        // Pre-validate so the consuming p2panda op cannot fail after we have
+        // already taken the state out of memory.
+        {
+            let state = self
+                .groups
+                .get(group_id)
+                .ok_or(EncryptionError::GroupNotFound(*group_id))?;
+            let members =
+                MessageGroup::members(state).map_err(|e| EncryptionError::Group(Box::new(e)))?;
+            if !members.contains(&member) {
+                return Err(EncryptionError::Group(Box::new(std::io::Error::other(
+                    "member is not in the group",
+                ))));
+            }
+            if member == my_id {
+                return Err(EncryptionError::Group(Box::new(std::io::Error::other(
+                    "cannot remove ourselves with this API",
+                ))));
+            }
+        }
+
+        // ── Compute the new crypto state WITHOUT committing to memory ──
+        let state = self
+            .groups
+            .remove(group_id)
+            .ok_or(EncryptionError::GroupNotFound(*group_id))?;
+        let backup = postcard::to_stdvec(&state)
+            .map_err(|e| EncryptionError::Internal(format!("state backup failed: {e}")))?;
+        let (new_state, message) = match MessageGroup::remove(state, member, &self.rng) {
+            Ok(v) => v,
+            Err(e) => {
+                self.rollback_group_state(group_id, &backup);
+                return Err(EncryptionError::Group(Box::new(e)));
+            }
+        };
+
+        // New role mirror: drop the removed member.
+        let mut new_roles = self.group_roles.get(group_id).cloned().unwrap_or_default();
+        new_roles.remove(&member);
+
+        // ── Persist atomically (roles + crypto state, ONE transaction) ──
+        let expected = self.group_versions.get(group_id).copied().unwrap_or(0);
+        let new_version =
+            match self.persist_group_mutation(group_id, &new_state, &new_roles, expected, fault) {
+                Ok(v) => v,
+                Err(e) => {
+                    self.rollback_group_state(group_id, &backup);
+                    return Err(e);
+                }
+            };
+
+        // ── Commit to memory ONLY after the transaction succeeded ──
+        self.groups.insert(*group_id, new_state);
+        self.group_roles.insert(*group_id, new_roles);
+        self.group_versions.insert(*group_id, new_version);
+
+        Ok((
+            message,
+            GroupAuthEvent::MemberRemoved {
+                group_id: *group_id,
+                member,
+                version: new_version,
+            },
+        ))
+    }
+
+    /// Apply a role change as one atomic transaction (BORU-AUDIT-09).
+    ///
+    /// Only an admin may change roles.  The updated role mirror and the
+    /// (unchanged) encrypted group state are persisted in a single SQLite
+    /// transaction with an optimistic-concurrency version check; the mirror
+    /// in memory is only updated after commit.
+    pub fn apply_role_change(
+        &mut self,
+        group_id: &GroupId,
+        actor: PeerId,
+        member: PeerId,
+        role: MemberRole,
+    ) -> Result<GroupAuthEvent, EncryptionError> {
+        let actor_role = self
+            .group_roles
+            .get(group_id)
+            .and_then(|roles| roles.get(&actor))
+            .copied()
+            .ok_or(EncryptionError::NotMember(actor))?;
+        if !actor_role.can_manage() {
+            return Err(EncryptionError::NotAuthorized(actor));
+        }
+        let roles = self
+            .group_roles
+            .get(group_id)
+            .cloned()
+            .ok_or(EncryptionError::GroupNotFound(*group_id))?;
+        if !roles.contains_key(&member) {
+            return Err(EncryptionError::NotMember(member));
+        }
+        let mut new_roles = roles;
+        new_roles.insert(member, role);
+
+        // Persist the updated mirror + the (unchanged) crypto state as ONE
+        // transaction.
+        let state = self
+            .groups
+            .get(group_id)
+            .ok_or(EncryptionError::GroupNotFound(*group_id))?;
+        let expected = self.group_versions.get(group_id).copied().unwrap_or(0);
+        let new_version =
+            self.persist_group_mutation(group_id, state, &new_roles, expected, None)?;
+
+        self.group_roles.insert(*group_id, new_roles);
+        self.group_versions.insert(*group_id, new_version);
+
+        Ok(GroupAuthEvent::RoleChanged {
+            group_id: *group_id,
+            member,
+            role,
+            version: new_version,
+        })
+    }
+
+    /// Rotate the group epoch (fresh key material) as one atomic transaction
+    /// (BORU-AUDIT-09).
+    ///
+    /// Rotates the group secret via the p2panda DCGKA (`MessageGroup::update`)
+    /// and persists the new encrypted group state in a single SQLite
+    /// transaction with an optimistic-concurrency version check.  Only an
+    /// admin may rotate.  In-memory state is installed only after commit.
+    ///
+    /// Returns the control message to broadcast and a domain event for the
+    /// UI/cache.
+    pub fn rotate_epoch(
+        &mut self,
+        group_id: &GroupId,
+        actor: PeerId,
+    ) -> Result<(EncryptedGroupEnvelope, GroupAuthEvent), EncryptionError> {
+        self.rotate_epoch_inner(group_id, actor, None)
+    }
+
+    /// Test-only fault-injecting variant of [`Self::rotate_epoch`].
+    pub fn rotate_epoch_with_fault(
+        &mut self,
+        group_id: &GroupId,
+        actor: PeerId,
+        fault: GroupAuthFault,
+    ) -> Result<(EncryptedGroupEnvelope, GroupAuthEvent), EncryptionError> {
+        self.rotate_epoch_inner(group_id, actor, Some(fault))
+    }
+
+    fn rotate_epoch_inner(
+        &mut self,
+        group_id: &GroupId,
+        actor: PeerId,
+        fault: Option<GroupAuthFault>,
+    ) -> Result<(EncryptedGroupEnvelope, GroupAuthEvent), EncryptionError> {
+        let actor_role = self
+            .member_role(group_id, &actor)
+            .unwrap_or(MemberRole::Writer);
+        if !actor_role.can_manage() {
+            return Err(EncryptionError::NotAuthorized(actor));
+        }
+
+        // ── Compute the new crypto state WITHOUT committing to memory ──
+        let state = self
+            .groups
+            .remove(group_id)
+            .ok_or(EncryptionError::GroupNotFound(*group_id))?;
+        let backup = postcard::to_stdvec(&state)
+            .map_err(|e| EncryptionError::Internal(format!("state backup failed: {e}")))?;
+        let (new_state, message) = match MessageGroup::update(state, &self.rng) {
+            Ok(v) => v,
+            Err(e) => {
+                self.rollback_group_state(group_id, &backup);
+                return Err(EncryptionError::Group(Box::new(e)));
+            }
+        };
+
+        // Roles are unchanged by rotation.
+        let roles = self.group_roles.get(group_id).cloned().unwrap_or_default();
+
+        // ── Persist atomically (roles + crypto state, ONE transaction) ──
+        let expected = self.group_versions.get(group_id).copied().unwrap_or(0);
+        let new_version =
+            match self.persist_group_mutation(group_id, &new_state, &roles, expected, fault) {
+                Ok(v) => v,
+                Err(e) => {
+                    self.rollback_group_state(group_id, &backup);
+                    return Err(e);
+                }
+            };
+
+        // ── Commit to memory ONLY after the transaction succeeded ──
+        self.groups.insert(*group_id, new_state);
+        self.group_roles.insert(*group_id, roles);
+        self.group_versions.insert(*group_id, new_version);
+
+        Ok((
+            message,
+            GroupAuthEvent::EpochRotated {
+                group_id: *group_id,
+                old_version: expected,
+                new_version,
+            },
+        ))
+    }
+
     /// Set (or change) the role of a group member.
     ///
     /// Only an admin (or the group owner, who is always `Admin`) may change
     /// roles.  The change is applied to the local role mirror used for
-    /// per-message enforcement and persisted with the group state.
+    /// per-message enforcement and persisted atomically with the group state.
     ///
     /// # Errors
     ///
@@ -369,25 +836,8 @@ impl EncryptionState {
         member: PeerId,
         role: MemberRole,
     ) -> Result<(), EncryptionError> {
-        let actor_role = self
-            .group_roles
-            .get(group_id)
-            .and_then(|roles| roles.get(&actor))
-            .copied()
-            .ok_or(EncryptionError::NotMember(actor))?;
-        if !actor_role.can_manage() {
-            return Err(EncryptionError::NotAuthorized(actor));
-        }
-        let roles = self
-            .group_roles
-            .get_mut(group_id)
-            .ok_or(EncryptionError::GroupNotFound(*group_id))?;
-        if !roles.contains_key(&member) {
-            return Err(EncryptionError::NotMember(member));
-        }
-        roles.insert(member, role);
-        self.save_current_group_state(group_id);
-        Ok(())
+        self.apply_role_change(group_id, actor, member, role)
+            .map(|_| ())
     }
 
     /// Look up the local role mirror entry for a peer in a group.
@@ -459,8 +909,13 @@ impl EncryptionState {
 
         self.groups.insert(*group_id, state);
 
-        // Persist updated state after sending.
-        self.save_current_group_state(group_id);
+        // Persist updated state after sending.  The write is transactional
+        // (state + role mirror in one commit), so a partial write can never
+        // occur; a failure is logged but does not fail the send (the ratchet
+        // must advance in memory regardless).
+        if let Err(e) = self.persist_current_group_state(group_id) {
+            tracing::warn!("failed to persist group state for {group_id} after send: {e}");
+        }
 
         Ok(message)
     }
@@ -502,8 +957,11 @@ impl EncryptionState {
 
         self.groups.insert(*group_id, state);
 
-        // Persist updated state after receiving.
-        self.save_current_group_state(group_id);
+        // Persist updated state after receiving (transactional, best-effort
+        // like the send path).
+        if let Err(e) = self.persist_current_group_state(group_id) {
+            tracing::warn!("failed to persist group state for {group_id} after receive: {e}");
+        }
 
         // GroupOutput wraps events in a Vec. If this is our first welcome
         // or a normal message, unwrap the single GroupOutput.
@@ -553,46 +1011,15 @@ impl EncryptionState {
     /// Only the group owner / an admin should call this.  Returns the control
     /// message to broadcast.  The new member's mirror role defaults to
     /// [`MemberRole::Writer`].
+    ///
+    /// This delegates to [`Self::apply_member_join`], which owns the atomic
+    /// transaction boundary: membership + crypto state commit together.
     pub fn add_member(
         &mut self,
         group_id: &GroupId,
         member: PeerId,
     ) -> Result<EncryptedGroupEnvelope, EncryptionError> {
-        // ── Role enforcement ─────────────────────────────────────────
-        // The actor is the local peer; only an admin may add members.  The
-        // p2panda DGM also enforces this inside `Membership::add`, but we
-        // fail fast with a clear error here.
-        let my_id = self.self_ids.get(group_id).copied().ok_or_else(|| {
-            EncryptionError::Internal(format!("no local identity recorded for {group_id:?}"))
-        })?;
-        let actor_role = self
-            .member_role(group_id, &my_id)
-            .unwrap_or(MemberRole::Writer);
-        if !actor_role.can_manage() {
-            return Err(EncryptionError::NotAuthorized(my_id));
-        }
-
-        let state = self
-            .groups
-            .remove(group_id)
-            .ok_or(EncryptionError::GroupNotFound(*group_id))?;
-
-        let (state, message) = MessageGroup::add(state, member, &self.rng)
-            .map_err(|e| EncryptionError::Group(Box::new(e)))?;
-
-        self.groups.insert(*group_id, state);
-
-        // Keep the mirror in sync: the new member defaults to Writer.
-        self.group_roles
-            .entry(*group_id)
-            .or_default()
-            .entry(member)
-            .or_insert(MemberRole::Writer);
-
-        // Persist updated state after adding member.
-        self.save_current_group_state(group_id);
-
-        Ok(message)
+        self.apply_member_join(group_id, member).map(|(env, _)| env)
     }
 
     /// Remove a member from an existing encrypted group.
@@ -600,42 +1027,70 @@ impl EncryptionState {
     /// Only the group owner / an admin should call this.  Returns the control
     /// message to broadcast.  The removed member's role is dropped from the
     /// mirror so a removed device cannot write even with a leaked key.
+    ///
+    /// This delegates to [`Self::apply_member_remove`], which owns the atomic
+    /// transaction boundary: membership + epoch-key rotation commit together.
     pub fn remove_member(
         &mut self,
         group_id: &GroupId,
         member: PeerId,
     ) -> Result<EncryptedGroupEnvelope, EncryptionError> {
-        // ── Role enforcement ─────────────────────────────────────────
-        let my_id = self.self_ids.get(group_id).copied().ok_or_else(|| {
-            EncryptionError::Internal(format!("no local identity recorded for {group_id:?}"))
-        })?;
-        let actor_role = self
-            .member_role(group_id, &my_id)
-            .unwrap_or(MemberRole::Writer);
-        if !actor_role.can_manage() {
-            return Err(EncryptionError::NotAuthorized(my_id));
-        }
-
-        let state = self
-            .groups
-            .remove(group_id)
-            .ok_or(EncryptionError::GroupNotFound(*group_id))?;
-
-        let (state, message) = MessageGroup::remove(state, member, &self.rng)
-            .map_err(|e| EncryptionError::Group(Box::new(e)))?;
-
-        self.groups.insert(*group_id, state);
-
-        // Drop the removed member from the role mirror.
-        if let Some(roles) = self.group_roles.get_mut(group_id) {
-            roles.remove(&member);
-        }
-
-        // Persist updated state after removing member.
-        self.save_current_group_state(group_id);
-
-        Ok(message)
+        self.apply_member_remove(group_id, member)
+            .map(|(env, _)| env)
     }
+}
+
+/// Domain event published AFTER a group-auth mutation commits
+/// (BORU-AUDIT-09).
+///
+/// The repository methods ([`EncryptionState::apply_member_join`],
+/// [`EncryptionState::apply_member_remove`],
+/// [`EncryptionState::apply_role_change`], [`EncryptionState::rotate_epoch`])
+/// persist membership/roles + crypto state as one transaction and only then
+/// return this event.  UI/cache layers should treat the event as the single
+/// "committed" signal — never mutate visible state before the persistence
+/// transaction succeeds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GroupAuthEvent {
+    /// A member joined; `version` is the committed optimistic-concurrency
+    /// version after the join.
+    MemberJoined {
+        /// The group that changed.
+        group_id: GroupId,
+        /// The peer that joined.
+        member: PeerId,
+        /// Committed state version after this mutation.
+        version: u64,
+    },
+    /// A member was removed (epoch keys rotated for survivors).
+    MemberRemoved {
+        /// The group that changed.
+        group_id: GroupId,
+        /// The peer that was removed.
+        member: PeerId,
+        /// Committed state version after this mutation.
+        version: u64,
+    },
+    /// A member's role changed.
+    RoleChanged {
+        /// The group that changed.
+        group_id: GroupId,
+        /// The peer whose role changed.
+        member: PeerId,
+        /// The new role.
+        role: MemberRole,
+        /// Committed state version after this mutation.
+        version: u64,
+    },
+    /// The group epoch was rotated (fresh key material).
+    EpochRotated {
+        /// The group that changed.
+        group_id: GroupId,
+        /// The committed version before the rotation.
+        old_version: u64,
+        /// The committed version after the rotation.
+        new_version: u64,
+    },
 }
 
 // ── Error type ───────────────────────────────────────────────────────────
@@ -721,6 +1176,12 @@ pub enum EncryptionError {
     /// unsupported format version). The caller must NOT initialize fresh
     /// state in response — surface a recovery action instead.
     GroupStateLoad(GroupStateLoadError),
+    /// A transactional membership/role/epoch write failed (BORU-AUDIT-09).
+    ///
+    /// The underlying transaction rolled back completely; the caller must
+    /// treat the mutation as NOT applied and may retry after reloading
+    /// authoritative state.
+    GroupStateWrite(GroupAuthTxError),
     /// ICE (internal consistency error).
     Internal(String),
 }
@@ -743,6 +1204,9 @@ impl std::fmt::Display for EncryptionError {
             EncryptionError::GroupStateLoad(e) => {
                 write!(f, "encrypted group state load error: {e}")
             }
+            EncryptionError::GroupStateWrite(e) => {
+                write!(f, "group state transaction failed: {e}")
+            }
             EncryptionError::Internal(msg) => write!(f, "internal error: {msg}"),
         }
     }
@@ -754,6 +1218,7 @@ impl std::error::Error for EncryptionError {
             EncryptionError::Group(e) => Some(&**e),
             EncryptionError::Membership(e) => Some(&**e),
             EncryptionError::GroupStateLoad(e) => Some(e),
+            EncryptionError::GroupStateWrite(e) => Some(e),
             _ => None,
         }
     }
