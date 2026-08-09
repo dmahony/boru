@@ -19,6 +19,16 @@
 //! ([`GroupEvent::sign`]); there is no deterministic-ID event class in the
 //! protocol today. If one is ever introduced it must be documented separately
 //! and must not reuse the generic event-ID constructor.
+//!
+//! # Replay tracking (BORU-AUDIT-16)
+//!
+//! Accepted event IDs are recorded in a bounded, durable replay store
+//! ([`crate::group_replay::ReplayStore`]) when one is attached. The in-memory
+//! `seen` map is a capped hot cache layered over that persisted state, never
+//! the sole authority: replay protection survives restart, memory stays
+//! bounded by [`REPLAY_MEMORY_CACHE_MAX`], and markers older than
+//! [`REPLAY_WINDOW_PRIOR_EPOCHS`] prior epochs are pruned on rotation and
+//! startup.
 
 use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -27,6 +37,7 @@ use iroh::{PublicKey, SecretKey, Signature};
 use serde::{Deserialize, Serialize};
 use serde_byte_array::ByteArray;
 
+use crate::group_replay::{RecordOutcome, ReplayStore};
 use crate::TopicId;
 
 /// Current group-control protocol version.
@@ -39,6 +50,23 @@ pub const GROUP_EVENT_VERSION: u8 = 2;
 pub const MAX_GROUP_EVENT_PAYLOAD: usize = 16 * 1024;
 /// Maximum permitted clock skew for a received event.
 pub const MAX_GROUP_EVENT_CLOCK_SKEW_SECS: u64 = 24 * 60 * 60;
+/// Number of prior epochs whose replay markers are retained (BORU-AUDIT-16).
+///
+/// The replay window is *current epoch plus [`REPLAY_WINDOW_PRIOR_EPOCHS`]
+/// prior epochs*. Markers older than the window are pruned from both the
+/// in-memory cache and the persisted store on epoch rotation and startup.
+/// `verify` already rejects any event whose epoch differs from the current
+/// one, so pruning old epochs never re-opens acceptance for the current
+/// epoch; the window exists so a node that missed the last rotation still
+/// rejects replays of events from the immediately preceding epochs.
+pub const REPLAY_WINDOW_PRIOR_EPOCHS: u64 = 2;
+/// Hard cap on the in-memory replay cache per [`GroupState`] (BORU-AUDIT-16).
+///
+/// When the cache exceeds this many entries the oldest (smallest-epoch)
+/// entries are evicted. Eviction is safe because the persisted
+/// [`ReplayStore`] remains the authority; the cache is only a hot fast-path
+/// over durable state.
+pub const REPLAY_MEMORY_CACHE_MAX: usize = 4096;
 const EVENT_ID_LEN: usize = 16;
 /// Length of the per-event cryptographic nonce (128 bits).
 const NONCE_LEN: usize = 16;
@@ -168,6 +196,8 @@ pub enum GroupValidationError {
     EventIdMismatch,
     /// Cryptographic randomness for the per-event nonce was unavailable.
     NonceGeneration,
+    /// The persisted replay store could not be consulted (fail closed).
+    ReplayStore(String),
     /// Timestamp is outside the accepted clock window.
     TimestampOutOfRange,
     /// Encoded payload exceeds the protocol limit.
@@ -357,8 +387,20 @@ impl GroupEvent {
             return Err(GroupValidationError::EventIdMismatch);
         }
         let event_id: &[u8; EVENT_ID_LEN] = envelope.event_id.as_ref();
-        if state.seen.contains(event_id) {
+        if state.seen.contains_key(event_id) {
             return Err(GroupValidationError::Replay);
+        }
+        // Persisted authority (BORU-AUDIT-16): if a store is attached it is
+        // consulted in addition to the in-memory cache. Any store error is
+        // fail-closed — the event is rejected because we cannot prove it is
+        // fresh.
+        if let Some(store) = &state.replay_store {
+            let persisted = store
+                .contains(&state.group_id, event_id)
+                .map_err(|e| GroupValidationError::ReplayStore(e.to_string()))?;
+            if persisted {
+                return Err(GroupValidationError::Replay);
+            }
         }
         let role = if envelope.actor == state.owner {
             Role::Owner
@@ -395,6 +437,26 @@ impl GroupEvent {
     pub fn apply_to(self, state: &mut GroupState) -> Result<(), GroupValidationError> {
         self.verify(state)?;
         let envelope = self.envelope().clone();
+        // Persist the replay marker BEFORE mutating state (BORU-AUDIT-16).
+        // `INSERT OR IGNORE` is atomic, so a concurrent duplicate arriving
+        // between `verify` and here cannot both be accepted: one caller gets
+        // `Recorded`, the other `AlreadySeen` and is rejected. Recording
+        // first also means a store failure aborts the mutation (fail closed).
+        if let Some(store) = &state.replay_store {
+            match store
+                .record(
+                    &state.group_id,
+                    envelope.epoch,
+                    *envelope.event_id.as_ref(),
+                    now_secs(),
+                )
+                .map_err(|e| GroupValidationError::ReplayStore(e.to_string()))?
+            {
+                RecordOutcome::Recorded => {}
+                RecordOutcome::AlreadySeen => return Err(GroupValidationError::Replay),
+            }
+        }
+        let advanced_epoch = matches!(envelope.payload, GroupEventPayload::EpochChanged { .. });
         match envelope.payload {
             GroupEventPayload::MemberInvited { member } => {
                 state.invited.insert(member);
@@ -412,7 +474,13 @@ impl GroupEvent {
                 state.epoch = epoch;
             }
         }
-        state.seen.insert(*envelope.event_id.as_ref());
+        state
+            .seen
+            .insert(*envelope.event_id.as_ref(), envelope.epoch);
+        state.cap_seen_cache();
+        if advanced_epoch {
+            state.prune_replay();
+        }
         Ok(())
     }
 
@@ -451,11 +519,26 @@ pub struct GroupState {
     epoch: u64,
     members: HashMap<PublicKey, Role>,
     invited: HashSet<PublicKey>,
-    seen: HashSet<[u8; EVENT_ID_LEN]>,
+    /// Bounded in-memory replay cache: event ID → epoch of acceptance.
+    ///
+    /// This is an optimization over the persisted [`ReplayStore`] (when one
+    /// is attached), never the sole authority. Capped at
+    /// [`REPLAY_MEMORY_CACHE_MAX`] and pruned to the replay window on epoch
+    /// rotation (BORU-AUDIT-16).
+    seen: HashMap<[u8; EVENT_ID_LEN], u64>,
+    /// Optional durable replay-marker store (BORU-AUDIT-16).
+    ///
+    /// When present, every accepted event is recorded here atomically and
+    /// replay checks consult it, so replay protection survives restart. When
+    /// absent, replay protection is in-memory only (bounded, ephemeral).
+    replay_store: Option<ReplayStore>,
 }
 
 impl GroupState {
     /// Create a state with an owner. The owner is implicitly a member.
+    ///
+    /// Replay protection is in-memory only; use
+    /// [`Self::with_replay_store`] to make it durable across restarts.
     pub fn new(group_id: TopicId, owner: PublicKey) -> Self {
         let mut members = HashMap::new();
         members.insert(owner, Role::Owner);
@@ -465,9 +548,32 @@ impl GroupState {
             epoch: 0,
             members,
             invited: HashSet::new(),
-            seen: HashSet::new(),
+            seen: HashMap::new(),
+            replay_store: None,
         }
     }
+
+    /// Create a state with a durable replay store attached.
+    ///
+    /// Accepted event IDs are persisted in `store` and consulted on every
+    /// replay check, so replay protection survives process restart
+    /// (BORU-AUDIT-16). The store must be opened over a connection that
+    /// outlives this state (typically an app-owned `Arc<Mutex<Connection>>`).
+    pub fn with_replay_store(group_id: TopicId, owner: PublicKey, store: ReplayStore) -> Self {
+        let mut state = Self::new(group_id, owner);
+        state.replay_store = Some(store);
+        state
+    }
+
+    /// Attach (or replace) the durable replay store.
+    ///
+    /// Existing in-memory markers are not copied into the store; the store is
+    /// authoritative going forward. Safe to call at startup with a store that
+    /// already contains markers from a previous process lifetime.
+    pub fn attach_replay_store(&mut self, store: ReplayStore) {
+        self.replay_store = Some(store);
+    }
+
     /// Current member set (including owner).
     pub fn members(&self) -> &HashMap<PublicKey, Role> {
         &self.members
@@ -476,6 +582,53 @@ impl GroupState {
     pub fn apply(&mut self, event: GroupEvent) -> Result<(), GroupValidationError> {
         event.apply_to(self)
     }
+
+    /// Current epoch.
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Number of entries currently in the in-memory replay cache.
+    ///
+    /// Useful for observing the [`REPLAY_MEMORY_CACHE_MAX`] bound in tests.
+    pub fn replay_cache_len(&self) -> usize {
+        self.seen.len()
+    }
+
+    /// Prune replay markers older than the retention window.
+    ///
+    /// The window is *current epoch plus [`REPLAY_WINDOW_PRIOR_EPOCHS`] prior
+    /// epochs*. Both the in-memory cache and the persisted store (when
+    /// attached) are pruned; the store is pruned in bounded batches
+    /// (BORU-AUDIT-16). Called automatically on epoch rotation, and available
+    /// for startup cleanup after a state is rebuilt from a persisted log.
+    pub fn prune_replay(&mut self) {
+        let min_epoch = self.epoch.saturating_sub(REPLAY_WINDOW_PRIOR_EPOCHS);
+        self.seen.retain(|_, epoch| *epoch >= min_epoch);
+        if let Some(store) = &self.replay_store {
+            if let Err(e) = store.prune_older_than(&self.group_id, min_epoch) {
+                tracing::warn!(
+                    "failed to prune group replay store for {}: {e}",
+                    self.group_id
+                );
+            }
+        }
+    }
+
+    /// Enforce the in-memory replay cache bound by evicting the oldest
+    /// (smallest-epoch) entries first.
+    fn cap_seen_cache(&mut self) {
+        if self.seen.len() <= REPLAY_MEMORY_CACHE_MAX {
+            return;
+        }
+        let mut by_epoch: Vec<_> = self.seen.iter().map(|(id, e)| (*e, *id)).collect();
+        by_epoch.sort_unstable();
+        let excess = self.seen.len() - REPLAY_MEMORY_CACHE_MAX;
+        for (_, id) in by_epoch.into_iter().take(excess) {
+            self.seen.remove(&id);
+        }
+    }
+
     /// Test-only fixture helper; production state must come from events.
     #[doc(hidden)]
     pub fn add_member_for_test(&mut self, member: PublicKey) {

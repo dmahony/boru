@@ -336,10 +336,36 @@ Every event passes through `GroupEvent::verify()` which checks in order:
    (covers the nonce, so mutating it invalidates the event)
 8. **Event ID** — `envelope.event_id` must equal the domain-separated BLAKE3
    hash of the signed contents (including the nonce); mismatches are rejected
-9. **Replay** — event ID must not have been seen before
+9. **Replay** — event ID must not have been seen before (checked against the
+   in-memory cache and, when attached, the persisted replay store)
 10. **Membership** — actor must be in the appropriate role for the operation
 11. **Permission** — actor must be authorised to perform the operation (owner-only
     operations require `Role::Owner`)
+
+### Replay Tracking (BORU-AUDIT-16)
+
+Replay protection is bounded and survives restart:
+
+- **Replay window**: markers are retained for the current epoch plus
+  [`REPLAY_WINDOW_PRIOR_EPOCHS`](`crate::group_events::REPLAY_WINDOW_PRIOR_EPOCHS`)
+  (2) prior epochs. Older markers are pruned from both the in-memory cache
+  and the persisted store on epoch rotation and startup
+  ([`GroupState::prune_replay`]).
+- **Persisted authority**: when a [`ReplayStore`](`crate::group_replay::ReplayStore`)
+  is attached (`GroupState::with_replay_store`), every accepted event ID is
+  recorded in the `group_event_replay` SQLite table in the same atomic step
+  as acceptance (`INSERT OR IGNORE`), keyed by `(group_id, event_id)` and
+  indexed by `(group_id, epoch)`. `verify()` consults the store as well as
+  the in-memory cache, so an event accepted before a restart is still
+  rejected afterwards.
+- **Bounded memory**: the in-memory cache is capped at
+  [`REPLAY_MEMORY_CACHE_MAX`](`crate::group_events::REPLAY_MEMORY_CACHE_MAX`)
+  (4096) entries per group; the oldest are evicted first. Eviction is safe
+  because the persisted store remains the authority — the cache is a hot
+  fast-path, not the sole replay record.
+- **Fail closed**: any replay-store error (lock or database) is surfaced as
+  `GroupValidationError::ReplayStore` and the event is rejected — an
+  unverifiable event is never accepted.
 
 ### Authoritative State
 
@@ -352,7 +378,8 @@ pub struct GroupState {
     epoch: u64,
     members: HashMap<PublicKey, Role>,   // includes owner
     invited: HashSet<PublicKey>,
-    seen: HashSet<[u8; 16]>,             // replay protection
+    seen: HashMap<[u8; 16], u64>,        // bounded replay cache: id -> epoch
+    replay_store: Option<ReplayStore>,   // durable authority when attached
 }
 ```
 
@@ -369,6 +396,8 @@ membership. The roster is never consulted to grant access.
 | `MAX_GROUP_EVENT_CLOCK_SKEW_SECS` | 86,400 (24h) | Allowed clock drift |
 | Event ID length | 16 bytes | BLAKE3 truncated hash (domain-separated) |
 | Nonce length | 16 bytes | Fresh per-event cryptographic nonce |
+| `REPLAY_WINDOW_PRIOR_EPOCHS` | 2 | Prior epochs whose replay markers are retained |
+| `REPLAY_MEMORY_CACHE_MAX` | 4096 | In-memory replay cache cap per group |
 
 ## Relationship Summary
 

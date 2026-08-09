@@ -461,3 +461,269 @@ fn exact_retransmission_keeps_same_event_id_and_is_replayed() {
         Err(GroupValidationError::Replay)
     ));
 }
+
+// ── BORU-AUDIT-16: bound and persist replay tracking ────────────────────────
+
+use std::sync::{Arc, Mutex};
+
+use boru_core::group_replay::ReplayStore;
+use rusqlite::Connection;
+
+fn memory_store() -> ReplayStore {
+    let conn = Arc::new(Mutex::new(Connection::open_in_memory().unwrap()));
+    ReplayStore::open(conn).unwrap()
+}
+
+/// Regression: replay protection must survive a process restart.
+///
+/// Old behaviour: `GroupState.seen` was a plain in-memory `HashSet`, so after
+/// a restart (a fresh `GroupState`) an accepted event could be applied again.
+/// New behaviour: with a durable [`ReplayStore`] attached, the marker is
+/// persisted and a fresh state rejects the replay.
+#[test]
+fn replay_after_restart_is_rejected_with_persisted_store() {
+    let owner = SecretKey::generate();
+    let member = SecretKey::generate().public();
+    let store = memory_store();
+    let group = group_id();
+
+    // First process lifetime: state with a durable store.
+    let mut state = GroupState::with_replay_store(group, owner.public(), store.clone());
+    let event = GroupEvent::sign(
+        &owner,
+        group,
+        0,
+        GroupEventPayload::MemberInvited { member },
+    )
+    .unwrap();
+    state.apply(event.clone()).unwrap();
+    assert_eq!(store.count(&group).unwrap(), 1);
+
+    // Simulated restart: a fresh GroupState sharing the same durable store.
+    // The in-memory cache is empty but the persisted marker must still reject
+    // the replay.
+    let mut restarted = GroupState::with_replay_store(group, owner.public(), store.clone());
+    assert_eq!(restarted.replay_cache_len(), 0);
+    assert!(matches!(
+        restarted.apply(event),
+        Err(GroupValidationError::Replay)
+    ));
+    assert_eq!(
+        store.count(&group).unwrap(),
+        1,
+        "no duplicate marker recorded"
+    );
+}
+
+/// The persisted store is the authority even when the in-memory cache has
+/// evicted entries (memory bound): every accepted marker is durable, so a
+/// replay of an evicted event is still rejected via the store.
+#[test]
+fn verify_consults_persisted_store_after_cache_eviction() {
+    let owner = SecretKey::generate();
+    let group = group_id();
+    let store = memory_store();
+    let mut state = GroupState::with_replay_store(group, owner.public(), store.clone());
+
+    // Apply many events so the cache overflows and evicts the oldest entries.
+    let volume = boru_core::group_events::REPLAY_MEMORY_CACHE_MAX + 10;
+    let mut first_encoded = None;
+    for i in 0..volume {
+        let event = GroupEvent::sign(
+            &owner,
+            group,
+            0,
+            GroupEventPayload::MemberInvited {
+                member: SecretKey::generate().public(),
+            },
+        )
+        .unwrap();
+        if i == 0 {
+            first_encoded = Some(event.encode().unwrap());
+        }
+        state.apply(event).unwrap();
+    }
+    assert!(state.replay_cache_len() <= boru_core::group_events::REPLAY_MEMORY_CACHE_MAX);
+    // The durable store keeps every marker (authority) even though the hot
+    // cache was trimmed.
+    assert_eq!(store.count(&group).unwrap(), volume);
+
+    // Replay the very first event. The hot cache was trimmed to
+    // REPLAY_MEMORY_CACHE_MAX, so at minimum some markers only exist in the
+    // persisted store — and this replay must be rejected regardless of which
+    // layer still holds its marker.
+    let first = GroupEvent::decode(first_encoded.as_deref().unwrap()).unwrap();
+    assert!(matches!(
+        state.apply(first),
+        Err(GroupValidationError::Replay)
+    ));
+}
+
+/// Very old prunable epoch entries are removed without affecting active
+/// epochs. On epoch rotation, markers older than the window
+/// (current − REPLAY_WINDOW_PRIOR_EPOCHS) are pruned from both the cache and
+/// the store; the active epoch's markers still reject replays.
+#[test]
+fn prune_removes_very_old_epochs_without_affecting_active() {
+    let owner = SecretKey::generate();
+    let group = group_id();
+    let store = memory_store();
+    let mut state = GroupState::with_replay_store(group, owner.public(), store.clone());
+
+    // Epoch 0: one event.
+    let e0 = GroupEvent::sign(
+        &owner,
+        group,
+        0,
+        GroupEventPayload::MemberInvited {
+            member: SecretKey::generate().public(),
+        },
+    )
+    .unwrap();
+    state.apply(e0.clone()).unwrap();
+
+    // Jump straight to epoch 3. The rotation event is authored in epoch 0 and
+    // its marker is recorded at epoch 0; after the jump the window is
+    // min_epoch = 3 − 2 = 1, so epoch-0 markers (e0 + rotation) are pruned.
+    let rotate3 = GroupEvent::sign(
+        &owner,
+        group,
+        0,
+        GroupEventPayload::EpochChanged { epoch: 3 },
+    )
+    .unwrap();
+    state.apply(rotate3).unwrap();
+    assert_eq!(state.epoch(), 3);
+    assert_eq!(
+        store.count(&group).unwrap(),
+        0,
+        "epoch-0 markers pruned after rotation"
+    );
+    assert!(
+        !store.contains(&group, &event_id(&e0)).unwrap(),
+        "epoch-0 marker pruned"
+    );
+
+    // Active epoch 3: new events are accepted and their replays rejected.
+    let e3 = GroupEvent::sign(
+        &owner,
+        group,
+        3,
+        GroupEventPayload::MemberInvited {
+            member: SecretKey::generate().public(),
+        },
+    )
+    .unwrap();
+    state.apply(e3.clone()).unwrap();
+    assert_eq!(store.count(&group).unwrap(), 1);
+    assert!(matches!(
+        state.apply(e3.clone()),
+        Err(GroupValidationError::Replay)
+    ));
+
+    // Rotate again to epoch 10: min_epoch = 8, so the epoch-3 marker is
+    // pruned, and active epoch-10 markers still work.
+    let rotate10 = GroupEvent::sign(
+        &owner,
+        group,
+        3,
+        GroupEventPayload::EpochChanged { epoch: 10 },
+    )
+    .unwrap();
+    state.apply(rotate10).unwrap();
+    assert_eq!(store.count(&group).unwrap(), 0, "epoch-3 markers pruned");
+
+    let e10 = GroupEvent::sign(
+        &owner,
+        group,
+        10,
+        GroupEventPayload::MemberInvited {
+            member: SecretKey::generate().public(),
+        },
+    )
+    .unwrap();
+    state.apply(e10.clone()).unwrap();
+    assert_eq!(store.count(&group).unwrap(), 1, "active marker retained");
+    assert!(matches!(
+        state.apply(e10),
+        Err(GroupValidationError::Replay)
+    ));
+}
+
+/// Large synthetic event volume keeps memory bounded: the in-memory replay
+/// cache never exceeds REPLAY_MEMORY_CACHE_MAX even when far more events are
+/// accepted, because the oldest entries are evicted (and remain durable).
+#[test]
+fn large_synthetic_volume_keeps_memory_bounded() {
+    let owner = SecretKey::generate();
+    let group = group_id();
+    let store = memory_store();
+    let mut state = GroupState::with_replay_store(group, owner.public(), store.clone());
+
+    let volume = boru_core::group_events::REPLAY_MEMORY_CACHE_MAX * 3;
+    for _ in 0..volume {
+        let event = GroupEvent::sign(
+            &owner,
+            group,
+            0,
+            GroupEventPayload::MemberInvited {
+                member: SecretKey::generate().public(),
+            },
+        )
+        .unwrap();
+        state.apply(event).unwrap();
+    }
+    assert!(
+        state.replay_cache_len() <= boru_core::group_events::REPLAY_MEMORY_CACHE_MAX,
+        "in-memory cache must stay bounded, got {}",
+        state.replay_cache_len()
+    );
+    // The durable store keeps every marker (authority), so replay protection
+    // is not lost — only the hot cache is trimmed.
+    assert_eq!(store.count(&group).unwrap(), volume);
+}
+
+/// Concurrent duplicate arrivals result in one accepted mutation. With a
+/// shared store the atomic INSERT OR IGNORE means exactly one caller records
+/// the marker; the rest see AlreadySeen/Replay.
+#[test]
+fn concurrent_duplicate_arrivals_result_in_one_acceptance() {
+    use std::thread;
+
+    let owner = SecretKey::generate();
+    let member = SecretKey::generate().public();
+    let group = group_id();
+    let store = memory_store();
+    let state = Arc::new(Mutex::new(GroupState::with_replay_store(
+        group,
+        owner.public(),
+        store.clone(),
+    )));
+    let event = GroupEvent::sign(
+        &owner,
+        group,
+        0,
+        GroupEventPayload::MemberInvited { member },
+    )
+    .unwrap();
+
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let state = state.clone();
+        let event = event.clone();
+        handles.push(thread::spawn(move || state.lock().unwrap().apply(event)));
+    }
+    let outcomes: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+    let accepted = outcomes.iter().filter(|r| r.is_ok()).count();
+    assert_eq!(accepted, 1, "exactly one concurrent duplicate is accepted");
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|r| matches!(r, Err(GroupValidationError::Replay)))
+            .count(),
+        7,
+        "the other seven see a replay"
+    );
+    assert_eq!(store.count(&group).unwrap(), 1, "one durable marker");
+}

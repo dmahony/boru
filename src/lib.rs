@@ -164,6 +164,11 @@ pub mod group_id;
 #[cfg(feature = "net")]
 pub mod group_events;
 
+/// Bounded, persistent replay-marker store backing group event replay
+/// protection (BORU-AUDIT-16).
+#[cfg(feature = "net")]
+pub mod group_replay;
+
 /// Secure member removal and per-epoch credential rotation.
 #[cfg(feature = "net")]
 pub mod group_epoch;
