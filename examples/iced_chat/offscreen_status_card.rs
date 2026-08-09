@@ -80,10 +80,13 @@ fn render_card(dep: &StatusCardDependency, w: f32, h: f32, name: &str) {
     let mut tree = Tree::new(element.as_widget());
     let limits = layout::Limits::new(Size::ZERO, Size::new(w, h));
     let node = element.as_widget_mut().layout(&mut tree, &renderer, &limits);
-    // CONN-04: report the card's REAL laid-out height (padding + content,
-    // unaffected by the drop shadow) so the 200-230px band is verifiable.
+    // CONN-04: report the card's REAL laid-out size (padding + content,
+    // unaffected by the drop shadow) so the 200-230px band and the
+    // no-horizontal-overflow criterion are verifiable directly from the
+    // layout tree (CONN-12 sweep).
     println!(
-        "layout height for {name}: {:.1}px (canvas {w}x{h})",
+        "layout size for {name}: {:.1}x{:.1}px (canvas {w}x{h})",
+        node.bounds().width,
         node.bounds().height
     );
     let theme = iced::Theme::Light;
@@ -281,25 +284,41 @@ mod tests {
         load_font(include_bytes!("fonts/IBMPlexSans-Medium.ttf"));
         load_font(include_bytes!("fonts/IBMPlexSans-SemiBold.ttf"));
 
-        // MODE A — wide desktop (1600 window → ~1215 content): full
-        // three-region row.
-        render_card(&dep(HomeConnectionVariant::Ready, 1215.0), 1215.0, 320.0, "status_ready_wide_1215");
-        // MODE B — minimum supported window (1024 → ~679 content):
-        // compact horizontal row, graph on the right (679 ≥ 560).
-        render_card(&dep(HomeConnectionVariant::Ready, 679.0), 679.0, 320.0, "status_ready_medium_679");
-        render_card(&dep(HomeConnectionVariant::Connecting, 679.0), 679.0, 320.0, "status_connecting_medium_679");
-        render_card(&dep(HomeConnectionVariant::Offline, 679.0), 679.0, 360.0, "status_offline_medium_679");
-        // MODE B bottom band (560-759): graph still visible but shrunk
-        // (560 is exactly the MODE B/C boundary).
-        render_card(&dep(HomeConnectionVariant::Ready, 560.0), 560.0, 360.0, "status_ready_modeb_560");
-        // MODE C with the small mesh still shown (520-559): stacked
-        // compact, mesh kept (520 is the mesh-hide boundary).
-        render_card(&dep(HomeConnectionVariant::Ready, 540.0), 540.0, 440.0, "status_ready_modec_540");
-        // MODE C below the mesh-hide width (<520): stacked compact, mesh
-        // NOT rendered (spec §13).
-        render_card(&dep(HomeConnectionVariant::Ready, 500.0), 500.0, 440.0, "status_ready_nomesh_500");
-        // Narrow (below supported widths) — stacked layout.
-        render_card(&dep(HomeConnectionVariant::Ready, 400.0), 400.0, 480.0, "status_ready_narrow_400");
+        // CONN-12 width sweep (spec §18 "Test widths manually"): capture
+        // the Ready card at every test width, width-tagged so the user
+        // can review each PNG against the acceptance checklist. Tier map
+        // (from status_card.rs constants): MODE A >= 760 (1215/900/800),
+        // MODE B 560-759 (700/679/600), MODE C < 560 (550/500/450/400);
+        // mesh hidden below 520 (500/450/400 have no mesh).
+        for w in [1215.0, 900.0, 800.0, 700.0, 679.0, 600.0, 550.0, 500.0, 450.0, 400.0] {
+            let (h, name) = match w {
+                1215.0 => (360.0, "status_ready_w1215"),
+                900.0 => (360.0, "status_ready_w900"),
+                800.0 => (360.0, "status_ready_w800"),
+                700.0 => (360.0, "status_ready_w700"),
+                679.0 => (360.0, "status_ready_w679"),
+                600.0 => (360.0, "status_ready_w600"),
+                550.0 => (440.0, "status_ready_w550"),
+                500.0 => (440.0, "status_ready_w500"),
+                450.0 => (480.0, "status_ready_w450"),
+                400.0 => (480.0, "status_ready_w400"),
+                _ => unreachable!(),
+            };
+            render_card(&dep(HomeConnectionVariant::Ready, w), w, h, name);
+        }
+        // State captures at one width (679, MODE B medium row).
+        render_card(
+            &dep(HomeConnectionVariant::Connecting, 679.0),
+            679.0,
+            320.0,
+            "status_connecting_medium_679",
+        );
+        render_card(
+            &dep(HomeConnectionVariant::Offline, 679.0),
+            679.0,
+            360.0,
+            "status_offline_medium_679",
+        );
     }
 
     #[test]
