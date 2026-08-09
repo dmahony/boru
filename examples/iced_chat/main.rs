@@ -35,6 +35,9 @@ mod presentation;
 mod quick_actions;
 mod recent_activity_view_model;
 mod shared_by_me_table;
+mod status_card;
+#[cfg(test)]
+mod offscreen_status_card;
 mod sharing_summary;
 #[cfg(feature = "terminal")]
 mod terminal_view;

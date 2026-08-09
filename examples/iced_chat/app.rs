@@ -898,16 +898,6 @@ pub(crate) const ICON_CHECK: &[u8] = include_bytes!("../../assets/icons/lucide/c
 pub(crate) const ICON_PLAY: &[u8] = include_bytes!("../../assets/icons/lucide/play.svg");
 pub(crate) const ICON_FOLDER: &[u8] = include_bytes!("../../assets/icons/lucide/folder.svg");
 pub(crate) const ICON_MESH: &[u8] = include_bytes!("../../assets/icons/lucide/share-2.svg");
-/// Static peer-to-peer node-graph decoration for the home hero card.
-/// Deliberately static (no animation) so it consumes no CPU while idle.
-pub(crate) const NETWORK_MOTIF: &[u8] = include_bytes!("../../assets/icons/network-motif.svg");
-/// UI-HOME-04: minimum content height of the large connection overview
-/// card, before padding. With the card's SPACE_32 padding (32 top +
-/// 32 bottom) the total card height lands at ~244 px, inside the plan's
-/// 230–260 px band. Implemented as a zero-width spacer inside the hero
-/// row so the card grows with content (wrapped degraded/offline reasons)
-/// instead of clipping.
-pub(crate) const HERO_MIN_CONTENT_HEIGHT: f32 = 180.0;
 pub(crate) const ICON_PAPERCLIP: &[u8] = include_bytes!("../../assets/icons/lucide/paperclip.svg");
 pub(crate) const ICON_SEND: &[u8] = include_bytes!("../../assets/icons/lucide/send.svg");
 pub(crate) const ICON_EMOJI: &str = "😊";
@@ -1530,7 +1520,7 @@ impl PeerPresence {
 //   4. relay reachable (sender present)    -> Connecting (waiting for peers)
 //   5. otherwise                           -> Starting  (bootstrap)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HomeConnectionVariant {
+pub(crate) enum HomeConnectionVariant {
     /// Boru is still booting its network stack; no sender or peers yet.
     Starting,
     /// The relay / gossip sender is up but no peer connections yet.
@@ -4783,6 +4773,15 @@ pub(crate) struct ChatListDependency {
     /// f32 bit pattern of the home menu item background opacity — included
     /// so the lazy home screen re-renders when the setting changes.
     pub(crate) home_menu_item_opacity_bits: u32,
+    /// Mesh-pulse phase for the status card's network canvas, derived from
+    /// the per-second `ActivityTick` so the card's slow node brighten/fade
+    /// costs nothing extra (the rail-card `tick` already rebuilds this
+    /// screen every second). Always advanced, not gated on connection
+    /// state; the status card ignores it unless it may animate.
+    pub(crate) hero_pulse_frame: u32,
+    /// OS reduced-motion preference — the status card keeps its mesh
+    /// static when this is set.
+    pub(crate) reduced_motion: bool,
 }
 
 /// One mesh event log row, snapshot for the home dependency.
@@ -29888,6 +29887,9 @@ impl IcedChat {
             activity: self.recent_activity_card_data(),
             tunnels: self.tunnels_card_data(),
             home_menu_item_opacity_bits: self.home_menu_item_opacity.to_bits(),
+            hero_pulse_frame: (self.activity_tick % crate::status_card::STATUS_CARD_PULSE_PHASES as u64)
+                as u32,
+            reduced_motion: self.reduced_motion,
         }
     }
 
@@ -30037,167 +30039,26 @@ impl IcedChat {
             }
         });
 
-        // ── Large connection hero card (Figure 3) ──
-        // UI-HOME-09: icon-container standardised on tokens — AVATAR_MD for
-        // the 48 px circle (radius = half) and IconSize::Lg for the glyph
-        // (was a raw 48.0 / 24.0 / 22.0 literal set).
-        let hero_badge =
-            container(
-                icon_svg(hero_icon, IconSize::Lg.px()).style(move |t, _| {
-                    iced::widget::svg::Style {
-                        color: Some(iced::Color::WHITE),
-                    }
-                }),
-            )
-            .width(Length::Fixed(crate::design_tokens::AVATAR_MD))
-            .height(Length::Fixed(crate::design_tokens::AVATAR_MD))
-            .style(move |t| iced::widget::container::Style {
-                background: Some(iced::Background::Color(hero_color(t))),
-                border: iced::Border {
-                    radius: (crate::design_tokens::AVATAR_MD / 2.0).into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            });
-
-        let mut hero_actions = Row::new().spacing(SPACE_8);
-        if show_retry {
-            hero_actions = hero_actions.push(
-                button(crate::fonts::type_role_text(
-                    crate::fonts::TypeRole::ButtonLabel,
-                    "Retry",
-                ))
-                .on_press(AppMessage::RetryConnection)
-                .padding([SPACE_6, SPACE_12])
-                .style(BUTTON_PRIMARY),
-            );
-        }
-        if show_details {
-            hero_actions = hero_actions.push(
-                button(crate::fonts::type_role_text(
-                    crate::fonts::TypeRole::ButtonLabel,
-                    "Details",
-                ))
-                .on_press(AppMessage::OpenConnectionDetails)
-                .padding([SPACE_6, SPACE_12])
-                .style(BUTTON_OUTLINE),
-            );
-        }
-
-        let mut hero_text = Column::new()
-            .push(
-                // Connection heading — section_title (IBM Plex Sans SemiBold 20).
-                // Fills the hero text column and glyph-wraps a long degraded /
-                // offline reason instead of overflowing the card (UI-HOME-10).
-                crate::fonts::type_role_text(
-                    crate::fonts::TypeRole::SectionTitle,
-                    headline.clone(),
-                )
-                .color(hero_color(&theme))
-                .width(Length::Fill)
-                .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
-            )
-            .push(Space::new().height(Length::Fixed(SPACE_4)))
-            .push(
-                // Body copy — IBM Plex Sans Regular 15, 1.45 line height.
-                crate::fonts::type_role_text_lh(
-                    crate::fonts::TypeRole::Body,
-                    "Private communication, peer to peer.",
-                    1.45,
-                )
-                .color(text_secondary(&theme)),
-            );
-        if show_retry || show_details {
-            hero_text = hero_text
-                .push(Space::new().height(Length::Fixed(SPACE_12)))
-                .push(hero_actions);
-        }
-        let hero_text = hero_text.spacing(0).width(Length::Fill);
-
-        // ── Large connection hero card (Figure 3 / UI-HOME-04) ──
-        // Left message group (state badge + headline + subtitle + actions)
-        // balanced against a right decorative mesh illustration group. The
-        // card keeps the approved large-green proportions: minimum height
-        // ~244 px (HERO_MIN_CONTENT_HEIGHT + SPACE_32 padding), ~32 px
-        // padding, light green-tinted surface when Ready, thin green-grey
-        // border and RADIUS_CARD through the shared card_style.
-        //
-        // The minimum height is content-driven, not a clip: a zero-width
-        // Space with the target content height sits inside the row, so the
-        // row is at least that tall but grows if a long degraded/offline
-        // reason wraps the headline. Nothing is clipped.
-
-        // Left message group: circular state icon + headline/subtitle,
-        // vertically centred against the card's minimum height.
-        let hero_left_group = Row::new()
-            .push(hero_badge)
-            .push(Space::new().width(Length::Fixed(SPACE_16)))
-            .push(hero_text)
-            .spacing(0)
-            .align_y(Alignment::Center)
-            .width(Length::Fill);
-
-        // Right illustration group: static low-contrast node-graph, scaled
-        // proportionally (native 220×150 → 205×140), inset from the card
-        // edge by the card padding. UI-HOME-15: the illustration is shown at
-        // full size on wide content, scaled down 0.8× in the medium band,
-        // and hidden below the minimum readable content width so the
-        // connection text never gets starved.
-        let hero_illustration = if content_width
-            < crate::design_tokens::HOME_ILLUSTRATION_HIDE_CONTENT
-        {
-            None
-        } else {
-            let (iw, ih) = if content_width
-                >= crate::design_tokens::HOME_ILLUSTRATION_FULL_CONTENT
-            {
-                (205.0, 140.0)
-            } else {
-                (164.0, 112.0) // 0.8× scale
-            };
-            Some(
-                iced::widget::svg(iced::widget::svg::Handle::from_memory(NETWORK_MOTIF))
-                    .width(Length::Fixed(iw))
-                    .height(Length::Fixed(ih))
-                    .style(|_t, _s| iced::widget::svg::Style { color: None }),
-            )
-        };
-
-        let mut hero_row = Row::new()
-            // Zero-width spacer drives the card's minimum height; the row
-            // grows with content (no fixed height, no clipping).
-            .push(
-                Space::new()
-                    .width(Length::Fixed(0.0))
-                    .height(Length::Fixed(HERO_MIN_CONTENT_HEIGHT)),
-            )
-            .push(hero_left_group)
-            .spacing(0)
-            .align_y(Alignment::Center)
-            .width(Length::Fill);
-        if let Some(illustration) = hero_illustration {
-            hero_row = hero_row
-                .push(Space::new().width(Length::Fixed(SPACE_16)))
-                .push(illustration);
-        }
-
-        let hero_card = container(hero_row)
-            .padding(SPACE_32)
-            .width(Length::Fill)
-            // Hero variant of the shared dashboard-card surface: same
-            // border/radius/shadow as every home card (card_style), with
-            // the background overridden to the primary soft tint when the
-            // mesh is Ready.
-            .style(move |t| {
-                let mut style = crate::design_tokens::card_style(t);
-                let mut bg = if matches!(variant, HomeConnectionVariant::Ready) {
-                    crate::design_tokens::primary_soft(t)
-                } else {
-                    bg_surface(t)
-                };
-                bg.a *= home_menu_opacity;
-                style.background = Some(iced::Background::Color(bg));
-                style
+        // ── Large connection status card (new dark panel) ──
+        // Rendered by the dedicated `status_card` module: dark green
+        // gradient panel, outlined status indicator, two-tone heading,
+        // privacy pill, and a native canvas peer-to-peer mesh on the
+        // right. All connection-state inputs are the same live selectors
+        // the previous hero card consumed (variant / headline / actions /
+        // width / opacity) — only the presentation changed. The mesh
+        // pulses very slowly while Ready and OS reduced-motion is off.
+        let hero_card =
+            crate::status_card::view_status_card(&crate::status_card::StatusCardDependency {
+                variant,
+                content_width,
+                headline: headline.clone(),
+                show_retry,
+                show_details,
+                pulse_frame: dep.hero_pulse_frame,
+                animate_mesh: !dep.reduced_motion
+                    && matches!(variant, HomeConnectionVariant::Ready),
+                dimmed_mesh: !matches!(variant, HomeConnectionVariant::Ready),
+                home_menu_opacity,
             });
 
         // ── Mesh Health card ──
@@ -43199,17 +43060,26 @@ mod tests {
     }
 
     #[test]
-    fn hero_card_min_height_stays_in_plan_band() {
-        // UI-HOME-04: the connection overview card minimum total height
-        // (min content + SPACE_32 top/bottom padding) must stay in the
-        // plan's 230–260 px band, and the content driver must be positive
-        // so the card can grow with wrapped degraded/offline reasons.
-        let total = HERO_MIN_CONTENT_HEIGHT + 2.0 * SPACE_32;
+    fn status_card_is_wired_into_home_screen() {
+        // The redesigned connection status card (dark panel) replaces the
+        // old hero card. Its layout/geometry bands are guarded in
+        // status_card.rs and design_tokens.rs; here we only verify the
+        // home screen actually routes the truthful variant + live selectors
+        // into it (never a hard-coded "connected" state).
+        let src = include_str!("app.rs");
+        let home = method_source(src, "fn view_chat_list_content(", "fn view_chat_panel(");
         assert!(
-            (230.0..=260.0).contains(&total),
-            "hero card total height {total} px outside the plan band 230–260"
+            home.contains("crate::status_card::view_status_card"),
+            "home screen must render the status card module"
         );
-        assert!(HERO_MIN_CONTENT_HEIGHT > 0.0);
+        assert!(
+            home.contains("variant,") && home.contains("headline: headline.clone()"),
+            "status card must receive the truthful variant + headline"
+        );
+        assert!(
+            home.contains("pulse_frame: dep.hero_pulse_frame"),
+            "status card must receive the pulse frame from the dependency"
+        );
     }
 
     #[test]
@@ -44900,9 +44770,10 @@ mod tests {
     fn home_screen_uses_type_role_roles() {
         // UI-HOME-12 approved mapping: greeting -> display_heading (Archivo
         // SemiCondensed Bold 32), subtitle -> body@16, pill -> metadata,
-        // hero headline -> section_title (IBM Plex Sans SemiBold 20), hero
-        // body -> body lh 1.45, Retry/Details -> button_label, mesh card ->
-        // card_title / supporting_text / body_emphasised / button_label.
+        // connection card heading -> display_heading (Archivo SemiCondensed
+        // Bold, two-tone) via status_card.rs, card body -> body, Retry/
+        // Details -> button_label, mesh card -> card_title /
+        // supporting_text / body_emphasised / button_label.
         // The whole home screen must resolve fonts through the central
         // TypeRole roles — no local font declarations (Archivo may only
         // arrive via DisplayHeading/PageTitle).
@@ -44912,12 +44783,13 @@ mod tests {
             home.contains("TypeRole::DisplayHeading"),
             "greeting must use TypeRole::DisplayHeading (Archivo SemiCondensed Bold 32)"
         );
+        let status = include_str!("status_card.rs");
         assert!(
-            home.contains("TypeRole::SectionTitle"),
-            "hero headline must use TypeRole::SectionTitle (IBM Plex Sans SemiBold 20)"
+            status.contains("TypeRole::DisplayHeading"),
+            "connection card heading must use TypeRole::DisplayHeading (Archivo SemiCondensed Bold)"
         );
         assert!(
-            home.contains("TypeRole::ButtonLabel"),
+            status.contains("TypeRole::ButtonLabel"),
             "hero Retry/Details must use TypeRole::ButtonLabel"
         );
         assert!(
@@ -45000,18 +44872,22 @@ mod tests {
             home.contains(".color(text_secondary(&theme))"),
             "subtitle must use the muted secondary colour"
         );
-        // Connection card headline + subtitle.
+        // Connection card headline + subtitle (moved to status_card.rs
+        // with the redesign: DisplayHeading two-tone heading, Body subtitle,
+        // SupportingText pill — all through TypeRole roles).
+        let status = include_str!("status_card.rs");
         assert!(
-            home.contains("crate::fonts::type_role_text(\n                    crate::fonts::TypeRole::SectionTitle,"),
-            "connection card title must use TypeRole::SectionTitle (IBM Plex Sans SemiBold 20)"
+            status.contains("fonts::type_role_text_lh(TypeRole::DisplayHeading,"),
+            "connection card heading must use type_role_text_lh with TypeRole::DisplayHeading (Archivo SemiCondensed Bold)"
         );
         assert!(
-            home.contains("\"Boru is connected and ready.\".to_string()"),
-            "connection card ready copy must remain"
+            status.contains("\"Boru \""),
+            "connection card ready copy must keep the two-tone Boru span"
         );
         assert!(
-            home.contains("crate::fonts::type_role_text_lh(\n                    crate::fonts::TypeRole::Body,\n                    \"Private communication, peer to peer.\",\n                    1.45,"),
-            "connection card subtitle must use type_role_text_lh(TypeRole::Body, ..., 1.45)"
+            status.contains("Private communication, peer to peer.")
+                && status.contains("TypeRole::Body"),
+            "connection card subtitle must use TypeRole::Body for the supporting copy"
         );
         // Dashboard headings: all four cards are built from the shared
         // CardShell foundation, which renders titles with TypeRole::CardTitle
@@ -45090,12 +44966,23 @@ mod tests {
             "greeting → welcome gap must use shared-scale SPACE_4 (4–8 px band)"
         );
         assert!(
-            home.contains("IconSize::Lg.px()"),
-            "hero badge glyph must use a standard IconSize token"
+            home.contains("crate::status_card::view_status_card"),
+            "the connection status card must be the redesigned dark panel module"
+        );
+        // The status card's indicator + glyph use dedicated design tokens
+        // (plan bands guarded in design_tokens.rs), never raw literals.
+        let status = include_str!("status_card.rs");
+        assert!(
+            status.contains("design_tokens::STATUS_INDICATOR_SIZE"),
+            "status indicator must use the STATUS_INDICATOR_SIZE token, not a raw 100.0 literal"
         );
         assert!(
-            home.contains("crate::design_tokens::AVATAR_MD"),
-            "hero badge container must use the AVATAR_MD token, not a 48.0 literal"
+            status.contains("design_tokens::STATUS_INDICATOR_GLYPH"),
+            "status indicator glyph must use the STATUS_INDICATOR_GLYPH token, not a raw 36.0 literal"
+        );
+        assert!(
+            !status.contains("Length::Fixed(48.0)"),
+            "the old 48 px hero badge literal must be gone from the status card"
         );
         assert!(
             home.contains(".padding([SPACE_12, SPACE_12])"),
@@ -45319,23 +45206,23 @@ mod tests {
     }
 
     #[test]
-    fn home_hero_illustration_adapts_to_content_width() {
-        // UI-HOME-15: the mesh illustration must scale/reposition based on
-        // content width — full at wide, scaled at medium, hidden at minimum —
-        // so the hero text never gets starved.
-        let src = include_str!("app.rs");
-        let home = method_source(src, "fn view_chat_list_content(", "fn view_chat_panel(");
+    fn status_card_mesh_adapts_to_content_width() {
+        // The redesigned status card's network mesh must scale with content
+        // width (full row at wide, reduced at medium, stacked below the
+        // description/pill on narrow) so the connection text is never
+        // starved or overlapped.
+        let status = include_str!("status_card.rs");
         assert!(
-            home.contains("HOME_ILLUSTRATION_FULL_CONTENT"),
-            "hero illustration must use the full-size content-width tier"
+            status.contains("STATUS_CARD_MEDIUM_CONTENT"),
+            "status card must define the medium content-width tier"
         );
         assert!(
-            home.contains("HOME_ILLUSTRATION_HIDE_CONTENT"),
-            "hero illustration must use the hide content-width tier"
+            status.contains("STATUS_CARD_NARROW_CONTENT"),
+            "status card must define the narrow content-width tier"
         );
         assert!(
-            !home.contains("let narrow = window_width"),
-            "the old window-width narrow flag must be gone"
+            status.contains("fn layout_tier("),
+            "status card must own a content-width layout tier function"
         );
     }
 

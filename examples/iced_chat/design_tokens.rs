@@ -787,6 +787,104 @@ pub fn icon_button(theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+// ── Status card (home connection overview) tokens ───────────────────
+// The connection status card is intentionally a dark green privacy panel
+// in BOTH light and dark themes (the approved mockup is a dark panel on
+// the light canvas), so these tokens are theme-independent constants —
+// not theme accessors. The card's own text/network colours therefore stay
+// readable regardless of the active app theme.
+//
+// Background gradient stops (top-left → mid → bottom-right):
+//   #10201C → #091714 → #06100E
+
+/// Status card background — top/left gradient stop (#10201C).
+pub const STATUS_CARD_BG_TOP: Color = Color::from_rgb(
+    0x10 as f32 / 255.0,
+    0x20 as f32 / 255.0,
+    0x1C as f32 / 255.0,
+);
+/// Status card background — middle gradient stop (#091714).
+pub const STATUS_CARD_BG_MID: Color = Color::from_rgb(
+    0x09 as f32 / 255.0,
+    0x17 as f32 / 255.0,
+    0x14 as f32 / 255.0,
+);
+/// Status card background — bottom/right gradient stop (#06100E).
+pub const STATUS_CARD_BG_BOTTOM: Color = Color::from_rgb(
+    0x06 as f32 / 255.0,
+    0x10 as f32 / 255.0,
+    0x0E as f32 / 255.0,
+);
+
+/// Status card border — thin, low-contrast green outline.
+pub const STATUS_CARD_BORDER: Color = Color::from_rgba(
+    0x4D as f32 / 255.0,
+    0xE5 as f32 / 255.0,
+    0xA3 as f32 / 255.0,
+    0.22,
+);
+
+/// Status card corner radius (px) — plan band 20–24 px.
+pub const STATUS_CARD_RADIUS: f32 = 22.0;
+
+/// Status card shadow — subtle dark outer shadow so the dark panel lifts
+/// off the canvas without a heavy drop shadow.
+pub fn status_card_shadow() -> iced::Shadow {
+    iced::Shadow {
+        color: Color::from_rgba(0.0, 0.0, 0.0, 0.22),
+        offset: iced::Vector::new(0.0, 6.0),
+        blur_radius: 16.0,
+    }
+}
+
+/// Connected accent green used inside the status card (on the dark panel
+/// the brighter #4DE5A3 reads better than the light-theme success green).
+pub const STATUS_CONNECTED: Color = Color::from_rgb(
+    0x4D as f32 / 255.0,
+    0xE5 as f32 / 255.0,
+    0xA3 as f32 / 255.0,
+);
+
+/// Status card primary text — near-white (#F3F7F5).
+pub const STATUS_PRIMARY_TEXT: Color = Color::from_rgb(
+    0xF3 as f32 / 255.0,
+    0xF7 as f32 / 255.0,
+    0xF5 as f32 / 255.0,
+);
+
+/// Status card secondary text — medium grey-green, clearly secondary to
+/// the heading but readable on the dark panel.
+pub const STATUS_SECONDARY_TEXT: Color = Color::from_rgb(
+    0x9F as f32 / 255.0,
+    0xB3 as f32 / 255.0,
+    0xAA as f32 / 255.0,
+);
+
+/// Status card network mesh — connection line base colour (the canvas
+/// modulates its alpha per line).
+pub const STATUS_NETWORK_LINE: Color = Color::from_rgb(
+    0x4D as f32 / 255.0,
+    0xE5 as f32 / 255.0,
+    0xA3 as f32 / 255.0,
+);
+
+/// Status card network mesh — node base colour (the canvas modulates its
+/// alpha per node for the subtle pulse).
+pub const STATUS_NETWORK_NODE: Color = Color::from_rgb(
+    0x4D as f32 / 255.0,
+    0xE5 as f32 / 255.0,
+    0xA3 as f32 / 255.0,
+);
+
+/// Status card — outer outlined indicator diameter (px), plan band
+/// 90–110 px.
+pub const STATUS_INDICATOR_SIZE: f32 = 100.0;
+/// Status card — inner ring diameter (px); the ring + internal glow sit
+/// inside the outer outline.
+pub const STATUS_INDICATOR_RING: f32 = 82.0;
+/// Status card — checkmark glyph size (px), plan band 34–42 px.
+pub const STATUS_INDICATOR_GLYPH: f32 = 36.0;
+
 // ── Tests ─────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1215,5 +1313,46 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn status_card_tokens_stay_in_approved_bands() {
+        // Connection status card redesign (UI-HOME-04 follow-up): the new
+        // dark status panel's geometry tokens must stay inside the approved
+        // plan bands so the card cannot silently regress to the old
+        // pale-green 48 px badge treatment.
+        assert!(
+            (20.0..=24.0).contains(&STATUS_CARD_RADIUS),
+            "status card radius {} px outside the 20–24 px band",
+            STATUS_CARD_RADIUS
+        );
+        assert!(
+            (90.0..=110.0).contains(&STATUS_INDICATOR_SIZE),
+            "status indicator {} px outside the 90–110 px band",
+            STATUS_INDICATOR_SIZE
+        );
+        assert!(
+            (34.0..=42.0).contains(&STATUS_INDICATOR_GLYPH),
+            "status indicator glyph {} px outside the 34–42 px band",
+            STATUS_INDICATOR_GLYPH
+        );
+        // The panel is a dark privacy surface in both themes: every
+        // background stop must be dark (low luminance) and the primary text
+        // must stay near-white so the heading is readable on it.
+        let luminance = |c: Color| 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+        for stop in [STATUS_CARD_BG_TOP, STATUS_CARD_BG_MID, STATUS_CARD_BG_BOTTOM] {
+            assert!(
+                luminance(stop) < 0.13,
+                "status card background stop {stop:?} must be near-black dark green"
+            );
+        }
+        assert!(
+            luminance(STATUS_PRIMARY_TEXT) > 0.85,
+            "status card primary text must be near-white"
+        );
+        assert!(
+            STATUS_CONNECTED == STATUS_NETWORK_NODE,
+            "connected accent and network node should share the status green"
+        );
     }
 }
