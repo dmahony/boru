@@ -1,0 +1,1230 @@
+//! Settings feature.
+//!
+//! Extracted from app.rs (BORU-AUDIT-22). Owns the Settings screen: its
+//! Hash-compatible dependency snapshots (`SettingsDependency`,
+//! `SettingsCachedKey`, `ProfileIdentityCacheKey`, the Secure Tunnels row
+//! types and status helpers) and the `impl IcedChat` methods that build and
+//! render the settings screen. Reads app state via `use super::*`; app.rs
+//! re-exports the pub(crate) items it still references with
+//! `use settings::*`.
+
+use super::*;
+
+/// Hash-compatible snapshot of one SHARING tunnel row rendered in the
+/// Settings → Secure Tunnels section. The live [`TunnelDefinition`] is not
+/// Hash, so the builder pre-renders every display field into this row.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub(crate) struct SettingsSharingTunnelRow {
+    pub(crate) id: boru_core::tunnel::TunnelId,
+    pub(crate) name: String,
+    pub(crate) friend: String,
+    pub(crate) target: String,
+    /// 0 = expired, 1 = Active, 2 = Connecting, 3 = Connected, 4 = Revoked,
+    /// 5 = Failed, 6 = Disconnected, 7 = Reconnecting. Mirrors
+    /// `tunnel_status_color` ordering.
+    pub(crate) status_kind: u8,
+    /// Pre-rendered status label (e.g. "Expired", "Available", "Failed").
+    pub(crate) status_label: String,
+    pub(crate) remaining: String,
+    pub(crate) connection_info: Option<String>,
+}
+
+/// Hash-compatible snapshot of one CONNECTED (received) tunnel row rendered
+/// in the Settings → Secure Tunnels section.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub(crate) struct SettingsConnectedTunnelRow {
+    pub(crate) id: boru_core::tunnel::TunnelId,
+    pub(crate) label: String,
+    pub(crate) address: String,
+    pub(crate) route_label: String,
+    pub(crate) connection_info: Option<String>,
+}
+
+/// Dependency for the Settings screen. Delegates to the existing
+/// `SettingsCachedKey` and `ProfileIdentityCacheKey` (both already Hash) and
+/// adds Hash-compatible snapshots of the shared-files list and the Secure
+/// Tunnels section (SHARING + CONNECTED rows).
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub(crate) struct SettingsDependency {
+    pub(crate) dark_mode: bool,
+    pub(crate) cached_key: SettingsCachedKey,
+    pub(crate) identity_key: ProfileIdentityCacheKey,
+    pub(crate) shared_files: Vec<(String, String)>,
+    pub(crate) sharing_tunnels: Vec<SettingsSharingTunnelRow>,
+    pub(crate) connected_tunnels: Vec<SettingsConnectedTunnelRow>,
+}
+
+/// Map a [`TunnelDefinition`] to the [`SettingsSharingTunnelRow::status_kind`]
+/// discriminant, mirroring `tunnel_status_color`'s expiry check first.
+fn settings_tunnel_status_kind(
+    def: &boru_core::tunnel::service::TunnelDefinition,
+    now: u64,
+) -> u8 {
+    use boru_core::tunnel::service::TunnelStatus;
+    if def.status != TunnelStatus::Revoked && def.expires_at_ms <= now {
+        return 0; // Expired
+    }
+    match def.status {
+        TunnelStatus::Active => 1,
+        TunnelStatus::Connecting => 2,
+        TunnelStatus::Connected => 3,
+        TunnelStatus::Revoked => 4,
+        TunnelStatus::Failed => 5,
+        TunnelStatus::Disconnected => 6,
+        TunnelStatus::Reconnecting => 7,
+    }
+}
+
+/// Map a [`SettingsSharingTunnelRow::status_kind`] discriminant back to the
+/// themed color used by the Settings → Secure Tunnels section, mirroring
+/// `tunnel_status_color` exactly (expired tunnels render muted).
+fn settings_tunnel_status_color(theme: &iced::Theme, status_kind: u8) -> iced::Color {
+    match status_kind {
+        0 | 4 | 6 => text_muted(theme),
+        1 => accent_primary(theme),
+        2 | 7 => color_warning(theme),
+        3 => accent_green(theme),
+        5 => color_error(theme),
+        _ => text_muted(theme),
+    }
+}
+
+/// Map a [`SettingsSharingTunnelRow::status_kind`] discriminant back to the
+/// human-readable label, mirroring `tunnel_status_label`.
+fn settings_tunnel_status_label(status_kind: u8) -> &'static str {
+    use boru_core::tunnel::service::TunnelStatus;
+    match status_kind {
+        0 => "Expired",
+        1 => TunnelStatus::Active.label(),
+        2 => TunnelStatus::Connecting.label(),
+        3 => TunnelStatus::Connected.label(),
+        4 => TunnelStatus::Revoked.label(),
+        5 => TunnelStatus::Failed.label(),
+        6 => TunnelStatus::Disconnected.label(),
+        7 => TunnelStatus::Reconnecting.label(),
+        _ => "Unknown",
+    }
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub(crate) struct SettingsCachedKey {
+    dark_mode: bool,
+    sound_enabled: bool,
+    direct_address_sharing: bool,
+    chat_text_size_bits: u32,
+    direct_peers: usize,
+    relayed_peers: usize,
+    neighbors_len: usize,
+    mesh_health_label: String,
+    relay_mode_label: String,
+    history_confirm_clear: bool,
+    history_clear_pending: bool,
+    history_clear_feedback: Option<String>,
+    history_clear_feedback_is_error: bool,
+    local_public_key: String,
+    /// Path of the configured home-screen background image, if any.
+    home_background_image: Option<String>,
+    /// f32 bit pattern of the home menu item background opacity, so the
+    /// lazy settings screen re-renders when the slider moves.
+    home_menu_item_opacity_bits: u32,
+    /// Optional user-selected accent color (RGB bytes) for the ColorPicker.
+    accent_color: Option<[u8; 3]>,
+    /// Whether the iced_aw ColorPicker overlay is open.
+    show_accent_picker: bool,
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub(crate) struct ProfileIdentityCacheKey {
+    local_label: String,
+    public_key: String,
+    friend_id_copied: bool,
+    profile_image_identifier: Option<String>,
+    profile_image_ticket: Option<String>,
+    has_profile_image: bool,
+}
+
+impl IcedChat {
+    pub(crate) fn settings_cached_key(&self) -> SettingsCachedKey {
+        let mesh_health_label = match &self.mesh_health {
+            MeshHealth::Good => "Mesh: healthy".to_string(),
+            MeshHealth::Degraded(reason) => format!("Mesh: degraded — {reason}"),
+            MeshHealth::Offline(reason) => format!("Mesh: offline — {reason}"),
+        };
+
+        SettingsCachedKey {
+            dark_mode: self.dark_mode,
+            sound_enabled: self.sound_enabled,
+            direct_address_sharing: self.share_direct_addresses,
+            chat_text_size_bits: self.chat_text_size.to_bits(),
+            direct_peers: self.direct_peers,
+            relayed_peers: self.relayed_peers,
+            neighbors_len: self.neighbors.len(),
+            mesh_health_label,
+            relay_mode_label: fmt_relay_mode(&self.relay_mode),
+            history_confirm_clear: self.history_confirm_clear,
+            history_clear_pending: self.history_clear_pending,
+            history_clear_feedback: self.history_clear_feedback.clone(),
+            history_clear_feedback_is_error: self.history_clear_feedback_is_error,
+            local_public_key: self.local_public.to_string(),
+            home_background_image: self.home_background_path.clone(),
+            home_menu_item_opacity_bits: self.home_menu_item_opacity.to_bits(),
+            accent_color: self.accent_color,
+            show_accent_picker: self.show_accent_picker,
+        }
+    }
+
+    pub(crate) fn settings_dependency(&self) -> SettingsDependency {
+        let identity_key = ProfileIdentityCacheKey {
+            local_label: self.local_label.clone(),
+            public_key: self.local_public.to_string(),
+            friend_id_copied: self.friend_id_copied,
+            profile_image_identifier: self.profile_image_identifier.clone(),
+            profile_image_ticket: self.profile_image_ticket.clone(),
+            has_profile_image: self.profile_image_handle.is_some(),
+        };
+        let cached_key = self.settings_cached_key();
+        let shared_files: Vec<(String, String)> = self
+            .shared_files
+            .iter()
+            .map(|f| (f.display_filename.clone(), f.content_hash.clone()))
+            .collect();
+
+        // SHARING tunnels: same filter + sort as the renderer used to do, but
+        // every display field is pre-rendered into a Hash row so the static
+        // content fn needs no live TunnelService access.
+        let now = now_ms().max(0) as u64;
+        let mut sharing = self
+            .tunnel_service
+            .list_tunnels()
+            .into_iter()
+            .filter(|def| {
+                def.owner == self.local_public
+                    && def.status != boru_core::tunnel::service::TunnelStatus::Revoked
+            })
+            .collect::<Vec<_>>();
+        sharing.sort_by_key(|def| {
+            let expired = def.expires_at_ms <= now;
+            let failed = def.status == boru_core::tunnel::service::TunnelStatus::Failed;
+            (expired as u8 * 2 + failed as u8, def.expires_at_ms)
+        });
+        let sharing_tunnels = sharing
+            .into_iter()
+            .map(|def| {
+                let name = self
+                    .shared_tunnels
+                    .get(&def.id)
+                    .map(|state| state.service_name.clone())
+                    .unwrap_or_else(|| "Shared service".to_string());
+                let friend = self.resolve_name(&def.allowed_peer);
+                let target = match def.target {
+                    boru_core::tunnel::service::TunnelTarget::Tcp { host, port } => {
+                        tunnel_target_label(host, port)
+                    }
+                };
+                let status_kind = settings_tunnel_status_kind(&def, now);
+                let status_label = settings_tunnel_status_label(status_kind).to_string();
+                let remaining = tunnel_remaining_label(def.expires_at_ms);
+                let connection_info = self
+                    .tunnel_service
+                    .connection_info(def.id)
+                    .map(tunnel_connection_info_label);
+                SettingsSharingTunnelRow {
+                    id: def.id,
+                    name,
+                    friend,
+                    target,
+                    status_kind,
+                    status_label,
+                    remaining,
+                    connection_info,
+                }
+            })
+            .collect();
+
+        // CONNECTED (received) tunnels: same filter + sort as the renderer.
+        let mut connected = self
+            .received_tunnels
+            .values()
+            .filter(|state| state.connected)
+            .collect::<Vec<_>>();
+        connected.sort_by_key(|state| state.offer.expires_at_ms);
+        let connected_tunnels = connected
+            .into_iter()
+            .map(|state| {
+                let label = format!("{} — {}", state.sharer_label, state.offer.service_name);
+                let address = state
+                    .local_addr
+                    .map(|addr| tunnel_local_address(&state.offer, addr))
+                    .unwrap_or_else(|| "Connecting…".to_string());
+                let route_label = state
+                    .live_info
+                    .as_ref()
+                    .map(|live| {
+                        let snapshot = live.snapshot();
+                        tunnel_route_label(snapshot.route).to_string()
+                    })
+                    .unwrap_or_default();
+                let connection_info = state
+                    .live_info
+                    .as_ref()
+                    .map(|live| tunnel_connection_info_label(live.snapshot()));
+                SettingsConnectedTunnelRow {
+                    id: state.offer.tunnel_id,
+                    label,
+                    address,
+                    route_label,
+                    connection_info,
+                }
+            })
+            .collect();
+
+        SettingsDependency {
+            dark_mode: self.dark_mode,
+            cached_key,
+            identity_key,
+            shared_files,
+            sharing_tunnels,
+            connected_tunnels,
+        }
+    }
+
+    pub(crate) fn view_settings_screen(&self) -> iced::Element<'_, AppMessage> {
+        let dep = self.settings_dependency();
+        let profile_image_handle = self.profile_image_handle.clone();
+        iced::widget::lazy(dep, move |dep| {
+            Self::view_settings_screen_content(dep, profile_image_handle.clone())
+        })
+        .into()
+    }
+
+    /// Static renderer for the Settings screen. Reads only from the
+    /// Hash-compatible [`SettingsDependency`] snapshot plus the (non-Hash)
+    /// profile image handle captured by the `lazy` closure.
+    pub(crate) fn view_settings_screen_content(
+        dep: &SettingsDependency,
+        profile_image_handle: Option<iced::widget::image::Handle>,
+    ) -> iced::Element<'static, AppMessage> {
+        use iced::widget::{
+            button, column, container, lazy, row, text, Column, Row, Space,
+        };
+        use iced::{Alignment, Length};
+
+        let theme = Self::theme_from_dark(dep.dark_mode);
+
+        // ── Header row ──────────────────────────────────────────────
+        let back_btn = button(crate::fonts::type_role_text(
+            crate::fonts::TypeRole::ButtonLabel,
+            "←",
+        ))
+        .on_press(AppMessage::CloseSettings)
+        .padding([SPACE_4, SPACE_6])
+        .style(BUTTON_ICON);
+
+        let header = container(
+            row![
+                back_btn,
+                crate::fonts::type_role_text(crate::fonts::TypeRole::SectionTitle, "Settings"),
+                Space::new().width(Length::Fill),
+            ]
+            .spacing(SPACE_8)
+            .align_y(Alignment::Center),
+        )
+        .width(Length::Fill)
+        .height(Length::Fixed(52.0))
+        .padding([SPACE_6, SPACE_10])
+        .style(container_header);
+
+        // ── Identity section ──
+        let profile_identity_key = dep.identity_key.clone();
+        let profile_local_label = dep.identity_key.local_label.clone();
+        let profile_public_key = dep.identity_key.public_key.clone();
+        let profile_friend_id_copied = dep.identity_key.friend_id_copied;
+        let identity_card: iced::Element<'static, AppMessage> =
+            lazy(profile_identity_key, move |_| {
+                profile_identity_card(
+                    profile_local_label.clone(),
+                    profile_public_key.clone(),
+                    profile_friend_id_copied,
+                    profile_image_handle.clone(),
+                )
+            })
+            .into();
+
+        // ── Cacheable sections ──
+        let cached_key = dep.cached_key.clone();
+        let cached_sections = lazy(cached_key, Self::view_settings_screen_cached);
+
+        // ── Shared files ──
+        let mut shared_file_rows: Vec<iced::Element<'static, AppMessage>> = Vec::new();
+
+        if dep.shared_files.is_empty() {
+            shared_file_rows.push(
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::SupportingText,
+                    "No shared files. Add files to share them with your contacts.",
+                )
+                .style(text_muted_style)
+                .into(),
+            );
+        } else {
+            for (display_filename, content_hash) in &dep.shared_files {
+                let hash_short = if content_hash.len() > 8 {
+                    &content_hash[..8]
+                } else {
+                    content_hash
+                };
+                let file_row = Row::new()
+                    .push(
+                        Column::new()
+                            .push(crate::fonts::type_role_text(
+                                crate::fonts::TypeRole::Body,
+                                display_filename.clone(),
+                            ))
+                            .push(
+                                crate::fonts::type_role_text(
+                                    crate::fonts::TypeRole::TechnicalValue,
+                                    format!("hash: {hash_short}…"),
+                                )
+                                .style(text_muted_style),
+                            )
+                            .spacing(SPACE_2)
+                            .width(Length::Fill)
+                            .align_x(Alignment::Start),
+                    )
+                    .push(
+                        button(crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::ButtonLabel,
+                            "Remove",
+                        ))
+                        .on_press(AppMessage::RemoveSharedFile(content_hash.clone()))
+                            .padding([SPACE_2, SPACE_6])
+                            .style(|t, _status| iced::widget::button::Style {
+                                background: Some(iced::Background::Color(
+                                    if matches!(t, iced::Theme::Dark) {
+                                        Color::from_rgb(0.6, 0.15, 0.15)
+                                    } else {
+                                        Color::from_rgb(0.9, 0.3, 0.3)
+                                    },
+                                )),
+                                text_color: Color::WHITE,
+                                border: iced::Border {
+                                    radius: SPACE_4.into(),
+                                    ..Default::default()
+                                },
+                                ..Default::default()
+                            }),
+                    )
+                    .spacing(SPACE_8)
+                    .align_y(Alignment::Center);
+                shared_file_rows.push(file_row.into());
+            }
+        }
+
+        let add_button_row = Row::new().push(
+            button(crate::fonts::type_role_text(
+                crate::fonts::TypeRole::ButtonLabel,
+                "Add File",
+            ))
+            .on_press(AppMessage::AddSharedFile)
+            .style(BUTTON_PRIMARY)
+            .padding([SPACE_6, SPACE_12]),
+        );
+
+        shared_file_rows.push(add_button_row.into());
+
+        let shared_files_card = section_card("SHARED FILES", shared_file_rows);
+
+        // ── Secure Tunnels section ──────────────────────────────────
+        // Two groups: SHARING (tunnels this user created locally, live
+        // metadata from the backend TunnelService) and CONNECTED (received
+        // tunnel offers the user has connected a local listener to).
+        // Both groups are pre-rendered into the Hash snapshot by
+        // `settings_dependency()` so this renderer stays static.
+        let mut tunnel_rows: Vec<iced::Element<'static, AppMessage>> = Vec::new();
+
+        let sharing_empty = dep.sharing_tunnels.is_empty();
+
+        if sharing_empty {
+            tunnel_rows.push(
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::SupportingText,
+                    "No services currently shared.",
+                )
+                .style(text_muted_style)
+                .into(),
+            );
+        } else {
+            tunnel_rows.push(
+                crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, "SHARING")
+                    .style(text_muted_style)
+                    .into(),
+            );
+            for row in &dep.sharing_tunnels {
+                let status_color = settings_tunnel_status_color(&theme, row.status_kind);
+                let mut info_column = Column::new()
+                    .push(
+                        Row::new()
+                            .push(crate::fonts::type_role_text(
+                                crate::fonts::TypeRole::Body,
+                                row.name.clone(),
+                            ))
+                            .push(
+                                crate::fonts::type_role_text(
+                                    crate::fonts::TypeRole::Metadata,
+                                    format!(" · {}", row.status_label),
+                                )
+                                .color(status_color),
+                            )
+                            .spacing(SPACE_4)
+                            .align_y(Alignment::Center),
+                    )
+                    .push(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::SupportingText,
+                            format!("With {}", row.friend),
+                        )
+                        .style(text_muted_style),
+                    )
+                    .push(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::SupportingText,
+                            format!("{}  ·  {}", row.target, row.remaining),
+                        )
+                        .style(text_muted_style),
+                    )
+                    .spacing(SPACE_2)
+                    .width(Length::Fill)
+                    .align_x(Alignment::Start);
+                if let Some(label) = &row.connection_info {
+                    info_column = info_column.push(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::SupportingText,
+                            label.clone(),
+                        )
+                        .style(text_muted_style),
+                    );
+                }
+                let row_el = Row::new()
+                    .push(info_column)
+                    .push(
+                        button(crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::ButtonLabel,
+                            "Stop Sharing",
+                        ))
+                        .on_press(AppMessage::StopSharingTunnel(row.id))
+                        .padding([SPACE_2, SPACE_8])
+                        .style(move |t, _status| iced::widget::button::Style {
+                            background: Some(iced::Background::Color(color_error(t))),
+                            text_color: Color::WHITE,
+                            border: iced::Border {
+                                radius: SPACE_4.into(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }),
+                    )
+                    .spacing(SPACE_8)
+                    .align_y(Alignment::Center);
+                tunnel_rows.push(row_el.into());
+            }
+        }
+
+        let connected_empty = dep.connected_tunnels.is_empty();
+
+        if !connected_empty {
+            tunnel_rows.push(
+                crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, "CONNECTED")
+                    .style(text_muted_style)
+                    .into(),
+            );
+            for row in &dep.connected_tunnels {
+                let mut info_column = Column::new()
+                    .push(
+                        Row::new()
+                            .push(crate::fonts::type_role_text(
+                                crate::fonts::TypeRole::Body,
+                                row.label.clone(),
+                            ))
+                            .push(
+                                crate::fonts::type_role_text(
+                                    crate::fonts::TypeRole::Metadata,
+                                    if !row.route_label.is_empty() {
+                                        format!(" · {}", row.route_label)
+                                    } else {
+                                        String::new()
+                                    },
+                                )
+                                .color(accent_green(&theme)),
+                            )
+                            .spacing(SPACE_4)
+                            .align_y(Alignment::Center),
+                    )
+                    .push(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::TechnicalValue,
+                            row.address.clone(),
+                        )
+                        .style(text_muted_style),
+                    )
+                    .spacing(SPACE_2)
+                    .width(Length::Fill)
+                    .align_x(Alignment::Start);
+                if let Some(info) = &row.connection_info {
+                    info_column = info_column.push(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::SupportingText,
+                            info.clone(),
+                        )
+                        .style(text_muted_style),
+                    );
+                }
+                let row_el = Row::new()
+                    .push(info_column)
+                    .push(
+                        button(crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::ButtonLabel,
+                            "Disconnect",
+                        ))
+                        .on_press(AppMessage::DisconnectReceivedTunnel(row.id))
+                        .padding([SPACE_2, SPACE_8]),
+                    )
+                    .spacing(SPACE_8)
+                    .align_y(Alignment::Center);
+                tunnel_rows.push(row_el.into());
+            }
+        }
+
+        if sharing_empty && connected_empty {
+            tunnel_rows.push(
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::SupportingText,
+                    "Share a local service from a friend's profile to see it here.",
+                )
+                .style(text_muted_style)
+                .into(),
+            );
+        }
+
+        let secure_tunnels_card = section_card("SECURE TUNNELS", tunnel_rows);
+
+        // ── Body (scrollable) ──
+        let body = column![
+            identity_card,
+            Space::new().height(Length::Fixed(SPACE_12)),
+            cached_sections,
+            Space::new().height(Length::Fixed(SPACE_12)),
+            shared_files_card,
+            Space::new().height(Length::Fixed(SPACE_12)),
+            secure_tunnels_card,
+            Space::new().height(Length::Fixed(SPACE_24)),
+        ]
+        .spacing(SPACE_6)
+        .padding(SPACE_24)
+        .align_x(Alignment::Start)
+        .width(Length::Fill)
+        .max_width(680.0);
+
+        let scrollable = crate::ui_components::gutter_scrollable(container(body).width(Length::Fill).center_x(Length::Fill))
+            .width(Length::Fill)
+            .height(Length::Fill);
+
+        column![header, scrollable]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    }
+
+    fn view_settings_screen_cached(key: &SettingsCachedKey) -> iced::Element<'static, AppMessage> {
+        use iced::widget::{button, container, row, text, Column, Row, Space};
+        use iced::{Alignment, Color, Length};
+
+        let appearance_theme = if key.dark_mode { "Dark" } else { "Light" };
+
+        let appearance_row = Row::new()
+            .push(
+                Column::new()
+                    .push(crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::Body,
+                        appearance_theme,
+                    ))
+                    .push(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::SupportingText,
+                            "Switch between dark and light colour themes.",
+                        )
+                        .style(text_muted_style),
+                    )
+                    .spacing(SPACE_2)
+                    .width(Length::Fill)
+                    .align_x(Alignment::Start),
+            )
+            .push(
+                button(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::ButtonLabel,
+                    if key.dark_mode { "Light" } else { "Dark" },
+                ))
+                .on_press(AppMessage::ToggleDark(!key.dark_mode))
+                .style(BUTTON_OUTLINE)
+                .padding([SPACE_6, SPACE_12]),
+            )
+            .spacing(SPACE_12)
+            .align_y(Alignment::Center);
+
+        // ── Chat text size ──
+        let text_sizes: &[(f32, &str)] = &[
+            (TYPO_XS, "XS"),
+            (TYPO_SM, "SM"),
+            (TYPO_MD, "MD"),
+            (TYPO_LG, "LG"),
+            (TYPO_XL, "XL"),
+        ];
+        let current_size = f32::from_bits(key.chat_text_size_bits);
+        let text_size_row = Row::new().push(
+            Column::new()
+                .push(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::Body,
+                    format!("Text size: {}px", current_size as u32),
+                ))
+                .push(
+                    crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::SupportingText,
+                        "Choose the font size for chat message bodies.",
+                    )
+                    .style(text_muted_style),
+                )
+                .spacing(SPACE_2)
+                .width(Length::Fill)
+                .align_x(Alignment::Start),
+        );
+        let text_size_row = text_sizes
+            .iter()
+            .fold(text_size_row, |row, &(size, label)| {
+                let is_active = (current_size - size).abs() < 0.5;
+                row.push(
+                    button(crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::ButtonLabel,
+                        label,
+                    ))
+                    .on_press(AppMessage::SetChatTextSize(size))
+                    .padding([SPACE_2, SPACE_6])
+                    .style(move |t, status| {
+                        if is_active {
+                            iced::widget::button::Style {
+                                background: Some(iced::Background::Color(accent_primary(t))),
+                                text_color: Color::WHITE,
+                                border: iced::Border {
+                                    radius: SPACE_6.into(),
+                                    ..Default::default()
+                                },
+                                ..Default::default()
+                            }
+                        } else {
+                            iced::widget::button::Style {
+                                background: None,
+                                text_color: match status {
+                                    iced::widget::button::Status::Hovered => accent_primary(t),
+                                    _ => Color::from_rgb(0.5, 0.5, 0.5),
+                                },
+                                border: iced::Border {
+                                    radius: SPACE_6.into(),
+                                    ..Default::default()
+                                },
+                                ..Default::default()
+                            }
+                        }
+                    }),
+                )
+                .spacing(SPACE_6)
+            })
+            .align_y(Alignment::Center)
+            .spacing(SPACE_8);
+
+        // ── Home screen background ──
+        // Choose/remove the image rendered behind the home (ChatList) screen.
+        let home_background_label = key
+            .home_background_image
+            .as_deref()
+            .and_then(|path| {
+                std::path::Path::new(path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+            })
+            .unwrap_or("None")
+            .to_string();
+        let mut home_background_actions = Row::new()
+            .push(
+                button(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::ButtonLabel,
+                    "Choose image…",
+                ))
+                .on_press(AppMessage::PickHomeBackgroundImage)
+                .style(BUTTON_OUTLINE)
+                .padding([SPACE_6, SPACE_12]),
+            )
+            .spacing(SPACE_8);
+        if key.home_background_image.is_some() {
+            home_background_actions = home_background_actions.push(
+                button(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::ButtonLabel,
+                    "Remove",
+                ))
+                .on_press(AppMessage::RemoveHomeBackgroundImage)
+                .style(BUTTON_OUTLINE)
+                .padding([SPACE_6, SPACE_12]),
+            );
+        }
+        let home_background_row = Row::new()
+            .push(
+                Column::new()
+                    .push(crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::Body,
+                        format!("Home background: {home_background_label}"),
+                    ))
+                    .push(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::SupportingText,
+                            "Show an image behind the home screen content.",
+                        )
+                        .style(text_muted_style),
+                    )
+                    .spacing(SPACE_2)
+                    .width(Length::Fill)
+                    .align_x(Alignment::Start),
+            )
+            .push(home_background_actions)
+            .spacing(SPACE_12)
+            .align_y(Alignment::Center);
+
+        // ── Accent color (ICEDAW-01) ──
+        // Optional accent-color customization via iced_aw ColorPicker. The
+        // picked RGB value is persisted in AppSettings and overrides
+        // `accent_primary` app-wide. The dark-mode toggle above is untouched.
+        let accent_theme = Self::theme_from_dark(key.dark_mode);
+        let accent_rgb = key.accent_color.unwrap_or_else(|| {
+            let c = accent_primary(&accent_theme);
+            [
+                (c.r * 255.0).round() as u8,
+                (c.g * 255.0).round() as u8,
+                (c.b * 255.0).round() as u8,
+            ]
+        });
+        let accent_color = iced::Color::from_rgb(
+            accent_rgb[0] as f32 / 255.0,
+            accent_rgb[1] as f32 / 255.0,
+            accent_rgb[2] as f32 / 255.0,
+        );
+        let accent_swatch = container(
+            crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, " "),
+        )
+        .width(24.0)
+        .height(24.0)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .style(move |_t| container::Style {
+            background: Some(iced::Background::Color(accent_color)),
+            border: iced::Border {
+                radius: SPACE_6.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let accent_button = button(
+            row![accent_swatch, crate::fonts::type_role_text(
+                crate::fonts::TypeRole::ButtonLabel,
+                if key.show_accent_picker { "Pick color…" } else { "Customize…" },
+            )]
+            .spacing(SPACE_6)
+            .align_y(Alignment::Center),
+        )
+        .on_press(AppMessage::ToggleAccentColorPicker)
+        .style(BUTTON_OUTLINE)
+        .padding([SPACE_4, SPACE_8]);
+        let accent_color_picker = iced_aw::ColorPicker::new(
+            key.show_accent_picker,
+            accent_color,
+            accent_button,
+            AppMessage::AccentColorCancelled,
+            |c| {
+                AppMessage::AccentColorSelected([
+                    (c.r * 255.0).round() as u8,
+                    (c.g * 255.0).round() as u8,
+                    (c.b * 255.0).round() as u8,
+                ])
+            },
+        )
+        .style(move |t, _status| iced_aw::style::color_picker::Style {
+            background: iced::Background::Color(bg_surface(t)),
+            border_radius: 8.0,
+            border_width: 1.0,
+            border_color: border_muted(t),
+            bar_border_radius: 4.0,
+            bar_border_width: 1.0,
+            bar_border_color: border_muted(t),
+        });
+        let accent_row = Row::new()
+            .push(
+                Column::new()
+                    .push(crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::Body,
+                        "Accent color",
+                    ))
+                    .push(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::SupportingText,
+                            "Customize the app's primary accent color.",
+                        )
+                        .style(text_muted_style),
+                    )
+                    .spacing(SPACE_2)
+                    .width(Length::Fill)
+                    .align_x(Alignment::Start),
+            )
+            .push(accent_color_picker)
+            .spacing(SPACE_12)
+            .align_y(Alignment::Center);
+
+        // ── Home menu item transparency (HOME-01) ──
+        // Shown only when a home background image is set: controls the
+        // opacity of the home-screen menu/action card backgrounds that sit
+        // over the image.
+        let mut appearance_children: Vec<iced::Element<'static, AppMessage>> = vec![
+            appearance_row.into(),
+            Space::new().height(Length::Fixed(SPACE_8)).into(),
+            accent_row.into(),
+            Space::new().height(Length::Fixed(SPACE_8)).into(),
+            text_size_row.into(),
+            Space::new().height(Length::Fixed(SPACE_8)).into(),
+            home_background_row.into(),
+        ];
+        if key.home_background_image.is_some() {
+            let opacity = f32::from_bits(key.home_menu_item_opacity_bits);
+            let pct = (opacity * 100.0).round() as u32;
+            appearance_children.push(Space::new().height(Length::Fixed(SPACE_8)).into());
+            appearance_children.push(
+                Row::new()
+                    .push(
+                        Column::new()
+                            .push(crate::fonts::type_role_text(
+                                crate::fonts::TypeRole::Body,
+                                format!("Menu item opacity: {pct}%"),
+                            ))
+                            .push(
+                                crate::fonts::type_role_text(
+                                    crate::fonts::TypeRole::SupportingText,
+                                    "Set the transparency of home menu item backgrounds over the image.",
+                                )
+                                .style(text_muted_style),
+                            )
+                            .spacing(SPACE_2)
+                            .width(Length::Fill)
+                            .align_x(Alignment::Start),
+                    )
+                    .push(
+                        iced::widget::slider(
+                            0.20..=1.0,
+                            opacity,
+                            AppMessage::SetHomeMenuItemOpacity,
+                        )
+                        .step(0.05)
+                        .width(Length::Fixed(160.0)),
+                    )
+                    .spacing(SPACE_12)
+                    .align_y(Alignment::Center)
+                    .into(),
+            );
+        }
+        let appearance_card = section_card("APPEARANCE", appearance_children);
+
+        // ── Notifications section ──
+        let sound_label = if key.sound_enabled {
+            "Sound on"
+        } else {
+            "Sound off"
+        };
+        let notifications_row = Row::new()
+            .push(
+                Column::new()
+                    .push(crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::Body,
+                        sound_label,
+                    ))
+                    .push(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::SupportingText,
+                            "Play a notification sound when a new message arrives.",
+                        )
+                        .style(text_muted_style),
+                    )
+                    .spacing(SPACE_2)
+                    .width(Length::Fill)
+                    .align_x(Alignment::Start),
+            )
+            .push(
+                button(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::ButtonLabel,
+                    if key.sound_enabled { "Mute" } else { "Unmute" },
+                ))
+                .on_press(AppMessage::ToggleSound(!key.sound_enabled))
+                .style(BUTTON_OUTLINE)
+                .padding([SPACE_6, SPACE_12]),
+            )
+            .spacing(SPACE_12)
+            .align_y(Alignment::Center);
+
+        let notifications_card = section_card("NOTIFICATIONS", vec![notifications_row.into()]);
+
+        // ── Network section ──
+        let connection_details_focus_anchor = iced::widget::text_input("", "")
+            .id(CONNECTION_DETAILS_TRIGGER_INPUT)
+            .on_input(|_| AppMessage::Noop)
+            .padding([0.0, 0.0])
+            .width(Length::Fixed(1.0));
+
+        let connection_details_trigger = iced::widget::Stack::new()
+            .push(connection_details_focus_anchor)
+            .push(
+                button(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::ButtonLabel,
+                    "Advanced details",
+                ))
+                .on_press(AppMessage::OpenConnectionDetails)
+                .style(BUTTON_OUTLINE)
+                .padding([SPACE_6, SPACE_12]),
+            );
+
+        let connection_details_row = Row::new()
+            .push(
+                Column::new()
+                    .push(crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::Body,
+                        "Advanced details",
+                    ))
+                    .push(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::SupportingText,
+                            "Open the redacted support snapshot for connection diagnostics.",
+                        )
+                        .style(text_muted_style)
+                        .wrapping(iced::widget::text::Wrapping::Glyph),
+                    )
+                    .spacing(SPACE_2)
+                    .width(Length::Fill)
+                    .align_x(Alignment::Start),
+            )
+            .push(connection_details_trigger)
+            .spacing(SPACE_12)
+            .align_y(Alignment::Center);
+
+        let connection_info = row![crate::fonts::type_role_text(
+            crate::fonts::TypeRole::Body,
+            format!(
+                "{} direct · {} relay · {} neighbors",
+                key.direct_peers, key.relayed_peers, key.neighbors_len,
+            ),
+        )]
+        .spacing(SPACE_4);
+
+        let mesh_status = row![crate::fonts::type_role_text(
+            crate::fonts::TypeRole::Body,
+            key.mesh_health_label.clone(),
+        )]
+        .spacing(SPACE_4);
+
+        let network_card = section_card(
+            "NETWORK",
+            vec![
+                connection_info.into(),
+                mesh_status.into(),
+                connection_details_row.into(),
+            ],
+        );
+
+        // ── Relay section ──
+        let relay_info =
+            row![crate::fonts::type_role_text(
+                crate::fonts::TypeRole::Body,
+                format!("Mode: {}", key.relay_mode_label),
+            )]
+            .spacing(SPACE_4);
+
+        let relay_note = crate::fonts::type_role_text(
+            crate::fonts::TypeRole::SupportingText,
+            "Relay mode is set at startup and cannot be changed at runtime.",
+        )
+        .style(text_muted_style);
+
+        let relay_card = section_card("RELAY", vec![relay_info.into(), relay_note.into()]);
+
+        // ── Logs & Diagnostics section removed per user request ──
+        // ── Data Management section ──
+        let clear_history_feedback = key
+            .history_clear_feedback
+            .clone()
+            .map(|message| (message, key.history_clear_feedback_is_error));
+        let clear_history_row = {
+            let title = if key.history_confirm_clear {
+                "Clear chat history?"
+            } else {
+                "Clear chat history"
+            };
+            let description = if key.history_clear_pending {
+                "Clearing the active chat's stored messages…"
+            } else if key.history_confirm_clear {
+                "This will delete the active chat's stored messages permanently."
+            } else {
+                "Delete all stored messages for the active chat permanently."
+            };
+            let status_line = clear_history_feedback.as_ref().map(|(message, is_error)| {
+                let color = if *is_error {
+                    Color::from_rgb(0.8, 0.2, 0.2)
+                } else {
+                    Color::from_rgb(0.15, 0.55, 0.2)
+                };
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, message.clone())
+                    .style(move |_| iced::widget::text::Style { color: Some(color) })
+            });
+
+            let action_buttons = if key.history_clear_pending {
+                Row::new().push(
+                    button(crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::ButtonLabel,
+                        "Clearing…",
+                    ))
+                    .padding([SPACE_6, SPACE_12]),
+                )
+            } else if key.history_confirm_clear {
+                Row::new()
+                    .push(
+                        button(crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::ButtonLabel,
+                            "Confirm",
+                        ))
+                        .on_press(AppMessage::ConfirmClearHistory)
+                        .padding([SPACE_6, SPACE_12]),
+                    )
+                    .push(
+                        button(crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::ButtonLabel,
+                            "Cancel",
+                        ))
+                        .on_press(AppMessage::ClearHistoryRequested)
+                        .padding([SPACE_6, SPACE_12]),
+                    )
+                    .spacing(SPACE_8)
+            } else {
+                Row::new().push(
+                    button(crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::ButtonLabel,
+                        "Clear",
+                    ))
+                    .on_press(AppMessage::ClearHistoryRequested)
+                    .padding([SPACE_6, SPACE_12]),
+                )
+            };
+
+            let is_danger_state = key.history_confirm_clear || key.history_clear_pending;
+
+            let mut column = Column::new()
+                .push(
+                    crate::fonts::type_role_text(crate::fonts::TypeRole::Body, title)
+                        .style(move |t| iced::widget::text::Style {
+                            color: Some(if is_danger_state {
+                                if matches!(t, iced::Theme::Dark) {
+                                    Color::from_rgb(0.9, 0.3, 0.3)
+                                } else {
+                                    Color::from_rgb(0.8, 0.2, 0.2)
+                                }
+                            } else {
+                                accent_primary(t)
+                            }),
+                        }),
+                )
+                .push(
+                    crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, description)
+                        .style(text_muted_style),
+                )
+                .spacing(SPACE_2)
+                .width(Length::Fill)
+                .align_x(Alignment::Start);
+
+            if let Some(status_line) = status_line {
+                column = column.push(status_line);
+            }
+
+            Row::new()
+                .push(column)
+                .push(action_buttons)
+                .spacing(SPACE_12)
+                .align_y(Alignment::Center)
+        };
+
+        let data_card = section_card("DATA", vec![clear_history_row.into()]);
+
+        // ── Privacy section (KLIPY-09) ──
+        // Concise note about external GIF search: it is optional, and the only
+        // data that leaves the device is the search term sent to the KLIPY
+        // provider.  Boru never sends identity, messages, contacts, or
+        // attachment metadata to KLIPY and adds no behavioural analytics.
+        let gif_privacy_row = Column::new()
+            .push(
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::Body,
+                    "External GIF search",
+                )
+                .style(move |t| iced::widget::text::Style {
+                    color: Some(if matches!(t, iced::Theme::Dark) {
+                        Color::from_rgb(0.9, 0.9, 0.9)
+                    } else {
+                        Color::from_rgb(0.15, 0.15, 0.15)
+                    }),
+                    ..Default::default()
+                }),
+            )
+            .push(
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::SupportingText,
+                    "GIF search is optional and only runs when you search in the GIF picker. \
+                     Search terms are sent to the KLIPY GIF service. Boru never sends your \
+                     identity, messages, contacts, or attachment metadata to KLIPY, and adds \
+                     no behavioural analytics.",
+                )
+                .style(text_muted_style)
+                .wrapping(iced::widget::text::Wrapping::Glyph),
+            )
+            .spacing(SPACE_2)
+            .width(Length::Fill)
+            .align_x(Alignment::Start);
+
+        let privacy_card = section_card("PRIVACY", vec![gif_privacy_row.into()]);
+
+        // ── Assemble page ──
+        let content = Column::new()
+            .push(appearance_card)
+            .push(Space::new().height(Length::Fixed(SPACE_12)))
+            .push(notifications_card)
+            .push(Space::new().height(Length::Fixed(SPACE_12)))
+            .push(network_card)
+            .push(Space::new().height(Length::Fixed(SPACE_12)))
+            .push(relay_card)
+            .push(Space::new().height(Length::Fixed(SPACE_12)))
+            .push(data_card)
+            .push(Space::new().height(Length::Fixed(SPACE_12)))
+            .push(privacy_card)
+            .spacing(SPACE_6)
+            .width(Length::Fill);
+
+        let scrollable = crate::ui_components::gutter_scrollable(
+            container(content)
+                .width(Length::Fill)
+                .center_x(Length::Fill),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill);
+
+        container(scrollable)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(container_primary)
+            .into()
+    }
+}
