@@ -198,12 +198,23 @@ mod tests {
         load_font(include_bytes!("fonts/IBMPlexSans-Medium.ttf"));
         load_font(include_bytes!("fonts/IBMPlexSans-SemiBold.ttf"));
 
-        // Wide desktop (1600 window → ~1215 content) — full three-region row.
+        // MODE A — wide desktop (1600 window → ~1215 content): full
+        // three-region row.
         render_card(&dep(HomeConnectionVariant::Ready, 1215.0), 1215.0, 320.0, "status_ready_wide_1215");
-        // Minimum supported window (1024 → ~679 content) — medium row.
+        // MODE B — minimum supported window (1024 → ~679 content):
+        // compact horizontal row, graph on the right (679 ≥ 560).
         render_card(&dep(HomeConnectionVariant::Ready, 679.0), 679.0, 320.0, "status_ready_medium_679");
         render_card(&dep(HomeConnectionVariant::Connecting, 679.0), 679.0, 320.0, "status_connecting_medium_679");
         render_card(&dep(HomeConnectionVariant::Offline, 679.0), 679.0, 360.0, "status_offline_medium_679");
+        // MODE B bottom band (560-759): graph still visible but shrunk
+        // (560 is exactly the MODE B/C boundary).
+        render_card(&dep(HomeConnectionVariant::Ready, 560.0), 560.0, 360.0, "status_ready_modeb_560");
+        // MODE C with the small mesh still shown (520-559): stacked
+        // compact, mesh kept (520 is the mesh-hide boundary).
+        render_card(&dep(HomeConnectionVariant::Ready, 540.0), 540.0, 440.0, "status_ready_modec_540");
+        // MODE C below the mesh-hide width (<520): stacked compact, mesh
+        // NOT rendered (spec §13).
+        render_card(&dep(HomeConnectionVariant::Ready, 500.0), 500.0, 440.0, "status_ready_nomesh_500");
         // Narrow (below supported widths) — stacked layout.
         render_card(&dep(HomeConnectionVariant::Ready, 400.0), 400.0, 480.0, "status_ready_narrow_400");
     }
