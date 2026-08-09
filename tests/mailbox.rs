@@ -55,7 +55,7 @@ fn mailbox_rejects_tampering_and_wrong_ack_signer() {
     let sender = SecretKey::generate();
     let identity = MailboxIdentity::from_secret(&recipient);
     let mut envelope = identity.seal(&sender, b"secret").unwrap();
-    envelope.ciphertext[0] ^= 1;
+    envelope.ciphertext_mut().unwrap()[0] ^= 1;
     assert!(envelope.open(&recipient).is_err());
 
     let dir = tempfile::tempdir().unwrap();
@@ -107,16 +107,14 @@ fn mailbox_recipient_restart_preserves_pending_for_reconnect() {
 #[test]
 fn mailbox_expired_messages_rejected_by_validate_for() {
     // Envelopes with created_at older than the TTL must be rejected by
-    // validate_for. We create an envelope with a well-past timestamp to
-    // simulate an expired message.
+    // validate_for. We seal at a well-past timestamp (so the signature is
+    // still valid) to simulate a genuinely expired message.
     let recipient = SecretKey::generate();
     let sender = SecretKey::generate();
     let identity = MailboxIdentity::from_secret(&recipient);
-    let mut envelope = identity.seal(&sender, b"soon-to-expire").unwrap();
-
     // Set created_at far in the past so it exceeds even a generous TTL.
     let ancient = 1_000_000; // well before Unix epoch + 1M seconds
-    envelope.created_at = ancient;
+    let envelope = identity.seal_at(&sender, b"soon-to-expire", ancient).unwrap();
 
     // A 1-hour TTL — the envelope is more than 1 hour old.
     let result = envelope.validate_for(&identity, &[sender.public()], Duration::from_secs(3600));
@@ -140,10 +138,10 @@ fn mailbox_accept_incoming_handles_expired_envelope() {
     let identity = MailboxIdentity::from_secret(&recipient);
     let mut store = MailboxStore::with_ttl(dir.path(), Duration::from_secs(3600));
 
-    let mut envelope = identity.seal(&sender, b"expired").unwrap();
-    // Set created_at far in the past so it exceeds the 1-hour TTL.
+    // Seal at a far-past timestamp so it exceeds the 1-hour TTL while the
+    // signature remains valid.
     let ancient = 1_000_000;
-    envelope.created_at = ancient;
+    let envelope = identity.seal_at(&sender, b"expired", ancient).unwrap();
 
     let result = store.accept_incoming(&identity, envelope, &[sender.public()]);
     assert!(
@@ -238,14 +236,12 @@ fn mailbox_invalid_identity_rejected_by_validate_for() {
 #[test]
 fn mailbox_envelope_rejects_future_timestamp() {
     // Envelopes with created_at more than 60 seconds in the future must
-    // be rejected as invalid.
+    // be rejected as invalid. Seal at the future timestamp so the
+    // signature is valid and the failure is the skew check.
     let recipient = SecretKey::generate();
     let sender = SecretKey::generate();
     let identity = MailboxIdentity::from_secret(&recipient);
-    let mut envelope = identity.seal(&sender, b"from future").unwrap();
-
-    // Set created_at far in the future.
-    envelope.created_at = u64::MAX;
+    let envelope = identity.seal_at(&sender, b"from future", u64::MAX).unwrap();
 
     let result = envelope.validate_for(&identity, &[sender.public()], DEFAULT_MAILBOX_TTL);
     assert!(

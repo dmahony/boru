@@ -985,7 +985,7 @@ mod tests {
         handle_b
             .send_mailbox_ack(
                 peer_a,
-                MailboxAck::sign(&sk_b, received.message_id(), received.from),
+                MailboxAck::sign(&sk_b, received.message_id(), received.from()),
             )
             .await?;
         assert_eq!(received.message_id(), message_id);

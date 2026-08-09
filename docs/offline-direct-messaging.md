@@ -101,17 +101,59 @@ history record in `MessageStore`.
 ### Mailbox fallback
 
 When Whisper returns an error and the peer has a cached
-`MailboxPublicKey`, `seal_for()` creates a `MailboxEnvelope`:
+`MailboxPublicKey`, `seal_for()` creates a `MailboxEnvelope` (always the
+current V2 format):
 
 - X25519 ephemeral-static Diffie-Hellman derives a key.
-- BLAKE3 domain-separated key derivation feeds AES-256-GCM.
+- BLAKE3 domain-separated key derivation (`boru/mailbox/v2`) feeds
+  AES-256-GCM.
 - The nonce is 12 random bytes.
-- The sender signs the envelope fields.
-- `message_id()` is BLAKE3 over the envelope signing bytes.
+- The AEAD associated data binds the canonical envelope context
+  `(domain, version, from, recipient, ephemeral, nonce, created_at)`.
+- The sender signs the canonical payload
+  `(domain, version, from, recipient, ephemeral, nonce, created_at,
+  ciphertext)` — `created_at` is part of the signed bytes, so TTL and
+  replay windows cannot be altered independently of the signature
+  (BORU-AUDIT-02).
+- `message_id()` is BLAKE3 over the envelope signing bytes — the same
+  bytes the signature covers (see the invariant below).
 
 The plaintext is not sent in the inbox protocol. However, the fallback is
 only reached after immediate Whisper failure and is not a general durable
 queue.
+
+### Envelope versioning and migration (BORU-AUDIT-02)
+
+`MailboxEnvelope` is a versioned enum:
+
+- `MailboxEnvelope::V2` (current): the only format `seal`/`seal_for`
+  emits. Serialization is externally tagged, so the version is explicit on
+  the wire and in persisted blobs.
+- `MailboxEnvelope::V1` (legacy): the pre-fix format, whose signature
+  covered `(from, recipient, ephemeral, nonce, ciphertext)` but NOT
+  `created_at`. It remains decodable only for a migration window — old
+  envelopes persisted in the SQLite `dm_outbox` blobs (or the deprecated
+  `mailbox.json`) are still read, verified with their original semantics,
+  and served until they expire under the mailbox TTL. V1 is never re-emitted.
+
+Compatibility decoder: `MailboxEnvelope::decode(bytes)` accepts both the
+current tagged encoding and the untagged legacy V1 layout; the SQLite
+storage layer uses it on every persisted-envelope read. The inbox/whisper
+wire paths decode the tagged encoding directly (both peers run the same
+version after upgrade).
+
+**message_id invariant.** `message_id()` is the BLAKE3 hash of exactly the
+bytes the sender's signature covers. Any mutation that breaks the signature
+— including `created_at` for V2 — also changes the id, so an id-stable
+envelope has an authentic signature and context. Acknowledgement matching
+relies on this: a tampered envelope can neither validate nor acknowledge.
+
+**Verification order (fail closed).** `validate_for()` verifies the
+signature FIRST, then sender authorization, then recipient identity, then
+clock-skew/TTL against the now-authenticated `created_at`, and only then
+decrypts. For a legacy V1 envelope the same order applies, but `created_at`
+is not covered by the V1 signature — the acknowledged migration-window
+exception, bounded by the mailbox TTL.
 
 ### Conversation IDs
 

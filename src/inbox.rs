@@ -512,7 +512,7 @@ impl ProtocolHandler for InboxProtocol {
 
                     // SyncRequest: send back a paginated SyncResponse.
                     if let Some(ref sk) = secret_key {
-                        let last_created_at_ms = response_envelopes.last().map(|e| e.created_at);
+                        let last_created_at_ms = response_envelopes.last().map(|e| e.created_at());
                         let payload = InboxPayload::SyncResponse {
                             envelopes: response_envelopes,
                             last_created_at_ms,
@@ -607,11 +607,11 @@ impl InboxProtocol {
                 // original sender must agree.  Otherwise a peer could relay
                 // somebody else's envelope and cause the recipient to send
                 // an acknowledgement to the wrong identity.
-                if envelope.from != verified_sender {
+                if envelope.from() != verified_sender {
                     return Err(n0_error::anyerr!(
                         "inbox envelope sender mismatch: transport={}, envelope={}",
                         verified_sender,
-                        envelope.from
+                        envelope.from()
                     ));
                 }
                 // Dedup by message_id.

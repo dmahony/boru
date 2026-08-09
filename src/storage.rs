@@ -1834,7 +1834,7 @@ impl Storage {
             }
             let mut id = [0; 32];
             id.copy_from_slice(&stored_id);
-            let envelope: MailboxEnvelope = postcard::from_bytes(&stored_envelope)
+            let envelope = MailboxEnvelope::decode(&stored_envelope)
                 .std_context("decode stored mailbox envelope")?;
             let sequence = postcard::from_bytes::<LogicalDm>(&stored_logical)
                 .std_context("decode stored logical message")?
@@ -2063,7 +2063,7 @@ impl Storage {
             let envelope_bytes: Vec<u8> = row
                 .get(4)
                 .std_context("get stored acknowledgement envelope")?;
-            let envelope: MailboxEnvelope = postcard::from_bytes(&envelope_bytes)
+            let envelope = MailboxEnvelope::decode(&envelope_bytes)
                 .std_context("decode stored acknowledgement envelope")?;
             if envelope.message_id().as_bytes() == ack.message_id.as_bytes() {
                 let stored_sender: Vec<u8> =
@@ -2204,8 +2204,8 @@ impl Storage {
                 continue;
             }
 
-            let envelope: MailboxEnvelope =
-                postcard::from_bytes(&envelope_bytes).std_context("decode envelope")?;
+            let envelope =
+                MailboxEnvelope::decode(&envelope_bytes).std_context("decode envelope")?;
             let encoded_size = envelope_bytes.len();
 
             // Check size bound

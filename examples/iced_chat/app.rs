@@ -21691,7 +21691,7 @@ impl IcedChat {
                             };
                             let mut results = Vec::new();
                             for envelope in pending {
-                                let peer_key = envelope.recipient.identity;
+                                let peer_key = envelope.recipient().identity;
                                 if !online_peers.contains(&peer_key) {
                                     continue;
                                 }
