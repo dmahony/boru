@@ -206,46 +206,54 @@ async fn handle_connection(
     }
     let method = parts[0];
 
-    // Parse Range header if present
+    // Parse Range header if present. Parsing is centralized in
+    // `parse_range_header` (a pure function) and validated against the
+    // resource length up front, so no unchecked or reversed range arithmetic
+    // can reach the file seek/read path.
     let range = request
         .lines()
         .find(|line| line.to_lowercase().starts_with("range:"))
-        .and_then(|line| parse_range_header(line));
+        .map(|line| parse_range_header(line, total_size))
+        .unwrap_or(RangeRequest::Full);
 
     match method {
         "HEAD" => {
             // HEAD describes the representation GET would return without
             // sending a body. Ranges are supported on HEAD and mirror the
             // corresponding GET status / Content-Range / length semantics.
-            if let Some((start, end)) = range {
-                if start >= total_size {
-                    write_response(stream, 416, "Range Not Satisfiable", Some(0), &[]).await;
-                    return;
+            match range.resolve(total_size) {
+                Some(resolved) if matches!(range, RangeRequest::Partial { .. }) => {
+                    let content_range =
+                        format!("bytes {}-{}/{}", resolved.start, resolved.end, total_size);
+                    write_response(
+                        stream,
+                        206,
+                        "Partial Content",
+                        Some(resolved.length),
+                        &[
+                            ("Content-Type", content_type),
+                            ("Content-Range", content_range.as_str()),
+                            ("Accept-Ranges", "bytes"),
+                        ],
+                    )
+                    .await;
                 }
-                let effective_end = end.min(total_size.saturating_sub(1));
-                let content_length = effective_end.saturating_sub(start).saturating_add(1);
-                let content_range = format!("bytes {}-{}/{}", start, effective_end, total_size);
-                write_response(
-                    stream,
-                    206,
-                    "Partial Content",
-                    Some(content_length),
-                    &[
-                        ("Content-Type", content_type),
-                        ("Content-Range", content_range.as_str()),
-                        ("Accept-Ranges", "bytes"),
-                    ],
-                )
-                .await;
-            } else {
-                write_response(
-                    stream,
-                    200,
-                    "OK",
-                    Some(total_size),
-                    &[("Content-Type", content_type), ("Accept-Ranges", "bytes")],
-                )
-                .await;
+                Some(resolved) => {
+                    // Full: describe the whole resource (Content-Length is
+                    // the validated length, which for Full equals total_size
+                    // unless the resource is empty).
+                    write_response(
+                        stream,
+                        200,
+                        "OK",
+                        Some(resolved.length),
+                        &[("Content-Type", content_type), ("Accept-Ranges", "bytes")],
+                    )
+                    .await;
+                }
+                None => {
+                    write_unsatisfiable(stream, total_size).await;
+                }
             }
         }
         "GET" => {
@@ -267,24 +275,148 @@ async fn handle_connection(
     }
 }
 
-/// Parse a `Range: bytes=START-END` or `Range: bytes=START-` header.
-/// Returns `(start, end_inclusive)`.
-fn parse_range_header(line: &str) -> Option<(u64, u64)> {
-    let value = line.split(':').nth(1)?.trim();
-    let range_spec = value.strip_prefix("bytes=")?;
-    let parts: Vec<&str> = range_spec.split(',').collect();
-    let spec = parts.first()?;
-    if let Some((start_str, end_str)) = spec.split_once('-') {
-        let start: u64 = start_str.trim().parse().ok()?;
-        if end_str.trim().is_empty() {
-            Some((start, u64::MAX)) // open-ended
-        } else {
-            let end: u64 = end_str.trim().parse().ok()?;
-            Some((start, end))
+/// Result of parsing an HTTP `Range` request header against a resource of
+/// known length.
+///
+/// Parsing and validation happen in one pure step ([`parse_range_header`]),
+/// so no unchecked or reversed range arithmetic can reach the file seek/read
+/// path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RangeRequest {
+    /// No Range header: serve the whole resource.
+    Full,
+    /// One satisfiable byte range, endpoints inclusive, already clamped to
+    /// `[0, resource_length - 1]`.
+    Partial { start: u64, end: u64 },
+    /// Syntactically valid but unsatisfiable (start past EOF, reversed range,
+    /// zero-length suffix, empty resource) — the server must answer 416.
+    Unsatisfiable,
+    /// Malformed: bad unit, empty value, multi-range, overflow, garbage —
+    /// the server must answer 416.
+    Malformed,
+}
+
+/// The concrete byte range to serve once a request has been validated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResolvedRange {
+    /// First byte to send (inclusive).
+    start: u64,
+    /// Last byte to send (inclusive), already clamped to the resource.
+    end: u64,
+    /// Number of bytes to send (`end - start + 1`), computed with checked
+    /// arithmetic only after validation.
+    length: u64,
+}
+
+impl RangeRequest {
+    /// Resolve this request against `resource_length` into the concrete byte
+    /// range to serve, or `None` when the request cannot be satisfied
+    /// (unsatisfiable or malformed — the caller answers 416).
+    fn resolve(self, resource_length: u64) -> Option<ResolvedRange> {
+        match self {
+            RangeRequest::Full => {
+                if resource_length == 0 {
+                    return None;
+                }
+                Some(ResolvedRange {
+                    start: 0,
+                    end: resource_length - 1,
+                    length: resource_length,
+                })
+            }
+            RangeRequest::Partial { start, end } => {
+                // The parser guarantees start <= end < resource_length, so
+                // this cannot overflow; fail closed rather than trust it.
+                let length = end.checked_sub(start)?.checked_add(1)?;
+                Some(ResolvedRange { start, end, length })
+            }
+            RangeRequest::Unsatisfiable | RangeRequest::Malformed => None,
         }
-    } else {
-        None
     }
+}
+
+/// Parse and validate a `Range` header line against `resource_length`.
+///
+/// Pure function: no I/O, no panics, all arithmetic checked. Supports only
+/// the single-range forms the streaming server needs — `bytes=start-end`,
+/// `bytes=start-`, and the suffix form `bytes=-N`. Multi-range requests and
+/// anything else are rejected.
+fn parse_range_header(line: &str, resource_length: u64) -> RangeRequest {
+    let Some(value) = line.split(':').nth(1) else {
+        return RangeRequest::Malformed;
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return RangeRequest::Malformed;
+    }
+    // The range unit is case-insensitive (RFC 9110 §14.2).
+    let lowered = value.to_ascii_lowercase();
+    let Some(spec) = lowered.strip_prefix("bytes=") else {
+        return RangeRequest::Malformed;
+    };
+    if spec.is_empty() || spec.contains(',') {
+        // Multi-range requests are explicitly unsupported.
+        return RangeRequest::Malformed;
+    }
+    let Some((first, second)) = spec.split_once('-') else {
+        return RangeRequest::Malformed; // no '-', e.g. "bytes=123"
+    };
+
+    // Suffix range: bytes=-N (the last N bytes).
+    if first.trim().is_empty() {
+        let Ok(n) = second.trim().parse::<u64>() else {
+            return RangeRequest::Malformed; // overflow or non-numeric
+        };
+        if n == 0 || resource_length == 0 {
+            return RangeRequest::Unsatisfiable;
+        }
+        // A suffix longer than the resource covers the whole representation.
+        let start = resource_length.saturating_sub(n);
+        return RangeRequest::Partial {
+            start,
+            end: resource_length - 1, // resource_length > 0
+        };
+    }
+
+    let Ok(start) = first.trim().parse::<u64>() else {
+        return RangeRequest::Malformed; // overflow or non-numeric
+    };
+    if start >= resource_length {
+        return RangeRequest::Unsatisfiable; // first byte past EOF
+    }
+
+    // Open-ended range: bytes=start-
+    if second.trim().is_empty() {
+        return RangeRequest::Partial {
+            start,
+            end: resource_length - 1, // resource_length > start >= 0
+        };
+    }
+
+    let Ok(end) = second.trim().parse::<u64>() else {
+        return RangeRequest::Malformed; // overflow or non-numeric
+    };
+    if end < start {
+        return RangeRequest::Unsatisfiable; // reversed range
+    }
+    // Clamp an end beyond EOF to the last byte of the resource
+    // (RFC 9110 §14.1.2).
+    let end = end.min(resource_length - 1); // resource_length > start >= 0
+    RangeRequest::Partial { start, end }
+}
+
+/// Answer 416 (Range Not Satisfiable) with the mandatory
+/// `Content-Range: bytes */<length>` header (RFC 9110 §15.5.17).
+async fn write_unsatisfiable(stream: &mut tokio::net::TcpStream, total_size: u64) {
+    let content_range = format!("bytes */{}", total_size);
+    write_response(
+        stream,
+        416,
+        "Range Not Satisfiable",
+        Some(0),
+        &[("Content-Range", content_range.as_str())],
+    )
+    .await;
 }
 
 /// Serve a file range, polling if the file hasn't grown enough yet.
@@ -297,14 +429,22 @@ async fn serve_file_range(
     file_path: &std::path::Path,
     total_size: u64,
     content_type: &str,
-    range: Option<(u64, u64)>,
+    range: RangeRequest,
     _permit: OwnedSemaphorePermit,
 ) {
     use tokio::io::AsyncWriteExt;
 
-    let (range_start, range_end) = range.unwrap_or((0, u64::MAX));
-    let effective_end = range_end.min(total_size.saturating_sub(1));
-    let content_length = effective_end.saturating_sub(range_start).saturating_add(1);
+    // Validate and resolve the request up front. Unsatisfiable and malformed
+    // requests are answered 416 before any file work, so a seek/read is never
+    // reached with an unchecked or reversed offset.
+    let Some(resolved) = range.resolve(total_size) else {
+        write_unsatisfiable(stream, total_size).await;
+        return;
+    };
+    let range_start = resolved.start;
+    let range_end = resolved.end;
+    let content_length = resolved.length;
+    let is_partial = matches!(range, RangeRequest::Partial { .. });
 
     let start_time = std::time::Instant::now();
 
@@ -315,17 +455,13 @@ async fn serve_file_range(
             Err(_) => 0,
         };
 
-        if range_start >= total_size {
-            write_response(stream, 416, "Range Not Satisfiable", Some(0), &[]).await;
-            return;
-        }
-
         if current_size > range_start {
             break;
         }
 
         if current_size >= total_size {
-            // File is complete but doesn't have data at our offset (shouldn't happen)
+            // File is complete but doesn't have data at our offset (shouldn't
+            // happen: resolve() already guaranteed range_start < total_size).
             write_response(stream, 416, "Range Not Satisfiable", Some(0), &[]).await;
             return;
         }
@@ -341,8 +477,8 @@ async fn serve_file_range(
     // Build response headers. Exactly one Content-Length is emitted, by the
     // shared response builder, so HEAD (which mirrors these headers without
     // a body) and GET always agree on the representation length.
-    if range.is_some() {
-        let content_range = format!("bytes {}-{}/{}", range_start, effective_end, total_size);
+    if is_partial {
+        let content_range = format!("bytes {}-{}/{}", range_start, range_end, total_size);
         write_response(
             stream,
             206,
@@ -390,7 +526,11 @@ async fn serve_file_range(
                     .await
                     .map(|m| m.len())
                     .unwrap_or(0);
-                let expected_offset = range_start + bytes_sent;
+                // Checked: range_start + bytes_sent never reaches the seek
+                // call with wrapping arithmetic.
+                let Some(expected_offset) = range_start.checked_add(bytes_sent) else {
+                    break;
+                };
 
                 if current_size >= total_size || expected_offset >= total_size {
                     // File is complete and we've sent everything available
@@ -402,11 +542,7 @@ async fn serve_file_range(
                 }
 
                 // Reposition (file might have been seeked by another operation)
-                if file
-                    .seek(SeekFrom::Start(range_start + bytes_sent))
-                    .await
-                    .is_err()
-                {
+                if file.seek(SeekFrom::Start(expected_offset)).await.is_err() {
                     break;
                 }
                 tokio::time::sleep(POLL_INTERVAL).await;
@@ -458,21 +594,164 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_range_header_handles_closed_and_open_ranges() {
-        assert_eq!(parse_range_header("Range: bytes=0-1023"), Some((0, 1023)));
-        assert_eq!(
-            parse_range_header("Range: bytes=4096-"),
-            Some((4096, u64::MAX))
-        );
-        assert_eq!(parse_range_header("range: bytes=0-0"), Some((0, 0)));
+    fn parse_range_header_accepts_valid_single_ranges() {
+        // (header, resource_length, expected)
+        let cases: &[(&str, u64, RangeRequest)] = &[
+            // Closed range covering the first byte only.
+            (
+                "Range: bytes=0-0",
+                10,
+                RangeRequest::Partial { start: 0, end: 0 },
+            ),
+            // Open-ended from the first byte.
+            (
+                "Range: bytes=0-",
+                10,
+                RangeRequest::Partial { start: 0, end: 9 },
+            ),
+            // Closed mid-range.
+            (
+                "Range: bytes=2-4",
+                10,
+                RangeRequest::Partial { start: 2, end: 4 },
+            ),
+            // Final byte, requested as an open-ended range.
+            (
+                "Range: bytes=9-",
+                10,
+                RangeRequest::Partial { start: 9, end: 9 },
+            ),
+            // Final byte, requested as a suffix range.
+            (
+                "Range: bytes=-1",
+                10,
+                RangeRequest::Partial { start: 9, end: 9 },
+            ),
+            // Suffix range of the last N bytes.
+            (
+                "Range: bytes=-3",
+                10,
+                RangeRequest::Partial { start: 7, end: 9 },
+            ),
+            // Suffix longer than the resource covers the whole representation.
+            (
+                "Range: bytes=-100",
+                10,
+                RangeRequest::Partial { start: 0, end: 9 },
+            ),
+            // End beyond EOF is clamped to resource_length - 1 (RFC 9110 §14.1.2).
+            (
+                "Range: bytes=0-999",
+                10,
+                RangeRequest::Partial { start: 0, end: 9 },
+            ),
+            (
+                "Range: bytes=5-999",
+                10,
+                RangeRequest::Partial { start: 5, end: 9 },
+            ),
+            // Unit is case-insensitive.
+            (
+                "range: BYTES=0-4",
+                10,
+                RangeRequest::Partial { start: 0, end: 4 },
+            ),
+            // Leading/trailing whitespace around the value is tolerated.
+            (
+                "Range:   bytes=0-4   ",
+                10,
+                RangeRequest::Partial { start: 0, end: 4 },
+            ),
+        ];
+        for (header, len, expected) in cases {
+            assert_eq!(
+                &parse_range_header(header, *len),
+                expected,
+                "header {header:?} len {len}"
+            );
+        }
     }
 
     #[test]
-    fn parse_range_header_rejects_invalid_specs() {
-        assert_eq!(parse_range_header("Range: bytes=-1023"), None);
-        assert_eq!(parse_range_header("Range: bytes=abc-"), None);
-        assert_eq!(parse_range_header("Range: items=0-1"), None);
-        assert_eq!(parse_range_header(""), None);
+    fn parse_range_header_rejects_unsatisfiable_ranges() {
+        // (header, resource_length) — all must be Unsatisfiable.
+        let cases: &[(&str, u64)] = &[
+            ("Range: bytes=10-", 10),     // start past EOF
+            ("Range: bytes=100-200", 10), // start past EOF
+            ("Range: bytes=5-2", 10),     // reversed range
+            ("Range: bytes=-0", 10),      // zero-length suffix
+            ("Range: bytes=0-", 0),       // empty resource
+        ];
+        for (header, len) in cases {
+            assert_eq!(
+                parse_range_header(header, *len),
+                RangeRequest::Unsatisfiable,
+                "header {header:?} len {len}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_range_header_rejects_malformed_ranges() {
+        // All must be Malformed, regardless of resource length (10 here).
+        let cases: &[&str] = &[
+            "",                                    // no colon
+            "Range: ",                             // empty value
+            "Range: bytes=",                       // empty spec
+            "Range: bytes",                        // missing '='
+            "Range: bytes=abc-",                   // non-numeric start
+            "Range: bytes=0-xyz",                  // non-numeric end
+            "Range: bytes=-",                      // dangling dash
+            "Range: bytes=1-2-3",                  // extra dash
+            "Range: bytes=0-1,10-20",              // multi-range rejected
+            "Range: bytes=1,2",                    // multi-range without dashes
+            "Range: items=0-1",                    // wrong unit
+            "Range: bytes=18446744073709551616-",  // start overflow (2^64)
+            "Range: bytes=0-18446744073709551616", // end overflow (2^64)
+            "Range: bytes=-18446744073709551616",  // suffix overflow (2^64)
+        ];
+        for header in cases {
+            assert_eq!(
+                parse_range_header(header, 10),
+                RangeRequest::Malformed,
+                "header {header:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_computes_length_with_checked_arithmetic() {
+        // Partial ranges resolve to (start, end, length = end - start + 1).
+        assert_eq!(
+            RangeRequest::Partial { start: 2, end: 4 }.resolve(10),
+            Some(ResolvedRange {
+                start: 2,
+                end: 4,
+                length: 3
+            })
+        );
+        assert_eq!(
+            RangeRequest::Partial { start: 9, end: 9 }.resolve(10),
+            Some(ResolvedRange {
+                start: 9,
+                end: 9,
+                length: 1
+            })
+        );
+        // Full covers the whole resource.
+        assert_eq!(
+            RangeRequest::Full.resolve(10),
+            Some(ResolvedRange {
+                start: 0,
+                end: 9,
+                length: 10
+            })
+        );
+        // Empty resource: Full cannot be served.
+        assert_eq!(RangeRequest::Full.resolve(0), None);
+        // Unsatisfiable / Malformed never resolve.
+        assert_eq!(RangeRequest::Unsatisfiable.resolve(10), None);
+        assert_eq!(RangeRequest::Malformed.resolve(10), None);
     }
 
     #[test]
@@ -613,6 +892,28 @@ mod tests {
         );
         assert_eq!(header_count(head, "Content-Length"), 1);
         assert_eq!(header_value(head, "Content-Length"), Some("0"));
+        assert_eq!(
+            header_value(head, "Content-Range"),
+            Some("bytes */2048"),
+            "416 must carry Content-Range: bytes */<length>, got: {head}"
+        );
+        assert!(body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn head_reversed_range_returns_416() {
+        let total = 2_048u64;
+        let resp = round_trip(
+            "HEAD /video HTTP/1.1\r\nHost: localhost\r\nRange: bytes=100-10\r\n\r\n",
+            total,
+        )
+        .await;
+        let (head, body) = split_response(&resp);
+        assert!(
+            head.starts_with("HTTP/1.1 416 Range Not Satisfiable"),
+            "reversed range must be unsatisfiable, got: {head}"
+        );
+        assert_eq!(header_value(head, "Content-Range"), Some("bytes */2048"));
         assert!(body.is_empty());
     }
 
@@ -651,6 +952,114 @@ mod tests {
             Some("bytes 200-299/10000")
         );
         assert_eq!(body.len(), 100, "body must match range length");
+    }
+
+    /// Unsatisfiable and malformed GET ranges must answer 416 with the
+    /// mandatory `Content-Range: bytes */<length>` header and an empty body.
+    #[tokio::test]
+    async fn get_unsatisfiable_and_malformed_ranges_return_416_with_content_range() {
+        let total = 2_048u64;
+        let cases = [
+            "GET /video HTTP/1.1\r\nHost: localhost\r\nRange: bytes=99999-\r\n\r\n", // start past EOF
+            "GET /video HTTP/1.1\r\nHost: localhost\r\nRange: bytes=5-2\r\n\r\n",    // reversed
+            "GET /video HTTP/1.1\r\nHost: localhost\r\nRange: bytes=-0\r\n\r\n",     // zero suffix
+            "GET /video HTTP/1.1\r\nHost: localhost\r\nRange: bytes=0-1,10-20\r\n\r\n", // multi-range
+            "GET /video HTTP/1.1\r\nHost: localhost\r\nRange: items=0-1\r\n\r\n",       // bad unit
+            "GET /video HTTP/1.1\r\nHost: localhost\r\nRange: bytes=abc-\r\n\r\n",      // garbage
+        ];
+        for req in cases {
+            let resp = round_trip(req, total).await;
+            let (head, body) = split_response(&resp);
+            assert!(
+                head.starts_with("HTTP/1.1 416 Range Not Satisfiable"),
+                "expected 416 for {req:?}, got: {head}"
+            );
+            assert_eq!(
+                header_value(head, "Content-Range"),
+                Some("bytes */2048"),
+                "416 must carry Content-Range: bytes */<length> for {req:?}: {head}"
+            );
+            assert_eq!(header_value(head, "Content-Length"), Some("0"));
+            assert!(body.is_empty(), "416 must not send a body for {req:?}");
+        }
+    }
+
+    /// Every valid partial range form must produce a 206 whose body length
+    /// exactly matches Content-Length and whose Content-Range matches the
+    /// clamped, inclusive byte offsets.
+    #[tokio::test]
+    async fn get_partial_body_matches_content_length_and_range() {
+        let total = 1_000u64;
+        // (request line, expected Content-Length, expected Content-Range, expected body len)
+        let cases: &[(&str, &str, &str, usize)] = &[
+            (
+                "Range: bytes=0-0", // first byte only
+                "1",
+                "bytes 0-0/1000",
+                1,
+            ),
+            (
+                "Range: bytes=999-", // final byte, open-ended
+                "1",
+                "bytes 999-999/1000",
+                1,
+            ),
+            (
+                "Range: bytes=-1", // final byte, suffix
+                "1",
+                "bytes 999-999/1000",
+                1,
+            ),
+            (
+                "Range: bytes=-5", // suffix of the last 5 bytes
+                "5",
+                "bytes 995-999/1000",
+                5,
+            ),
+            (
+                "Range: bytes=0-99999", // end beyond EOF clamped to last byte
+                "1000",
+                "bytes 0-999/1000",
+                1000,
+            ),
+            (
+                "Range: bytes=100-", // open-ended from 100
+                "900",
+                "bytes 100-999/1000",
+                900,
+            ),
+        ];
+        for (range_header, expected_len, expected_range, expected_body_len) in cases {
+            let req = format!(
+                "GET /video HTTP/1.1\r\nHost: localhost\r\n{}\r\n\r\n",
+                range_header
+            );
+            let resp = round_trip(&req, total).await;
+            let (head, body) = split_response(&resp);
+            assert!(
+                head.starts_with("HTTP/1.1 206 Partial Content"),
+                "expected 206 for {req:?}, got: {head}"
+            );
+            assert_eq!(
+                header_value(head, "Content-Length"),
+                Some(*expected_len),
+                "Content-Length mismatch for {range_header:?}: {head}"
+            );
+            assert_eq!(
+                header_value(head, "Content-Range"),
+                Some(*expected_range),
+                "Content-Range mismatch for {range_header:?}: {head}"
+            );
+            assert_eq!(
+                body.len(),
+                *expected_body_len,
+                "body length must equal Content-Length for {range_header:?}"
+            );
+            assert!(
+                body.iter().all(|&b| b == 0xAB),
+                "body content mismatch for {range_header:?}"
+            );
+        }
     }
 
     #[tokio::test]
