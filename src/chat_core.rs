@@ -2701,10 +2701,22 @@ pub async fn download_blob_with_progress(
     Ok(buf)
 }
 
-/// Download a blob with progress reporting, streaming directly to a file.
+/// Download a blob with progress reporting, streaming directly into an
+/// already-reserved destination file.
 ///
 /// The blob is downloaded to the local store, then streamed from the store
-/// to `save_path` in fixed-size chunks.  No whole-file buffer is allocated.
+/// into the reserved destination handle in fixed-size chunks.  All writes go
+/// through the handle that
+/// [`reserve_download_destination`](crate::safe_destination::reserve_download_destination)
+/// created — the destination path is never reopened, so the
+/// time-of-check/time-of-use gap (BORU-AUDIT-21) is closed: a path that was
+/// checked cannot be swapped for a symlink or an existing file before the
+/// download writes to it.  The BLAKE3 hash of the written bytes is computed
+/// as the copy proceeds and compared against `expected_content_hash` when
+/// supplied, so a corrupted transfer fails before the destination is
+/// published (the caller drops the reservation and the created file is
+/// removed).
+///
 /// Progress events (`TransferProgress`) are emitted via `on_progress`.
 #[allow(clippy::too_many_arguments)]
 pub async fn download_blob_to_file(
@@ -2714,13 +2726,14 @@ pub async fn download_blob_to_file(
     candidates: Vec<PublicKey>,
     name: String,
     kind: TransferKind,
-    save_path: &std::path::Path,
+    destination: &mut crate::safe_destination::ReservedDestination,
+    expected_content_hash: Option<&str>,
     on_progress: impl FnMut(TransferProgress) + Send + 'static,
     max_bytes: Option<u64>,
 ) -> Result<()> {
     let id = TransferId::next();
     let shared_cb: TransferProgressCallback = Arc::new(Mutex::new(Some(Box::new(on_progress))));
-    let emit = |ev: TransferProgress| {
+    let mut emit = |ev: TransferProgress| {
         if let Ok(mut guard) = shared_cb.lock() {
             if let Some(cb) = guard.as_mut() {
                 cb(ev);
@@ -2765,7 +2778,7 @@ pub async fn download_blob_to_file(
                 cancel_guard.disarm();
                 emit(TransferProgress::Failed {
                     id,
-                    name,
+                    name: name.clone(),
                     error: format!("{e}"),
                 });
                 return Err(e);
@@ -2774,7 +2787,7 @@ pub async fn download_blob_to_file(
                 cancel_guard.disarm();
                 emit(TransferProgress::Failed {
                     id,
-                    name,
+                    name: name.clone(),
                     error: "Download error".into(),
                 });
                 return Err(n0_error::anyerr!("Download error"));
@@ -2785,39 +2798,107 @@ pub async fn download_blob_to_file(
     }
     cancel_guard.disarm();
 
-    // Phase 2: export from blob store to file using the native export
-    // API, which is much more efficient than the manual 256KB read loop.
-    // On CoW-capable filesystems the copy is instantaneous; on others the
-    // store handles optimal buffering internally and emits CopyProgress
-    // events for real-time UI feedback.
-    {
-        use iroh_blobs::api::proto::ExportProgressItem;
-        let export = blob_store.blobs().export(hash, save_path);
-        let mut export_stream = export.stream().await;
-        let mut total = None;
-        while let Some(item) = export_stream.next().await {
-            match item {
-                ExportProgressItem::Size(s) => {
-                    total = Some(s);
-                }
-                ExportProgressItem::CopyProgress(offset) => {
-                    emit(TransferProgress::Progress {
-                        id,
-                        kind,
-                        name: name.clone(),
-                        bytes: offset,
-                        total,
-                    });
-                }
-                ExportProgressItem::Done => break,
-                ExportProgressItem::Error(cause) => {
-                    return Err(n0_error::anyerr!("Export failed: {cause}"));
-                }
+    // Phase 2: stream from the local store into the reserved destination
+    // handle.  Never reopens the path (BORU-AUDIT-21); verifies the content
+    // hash before the caller publishes the destination.
+    write_blob_to_reserved_file(
+        blob_store,
+        hash,
+        destination,
+        expected_content_hash,
+        max_bytes,
+        &mut emit,
+        id,
+        kind,
+        name.clone(),
+    )
+    .await?;
+
+    emit(TransferProgress::Completed { id, kind, name });
+    Ok(())
+}
+
+/// Stream a blob from the local store into a reserved destination handle,
+/// computing the BLAKE3 hash of the written bytes as the copy proceeds.
+///
+/// The destination was created atomically by
+/// [`reserve_download_destination`](crate::safe_destination::reserve_download_destination);
+/// this function writes exclusively through the returned handle (wrapped in
+/// `tokio::fs::File` so blocking I/O is offloaded) and never reopens the
+/// path.  On success the file is synced to disk and the handle is restored
+/// into the reservation so its drop-cleanup can still run.  On hash mismatch
+/// or size overflow the function returns an error; the caller drops the
+/// reservation and the created file is removed.
+async fn write_blob_to_reserved_file(
+    blob_store: &iroh_blobs::api::Store,
+    hash: iroh_blobs::Hash,
+    destination: &mut crate::safe_destination::ReservedDestination,
+    expected_content_hash: Option<&str>,
+    max_bytes: Option<u64>,
+    on_progress: &mut impl FnMut(TransferProgress),
+    id: TransferId,
+    kind: TransferKind,
+    name: String,
+) -> Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let std_file = destination
+        .take_file()
+        .ok_or_else(|| n0_error::anyerr!("reserved destination already consumed"))?;
+    let mut file = tokio::fs::File::from_std(std_file);
+
+    let mut reader = blob_store.blobs().reader(hash);
+    let mut buf = vec![0u8; 256 * 1024];
+    let mut hasher = blake3::Hasher::new();
+    let mut total: u64 = 0;
+    loop {
+        let n = reader
+            .read(&mut buf)
+            .await
+            .map_err(|e| n0_error::anyerr!("read blob from store: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        if let Some(max) = max_bytes {
+            let written = total + n as u64;
+            if written > max {
+                return Err(n0_error::anyerr!(
+                    "blob too large: {written} bytes, limit {max} bytes"
+                ));
             }
+        }
+        file.write_all(&buf[..n])
+            .await
+            .map_err(|e| n0_error::anyerr!("write download destination: {e}"))?;
+        hasher.update(&buf[..n]);
+        total += n as u64;
+        on_progress(TransferProgress::Progress {
+            id,
+            kind,
+            name: name.clone(),
+            bytes: total,
+            total: Some(total),
+        });
+    }
+
+    // Durability: flush + fsync before the file is published.
+    file.sync_all()
+        .await
+        .map_err(|e| n0_error::anyerr!("sync download destination: {e}"))?;
+    // tokio's `into_std` flushes the file and returns the underlying handle
+    // directly (no Result wrapper in this version).
+    let std_file = file.into_std().await;
+    destination.restore_file(std_file);
+
+    let actual_hash = hasher.finalize().to_hex().to_string();
+    if let Some(expected) = expected_content_hash {
+        if actual_hash != expected.to_ascii_lowercase() {
+            return Err(n0_error::anyerr!(
+                "download content hash mismatch: expected {expected}, got {actual_hash}"
+            ));
         }
     }
 
-    emit(TransferProgress::Completed { id, kind, name });
     Ok(())
 }
 
@@ -5649,5 +5730,105 @@ mod tests {
         );
         assert_send(&ticket);
         assert_sync(&ticket);
+    }
+
+    // ── BORU-AUDIT-21: reserved-destination hash-failure cleanup ────────
+
+    #[tokio::test]
+    async fn reserved_destination_hash_failure_removes_file_and_never_publishes() {
+        // Store a blob in an in-memory store, then stream it into a reserved
+        // destination with a WRONG expected hash. The write must fail, the
+        // created file must be removed, and the final name must not exist.
+        let blob_store: iroh_blobs::api::Store =
+            iroh_blobs::store::mem::MemStore::new().into();
+        let content = b"verified download bytes".to_vec();
+        let tag = blob_store.blobs().add_bytes(content.clone()).await.unwrap();
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut destination = match crate::safe_destination::reserve_download_destination(
+            dir.path(),
+            "report.pdf",
+            "download",
+            crate::safe_destination::OverwritePolicy::KeepBoth,
+        )
+        .unwrap()
+        {
+            crate::safe_destination::Reservation::Use(dest) => dest,
+            crate::safe_destination::Reservation::Skip => panic!("fresh temp dir must not skip"),
+        };
+        let final_path = destination.final_path().to_path_buf();
+
+        let mut progress = Vec::new();
+        let result = write_blob_to_reserved_file(
+            &blob_store,
+            tag.hash,
+            &mut destination,
+            Some(&blake3::hash(b"some other bytes").to_hex().to_string()),
+            None,
+            &mut |ev| progress.push(ev),
+            TransferId::next(),
+            TransferKind::File,
+            "report.pdf".to_string(),
+        )
+        .await;
+
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("content hash mismatch"),
+            "unexpected error: {err}"
+        );
+        drop(destination);
+        assert!(
+            !final_path.exists(),
+            "hash failure must remove the created destination file"
+        );
+        // The reservation was never published, so no final file appears.
+        assert!(!dir.path().join("report.pdf").exists());
+    }
+
+    #[tokio::test]
+    async fn reserved_destination_matching_hash_publishes_file() {
+        let blob_store: iroh_blobs::api::Store =
+            iroh_blobs::store::mem::MemStore::new().into();
+        let content = b"verified download bytes".to_vec();
+        let tag = blob_store.blobs().add_bytes(content.clone()).await.unwrap();
+        let expected = blake3::hash(&content).to_hex().to_string();
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut destination = match crate::safe_destination::reserve_download_destination(
+            dir.path(),
+            "report.pdf",
+            "download",
+            crate::safe_destination::OverwritePolicy::KeepBoth,
+        )
+        .unwrap()
+        {
+            crate::safe_destination::Reservation::Use(dest) => dest,
+            crate::safe_destination::Reservation::Skip => panic!("fresh temp dir must not skip"),
+        };
+        let final_path = destination.final_path().to_path_buf();
+
+        let mut progress = Vec::new();
+        write_blob_to_reserved_file(
+            &blob_store,
+            tag.hash,
+            &mut destination,
+            Some(&expected),
+            None,
+            &mut |ev| progress.push(ev),
+            TransferId::next(),
+            TransferKind::File,
+            "report.pdf".to_string(),
+        )
+        .await
+        .unwrap();
+        destination.publish().unwrap();
+
+        assert_eq!(std::fs::read(&final_path).unwrap(), content);
+        assert!(
+            progress
+                .iter()
+                .any(|ev| matches!(ev, TransferProgress::Progress { .. }))
+        );
     }
 }

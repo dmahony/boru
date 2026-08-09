@@ -77,7 +77,9 @@ use boru_core::directory::DirectoryStore;
 use boru_core::download_initiation::initiate_download;
 use boru_core::net::Gossip;
 use boru_core::proto::TopicId;
-use boru_core::safe_destination::safe_destination_path;
+use boru_core::safe_destination::{
+    reserve_download_destination, OverwritePolicy, Reservation,
+};
 use bytes::Bytes;
 use iroh::address_lookup::memory::MemoryLookup;
 use iroh::{Endpoint, EndpointAddr, SecretKey};
@@ -3447,6 +3449,7 @@ async fn handle_download_file(req: &JsonRpcRequest, state: &McpAppState) -> Resu
     let hash: iroh_blobs::Hash = content_hash
         .parse()
         .map_err(|e| format!("Invalid content_hash '{content_hash}': {e}"))?;
+    let content_hash_owned = content_hash.to_string();
     let max_bytes = if result.total_bytes > 0 {
         Some(result.total_bytes)
     } else {
@@ -3457,8 +3460,21 @@ async fn handle_download_file(req: &JsonRpcRequest, state: &McpAppState) -> Resu
     let storage_task = storage.clone();
     let display_name_task = display_name.clone();
     let peer_pk_task = peer_pk;
-    let save_path = safe_destination_path(&downloads_dir, &display_name, content_hash)
-        .map_err(|e| format!("Unsafe download name: {e}"))?;
+    // BORU-AUDIT-21: fuse validation + creation into one atomic reservation
+    // (O_EXCL + O_NOFOLLOW) instead of checking a path and reopening it later.
+    let mut destination = match reserve_download_destination(
+        &downloads_dir,
+        &display_name,
+        &content_hash_owned,
+        OverwritePolicy::KeepBoth,
+    )
+    .map_err(|e| format!("Unsafe download name: {e}"))?
+    {
+        Reservation::Use(dest) => dest,
+        Reservation::Skip => {
+            return Err("Download skipped: destination name already exists".to_string());
+        }
+    };
 
     // Mark the durable row as actively downloading, then run the transfer in
     // the background. The MCP response returns immediately so the harness can
@@ -3478,7 +3494,8 @@ async fn handle_download_file(req: &JsonRpcRequest, state: &McpAppState) -> Resu
             vec![peer_pk_task],
             display_name_task.clone(),
             TransferKind::File,
-            &save_path,
+            &mut destination,
+            Some(&content_hash_owned),
             move |ev: boru_core::chat_callbacks::TransferProgress| {
                 use boru_core::chat_callbacks::TransferProgress;
                 match ev {
@@ -3503,6 +3520,25 @@ async fn handle_download_file(req: &JsonRpcRequest, state: &McpAppState) -> Resu
 
         match result {
             Ok(()) => {
+                // Publish (no-op rename for KeepBoth) so the file is final
+                // and the reservation's drop-cleanup does not remove it.
+                if let Err(e) = destination.publish() {
+                    let msg = format!("{e:#}");
+                    let msg_cl = msg.clone();
+                    if let Err(e2) = storage_task
+                        .run_blocking("mcp.fail_download", move |s| {
+                            s.fail_download(download_id, &msg_cl, None)
+                        })
+                        .await
+                    {
+                        tracing::warn!(
+                            download_id,
+                            "boru_download_file: fail_download failed: {e2}"
+                        );
+                    }
+                    tracing::warn!(download_id, "boru_download_file: publish failed: {msg}");
+                    return;
+                }
                 if let Err(e) = storage_task
                     .run_blocking("mcp.complete_download", move |s| {
                         s.complete_download(download_id, max_bytes.unwrap_or(0))

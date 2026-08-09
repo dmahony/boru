@@ -18,7 +18,10 @@
 
 use std::path::{Path, PathBuf};
 
-use n0_error::Result;
+use n0_error::{Result, StdResultExt};
+
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 
 /// Maximum number of deduplication attempts before giving up.
 const MAX_DEDUP_ATTEMPTS: u32 = 10_000;
@@ -203,6 +206,29 @@ fn check_traversal(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Build the `N`-th deduplicated variant of a filename.
+///
+/// Returns the original filename unchanged for `n == 0`, and `stem (n).ext`
+/// (or `stem (n)` for extensionless names) for `n >= 1`.  The format is
+/// opaque; callers must not parse it.
+fn dedup_name(filename: &str, n: u32) -> String {
+    if n == 0 {
+        return filename.to_string();
+    }
+    let (stem, ext) = match filename.rfind('.') {
+        Some(dot) if dot > 0 => {
+            let (base, suffix) = filename.split_at(dot);
+            (base.to_string(), suffix.to_string())
+        }
+        _ => (filename.to_string(), String::new()),
+    };
+    if ext.is_empty() {
+        format!("{stem} ({n})")
+    } else {
+        format!("{stem} ({n}){ext}")
+    }
+}
+
 /// If `path` already exists, generate a non-existent variant by inserting a
 /// deduplication suffix before the extension.
 ///
@@ -221,21 +247,8 @@ fn deduplicate_path(path: &Path, max_attempts: u32) -> Result<PathBuf> {
         .and_then(|s| s.to_str())
         .ok_or_else(|| n0_error::anyerr!("path has no filename component"))?;
 
-    let (stem, ext) = match filename.rfind('.') {
-        Some(dot) if dot > 0 => {
-            let (base, suffix) = filename.split_at(dot);
-            (base.to_string(), suffix.to_string())
-        }
-        _ => (filename.to_string(), String::new()),
-    };
-
     for i in 1..=max_attempts {
-        let deduped = if ext.is_empty() {
-            format!("{stem} ({i})")
-        } else {
-            format!("{stem} ({i}){ext}")
-        };
-        let candidate = parent.join(&deduped);
+        let candidate = parent.join(dedup_name(filename, i));
         if !candidate.exists() {
             return Ok(candidate);
         }
@@ -401,6 +414,320 @@ fn safe_destination_path_no_dedup(
     }
 
     Ok(candidate)
+}
+
+// ── TOCTOU-safe destination reservation (BORU-AUDIT-21) ─────────────────
+//
+// The path-only helpers above are pure name computation: they CHECK a path
+// but never CREATE it.  A caller that later opens the checked path by name
+// (e.g. `File::create` or iroh's `blobs().export`) leaves a
+// time-of-check/time-of-use window in which the path can be swapped for a
+// symlink or an existing file.  The reservation API below fuses validation
+// and creation into ONE atomic operation: the destination file is created
+// with O_EXCL + O_NOFOLLOW at the same moment the name is chosen, and all
+// subsequent writes go through the returned handle — the path is never
+// reopened.
+
+/// An atomically-reserved download destination.
+///
+/// Constructed by [`reserve_download_destination`].  Path validation and
+/// file creation happen in a single `O_EXCL` (create-new) operation, so an
+/// existing file is never silently replaced and a symlink planted at the
+/// final component is never followed.
+///
+/// The holder writes download bytes through [`file_mut`](Self::file_mut)
+/// (or the tokio wrapper in the download worker), then calls
+/// [`publish`](Self::publish) once the content hash has been verified.
+/// Dropping the reservation without publishing removes the file it created
+/// (and only that file), so a cancelled or failed transfer leaves neither a
+/// partial destination nor a stray temporary file behind.
+pub struct ReservedDestination {
+    file: Option<std::fs::File>,
+    /// Path the handle refers to.  For `KeepBoth`/`Skip` reservations this
+    /// IS the final display path (created atomically).  For `Overwrite`
+    /// reservations this is a hidden temporary path that must be renamed
+    /// onto `final_path` at publish time.
+    write_path: PathBuf,
+    /// Final display path after publication.
+    final_path: PathBuf,
+    /// Whether publication requires renaming `write_path` onto `final_path`
+    /// (true only for the Overwrite policy).
+    rename_on_publish: bool,
+    published: bool,
+}
+
+impl ReservedDestination {
+    /// The final display path the download will be published at.
+    pub fn final_path(&self) -> &Path {
+        &self.final_path
+    }
+
+    /// Mutable access to the reserved file handle (blocking I/O; the
+    /// download worker wraps it in `tokio::fs::File::from_std`).
+    pub fn file_mut(&mut self) -> Option<&mut std::fs::File> {
+        self.file.as_mut()
+    }
+
+    /// Take ownership of the reserved file handle (used by the download
+    /// worker so writes are offloaded onto tokio's blocking pool).
+    pub fn take_file(&mut self) -> Option<std::fs::File> {
+        self.file.take()
+    }
+
+    /// Restore the file handle after the download worker is done with it
+    /// (kept so the drop-cleanup identity check can still run).
+    pub fn restore_file(&mut self, file: std::fs::File) {
+        self.file = Some(file);
+    }
+
+    /// Publish the download.
+    ///
+    /// For `Overwrite` reservations this atomically renames the temporary
+    /// file onto the final path (replacing the previous file entry — a
+    /// symlink at the destination is replaced, never followed).  For
+    /// `KeepBoth`/`Skip` reservations the file was created at the final
+    /// path, so publication is a no-op that records completion.
+    ///
+    /// Returns the final display path.  Must be called only after the
+    /// download bytes have been verified; on error the reservation is
+    /// dropped and the created file is removed.
+    pub fn publish(mut self) -> Result<PathBuf> {
+        if self.rename_on_publish {
+            // Belt-and-suspenders: re-verify the destination still resolves
+            // inside the trusted root before replacing it.  If the download
+            // root was swapped while the transfer was in flight, the rename
+            // must not move the file outside it.  A pre-existing symlink at
+            // the destination that points outside is resolved by
+            // canonicalize_allow_missing and rejected here.
+            let root = self
+                .final_path
+                .parent()
+                .ok_or_else(|| n0_error::anyerr!("destination has no parent directory"))?;
+            let root_canon = crate::path_containment::canonicalize_allow_missing(root);
+            let final_canon = crate::path_containment::canonicalize_allow_missing(&self.final_path);
+            if !final_canon.starts_with(&root_canon) {
+                return Err(n0_error::anyerr!(
+                    "destination path escapes download directory: {}",
+                    self.final_path.display()
+                ));
+            }
+            std::fs::rename(&self.write_path, &self.final_path).with_std_context(|_| {
+                format!(
+                    "atomically publish download {} -> {}",
+                    self.write_path.display(),
+                    self.final_path.display()
+                )
+            })?;
+        }
+        self.published = true;
+        Ok(self.final_path.clone())
+    }
+}
+
+/// On Unix, compare the reserved handle's identity (device+inode) against
+/// the file currently at `path`.  Guards drop-cleanup: if the download root
+/// was swapped mid-transfer, the path may no longer refer to the file this
+/// reservation created, and we must not delete an unrelated file.
+#[cfg(unix)]
+fn reserved_handle_matches_path(file: &std::fs::File, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(handle_meta) = file.metadata() else {
+        return false;
+    };
+    let Ok(path_meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    handle_meta.dev() == path_meta.dev() && handle_meta.ino() == path_meta.ino()
+}
+
+impl Drop for ReservedDestination {
+    fn drop(&mut self) {
+        if self.published {
+            return;
+        }
+        // Only remove the file this reservation created.  On Unix compare
+        // identities first; if the path now refers to something else (or is
+        // gone), leave it alone.
+        #[cfg(unix)]
+        if let Some(file) = self.file.as_ref() {
+            if !reserved_handle_matches_path(file, &self.write_path) {
+                return;
+            }
+        }
+        let _ = std::fs::remove_file(&self.write_path);
+    }
+}
+
+/// Outcome of [`reserve_download_destination`].
+pub enum Reservation {
+    /// The destination is reserved and ready to receive download bytes.
+    Use(ReservedDestination),
+    /// The overwrite policy (Skip) declined the download because the file
+    /// already exists.
+    Skip,
+}
+
+/// Reserve a download destination inside `download_dir`, atomically.
+///
+/// Unlike the path-only helpers, this fuses sanitisation, containment
+/// validation, and file creation into one operation:
+///
+/// - The final component is created with `O_EXCL` (`create_new`), so an
+///   existing file — regular or symlink — can never be silently replaced or
+///   followed; on Unix `O_NOFOLLOW` is added for defense in depth.
+/// - Collision-safe names are generated without a separate existence-check
+///   race: `create_new` either claims the name atomically or reports
+///   `AlreadyExists`, in which case the next deduplicated name is tried.
+/// - The created file is guaranteed to live inside `download_dir` (the
+///   containment check from [`safe_destination_path`] runs before creation).
+///
+/// Policy behaviour:
+/// - [`OverwritePolicy::KeepBoth`] (default): the file is created at the
+///   sanitised name, or the next free `name (N)` variant.
+/// - [`OverwritePolicy::Skip`]: returns [`Reservation::Skip`] when the
+///   sanitised name already exists (including a racy appearance between the
+///   existence check and the atomic create — the download is declined rather
+///   than overwritten).
+/// - [`OverwritePolicy::Overwrite`]: a hidden temporary file is created in
+///   the same directory and returned; [`ReservedDestination::publish`]
+///   atomically renames it onto the sanitised name, replacing the previous
+///   file only after the download has been verified.
+///
+/// # Errors
+///
+/// Same error conditions as [`safe_destination_path`], plus exhaustion of
+/// [`MAX_DEDUP_ATTEMPTS`] and any filesystem error that is not
+/// `AlreadyExists`.
+pub fn reserve_download_destination(
+    download_dir: &Path,
+    display_name: &str,
+    fallback_stem: &str,
+    policy: OverwritePolicy,
+) -> Result<Reservation> {
+    if !download_dir.is_absolute() {
+        return Err(n0_error::anyerr!(
+            "download_dir must be absolute: {}",
+            download_dir.display()
+        ));
+    }
+
+    let stripped: String = display_name
+        .chars()
+        .filter(|&c| c != '/' && c != '\\')
+        .collect();
+    check_traversal(&stripped)?;
+
+    let safe_name = sanitise_filename(display_name, fallback_stem);
+    let exact = download_dir.join(&safe_name);
+
+    // Belt-and-suspenders containment check (same as safe_destination_path).
+    let download_dir_canon = crate::path_containment::canonicalize_allow_missing(download_dir);
+    let exact_safe = crate::path_containment::canonicalize_allow_missing(&exact);
+    if !exact_safe.starts_with(&download_dir_canon) {
+        return Err(n0_error::anyerr!(
+            "destination path escapes download directory: {}",
+            exact_safe.display()
+        ));
+    }
+
+    match policy {
+        OverwritePolicy::KeepBoth => {
+            for n in 0..MAX_DEDUP_ATTEMPTS {
+                let name = dedup_name(&safe_name, n);
+                match open_exclusive_at(download_dir, &name) {
+                    Ok(file) => {
+                        let path = download_dir.join(&name);
+                        return Ok(Reservation::Use(ReservedDestination {
+                            file: Some(file),
+                            write_path: path.clone(),
+                            final_path: path,
+                            rename_on_publish: false,
+                            published: false,
+                        }));
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(e) => {
+                        return Err(n0_error::anyerr!(
+                            "failed to reserve download destination {}: {e}",
+                            download_dir.join(&name).display()
+                        ));
+                    }
+                }
+            }
+            Err(n0_error::anyerr!(
+                "exhausted {MAX_DEDUP_ATTEMPTS} reservation attempts for {safe_name:?}"
+            ))
+        }
+        OverwritePolicy::Skip => {
+            if exact.exists() {
+                return Ok(Reservation::Skip);
+            }
+            match open_exclusive_at(download_dir, &safe_name) {
+                Ok(file) => Ok(Reservation::Use(ReservedDestination {
+                    file: Some(file),
+                    write_path: exact.clone(),
+                    final_path: exact,
+                    rename_on_publish: false,
+                    published: false,
+                })),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    // The file appeared between the check and the create;
+                    // decline rather than overwrite.
+                    Ok(Reservation::Skip)
+                }
+                Err(e) => Err(n0_error::anyerr!(
+                    "failed to reserve download destination {}: {e}",
+                    exact.display()
+                )),
+            }
+        }
+        OverwritePolicy::Overwrite => {
+            // Write to a hidden temporary file in the same directory, then
+            // rename onto the destination only after verification.
+            let tmp_base = format!(".boru-part-{safe_name}");
+            for n in 0..MAX_DEDUP_ATTEMPTS {
+                let tmp_name = dedup_name(&tmp_base, n);
+                match open_exclusive_at(download_dir, &tmp_name) {
+                    Ok(file) => {
+                        let tmp_path = download_dir.join(&tmp_name);
+                        return Ok(Reservation::Use(ReservedDestination {
+                            file: Some(file),
+                            write_path: tmp_path,
+                            final_path: exact.clone(),
+                            rename_on_publish: true,
+                            published: false,
+                        }));
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(e) => {
+                        return Err(n0_error::anyerr!(
+                            "failed to reserve temporary download destination {}: {e}",
+                            download_dir.join(&tmp_name).display()
+                        ));
+                    }
+                }
+            }
+            Err(n0_error::anyerr!(
+                "exhausted {MAX_DEDUP_ATTEMPTS} temporary reservation attempts for {safe_name:?}"
+            ))
+        }
+    }
+}
+
+/// Open (create) a file exclusively under `root` with no-follow semantics
+/// for the final component.  Fails with `AlreadyExists` when anything —
+/// including a symlink — already occupies the name.
+fn open_exclusive_at(root: &Path, name: &str) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        // Defense in depth: create_new already refuses an existing symlink
+        // (O_EXCL), but O_NOFOLLOW documents and enforces the no-follow
+        // guarantee for the final component explicitly.
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    options.open(root.join(name))
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────
@@ -977,6 +1304,272 @@ mod tests {
         assert!(
             err.to_string().contains("escapes download directory"),
             "unexpected error: {err}"
+        );
+    }
+
+    // ── TOCTOU-safe reservation (BORU-AUDIT-21) ────────────────────────
+
+    fn use_reservation(
+        dir: &std::path::Path,
+        name: &str,
+        policy: OverwritePolicy,
+    ) -> ReservedDestination {
+        match reserve_download_destination(dir, name, "hash", policy).unwrap() {
+            Reservation::Use(dest) => dest,
+            Reservation::Skip => panic!("expected Use, got Skip"),
+        }
+    }
+
+    #[test]
+    fn keep_both_never_overwrites_existing_file() {
+        let dir = TempDir::new().unwrap();
+        let existing = dir.path().join("report.pdf");
+        fs::write(&existing, b"original content").unwrap();
+
+        let dest = use_reservation(dir.path(), "report.pdf", OverwritePolicy::KeepBoth);
+        let final_path = dest.final_path().to_path_buf();
+        drop(dest);
+
+        assert_ne!(final_path, existing);
+        assert_eq!(final_path.file_name().unwrap(), "report (1).pdf");
+        // The pre-existing file is untouched.
+        assert_eq!(fs::read(&existing).unwrap(), b"original content");
+    }
+
+    #[test]
+    fn skip_policy_declines_existing_file() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("report.pdf"), b"original").unwrap();
+
+        match reserve_download_destination(dir.path(), "report.pdf", "hash", OverwritePolicy::Skip)
+            .unwrap()
+        {
+            Reservation::Skip => {}
+            Reservation::Use(_) => panic!("Skip policy must decline an existing file"),
+        }
+        // And it must not have created anything.
+        let entries: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn skip_policy_use_when_file_absent() {
+        let dir = TempDir::new().unwrap();
+        let dest = use_reservation(dir.path(), "fresh.pdf", OverwritePolicy::Skip);
+        assert_eq!(dest.final_path().file_name().unwrap(), "fresh.pdf");
+        drop(dest);
+        // Dropping an unpublished reservation removes the created file.
+        assert!(!dir.path().join("fresh.pdf").exists());
+    }
+
+    #[test]
+    fn overwrite_publishes_only_after_verification() {
+        let dir = TempDir::new().unwrap();
+        let existing = dir.path().join("report.pdf");
+        fs::write(&existing, b"old bytes").unwrap();
+
+        let mut dest =
+            use_reservation(dir.path(), "report.pdf", OverwritePolicy::Overwrite);
+        // The original is NOT touched before publish (the reservation writes
+        // to a hidden temp file until the content is verified).
+        assert_eq!(fs::read(&existing).unwrap(), b"old bytes");
+        // The temp file lives inside the download root.
+        assert!(dest.final_path().starts_with(dir.path()));
+
+        use std::io::Write;
+        dest.file_mut()
+            .unwrap()
+            .write_all(b"new verified bytes")
+            .unwrap();
+        dest.file_mut().unwrap().sync_all().unwrap();
+        let published = dest.publish().unwrap();
+
+        assert_eq!(published, existing);
+        assert_eq!(fs::read(&existing).unwrap(), b"new verified bytes");
+        // No leftover temp files.
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|n| n.to_string_lossy().starts_with(".boru-part-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files must be renamed away: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn drop_without_publish_removes_fresh_file_but_keeps_existing() {
+        let dir = TempDir::new().unwrap();
+
+        // KeepBoth: the reservation created the file; dropping without
+        // publishing removes it.
+        {
+            let mut dest = use_reservation(dir.path(), "fresh.txt", OverwritePolicy::KeepBoth);
+            use std::io::Write;
+            dest.file_mut().unwrap().write_all(b"partial").unwrap();
+        }
+        assert!(
+            !dir.path().join("fresh.txt").exists(),
+            "unpublished KeepBoth reservation must clean up its file"
+        );
+
+        // Overwrite: dropping without publishing leaves the pre-existing
+        // original untouched and removes the temp file.
+        let existing = dir.path().join("report.pdf");
+        fs::write(&existing, b"old bytes").unwrap();
+        {
+            let mut dest =
+                use_reservation(dir.path(), "report.pdf", OverwritePolicy::Overwrite);
+            use std::io::Write;
+            dest.file_mut().unwrap().write_all(b"new bytes").unwrap();
+        }
+        assert_eq!(fs::read(&existing).unwrap(), b"old bytes");
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with(".boru-part-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files must be cleaned up: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn concurrent_reservations_same_name_get_distinct_files() {
+        let dir = TempDir::new().unwrap();
+
+        let mut d1 = use_reservation(
+            dir.path(),
+            "same-name.txt",
+            OverwritePolicy::KeepBoth,
+        );
+        let mut d2 = use_reservation(
+            dir.path(),
+            "same-name.txt",
+            OverwritePolicy::KeepBoth,
+        );
+
+        let p1 = d1.final_path().to_path_buf();
+        let p2 = d2.final_path().to_path_buf();
+        assert_ne!(p1, p2, "two reservations must not claim the same name");
+
+        use std::io::Write;
+        d1.file_mut().unwrap().write_all(b"one").unwrap();
+        d2.file_mut().unwrap().write_all(b"two").unwrap();
+        let f1 = d1.publish().unwrap();
+        let f2 = d2.publish().unwrap();
+
+        assert_eq!(fs::read(&f1).unwrap(), b"one");
+        assert_eq!(fs::read(&f2).unwrap(), b"two");
+    }
+
+    #[test]
+    fn reservation_stays_inside_download_root() {
+        let dir = TempDir::new().unwrap();
+        let root_canon = crate::path_containment::canonicalize_allow_missing(dir.path());
+
+        let dest = use_reservation(
+            dir.path(),
+            "nested/../evil.txt",
+            OverwritePolicy::KeepBoth,
+        );
+        let final_path = dest.final_path();
+        assert!(final_path.starts_with(dir.path()));
+        let final_canon = crate::path_containment::canonicalize_allow_missing(final_path);
+        assert!(
+            final_canon.starts_with(&root_canon),
+            "reserved file must resolve inside the download root"
+        );
+        // The sanitised filename has separators stripped.
+        assert_eq!(final_path.file_name().unwrap(), "nested..evil.txt");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn keep_both_does_not_follow_symlink_final_component() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new().unwrap();
+        let outside = dir.path().join("outside.txt");
+        fs::write(&outside, b"secret").unwrap();
+        symlink(&outside, dir.path().join("photo.jpg")).unwrap();
+
+        // The symlink occupies the exact name; KeepBoth must skip to a new
+        // name rather than follow or replace it.
+        let dest = use_reservation(dir.path(), "photo.jpg", OverwritePolicy::KeepBoth);
+        let final_path = dest.final_path().to_path_buf();
+        drop(dest);
+
+        assert_eq!(final_path.file_name().unwrap(), "photo (1).jpg");
+        // The symlink is untouched and still points at the outside file.
+        assert!(dir.path().join("photo.jpg").is_symlink());
+        assert_eq!(fs::read(&outside).unwrap(), b"secret");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overwrite_publish_replaces_symlink_without_following_it() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new().unwrap();
+        let outside = dir.path().join("outside.txt");
+        fs::write(&outside, b"secret").unwrap();
+        symlink(&outside, dir.path().join("report.pdf")).unwrap();
+
+        let mut dest =
+            use_reservation(dir.path(), "report.pdf", OverwritePolicy::Overwrite);
+        use std::io::Write;
+        dest.file_mut().unwrap().write_all(b"verified").unwrap();
+        dest.file_mut().unwrap().sync_all().unwrap();
+        let published = dest.publish().unwrap();
+
+        // Rename replaces the directory entry: the result is a regular file
+        // with the new content, and the outside target is untouched.
+        assert!(!published.is_symlink());
+        assert_eq!(fs::read(&published).unwrap(), b"verified");
+        assert_eq!(fs::read(&outside).unwrap(), b"secret");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overwrite_publish_rejects_destination_escaping_root() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new().unwrap();
+        // The symlink target must live OUTSIDE the download root for the
+        // containment re-check to have anything to catch.
+        let outside_dir = TempDir::new().unwrap();
+        let outside = outside_dir.path().join("outside.txt");
+        fs::write(&outside, b"secret").unwrap();
+
+        // Reserve for a fresh name (temp in root), then swap the final path
+        // for an escaping symlink before publish — the containment re-check
+        // must refuse to replace it.
+        let mut dest =
+            use_reservation(dir.path(), "report.pdf", OverwritePolicy::Overwrite);
+        let final_path = dest.final_path().to_path_buf();
+        symlink(&outside, &final_path).unwrap();
+
+        use std::io::Write;
+        dest.file_mut().unwrap().write_all(b"verified").unwrap();
+        dest.file_mut().unwrap().sync_all().unwrap();
+        let err = dest.publish().unwrap_err();
+        assert!(
+            err.to_string().contains("escapes download directory"),
+            "unexpected error: {err}"
+        );
+        // The outside file is untouched and no temp remains.
+        assert_eq!(fs::read(&outside).unwrap(), b"secret");
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with(".boru-part-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files must be cleaned up: {leftovers:?}"
         );
     }
 }

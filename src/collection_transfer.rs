@@ -37,9 +37,10 @@ use anyhow::{anyhow, ensure, Context};
 use n0_future::BufferedStreamExt;
 use n0_future::StreamExt;
 
-use iroh_blobs::api::blobs::{
-    AddPathOptions, AddProgressItem, ExportMode, ExportOptions, ExportProgressItem, ImportMode,
-};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+
+use iroh_blobs::api::blobs::{AddPathOptions, AddProgressItem, ImportMode};
 use iroh_blobs::api::{Store, TempTag};
 use iroh_blobs::format::collection::Collection;
 use iroh_blobs::BlobFormat;
@@ -246,45 +247,65 @@ pub fn get_export_path(root: &Path, name: &str) -> anyhow::Result<PathBuf> {
 /// Export every entry of a collection under `root`, mirroring sendme's
 /// per-file export loop.
 ///
-/// Each entry is written with [`ExportMode::Copy`] (never modified in place).
-/// If a target already exists the export stops with an error, exactly like
-/// sendme — the caller can remove the conflicting path and retry without
-/// re-downloading (blobs stay in the local store).
+/// Each entry is streamed from the local store through a handle created
+/// atomically with `O_EXCL` + `O_NOFOLLOW` (BORU-AUDIT-21): the target is
+/// never checked by path and later reopened, so an existing file — or a
+/// symlink planted at the target — is refused at creation time instead of
+/// being silently overwritten or followed.  If a target already exists the
+/// export stops with an error, exactly like sendme — the caller can remove
+/// the conflicting path and retry without re-downloading (blobs stay in the
+/// local store).
 pub async fn export_collection(
     db: &Store,
     collection: &Collection,
     root: &Path,
 ) -> anyhow::Result<Vec<PathBuf>> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
     let mut exported = Vec::with_capacity(collection.len());
     for (name, hash) in collection.iter() {
         let target = get_export_path(root, name)?;
-        ensure!(
-            !target.exists(),
-            "target {} already exists; remove it and retry (the download is not repeated)",
-            target.display()
-        );
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent).with_context(|| {
                 format!("create parent directory {}", parent.display())
             })?;
         }
-        let progress = db
-            .blobs()
-            .export_with_opts(ExportOptions {
-                hash: *hash,
-                target: target.clone(),
-                mode: ExportMode::Copy,
-            });
-        let mut stream = progress.stream().await;
-        while let Some(item) = stream.next().await {
-            match item {
-                ExportProgressItem::Size(_) | ExportProgressItem::CopyProgress(_) => {}
-                ExportProgressItem::Done => break,
-                ExportProgressItem::Error(cause) => {
-                    anyhow::bail!("error exporting {}: {}", name, cause);
-                }
-            }
+        // Atomic create: refuse any existing entry (regular file or symlink)
+        // rather than check-then-open.
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            options.custom_flags(libc::O_NOFOLLOW);
         }
+        let std_file = options
+            .open(&target)
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::AlreadyExists => anyhow!(
+                    "target {} already exists; remove it and retry (the download is not repeated)",
+                    target.display()
+                ),
+                _ => anyhow!("create target {}: {e}", target.display()),
+            })?;
+        let mut file = tokio::fs::File::from_std(std_file);
+
+        let mut reader = db.blobs().reader(*hash);
+        let mut buf = vec![0u8; 256 * 1024];
+        loop {
+            let n = reader
+                .read(&mut buf)
+                .await
+                .with_context(|| format!("read blob for {name:?} from store"))?;
+            if n == 0 {
+                break;
+            }
+            file.write_all(&buf[..n])
+                .await
+                .with_context(|| format!("write target {}", target.display()))?;
+        }
+        file.sync_all()
+            .await
+            .with_context(|| format!("sync target {}", target.display()))?;
         exported.push(target);
     }
     Ok(exported)

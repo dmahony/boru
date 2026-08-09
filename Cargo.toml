@@ -159,6 +159,7 @@ parking_lot = { version = "0.12" }
 rusqlite = { version = "0.39", features = ["bundled"] }
 anyhow = "1.0.103"
 socket2 = "0.5"
+libc = "0.2"
 unicode-normalization = "0.1"
 
 # p2panda encryption and core for group encryption

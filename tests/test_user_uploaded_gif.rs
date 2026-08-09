@@ -537,7 +537,22 @@ async fn mp4_file_share_progress_emits_started_and_completed() -> Result<()> {
     let (t_addr, t_hash, _fmt) = parsed.into_parts();
     let candidates = download_candidates(t_addr.id, &sim_b.neighbors);
     let dir = tempfile::tempdir().unwrap();
-    let save_path = dir.path().join("movie.mp4");
+    // BORU-AUDIT-21: reserve the destination atomically (O_EXCL) instead of
+    // checking a path and reopening it later.
+    let mut destination = match boru_core::safe_destination::reserve_download_destination(
+        dir.path(),
+        "movie.mp4",
+        "download",
+        boru_core::safe_destination::OverwritePolicy::KeepBoth,
+    )
+    .unwrap()
+    {
+        boru_core::safe_destination::Reservation::Use(dest) => dest,
+        boru_core::safe_destination::Reservation::Skip => {
+            panic!("fresh temp dir must not skip");
+        }
+    };
+    let save_path = destination.final_path().to_path_buf();
 
     let events = Arc::new(Mutex::new(Vec::new()));
     let events_cb = events.clone();
@@ -548,7 +563,8 @@ async fn mp4_file_share_progress_emits_started_and_completed() -> Result<()> {
         candidates,
         fname.clone(),
         TransferKind::Video,
-        &save_path,
+        &mut destination,
+        None,
         move |ev| {
             if let Ok(mut guard) = events_cb.try_lock() {
                 guard.push(ev);
@@ -558,6 +574,7 @@ async fn mp4_file_share_progress_emits_started_and_completed() -> Result<()> {
     )
     .await
     .map_err(|e| format!("mp4 download failed: {e}"))?;
+    destination.publish().unwrap();
 
     let events = events.lock().await;
     assert!(

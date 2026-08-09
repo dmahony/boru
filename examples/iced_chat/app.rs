@@ -10524,6 +10524,7 @@ impl IcedChat {
             )));
         }
         let name = download.name.clone();
+        let expected_hash = download.expected_content_hash.clone();
         let data_dir = self.data_dir.clone();
         let blob_store = self.blob_store.clone();
         let endpoint = self.endpoint.clone();
@@ -10536,7 +10537,22 @@ impl IcedChat {
             async move {
                 let dl_dir = data_dir.join("downloads");
                 let _ = tokio::fs::create_dir_all(&dl_dir).await;
-                let save_path = dl_dir.join(&name);
+                // BORU-AUDIT-21: reserve the destination atomically
+                // (O_EXCL) instead of checking a path and reopening it later.
+                let mut destination =
+                    match boru_core::safe_destination::reserve_download_destination(
+                        &dl_dir,
+                        &name,
+                        "download",
+                        boru_core::safe_destination::OverwritePolicy::KeepBoth,
+                    )
+                    .map_err(|e| format!("Unsafe download name: {e}"))?
+                    {
+                        boru_core::safe_destination::Reservation::Use(dest) => dest,
+                        boru_core::safe_destination::Reservation::Skip => {
+                            return Err("Download skipped: destination name already exists".into());
+                        }
+                    };
 
                 let parsed: iroh_blobs::ticket::BlobTicket =
                     ticket.parse().map_err(|e| format!("Invalid ticket: {e}"))?;
@@ -10550,7 +10566,8 @@ impl IcedChat {
                     candidates,
                     name.clone(),
                     kind,
-                    &save_path,
+                    &mut destination,
+                    expected_hash.as_deref(),
                     move |ev| {
                         if let Ok(mut q) = progress_queue.lock() {
                             q.push_back(ev);
@@ -10560,11 +10577,14 @@ impl IcedChat {
                 )
                 .await
                 .map_err(|e| format!("Download failed: {e}"))?;
+                let save_path = destination
+                    .publish()
+                    .map_err(|e| format!("Publish failed: {e}"))?;
 
-                Ok::<_, String>(name)
+                Ok::<_, String>((name, save_path))
             },
             |result| match result {
-                Ok(name) => AppMessage::OpenDownloadedFile(name),
+                Ok((name, save_path)) => AppMessage::DownloadDone(name, save_path),
                 Err(e) => AppMessage::ErrorMsg(e),
             },
         ))
@@ -17187,6 +17207,7 @@ impl IcedChat {
                 let kind = dl.kind;
                 let is_folder = dl.is_folder;
                 let overwrite_policy = dl.overwrite_policy;
+                let expected_hash = dl.expected_content_hash.clone();
                 let content_hash_fallback = dl
                     .expected_content_hash
                     .clone()
@@ -17220,24 +17241,23 @@ impl IcedChat {
                             .map_err(|e| format!("Folder download failed: {e}"))?;
                             return Ok::<_, String>((name.clone(), save_dir, false));
                         }
-                        // FS-26 overwrite-conflict policy: resolve the
-                        // destination with the policy chosen on the card.
-                        // Skip returns without downloading when the file
-                        // already exists (never silently overwrite).
-                        let decision =
-                            boru_core::safe_destination::resolve_destination_with_policy(
+                        // BORU-AUDIT-21: fuse validation + creation into one
+                        // atomic reservation (O_EXCL + O_NOFOLLOW) instead of
+                        // checking a path and reopening it later.
+                        let mut destination =
+                            match boru_core::safe_destination::reserve_download_destination(
                                 &dl_dir,
                                 &name,
                                 &content_hash_fallback,
                                 overwrite_policy,
                             )
-                            .map_err(|e| format!("Unsafe download name: {e}"))?;
-                        let save_path = match decision {
-                            boru_core::safe_destination::DestinationDecision::Use(path) => path,
-                            boru_core::safe_destination::DestinationDecision::Skip => {
-                                return Ok::<_, String>((name.clone(), dl_dir.join(&name), true));
-                            }
-                        };
+                            .map_err(|e| format!("Unsafe download name: {e}"))?
+                            {
+                                boru_core::safe_destination::Reservation::Use(dest) => dest,
+                                boru_core::safe_destination::Reservation::Skip => {
+                                    return Ok::<_, String>((name.clone(), dl_dir.join(&name), true));
+                                }
+                            };
                         download_blob_to_file(
                             &blob_store,
                             &endpoint,
@@ -17245,7 +17265,8 @@ impl IcedChat {
                             candidates,
                             name.clone(),
                             kind,
-                            &save_path,
+                            &mut destination,
+                            expected_hash.as_deref(),
                             {
                                 let queue = progress_queue.clone();
                                 move |ev| {
@@ -17258,6 +17279,9 @@ impl IcedChat {
                         )
                         .await
                         .map_err(|e| format!("Download failed: {e}"))?;
+                        let save_path = destination
+                            .publish()
+                            .map_err(|e| format!("Publish failed: {e}"))?;
                         Ok::<_, String>((name.clone(), save_path, false))
                     },
                     move |r| match r {
@@ -17771,6 +17795,7 @@ impl IcedChat {
                             return iced::Task::none();
                         }
                         let name = download.name.clone();
+                        let expected_hash = download.expected_content_hash.clone();
                         let data_dir = self.data_dir.clone();
                         let blob_store = self.blob_store.clone();
                         let endpoint = self.endpoint.clone();
@@ -17806,7 +17831,21 @@ impl IcedChat {
                             async move {
                                 let dl_dir = data_dir.join("downloads");
                                 let _ = tokio::fs::create_dir_all(&dl_dir).await;
-                                let save_path = dl_dir.join(&task_name);
+                                // BORU-AUDIT-21: reserve atomically instead of
+                                // checking a path and reopening it later.
+                                let mut destination = match boru_core::safe_destination::reserve_download_destination(
+                                    &dl_dir,
+                                    &task_name,
+                                    "download",
+                                    boru_core::safe_destination::OverwritePolicy::KeepBoth,
+                                )
+                                .map_err(|e| format!("Unsafe download name: {e}"))?
+                                {
+                                    boru_core::safe_destination::Reservation::Use(dest) => dest,
+                                    boru_core::safe_destination::Reservation::Skip => {
+                                        return Err("Download skipped: destination name already exists".into());
+                                    }
+                                };
 
                                 let parsed: iroh_blobs::ticket::BlobTicket = ticket
                                     .parse()
@@ -17821,7 +17860,8 @@ impl IcedChat {
                                     candidates,
                                     task_name.clone(),
                                     kind,
-                                    &save_path,
+                                    &mut destination,
+                                    expected_hash.as_deref(),
                                     move |ev| {
                                         if let Ok(mut q) = progress_queue.lock() {
                                             q.push_back(ev);
@@ -17831,6 +17871,9 @@ impl IcedChat {
                                 )
                                 .await
                                 .map_err(|e| format!("Download failed: {e}"))?;
+                                let save_path = destination
+                                    .publish()
+                                    .map_err(|e| format!("Publish failed: {e}"))?;
                                 Ok::<_, String>((task_name, save_path))
                             },
                             |result| match result {
@@ -18063,6 +18106,7 @@ impl IcedChat {
                             return iced::Task::none();
                         }
                     };
+                    let task_content_hash = content_hash.clone();
                     let name = download.name.clone();
                     let kind = download.kind;
                     let ticket_str = download.ticket.clone();
@@ -18129,7 +18173,21 @@ impl IcedChat {
                                     .map_err(|e| format!("Folder download failed: {e}"))?;
                                     return Ok::<_, String>((task_name, save_dir));
                                 }
-                                let save_path = dl_dir.join(&task_name);
+                                // BORU-AUDIT-21: reserve atomically instead of
+                                // checking a path and reopening it later.
+                                let mut destination = match boru_core::safe_destination::reserve_download_destination(
+                                    &dl_dir,
+                                    &task_name,
+                                    &task_content_hash,
+                                    boru_core::safe_destination::OverwritePolicy::KeepBoth,
+                                )
+                                .map_err(|e| format!("Unsafe download name: {e}"))?
+                                {
+                                    boru_core::safe_destination::Reservation::Use(dest) => dest,
+                                    boru_core::safe_destination::Reservation::Skip => {
+                                        return Err("Download skipped: destination name already exists".into());
+                                    }
+                                };
                                 download_blob_to_file(
                                     &task_blob_store,
                                     &task_endpoint,
@@ -18137,7 +18195,8 @@ impl IcedChat {
                                     candidates,
                                     task_name.clone(),
                                     task_kind,
-                                    &save_path,
+                                    &mut destination,
+                                    Some(&task_content_hash),
                                     move |ev| {
                                         if let Ok(mut q) = task_progress_queue.lock() {
                                             q.push_back(ev);
@@ -18147,6 +18206,9 @@ impl IcedChat {
                                 )
                                 .await
                                 .map_err(|e| format!("Download failed: {e}"))?;
+                                let save_path = destination
+                                    .publish()
+                                    .map_err(|e| format!("Publish failed: {e}"))?;
                                 Ok::<_, String>((task_name, save_path))
                             },
                             |result| match result {
@@ -20711,17 +20773,24 @@ impl IcedChat {
                             boru_core::chat_core::download_candidates(peer, &neighbors);
                         // FS-20 hardening: derive the destination through the
                         // shared safe-destination helper (strip separators,
-                        // reject traversal, dedupe collisions) even though the
-                        // catalogue validation already rejects unsafe names.
-                        // Falls back to a content-hash stem when the display
-                        // name is empty or reserved.
-                        let save_path =
-                            boru_core::safe_destination::safe_destination_path(
-                                &dl_dir,
-                                &display_name,
-                                &content_hash,
-                            )
-                            .map_err(|e| format!("Unsafe download name: {e}"))?;
+                        // reject traversal) even though the catalogue
+                        // validation already rejects unsafe names.  Falls
+                        // back to a content-hash stem when the display name
+                        // is empty or reserved.  BORU-AUDIT-21: reservation
+                        // fuses validation + atomic creation (O_EXCL).
+                        let mut destination = match boru_core::safe_destination::reserve_download_destination(
+                            &dl_dir,
+                            &display_name,
+                            &content_hash,
+                            boru_core::safe_destination::OverwritePolicy::KeepBoth,
+                        )
+                        .map_err(|e| format!("Unsafe download name: {e}"))?
+                        {
+                            boru_core::safe_destination::Reservation::Use(dest) => dest,
+                            boru_core::safe_destination::Reservation::Skip => {
+                                return Err("Download skipped: destination name already exists".into());
+                            }
+                        };
                         let kind = boru_core::chat_callbacks::TransferKind::File;
                         download_blob_to_file(
                             &blob_store,
@@ -20730,7 +20799,8 @@ impl IcedChat {
                             candidates,
                             display_name.clone(),
                             kind,
-                            &save_path,
+                            &mut destination,
+                            Some(&content_hash),
                             {
                                 let queue = progress_queue.clone();
                                 move |ev| {
@@ -20743,6 +20813,9 @@ impl IcedChat {
                         )
                         .await
                         .map_err(|e| format!("Download failed: {e}"))?;
+                        let save_path = destination
+                            .publish()
+                            .map_err(|e| format!("Publish failed: {e}"))?;
                         Ok::<_, String>((display_name, save_path))
                     },
                     move |r| match r {
@@ -23949,12 +24022,21 @@ impl IcedChat {
                         let node_id = addr.id;
                         let candidates = download_candidates(node_id, &neighbors);
                         let _ = tokio::fs::create_dir_all(&dl_dir).await;
-                        let save_path = boru_core::safe_destination::safe_destination_path(
+                        // BORU-AUDIT-21: reserve atomically instead of
+                        // checking a path and reopening it later.
+                        let mut destination = match boru_core::safe_destination::reserve_download_destination(
                             &dl_dir,
                             &name,
                             &preflight.content_hash,
+                            boru_core::safe_destination::OverwritePolicy::KeepBoth,
                         )
-                        .map_err(|e| format!("Unsafe download name: {e}"))?;
+                        .map_err(|e| format!("Unsafe download name: {e}"))?
+                        {
+                            boru_core::safe_destination::Reservation::Use(dest) => dest,
+                            boru_core::safe_destination::Reservation::Skip => {
+                                return Err("Download skipped: destination name already exists".into());
+                            }
+                        };
                         download_blob_to_file(
                             &blob_store,
                             &endpoint,
@@ -23962,7 +24044,8 @@ impl IcedChat {
                             candidates,
                             name.clone(),
                             TransferKind::File,
-                            &save_path,
+                            &mut destination,
+                            Some(&preflight.content_hash),
                             {
                                 let queue = progress_queue.clone();
                                 move |ev| {
@@ -23975,6 +24058,9 @@ impl IcedChat {
                         )
                         .await
                         .map_err(|e| format!("Download failed: {e}"))?;
+                        let save_path = destination
+                            .publish()
+                            .map_err(|e| format!("Publish failed: {e}"))?;
                         Ok::<_, String>((name, save_path))
                     },
                     move |r| match r {
