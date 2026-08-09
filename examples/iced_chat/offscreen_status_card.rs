@@ -80,10 +80,13 @@ fn render_card(dep: &StatusCardDependency, w: f32, h: f32, name: &str) {
     let mut tree = Tree::new(element.as_widget());
     let limits = layout::Limits::new(Size::ZERO, Size::new(w, h));
     let node = element.as_widget_mut().layout(&mut tree, &renderer, &limits);
-    // CONN-04: report the card's REAL laid-out height (padding + content,
-    // unaffected by the drop shadow) so the 200-230px band is verifiable.
+    // CONN-04: report the card's REAL laid-out size (padding + content,
+    // unaffected by the drop shadow) so the 200-230px band and the
+    // no-horizontal-overflow criterion are verifiable directly from the
+    // layout tree (CONN-12 sweep).
     println!(
-        "layout height for {name}: {:.1}px (canvas {w}x{h})",
+        "layout size for {name}: {:.1}x{:.1}px (canvas {w}x{h})",
+        node.bounds().width,
         node.bounds().height
     );
     let theme = iced::Theme::Light;
@@ -150,6 +153,89 @@ mod tests {
     use super::*;
 
     #[test]
+    fn conn11_icon_heading_row_and_text_block_align() {
+        // CONN-11 acceptance (spec §15): in the horizontal modes the
+        // check indicator belongs to the HEADING ROW — its vertical
+        // centre aligns with the heading's vertical centre — and the
+        // divider / description / pill share the HEADING's left edge.
+        // The text block is the visual anchor; the icon sits off to its
+        // left. This walks the real layout tree of the Ready card and
+        // asserts those shared alignment lines from the layout engine
+        // (ground truth, not pixel estimates).
+        load_font(include_bytes!("fonts/ArchivoSemiCondensed-Bold.ttf"));
+        load_font(include_bytes!("fonts/IBMPlexSans-Regular.ttf"));
+        load_font(include_bytes!("fonts/IBMPlexSans-Medium.ttf"));
+        load_font(include_bytes!("fonts/IBMPlexSans-SemiBold.ttf"));
+
+        for (width, label) in [(1215.0, "Full"), (679.0, "Medium")] {
+            let dep = dep(HomeConnectionVariant::Ready, width);
+            let renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
+                Font::default(),
+                Pixels(16.0),
+            ));
+            let mut element: iced::Element<'_, AppMessage> = view_status_card(&dep);
+            let mut tree = Tree::new(element.as_widget());
+            let limits = layout::Limits::new(Size::ZERO, Size::new(width, 320.0));
+            let node = element.as_widget_mut().layout(&mut tree, &renderer, &limits);
+
+            // Card container -> row -> info column.
+            let row = &node.children()[0];
+            let info = &row.children()[0];
+            // Info column children: [header_row, content_row].
+            let header_row = &info.children()[0];
+            let content_row = &info.children()[1];
+
+            // Header row: [icon][gap][heading]. Icon and heading centres
+            // must coincide vertically (the icon/heading row). The icon
+            // and heading are siblings in the header row, so their bounds
+            // share the same coordinate space — compare centres directly.
+            let icon = &header_row.children()[0];
+            let heading = &header_row.children()[2];
+            let icon_c = icon.bounds().center_y();
+            let heading_c = heading.bounds().center_y();
+            assert!(
+                (icon_c - heading_c).abs() < 1.0,
+                "{label}: icon centre {icon_c:.1}px must align with heading centre {heading_c:.1}px \
+                 (CONN-11 spec §15 icon/heading row)"
+            );
+
+            // Node bounds are parent-relative, so reconstruct the
+            // heading's absolute left edge by summing the ancestor row
+            // offsets, and do the same for the content elements.
+            let header_x = header_row.bounds().x;
+            let heading_left = header_x + heading.bounds().x;
+
+            // Content row: [indent spacer][content column]; the content
+            // column children are [divider, gap, description, gap,
+            // footer/pill]. All must share the heading's left edge.
+            let content_row_x = content_row.bounds().x;
+            let content_col = &content_row.children()[1];
+            let content_col_x = content_row_x + content_col.bounds().x;
+            let divider = &content_col.children()[0];
+            let description = &content_col.children()[2];
+            let footer = &content_col.children()[4];
+            for (name, el) in [
+                ("divider", divider),
+                ("description", description),
+                ("footer", footer),
+            ] {
+                let x = content_col_x + el.bounds().x;
+                assert!(
+                    (x - heading_left).abs() < 1.0,
+                    "{label}: {name} left edge {x:.1}px must share the heading's left edge \
+                     {heading_left:.1}px (text block is the visual anchor)"
+                );
+            }
+            // The icon must sit to the LEFT of the text block, not inside it.
+            let icon_x = header_x + icon.bounds().x;
+            assert!(
+                icon_x < heading_left,
+                "{label}: the icon must sit left of the heading"
+            );
+        }
+    }
+
+    #[test]
     fn capture_mesh_isolated_on_white() {
         let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
             Font::default(),
@@ -198,14 +284,41 @@ mod tests {
         load_font(include_bytes!("fonts/IBMPlexSans-Medium.ttf"));
         load_font(include_bytes!("fonts/IBMPlexSans-SemiBold.ttf"));
 
-        // Wide desktop (1600 window → ~1215 content) — full three-region row.
-        render_card(&dep(HomeConnectionVariant::Ready, 1215.0), 1215.0, 320.0, "status_ready_wide_1215");
-        // Minimum supported window (1024 → ~679 content) — medium row.
-        render_card(&dep(HomeConnectionVariant::Ready, 679.0), 679.0, 320.0, "status_ready_medium_679");
-        render_card(&dep(HomeConnectionVariant::Connecting, 679.0), 679.0, 320.0, "status_connecting_medium_679");
-        render_card(&dep(HomeConnectionVariant::Offline, 679.0), 679.0, 360.0, "status_offline_medium_679");
-        // Narrow (below supported widths) — stacked layout.
-        render_card(&dep(HomeConnectionVariant::Ready, 400.0), 400.0, 480.0, "status_ready_narrow_400");
+        // CONN-12 width sweep (spec §18 "Test widths manually"): capture
+        // the Ready card at every test width, width-tagged so the user
+        // can review each PNG against the acceptance checklist. Tier map
+        // (from status_card.rs constants): MODE A >= 760 (1215/900/800),
+        // MODE B 560-759 (700/679/600), MODE C < 560 (550/500/450/400);
+        // mesh hidden below 520 (500/450/400 have no mesh).
+        for w in [1215.0, 900.0, 800.0, 700.0, 679.0, 600.0, 550.0, 500.0, 450.0, 400.0] {
+            let (h, name) = match w {
+                1215.0 => (360.0, "status_ready_w1215"),
+                900.0 => (360.0, "status_ready_w900"),
+                800.0 => (360.0, "status_ready_w800"),
+                700.0 => (360.0, "status_ready_w700"),
+                679.0 => (360.0, "status_ready_w679"),
+                600.0 => (360.0, "status_ready_w600"),
+                550.0 => (440.0, "status_ready_w550"),
+                500.0 => (440.0, "status_ready_w500"),
+                450.0 => (480.0, "status_ready_w450"),
+                400.0 => (480.0, "status_ready_w400"),
+                _ => unreachable!(),
+            };
+            render_card(&dep(HomeConnectionVariant::Ready, w), w, h, name);
+        }
+        // State captures at one width (679, MODE B medium row).
+        render_card(
+            &dep(HomeConnectionVariant::Connecting, 679.0),
+            679.0,
+            320.0,
+            "status_connecting_medium_679",
+        );
+        render_card(
+            &dep(HomeConnectionVariant::Offline, 679.0),
+            679.0,
+            360.0,
+            "status_offline_medium_679",
+        );
     }
 
     #[test]
@@ -216,10 +329,12 @@ mod tests {
         // the minimum supported window (Medium 679) allows some tolerance
         // above 230 because requirement 3 sanctions content-driven growth.
         // CONN-06: the heading is now 25px at Medium and no longer wraps
-        // at 679px, so the card's height is driven by the 136px mesh
-        // (136 + 48 padding ≈ 184px) — still compact, and the spec's
-        // "grow only when its content requires it" permits heights below
-        // the 200 target when the content genuinely fits on one line.
+        // at 679px. CONN-11: the check indicator now shares the heading
+        // row, so the card's height is driven by the 74px icon + heading
+        // row (159.9px content + 48px padding ≈ 208px at 679) — still
+        // inside the compact band, and the spec's "grow only when its
+        // content requires it" permits heights below the 200 target when
+        // the content genuinely fits on one line.
         load_font(include_bytes!("fonts/ArchivoSemiCondensed-Bold.ttf"));
         load_font(include_bytes!("fonts/IBMPlexSans-Regular.ttf"));
         load_font(include_bytes!("fonts/IBMPlexSans-Medium.ttf"));
@@ -309,5 +424,194 @@ mod tests {
                 "pill must fit its container at {available:.0}px (got width {w:.1}px)"
             );
         }
+    }
+
+    // ── CONN-10 (spec §14): no parent layout stretching ────────────────
+    //
+    // The dashboard grid replicates app.rs's wide-mode structure exactly:
+    // left column (hero card + mesh card + quick actions) in a
+    // FillPortion(2) wrapper, a 24 px gutter, and the right rail in a
+    // FillPortion(1) wrapper, all inside a Row with `align_y(Start)` —
+    // then the outer Fill-height canvas chain and the gutter scrollable.
+    // The hero card must keep its content-determined height whether the
+    // rail is tall (open) or empty (closed): the wrappers are explicit
+    // Shrink-height, so iced never stretches the card to match a taller
+    // sibling.
+
+    /// Build the dashboard grid with a rail of `rail_card_height` px cards
+    /// (or an empty rail when `None`). Returns the full scrollable element.
+    fn build_dashboard_grid(
+        hero_dep: &StatusCardDependency,
+        rail_card_height: Option<f32>,
+    ) -> iced::Element<'static, AppMessage> {
+        use iced::widget::{container, Column, Row, Space};
+        use iced::{Alignment, Length};
+
+        let card_gap = crate::design_tokens::SPACE_20;
+
+        let hero_card = view_status_card(hero_dep);
+
+        // Content-height stand-ins for the Mesh Health card and the quick
+        // action grid (fixed heights, non-void, so they never stretch).
+        let mesh_card = container(Space::new().height(Length::Fixed(140.0)))
+            .width(Length::Fill)
+            .height(Length::Shrink);
+        let action_grid = container(Space::new().height(Length::Fixed(160.0)))
+            .width(Length::Fill)
+            .height(Length::Shrink);
+
+        let left_col = Column::new()
+            .push(hero_card)
+            .push(Space::new().height(Length::Fixed(card_gap)))
+            .push(mesh_card)
+            .push(Space::new().height(Length::Fixed(card_gap)))
+            .push(action_grid)
+            .spacing(0)
+            .width(Length::Fill);
+
+        let right_col: iced::Element<'static, AppMessage> = if let Some(h) = rail_card_height {
+            // Three tall rail cards (Online Peers / Recent Activity /
+            // Tunnels), each taller than the left column, so the rail is
+            // the tallest sibling in the row — exactly the scenario that
+            // used to make the card "extremely tall" when the rail opened.
+            // Rebuilt per push (iced elements are not Clone).
+            let rail_card = || {
+                container(Space::new().height(Length::Fixed(h)))
+                    .width(Length::Fill)
+                    .height(Length::Shrink)
+            };
+            Column::new()
+                .push(rail_card())
+                .push(Space::new().height(Length::Fixed(card_gap)))
+                .push(rail_card())
+                .push(Space::new().height(Length::Fixed(card_gap)))
+                .push(rail_card())
+                .spacing(0)
+                .width(Length::Fill)
+                .into()
+        } else {
+            // Rail closed: empty column — left column is the tallest.
+            Column::new().spacing(0).width(Length::Fill).into()
+        };
+
+        // Wide mode: two-column dashboard grid, both columns aligned top
+        // (mirrors app.rs; the wrappers carry the CONN-10 explicit
+        // Shrink-height guard).
+        let main_content: iced::Element<'static, AppMessage> = Row::new()
+            .push(
+                container(left_col)
+                    .width(Length::FillPortion(2))
+                    .height(Length::Shrink),
+            )
+            .push(Space::new().width(Length::Fixed(crate::design_tokens::SPACE_24)))
+            .push(
+                container(right_col)
+                    .width(Length::FillPortion(1))
+                    .height(Length::Shrink),
+            )
+            .spacing(0)
+            .align_y(Alignment::Start)
+            .width(Length::Fill)
+            .into();
+
+        // Outer canvas chain: header + grid + footer inside a Fill-height
+        // container, centred and capped, inside the gutter scrollable.
+        let header = container(Space::new().height(Length::Fixed(80.0)))
+            .width(Length::Fill)
+            .height(Length::Shrink);
+        let footer = container(Space::new().height(Length::Fixed(40.0)))
+            .width(Length::Fill)
+            .height(Length::Shrink);
+        let col = Column::new()
+            .push(header)
+            .push(Space::new().height(Length::Fixed(crate::design_tokens::SPACE_28)))
+            .push(main_content)
+            .push(Space::new().height(Length::Fixed(crate::design_tokens::SPACE_16)))
+            .push(footer)
+            .spacing(0)
+            .width(Length::Fill);
+
+        let canvas = container(
+            container(col)
+                .padding(iced::Padding::from([
+                    crate::design_tokens::SPACE_28,
+                    crate::design_tokens::SPACE_32,
+                ]))
+                .width(Length::Fill)
+                .max_width(crate::design_tokens::DASHBOARD_MAX_WIDTH)
+                .height(Length::Fill),
+        )
+        .width(Length::Fill)
+        .align_x(Alignment::Center)
+        .height(Length::Fill);
+
+        crate::ui_components::gutter_scrollable(canvas)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    }
+
+    /// Lay the dashboard grid out at a maximized canvas and return the
+    /// laid-out height of the hero card node (index path through the
+    /// scrollable → canvas → col → main_content row → left wrapper → left
+    /// column; the hero card is the first child of the left column).
+    fn grid_hero_card_height(
+        hero_dep: &StatusCardDependency,
+        rail_card_height: Option<f32>,
+    ) -> f32 {
+        let renderer =
+            iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(Font::default(), Pixels(16.0)));
+        let mut element = build_dashboard_grid(hero_dep, rail_card_height);
+        let mut tree = Tree::new(element.as_widget());
+        // Maximized window: 1600 x 900 viewport.
+        let limits = layout::Limits::new(Size::ZERO, Size::new(1600.0, 900.0));
+        let node = element.as_widget_mut().layout(&mut tree, &renderer, &limits);
+        // scrollable[0] = canvas; canvas[0] = col wrapper; [0] = col;
+        // col[2] = main_content row; row[0] = left wrapper; [0] = left
+        // column; left column [0] = hero card.
+        let hero = &node.children()[0].children()[0].children()[0].children()[2]
+            .children()[0].children()[0].children()[0];
+        hero.bounds().height
+    }
+
+    #[test]
+    fn hero_card_height_is_content_determined_in_dashboard_grid() {
+        // CONN-10 (spec §14): the card's vertical size must be determined
+        // by its own content, never by the right rail. Replicate the wide
+        // dashboard grid with the rail OPEN (three tall cards, each taller
+        // than the whole left column) and with the rail CLOSED (empty),
+        // and assert the hero card's laid-out height is identical in both
+        // — and equal to the standalone content-determined height.
+        load_font(include_bytes!("fonts/ArchivoSemiCondensed-Bold.ttf"));
+        load_font(include_bytes!("fonts/IBMPlexSans-Regular.ttf"));
+        load_font(include_bytes!("fonts/IBMPlexSans-Medium.ttf"));
+        load_font(include_bytes!("fonts/IBMPlexSans-SemiBold.ttf"));
+
+        // Maximized window (~1600 → content 1215 → card (1215-24)*2/3 =
+        // 794, Full tier).
+        let content_width = 1215.0;
+        let card_width = crate::design_tokens::status_card_content_width(content_width);
+        assert!(
+            card_width >= crate::status_card::STATUS_CARD_MEDIUM_CONTENT,
+            "precondition: maximized-with-rail card width {card_width} must be Full tier"
+        );
+        let hero_dep = dep(HomeConnectionVariant::Ready, card_width);
+
+        let standalone = measure_card_height(&hero_dep, card_width);
+        let rail_open = grid_hero_card_height(&hero_dep, Some(400.0));
+        let rail_closed = grid_hero_card_height(&hero_dep, None);
+
+        assert!(
+            (rail_open - standalone).abs() < 0.5,
+            "hero card height in the grid with the rail OPEN ({rail_open:.1}px) must equal \
+             its content-determined standalone height ({standalone:.1}px) — the rail must \
+             not stretch the card (CONN-10 / spec §14)"
+        );
+        assert!(
+            (rail_closed - standalone).abs() < 0.5,
+            "hero card height in the grid with the rail CLOSED ({rail_closed:.1}px) must \
+             equal its content-determined standalone height ({standalone:.1}px) — opening \
+             the rail must not change the card's height (CONN-10 / spec §14)"
+        );
     }
 }

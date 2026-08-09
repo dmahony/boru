@@ -52,22 +52,32 @@ pub(crate) const STATUS_CARD_PULSE_PHASES: u32 = 6;
 pub(crate) const STATUS_CARD_MIN_CONTENT_HEIGHT: f32 = 150.0;
 
 /// Content width at which the card switches from the full three-region
-/// row layout to the reduced medium layout.
+/// row layout (MODE A) to the reduced compact horizontal layout
+/// (MODE B). Matches the spec's `@container (min-width: 760px)` MODE A
+/// boundary (spec §11).
 pub(crate) const STATUS_CARD_MEDIUM_CONTENT: f32 = 760.0;
-/// Content width below which the card switches to the stacked narrow
-/// layout (icon + heading on one row, then divider/description/pill, then
-/// the network graphic below).
-pub(crate) const STATUS_CARD_NARROW_CONTENT: f32 = 520.0;
+/// Content width below which the card switches from the compact
+/// horizontal layout (MODE B) to the stacked narrow layout (MODE C).
+/// Matches the spec's `@container (max-width: 559px)` MODE C boundary
+/// (spec §12).
+pub(crate) const STATUS_CARD_NARROW_CONTENT: f32 = 560.0;
+/// Content width below which the decorative network graphic is hidden
+/// entirely — the `@container (max-width: 520px) { .network-graphic {
+/// display: none; } }` rule from spec §13. The card must communicate
+/// status perfectly without the decoration.
+pub(crate) const STATUS_CARD_MESH_HIDE_CONTENT: f32 = 520.0;
 
 /// Minimum width the text (heading/description) column is guaranteed in the
 /// Full tier. Mirrors the spec's `minmax(260px, 1fr)` text column — the
 /// heading must never be squeezed below ~260px while a horizontal layout is
 /// active (spec sections 2, 3, 18).
 pub(crate) const STATUS_CARD_TEXT_MIN_WIDTH: f32 = 260.0;
-/// Same guarantee for the Medium tier. The spec's MODE B keeps the text
-/// area at roughly 220-260px; 240 is the mid-band floor so the mesh still
-/// has room to stay visible at the bottom of the band.
-const STATUS_CARD_TEXT_MIN_WIDTH_MEDIUM: f32 = 240.0;
+/// Same guarantee for the Medium (MODE B) tier. Spec §11: the graph stays
+/// on the right only while the text area retains at least ~260px — the
+/// mesh must yield before heading/description/pill. The Full-tier minimum
+/// is already 260, so MODE B keeps the same floor and the mesh simply
+/// shrinks (and can reach 0) as width drops toward the MODE C boundary.
+const STATUS_CARD_TEXT_MIN_WIDTH_MEDIUM: f32 = 260.0;
 /// Upper bound for the decorative mesh in the horizontal tiers (spec §5
 /// graph 150–180 px; CONN-05 tuned the exact size to 170). The mesh must
 /// NEVER consume width the heading needs: it only gets the leftover after
@@ -161,45 +171,91 @@ pub(crate) fn view_status_card(
     // The decorative mesh yields before the text column: in the horizontal
     // tiers its width is the leftover AFTER the text minimum is satisfied
     // (bounded to [0, STATUS_CARD_MESH_MAX_WIDTH]); the narrow stacked tier
-    // keeps the fixed per-tier size.
-    let network = match tier {
-        Tier::Full | Tier::Medium => {
-            network_mesh(dep, tier, horizontal_mesh_width(dep.content_width, tier))
+    // keeps the fixed per-tier size. Below STATUS_CARD_MESH_HIDE_CONTENT
+    // the mesh is not rendered at all (spec §13 — the card must still
+    // communicate status perfectly without the decoration).
+    let network: iced::Element<'static, AppMessage> = if mesh_rendered(dep.content_width) {
+        match tier {
+            Tier::Full | Tier::Medium => {
+                network_mesh(dep, tier, horizontal_mesh_width(dep.content_width, tier))
+            }
+            Tier::Narrow => network_mesh(dep, tier, network_size(tier).0),
         }
-        Tier::Narrow => network_mesh(dep, tier, network_size(tier).0),
+    } else {
+        Space::new()
+            .width(Length::Fixed(0.0))
+            .height(Length::Fixed(0.0))
+            .into()
     };
 
     let body: iced::Element<'static, AppMessage> = match tier {
         Tier::Full | Tier::Medium => {
             // [status icon] [status information] [network]
-            // Vertical rhythm of the info column (hd/divider/dd/description/
-            // dp/footer) trimmed for the compact height band (CONN-04).
-            // Horizontal gaps (icon-text, text-graph) tuned by CONN-05 to
-            // the spec §5 bands (Full ≈24px icon-text, 24–32px text-graph).
-            let (icon_text_gap, text_graph_gap, hd_gap, dd_gap, dp_gap) = match tier {
+            //
+            // CONN-11 (spec §15): the check indicator belongs to the
+            // HEADING ROW — `[✓] Boru is connected and ready.` reads as
+            // one composed unit, then the divider / description / pill
+            // flow below in the text column (the visual anchor). Before
+            // this pass the icon floated beside the WHOLE text column
+            // (its vertical centre sat between the description and the
+            // pill), which is the "scattered" look the spec calls out.
+            // The icon/heading row is exactly the MODE C pattern, applied
+            // to the horizontal tiers too.
+            //
+            // Vertical rhythm of the info column (hd/divider/dd/
+            // description/dp/footer) trimmed for the compact height band
+            // (CONN-04): the icon in the heading row adds ~44px vs the
+            // bare heading, so the sub-heading gaps are tightened to keep
+            // the card in the spec's 200-230px band. Horizontal gaps
+            // (icon-text, text-graph) tuned by CONN-05 to the spec §5
+            // bands (Full ≈24px icon-text, 24–32px text-graph).
+            let (icon_text_gap, text_graph_gap, dd_gap, dp_gap) = match tier {
                 Tier::Full => (
                     STATUS_ICON_TEXT_GAP_FULL,
                     STATUS_TEXT_GRAPH_GAP_FULL,
-                    16.0,
-                    12.0,
-                    20.0,
+                    10.0,
+                    18.0,
                 ),
                 _ => (
                     STATUS_ICON_TEXT_GAP_MEDIUM,
                     STATUS_TEXT_GRAPH_GAP_MEDIUM,
-                    12.0,
                     10.0,
                     16.0,
                 ),
             };
-            let info = Column::new()
+            let header_row = Row::new()
+                .push(indicator)
+                .push(Space::new().width(Length::Fixed(icon_text_gap)))
                 .push(heading)
-                .push(Space::new().height(Length::Fixed(hd_gap)))
+                .spacing(0)
+                .align_y(Alignment::Center)
+                .width(Length::Fill);
+            // The divider / description / pill share the HEADING's left
+            // edge (spec §15 sketch: `---` and the description and the
+            // pill all start under "Boru is connected and ready.") — the
+            // text block is the visual anchor, the icon sits off to its
+            // left. The indent is exactly the icon + icon-text gap, so
+            // the sub-heading content reads as one column with the
+            // heading.
+            let content = Column::new()
                 .push(divider)
                 .push(Space::new().height(Length::Fixed(dd_gap)))
                 .push(supporting)
                 .push(Space::new().height(Length::Fixed(dp_gap)))
                 .push(footer)
+                .spacing(0)
+                .width(Length::Fill);
+            let info = Column::new()
+                .push(header_row)
+                .push(
+                    Row::new()
+                        .push(Space::new().width(Length::Fixed(
+                            design_tokens::STATUS_INDICATOR_SIZE + icon_text_gap,
+                        )))
+                        .push(content)
+                        .spacing(0)
+                        .width(Length::Fill),
+                )
                 .spacing(0)
                 .width(Length::Fill);
             Row::new()
@@ -208,8 +264,6 @@ pub(crate) fn view_status_card(
                         .width(Length::Fixed(0.0))
                         .height(Length::Fixed(STATUS_CARD_MIN_CONTENT_HEIGHT)),
                 )
-                .push(indicator)
-                .push(Space::new().width(Length::Fixed(icon_text_gap)))
                 .push(info)
                 .push(Space::new().width(Length::Fixed(text_graph_gap)))
                 .push(network)
@@ -227,19 +281,23 @@ pub(crate) fn view_status_card(
                 .spacing(0)
                 .align_y(Alignment::Center)
                 .width(Length::Fill);
-            Column::new()
+            let mut column = Column::new()
                 .push(header_row)
                 .push(Space::new().height(Length::Fixed(18.0)))
                 .push(divider)
                 .push(Space::new().height(Length::Fixed(14.0)))
                 .push(supporting)
                 .push(Space::new().height(Length::Fixed(22.0)))
-                .push(footer)
-                .push(Space::new().height(Length::Fixed(28.0)))
-                .push(network)
-                .spacing(0)
-                .width(Length::Fill)
-                .into()
+                .push(footer);
+            // The decorative mesh is optional below MODE B and hidden
+            // entirely below STATUS_CARD_MESH_HIDE_CONTENT (spec §12/13);
+            // only add its gap when it is actually rendered.
+            if mesh_rendered(dep.content_width) {
+                column = column
+                    .push(Space::new().height(Length::Fixed(28.0)))
+                    .push(network);
+            }
+            column.spacing(0).width(Length::Fill).into()
         }
     };
 
@@ -250,9 +308,19 @@ pub(crate) fn view_status_card(
     // matched the horizontal so the padding is uniform and the content row
     // gets more width). The mesh-width math below shares
     // STATUS_CARD_PADDING_X so it always stays in sync.
+    // CONN-10 (spec §14 — no parent layout stretching): the card's vertical
+    // size is explicitly content-determined (`height: fit-content` /
+    // `align-self: start` in CSS terms). Without this explicit Shrink the
+    // container's height would be inferred from the content's size hint
+    // (`Container::new` uses `size.height.fluid()`), so any future child
+    // with a Fill-height hint — or a parent chain that forces Fill — could
+    // stretch the card taller than its content. Pinning Shrink makes the
+    // card's height always equal to its own content, never a taller
+    // sibling, the right rail, or the outer Fill chain.
     container(body)
         .padding([design_tokens::SPACE_24, STATUS_CARD_PADDING_X])
         .width(Length::Fill)
+        .height(Length::Shrink)
         .style(move |_t| {
             container::Style {
                 background: Some(Background::Gradient(iced::Gradient::Linear(
@@ -289,6 +357,14 @@ fn layout_tier(content_width: f32) -> Tier {
     } else {
         Tier::Narrow
     }
+}
+
+/// Whether the decorative network mesh is rendered at the given card
+/// width. Spec §13: below ~520px the mesh is hidden entirely (the
+/// `@container (max-width: 520px) { .network-graphic { display: none; } }`
+/// equivalent) — the card must still communicate status without it.
+fn mesh_rendered(content_width: f32) -> bool {
+    content_width >= STATUS_CARD_MESH_HIDE_CONTENT
 }
 
 /// Accent colour for the current variant: green when connected, amber
@@ -423,12 +499,16 @@ fn status_heading(dep: &StatusCardDependency, size: f32) -> iced::Element<'stati
 }
 
 /// Short accent divider under the heading (a small rounded green bar).
+/// CONN-11: widened to ~44px and slightly desaturated so it reads as a
+/// deliberate accent aligned under the heading text (it shares the text
+/// column's left edge), while staying subordinate to the status message
+/// (spec §17 — decorative elements must not compete).
 fn status_divider(accent: Color) -> iced::Element<'static, AppMessage> {
     container(Space::new().width(Length::Fill).height(Length::Fill))
-        .width(Length::Fixed(32.0))
+        .width(Length::Fixed(44.0))
         .height(Length::Fixed(3.0))
         .style(move |_t| container::Style {
-            background: Some(Background::Color(with_alpha(accent, 0.55))),
+            background: Some(Background::Color(with_alpha(accent, 0.45))),
             border: Border {
                 radius: 1.5.into(),
                 ..Default::default()
@@ -517,7 +597,10 @@ fn actions_row(show_retry: bool, show_details: bool) -> iced::Element<'static, A
 /// horizontal tiers cap the width at [`STATUS_CARD_MESH_MAX_WIDTH`] — the
 /// exact value used in the row comes from [`horizontal_mesh_width`] (the
 /// mesh yields space to the text column); this only bounds the nominal
-/// size. The narrow stacked tier keeps its own fixed size.
+/// size. The narrow stacked tier keeps its own fixed size. NOTE: the
+/// mesh is only *rendered* when [`mesh_rendered`] is true — below
+/// [`STATUS_CARD_MESH_HIDE_CONTENT`] the graphic is dropped entirely, so
+/// this nominal size is never laid out at those widths.
 fn network_size(tier: Tier) -> (f32, f32) {
     match tier {
         Tier::Full => (STATUS_CARD_MESH_MAX_WIDTH, 170.0),
@@ -753,12 +836,19 @@ mod tests {
     fn layout_tiers_are_ordered_and_consistent() {
         assert!(
             STATUS_CARD_MEDIUM_CONTENT > STATUS_CARD_NARROW_CONTENT,
-            "medium tier must sit above the narrow tier"
+            "MODE A boundary must sit above the MODE B/C boundary"
+        );
+        assert!(
+            STATUS_CARD_NARROW_CONTENT > STATUS_CARD_MESH_HIDE_CONTENT,
+            "the MODE B/C boundary (560) must sit above the mesh-hide width (520)"
         );
         assert_eq!(layout_tier(STATUS_CARD_MEDIUM_CONTENT), Tier::Full);
         assert_eq!(layout_tier(STATUS_CARD_MEDIUM_CONTENT - 1.0), Tier::Medium);
         assert_eq!(layout_tier(STATUS_CARD_NARROW_CONTENT), Tier::Medium);
         assert_eq!(layout_tier(STATUS_CARD_NARROW_CONTENT - 1.0), Tier::Narrow);
+        // The mesh-hide width lives INSIDE the Narrow (MODE C) band — the
+        // mesh disappears before the stacked layout ever gives up.
+        assert_eq!(layout_tier(STATUS_CARD_MESH_HIDE_CONTENT), Tier::Narrow);
         assert_eq!(layout_tier(0.0), Tier::Narrow);
         // The minimum supported window width (1024) must land in the
         // medium tier, where the three regions stay visible. CONN-02: the
@@ -861,12 +951,15 @@ mod tests {
         // CONN-03 spec sections 2/3/18: while ANY horizontal layout is
         // active the heading must never be squeezed below ~220-260px.
         // Sweep the tier boundary bands (the spec's manual test widths:
-        // 400/450/500/550/600/700/800/900+). For every width that selects
-        // a horizontal tier, the mesh must yield enough space that the
-        // text column (icon + gaps + mesh removed from the card inner
-        // width) stays at or above its tier minimum.
+        // 400/450/500/550/600/700/800/900+, plus the new MODE B/C
+        // boundary 560 and MODE A boundary 760). For every width that
+        // selects a horizontal tier (Full ≥ 760, Medium 560-759), the
+        // mesh must yield enough space that the text column (icon + gaps
+        // + mesh removed from the card inner width) stays at or above its
+        // tier minimum. Narrow (< 560) is the stacked MODE C — no
+        // horizontal text minimum applies.
         let widths = [
-            400.0, 450.0, 500.0, 520.0, 550.0, 560.0, 600.0, 650.0, 700.0,
+            400.0, 450.0, 500.0, 520.0, 550.0, 559.0, 560.0, 600.0, 650.0, 700.0,
             759.0, 760.0, 800.0, 900.0, 1024.0, 1215.0,
         ];
         for width in widths {
@@ -906,15 +999,16 @@ mod tests {
 
     #[test]
     fn mesh_yields_before_text_when_space_is_tight() {
-        // At the bottom of the Medium band (520px) the decorative mesh
-        // must shrink well below its cap so the text keeps its minimum —
-        // the spec's priority order (heading > description > pill > graph).
-        let tight = horizontal_mesh_width(520.0, Tier::Medium);
+        // At the bottom of the MODE B (Medium) band (560px) the decorative
+        // mesh must shrink well below its cap so the text keeps its
+        // minimum — the spec's priority order (heading > description >
+        // pill > graph).
+        let tight = horizontal_mesh_width(560.0, Tier::Medium);
         assert!(
             tight > 0.0 && tight < STATUS_CARD_MESH_MAX_WIDTH,
-            "at 520px the mesh should shrink ({tight}px) but stay visible"
+            "at 560px the mesh should shrink ({tight}px) but stay visible"
         );
-        let text_at_tight = 520.0
+        let text_at_tight = 560.0
             - 2.0 * STATUS_CARD_PADDING_X
             - design_tokens::STATUS_INDICATOR_SIZE
             - STATUS_ICON_TEXT_GAP_MEDIUM
@@ -931,6 +1025,29 @@ mod tests {
             (wide - STATUS_CARD_MESH_MAX_WIDTH).abs() < 0.01,
             "at 1215px the mesh should be capped at {STATUS_CARD_MESH_MAX_WIDTH}px, got {wide}px"
         );
+    }
+
+    #[test]
+    fn mesh_is_hidden_below_mesh_hide_width() {
+        // Spec §13: below ~520px card width the decorative network graphic
+        // is NOT rendered (the `@container (max-width: 520px)` rule). The
+        // card must still communicate status perfectly without the mesh.
+        assert!(
+            STATUS_CARD_MESH_HIDE_CONTENT < STATUS_CARD_NARROW_CONTENT,
+            "the mesh-hide width must sit inside the MODE C (narrow) band"
+        );
+        // The mesh is rendered from the hide boundary upward...
+        assert!(mesh_rendered(STATUS_CARD_MESH_HIDE_CONTENT));
+        assert!(mesh_rendered(STATUS_CARD_NARROW_CONTENT));
+        assert!(mesh_rendered(STATUS_CARD_MEDIUM_CONTENT));
+        // ...and hidden below it (400/450/500/519 are all sub-520).
+        assert!(!mesh_rendered(STATUS_CARD_MESH_HIDE_CONTENT - 1.0));
+        assert!(!mesh_rendered(500.0));
+        assert!(!mesh_rendered(400.0));
+        assert!(!mesh_rendered(0.0));
+        // The hide width is a MODE C width: stacked layout, no horizontal
+        // text minimum, no mesh.
+        assert_eq!(layout_tier(STATUS_CARD_MESH_HIDE_CONTENT), Tier::Narrow);
     }
 
     #[test]

@@ -30627,10 +30627,25 @@ impl IcedChat {
                 .into()
         } else {
             // Wide: two-column dashboard grid, both columns aligned top.
+            // CONN-10 (spec §14 — no parent layout stretching): the left
+            // column wrapper is explicitly Shrink-height so the hero card
+            // can never be stretched by the (taller) right rail. The Row's
+            // `align_y(Start)` is the `align-self: start` equivalent — iced
+            // never resizes a Shrink-height child to match a sibling, so
+            // opening the rail cannot force the status card taller. The
+            // card's own container in status_card.rs pins the same guard.
             Row::new()
-                .push(container(left_col).width(Length::FillPortion(2)))
+                .push(
+                    container(left_col)
+                        .width(Length::FillPortion(2))
+                        .height(Length::Shrink),
+                )
                 .push(Space::new().width(Length::Fixed(SPACE_24)))
-                .push(container(right_col).width(Length::FillPortion(1)))
+                .push(
+                    container(right_col)
+                        .width(Length::FillPortion(1))
+                        .height(Length::Shrink),
+                )
                 .spacing(0)
                 .align_y(Alignment::Start)
                 .width(Length::Fill)
