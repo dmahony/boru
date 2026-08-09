@@ -468,13 +468,30 @@ pub struct GroupMemberRow {
 
 /// Durable group topic/discovery epoch.
 #[allow(missing_docs)]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct GroupEpochRow {
     pub group_id: [u8; 32],
     pub epoch: u64,
     pub topic_id: TopicId,
     pub discovery_secret: Vec<u8>,
     pub created_at_ms: u64,
+}
+
+impl std::fmt::Debug for GroupEpochRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Redact the raw discovery secret (BORU-AUDIT-17); only its length is
+        // revealed so logs stay free of key material.
+        f.debug_struct("GroupEpochRow")
+            .field("group_id", &hex::encode(&self.group_id[..4]))
+            .field("epoch", &self.epoch)
+            .field("topic_id", &hex::encode(&self.topic_id.as_bytes()[..4]))
+            .field(
+                "discovery_secret",
+                &format!("<redacted {} bytes>", self.discovery_secret.len()),
+            )
+            .field("created_at_ms", &self.created_at_ms)
+            .finish()
+    }
 }
 
 /// Durable group invitation state.

@@ -31,6 +31,7 @@ use n0_error::{Result, StdResultExt};
 use serde::{Deserialize, Serialize};
 use serde_byte_array::ByteArray;
 use x25519_dalek::{PublicKey as EncryptionPublicKey, StaticSecret};
+use zeroize::Zeroize;
 
 const SCHEMA_VERSION: u32 = 1;
 const NONCE_LEN: usize = 12;
@@ -373,19 +374,23 @@ impl MailboxEnvelope {
                 let shared = identity
                     .secret
                     .diffie_hellman(&EncryptionPublicKey::from(e.ephemeral));
-                let key = derive_key_v1(shared.as_bytes());
-                Aes256Gcm::new_from_slice(&key)
+                // Derived AEAD key — scrub it once the payload is decrypted
+                // (BORU-AUDIT-17).
+                let mut key = derive_key_v1(shared.as_bytes());
+                let plaintext = Aes256Gcm::new_from_slice(&key)
                     .expect("32-byte key")
-                    .decrypt(Nonce::from_slice(&e.nonce), e.ciphertext.as_ref())
+                    .decrypt(Nonce::from_slice(&e.nonce), e.ciphertext.as_ref());
+                key.zeroize();
+                plaintext
                     .map_err(|_| n0_error::anyerr!("mailbox ciphertext authentication failed"))
             }
             MailboxEnvelope::V2(e) => {
                 let shared = identity
                     .secret
                     .diffie_hellman(&EncryptionPublicKey::from(e.ephemeral));
-                let key = derive_key_v2(shared.as_bytes());
+                let mut key = derive_key_v2(shared.as_bytes());
                 let aad = e.context_bytes();
-                Aes256Gcm::new_from_slice(&key)
+                let plaintext = Aes256Gcm::new_from_slice(&key)
                     .expect("32-byte key")
                     .decrypt(
                         Nonce::from_slice(&e.nonce),
@@ -393,7 +398,9 @@ impl MailboxEnvelope {
                             msg: e.ciphertext.as_ref(),
                             aad: &aad,
                         },
-                    )
+                    );
+                key.zeroize();
+                plaintext
                     .map_err(|_| n0_error::anyerr!("mailbox ciphertext authentication failed"))
             }
         }
@@ -495,7 +502,10 @@ fn seal_at(
         signature: ByteArray::new([0u8; SIGNATURE_LEN]),
     };
     let aad = envelope.context_bytes();
-    let ciphertext = Aes256Gcm::new_from_slice(&derive_key_v2(shared.as_bytes()))
+    // Derived AEAD key — scrub it as soon as the payload has been encrypted
+    // (BORU-AUDIT-17).
+    let mut key = derive_key_v2(shared.as_bytes());
+    let ciphertext = Aes256Gcm::new_from_slice(&key)
         .expect("32-byte key")
         .encrypt(
             Nonce::from_slice(&nonce),
@@ -505,6 +515,7 @@ fn seal_at(
             },
         )
         .map_err(|_| n0_error::anyerr!("encrypt mailbox payload"))?;
+    key.zeroize();
     envelope.ciphertext = ciphertext;
     envelope.signature = ByteArray::new(sender.sign(&envelope.signing_bytes()).to_bytes());
     Ok(MailboxEnvelope::V2(envelope))
@@ -512,22 +523,18 @@ fn seal_at(
 
 /// V1 key derivation — preserved unchanged so legacy envelopes decrypt.
 fn derive_key_v1(shared: &[u8; 32]) -> [u8; 32] {
-    *blake3::hash(
-        [b"iroh-gossip-chat/mailbox/v1".as_slice(), shared]
-            .concat()
-            .as_slice(),
-    )
-    .as_bytes()
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"iroh-gossip-chat/mailbox/v1");
+    hasher.update(shared);
+    *hasher.finalize().as_bytes()
 }
 
 /// V2 key derivation — domain-separated from V1.
 fn derive_key_v2(shared: &[u8; 32]) -> [u8; 32] {
-    *blake3::hash(
-        [b"boru/mailbox/v2".as_slice(), shared]
-            .concat()
-            .as_slice(),
-    )
-    .as_bytes()
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"boru/mailbox/v2");
+    hasher.update(shared);
+    *hasher.finalize().as_bytes()
 }
 
 fn verify_signature(envelope: &MailboxEnvelope) -> Result<()> {

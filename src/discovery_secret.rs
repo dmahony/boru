@@ -16,10 +16,15 @@
 //! * The secret is generated with a CSPRNG ([`getrandom`]).
 //! * [`Debug`] redacts all but the first four bytes to prevent accidental
 //!   leakage in logs.
-//! * [`Clone`] is intentionally *not* implemented — secrets should be
-//!   explicitly borrowed via [`as_bytes`](DiscoverySecret::as_bytes).
-//!   (We provide a manual [`Clone`] impl for practical testing use; see
-//!   the type-level docs for guidance.)
+//! * The raw bytes are zeroized on drop ([`ZeroizeOnDrop`](zeroize::ZeroizeOnDrop)),
+//!   so secret material does not linger on the stack or heap after the value
+//!   is destroyed.
+//! * [`Clone`] is intentionally *not* derived — secrets should be explicitly
+//!   borrowed via [`as_bytes`](DiscoverySecret::as_bytes), and duplicated only
+//!   with a deliberate [`clone()`](Clone::clone) call. (We provide a manual
+//!   [`Clone`] impl for practical testing use; see the type-level docs for
+//!   guidance.) `Copy` is deliberately absent so the secret can never be
+//!   duplicated implicitly.
 //!
 //! # Domain-separated subkey assessment (V1 vs V2)
 //!
@@ -57,6 +62,7 @@
 
 use getrandom;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroize;
 
 /// Size of a discovery secret in bytes.
 pub const DISCOVERY_SECRET_SIZE: usize = 32;
@@ -90,11 +96,19 @@ pub const SUBKEY_SIGNING_DOMAIN: &[u8] = b"boru-chat private-room v2 signing";
 /// The [`Debug`] impl only shows the first 4 hex bytes:
 /// `DiscoverySecret(ab12cd34..)` to prevent accidental secret leakage.
 ///
+/// # Zeroization
+///
+/// The raw bytes are overwritten with zeros when the value is dropped
+/// ([`ZeroizeOnDrop`](zeroize::ZeroizeOnDrop)); every clone is zeroized
+/// independently when it goes out of scope.
+///
 /// # Clone
 ///
 /// `Clone` is implemented for practical use (testing, passing into async
 /// closures), but treat cloned secrets with the same care as the original.
-#[derive(Copy, Serialize, Deserialize)]
+/// `Copy` is deliberately NOT implemented: every duplication must be an
+/// explicit `clone()` call.
+#[derive(Serialize, Deserialize)]
 pub struct DiscoverySecret {
     /// The secret bytes.
     #[serde(with = "serde_bytes")]
@@ -186,12 +200,30 @@ impl DiscoverySecret {
 }
 
 // Manual Clone — we want it available but leave a doc trail so callers
-// know to handle cloned copies with appropriate care.
+// know to handle cloned copies with appropriate care.  `Copy` is
+// deliberately absent: every duplication must be an explicit clone() call.
 impl Clone for DiscoverySecret {
     fn clone(&self) -> Self {
-        *self
+        Self { bytes: self.bytes }
     }
 }
+
+/// Zeroize the raw secret bytes (used on drop and available for explicit
+/// scrubbing of short-lived copies).
+impl Zeroize for DiscoverySecret {
+    fn zeroize(&mut self) {
+        self.bytes.zeroize();
+    }
+}
+
+/// The raw secret bytes are overwritten with zeros when the value is dropped.
+impl Drop for DiscoverySecret {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+impl zeroize::ZeroizeOnDrop for DiscoverySecret {}
 
 impl std::fmt::Debug for DiscoverySecret {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -322,8 +354,55 @@ mod tests {
     #[test]
     fn clone_equality() {
         let a = DiscoverySecret::from_bytes([0xABu8; 32]);
-        let b = a;
+        let b = a.clone();
         assert_eq!(a, b);
+    }
+
+    // ── Zeroization (BORU-AUDIT-17) ────────────────────────────────────
+
+    /// Regression: the drop path must zeroize the raw secret bytes.
+    /// Fails on the old impl (plain `[u8; 32]` field with no Drop).
+    ///
+    /// Note: the value is dropped IN PLACE at the end of the inner scope
+    /// (passing it to `mem::drop` would move it, and the drop glue would
+    /// zeroize the moved-to slot, not the original stack location).
+    #[test]
+    fn drop_zeroizes_secret_bytes() {
+        let ptr: *const u8;
+        {
+            let secret = DiscoverySecret::from_bytes([0xABu8; 32]);
+            ptr = secret.as_bytes().as_ptr();
+            assert_eq!(unsafe { *ptr }, 0xAB, "sanity: byte is set before drop");
+        } // secret dropped in place here → ZeroizeOnDrop scrubs this memory
+        assert_eq!(
+            unsafe { *ptr },
+            0,
+            "secret bytes were not zeroized when the value was dropped"
+        );
+    }
+
+    /// Explicit `zeroize()` clears the bytes immediately.
+    #[test]
+    fn explicit_zeroize_clears_bytes() {
+        let mut secret = DiscoverySecret::from_bytes([0xCDu8; 32]);
+        assert!(secret.as_bytes().iter().any(|&b| b != 0));
+        secret.zeroize();
+        assert!(
+            secret.as_bytes().iter().all(|&b| b == 0),
+            "explicit zeroize must clear every byte"
+        );
+    }
+
+    /// A clone is a deliberate, independent copy: it zeroizes on its own
+    /// drop without touching the original (which remains usable).
+    #[test]
+    fn clone_is_independent_and_zeroizes_itself() {
+        let original = DiscoverySecret::from_bytes([0xEFu8; 32]);
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
+        drop(cloned);
+        // Original is unaffected by the clone's drop.
+        assert_eq!(original.as_bytes(), &[0xEFu8; 32]);
     }
 
     // ── V2 subkey derivation tests ────────────────────────────────────

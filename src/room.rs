@@ -307,9 +307,9 @@ mod tests {
         let dir = temp_dir("secret-roundtrip");
         let mut store = RoomStore::empty_at(&dir);
         let secret = DiscoverySecret::from_bytes([0xAAu8; 32]);
-        store.set_discovery_secret(Some(secret));
+        store.set_discovery_secret(Some(secret.clone()));
 
-        assert_eq!(store.discovery_secret, Some(secret));
+        assert_eq!(store.discovery_secret.as_ref(), Some(&secret));
     }
 
     #[test]

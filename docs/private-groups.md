@@ -115,7 +115,10 @@ room discovery: knowing the secret lets a peer:
 Like the `TopicId`, the `DiscoverySecret` changes with every epoch rotation.
 
 - Redacted in `Debug` output (only first 4 hex bytes visible)
-- `Clone` intentionally documented as a sensitive operation
+- `Clone` intentionally documented as a sensitive operation; `Copy` is
+  deliberately NOT implemented — every duplication requires an explicit
+  `clone()` call
+- Raw bytes zeroized on drop (`ZeroizeOnDrop`)
 - Constant-time `PartialEq` comparison
 - Defined in: `src/discovery_secret.rs`
 

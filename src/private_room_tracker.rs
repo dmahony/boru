@@ -119,8 +119,9 @@ pub struct PrivateRoomTracker {
     backend: Box<dyn TopicDiscoveryBackend>,
     /// The DHT namespace derived from this room's topic and secret.
     namespace: NamespaceId,
-    /// The discovery key — the secret bytes used for signing/verifying records.
-    discovery_key: [u8; 32],
+    /// The shared discovery secret — the raw bytes are zeroized when the
+    /// tracker is dropped ([`DiscoverySecret`] implements `ZeroizeOnDrop`).
+    secret: DiscoverySecret,
     /// The gossip topic for logging / identification.
     topic: TopicId,
     /// This node's iroh EndpointId.
@@ -160,7 +161,6 @@ impl PrivateRoomTracker {
         secret_key: SecretKey,
     ) -> Self {
         let namespace = private_room_namespace(&topic, &secret);
-        let discovery_key = *secret.as_bytes();
         info!(
             topic = %hex::encode(&topic.as_bytes()[..4]),
             namespace = %hex::encode(&namespace.as_bytes()[..4]),
@@ -169,7 +169,7 @@ impl PrivateRoomTracker {
         Self {
             backend,
             namespace,
-            discovery_key,
+            secret,
             topic,
             local_endpoint_id,
             secret_key,
@@ -178,8 +178,8 @@ impl PrivateRoomTracker {
     }
 
     fn encryption_key(&self, minute: u64) -> ed25519_dalek::SigningKey {
-        let tracker_topic = TrackerTopicId::from_hash(&self.discovery_key);
-        let secret_hash = *blake3::hash(&self.discovery_key).as_bytes();
+        let tracker_topic = TrackerTopicId::from_hash(self.secret.as_bytes());
+        let secret_hash = *blake3::hash(self.secret.as_bytes()).as_bytes();
         encryption_keypair(
             &tracker_topic,
             &RotationHandle::default(),
@@ -225,7 +225,7 @@ impl PrivateRoomTracker {
 
         let now = unix_minute(0);
         let record = create_discovery_record(
-            self.discovery_key,
+            *self.secret.as_bytes(),
             now,
             &self.local_endpoint_id,
             &self.secret_key,
@@ -329,7 +329,7 @@ impl PrivateRoomTracker {
 
         // Validate and filter through the discovery-validation pipeline
         // using the discovery_key derived from the shared secret.
-        let config = ValidationConfig::new(self.discovery_key);
+        let config = ValidationConfig::new(*self.secret.as_bytes());
         let now_minute = unix_minute(0);
         let validator = DiscoveryRecordValidator::new(config, now_minute);
         let PeerCandidates { peers, counters } =
@@ -828,7 +828,7 @@ mod tests {
     fn secret_safe_logging_excludes_sensitive_room_data() {
         let topic = TopicId::from_bytes([0xABu8; 32]);
         let secret = DiscoverySecret::from_bytes([0x42u8; 32]);
-        let invite = crate::chat_core::RoomInviteV2::new(topic, secret);
+        let invite = crate::chat_core::RoomInviteV2::new(topic, secret.clone());
         let invitation = invite.encode();
         let raw_secret = hex::encode(secret.as_bytes());
 
@@ -840,7 +840,7 @@ mod tests {
         let publisher_tracker = PrivateRoomTracker::new(
             Box::new(backend.clone()),
             topic,
-            secret,
+            secret.clone(),
             publisher,
             publisher_key,
         );
@@ -949,7 +949,7 @@ mod tests {
 
         // Tracker A publishes into shared backend.
         let tracker_a =
-            PrivateRoomTracker::new(Box::new(shared.clone()), topic, secret, ep_a, sk_a);
+            PrivateRoomTracker::new(Box::new(shared.clone()), topic, secret.clone(), ep_a, sk_a);
         block_on(tracker_a.publish_once()).unwrap();
         block_on(tracker_a.shutdown());
 
@@ -1038,7 +1038,8 @@ mod tests {
         let topic = TopicId::from_bytes([0xCDu8; 32]);
         let secret = DiscoverySecret::from_bytes([0x52u8; 32]);
         let backend = InMemoryDiscoveryBackend::new();
-        let tracker = PrivateRoomTracker::new(Box::new(backend.clone()), topic, secret, ep, sk);
+        let tracker =
+            PrivateRoomTracker::new(Box::new(backend.clone()), topic, secret.clone(), ep, sk);
         let namespace = *tracker.namespace();
         block_on(backend.publish(&namespace, EncryptedDiscoveryRecord::new(vec![0xAA; 32])))
             .unwrap();
@@ -1157,8 +1158,13 @@ mod tests {
         let secret = DiscoverySecret::from_bytes([0xC1u8; 32]);
 
         // Bob publishes first.
-        let bob_tracker =
-            PrivateRoomTracker::new(Box::new(backend.clone()), topic, secret, bob_ep, bob_sk);
+        let bob_tracker = PrivateRoomTracker::new(
+            Box::new(backend.clone()),
+            topic,
+            secret.clone(),
+            bob_ep,
+            bob_sk,
+        );
         bob_tracker.publish_once().await.unwrap();
 
         let alice_tracker = PrivateRoomTracker::new(
@@ -1202,8 +1208,13 @@ mod tests {
         let secret = DiscoverySecret::from_bytes([0xC2u8; 32]);
 
         // Bob publishes first.
-        let bob_tracker =
-            PrivateRoomTracker::new(Box::new(backend.clone()), topic, secret, bob_ep, bob_sk);
+        let bob_tracker = PrivateRoomTracker::new(
+            Box::new(backend.clone()),
+            topic,
+            secret.clone(),
+            bob_ep,
+            bob_sk,
+        );
         bob_tracker.publish_once().await.unwrap();
 
         let alice_tracker = PrivateRoomTracker::new(
@@ -1250,8 +1261,13 @@ mod tests {
         let topic = TopicId::from_bytes([0xC3u8; 32]);
         let secret = DiscoverySecret::from_bytes([0xC3u8; 32]);
 
-        let bob_tracker =
-            PrivateRoomTracker::new(Box::new(backend.clone()), topic, secret, bob_ep, bob_sk);
+        let bob_tracker = PrivateRoomTracker::new(
+            Box::new(backend.clone()),
+            topic,
+            secret.clone(),
+            bob_ep,
+            bob_sk,
+        );
         bob_tracker.publish_once().await.unwrap();
 
         let alice_tracker =
@@ -1439,8 +1455,13 @@ mod tests {
         let secret = DiscoverySecret::from_bytes([0xC4u8; 32]);
 
         // Bob publishes first.
-        let bob_tracker =
-            PrivateRoomTracker::new(Box::new(backend.clone()), topic, secret, bob_ep, bob_sk);
+        let bob_tracker = PrivateRoomTracker::new(
+            Box::new(backend.clone()),
+            topic,
+            secret.clone(),
+            bob_ep,
+            bob_sk,
+        );
         bob_tracker.publish_once().await.unwrap();
 
         let alice_tracker = PrivateRoomTracker::new(
@@ -1488,11 +1509,16 @@ mod tests {
         let topic = TopicId::from_bytes([0xC5u8; 32]);
         let secret = DiscoverySecret::from_bytes([0xC5u8; 32]);
         let raw_secret = hex::encode(secret.as_bytes());
-        let invitation = crate::chat_core::RoomInviteV2::new(topic, secret).encode();
+        let invitation = crate::chat_core::RoomInviteV2::new(topic, secret.clone()).encode();
         let bob_hex = hex::encode(bob_ep.as_bytes());
 
-        let bob_tracker =
-            PrivateRoomTracker::new(Box::new(backend.clone()), topic, secret, bob_ep, bob_sk);
+        let bob_tracker = PrivateRoomTracker::new(
+            Box::new(backend.clone()),
+            topic,
+            secret.clone(),
+            bob_ep,
+            bob_sk,
+        );
         bob_tracker.publish_once().await.unwrap();
 
         let alice_tracker = PrivateRoomTracker::new(
