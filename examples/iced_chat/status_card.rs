@@ -142,11 +142,7 @@ pub(crate) fn view_status_card(
     let indicator = status_indicator(dep.variant);
     let tier = layout_tier(dep.content_width);
 
-    let (heading_size, support_size) = match tier {
-        Tier::Full => (30.0, 17.0),
-        Tier::Medium => (28.0, 16.0),
-        Tier::Narrow => (26.0, 16.0),
-    };
+    let (heading_size, support_size) = heading_sizes(tier);
 
     let heading = status_heading(dep, heading_size);
     let divider = status_divider(accent);
@@ -370,46 +366,59 @@ fn status_indicator(variant: HomeConnectionVariant) -> iced::Element<'static, Ap
         .into()
 }
 
+/// Heading + supporting-text pixel sizes per responsive tier.
+///
+/// CONN-06: the heading's Full tier lands in the spec's 24-27 px band —
+/// the real application context (the compact ~200-230 px card from
+/// CONN-04) is the authority, and 30 px read oversized there. Medium and
+/// Narrow scale down proportionally with 24 px as the floor. The
+/// supporting text ("Private communication, peer to peer.") keeps its
+/// own compact scale unchanged.
+fn heading_sizes(tier: Tier) -> (f32, f32) {
+    match tier {
+        Tier::Full => (26.0, 17.0),
+        Tier::Medium => (25.0, 16.0),
+        Tier::Narrow => (24.0, 16.0),
+    }
+}
+
 /// Two-tone heading: `Boru` in the accent green, the rest near-white; any
 /// other variant renders its truthful headline in the variant accent.
-fn status_heading(
-    dep: &StatusCardDependency,
-    size: f32,
-) -> iced::Element<'static, AppMessage> {
+fn status_heading(dep: &StatusCardDependency, size: f32) -> iced::Element<'static, AppMessage> {
     const HEADING_LH: f32 = 1.15;
     if matches!(dep.variant, HomeConnectionVariant::Ready) {
-        Row::new()
-            .push(
-                fonts::type_role_text_lh(TypeRole::DisplayHeading, "Boru ", HEADING_LH)
-                    .size(size)
-                    .color(design_tokens::STATUS_CONNECTED),
-            )
-            .push(
-                fonts::type_role_text_lh(
-                    TypeRole::DisplayHeading,
-                    "is connected and ready.",
-                    HEADING_LH,
-                )
-                .size(size)
-                .color(design_tokens::STATUS_PRIMARY_TEXT)
-                .width(Length::Fill)
-                .wrapping(iced::widget::text::Wrapping::Word),
-            )
-            .spacing(0)
-            .align_y(Alignment::Center)
-            .width(Length::Fill)
-            .into()
-    } else {
-        fonts::type_role_text_lh(
-            TypeRole::DisplayHeading,
-            dep.headline.clone(),
-            HEADING_LH,
-        )
+        // CONN-06: "Boru is connected and ready." is ONE rich-text
+        // paragraph — two differently styled runs (green "Boru", the
+        // remainder near-white) in a single layout flow. A Row of
+        // separate Text widgets could break the spans apart (the "is
+        // connected Boru and ready" failure mode); a shared paragraph
+        // cannot. A non-breaking space glues the brand to the sentence so
+        // "Boru" can never wrap onto a line of its own either. Weight is
+        // Archivo SemiCondensed Bold (700) via TypeRole::DisplayHeading —
+        // already in the spec's 650-700 band; line height stays 1.15.
+        use iced::widget::text::{LineHeight, Rich, Span, Wrapping};
+        // The spans carry no links, so the `Link` generic is explicitly
+        // `()` — without a turbofish the compiler cannot infer it.
+        Rich::with_spans([
+            Span::<()>::new("Boru\u{00A0}")
+                .font(TypeRole::DisplayHeading.font())
+                .color(design_tokens::STATUS_CONNECTED),
+            Span::<()>::new("is connected and ready.")
+                .font(TypeRole::DisplayHeading.font())
+                .color(design_tokens::STATUS_PRIMARY_TEXT),
+        ])
         .size(size)
-        .color(variant_accent(dep.variant))
+        .line_height(LineHeight::Relative(HEADING_LH))
         .width(Length::Fill)
-        .wrapping(iced::widget::text::Wrapping::Word)
+        .wrapping(Wrapping::Word)
         .into()
+    } else {
+        fonts::type_role_text_lh(TypeRole::DisplayHeading, dep.headline.clone(), HEADING_LH)
+            .size(size)
+            .color(variant_accent(dep.variant))
+            .width(Length::Fill)
+            .wrapping(iced::widget::text::Wrapping::Word)
+            .into()
     }
 }
 
@@ -901,6 +910,33 @@ mod tests {
             (wide - STATUS_CARD_MESH_MAX_WIDTH).abs() < 0.01,
             "at 1215px the mesh should be capped at {STATUS_CARD_MESH_MAX_WIDTH}px, got {wide}px"
         );
+    }
+
+    #[test]
+    fn heading_sizes_land_in_the_conn06_band() {
+        // CONN-06 acceptance (spec §§7/8/16 — the real application
+        // context is the authority): the heading must read at the compact
+        // card's scale. Full tier in the 24-27 px band, Medium/Narrow
+        // scaled down proportionally with 24 px as the floor.
+        let (full, _) = heading_sizes(Tier::Full);
+        let (medium, _) = heading_sizes(Tier::Medium);
+        let (narrow, _) = heading_sizes(Tier::Narrow);
+        assert!(
+            (24.0..=27.0).contains(&full),
+            "Full-tier heading {full}px must be in the spec's 24-27 px band"
+        );
+        assert!(
+            (24.0..=full).contains(&medium) && medium >= 24.0,
+            "Medium-tier heading {medium}px must scale down from Full ({full}px) to the 24px floor"
+        );
+        assert_eq!(
+            narrow, 24.0,
+            "Narrow-tier heading must sit on the 24px floor"
+        );
+        // Supporting text ("Private communication, peer to peer.") keeps
+        // its own compact scale — always positive.
+        let (_, support_full) = heading_sizes(Tier::Full);
+        assert!(support_full > 0.0);
     }
 
     #[test]
