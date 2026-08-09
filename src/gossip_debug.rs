@@ -360,15 +360,15 @@ mod tests {
         // BORU_DEBUG unset: debug builds (where tests run) enable tracing,
         // release builds disable it.
         // Guard: this test runs in a debug build, so `init` should succeed.
-        // The state is a process-wide OnceLock — clear it to keep the test
-        // isolated from other tests that may have initialised the log.
-        let _ = DEBUG_STATE.take();
+        // Note: the process-wide state is a OnceLock that cannot be reset
+        // from a test (`take()` needs `&mut` on the static), so `init` may
+        // already have been called by an earlier test — the assertion only
+        // depends on `is_enabled()`, which is stable across inits.
         init("test");
         assert!(
             is_enabled() == cfg!(debug_assertions),
             "debug-build default mismatch"
         );
-        let _ = DEBUG_STATE.take();
     }
 
     #[test]

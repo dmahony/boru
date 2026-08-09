@@ -26249,7 +26249,7 @@ impl IcedChat {
         tokio::task::spawn(async move {
             let (bf_tx, mut bf_rx) = tokio::sync::mpsc::channel::<crate::NetEvent>(256);
             match bf_handle
-                .try_backfill_from_peer(&endpoint, peer, local_count, Some(topic), bf_tx, None)
+                .try_backfill_from_peer(&endpoint, peer, local_count, topic, bf_tx, None)
                 .await
             {
                 Ok(Some(count)) => {

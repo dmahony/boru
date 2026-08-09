@@ -1654,9 +1654,8 @@ mod tests {
     fn signed_message_starting_with_metadata_marker_is_not_dropped() {
         use crate::chat_core::{Message, SignedMessage};
         let key = SecretKey::generate();
-        let msg = Message::Text {
+        let msg = Message::Message {
             text: "hello from the marker test".into(),
-            reply_to: None,
         };
         let encoded = SignedMessage::sign_and_encode(&key, &msg).unwrap();
         // SignedMessage wire format is postcard: from-key (32 bytes) +
@@ -1671,9 +1670,8 @@ mod tests {
         // bytes, and assert none is misclassified as metadata.
         let mut saw_fe_first_byte = false;
         for i in 0..64u8 {
-            let m = Message::Text {
+            let m = Message::Message {
                 text: format!("marker sweep {i}").into(),
-                reply_to: None,
             };
             let e = SignedMessage::sign_and_encode(&key, &m).unwrap();
             if e.first() == Some(&METADATA_MARKER) {

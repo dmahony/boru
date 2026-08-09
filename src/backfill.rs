@@ -16,6 +16,15 @@
 //!    [`SignedMessage::verify_and_decode`] and feeds the result into its
 //!    `NetEvent` channel as if they arrived over gossip.
 //!
+//! # Authorization
+//!
+//! Every remote request must name a concrete topic and pass the
+//! [`BackfillAuthorizer`] gate, which checks the authenticated connection
+//! peer against the topic's conversation type: active group membership,
+//! the deterministic direct-chat pairing, or the public-room policy.
+//! Unauthorized and unknown topics receive an identical generic denial
+//! before any storage query runs.
+//!
 //! # Rate limiting
 //!
 //! The responding side enforces a per-peer concurrency limit: at most one
@@ -53,7 +62,9 @@ use tracing::{debug, trace, warn};
 const BACKFILL_TIMEOUT_MSG: &str = "backfill timed out";
 
 use crate::chat_core::{filter_net_event_with_safety, NetEvent, SignedMessage};
+use crate::contact::direct_topic;
 use crate::proto::TopicId;
+use crate::public_room::{public_lobby_topic, PublicNetwork};
 use crate::public_room_safety::PublicRoomSafety;
 use crate::storage::Storage;
 
@@ -103,6 +114,14 @@ const MAX_CONCURRENT_BACKFILLS: usize = 32;
 // ── Wire messages ──────────────────────────────────────────────────────────────
 
 /// Request for history backfill — sent by the requester.
+///
+/// # Security
+///
+/// `topic` is REQUIRED for remote requests.  The responding side rejects
+/// `None` before any storage query — an unscoped remote history query is
+/// never served.  The field stays `Option` on the wire for backward
+/// compatibility with older clients that omit it (they are denied), while
+/// new clients always send `Some(topic)`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackfillRequest {
     /// Only return messages with `timestamp >= since_ms` (milliseconds since UNIX epoch).
@@ -110,7 +129,8 @@ pub struct BackfillRequest {
     pub since_ms: u64,
     /// Maximum number of messages to return.
     pub max_messages: u32,
-    /// If set, only return messages for this topic.
+    /// The conversation topic to backfill.  `None` is rejected by the
+    /// server — every remote request must name a concrete topic.
     #[serde(default)]
     pub topic: Option<TopicId>,
 }
@@ -171,6 +191,89 @@ impl BackfillRateLimit {
     }
 }
 
+// ── Authorization (server side) ───────────────────────────────────────────────
+
+/// Centralized authorization for history backfill requests.
+///
+/// Decides whether a remote `peer` may currently request history for
+/// `topic`.  The peer identity ALWAYS comes from the authenticated QUIC
+/// connection ([`Connection::remote_id`]) — never from the request payload.
+///
+/// Policy:
+/// - **Group epoch topics** — the peer must be an active member of the group
+///   (state `Active`/`Member`/`Owner`) *and* the local node must still be an
+///   active member, so a node removed from a group never serves stale group
+///   history.
+/// - **Direct-chat topics** — the peer must be the deterministic counterpart
+///   of the local node for that topic (`direct_topic(peer, local) == topic`).
+/// - **Public rooms** — the canonical public lobby and any topic advertised
+///   in the public-room directory are readable by any authenticated peer.
+/// - **Everything else** is denied without leaking whether the topic exists.
+#[derive(Debug, Clone)]
+pub struct BackfillAuthorizer {
+    storage: Arc<Storage>,
+    local_public: PublicKey,
+}
+
+impl BackfillAuthorizer {
+    /// Create an authorizer for a node with the given local identity.
+    pub fn new(storage: Arc<Storage>, local_public: PublicKey) -> Self {
+        Self {
+            storage,
+            local_public,
+        }
+    }
+
+    /// One authorization check: is `peer` currently allowed to backfill
+    /// history for `topic`?
+    ///
+    /// This runs *before* any storage query that would reveal message
+    /// IDs, counts, or metadata.  Unknown and forbidden topics both return
+    /// `false` so an attacker cannot distinguish them externally.
+    pub fn authorize(&self, peer: &PublicKey, topic: &TopicId) -> bool {
+        // 1. Group epoch topic — membership is authoritative.  A group topic
+        //    never falls through to the other checks even when the requester
+        //    is not a member.
+        if let Ok(Some(group)) = self.storage.find_group_by_topic(topic) {
+            return is_active_group_member(&self.storage, &group.group_id, peer)
+                && is_active_group_member(&self.storage, &group.group_id, &self.local_public);
+        }
+
+        // 2. Deterministic direct-chat topic — only the two participants can
+        //    derive it, so the requester matching the topic IS the
+        //    direct-chat relationship.
+        if direct_topic(peer, &self.local_public) == *topic {
+            return true;
+        }
+
+        // 3. Public-room policy — the canonical lobby and rooms advertised in
+        //    the public-room directory are open to any authenticated peer.
+        self.is_public_room_topic(topic)
+    }
+
+    fn is_public_room_topic(&self, topic: &TopicId) -> bool {
+        if *topic == public_lobby_topic(PublicNetwork::Mainnet)
+            || *topic == public_lobby_topic(PublicNetwork::Development)
+            || *topic == public_lobby_topic(PublicNetwork::Test)
+        {
+            return true;
+        }
+        self.storage.is_public_room_topic(topic).unwrap_or(false)
+    }
+}
+
+/// Active membership states — mirrored from the group UI filter in
+/// `examples/iced_chat/app.rs` (view_group_member_list).
+fn is_active_group_member(storage: &Storage, group_id: &[u8; 32], peer: &PublicKey) -> bool {
+    match storage.list_group_members(group_id) {
+        Ok(members) => members.iter().any(|m| {
+            m.public_key.as_slice() == peer.as_bytes()
+                && (m.state == "Active" || m.state == "Member" || m.state == "Owner")
+        }),
+        Err(_) => false,
+    }
+}
+
 // ── Protocol handler (server side) ─────────────────────────────────────────────
 
 /// Protocol handler for incoming backfill connections.
@@ -178,12 +281,14 @@ impl BackfillRateLimit {
 /// Register this on your [`Router`](iroh::protocol::Router):
 ///
 /// ```ignore
-/// router.accept(BACKFILL_ALPN, BackfillProtocolHandler::new(history_store.clone()));
+/// router.accept(BACKFILL_ALPN, BackfillProtocolHandler::new(history_store.clone(), local_public));
 /// ```
 #[derive(Debug, Clone)]
 pub struct BackfillProtocolHandler {
     /// Shared storage — used to respond to backfill requests.
     storage: Arc<Storage>,
+    /// Centralized authorization for incoming requests.
+    authorizer: BackfillAuthorizer,
     /// Per-peer rate-limiting state.
     rate_limit: Arc<Mutex<BackfillRateLimit>>,
     /// Global concurrency cap on backfill serve tasks.
@@ -193,8 +298,13 @@ pub struct BackfillProtocolHandler {
 
 impl BackfillProtocolHandler {
     /// Create a new handler that reads history from the given storage.
-    pub fn new(storage: Arc<Storage>) -> Self {
+    ///
+    /// `local_public` is this node's own public key — it anchors the
+    /// direct-chat authorization check ([`direct_topic`]) and is never
+    /// taken from a request.
+    pub fn new(storage: Arc<Storage>, local_public: PublicKey) -> Self {
         Self {
+            authorizer: BackfillAuthorizer::new(storage.clone(), local_public),
             storage,
             rate_limit: Arc::new(Mutex::new(BackfillRateLimit::default())),
             backfill_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_BACKFILLS)),
@@ -225,6 +335,7 @@ impl ProtocolHandler for BackfillProtocolHandler {
         };
 
         let store = self.storage.clone();
+        let authorizer = self.authorizer.clone();
         let rate_limit = self.rate_limit.clone();
 
         tokio::task::spawn(async move {
@@ -245,7 +356,7 @@ impl ProtocolHandler for BackfillProtocolHandler {
                 }
             }
 
-            let result = serve_backfill(connection, &store).await;
+            let result = serve_backfill(connection, &store, &authorizer).await;
 
             // Always release the rate limit slot.
             rate_limit.lock().unwrap().release(&remote_id);
@@ -267,7 +378,18 @@ impl ProtocolHandler for BackfillProtocolHandler {
 /// Uses the bi-directional stream in the already-accepted connection.
 /// The entire exchange is bounded by [`BACKFILL_REQUEST_TIMEOUT`] — a slow
 /// or stuck peer cannot hold resources indefinitely.
-async fn serve_backfill(connection: Connection, storage: &Storage) -> Result<()> {
+///
+/// # Authorization
+///
+/// A concrete topic is mandatory and the remote peer (from the connection
+/// context, never the payload) must be authorized for it before any storage
+/// query runs.  Unauthorized requests are rejected with a generic error
+/// that does not reveal whether the topic exists or how much history it has.
+async fn serve_backfill(
+    connection: Connection,
+    storage: &Storage,
+    authorizer: &BackfillAuthorizer,
+) -> Result<()> {
     // Enforce a hard timeout on the entire backfill exchange.
     tokio::time::timeout(BACKFILL_REQUEST_TIMEOUT, async {
         // accept_bi() returns (SendStream, RecvStream) — accepts the
@@ -276,6 +398,8 @@ async fn serve_backfill(connection: Connection, storage: &Storage) -> Result<()>
             .accept_bi()
             .await
             .map_err(|e| n0_error::anyerr!("backfill: accept_bi: {e}"))?;
+
+        let remote_id = connection.remote_id();
 
         // Read the length-prefixed request from the RecvStream
         let req_len = reader
@@ -293,6 +417,29 @@ async fn serve_backfill(connection: Connection, storage: &Storage) -> Result<()>
         let request: BackfillRequest =
             postcard::from_bytes(&req_buf).map_err(|e| n0_error::anyerr!("decode request: {e}"))?;
 
+        // Authorization gate — runs before any storage query.  A remote
+        // request without a concrete topic is never served.
+        let topic = match request.topic {
+            Some(t) => t,
+            None => {
+                warn!(
+                    peer = %remote_id.fmt_short(),
+                    "backfill: denied — request omitted topic"
+                );
+                bail_any!("backfill: topic required");
+            }
+        };
+        if !authorizer.authorize(&remote_id, &topic) {
+            // Audit log: remote peer id + safe topic identifier only.
+            // Message contents are never logged.
+            warn!(
+                peer = %remote_id.fmt_short(),
+                topic = %topic.fmt_short(),
+                "backfill: denied — peer not authorized for topic"
+            );
+            bail_any!("backfill: unauthorized");
+        }
+
         // Hard cap on max_messages — server enforces its own limit
         let max_messages = request.max_messages.min(SERVER_MAX_BACKFILL);
         trace!(
@@ -302,30 +449,21 @@ async fn serve_backfill(connection: Connection, storage: &Storage) -> Result<()>
             "backfill: received request"
         );
 
-        // Query storage for recent messages.
-        let topic_filter = request.topic;
+        // Query storage for recent messages for the authorized topic.
         let (resp_bytes, count) = {
             // Determine the total available count for accurate `skipped`.
-            let total_available = match topic_filter.as_ref() {
-                Some(t) => storage.count_chat_messages_for_topic(t).unwrap_or(0),
-                None => storage.total_chat_message_count().unwrap_or(0),
-            };
+            let total_available = storage
+                .count_chat_messages_for_topic(&topic)
+                .unwrap_or(0);
 
-            // Collect entries — use bounded queries where possible.
-            let entries: Vec<_> = match topic_filter {
-                Some(ref t) => storage
-                    .get_recent_chat_messages_for_topic(t, max_messages as usize)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|(ts, bytes)| (ts, bytes))
-                    .collect(),
-                None => storage
-                    .get_recent_chat_messages(max_messages as usize)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|(ts, bytes)| (ts, bytes))
-                    .collect(),
-            };
+            // Collect entries — bounded topic query only; the unscoped
+            // recent-history query is never reachable from the network.
+            let entries: Vec<_> = storage
+                .get_recent_chat_messages_for_topic(&topic, max_messages as usize)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(ts, bytes)| (ts, bytes))
+                .collect();
 
             // Apply since_ms filter and cap at max_messages (newest-first
             // for relevance, then oldest-first in the response).
@@ -404,7 +542,7 @@ enum Cmd {
         addr: EndpointAddr,
         since_ms: u64,
         max_messages: u32,
-        topic: Option<TopicId>,
+        topic: TopicId,
         net_tx: mpsc::Sender<NetEvent>,
         safety: Option<Arc<PublicRoomSafety>>,
         reply: tokio::sync::oneshot::Sender<Result<u32>>,
@@ -437,7 +575,8 @@ impl BackfillHandle {
     /// * `since_ms` — UNIX-epoch milliseconds; only messages at or after this
     ///   timestamp are returned.  Pass `0` for all recent messages.
     /// * `max_messages` — Cap on how many messages to request.
-    /// * `topic` — If set, only request messages for this topic.
+    /// * `topic` — The conversation topic to request history for.  A concrete
+    ///   topic is required — the server rejects unscoped requests.
     /// * `net_tx` — Channel to inject decoded [`NetEvent::Message`] items into.
     ///
     /// Returns the number of messages that were decoded and injected, or an
@@ -447,7 +586,7 @@ impl BackfillHandle {
         addr: EndpointAddr,
         since_ms: u64,
         max_messages: u32,
-        topic: Option<TopicId>,
+        topic: TopicId,
         net_tx: mpsc::Sender<NetEvent>,
         safety: Option<Arc<PublicRoomSafety>>,
     ) -> Result<u32> {
@@ -474,7 +613,8 @@ impl BackfillHandle {
     /// Looks up the peer's [`EndpointAddr`] from the [`Endpoint`], requests up to
     /// `DEFAULT_MAX_BACKFILL` messages, and injects them into `net_tx`.
     ///
-    /// `topic` — If set, only messages for this topic are requested.
+    /// `topic` — The conversation topic to request history for.  A concrete
+    /// topic is required — the server rejects unscoped requests.
     ///
     /// Returns `Ok(Some(count))` on success, `Ok(None)` if not needed, or `Err` on failure.
     pub async fn try_backfill_from_peer(
@@ -482,7 +622,7 @@ impl BackfillHandle {
         endpoint: &Endpoint,
         peer: PublicKey,
         local_history_count: usize,
-        topic: Option<TopicId>,
+        topic: TopicId,
         net_tx: mpsc::Sender<NetEvent>,
         safety: Option<Arc<PublicRoomSafety>>,
     ) -> Result<Option<u32>> {
@@ -550,7 +690,7 @@ async fn backfill_round(
     addr: &EndpointAddr,
     since_ms: u64,
     max_messages: u32,
-    topic: Option<TopicId>,
+    topic: TopicId,
     peer_id: PublicKey,
     round: u32,
 ) -> Result<(BackfillResponse, u32)> {
@@ -574,7 +714,7 @@ async fn backfill_round(
     let request = BackfillRequest {
         since_ms,
         max_messages,
-        topic,
+        topic: Some(topic),
     };
     let req_bytes =
         postcard::to_stdvec(&request).map_err(|e| n0_error::anyerr!("encode request: {e}"))?;
@@ -626,7 +766,7 @@ async fn do_backfill_request(
     addr: EndpointAddr,
     since_ms: u64,
     max_messages: u32,
-    topic: Option<TopicId>,
+    topic: TopicId,
     net_tx: mpsc::Sender<NetEvent>,
     safety: Option<Arc<PublicRoomSafety>>,
 ) -> Result<u32> {
@@ -750,6 +890,8 @@ async fn do_backfill_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chat_core::Message;
+    use crate::storage::{GroupEpochRow, GroupMemberRow, GroupRow};
     use iroh::SecretKey;
     use std::time::Duration;
 
@@ -819,6 +961,7 @@ mod tests {
             .expect("bind endpoint");
         let handle = BackfillHandle::spawn(ep.clone());
         let peer = SecretKey::generate().public();
+        let topic = TopicId::from_bytes([0u8; 32]);
         let (net_tx, _net_rx) = mpsc::channel(16);
 
         // At exactly the threshold: no backfill request.
@@ -827,7 +970,7 @@ mod tests {
                 &ep,
                 peer,
                 BACKFILL_TRIGGER_THRESHOLD,
-                None,
+                topic,
                 net_tx.clone(),
                 None,
             )
@@ -841,7 +984,7 @@ mod tests {
                 &ep,
                 peer,
                 BACKFILL_TRIGGER_THRESHOLD + 10,
-                None,
+                topic,
                 net_tx.clone(),
                 None,
             )
@@ -852,7 +995,7 @@ mod tests {
         // Below the threshold but no known route to the peer: Ok(None), not an
         // error — the caller simply gets no history this round.
         let below = handle
-            .try_backfill_from_peer(&ep, peer, 0, None, net_tx.clone(), None)
+            .try_backfill_from_peer(&ep, peer, 0, topic, net_tx.clone(), None)
             .await
             .expect("unknown-peer below threshold degrades gracefully");
         assert_eq!(below, None, "no route → no backfill performed");
@@ -877,17 +1020,19 @@ mod tests {
     #[derive(Debug, Clone)]
     struct DelayedBackfillHandler {
         storage: Arc<Storage>,
+        authorizer: BackfillAuthorizer,
         delay: Duration,
     }
 
     impl ProtocolHandler for DelayedBackfillHandler {
         async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
             let storage = self.storage.clone();
+            let authorizer = self.authorizer.clone();
             let delay = self.delay;
             tokio::task::spawn(async move {
                 // Add the configured delay before processing
                 tokio::time::sleep(delay).await;
-                let _result = serve_backfill(connection, &storage).await;
+                let _result = serve_backfill(connection, &storage, &authorizer).await;
             });
             Ok(())
         }
@@ -916,6 +1061,7 @@ mod tests {
         let storage = Arc::new(Storage::memory().unwrap());
         let slow_handler = DelayedBackfillHandler {
             storage: storage.clone(),
+            authorizer: BackfillAuthorizer::new(storage.clone(), sk_responder.public()),
             // Delay long enough that the client timeout fires first.
             // With paused tokio time, this is virtual time — instant in wall-clock.
             delay: Duration::from_secs(7),
@@ -927,7 +1073,7 @@ mod tests {
 
         let sk_requester = SecretKey::generate();
         let ep_requester = Endpoint::builder(iroh::endpoint::presets::N0DisableRelay)
-            .secret_key(sk_requester)
+            .secret_key(sk_requester.clone())
             .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddrV4>().unwrap())
             .unwrap()
             .bind()
@@ -937,6 +1083,10 @@ mod tests {
         let addr =
             EndpointAddr::from_parts(sk_responder.public(), ep_responder.addr().addrs.clone());
 
+        // Authorized direct-chat topic between requester and responder, so the
+        // only reason the request fails is the server-side delay.
+        let topic = direct_topic(&sk_requester.public(), &sk_responder.public());
+
         let (net_tx, _) = tokio::sync::mpsc::channel(64);
 
         // Spawn the backfill request in a background task so we can
@@ -944,7 +1094,7 @@ mod tests {
         // Clone the endpoint so the spawned task owns its own reference.
         let ep_for_task = ep_requester.clone();
         let handle = tokio::spawn(async move {
-            do_backfill_request(&ep_for_task, addr, 0, 10, None, net_tx, None).await
+            do_backfill_request(&ep_for_task, addr, 0, 10, topic, net_tx, None).await
         });
 
         // Advance time past the client's 5s timeout.  The server's 7s
@@ -977,7 +1127,7 @@ mod tests {
         // Set up an empty SQLite storage.
         let storage = Arc::new(Storage::memory().unwrap());
 
-        let handler = BackfillProtocolHandler::new(storage.clone());
+        let handler = BackfillProtocolHandler::new(storage.clone(), sk_responder.public());
 
         let _router = iroh::protocol::Router::builder(ep_responder.clone())
             .accept(BACKFILL_ALPN, handler)
@@ -985,7 +1135,7 @@ mod tests {
 
         let sk_requester = SecretKey::generate();
         let ep_requester = Endpoint::builder(iroh::endpoint::presets::N0DisableRelay)
-            .secret_key(sk_requester)
+            .secret_key(sk_requester.clone())
             .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddrV4>().unwrap())
             .unwrap()
             .bind()
@@ -995,9 +1145,13 @@ mod tests {
         let addr =
             EndpointAddr::from_parts(sk_responder.public(), ep_responder.addr().addrs.clone());
 
+        // The requester is the direct-chat counterpart of the responder, so
+        // authorization passes; the store is empty so 0 messages return.
+        let topic = direct_topic(&sk_requester.public(), &sk_responder.public());
+
         let (net_tx, _) = tokio::sync::mpsc::channel(64);
 
-        let result = do_backfill_request(&ep_requester, addr, 0, 10, None, net_tx, None).await;
+        let result = do_backfill_request(&ep_requester, addr, 0, 10, topic, net_tx, None).await;
 
         // Even with an empty store, the backfill should succeed (returning 0 messages).
         assert!(
@@ -1007,5 +1161,403 @@ mod tests {
         );
         let count = result.unwrap();
         assert_eq!(count, 0, "empty store should return 0 messages");
+    }
+
+    // ── Authorization regression tests (BORU-AUDIT-01) ─────────────────
+
+    /// Spawn a responder endpoint with the real backfill handler over the
+    /// given storage; returns the responder's address and the kept-alive
+    /// router.
+    async fn spawn_responder(
+        storage: Arc<Storage>,
+        sk: &SecretKey,
+    ) -> (EndpointAddr, iroh::protocol::Router) {
+        let ep = Endpoint::builder(iroh::endpoint::presets::N0DisableRelay)
+            .secret_key(sk.clone())
+            .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddrV4>().unwrap())
+            .unwrap()
+            .bind()
+            .await
+            .expect("bind responder endpoint");
+        let handler = BackfillProtocolHandler::new(storage.clone(), sk.public());
+        let router = iroh::protocol::Router::builder(ep.clone())
+            .accept(BACKFILL_ALPN, handler)
+            .spawn();
+        let addr = EndpointAddr::from_parts(sk.public(), ep.addr().addrs.clone());
+        (addr, router)
+    }
+
+    /// Spawn a fresh requester endpoint and return it plus its public key.
+    async fn spawn_requester() -> (Endpoint, PublicKey) {
+        let sk = SecretKey::generate();
+        (spawn_requester_with(&sk).await, sk.public())
+    }
+
+    /// Spawn a requester endpoint keyed by a specific secret key.
+    async fn spawn_requester_with(sk: &SecretKey) -> Endpoint {
+        Endpoint::builder(iroh::endpoint::presets::N0DisableRelay)
+            .secret_key(sk.clone())
+            .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddrV4>().unwrap())
+            .unwrap()
+            .bind()
+            .await
+            .expect("bind requester endpoint")
+    }
+
+    /// Storage with one group (owner = responder, member = member_sk), one
+    /// epoch topic, and one signed message from the member in that topic.
+    fn make_group_storage(local_sk: &SecretKey, member_sk: &SecretKey) -> (Arc<Storage>, TopicId, [u8; 32]) {
+        let storage = Arc::new(Storage::memory().unwrap());
+        let group_id = [7u8; 32];
+        let topic = TopicId::from_bytes([0xAB; 32]);
+        storage
+            .create_group(&GroupRow {
+                group_id,
+                name: "AuditGroup".into(),
+                description: String::new(),
+                owner_public_key: local_sk.public().as_bytes().to_vec(),
+                current_epoch: 1,
+                created_at_ms: 1,
+                updated_at_ms: 1,
+                archived: false,
+            })
+            .unwrap();
+        storage
+            .create_group_epoch(&GroupEpochRow {
+                group_id,
+                epoch: 1,
+                topic_id: topic,
+                discovery_secret: vec![1u8; 32],
+                created_at_ms: 1,
+            })
+            .unwrap();
+        let add_member = |pk: &PublicKey, role: &str, state: &str| {
+            storage
+                .add_group_member(&GroupMemberRow {
+                    group_id,
+                    public_key: pk.as_bytes().to_vec(),
+                    role: role.into(),
+                    joined_at_ms: 1,
+                    invited_by: None,
+                    epoch_joined: 1,
+                    state: state.into(),
+                })
+                .unwrap();
+        };
+        add_member(&local_sk.public(), "Owner", "Owner");
+        add_member(&member_sk.public(), "Member", "Active");
+        let signed = SignedMessage::sign_and_encode(
+            member_sk,
+            &Message::Message {
+                text: "audit hello".into(),
+            },
+        )
+        .unwrap();
+        storage
+            .insert_chat_message(
+                &[1u8; 32],
+                &topic,
+                member_sk.public().as_bytes(),
+                1000,
+                &signed,
+            )
+            .unwrap();
+        (storage, topic, group_id)
+    }
+
+    /// Raw length-prefixed backfill exchange — lets a test send a request
+    /// the normal client API can no longer produce (e.g. `topic: None`).
+    /// Returns the decoded response or the transport-level error observed.
+    async fn raw_backfill_request(
+        ep: &Endpoint,
+        addr: EndpointAddr,
+        request: &BackfillRequest,
+    ) -> Result<BackfillResponse, String> {
+        let conn = ep
+            .connect(addr, BACKFILL_ALPN)
+            .await
+            .map_err(|e| e.to_string())?;
+        let (mut writer, mut reader) = conn.open_bi().await.map_err(|e| e.to_string())?;
+        let req_bytes = postcard::to_stdvec(request).map_err(|e| e.to_string())?;
+        writer
+            .write_u32_le(req_bytes.len() as u32)
+            .await
+            .map_err(|e| e.to_string())?;
+        writer
+            .write_all(&req_bytes)
+            .await
+            .map_err(|e| e.to_string())?;
+        writer.finish().map_err(|e| e.to_string())?;
+        let resp_len = reader
+            .read_u32_le()
+            .await
+            .map_err(|e| format!("read response: {e}"))?;
+        if resp_len > 10 * 1024 * 1024 {
+            return Err("response too large".into());
+        }
+        let mut buf = vec![0u8; resp_len as usize];
+        reader
+            .read_exact(&mut buf)
+            .await
+            .map_err(|e| e.to_string())?;
+        postcard::from_bytes(&buf).map_err(|e| e.to_string())
+    }
+
+    /// Regression: a remote request with `topic = None` is rejected before
+    /// any DB query.  The storage holds a message that an unscoped query
+    /// would return — the client must observe a transport error instead.
+    #[tokio::test]
+    async fn backfill_rejects_request_without_topic() {
+        let sk_responder = SecretKey::generate();
+        let storage = Arc::new(Storage::memory().unwrap());
+        let other = SecretKey::generate();
+        let signed = SignedMessage::sign_and_encode(
+            &other,
+            &Message::Message {
+                text: "private".into(),
+            },
+        )
+        .unwrap();
+        storage
+            .insert_chat_message(
+                &[2u8; 32],
+                &TopicId::from_bytes([0xCD; 32]),
+                other.public().as_bytes(),
+                1,
+                &signed,
+            )
+            .unwrap();
+
+        let (addr, _router) = spawn_responder(storage, &sk_responder).await;
+        let (ep, _pk) = spawn_requester().await;
+
+        let result = raw_backfill_request(
+            &ep,
+            addr,
+            &BackfillRequest {
+                since_ms: 0,
+                max_messages: 10,
+                topic: None,
+            },
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "topic=None must be rejected, got a response: {result:?}"
+        );
+    }
+
+    /// Regression: only active group members may backfill a group topic.
+    /// Non-members and removed members are denied with zero message
+    /// metadata; an active member receives the seeded history.
+    #[tokio::test]
+    async fn backfill_authorizes_group_membership() {
+        let sk_responder = SecretKey::generate();
+        let sk_member = SecretKey::generate();
+        let (storage, topic, group_id) = make_group_storage(&sk_responder, &sk_member);
+        let (addr, _router) = spawn_responder(storage.clone(), &sk_responder).await;
+
+        // Outsider (never a member) → denied.
+        let (ep_outsider, _) = spawn_requester().await;
+        let result = do_backfill_request(
+            &ep_outsider,
+            addr.clone(),
+            0,
+            50,
+            topic,
+            mpsc::channel(64).0,
+            None,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "non-member must be denied, got: {result:?}"
+        );
+
+        // Active member → succeeds and receives the seeded message.  The
+        // requester endpoint must be keyed by the member's own identity.
+        let ep_member = spawn_requester_with(&sk_member).await;
+        let (net_tx, mut net_rx) = mpsc::channel(64);
+        let result = do_backfill_request(&ep_member, addr.clone(), 0, 50, topic, net_tx, None)
+            .await;
+        assert!(
+            result.is_ok(),
+            "member backfill should succeed: {:?}",
+            result.err()
+        );
+        assert_eq!(
+            result.unwrap(),
+            1,
+            "member should receive the seeded message"
+        );
+        assert!(
+            net_rx.recv().await.is_some(),
+            "member should receive a decoded NetEvent"
+        );
+
+        // Former member after removal → denied immediately.
+        storage
+            .remove_group_member(&group_id, sk_member.public().as_bytes(), "Removed")
+            .unwrap();
+        let result2 = do_backfill_request(
+            &ep_member,
+            addr,
+            0,
+            50,
+            topic,
+            mpsc::channel(64).0,
+            None,
+        )
+        .await;
+        assert!(
+            result2.is_err(),
+            "removed member must be denied, got: {result2:?}"
+        );
+    }
+
+    /// Regression: authorization is re-checked on every request.  A first
+    /// page does not grant a permanent capability — after membership
+    /// revocation the next (continued) page is denied.
+    #[tokio::test]
+    async fn backfill_rechecks_authorization_on_next_page() {
+        let sk_responder = SecretKey::generate();
+        let sk_member = SecretKey::generate();
+        let (storage, topic, group_id) = make_group_storage(&sk_responder, &sk_member);
+        let (addr, _router) = spawn_responder(storage.clone(), &sk_responder).await;
+        let ep = spawn_requester_with(&sk_member).await;
+
+        // Page 1 (since=0): authorized member succeeds.
+        let page1 =
+            do_backfill_request(&ep, addr.clone(), 0, 50, topic, mpsc::channel(64).0, None).await;
+        assert!(
+            page1.is_ok(),
+            "first page should succeed: {:?}",
+            page1.err()
+        );
+
+        // Revocation between pages.
+        storage
+            .remove_group_member(&group_id, sk_member.public().as_bytes(), "Removed")
+            .unwrap();
+
+        // Page 2 (continued since_ms): denied immediately.
+        let page2 =
+            do_backfill_request(&ep, addr, 1000, 50, topic, mpsc::channel(64).0, None).await;
+        assert!(
+            page2.is_err(),
+            "next page after revocation must be denied: {page2:?}"
+        );
+    }
+
+    /// Regression: unknown topics and forbidden topics are externally
+    /// indistinguishable — both are denied with no response body, so an
+    /// attacker cannot probe for topic existence or history size.
+    #[tokio::test]
+    async fn backfill_unknown_and_forbidden_topics_look_identical() {
+        let sk_responder = SecretKey::generate();
+        let sk_member = SecretKey::generate();
+        let (storage, topic, _group_id) = make_group_storage(&sk_responder, &sk_member);
+        let (addr, _router) = spawn_responder(storage, &sk_responder).await;
+        let (ep, _) = spawn_requester().await;
+
+        // Unknown topic: no local record at all.
+        let unknown = TopicId::from_bytes([0xEE; 32]);
+        // Forbidden topic: a real group the requester is not a member of.
+        let forbidden = topic;
+
+        let unknown_res = raw_backfill_request(
+            &ep,
+            addr.clone(),
+            &BackfillRequest {
+                since_ms: 0,
+                max_messages: 10,
+                topic: Some(unknown),
+            },
+        )
+        .await;
+        let forbidden_res = raw_backfill_request(
+            &ep,
+            addr,
+            &BackfillRequest {
+                since_ms: 0,
+                max_messages: 10,
+                topic: Some(forbidden),
+            },
+        )
+        .await;
+
+        assert!(
+            unknown_res.is_err(),
+            "unknown topic must be denied: {unknown_res:?}"
+        );
+        assert!(
+            forbidden_res.is_err(),
+            "forbidden topic must be denied: {forbidden_res:?}"
+        );
+        // Both fail at the same stage (reading the response that never
+        // comes) — identical external error behavior.
+        let unknown_msg = unknown_res.unwrap_err();
+        let forbidden_msg = forbidden_res.unwrap_err();
+        assert!(
+            unknown_msg.starts_with("read response"),
+            "unknown failure should be a response-read error: {unknown_msg}"
+        );
+        assert!(
+            forbidden_msg.starts_with("read response"),
+            "forbidden failure should be a response-read error: {forbidden_msg}"
+        );
+    }
+
+    /// Regression: a direct-chat topic is only readable by its two
+    /// participants.  The requester that matches the deterministic topic is
+    /// authorized; a third party guessing the topic is denied.
+    #[tokio::test]
+    async fn backfill_direct_chat_only_authorizes_participants() {
+        let sk_responder = SecretKey::generate();
+        let storage = Arc::new(Storage::memory().unwrap());
+        let (addr, _router) = spawn_responder(storage, &sk_responder).await;
+
+        let sk_peer = SecretKey::generate();
+        let topic = direct_topic(&sk_peer.public(), &sk_responder.public());
+
+        // The peer IS a participant in this direct topic — build the
+        // requester endpoint from the participant's key.
+        let ep_peer = spawn_requester_with(&sk_peer).await;
+        let res =
+            do_backfill_request(&ep_peer, addr.clone(), 0, 10, topic, mpsc::channel(64).0, None)
+                .await;
+        assert!(
+            res.is_ok(),
+            "direct participant should be authorized: {:?}",
+            res.err()
+        );
+
+        // A third party requesting the same topic is denied.
+        let (ep_outsider, _) = spawn_requester().await;
+        let res_out =
+            do_backfill_request(&ep_outsider, addr, 0, 10, topic, mpsc::channel(64).0, None).await;
+        assert!(
+            res_out.is_err(),
+            "non-participant must be denied: {res_out:?}"
+        );
+    }
+
+    /// Regression: the canonical public lobby is readable by any
+    /// authenticated peer (public-room policy).
+    #[tokio::test]
+    async fn backfill_public_lobby_is_open_to_any_peer() {
+        let sk_responder = SecretKey::generate();
+        let storage = Arc::new(Storage::memory().unwrap());
+        let (addr, _router) = spawn_responder(storage, &sk_responder).await;
+        let (ep, _) = spawn_requester().await;
+
+        let lobby = public_lobby_topic(PublicNetwork::Mainnet);
+        let res = do_backfill_request(&ep, addr, 0, 10, lobby, mpsc::channel(64).0, None).await;
+        assert!(
+            res.is_ok(),
+            "public lobby must be readable by any peer: {:?}",
+            res.err()
+        );
+        assert_eq!(res.unwrap(), 0, "empty lobby store returns no messages");
     }
 }

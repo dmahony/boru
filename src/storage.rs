@@ -51,7 +51,7 @@ use crate::store::{DeliveryStatus, MessageId, OutboxRow, StoredEnvelope};
 // ── Current schema version ────────────────────────────────────────────────
 
 /// Bump every time a new migration is added.
-const CURRENT_SCHEMA_VERSION: u32 = 18;
+const CURRENT_SCHEMA_VERSION: u32 = 19;
 
 /// Maximum number of rows inspected by a single outbox claim query.
 pub const MAX_OUTBOX_CLAIM_LIMIT: u32 = 100;
@@ -881,6 +881,7 @@ impl Storage {
                 16 => self.migrate_v16(&conn)?,
                 17 => self.migrate_v17(&conn)?,
                 18 => self.migrate_v18(&conn)?,
+                19 => self.migrate_v19(&conn)?,
                 _ => unreachable!("unknown migration version {v}"),
             }
             let now = now_ms();
@@ -1416,6 +1417,36 @@ impl Storage {
         Ok(())
     }
 
+    /// v19 creates the durable chat-message history table used by the
+    /// backfill service.
+    ///
+    /// The storage CRUD methods (`insert_chat_message`,
+    /// `get_recent_chat_messages_for_topic`, `count_chat_messages_for_topic`)
+    /// have always referenced `chat_messages`, but no migration ever created
+    /// the table — so every backfill query silently failed and returned
+    /// empty history.  This migration adds the table with the exact columns
+    /// the CRUD layer uses (`msg_hash` unique for `INSERT OR IGNORE` dedup,
+    /// `id` for newest-first ordering).
+    fn migrate_v19(&self, conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                msg_hash BLOB NOT NULL,
+                topic BLOB NOT NULL,
+                sender BLOB NOT NULL,
+                timestamp_ms INTEGER NOT NULL,
+                signed_bytes BLOB NOT NULL,
+                UNIQUE(msg_hash)
+            );
+            CREATE INDEX IF NOT EXISTS idx_chat_messages_topic
+                ON chat_messages(topic, timestamp_ms);
+            ",
+        )
+        .std_context("migrate v19 chat_messages")?;
+        Ok(())
+    }
+
     /// during repeat sync requests.  Every message id served via SyncResponse
     /// is recorded in sync_dedup.  The query_pending_outbound_for_recipient
     /// method filters out already-served ids so that subsequent sync requests
@@ -1573,24 +1604,48 @@ impl Storage {
 
     /// Look up the group for a given epoch topic, using the unique topic→group index.
     pub fn find_group_by_topic(&self, topic_id: &TopicId) -> Result<Option<GroupRow>> {
-        let conn = self.conn.lock().unwrap();
-        let topic_bytes: &[u8] = topic_id.as_ref();
-        let group_id: Option<Vec<u8>> = conn
-            .query_row(
+        // Resolve the group id inside a scoped lock and DROP the guard before
+        // calling `get_group` — holding the connection mutex while re-locking
+        // it deadlocks (std::sync::Mutex is not reentrant).
+        let group_id: Option<[u8; 32]> = {
+            let conn = self.conn.lock().unwrap();
+            let topic_bytes: &[u8] = topic_id.as_ref();
+            conn.query_row(
                 "SELECT group_id FROM group_epochs WHERE topic_id=?1 LIMIT 1",
                 [topic_bytes],
-                |r| r.get(0),
+                |r| r.get::<_, Vec<u8>>(0),
             )
             .optional()
-            .std_context("find group epoch by topic")?;
-        match group_id {
-            Some(bytes) => {
+            .std_context("find group epoch by topic")?
+            .map(|bytes| {
                 let mut id = [0u8; 32];
                 id.copy_from_slice(&bytes);
-                self.get_group(&id)
-            }
+                id
+            })
+        };
+        match group_id {
+            Some(id) => self.get_group(&id),
             None => Ok(None),
         }
+    }
+
+    /// Whether `topic` is a known public room advertised in the public-room
+    /// directory (`directory_ads`).
+    ///
+    /// Public rooms are readable by any authenticated peer, so the backfill
+    /// authorization layer treats advertised topics as open.  This is a
+    /// **live** query — an advertisement that is later evicted stops
+    /// authorizing the topic at request time.
+    pub fn is_public_room_topic(&self, topic_id: &TopicId) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let allowed: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM directory_ads WHERE topic = ?1 LIMIT 1)",
+                [topic_id.as_ref() as &[u8]],
+                |row| row.get(0),
+            )
+            .std_context("is public room topic")?;
+        Ok(allowed)
     }
 
     /// Insert an invitation idempotently.

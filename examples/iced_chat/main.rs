@@ -901,7 +901,9 @@ fn main() -> Result<()> {
         }
 
         // ── Backfill handler ──────────────────────────────────────────
-        let backfill_handler = BackfillProtocolHandler::new(storage.clone());
+        // Authorization is anchored to this node's own public key; remote
+        // requests must name a concrete topic and pass `authorize_backfill`.
+        let backfill_handler = BackfillProtocolHandler::new(storage.clone(), secret_key.public());
 
         // ── Whisper protocol ──────────────────────────────────────────
         // Direct QUIC channels for private 1:1 messaging and file transfer.
