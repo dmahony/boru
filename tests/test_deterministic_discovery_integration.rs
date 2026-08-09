@@ -469,7 +469,13 @@ async fn three_peer_dht_outage_eventual_discovery() {
     let trackers: Vec<PrivateRoomTracker> = identities
         .iter()
         .map(|(sk, ep)| {
-            PrivateRoomTracker::new(Box::new(backend.clone()), topic, secret, *ep, sk.clone())
+            PrivateRoomTracker::new(
+                Box::new(backend.clone()),
+                topic,
+                secret.clone(),
+                *ep,
+                sk.clone(),
+            )
         })
         .collect();
 
@@ -481,7 +487,7 @@ async fn three_peer_dht_outage_eventual_discovery() {
     let checker = PrivateRoomTracker::new(
         Box::new(backend.clone()),
         topic,
-        secret,
+        secret.clone(),
         check_ep,
         SecretKey::generate(),
     );
@@ -532,8 +538,13 @@ async fn three_peer_dht_outage_eventual_discovery() {
 
     // ── Phase 4: Late peer joins and discovers only the active peer ──
     let (late_sk, late_ep) = test_identity();
-    let late_tracker =
-        PrivateRoomTracker::new(Box::new(backend.clone()), topic, secret, late_ep, late_sk);
+    let late_tracker = PrivateRoomTracker::new(
+        Box::new(backend.clone()),
+        topic,
+        secret.clone(),
+        late_ep,
+        late_sk,
+    );
 
     let peers_after_outage = late_tracker.discover_once().await.unwrap();
     assert!(

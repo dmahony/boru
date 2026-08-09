@@ -12302,7 +12302,7 @@ impl IcedChat {
                             let tracker = PrivateRoomTracker::new(
                                 Box::new(backend),
                                 topic,
-                                secret,
+                                secret.clone(),
                                 endpoint.id(),
                                 endpoint.secret_key().clone(),
                             );
@@ -12324,8 +12324,10 @@ impl IcedChat {
                         };
 
                         // Start continuous DHT publish/discover for this room.
+                        // Clone the secret for the long-lived tracker; the
+                        // original is encoded into the invitation ticket below.
                         let room_tracker = if let (Some(secret), Some(dht)) =
-                            (discovery_secret, dht)
+                            (discovery_secret.clone(), dht)
                         {
                             let backend = MainlineDhtBackend::new(dht);
                             let tracker = PrivateRoomTracker::new(
@@ -12358,7 +12360,7 @@ impl IcedChat {
                         let ticket_str = Ticket {
                             topic,
                             peers: vec![local_peer_addr.clone()],
-                            discovery_secret,
+                            discovery_secret: discovery_secret.clone(),
                         }
                         .to_string();
                         let _personal_ticket = Ticket {
@@ -12420,7 +12422,9 @@ impl IcedChat {
 
                         let mut room =
                             RoomStore::with_peers(&data_dir, topic, vec![local_peer_addr]);
-                        room.discovery_secret = discovery_secret;
+                        // The original secret was encoded into the ticket; the
+                        // persisted store keeps its own copy.
+                        room.discovery_secret = discovery_secret.clone();
 
                         Ok::<
                             (
@@ -12723,7 +12727,10 @@ impl IcedChat {
                         );
 
                         let room_tracker = if !private_dht_disabled {
-                            if let (Some(secret), Some(dht)) = (saved_discovery_secret, dht.clone())
+                            // Clone the secret for the long-lived tracker; the
+                            // original is persisted to the RoomStore below.
+                            if let (Some(secret), Some(dht)) =
+                                (saved_discovery_secret.clone(), dht.clone())
                             {
                                 let backend = MainlineDhtBackend::new(dht);
                                 let tracker = PrivateRoomTracker::new(
@@ -12756,7 +12763,9 @@ impl IcedChat {
                         } else {
                             None
                         };
-                        let room_secret = saved_discovery_secret;
+                        // Clone the secret into the invitation ticket; the
+                        // original is persisted to the RoomStore below.
+                        let room_secret = saved_discovery_secret.clone();
                         let ticket_str = Ticket {
                             topic,
                             peers: vec![local_peer_addr.clone()],

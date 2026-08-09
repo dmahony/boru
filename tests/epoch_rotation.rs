@@ -77,7 +77,8 @@ fn removed_member_cannot_open_new_credentials_and_survivor_can() {
     let opened = result
         .open_for(&MailboxIdentity::from_secret(&survivor))
         .unwrap();
-    assert_eq!(opened, *result.credentials());
+    // Deliberate clone: EpochCredentials is not Copy (secret key material).
+    assert_eq!(opened, result.credentials().clone());
 }
 
 #[test]

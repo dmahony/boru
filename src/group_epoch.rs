@@ -13,6 +13,7 @@ use std::{
 use iroh::{PublicKey, SecretKey, Signature};
 use serde::{Deserialize, Serialize};
 use serde_byte_array::ByteArray;
+use zeroize::Zeroize;
 
 use crate::{
     discovery_secret::DiscoverySecret,
@@ -24,7 +25,27 @@ use crate::{
 const SIGNATURE_LEN: usize = Signature::LENGTH;
 
 /// Credentials used to subscribe to one group epoch.
-#[derive(Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+///
+/// The bundle contains the epoch's [`DiscoverySecret`], so it is treated as
+/// key material: `Copy` is deliberately NOT implemented (every duplication
+/// must be an explicit `clone()`), the secret field zeroizes itself on drop,
+/// and the serialized credential payload is scrubbed after use.
+///
+/// # Not `Copy` (regression)
+///
+/// ```compile_fail
+/// // BORU-AUDIT-17: secret-bearing credentials must not be Copy. If `Copy`
+/// // is re-added, this doctest compiles successfully and the suite fails.
+/// use boru_core::group_epoch::EpochCredentials;
+/// use boru_core::group_id::GroupId;
+///
+/// fn require_copy<T: Copy>(t: T) -> T { t }
+///
+/// let creds = EpochCredentials::generate(GroupId::generate(), 0);
+/// require_copy(creds);
+/// require_copy(creds); // would only compile if EpochCredentials: Copy
+/// ```
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct EpochCredentials {
     group_id: GroupId,
     epoch: u64,
@@ -135,10 +156,16 @@ impl CredentialDelivery {
     }
     /// Open after checking the recipient's mailbox identity.
     pub fn open(&self, identity: &MailboxIdentity) -> Result<EpochCredentials, EpochRotationError> {
-        let bytes = identity
+        // The decrypted bytes are the serialized credential bundle, which
+        // contains the epoch's discovery secret.  Scrub the buffer as soon
+        // as the credentials have been parsed out of it.
+        let mut bytes = identity
             .open(&self.envelope)
             .map_err(|_| EpochRotationError::DecryptionFailed)?;
-        postcard::from_bytes(&bytes).map_err(|e| EpochRotationError::Decode(e.to_string()))
+        let credentials =
+            postcard::from_bytes(&bytes).map_err(|e| EpochRotationError::Decode(e.to_string()))?;
+        bytes.zeroize();
+        Ok(credentials)
     }
 }
 
@@ -305,17 +332,23 @@ impl EpochRotationState {
                 return Err(EpochRotationError::MissingRecipient(*member));
             }
         }
-        let old = self.current;
+        // Borrow the current epoch's public fields instead of copying the
+        // whole credentials bundle (which contains the secret).  The secret
+        // itself stays in `self.current` until it is replaced by `next`.
+        let old_group_id = self.current.group_id();
+        let old_epoch = self.current.epoch();
         let next = EpochCredentials::generate(
-            old.group_id,
-            old.epoch
+            old_group_id,
+            old_epoch
                 .checked_add(1)
                 .ok_or_else(|| EpochRotationError::Encode("epoch overflow".into()))?,
         );
         let timestamp = now_secs();
-        let member_removed = sign_removed(owner_key, old.group_id, old.epoch, removed, timestamp)?;
-        let epoch_changed = sign_epoch(owner_key, old.group_id, old.epoch, next.epoch, timestamp)?;
-        let payload =
+        let member_removed = sign_removed(owner_key, old_group_id, old_epoch, removed, timestamp)?;
+        let epoch_changed = sign_epoch(owner_key, old_group_id, old_epoch, next.epoch, timestamp)?;
+        // Serialized credentials contain the epoch's discovery secret.
+        // Scrub the buffer once every delivery has been sealed.
+        let mut payload =
             postcard::to_stdvec(&next).map_err(|e| EpochRotationError::Encode(e.to_string()))?;
         let mut deliveries = Vec::with_capacity(survivors.len());
         for member in survivors {
@@ -326,8 +359,12 @@ impl EpochRotationState {
                 envelope,
             });
         }
+        payload.zeroize();
         self.members.remove(&removed);
-        self.current = next;
+        // Both the state and the returned rotation own the new credentials;
+        // EpochCredentials is not Copy, so the state takes a deliberate clone
+        // and the rotation carries the original.
+        self.current = next.clone();
         Ok(EpochRotation {
             credentials: next,
             member_removed,
@@ -381,4 +418,58 @@ fn sign_epoch(
         timestamp,
         signature: ByteArray::new(key.sign(&bytes).to_bytes()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression (BORU-AUDIT-17): `Debug` must never print the discovery
+    /// secret bytes — only the redaction marker.
+    #[test]
+    fn debug_redacts_discovery_secret() {
+        let secret = [0xABu8; 32];
+        let creds = EpochCredentials::from_parts(
+            GroupId::from_bytes([1; 32]),
+            7,
+            TopicId::from_bytes([2; 32]),
+            DiscoverySecret::from_bytes(secret),
+        );
+        let debug = format!("{creds:?}");
+        assert!(
+            !debug.contains("abababab"),
+            "Debug leaked the full discovery secret: {debug}"
+        );
+        assert!(
+            debug.contains("[redacted]"),
+            "expected redaction marker: {debug}"
+        );
+        assert!(
+            debug.contains("epoch: 7"),
+            "epoch should be visible: {debug}"
+        );
+    }
+
+    /// Regression (BORU-AUDIT-17): the credential delivery open path still
+    /// parses after the decrypted buffer is zeroized.
+    #[test]
+    fn credential_delivery_open_roundtrip() {
+        let owner = SecretKey::generate();
+        let survivor = SecretKey::generate();
+        let identity = MailboxIdentity::from_secret(&survivor);
+        let creds = EpochCredentials::from_parts(
+            GroupId::from_bytes([3; 32]),
+            1,
+            TopicId::from_bytes([4; 32]),
+            DiscoverySecret::from_bytes([5; 32]),
+        );
+        let payload = postcard::to_stdvec(&creds).unwrap();
+        let envelope = mailbox::seal_for(&owner, identity.public_key(), &payload).unwrap();
+        let delivery = CredentialDelivery {
+            recipient: survivor.public(),
+            envelope,
+        };
+        let opened = delivery.open(&identity).unwrap();
+        assert_eq!(opened, creds);
+    }
 }
