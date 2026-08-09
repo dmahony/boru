@@ -36282,6 +36282,12 @@ fn subscription_stream(
             tracing::debug!(
                 instance,
                 net_rx = format!("{:p}", rx.as_ref() as *const _),
+                friend_rx = format!("{:p}", friend_rx.as_ref() as *const _),
+                whisper_rx = format!("{:p}", whisper_rx.as_ref() as *const _),
+                inbox_rx = format!("{:p}", inbox_rx.as_ref() as *const _),
+                discovered_rx = format!("{:p}", discovered_rx.as_ref() as *const _),
+                gui_action_rx = format!("{:p}", gui_action_rx.as_ref() as *const _),
+                transfer_rx = format!("{:p}", transfer_rx.as_ref() as *const _),
                 "SUBSCRIPTION_STREAM_START: combined subscription stream running",
             );
             loop {
