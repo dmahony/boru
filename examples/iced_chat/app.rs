@@ -19941,7 +19941,18 @@ impl IcedChat {
                             .await
                             .map_err(|e| e.to_string())?;
                         let (sender, receiver) = sub.split();
-                        let _neighbor_count = receiver.neighbors().count();
+                        let receiver_id = format!("{:p}", &receiver as *const _);
+                        let neighbors_before = receiver
+                            .neighbors()
+                            .map(|p| p.fmt_short().to_string())
+                            .collect::<Vec<_>>();
+                        info!(
+                            topic=%topic,
+                            receiver_id,
+                            neighbors = ?neighbors_before,
+                            "BACKGROUND_RX_CREATED: subscription split — receiver created, neighbors snapshot",
+                        );
+                        let _neighbor_count = neighbors_before.len();
                         let metadata_doc = boru_core::room_docs::create_metadata_doc(
                             topic,
                             &sender,
@@ -19968,6 +19979,12 @@ impl IcedChat {
                             receiver,
                             net_tx,
                             None,
+                        );
+                        info!(
+                            topic=%topic,
+                            receiver_id,
+                            neighbors = ?neighbors_before,
+                            "FORWARDER_SPAWN: permanent forwarder spawned with receiver",
                         );
                         // Broadcast AboutMe so the peer knows we're here
                         if let Ok(msg) = crate::SignedMessage::sign_and_encode(
@@ -36300,7 +36317,12 @@ fn subscription_stream(
                 tokio::select! {
                     event = async { rx.lock().await.recv().await }, if rx_open => {
                         match event {
-                            Some(e) => return Some((AppMessage::NetEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx, transfer_rx))),
+                            Some(e) => {
+                                tracing::debug!(
+                                    "APP_NET_RX: combined stream received net event",
+                                );
+                                return Some((AppMessage::NetEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx, transfer_rx)));
+                            }
                             None => {
                                 tracing::warn!(
                                     "subscription_stream: net_rx channel closed — net events permanently disabled"

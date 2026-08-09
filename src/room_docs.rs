@@ -1114,6 +1114,10 @@ pub async fn forward_room_events_for_chat(
                 continue;
             }
         };
+        tracing::debug!(
+            event_kind = ?matches!(&event, GossipEvent::NeighborUp(_)).then(|| "NeighborUp").or_else(|| matches!(&event, GossipEvent::NeighborDown(_)).then(|| "NeighborDown")).or_else(|| matches!(&event, GossipEvent::Received(_)).then(|| "Received")).unwrap_or("Other"),
+            "GOSSIP_RX_EVENT: room forwarder received event from GossipReceiver",
+        );
 
         let is_metadata = matches!(
             &event,

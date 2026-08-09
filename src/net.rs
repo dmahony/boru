@@ -68,6 +68,16 @@ const TOPIC_EVENT_CAP: usize = 256;
 
 /// Events emitted from the gossip protocol
 pub type ProtoEvent = proto::Event<PublicKey>;
+
+/// Short tag for diagnostic logging of a proto event kind.
+fn event_kind_tag(event: &ProtoEvent) -> &'static str {
+    match event {
+        ProtoEvent::NeighborUp(_) => "NeighborUp",
+        ProtoEvent::NeighborDown(_) => "NeighborDown",
+        ProtoEvent::Received(_) => "Received",
+        ProtoEvent::MissingMessages { .. } => "MissingMessages",
+    }
+}
 /// Commands for the gossip protocol
 pub type ProtoCommand = proto::Command<PublicKey>;
 
@@ -1148,11 +1158,18 @@ impl Actor {
                         }
                         _ => {}
                     }
+                    let event_kind = event_kind_tag(&event);
                     if let Err(err) = event_sender.send(event) {
                         warn!(
                             topic = %topic_id.fmt_short(),
                             error = %err,
                             "gossip: event_sender.send failed — event dropped (broadcast channel closed or no receivers)"
+                        );
+                    } else {
+                        debug!(
+                            topic = %topic_id.fmt_short(),
+                            event_kind,
+                            "ACTOR_EMIT: broadcast sent to subscriber loops",
                         );
                     }
                     if !state.still_needed() {
@@ -1464,10 +1481,27 @@ async fn topic_subscriber_loop(
                    }
                    Ok(event) => event.into(),
                };
+               let kind = match &event {
+                   crate::api::Event::NeighborUp(_) => "NeighborUp",
+                   crate::api::Event::NeighborDown(_) => "NeighborDown",
+                   crate::api::Event::Received(_) => "Received",
+                   crate::api::Event::MissingMessages { .. } => "MissingMessages",
+                   crate::api::Event::Lagged => "Lagged",
+               };
+               debug!(
+                   topic = %topic_id.fmt_short(),
+                   event_kind = kind,
+                   "SUBSCRIBER_SEND_BEGIN: forwarding event to app-side irpc channel",
+               );
                if sender.send(event).await.is_err() {
                    debug!(topic = %topic_id.fmt_short(), "gossip: subscriber loop exiting — app-side receiver dropped");
                    break;
                }
+               debug!(
+                   topic = %topic_id.fmt_short(),
+                   event_kind = kind,
+                   "SUBSCRIBER_SEND_OK: irpc send completed",
+               );
            }
            _ = sender.closed() => {
                debug!(topic = %topic_id.fmt_short(), "gossip: subscriber loop exiting — subscription channel closed (app receiver dropped)");

@@ -692,6 +692,14 @@ pub fn spawn_conversation_forwarder(
             ));
         // Bridge: tag each NetEvent with the topic and forward to the shared channel
         while let Some(event) = inner_rx.recv().await {
+            tracing::debug!(
+                topic = %topic.fmt_short(),
+                "ROOM_FORWARD_RX: bridge received tagged event from room forwarder",
+            );
+            tracing::debug!(
+                topic = %topic.fmt_short(),
+                "CONVERSATION_NET_SEND_BEGIN: sending tagged event to app net channel",
+            );
             if net_tx
                 .send(ConversationNetEvent::new(topic, event))
                 .await
@@ -703,6 +711,10 @@ pub fn spawn_conversation_forwarder(
                 );
                 break;
             }
+            tracing::debug!(
+                topic = %topic.fmt_short(),
+                "CONVERSATION_NET_SEND_OK: tagged event delivered to app net channel",
+            );
         }
         tracing::debug!(
             topic = %topic.fmt_short(),
