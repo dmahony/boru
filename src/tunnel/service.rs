@@ -38,6 +38,18 @@ pub const MAX_CONNECTION_ATTEMPTS_PER_INTERVAL: usize = 8;
 /// Window used by the per-peer connection-attempt limiter.
 pub const CONNECTION_ATTEMPT_INTERVAL: Duration = Duration::from_secs(60);
 const MAX_TRACKED_ATTEMPT_PEERS: usize = 256;
+/// Smallest permitted per-tunnel idle timeout.
+pub const MIN_TUNNEL_IDLE_TIMEOUT: Duration = Duration::from_secs(1);
+/// Largest permitted per-tunnel idle timeout.
+pub const MAX_TUNNEL_IDLE_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Clamp an idle timeout into the permitted range.
+///
+/// The floor prevents a misconfigured (near-zero) timeout from closing every
+/// tunnel immediately; the ceiling keeps the setting within policy bounds.
+pub fn clamp_tunnel_idle_timeout(timeout: Duration) -> Duration {
+    timeout.clamp(MIN_TUNNEL_IDLE_TIMEOUT, MAX_TUNNEL_IDLE_TIMEOUT)
+}
 
 /// A local service target exposed through a tunnel.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -386,6 +398,9 @@ pub struct TunnelService {
     live_info: RwLock<HashMap<TunnelId, Arc<TunnelLiveInfo>>>,
     reconnect: RwLock<HashMap<TunnelId, ReconnectInfo>>,
     enrollment: Arc<EnrollmentTokenStore>,
+    /// Maximum time a tunnel connection may remain completely idle before it
+    /// is closed. Forwarding resets the timer on every transferred byte.
+    idle_timeout: Duration,
 }
 
 impl Default for TunnelService {
@@ -397,6 +412,7 @@ impl Default for TunnelService {
             live_info: RwLock::new(HashMap::new()),
             reconnect: RwLock::new(HashMap::new()),
             enrollment: Arc::new(EnrollmentTokenStore::new()),
+            idle_timeout: crate::tunnel::TUNNEL_IDLE_TIMEOUT,
         }
     }
 }
@@ -422,6 +438,21 @@ impl TunnelService {
     /// Return the shared enrollment-token store.
     pub fn enrollment(&self) -> &Arc<EnrollmentTokenStore> {
         &self.enrollment
+    }
+
+    /// Configure the per-tunnel idle timeout, clamped to
+    /// [`MIN_TUNNEL_IDLE_TIMEOUT`]..=[`MAX_TUNNEL_IDLE_TIMEOUT`].
+    ///
+    /// A tunnel with no forwarded bytes for this duration is closed; any
+    /// activity in either direction resets the timer.
+    pub fn with_idle_timeout(mut self, idle_timeout: Duration) -> Self {
+        self.idle_timeout = clamp_tunnel_idle_timeout(idle_timeout);
+        self
+    }
+
+    /// Return the configured per-tunnel idle timeout.
+    pub fn idle_timeout(&self) -> Duration {
+        self.idle_timeout
     }
 
     /// Register a tunnel in the active state.
@@ -836,7 +867,8 @@ mod tests {
     use iroh::SecretKey;
 
     use super::{
-        TunnelLiveInfo, TunnelRoute, TunnelService, TunnelServiceError, TunnelStatus, TunnelTarget,
+        clamp_tunnel_idle_timeout, TunnelLiveInfo, TunnelRoute, TunnelService, TunnelServiceError,
+        TunnelStatus, TunnelTarget, MAX_TUNNEL_IDLE_TIMEOUT, MIN_TUNNEL_IDLE_TIMEOUT,
     };
     use crate::tunnel::TunnelId;
 
@@ -845,6 +877,35 @@ mod tests {
         let peer = SecretKey::generate().public();
         let id = TunnelId([7; 32]);
         (TunnelService::new(), owner, peer, id)
+    }
+
+    #[test]
+    fn idle_timeout_defaults_to_five_minutes_and_is_bounded() {
+        let service = TunnelService::new();
+        assert_eq!(
+            service.idle_timeout(),
+            crate::tunnel::TUNNEL_IDLE_TIMEOUT,
+            "the default idle timeout must match the documented five-minute constant"
+        );
+        // Near-zero values clamp up so a misconfiguration cannot close every
+        // tunnel immediately.
+        assert_eq!(
+            clamp_tunnel_idle_timeout(Duration::ZERO),
+            MIN_TUNNEL_IDLE_TIMEOUT
+        );
+        assert_eq!(
+            clamp_tunnel_idle_timeout(Duration::from_millis(1)),
+            MIN_TUNNEL_IDLE_TIMEOUT
+        );
+        // Ordinary values pass through unchanged.
+        let chosen = Duration::from_secs(300);
+        assert_eq!(clamp_tunnel_idle_timeout(chosen), chosen);
+        assert_eq!(service.with_idle_timeout(chosen).idle_timeout(), chosen);
+        // Absurdly long values clamp down to the policy ceiling.
+        assert_eq!(
+            clamp_tunnel_idle_timeout(Duration::from_secs(48 * 60 * 60)),
+            MAX_TUNNEL_IDLE_TIMEOUT
+        );
     }
 
     #[test]

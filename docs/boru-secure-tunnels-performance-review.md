@@ -24,12 +24,13 @@ Reviewed the Phase 27 checklist against the tunnel implementation in `src/tunnel
   on the shared connection. Sequential and simultaneous stream reuse are covered
   by the existing tunnel tests; no per-request QUIC connection is created.
 - **Idle behavior:** there are no polling loops, keepalive loops, or application
-  heartbeats. QUIC's transport manages its own protocol traffic. The existing
-  `TUNNEL_IDLE_TIMEOUT` is a five-minute forwarding deadline (a lifetime guard),
-  not a high-frequency timer and not synthetic idle traffic. A future refinement
-  could make this an inactivity deadline that resets on bytes transferred; that is
-  intentionally left as a separate change because it requires activity-aware
-  forwarding rather than a simple wrapper timeout.
+  heartbeats. QUIC's transport manages its own protocol traffic. `TUNNEL_IDLE_TIMEOUT`
+  is an inactivity deadline, not a lifetime guard: forwarding is activity-aware
+  and every successfully transferred chunk in either direction resets the idle
+  timer, so a healthy tunnel with ongoing traffic lives indefinitely while an
+  inactive tunnel is closed after the configured idle period. The duration is
+  configurable per service (bounded to 1 s–24 h), and the idle-close reason is
+  logged distinctly from graceful close and I/O errors.
 - **Shutdown behavior:** listener shutdown now propagates its cancellation token
   to every in-flight forwarding task, so stopping `LocalTunnelListener::run`
   does not leave active TCP/QUIC forwarding tasks behind. A cached connection is

@@ -3,6 +3,7 @@
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::Arc,
+    time::Duration,
 };
 
 use iroh::{endpoint::Connection, Endpoint, EndpointAddr};
@@ -33,6 +34,8 @@ pub struct LocalTunnelListener {
     max_connections: Arc<Semaphore>,
     peer_connection: Arc<Mutex<Option<Connection>>>,
     live: Arc<TunnelLiveInfo>,
+    /// Maximum time one routed connection may remain idle before it is closed.
+    idle_timeout: Duration,
 }
 
 impl LocalTunnelListener {
@@ -83,7 +86,20 @@ impl LocalTunnelListener {
             max_connections: Arc::new(Semaphore::new(max_connections)),
             peer_connection: Arc::new(Mutex::new(None)),
             live: Arc::new(TunnelLiveInfo::default()),
+            idle_timeout: super::TUNNEL_IDLE_TIMEOUT,
         })
+    }
+
+    /// Configure the per-connection idle timeout, clamped to the permitted
+    /// range. Any forwarded byte in either direction resets the timer.
+    pub fn with_idle_timeout(mut self, idle_timeout: Duration) -> Self {
+        self.idle_timeout = super::service::clamp_tunnel_idle_timeout(idle_timeout);
+        self
+    }
+
+    /// Return the configured per-connection idle timeout.
+    pub fn idle_timeout(&self) -> Duration {
+        self.idle_timeout
     }
 
     /// Return the shared live connection-info handle for this listener.
@@ -199,6 +215,7 @@ impl LocalTunnelListener {
             let capability = self.capability.clone();
             let peer_connection = Arc::clone(&self.peer_connection);
             let live = Arc::clone(&self.live);
+            let idle_timeout = self.idle_timeout;
             let route_cancellation = cancellation.clone();
             tokio::spawn(async move {
                 let result = Self::route_with(
@@ -208,6 +225,7 @@ impl LocalTunnelListener {
                     capability,
                     peer_connection,
                     live,
+                    idle_timeout,
                     local,
                     permit,
                     route_cancellation,
@@ -233,6 +251,7 @@ impl LocalTunnelListener {
             self.capability.clone(),
             Arc::clone(&self.peer_connection),
             Arc::clone(&self.live),
+            self.idle_timeout,
             local,
             permit,
             cancellation,
@@ -247,6 +266,7 @@ impl LocalTunnelListener {
         capability: TunnelCapability,
         peer_connection: Arc<Mutex<Option<Connection>>>,
         live: Arc<TunnelLiveInfo>,
+        idle_timeout: Duration,
         local: TcpStream,
         _permit: OwnedSemaphorePermit,
         cancellation: CancellationToken,
@@ -280,8 +300,33 @@ impl LocalTunnelListener {
                 return Err(error);
             }
         };
-        forwarding::forward_bidirectional(local, send, recv, cancellation, Some(live.clone()))
-            .await;
+        match forwarding::forward_bidirectional(
+            local,
+            send,
+            recv,
+            cancellation,
+            idle_timeout,
+            Some(live.clone()),
+        )
+        .await
+        {
+            Ok(forwarding::ForwardEnd::Eof) => {
+                tracing::debug!(tunnel = %super::tunnel_id_label(tunnel_id), "tunnel local connection closed: end of stream");
+            }
+            Ok(forwarding::ForwardEnd::IdleTimeout) => {
+                tracing::info!(
+                    tunnel = %super::tunnel_id_label(tunnel_id),
+                    idle_timeout = ?idle_timeout,
+                    "tunnel local connection closed: idle timeout"
+                );
+            }
+            Ok(forwarding::ForwardEnd::Cancelled) => {
+                tracing::debug!(tunnel = %super::tunnel_id_label(tunnel_id), "tunnel local connection closed: cancelled");
+            }
+            Err(error) => {
+                tracing::warn!(tunnel = %super::tunnel_id_label(tunnel_id), %error, "tunnel local forwarding failed");
+            }
+        }
         if connection.close_reason().is_some() {
             peer_connection.lock().await.take();
         }

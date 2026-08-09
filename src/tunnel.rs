@@ -455,7 +455,9 @@ const MAX_HANDSHAKE_SIZE: usize = 64 * 1024;
 pub const TUNNEL_CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 /// Bounds each tunnel handshake read, preventing stuck pending streams.
 pub const TUNNEL_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
-/// Maximum time a tunnel may remain completely idle.
+/// Default maximum time a tunnel may remain completely idle before it is
+/// closed. Any successfully transferred byte in either direction resets the
+/// idle timer; this is inactivity detection, not a hard lifetime limit.
 pub const TUNNEL_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 pub(crate) async fn write_frame<T: Serialize>(
@@ -689,12 +691,34 @@ async fn handle_incoming_stream(
     service.record_connection_opened(tunnel_id);
     let live = service.live_info(tunnel_id);
     write_frame(&mut send, &TunnelResponse::Accepted).await?;
-    timeout(
-        TUNNEL_IDLE_TIMEOUT,
-        forwarding::forward_bidirectional(local, send, recv, cancellation, live),
+    let idle_timeout = service.idle_timeout();
+    match forwarding::forward_bidirectional(
+        local,
+        send,
+        recv,
+        cancellation,
+        idle_timeout,
+        live,
     )
     .await
-    .ok();
+    {
+        Ok(forwarding::ForwardEnd::Eof) => {
+            tracing::debug!(tunnel = %tunnel_label, "tunnel closed: end of stream");
+        }
+        Ok(forwarding::ForwardEnd::IdleTimeout) => {
+            tracing::info!(
+                tunnel = %tunnel_label,
+                idle_timeout = ?idle_timeout,
+                "tunnel closed: idle timeout"
+            );
+        }
+        Ok(forwarding::ForwardEnd::Cancelled) => {
+            tracing::debug!(tunnel = %tunnel_label, "tunnel closed: cancelled");
+        }
+        Err(error) => {
+            tracing::warn!(tunnel = %tunnel_label, %error, "tunnel forwarding failed");
+        }
+    }
     service.release_connection(tunnel_id);
     service.record_connection_closed(tunnel_id);
     Ok(())
@@ -1403,6 +1427,74 @@ mod tests {
         recv.read_exact(&mut response).await?;
         assert_eq!(&response, b"pong");
         service_task.await??;
+        router.shutdown().await?;
+        client.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn idle_tunnel_is_closed_after_configured_idle_period() -> anyhow::Result<()> {
+        let tcp_listener = TcpListener::bind("127.0.0.1:0").await?;
+        let target_addr = tcp_listener.local_addr()?;
+        let target_task = tokio::spawn(async move {
+            let (mut socket, _) = tcp_listener.accept().await?;
+            let mut request = [0; 4];
+            socket.read_exact(&mut request).await?;
+            socket.write_all(b"pong").await?;
+            // Hold the connection open with no further traffic: the owner-side
+            // idle timeout is what must close the tunnel, not EOF.
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            anyhow::Ok(())
+        });
+
+        let owner = iroh::SecretKey::generate();
+        let tunnel_id = TunnelId([46; 32]);
+        let listener = Endpoint::bind(presets::Minimal).await?;
+        let client = Endpoint::bind(presets::Minimal).await?;
+        let service = Arc::new(
+            crate::tunnel::service::TunnelService::new()
+                .with_idle_timeout(crate::tunnel::service::MIN_TUNNEL_IDLE_TIMEOUT),
+        );
+        service
+            .create_tunnel(
+                tunnel_id,
+                owner.public(),
+                crate::tunnel::service::TunnelTarget::tcp(target_addr.ip(), target_addr.port()),
+                client.id(),
+                0,
+                u64::MAX,
+            )
+            .unwrap();
+        let tunnel = TunnelProtocol::with_service(Arc::clone(&service), owner.public());
+        let router = Router::builder(listener)
+            .accept(BORU_TUNNEL_ALPN, tunnel)
+            .spawn();
+        let connection = client
+            .connect(router.endpoint().addr(), BORU_TUNNEL_ALPN)
+            .await?;
+        let capability = TunnelCapability::sign(&owner, client.id(), tunnel_id, 0, u64::MAX);
+        let (mut send, mut recv) = super::open_tunnel(&connection, tunnel_id, capability).await?;
+        send.write_all(b"ping").await?;
+        let mut response = [0; 4];
+        recv.read_exact(&mut response).await?;
+        assert_eq!(&response, b"pong");
+
+        // Go idle. The owner must close the tunnel after the configured idle
+        // period; a read must then return promptly (stream reset / EOF)
+        // instead of hanging until a hard five-minute lifetime would fire.
+        let read = timeout(Duration::from_secs(2), recv.read_to_end(1024))
+            .await
+            .map_err(|_| anyhow::anyhow!("idle tunnel was not closed; read hung"))?;
+        let closed = match &read {
+            Ok(bytes) => bytes.is_empty(),
+            Err(_) => true,
+        };
+        assert!(
+            closed,
+            "expected the idle tunnel to be closed by the owner, got {read:?}"
+        );
+
+        target_task.abort();
         router.shutdown().await?;
         client.close().await;
         Ok(())

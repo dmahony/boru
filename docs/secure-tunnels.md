@@ -131,7 +131,11 @@ created.
    stream. The two directions are copied concurrently with explicit
    cancellation: EOF in one direction half-closes that direction while the
    other drains; an error or cancellation stops both. The owner side applies
-   an idle timeout (5 minutes) and connection/handshake timeouts (10 s / 5 s).
+   an idle timeout (5 minutes by default): any successfully transferred byte
+   in either direction resets the timer, so healthy tunnels with ongoing
+   traffic live indefinitely while inactive tunnels are closed after the
+   configured idle period. Connection/handshake timeouts (10 s / 5 s) bound
+   stream setup.
 
 ### Limits and timeouts
 
@@ -144,7 +148,7 @@ created.
 | `CONNECTION_ATTEMPT_INTERVAL` | 60 s | Rate-limit window |
 | `TUNNEL_CONNECTION_TIMEOUT` | 10 s | Bounds endpoint/local-service connection setup |
 | `TUNNEL_HANDSHAKE_TIMEOUT` | 5 s | Bounds each tunnel handshake read |
-| `TUNNEL_IDLE_TIMEOUT` | 5 min | Max time a tunnel may remain completely idle |
+| `TUNNEL_IDLE_TIMEOUT` | 5 min | Max time a tunnel may remain completely idle; any transferred byte resets the timer (configurable per service, bounded 1 s–24 h) |
 | `MAX_HANDSHAKE_SIZE` | 64 KiB | Bounds handshake frames |
 
 ---
