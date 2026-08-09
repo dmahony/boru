@@ -80,6 +80,12 @@ fn render_card(dep: &StatusCardDependency, w: f32, h: f32, name: &str) {
     let mut tree = Tree::new(element.as_widget());
     let limits = layout::Limits::new(Size::ZERO, Size::new(w, h));
     let node = element.as_widget_mut().layout(&mut tree, &renderer, &limits);
+    // CONN-04: report the card's REAL laid-out height (padding + content,
+    // unaffected by the drop shadow) so the 200-230px band is verifiable.
+    println!(
+        "layout height for {name}: {:.1}px (canvas {w}x{h})",
+        node.bounds().height
+    );
     let theme = iced::Theme::Light;
     let viewport = Rectangle::with_size(Size::new(w, h));
     element.as_widget().draw(
@@ -108,6 +114,19 @@ fn render_card(dep: &StatusCardDependency, w: f32, h: f32, name: &str) {
     )
     .unwrap();
     println!("captured {path} ({w} x {h})");
+}
+
+/// Lay the card out at the given content width and return its REAL
+/// laid-out height (padding + content). The drop shadow is rendered, not
+/// laid out, so this is the authoritative measure for the CONN-04 band.
+fn measure_card_height(dep: &StatusCardDependency, w: f32) -> f32 {
+    let renderer =
+        iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(Font::default(), Pixels(16.0)));
+    let mut element: iced::Element<'_, AppMessage> = view_status_card(dep);
+    let mut tree = Tree::new(element.as_widget());
+    let limits = layout::Limits::new(Size::ZERO, Size::new(w, 320.0));
+    let node = element.as_widget_mut().layout(&mut tree, &renderer, &limits);
+    node.bounds().height
 }
 
 #[cfg(test)]
@@ -171,5 +190,32 @@ mod tests {
         render_card(&dep(HomeConnectionVariant::Offline, 679.0), 679.0, 360.0, "status_offline_medium_679");
         // Narrow (below supported widths) — stacked layout.
         render_card(&dep(HomeConnectionVariant::Ready, 400.0), 400.0, 480.0, "status_ready_narrow_400");
+    }
+
+    #[test]
+    fn ready_card_lands_in_compact_band() {
+        // CONN-04 acceptance (spec §4): the normal desktop Ready card must
+        // be ~200-230px tall — content-determined, not a fixed height.
+        // The Full tier (single-line heading) is held strictly to the band;
+        // at the minimum supported window (Medium 679) the heading wraps to
+        // two lines, and requirement 3 sanctions that content-driven growth
+        // — so Medium gets a small tolerance above 230.
+        load_font(include_bytes!("fonts/ArchivoSemiCondensed-Bold.ttf"));
+        load_font(include_bytes!("fonts/IBMPlexSans-Regular.ttf"));
+        load_font(include_bytes!("fonts/IBMPlexSans-Medium.ttf"));
+        load_font(include_bytes!("fonts/IBMPlexSans-SemiBold.ttf"));
+
+        // Wide desktop (1600 window → ~1215 content) — full three-region row.
+        let full = measure_card_height(&dep(HomeConnectionVariant::Ready, 1215.0), 1215.0);
+        assert!(
+            (200.0..=230.0).contains(&full),
+            "Ready Full card height {full:.1}px must land in the spec's 200-230px band"
+        );
+        // Minimum supported window (1024 → ~679 content) — medium row.
+        let medium = measure_card_height(&dep(HomeConnectionVariant::Ready, 679.0), 679.0);
+        assert!(
+            (200.0..=240.0).contains(&medium),
+            "Ready Medium card height {medium:.1}px must stay compact (wrapped-heading growth allowed to 240)"
+        );
     }
 }

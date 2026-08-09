@@ -40,11 +40,16 @@ use crate::fonts::{self, TypeRole};
 /// `ActivityTick`), so the full cycle is slow and unobtrusive.
 pub(crate) const STATUS_CARD_PULSE_PHASES: u32 = 6;
 
-/// Minimum content height of the status card, before padding. With the
-/// card's 32 px top/bottom padding the Ready card lands around 280 px tall.
-/// Implemented as a zero-width spacer so the card grows with content
-/// (wrapped degraded/offline reasons) instead of clipping.
-pub(crate) const STATUS_CARD_MIN_CONTENT_HEIGHT: f32 = 200.0;
+/// Lower bound for the status card's content height, before padding.
+/// Kept compact (CONN-04): with the card's 24 px vertical padding the
+/// Ready card lands ~218-235 px tall — inside or within a few px of the
+/// spec's 200-230 px band — and grows beyond this floor only when its
+/// content requires it (a wrapped two-line heading at Medium widths, or
+/// wrapped degraded/offline reasons). Implemented as a zero-width spacer
+/// so the card never clips content; the mesh (170 px Full / 136 px
+/// Medium) and a wrapped two-line heading usually exceed this floor
+/// anyway.
+pub(crate) const STATUS_CARD_MIN_CONTENT_HEIGHT: f32 = 150.0;
 
 /// Content width at which the card switches from the full three-region
 /// row layout to the reduced medium layout.
@@ -156,9 +161,13 @@ pub(crate) fn view_status_card(
     let body: iced::Element<'static, AppMessage> = match tier {
         Tier::Full | Tier::Medium => {
             // [status icon] [status information] [network]
+            // Vertical rhythm of the info column (hd/divider/dd/description/
+            // dp/footer) trimmed for the compact height band (CONN-04).
+            // Horizontal gaps (icon-text, text-graph) stay — CONN-05 owns
+            // their tuning.
             let (icon_text_gap, text_graph_gap, hd_gap, dd_gap, dp_gap) = match tier {
-                Tier::Full => (32.0, 40.0, 20.0, 16.0, 24.0),
-                _ => (28.0, 32.0, 16.0, 12.0, 20.0),
+                Tier::Full => (32.0, 40.0, 16.0, 12.0, 20.0),
+                _ => (28.0, 32.0, 12.0, 10.0, 16.0),
             };
             let info = Column::new()
                 .push(heading)
@@ -213,8 +222,12 @@ pub(crate) fn view_status_card(
 
     let opacity = dep.home_menu_opacity.clamp(0.0, 1.0);
 
+    // Vertical padding tightened to SPACE_24 for the compact height band
+    // (CONN-04; the spec's 24-28px padding target — CONN-05 owns the full
+    // pass). Horizontal stays SPACE_32 so the width math in
+    // `horizontal_mesh_width` (which subtracts 2 × SPACE_32) is unchanged.
     container(body)
-        .padding(design_tokens::SPACE_32)
+        .padding([design_tokens::SPACE_24, design_tokens::SPACE_32])
         .width(Length::Fill)
         .style(move |_t| {
             container::Style {
