@@ -25,6 +25,11 @@
 //!   subsequent resolution ([`ShortCodeError::AlreadyUsed`]).
 //! - **Authenticity** — announcements are signed with the sender's iroh
 //!   secret key; receivers verify before trusting the ticket.
+//! - **Freshness** — every signed announcement carries an authenticated
+//!   `sent_at_unix_secs`; [`SignedShortCodeAnnouncement::verify`] /
+//!   [`SignedShortCodeAnnouncement::verify_at`] reject announcements outside
+//!   the [`ShortCodeFreshnessPolicy`] window as [`ShortCodeError::Stale`], so
+//!   a captured announcement cannot be replayed indefinitely.
 //!
 //! Persistence follows the `pairing_service.rs` pattern: a JSON file in the
 //! data directory written atomically, so codes survive restarts.
@@ -93,6 +98,9 @@ pub enum ShortCodeError {
     Expired,
     /// The code was already resolved (replay attempt).
     AlreadyUsed,
+    /// The signed announcement's authenticated timestamp is outside the
+    /// allowed freshness/skew window ([`ShortCodeFreshnessPolicy`]).
+    Stale,
 }
 
 impl std::fmt::Display for ShortCodeError {
@@ -101,6 +109,7 @@ impl std::fmt::Display for ShortCodeError {
             Self::UnknownCode => write!(f, "unknown short code"),
             Self::Expired => write!(f, "short code has expired"),
             Self::AlreadyUsed => write!(f, "short code was already used"),
+            Self::Stale => write!(f, "short-code announcement is outside its freshness window"),
         }
     }
 }
@@ -328,6 +337,35 @@ pub struct ShortCodeAnnouncement {
     pub created_at_ms: u64,
 }
 
+/// Clock policy for short-code announcement freshness.
+///
+/// Both bounds are applied to the envelope's **authenticated**
+/// `sent_at_unix_secs` timestamp (it is part of the signed canonical
+/// payload), so a captured announcement cannot be replayed beyond `max_age`
+/// and an announcement claiming to be from a clock more than
+/// `max_future_skew` in the future is rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShortCodeFreshnessPolicy {
+    /// Maximum allowed age of a signed announcement, inclusive.
+    pub max_age: Duration,
+    /// Maximum allowed future skew, inclusive.
+    pub max_future_skew: Duration,
+}
+
+impl ShortCodeFreshnessPolicy {
+    /// Default policy: announcements older than 5 minutes, or claiming to be
+    /// from more than 1 minute in the future, are rejected.
+    pub const DEFAULT: Self = Self::new(Duration::from_secs(5 * 60), Duration::from_secs(60));
+
+    /// Build a policy with explicit bounds.
+    pub const fn new(max_age: Duration, max_future_skew: Duration) -> Self {
+        Self {
+            max_age,
+            max_future_skew,
+        }
+    }
+}
+
 /// Signed envelope for a [`ShortCodeAnnouncement`], following the
 /// `SignedContactMessage` wire pattern.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -348,9 +386,20 @@ impl SignedShortCodeAnnouncement {
         secret_key: &iroh::SecretKey,
         announcement: &ShortCodeAnnouncement,
     ) -> Result<Vec<u8>> {
+        Self::sign_at(secret_key, announcement, now_unix_ms() / 1000)
+    }
+
+    /// Sign with an explicit `sent_at_unix_secs`.
+    ///
+    /// Production code uses [`Self::sign`]; the timestamp parameter exists so
+    /// tests can build old/future announcements deterministically.
+    fn sign_at(
+        secret_key: &iroh::SecretKey,
+        announcement: &ShortCodeAnnouncement,
+        sent_at_unix_secs: u64,
+    ) -> Result<Vec<u8>> {
         let data = postcard::to_stdvec(announcement)
             .map_err(|e| n0_error::anyerr!("encode short-code announcement: {e}"))?;
-        let sent_at_unix_secs = now_unix_ms() / 1000;
         let signing_data = signing_bytes(sent_at_unix_secs, &data);
         let signature = secret_key.sign(&signing_data);
         let envelope = Self {
@@ -363,12 +412,72 @@ impl SignedShortCodeAnnouncement {
             .map_err(|e| n0_error::anyerr!("encode signed short-code announcement: {e}"))
     }
 
-    /// Verify the envelope, decode the announcement, and require the
-    /// announcement's code to match `expected_code` (normalised).
+    /// Verify the envelope, decode the announcement, and enforce freshness.
+    ///
+    /// Signature verification, identity binding, code matching AND the
+    /// freshness window are all checked in this one mandatory operation:
+    ///
+    /// - the authenticated `sent_at_unix_secs` must not be more than
+    ///   `policy.max_age` in the past (boundary inclusive), and
+    /// - must not be more than `policy.max_future_skew` in the future
+    ///   (boundary inclusive).
+    ///
+    /// An announcement outside the window fails with
+    /// [`ShortCodeError::Stale`] even though its signature is valid, so
+    /// callers cannot accidentally accept a replayed announcement.
+    pub fn verify_at(
+        now: SystemTime,
+        policy: &ShortCodeFreshnessPolicy,
+        bytes: &[u8],
+        expected_code: &str,
+    ) -> std::result::Result<(iroh::PublicKey, ShortCodeAnnouncement), ShortCodeError> {
+        let (from, announcement, sent_at_unix_secs) =
+            Self::verify_signature_only(bytes, expected_code)?;
+        let now_secs = now
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| ShortCodeError::Stale)?
+            .as_secs();
+        // Reject announcements claiming to be from the future beyond skew.
+        if sent_at_unix_secs > now_secs
+            && sent_at_unix_secs - now_secs > policy.max_future_skew.as_secs()
+        {
+            return Err(ShortCodeError::Stale);
+        }
+        // Reject announcements older than the allowed maximum age.
+        if now_secs > sent_at_unix_secs && now_secs - sent_at_unix_secs > policy.max_age.as_secs() {
+            return Err(ShortCodeError::Stale);
+        }
+        Ok((from, announcement))
+    }
+
+    /// Convenience wrapper that enforces the
+    /// [`ShortCodeFreshnessPolicy::DEFAULT`] policy against the current wall
+    /// clock.
+    ///
+    /// This is the only public entry point most callers need; it never
+    /// returns an expired announcement as valid.
     pub fn verify(
         bytes: &[u8],
         expected_code: &str,
     ) -> std::result::Result<(iroh::PublicKey, ShortCodeAnnouncement), ShortCodeError> {
+        Self::verify_at(
+            SystemTime::now(),
+            &ShortCodeFreshnessPolicy::DEFAULT,
+            bytes,
+            expected_code,
+        )
+    }
+
+    /// Decode + signature + identity + code-match, WITHOUT freshness.
+    ///
+    /// Private on purpose (BORU-AUDIT-14): callers must go through
+    /// [`Self::verify_at`] / [`Self::verify`] so freshness can never be
+    /// skipped by accident.  Exists so the freshness check is layered on a
+    /// single decode/verify implementation.
+    fn verify_signature_only(
+        bytes: &[u8],
+        expected_code: &str,
+    ) -> std::result::Result<(iroh::PublicKey, ShortCodeAnnouncement, u64), ShortCodeError> {
         let envelope: Self = postcard::from_bytes(bytes).map_err(|e| {
             tracing::debug!("short-code: decode envelope failed: {e}");
             ShortCodeError::UnknownCode
@@ -391,7 +500,7 @@ impl SignedShortCodeAnnouncement {
         if normalise_code(&announcement.code) != normalise_code(expected_code) {
             return Err(ShortCodeError::UnknownCode);
         }
-        Ok((envelope.from, announcement))
+        Ok((envelope.from, announcement, envelope.sent_at_unix_secs))
     }
 }
 
@@ -417,6 +526,24 @@ mod tests {
 
     fn sample_ticket() -> String {
         "blob:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string()
+    }
+
+    fn sample_announcement() -> ShortCodeAnnouncement {
+        ShortCodeAnnouncement {
+            code: "ABC2345".to_string(),
+            name: "photo.jpg".to_string(),
+            ticket: sample_ticket(),
+            size: 8192,
+            created_at_ms: now_unix_ms(),
+        }
+    }
+
+    fn fixed_policy() -> ShortCodeFreshnessPolicy {
+        ShortCodeFreshnessPolicy::new(Duration::from_secs(60), Duration::from_secs(5))
+    }
+
+    fn epoch_secs(secs: u64) -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
     }
 
     // ── Code generation ──────────────────────────────────────────────
@@ -615,6 +742,98 @@ mod tests {
         bytes[mid] ^= 0x01;
         assert_eq!(
             SignedShortCodeAnnouncement::verify(&bytes, "ABC2345").unwrap_err(),
+            ShortCodeError::UnknownCode
+        );
+    }
+
+    // ── Freshness enforcement (BORU-AUDIT-14) ───────────────────────
+
+    #[test]
+    fn verify_at_accepts_fresh_announcement() {
+        let sk = iroh::SecretKey::generate();
+        let now = epoch_secs(1_000_000);
+        let ann = sample_announcement();
+        let bytes = SignedShortCodeAnnouncement::sign_at(&sk, &ann, 1_000_000).unwrap();
+        let (from, decoded) =
+            SignedShortCodeAnnouncement::verify_at(now, &fixed_policy(), &bytes, "ABC2345")
+                .unwrap();
+        assert_eq!(from, sk.public());
+        assert_eq!(decoded, ann);
+    }
+
+    #[test]
+    fn verify_rejects_old_but_correctly_signed_announcement() {
+        let sk = iroh::SecretKey::generate();
+        let now = epoch_secs(1_000_000);
+        let ann = sample_announcement();
+        // Signed 10 minutes ago: the signature is valid, but the envelope is
+        // far outside the 60s max-age of `fixed_policy()`.
+        let bytes = SignedShortCodeAnnouncement::sign_at(&sk, &ann, 1_000_000 - 600).unwrap();
+        assert_eq!(
+            SignedShortCodeAnnouncement::verify_at(now, &fixed_policy(), &bytes, "ABC2345")
+                .unwrap_err(),
+            ShortCodeError::Stale
+        );
+        // The convenience verify() (default policy, wall clock) also rejects
+        // an announcement signed 10 minutes ago.
+        assert_eq!(
+            SignedShortCodeAnnouncement::verify(&bytes, "ABC2345").unwrap_err(),
+            ShortCodeError::Stale
+        );
+    }
+
+    #[test]
+    fn verify_at_rejects_future_announcement_beyond_skew() {
+        let sk = iroh::SecretKey::generate();
+        let now = epoch_secs(1_000_000);
+        let ann = sample_announcement();
+        // Signed 1 hour in the future: far beyond the 5s skew allowance.
+        let bytes = SignedShortCodeAnnouncement::sign_at(&sk, &ann, 1_000_000 + 3600).unwrap();
+        assert_eq!(
+            SignedShortCodeAnnouncement::verify_at(now, &fixed_policy(), &bytes, "ABC2345")
+                .unwrap_err(),
+            ShortCodeError::Stale
+        );
+    }
+
+    #[test]
+    fn verify_at_boundary_age_and_skew_are_deterministic() {
+        let sk = iroh::SecretKey::generate();
+        let now_secs = 1_000_000u64;
+        let now = epoch_secs(now_secs);
+        let policy = fixed_policy(); // max_age 60s, max_future_skew 5s, both inclusive
+        let ann = sample_announcement();
+        let cases = [
+            (now_secs - 61, false), // 1s older than max_age -> stale
+            (now_secs - 60, true),  // exactly max_age -> accepted
+            (now_secs, true),       // now -> accepted
+            (now_secs + 5, true),   // exactly max_future_skew -> accepted
+            (now_secs + 6, false),  // 1s beyond skew -> stale
+        ];
+        for (sent_at, expect_ok) in cases {
+            let bytes = SignedShortCodeAnnouncement::sign_at(&sk, &ann, sent_at).unwrap();
+            let result = SignedShortCodeAnnouncement::verify_at(now, &policy, &bytes, "ABC2345");
+            assert_eq!(
+                result.is_ok(),
+                expect_ok,
+                "sent_at={sent_at} (expected ok={expect_ok})"
+            );
+        }
+    }
+
+    #[test]
+    fn timestamp_mutation_breaks_signature() {
+        let sk = iroh::SecretKey::generate();
+        let ann = sample_announcement();
+        let bytes = SignedShortCodeAnnouncement::sign(&sk, &ann).unwrap();
+        // Re-encode the envelope with a different sent_at_unix_secs. The
+        // timestamp is part of the signed canonical payload, so the signature
+        // must no longer verify — a mutation cannot silently shift freshness.
+        let mut envelope: SignedShortCodeAnnouncement = postcard::from_bytes(&bytes).unwrap();
+        envelope.sent_at_unix_secs += 1;
+        let tampered = postcard::to_stdvec(&envelope).unwrap();
+        assert_eq!(
+            SignedShortCodeAnnouncement::verify(&tampered, "ABC2345").unwrap_err(),
             ShortCodeError::UnknownCode
         );
     }
