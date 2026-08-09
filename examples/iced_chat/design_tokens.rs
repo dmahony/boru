@@ -268,6 +268,31 @@ pub fn home_content_width(window_width: f32) -> f32 {
 /// (narrow band). Above it the dashboard keeps two columns.
 pub const HOME_TWO_COL_CONTENT: f32 = 720.0;
 
+/// Real width of the connection status card inside the home dashboard
+/// layout, expressed in *content* width units (see [`home_content_width`]).
+///
+/// The status card sits in the left column of the home grid. When the
+/// right activity rail is stacked below the main column (narrow band,
+/// `content_width < HOME_TWO_COL_CONTENT`) the card spans the full
+/// dashboard content width; when the rail sits beside it the left column
+/// is `FillPortion(2)` of a two-column row with a 24 px gap, so the card
+/// gets two-thirds of `content_width − SPACE_24`.
+///
+/// CONN-02: the card's responsive tier must be chosen from THIS width, not
+/// the raw window-derived `content_width`. iced has no container queries,
+/// so the call site derives the card's real width from the same layout
+/// rules the grid builds. The `DASHBOARD_MAX_WIDTH` centering cap is
+/// intentionally not modelled: it only binds above ~1785 px windows, where
+/// both the derived and the real card width exceed the Full-tier threshold,
+/// so it never changes a tier decision.
+pub fn status_card_content_width(content_width: f32) -> f32 {
+    if content_width < HOME_TWO_COL_CONTENT {
+        content_width
+    } else {
+        (content_width - SPACE_24) * 2.0 / 3.0
+    }
+}
+
 /// Below this content width quick actions collapse to one card per row
 /// (minimum supported width). Above it a two-by-two grid is used.
 pub const HOME_QUICK_ONE_COL_CONTENT: f32 = 520.0;
@@ -1170,6 +1195,25 @@ mod tests {
         let minimum = home_content_width(800.0);
         assert!(minimum < HOME_QUICK_ONE_COL_CONTENT,
             "800 should be minimum (one quick action per row)");
+    }
+
+    #[test]
+    fn status_card_width_tracks_the_real_container_not_the_window() {
+        // CONN-02 regression: the connection card's responsive tier must be
+        // chosen from the card's ACTUAL width, not the window-derived
+        // dashboard width. With the right rail open the card is only
+        // FillPortion(2) of (content − 24): ~2/3 of the dashboard width.
+        // At the 1280 reference window the dashboard is 919 px but the card
+        // is (919−24)×2/3 = 596.7 px.
+        let content = home_content_width(VIEWPORT_REF_WIDTH);
+        assert!(content >= HOME_TWO_COL_CONTENT, "precondition: rail open at 1280");
+        let card = status_card_content_width(content);
+        assert!((card - (content - SPACE_24) * 2.0 / 3.0).abs() < 0.01);
+        assert!(card < content, "card must be narrower than the dashboard when the rail is open");
+        // When the rail stacks (narrow band) the card spans the full width.
+        let narrow = home_content_width(VIEWPORT_MIN_WIDTH);
+        assert!(narrow < HOME_TWO_COL_CONTENT, "precondition: rail stacked at 1024");
+        assert_eq!(status_card_content_width(narrow), narrow);
     }
 
     // ── Shadow token invariants ────────────────────────────────────────

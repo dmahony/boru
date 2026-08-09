@@ -630,11 +630,44 @@ mod tests {
         assert_eq!(layout_tier(STATUS_CARD_NARROW_CONTENT - 1.0), Tier::Narrow);
         assert_eq!(layout_tier(0.0), Tier::Narrow);
         // The minimum supported window width (1024) must land in the
-        // medium tier, where the three regions stay visible.
+        // medium tier, where the three regions stay visible. CONN-02: the
+        // tier input is the card's REAL width — at 1024 the rail stacks, so
+        // the card spans the full content width (679 px) — never the raw
+        // window-derived dashboard width.
         assert_eq!(
-            layout_tier(crate::design_tokens::home_content_width(1024.0)),
+            layout_tier(crate::design_tokens::status_card_content_width(
+                crate::design_tokens::home_content_width(1024.0)
+            )),
             Tier::Medium
         );
+    }
+
+    #[test]
+    fn card_tier_uses_card_width_not_window_width() {
+        // CONN-02 regression: at the 1280 reference window the window-derived
+        // dashboard width is 919 px, which alone would select Tier::Full —
+        // but with the right rail open the card's real container is only
+        // (919−24)×2/3 = 596.7 px, which must select Tier::Medium. The tier
+        // must track the card's actual width, not the window.
+        let window_content = crate::design_tokens::home_content_width(1280.0);
+        assert!(
+            window_content >= STATUS_CARD_MEDIUM_CONTENT,
+            "precondition: old (window-derived) input would pick Full"
+        );
+        assert!(
+            window_content >= crate::design_tokens::HOME_TWO_COL_CONTENT,
+            "precondition: rail open at 1280"
+        );
+        let card_width = crate::design_tokens::status_card_content_width(window_content);
+        assert!(
+            card_width < STATUS_CARD_MEDIUM_CONTENT,
+            "card real width {card_width} must sit below the Full tier"
+        );
+        assert!(
+            card_width >= STATUS_CARD_NARROW_CONTENT,
+            "card real width {card_width} must stay in the readable Medium band"
+        );
+        assert_eq!(layout_tier(card_width), Tier::Medium);
     }
 
     #[test]

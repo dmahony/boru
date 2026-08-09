@@ -30047,10 +30047,19 @@ impl IcedChat {
         // the previous hero card consumed (variant / headline / actions /
         // width / opacity) — only the presentation changed. The mesh
         // pulses very slowly while Ready and OS reduced-motion is off.
+        //
+        // CONN-02: the card's responsive tier must respond to the card's
+        // REAL container width, not the window-derived dashboard width.
+        // With the right rail open the card occupies FillPortion(2) of
+        // (content_width − 24); with the rail stacked it spans the full
+        // content width. iced has no container queries, so the width is
+        // derived here from the same layout rules the grid below builds
+        // (see design_tokens::status_card_content_width).
+        let card_width = crate::design_tokens::status_card_content_width(content_width);
         let hero_card =
             crate::status_card::view_status_card(&crate::status_card::StatusCardDependency {
                 variant,
-                content_width,
+                content_width: card_width,
                 headline: headline.clone(),
                 show_retry,
                 show_details,
