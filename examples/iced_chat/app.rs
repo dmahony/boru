@@ -12927,6 +12927,11 @@ impl IcedChat {
                 // to Connected without requiring a manual chat click.
                 for &peer in &neighbor_ids {
                     if peer != self.local_public {
+                        // Seed the active conversation's neighbor set from
+                        // neighbors known at subscription time, so the first
+                        // send after a slow-path open does not stall (same
+                        // gate as the NeighborUp sync above).
+                        self.neighbors.insert(peer);
                         DIAGNOSTICS.record_with_peer(
                             Some(topic),
                             Some(peer.to_string()),
@@ -15583,6 +15588,18 @@ impl IcedChat {
                         conversation.sender_ready = conversation.sender.is_some();
                         if topic == self.topic {
                             let was_ready = self.sender_ready;
+                            // Keep the active conversation's neighbor set in
+                            // sync with the per-conversation set. switch_to_
+                            // conversation only copies conversation.neighbors
+                            // once; a NeighborUp arriving after the switch
+                            // (e.g. direct chat opened via the fast path
+                            // before the direct-topic mesh formed) would
+                            // otherwise leave self.neighbors empty forever,
+                            // silently queueing every send (broadcast_or_queue
+                            // requires sender_ready && neighbor_count > 0) and
+                            // never retrying them (the retry loop also gates on
+                            // self.neighbors.len() for the active topic).
+                            self.neighbors.insert(*peer);
                             self.sender_ready = self.sender.is_some();
                             info!(
                                 %peer,
@@ -15602,6 +15619,7 @@ impl IcedChat {
                         conversation.sender_ready =
                             !conversation.neighbors.is_empty() && conversation.sender.is_some();
                         if topic == self.topic {
+                            self.neighbors.remove(peer);
                             self.sender_ready =
                                 !conversation.neighbors.is_empty() && self.sender.is_some();
                         }
@@ -19888,9 +19906,16 @@ impl IcedChat {
                 )
             }
             AppMessage::BackgroundSubscribe(topic, bootstrap_peers) => {
-                // Already subscribed — skip.
-                if self.conversations.contains_key(&topic)
-                    && self.conversations[&topic].sender.is_some()
+                // Already subscribed — skip. The active conversation is not
+                // in self.conversations (switch_to_conversation removed it),
+                // so also treat a live sender on the active topic as already
+                // subscribed — otherwise a duplicate subscription to the same
+                // topic is created, which floods the mesh with duplicate
+                // messages and leaves an orphan sender whose broadcasts are
+                // accepted but never delivered.
+                if (self.conversations.contains_key(&topic)
+                    && self.conversations[&topic].sender.is_some())
+                    || (topic == self.topic && self.sender.is_some())
                 {
                     return iced::Task::none();
                 }
