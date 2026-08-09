@@ -440,7 +440,16 @@ fn status_divider(accent: Color) -> iced::Element<'static, AppMessage> {
 
 /// Compact `Secure • Decentralized • Private` status pill with a lock
 /// glyph. Purely informational — no hover/click behaviour.
-fn security_pill() -> iced::Element<'static, AppMessage> {
+///
+/// CONN-07 (spec §9): the pill is ONE compact inline row —
+/// `white-space: nowrap` + `width: fit-content` — so the icon and the
+/// text always share a single line. The text element uses
+/// `Wrapping::None` (the iced equivalent of nowrap) and both the inner
+/// row and the container use Shrink width so the pill hugs its content
+/// and can never be compressed into a vertical column. When the card is
+/// genuinely narrow the stacked layout (CONN-09) takes over instead of
+/// squeezing this pill.
+pub(crate) fn security_pill() -> iced::Element<'static, AppMessage> {
     container(
         Row::new()
             .push(
@@ -455,12 +464,18 @@ fn security_pill() -> iced::Element<'static, AppMessage> {
                     TypeRole::SupportingText,
                     "Secure  \u{2022}  Decentralized  \u{2022}  Private",
                 )
-                .color(design_tokens::STATUS_CONNECTED),
+                .color(design_tokens::STATUS_CONNECTED)
+                // Nowrap: the pill text must never wrap onto a second
+                // line or break into a vertical stack (spec §9).
+                .wrapping(iced::widget::text::Wrapping::None),
             )
             .spacing(0)
-            .align_y(Alignment::Center),
+            .align_y(Alignment::Center)
+            // fit-content — hug the icon + gap + text.
+            .width(Length::Shrink),
     )
-    .padding([design_tokens::SPACE_8, 14.0])
+    .padding([design_tokens::SPACE_8, design_tokens::SPACE_12])
+    .width(Length::Shrink)
     .style(move |_t| container::Style {
         background: Some(Background::Color(with_alpha(
             design_tokens::STATUS_CONNECTED,

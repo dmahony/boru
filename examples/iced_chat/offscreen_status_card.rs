@@ -129,6 +129,22 @@ fn measure_card_height(dep: &StatusCardDependency, w: f32) -> f32 {
     node.bounds().height
 }
 
+/// Lay the `Secure • Decentralized • Private` pill out at the given
+/// available width and return its REAL laid-out (width, height). Used by
+/// the CONN-07 nowrap regression test: with `Wrapping::None` the pill must
+/// hug its content at wide widths and must NEVER grow taller (i.e. wrap
+/// into a vertical column) when the available width shrinks.
+fn measure_pill(available_width: f32) -> (f32, f32) {
+    let renderer =
+        iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(Font::default(), Pixels(16.0)));
+    let mut element: iced::Element<'_, AppMessage> = crate::status_card::security_pill();
+    let mut tree = Tree::new(element.as_widget());
+    let limits = layout::Limits::new(Size::ZERO, Size::new(available_width, 100.0));
+    let node = element.as_widget_mut().layout(&mut tree, &renderer, &limits);
+    let b = node.bounds();
+    (b.width, b.height)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,5 +237,77 @@ mod tests {
             (170.0..=240.0).contains(&medium),
             "Ready Medium card height {medium:.1}px must stay compact (single-line heading at CONN-06 scale; wrapped-growth allowed to 240)"
         );
+    }
+
+    #[test]
+    fn security_pill_stays_one_compact_row_at_every_width() {
+        // CONN-07 acceptance (spec §9): the pill is one compact inline row
+        // (icon + text on a single line, `white-space: nowrap`,
+        // `width: fit-content`). It must hug its content at wide widths
+        // and MUST NEVER grow taller (wrap into a second line / a vertical
+        // column) when the available width shrinks — the card switches to
+        // the stacked layout (CONN-09) instead of squeezing the pill.
+        load_font(include_bytes!("fonts/IBMPlexSans-Regular.ttf"));
+
+        // Measure at an unconstrained width first — the natural, hugging
+        // size of the pill (icon 14 + gap 8 + text + padding 8/12).
+        let (natural_w, natural_h) = measure_pill(1000.0);
+        assert!(
+            natural_w > 0.0 && natural_w < 400.0,
+            "pill natural width {natural_w:.1}px should be a compact one-row element"
+        );
+        // A single line of 13px supporting text + 8px vertical padding.
+        assert!(
+            natural_h < 45.0,
+            "pill natural height {natural_h:.1}px must be a single compact row"
+        );
+
+        // Now squeeze: every available width from wide down to absurdly
+        // narrow must keep the SAME height (one line, never a vertical
+        // stack). The laid-out width must never exceed the available width
+        // (the pill never forces the card wider than its container).
+        for available in [
+            400.0, 300.0, 280.0, 260.0, 240.0, 220.0, 200.0, 180.0, 160.0, 140.0, 120.0,
+            100.0, 80.0, 60.0,
+        ] {
+            let (w, h) = measure_pill(available);
+            assert!(
+                (h - natural_h).abs() < 0.5,
+                "pill height {h:.1}px at {available:.0}px available must stay the \
+                 single-row height {natural_h:.1}px (never a vertical column)"
+            );
+            assert!(
+                w <= available + 0.5,
+                "pill width {w:.1}px at {available:.0}px available must never exceed \
+                 its container"
+            );
+        }
+    }
+
+    #[test]
+    fn security_pill_uses_nowrap_and_fit_content() {
+        // CONN-07: structural regression guard — the pill must stay a
+        // single-row fit-content element. This renders the pill inside a
+        // narrow fixed container and asserts the laid-out height is
+        // identical to the natural single-row height (the wrapped pill
+        // would grow vertically; the stacked pill would be a column).
+        load_font(include_bytes!("fonts/IBMPlexSans-Regular.ttf"));
+
+        let (_, natural_h) = measure_pill(1000.0);
+        // The tightest horizontal tier the card supports before switching
+        // to the stacked layout: the Medium text column floor (240px) and
+        // the Full tier floor (260px) — plus the real 679/1215 widths.
+        for available in [240.0, 260.0, 679.0, 1215.0] {
+            let (w, h) = measure_pill(available);
+            assert!(
+                (h - natural_h).abs() < 0.5,
+                "pill must stay a single row at {available:.0}px (got height {h:.1}px, \
+                 natural {natural_h:.1}px)"
+            );
+            assert!(
+                w <= available + 0.5,
+                "pill must fit its container at {available:.0}px (got width {w:.1}px)"
+            );
+        }
     }
 }
