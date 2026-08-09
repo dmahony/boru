@@ -9,12 +9,14 @@ use p2panda_encryption::crypto::Rng;
 use p2panda_encryption::key_bundle::{Lifetime, OneTimeKeyBundle, PreKey};
 use p2panda_encryption::message_scheme::group::GroupEvent;
 use p2panda_encryption::traits::PreKeyManager;
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 
-use crate::group_encryption::encryption_state::{EncryptionError, EncryptionState};
+use crate::group_encryption::encryption_state::{
+    EncryptionError, EncryptionState, GroupStateLoadOutcome,
+};
 use crate::group_encryption::manager::Manager;
 use crate::group_encryption::membership::MemberRole;
-use crate::group_encryption::persistence;
+use crate::group_encryption::persistence::{self, GroupStateLoadError};
 use crate::group_encryption::registry::RegistryState;
 use crate::group_encryption::types::PeerId;
 use crate::group_id::GroupId;
@@ -455,9 +457,8 @@ mod integration {
         persistence::save_group_state(&conn, &group_id, &alice_state).expect("save alice state");
 
         // ── Load back ──
-        let loaded_state = persistence::load_group_state(&conn, &group_id)
-            .expect("load alice state")
-            .expect("state should exist after save");
+        let loaded_state =
+            persistence::load_group_state(&conn, &group_id).expect("load alice state");
 
         // Replace Alice's old state with the loaded one.  Because
         // RegistryState creates a fresh in-memory DB on deserialization,
@@ -951,9 +952,7 @@ mod integration {
         persistence::save_group_state(&conn, &group_id, &alice_state).expect("save rotated state");
 
         // Reload Alice's rotated state from the DB (simulates restart).
-        let loaded = persistence::load_group_state(&conn, &group_id)
-            .expect("load rotated state")
-            .expect("state exists");
+        let loaded = persistence::load_group_state(&conn, &group_id).expect("load rotated state");
         let mut alice2 = make_enc_state(Rng::default(), &alice.registry);
         register_peer(&mut alice2, alice_id);
         register_peer(&mut alice2, bob_id);
@@ -1047,5 +1046,163 @@ mod integration {
             "owner stays admin"
         );
         assert_eq!(loaded.1, Some(alice_id), "self id round-trips");
+    }
+
+    // ── Fail-closed load-through-DB regression tests (BORU-AUDIT-04) ─────
+
+    /// A genuinely new group with no saved state → Missing (fresh init
+    /// allowed).
+    #[test]
+    fn test_load_from_db_missing_permits_fresh_init() {
+        let (mut alice, _bob, alice_id, _bob_id, _registry) = setup_two_peers();
+        let group_id = GroupId::generate();
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS group_encryption_state (
+                group_id BLOB PRIMARY KEY,
+                state BLOB NOT NULL,
+                updated_at INTEGER NOT NULL
+            );",
+        )
+        .expect("create table");
+        alice.db = Some(std::sync::Arc::new(std::sync::Mutex::new(conn)));
+
+        match alice.load_group_state_from_db(&group_id).expect("load") {
+            GroupStateLoadOutcome::Missing => {}
+            other => panic!("expected Missing for a new group, got: {other:?}"),
+        }
+    }
+
+    /// A valid saved state loads as Loaded and can still decrypt a known
+    /// fixture message after a simulated restart.
+    #[test]
+    fn test_load_from_db_valid_state_decrypts() {
+        let (mut alice, mut bob, alice_id, bob_id, registry) = setup_two_peers();
+        let group_id = GroupId::generate();
+
+        let create_msg = alice
+            .create_group(group_id, alice_id, vec![bob_id])
+            .expect("alice create group");
+        bob.init_group(group_id, bob_id).expect("bob init");
+        let bob_create_event = bob
+            .receive_message(&group_id, &create_msg)
+            .expect("bob receive create");
+        if let Some(GroupEvent::Control(ack)) = &bob_create_event {
+            alice
+                .receive_message(&group_id, ack)
+                .expect("alice receive ack");
+        }
+        let msg1 = alice
+            .send_message(&group_id, b"before save")
+            .expect("alice send");
+        bob.receive_message(&group_id, &msg1).expect("bob receive");
+
+        // Give Alice a DB and persist through the normal send path.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS group_encryption_state (
+                group_id BLOB PRIMARY KEY,
+                state BLOB NOT NULL,
+                updated_at INTEGER NOT NULL
+            );",
+        )
+        .expect("create table");
+        let db = std::sync::Arc::new(std::sync::Mutex::new(conn));
+        alice.db = Some(db.clone());
+        let _persisted = alice
+            .send_message(&group_id, b"persisted")
+            .expect("alice send persisted");
+
+        // Simulate restart: fresh EncryptionState sharing the same DB.
+        let mut alice2 = make_enc_state(Rng::default(), &registry);
+        register_peer(&mut alice2, alice_id);
+        register_peer(&mut alice2, bob_id);
+        alice2.db = Some(db);
+
+        match alice2.load_group_state_from_db(&group_id).expect("load") {
+            GroupStateLoadOutcome::Loaded => {}
+            other => panic!("expected Loaded for valid saved state, got: {other:?}"),
+        }
+
+        // Bob sends a message; the reloaded state must decrypt it.
+        let bob_msg = bob
+            .send_message(&group_id, b"after reload")
+            .expect("bob send");
+        match alice2
+            .receive_message(&group_id, &bob_msg)
+            .expect("alice2 receive")
+        {
+            Some(GroupEvent::Application { plaintext, .. }) => {
+                assert_eq!(
+                    plaintext, b"after reload",
+                    "reloaded state decrypts known fixture message"
+                );
+            }
+            other => panic!("expected Application event, got: {other:?}"),
+        }
+    }
+
+    /// Existing state with one corrupted byte → load through the high-level
+    /// API fails closed (Corrupt), never Missing, and no partial state is
+    /// installed.
+    #[test]
+    fn test_load_from_db_corrupt_fails_closed() {
+        let (mut alice, _bob, alice_id, _bob_id, registry) = setup_two_peers();
+        let group_id = GroupId::generate();
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS group_encryption_state (
+                group_id BLOB PRIMARY KEY,
+                state BLOB NOT NULL,
+                updated_at INTEGER NOT NULL
+            );",
+        )
+        .expect("create table");
+        let db = std::sync::Arc::new(std::sync::Mutex::new(conn));
+        alice.db = Some(db.clone());
+        // Persist through the normal create path (owner-only group).
+        let _create_msg = alice
+            .create_group(group_id, alice_id, vec![])
+            .expect("alice create group");
+
+        // Corrupt one byte of the stored record.
+        {
+            let conn = db.lock().unwrap();
+            let mut stmt = conn
+                .prepare("SELECT state FROM group_encryption_state WHERE group_id = ?1")
+                .unwrap();
+            let mut blob: Vec<u8> = stmt
+                .query_row(params![group_id.as_bytes().as_slice()], |r| r.get(0))
+                .unwrap();
+            assert!(blob.len() > 32, "stored blob should be non-trivial");
+            let mid = blob.len() / 2;
+            blob[mid] ^= 0xFF;
+            conn.execute(
+                "UPDATE group_encryption_state SET state = ?1 WHERE group_id = ?2",
+                params![blob, group_id.as_bytes().as_slice()],
+            )
+            .unwrap();
+        }
+
+        // A fresh EncryptionState must fail closed — NOT Missing, NOT Loaded.
+        let mut alice2 = make_enc_state(Rng::default(), &registry);
+        register_peer(&mut alice2, alice_id);
+        alice2.db = Some(db);
+
+        match alice2.load_group_state_from_db(&group_id) {
+            Err(EncryptionError::GroupStateLoad(GroupStateLoadError::Corrupt { .. })) => {}
+            other => panic!("expected Corrupt via load_group_state_from_db, got: {other:?}"),
+        }
+        // No half-loaded state may be left in memory (fail closed).
+        assert!(
+            !alice2.groups.contains_key(&group_id),
+            "no partial state installed after corruption"
+        );
+        assert!(
+            !alice2.self_ids.contains_key(&group_id),
+            "no partial identity installed after corruption"
+        );
     }
 }

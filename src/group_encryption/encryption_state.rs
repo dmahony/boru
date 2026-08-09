@@ -25,7 +25,7 @@ use super::manager::{KmgState, Manager, ManagerError};
 use super::membership::{MemberRole, Membership};
 use super::message::EncryptedGroupEnvelope;
 use super::ordering::{LamportOrderer, OrderingState};
-use super::persistence;
+use super::persistence::{self, GroupStateLoadError};
 use super::registry::{Registry, RegistryState};
 use super::types::{OpId, PeerId};
 
@@ -126,6 +126,19 @@ impl<'de> Deserialize<'de> for EncryptionState {
     }
 }
 
+/// Outcome of loading a group's encryption state from the database.
+///
+/// Callers must treat everything except [`Self::Missing`] as fail-closed:
+/// fresh initialization is only permitted when no saved state exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupStateLoadOutcome {
+    /// A valid state was loaded, validated, and installed.
+    Loaded,
+    /// No persisted state exists (a genuinely new group). The ONLY outcome
+    /// that permits fresh initialization.
+    Missing,
+}
+
 impl EncryptionState {
     /// Create a new encryption state with a freshly generated x25519 identity
     /// and an initial long-term pre-key.
@@ -190,35 +203,56 @@ impl EncryptionState {
 
     /// Load a previously-persisted `GroupEncryptionState` from SQLite.
     ///
-    /// Returns `true` if a state was loaded and inserted into `self.groups`,
-    /// `false` if no persisted state existed.
+    /// Returns the load outcome:
+    ///
+    /// - [`GroupStateLoadOutcome::Loaded`] — a valid state was loaded,
+    ///   validated, and inserted into `self.groups`.
+    /// - [`GroupStateLoadOutcome::Missing`] — no persisted state exists (a
+    ///   genuinely new group). This is the **only** outcome that permits
+    ///   fresh initialization.
+    ///
+    /// A saved state that exists but cannot be decoded or validated fails
+    /// closed with [`EncryptionError::GroupStateLoad`] (corruption or an
+    /// unsupported format version) — it is never reported as missing, and the
+    /// raw record is left untouched for recovery.
     pub fn load_group_state_from_db(
         &mut self,
         group_id: &GroupId,
-    ) -> Result<bool, EncryptionError> {
+    ) -> Result<GroupStateLoadOutcome, EncryptionError> {
         let Some(ref conn) = self.db else {
-            return Ok(false);
+            // No persistence configured: there is nothing saved to load.
+            return Ok(GroupStateLoadOutcome::Missing);
         };
         let conn = conn
             .lock()
             .map_err(|e| EncryptionError::Internal(format!("db lock: {e}")))?;
-        match persistence::load_group_state(&conn, group_id) {
-            Ok(Some(state)) => {
-                self.groups.insert(*group_id, state);
-                // Restore the role mirror + local identity if present.
-                if let Ok(Some((roles, self_id))) = persistence::load_group_roles(&conn, group_id) {
-                    if !roles.is_empty() {
-                        self.group_roles.insert(*group_id, roles);
-                    }
-                    if let Some(me) = self_id {
-                        self.self_ids.insert(*group_id, me);
-                    }
-                }
-                Ok(true)
-            }
-            Ok(None) => Ok(false),
-            Err(e) => Err(EncryptionError::Internal(format!("db error: {e}"))),
+
+        let state = match persistence::load_group_state(&conn, group_id) {
+            Ok(state) => state,
+            Err(GroupStateLoadError::Missing) => return Ok(GroupStateLoadOutcome::Missing),
+            Err(e) => return Err(EncryptionError::GroupStateLoad(e)),
+        };
+
+        // Restore the role mirror + local identity if present. A role mirror
+        // that exists but cannot be decoded is ALSO fail-closed corruption.
+        let (roles, self_id) = match persistence::load_group_roles(&conn, group_id) {
+            Ok(Some(pair)) => pair,
+            Ok(None) => (HashMap::new(), None),
+            Err(e) => return Err(EncryptionError::GroupStateLoad(e)),
+        };
+
+        // Validate decoded invariants BEFORE mutating in-memory state so a
+        // bad record cannot leave a half-loaded group behind.
+        validate_loaded_group_state(group_id, &state, &roles, self_id.as_ref())?;
+
+        self.groups.insert(*group_id, state);
+        if !roles.is_empty() {
+            self.group_roles.insert(*group_id, roles);
         }
+        if let Some(me) = self_id {
+            self.self_ids.insert(*group_id, me);
+        }
+        Ok(GroupStateLoadOutcome::Loaded)
     }
 
     /// Remove a group's persisted encryption state from SQLite.
@@ -606,6 +640,63 @@ impl EncryptionState {
 
 // ── Error type ───────────────────────────────────────────────────────────
 
+/// Validate that a decoded state and its companion role mirror are
+/// self-consistent before they are installed into memory.
+///
+/// Checks:
+///
+/// - the p2panda DGM member view is readable and non-empty (a decoded but
+///   internally inconsistent membership state is corruption);
+/// - the stored local identity (if any) is a member of the group (local
+///   identity binding);
+/// - every peer in the role mirror is a current member (the mirror is kept in
+///   sync with the DGM at every mutation, so a mirror that references a
+///   non-member indicates tampering or corruption).
+fn validate_loaded_group_state(
+    group_id: &GroupId,
+    state: &GroupEncryptionState,
+    roles: &HashMap<PeerId, MemberRole>,
+    self_id: Option<&PeerId>,
+) -> Result<(), EncryptionError> {
+    let members = MessageGroup::members(state).map_err(|e| {
+        EncryptionError::GroupStateLoad(GroupStateLoadError::Corrupt {
+            group_id: *group_id,
+            reason: format!("decoded state failed membership validation: {e}"),
+        })
+    })?;
+    if members.is_empty() {
+        return Err(EncryptionError::GroupStateLoad(
+            GroupStateLoadError::Corrupt {
+                group_id: *group_id,
+                reason: "decoded state has an empty member set".to_string(),
+            },
+        ));
+    }
+    if let Some(me) = self_id {
+        if !members.contains(me) {
+            return Err(EncryptionError::GroupStateLoad(
+                GroupStateLoadError::Corrupt {
+                    group_id: *group_id,
+                    reason: format!(
+                        "stored local identity {me:?} is not a member of the decoded group state"
+                    ),
+                },
+            ));
+        }
+    }
+    for peer in roles.keys() {
+        if !members.contains(peer) {
+            return Err(EncryptionError::GroupStateLoad(
+                GroupStateLoadError::Corrupt {
+                    group_id: *group_id,
+                    reason: format!("role mirror references non-member {peer:?}"),
+                },
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Errors that can occur during encryption operations.
 #[derive(Debug)]
 pub enum EncryptionError {
@@ -626,6 +717,10 @@ pub enum EncryptionError {
         /// The role that does not permit writing.
         role: MemberRole,
     },
+    /// A saved encryption state exists but cannot be loaded (corruption or an
+    /// unsupported format version). The caller must NOT initialize fresh
+    /// state in response — surface a recovery action instead.
+    GroupStateLoad(GroupStateLoadError),
     /// ICE (internal consistency error).
     Internal(String),
 }
@@ -645,6 +740,9 @@ impl std::fmt::Display for EncryptionError {
             EncryptionError::ForbiddenRole { peer, role } => {
                 write!(f, "peer {peer:?} has role {role:?} which cannot write")
             }
+            EncryptionError::GroupStateLoad(e) => {
+                write!(f, "encrypted group state load error: {e}")
+            }
             EncryptionError::Internal(msg) => write!(f, "internal error: {msg}"),
         }
     }
@@ -655,6 +753,7 @@ impl std::error::Error for EncryptionError {
         match self {
             EncryptionError::Group(e) => Some(&**e),
             EncryptionError::Membership(e) => Some(&**e),
+            EncryptionError::GroupStateLoad(e) => Some(e),
             _ => None,
         }
     }
