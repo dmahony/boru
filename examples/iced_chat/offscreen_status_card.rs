@@ -321,4 +321,193 @@ mod tests {
             );
         }
     }
+
+    // ── CONN-10 (spec §14): no parent layout stretching ────────────────
+    //
+    // The dashboard grid replicates app.rs's wide-mode structure exactly:
+    // left column (hero card + mesh card + quick actions) in a
+    // FillPortion(2) wrapper, a 24 px gutter, and the right rail in a
+    // FillPortion(1) wrapper, all inside a Row with `align_y(Start)` —
+    // then the outer Fill-height canvas chain and the gutter scrollable.
+    // The hero card must keep its content-determined height whether the
+    // rail is tall (open) or empty (closed): the wrappers are explicit
+    // Shrink-height, so iced never stretches the card to match a taller
+    // sibling.
+
+    /// Build the dashboard grid with a rail of `rail_card_height` px cards
+    /// (or an empty rail when `None`). Returns the full scrollable element.
+    fn build_dashboard_grid(
+        hero_dep: &StatusCardDependency,
+        rail_card_height: Option<f32>,
+    ) -> iced::Element<'static, AppMessage> {
+        use iced::widget::{container, Column, Row, Space};
+        use iced::{Alignment, Length};
+
+        let card_gap = crate::design_tokens::SPACE_20;
+
+        let hero_card = view_status_card(hero_dep);
+
+        // Content-height stand-ins for the Mesh Health card and the quick
+        // action grid (fixed heights, non-void, so they never stretch).
+        let mesh_card = container(Space::new().height(Length::Fixed(140.0)))
+            .width(Length::Fill)
+            .height(Length::Shrink);
+        let action_grid = container(Space::new().height(Length::Fixed(160.0)))
+            .width(Length::Fill)
+            .height(Length::Shrink);
+
+        let left_col = Column::new()
+            .push(hero_card)
+            .push(Space::new().height(Length::Fixed(card_gap)))
+            .push(mesh_card)
+            .push(Space::new().height(Length::Fixed(card_gap)))
+            .push(action_grid)
+            .spacing(0)
+            .width(Length::Fill);
+
+        let right_col: iced::Element<'static, AppMessage> = if let Some(h) = rail_card_height {
+            // Three tall rail cards (Online Peers / Recent Activity /
+            // Tunnels), each taller than the left column, so the rail is
+            // the tallest sibling in the row — exactly the scenario that
+            // used to make the card "extremely tall" when the rail opened.
+            // Rebuilt per push (iced elements are not Clone).
+            let rail_card = || {
+                container(Space::new().height(Length::Fixed(h)))
+                    .width(Length::Fill)
+                    .height(Length::Shrink)
+            };
+            Column::new()
+                .push(rail_card())
+                .push(Space::new().height(Length::Fixed(card_gap)))
+                .push(rail_card())
+                .push(Space::new().height(Length::Fixed(card_gap)))
+                .push(rail_card())
+                .spacing(0)
+                .width(Length::Fill)
+                .into()
+        } else {
+            // Rail closed: empty column — left column is the tallest.
+            Column::new().spacing(0).width(Length::Fill).into()
+        };
+
+        // Wide mode: two-column dashboard grid, both columns aligned top
+        // (mirrors app.rs; the wrappers carry the CONN-10 explicit
+        // Shrink-height guard).
+        let main_content: iced::Element<'static, AppMessage> = Row::new()
+            .push(
+                container(left_col)
+                    .width(Length::FillPortion(2))
+                    .height(Length::Shrink),
+            )
+            .push(Space::new().width(Length::Fixed(crate::design_tokens::SPACE_24)))
+            .push(
+                container(right_col)
+                    .width(Length::FillPortion(1))
+                    .height(Length::Shrink),
+            )
+            .spacing(0)
+            .align_y(Alignment::Start)
+            .width(Length::Fill)
+            .into();
+
+        // Outer canvas chain: header + grid + footer inside a Fill-height
+        // container, centred and capped, inside the gutter scrollable.
+        let header = container(Space::new().height(Length::Fixed(80.0)))
+            .width(Length::Fill)
+            .height(Length::Shrink);
+        let footer = container(Space::new().height(Length::Fixed(40.0)))
+            .width(Length::Fill)
+            .height(Length::Shrink);
+        let col = Column::new()
+            .push(header)
+            .push(Space::new().height(Length::Fixed(crate::design_tokens::SPACE_28)))
+            .push(main_content)
+            .push(Space::new().height(Length::Fixed(crate::design_tokens::SPACE_16)))
+            .push(footer)
+            .spacing(0)
+            .width(Length::Fill);
+
+        let canvas = container(
+            container(col)
+                .padding(iced::Padding::from([
+                    crate::design_tokens::SPACE_28,
+                    crate::design_tokens::SPACE_32,
+                ]))
+                .width(Length::Fill)
+                .max_width(crate::design_tokens::DASHBOARD_MAX_WIDTH)
+                .height(Length::Fill),
+        )
+        .width(Length::Fill)
+        .align_x(Alignment::Center)
+        .height(Length::Fill);
+
+        crate::ui_components::gutter_scrollable(canvas)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    }
+
+    /// Lay the dashboard grid out at a maximized canvas and return the
+    /// laid-out height of the hero card node (index path through the
+    /// scrollable → canvas → col → main_content row → left wrapper → left
+    /// column; the hero card is the first child of the left column).
+    fn grid_hero_card_height(
+        hero_dep: &StatusCardDependency,
+        rail_card_height: Option<f32>,
+    ) -> f32 {
+        let renderer =
+            iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(Font::default(), Pixels(16.0)));
+        let mut element = build_dashboard_grid(hero_dep, rail_card_height);
+        let mut tree = Tree::new(element.as_widget());
+        // Maximized window: 1600 x 900 viewport.
+        let limits = layout::Limits::new(Size::ZERO, Size::new(1600.0, 900.0));
+        let node = element.as_widget_mut().layout(&mut tree, &renderer, &limits);
+        // scrollable[0] = canvas; canvas[0] = col wrapper; [0] = col;
+        // col[2] = main_content row; row[0] = left wrapper; [0] = left
+        // column; left column [0] = hero card.
+        let hero = &node.children()[0].children()[0].children()[0].children()[2]
+            .children()[0].children()[0].children()[0];
+        hero.bounds().height
+    }
+
+    #[test]
+    fn hero_card_height_is_content_determined_in_dashboard_grid() {
+        // CONN-10 (spec §14): the card's vertical size must be determined
+        // by its own content, never by the right rail. Replicate the wide
+        // dashboard grid with the rail OPEN (three tall cards, each taller
+        // than the whole left column) and with the rail CLOSED (empty),
+        // and assert the hero card's laid-out height is identical in both
+        // — and equal to the standalone content-determined height.
+        load_font(include_bytes!("fonts/ArchivoSemiCondensed-Bold.ttf"));
+        load_font(include_bytes!("fonts/IBMPlexSans-Regular.ttf"));
+        load_font(include_bytes!("fonts/IBMPlexSans-Medium.ttf"));
+        load_font(include_bytes!("fonts/IBMPlexSans-SemiBold.ttf"));
+
+        // Maximized window (~1600 → content 1215 → card (1215-24)*2/3 =
+        // 794, Full tier).
+        let content_width = 1215.0;
+        let card_width = crate::design_tokens::status_card_content_width(content_width);
+        assert!(
+            card_width >= crate::status_card::STATUS_CARD_MEDIUM_CONTENT,
+            "precondition: maximized-with-rail card width {card_width} must be Full tier"
+        );
+        let hero_dep = dep(HomeConnectionVariant::Ready, card_width);
+
+        let standalone = measure_card_height(&hero_dep, card_width);
+        let rail_open = grid_hero_card_height(&hero_dep, Some(400.0));
+        let rail_closed = grid_hero_card_height(&hero_dep, None);
+
+        assert!(
+            (rail_open - standalone).abs() < 0.5,
+            "hero card height in the grid with the rail OPEN ({rail_open:.1}px) must equal \
+             its content-determined standalone height ({standalone:.1}px) — the rail must \
+             not stretch the card (CONN-10 / spec §14)"
+        );
+        assert!(
+            (rail_closed - standalone).abs() < 0.5,
+            "hero card height in the grid with the rail CLOSED ({rail_closed:.1}px) must \
+             equal its content-determined standalone height ({standalone:.1}px) — opening \
+             the rail must not change the card's height (CONN-10 / spec §14)"
+        );
+    }
 }

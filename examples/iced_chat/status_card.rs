@@ -273,9 +273,19 @@ pub(crate) fn view_status_card(
     // matched the horizontal so the padding is uniform and the content row
     // gets more width). The mesh-width math below shares
     // STATUS_CARD_PADDING_X so it always stays in sync.
+    // CONN-10 (spec §14 — no parent layout stretching): the card's vertical
+    // size is explicitly content-determined (`height: fit-content` /
+    // `align-self: start` in CSS terms). Without this explicit Shrink the
+    // container's height would be inferred from the content's size hint
+    // (`Container::new` uses `size.height.fluid()`), so any future child
+    // with a Fill-height hint — or a parent chain that forces Fill — could
+    // stretch the card taller than its content. Pinning Shrink makes the
+    // card's height always equal to its own content, never a taller
+    // sibling, the right rail, or the outer Fill chain.
     container(body)
         .padding([design_tokens::SPACE_24, STATUS_CARD_PADDING_X])
         .width(Length::Fill)
+        .height(Length::Shrink)
         .style(move |_t| {
             container::Style {
                 background: Some(Background::Gradient(iced::Gradient::Linear(
