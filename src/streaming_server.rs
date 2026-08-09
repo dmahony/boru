@@ -110,7 +110,7 @@ async fn handle_connection(
     total_size: u64,
     content_type: &str,
 ) {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncReadExt;
 
     let mut buf = [0u8; 4096];
     let n = match tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf)).await {
@@ -124,7 +124,7 @@ async fn handle_connection(
     // Parse method and path
     let parts: Vec<&str> = first_line.split_whitespace().collect();
     if parts.len() < 2 {
-        respond(stream, 400, "Bad Request", &[]).await;
+        write_response(stream, 400, "Bad Request", Some(0), &[]).await;
         return;
     }
     let method = parts[0];
@@ -137,17 +137,45 @@ async fn handle_connection(
 
     match method {
         "HEAD" => {
-            let headers = format!(
-                "Content-Type: {}\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n",
-                content_type, total_size
-            );
-            respond(stream, 200, "OK", headers.as_bytes()).await;
+            // HEAD describes the representation GET would return without
+            // sending a body. Ranges are supported on HEAD and mirror the
+            // corresponding GET status / Content-Range / length semantics.
+            if let Some((start, end)) = range {
+                if start >= total_size {
+                    write_response(stream, 416, "Range Not Satisfiable", Some(0), &[]).await;
+                    return;
+                }
+                let effective_end = end.min(total_size.saturating_sub(1));
+                let content_length = effective_end.saturating_sub(start).saturating_add(1);
+                let content_range = format!("bytes {}-{}/{}", start, effective_end, total_size);
+                write_response(
+                    stream,
+                    206,
+                    "Partial Content",
+                    Some(content_length),
+                    &[
+                        ("Content-Type", content_type),
+                        ("Content-Range", content_range.as_str()),
+                        ("Accept-Ranges", "bytes"),
+                    ],
+                )
+                .await;
+            } else {
+                write_response(
+                    stream,
+                    200,
+                    "OK",
+                    Some(total_size),
+                    &[("Content-Type", content_type), ("Accept-Ranges", "bytes")],
+                )
+                .await;
+            }
         }
         "GET" => {
             serve_file_range(stream, &file_path, total_size, content_type, range).await;
         }
         _ => {
-            respond(stream, 405, "Method Not Allowed", &[]).await;
+            write_response(stream, 405, "Method Not Allowed", Some(0), &[]).await;
         }
     }
 }
@@ -196,7 +224,7 @@ async fn serve_file_range(
         };
 
         if range_start >= total_size {
-            respond(stream, 416, "Range Not Satisfiable", &[]).await;
+            write_response(stream, 416, "Range Not Satisfiable", Some(0), &[]).await;
             return;
         }
 
@@ -206,35 +234,44 @@ async fn serve_file_range(
 
         if current_size >= total_size {
             // File is complete but doesn't have data at our offset (shouldn't happen)
-            respond(stream, 416, "Range Not Satisfiable", &[]).await;
+            write_response(stream, 416, "Range Not Satisfiable", Some(0), &[]).await;
             return;
         }
 
         if start_time.elapsed() > MAX_WAIT {
-            respond(stream, 503, "Service Unavailable", &[]).await;
+            write_response(stream, 503, "Service Unavailable", Some(0), &[]).await;
             return;
         }
 
         tokio::time::sleep(POLL_INTERVAL).await;
     }
 
-    // Build response headers
-    let status = if range.is_some() {
-        format!(
-            "HTTP/1.1 206 Partial Content\r\nContent-Type: {}\r\nContent-Length: {}\r\n\
-             Content-Range: bytes {}-{}/{}\r\nAccept-Ranges: bytes\r\n\r\n",
-            content_type, content_length, range_start, effective_end, total_size
+    // Build response headers. Exactly one Content-Length is emitted, by the
+    // shared response builder, so HEAD (which mirrors these headers without
+    // a body) and GET always agree on the representation length.
+    if range.is_some() {
+        let content_range = format!("bytes {}-{}/{}", range_start, effective_end, total_size);
+        write_response(
+            stream,
+            206,
+            "Partial Content",
+            Some(content_length),
+            &[
+                ("Content-Type", content_type),
+                ("Content-Range", content_range.as_str()),
+                ("Accept-Ranges", "bytes"),
+            ],
         )
+        .await;
     } else {
-        format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\n\
-             Accept-Ranges: bytes\r\n\r\n",
-            content_type, total_size
+        write_response(
+            stream,
+            200,
+            "OK",
+            Some(total_size),
+            &[("Content-Type", content_type), ("Accept-Ranges", "bytes")],
         )
-    };
-
-    if stream.write_all(status.as_bytes()).await.is_err() {
-        return;
+        .await;
     }
 
     // Stream the file data, polling for more if needed
@@ -289,15 +326,35 @@ async fn serve_file_range(
     }
 }
 
-async fn respond(stream: &mut tokio::net::TcpStream, code: u16, reason: &str, headers: &[u8]) {
+/// Write a complete HTTP response header block.
+///
+/// `Content-Length` is written exactly once — and only when the caller
+/// supplies it. Error responses pass `Some(0)`; responses that must not
+/// carry a length pass `None`. No generic helper ever injects
+/// `Content-Length` implicitly, which previously produced duplicate,
+/// contradictory headers on HEAD (one `0` from the helper plus the real
+/// size from the caller).
+async fn write_response(
+    stream: &mut tokio::net::TcpStream,
+    code: u16,
+    reason: &str,
+    content_length: Option<u64>,
+    extra_headers: &[(&str, &str)],
+) {
     use tokio::io::AsyncWriteExt;
-    let response = format!(
-        "HTTP/1.1 {} {}\r\nContent-Length: 0\r\nConnection: close\r\n",
-        code, reason
-    );
+
+    let mut response = format!("HTTP/1.1 {} {}\r\nConnection: close\r\n", code, reason);
+    if let Some(len) = content_length {
+        response.push_str(&format!("Content-Length: {}\r\n", len));
+    }
+    for (name, value) in extra_headers {
+        response.push_str(name);
+        response.push_str(": ");
+        response.push_str(value);
+        response.push_str("\r\n");
+    }
+    response.push_str("\r\n");
     let _ = stream.write_all(response.as_bytes()).await;
-    let _ = stream.write_all(headers).await;
-    let _ = stream.write_all(b"\r\n").await;
 }
 
 #[cfg(test)]
@@ -306,18 +363,12 @@ mod tests {
 
     #[test]
     fn parse_range_header_handles_closed_and_open_ranges() {
-        assert_eq!(
-            parse_range_header("Range: bytes=0-1023"),
-            Some((0, 1023))
-        );
+        assert_eq!(parse_range_header("Range: bytes=0-1023"), Some((0, 1023)));
         assert_eq!(
             parse_range_header("Range: bytes=4096-"),
             Some((4096, u64::MAX))
         );
-        assert_eq!(
-            parse_range_header("range: bytes=0-0"),
-            Some((0, 0))
-        );
+        assert_eq!(parse_range_header("range: bytes=0-0"), Some((0, 0)));
     }
 
     #[test]
@@ -335,5 +386,195 @@ mod tests {
         let url = format!("http://127.0.0.1:{}/video", 45678);
         assert!(url.starts_with("http://127.0.0.1:"));
         assert!(url.ends_with("/video"));
+    }
+
+    // ---------------------------------------------------------------------
+    // HTTP response regression tests (BORU-AUDIT-11): exactly one
+    // Content-Length per response; HEAD describes GET without a body.
+    // ---------------------------------------------------------------------
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// Run one raw HTTP request against a real `handle_connection` over a
+    /// loopback socket and return the complete raw response bytes.
+    async fn round_trip(request: &str, total_size: u64) -> Vec<u8> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (mut server, _) = listener.accept().await.unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("video.bin");
+        std::fs::write(&file_path, vec![0xABu8; total_size as usize]).unwrap();
+
+        let handle = tokio::spawn(async move {
+            handle_connection(&mut server, file_path, total_size, "video/mp4").await;
+        });
+
+        client.write_all(request.as_bytes()).await.unwrap();
+        // Half-close the write side so the server's single 4 KiB read
+        // returns even though the request is much shorter.
+        client.shutdown().await.unwrap();
+
+        let mut resp = Vec::new();
+        client.read_to_end(&mut resp).await.unwrap();
+        handle.await.unwrap();
+        resp
+    }
+
+    /// Split a raw response into (header block, body).
+    fn split_response(resp: &[u8]) -> (&str, &[u8]) {
+        let idx = resp
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("response has header terminator");
+        let head = std::str::from_utf8(&resp[..idx]).expect("headers are utf8");
+        let body = &resp[idx + 4..];
+        (head, body)
+    }
+
+    /// Count occurrences of a header name (case-insensitive) in a header block.
+    fn header_count(head: &str, name: &str) -> usize {
+        let needle = format!("{}:", name);
+        head.lines()
+            .filter(|line| {
+                let line = line.trim_end_matches('\r');
+                line.len() >= needle.len() && line[..needle.len()].eq_ignore_ascii_case(&needle)
+            })
+            .count()
+    }
+
+    /// Return the value of the first occurrence of a header, if present.
+    fn header_value<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+        let needle = format!("{}:", name);
+        head.lines().find_map(|line| {
+            let line = line.trim_end_matches('\r');
+            if line.len() >= needle.len() && line[..needle.len()].eq_ignore_ascii_case(&needle) {
+                Some(line[needle.len()..].trim())
+            } else {
+                None
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn head_returns_single_content_length_equal_to_video_size() {
+        let total = 123_456u64;
+        let resp = round_trip("HEAD /video HTTP/1.1\r\nHost: localhost\r\n\r\n", total).await;
+        let (head, body) = split_response(&resp);
+        assert!(
+            head.starts_with("HTTP/1.1 200 OK"),
+            "unexpected status: {head}"
+        );
+        assert_eq!(
+            header_count(head, "Content-Length"),
+            1,
+            "expected exactly one Content-Length, got: {head}"
+        );
+        assert_eq!(header_value(head, "Content-Length"), Some("123456"));
+        assert!(
+            body.is_empty(),
+            "HEAD must not send a body, got {} bytes",
+            body.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn head_with_range_mirrors_get_semantics() {
+        let total = 1_000u64;
+        let resp = round_trip(
+            "HEAD /video HTTP/1.1\r\nHost: localhost\r\nRange: bytes=100-199\r\n\r\n",
+            total,
+        )
+        .await;
+        let (head, body) = split_response(&resp);
+        assert!(
+            head.starts_with("HTTP/1.1 206 Partial Content"),
+            "unexpected status: {head}"
+        );
+        assert_eq!(header_count(head, "Content-Length"), 1);
+        assert_eq!(header_value(head, "Content-Length"), Some("100"));
+        assert_eq!(
+            header_value(head, "Content-Range"),
+            Some("bytes 100-199/1000")
+        );
+        assert!(body.is_empty(), "HEAD must not send a body");
+    }
+
+    #[tokio::test]
+    async fn head_unsatisfiable_range_returns_416() {
+        let total = 2_048u64;
+        let resp = round_trip(
+            "HEAD /video HTTP/1.1\r\nHost: localhost\r\nRange: bytes=99999-\r\n\r\n",
+            total,
+        )
+        .await;
+        let (head, body) = split_response(&resp);
+        assert!(
+            head.starts_with("HTTP/1.1 416 Range Not Satisfiable"),
+            "unexpected status: {head}"
+        );
+        assert_eq!(header_count(head, "Content-Length"), 1);
+        assert_eq!(header_value(head, "Content-Length"), Some("0"));
+        assert!(body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_returns_correct_content_length_and_body() {
+        let total = 4_096u64;
+        let resp = round_trip("GET /video HTTP/1.1\r\nHost: localhost\r\n\r\n", total).await;
+        let (head, body) = split_response(&resp);
+        assert!(
+            head.starts_with("HTTP/1.1 200 OK"),
+            "unexpected status: {head}"
+        );
+        assert_eq!(header_count(head, "Content-Length"), 1);
+        assert_eq!(header_value(head, "Content-Length"), Some("4096"));
+        assert_eq!(body.len() as u64, total, "body must match Content-Length");
+        assert!(body.iter().all(|&b| b == 0xAB), "body content mismatch");
+    }
+
+    #[tokio::test]
+    async fn get_range_returns_partial_content_and_length() {
+        let total = 10_000u64;
+        let resp = round_trip(
+            "GET /video HTTP/1.1\r\nHost: localhost\r\nRange: bytes=200-299\r\n\r\n",
+            total,
+        )
+        .await;
+        let (head, body) = split_response(&resp);
+        assert!(
+            head.starts_with("HTTP/1.1 206 Partial Content"),
+            "unexpected status: {head}"
+        );
+        assert_eq!(header_count(head, "Content-Length"), 1);
+        assert_eq!(header_value(head, "Content-Length"), Some("100"));
+        assert_eq!(
+            header_value(head, "Content-Range"),
+            Some("bytes 200-299/10000")
+        );
+        assert_eq!(body.len(), 100, "body must match range length");
+    }
+
+    #[tokio::test]
+    async fn no_response_contains_duplicate_content_length() {
+        let total = 2_048u64;
+        let cases = [
+            "HEAD /video HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            "HEAD /video HTTP/1.1\r\nHost: localhost\r\nRange: bytes=0-99\r\n\r\n",
+            "HEAD /video HTTP/1.1\r\nHost: localhost\r\nRange: bytes=99999-\r\n\r\n",
+            "GET /video HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            "GET /video HTTP/1.1\r\nHost: localhost\r\nRange: bytes=0-99\r\n\r\n",
+            "POST /video HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            "BOGUS\r\n",
+        ];
+        for req in cases {
+            let resp = round_trip(req, total).await;
+            let (head, _body) = split_response(&resp);
+            assert!(
+                header_count(head, "Content-Length") <= 1,
+                "duplicate Content-Length for {req:?}:\n{head}"
+            );
+        }
     }
 }
