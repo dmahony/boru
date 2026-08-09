@@ -42,10 +42,9 @@ use super::app::{
 };
 use super::app::{AppMessage, DownloadAttachment, DownloadState};
 use super::download_progress_view::{
-    action_buttons, active_download_detail, error_slot_height, failure_block, file_type_icon_element,
-    file_type_icon_element_with_tooltip, fixed_slot, human_size, progress_section, resolve_theme,
-    secondary_button, state_badge_color, DETAIL_SLOT_HEIGHT, METADATA_SLOT_HEIGHT, POLICY_SLOT_HEIGHT,
-    PROGRESS_SLOT_HEIGHT,
+    action_buttons, active_download_detail, content_slot, failure_block, file_type_icon_element,
+    file_type_icon_element_with_tooltip, human_size, progress_section, resolve_theme,
+    secondary_button, state_badge_color,
 };
 use crate::design_tokens;
 use crate::file_type_icon::FileTypeIconSize;
@@ -775,13 +774,11 @@ impl<'a> BoruVideoFileCard<'a> {
         let status = self.status_metadata(attachment, &theme, tone, muted);
         let actions = self.actions(attachment);
 
-        // Shape stability: the state-conditional sections (progress rows,
-        // policy selector, failure block) render inside fixed-height slots,
-        // so the card's outer box never collapses/expands when the state
-        // changes.  The slot width is bounded to the media-frame width at
-        // wide/medium (the card is content-driven there) so a long failure
-        // message can never widen the card; at narrow the card fills the
-        // column and the slot wraps at the card width.
+        // Content sizing: the state-conditional sections (progress rows,
+        // policy selector, failure block) are included only when the current
+        // state actually renders them, so the card sizes itself from its
+        // contents. The media frame keeps its own aspect-ratio-aware sizing
+        // (below) — the card height and the media height are independent.
         let media_sizing = MediaFrameSizing::new(
             attachment.poster_dimensions,
             self.band(),
@@ -791,11 +788,6 @@ impl<'a> BoruVideoFileCard<'a> {
             Length::Fill
         } else {
             Length::Fixed(media_sizing.width)
-        };
-        let inner_width = if self.band() == CardBand::Narrow {
-            self.inner_available_width()
-        } else {
-            media_sizing.width
         };
 
         let mut body = Column::new()
@@ -808,20 +800,34 @@ impl<'a> BoruVideoFileCard<'a> {
             .push(status)
             .push(actions)
             .spacing(SPACE_12);
-        // Failure details — a fixed-height slot in EVERY state so the card
-        // box never re-flows on failure (this task).  Failed fills it with
-        // the bordered failure block; all other states reserve the same
-        // space.
+        // Failure details — only the Failed state renders the bordered block
+        // (content-sized). Other states omit it entirely: reserving a
+        // fixed-height slot here left a large blank region inside every
+        // non-failed card.
         let error_content: Option<iced::Element<'a, AppMessage>> = match &attachment.state {
             DownloadState::Failed { failure } => {
                 Some(failure_block(failure, &theme, tone, muted, error_color))
             }
             _ => None,
         };
-        body = body.push(
-            container(fixed_slot(error_slot_height(inner_width), error_content))
-                .width(slot_width),
-        );
+        if let Some(error_content) = error_content {
+            body = body.push(content_slot(slot_width, error_content));
+        }
+        // Width anchor (zero height): the body column is Shrink at
+        // wide/medium and its width is driven by the widest non-fluid child.
+        // The media frame sits inside a Fill wrapper, so without a fixed
+        // width anchor the preview would be clamped to the header width in
+        // states where the media is the widest element (the pre-fix error
+        // slot anchored the card this way; this anchor keeps the same width
+        // behaviour with zero height — no reserved blank space). Note: the
+        // height must NOT be Length::Fixed(0.0) — iced drops containers with
+        // an explicit zero height from the layout tree; a Shrink height
+        // resolves to 0 here (the Space content is empty) and anchors fine.
+        if self.band() != CardBand::Narrow {
+            body = body.push(
+                container(iced::widget::Space::new()).width(Length::Fixed(media_sizing.width)),
+            );
+        }
         body = body.spacing(SPACE_12);
 
         // VIDCARD-03 card surface: reuse the shared Boru card style —
@@ -1424,13 +1430,6 @@ impl<'a> BoruVideoFileCard<'a> {
             DownloadState::Paused { .. } => text_system(theme),
             _ => tone,
         };
-        let mut column = Column::new().push(
-            crate::fonts::type_role_text(
-                crate::fonts::TypeRole::BodyEmphasised,
-                format!("●  {status}"),
-            )
-            .color(status_color),
-        );
 
         // ── Metadata groups (real values only; hidden when unavailable) ─
         // One wrapping muted line so the groups stack gracefully at narrow
@@ -1493,10 +1492,9 @@ impl<'a> BoruVideoFileCard<'a> {
         if let Some(time) = time_label {
             groups.push(time);
         }
-        // Shape stability: the metadata line is a FIXED-height slot.  The
-        // group list is partly state-dependent (size disappears on
-        // Failed/Cancelled), so reserving the space keeps the card box
-        // identical across every DownloadState.
+        // Content-sized metadata rows: each row is included only when the
+        // state really renders it (metadata groups, progress, in-flight
+        // detail), so the status section never reserves blank space.
         let groups_el: Option<iced::Element<'a, AppMessage>> = if groups.is_empty() {
             None
         } else {
@@ -1511,19 +1509,11 @@ impl<'a> BoruVideoFileCard<'a> {
                 .into(),
             )
         };
-        column = column.push(fixed_slot(METADATA_SLOT_HEIGHT, groups_el));
-
-        // Progress bar + in-flight detail — fixed-height slots reserved in
-        // every state; content only Active/Paused (shape stability).
-        column = column.push(fixed_slot(
-            PROGRESS_SLOT_HEIGHT,
-            progress_section(state, self.dark_mode),
-        ));
         // VIDCARD-14: bytes of total, percentage and transfer speed — only
         // where the transfer layer provides them (no invented estimates).
         // Active uses the green progress accent; paused uses the muted tone.
-        let detail_el: Option<iced::Element<'a, AppMessage>> =
-            active_download_detail(attachment).map(|detail| {
+        let detail_el: Option<iced::Element<'a, AppMessage>> = active_download_detail(attachment)
+            .map(|detail| {
                 let detail_color = if matches!(state, DownloadState::Paused { .. }) {
                     muted
                 } else {
@@ -1533,9 +1523,24 @@ impl<'a> BoruVideoFileCard<'a> {
                     .color(detail_color)
                     .into()
             });
-        column = column.push(fixed_slot(DETAIL_SLOT_HEIGHT, detail_el));
-
-        column.spacing(SPACE_6).into()
+        let mut rows: Vec<iced::Element<'a, AppMessage>> = vec![
+            crate::fonts::type_role_text(
+                crate::fonts::TypeRole::BodyEmphasised,
+                format!("●  {status}"),
+            )
+            .color(status_color)
+            .into(),
+        ];
+        if let Some(groups) = groups_el {
+            rows.push(content_slot(Length::Fill, groups));
+        }
+        if let Some(progress) = progress_section(state, self.dark_mode) {
+            rows.push(content_slot(Length::Fill, progress));
+        }
+        if let Some(detail) = detail_el {
+            rows.push(content_slot(Length::Fill, detail));
+        }
+        Column::with_children(rows).spacing(SPACE_6).into()
     }
 
     #[cfg(feature = "video-playback")]
@@ -1558,48 +1563,33 @@ impl<'a> BoruVideoFileCard<'a> {
     fn actions(&self, attachment: &DownloadAttachment) -> iced::Element<'a, AppMessage> {
         let state = &attachment.state;
         let name_str = attachment.name.clone();
-        let mut column = Column::new();
 
         // VIDCARD-13: state-appropriate primary/secondary actions come from
         // the shared action_buttons helper (green filled primary, light
-        // bordered secondary, destructive text for removal).
+        // bordered secondary, destructive text for removal). The wrapping
+        // row is content-sized and bounded to the card width so 1-line and
+        // 2-line rows both end exactly where their buttons end.
         let action_row = action_buttons(self.entry_index, attachment.kind, state, &name_str);
-        // Shape stability: the action row is a fixed-height slot.  The
-        // button count changes per state (1-5 buttons, wrapping at narrow
-        // widths); reserving the space keeps the card box identical.
-        let inner_width = if self.band() == CardBand::Narrow {
-            self.inner_available_width()
-        } else {
-            MediaFrameSizing::new(
-                attachment.poster_dimensions,
-                self.band(),
-                self.inner_available_width(),
-            )
-            .width
-        };
-        column = column.push(fixed_slot(
-            super::download_progress_view::action_slot_height(inner_width),
-            Some(action_row),
-        ));
+        let mut rows: Vec<iced::Element<'a, AppMessage>> =
+            vec![content_slot(Length::Fill, action_row)];
 
         // FS-26 overwrite-conflict policy: while the download is ready to
         // start, surface the policy that decides what happens when the
         // destination file already exists. Default is Keep Both — never
-        // silently overwrite.  Reserved as a fixed slot in every state
-        // (visibility preserved in Ready; shape stability everywhere).
-        let policy = if matches!(state, DownloadState::Ready { .. }) {
-            Some(super::download_progress_view::policy_selector(
-                self.entry_index,
-                attachment.overwrite_policy,
-            ))
-        } else {
-            None
-        };
-        column = column.push(fixed_slot(POLICY_SLOT_HEIGHT, policy));
+        // silently overwrite. Only the Ready state renders it.
+        if matches!(state, DownloadState::Ready { .. }) {
+            rows.push(content_slot(
+                Length::Fill,
+                super::download_progress_view::policy_selector(
+                    self.entry_index,
+                    attachment.overwrite_policy,
+                ),
+            ));
+        }
 
         if let Some(error) = attachment.playback_error.as_ref() {
             if error.retry_available() {
-                column = column.push(iced::Element::<'_, AppMessage>::from(secondary_button(
+                rows.push(iced::Element::<'_, AppMessage>::from(secondary_button(
                     None,
                     "Retry player",
                     AppMessage::PlayInlineVideo(self.entry_index),
@@ -1607,7 +1597,7 @@ impl<'a> BoruVideoFileCard<'a> {
             }
         }
 
-        column.spacing(SPACE_6).into()
+        Column::with_children(rows).spacing(SPACE_6).into()
     }
 }
 
@@ -3075,7 +3065,7 @@ mod tests {
         );
     }
 
-    // ── Shape stability (this task) ────────────────────────────────────
+    // ── Content sizing (this task) ─────────────────────────────────────
 
     /// Lay out a video card element offscreen (tiny-skia CPU renderer) and
     /// return the outer node bounds.  Same harness as the FONTS-17 captures.
@@ -3099,14 +3089,15 @@ mod tests {
         (bounds.width, bounds.height)
     }
 
-    /// Assert the video card keeps IDENTICAL outer dimensions (width,
-    /// height) across every DownloadState — the media frame is always
-    /// rendered and the state-conditional sections occupy fixed-height
-    /// slots, so failure (or completion, or cancellation) never re-flows
-    /// the card box.
+    /// Assert the video card is content-sized: the compact terminal states
+    /// (Completed/Shared/Cancelled — no progress rows, no policy, no failure
+    /// block) are SHORTER than Ready (policy row), Active/Paused (progress +
+    /// detail rows) and Failed (failure block), and every state stays well
+    /// under the old fixed-slot footprint that reserved ~200 px of blank
+    /// space inside every card.
     #[cfg(feature = "video-playback")]
     #[test]
-    fn video_card_outer_bounds_are_identical_across_all_states() {
+    fn video_card_heights_are_content_sized_across_states() {
         let states = [
             DownloadState::Ready { total: Some(44_000_000) },
             DownloadState::Active {
@@ -3136,9 +3127,9 @@ mod tests {
         ];
 
         let mut measured: Vec<(f32, f32)> = Vec::new();
-        for state in states {
+        for state in &states {
             let mut att = DownloadAttachment::new(TransferKind::Video, "clip.mp4", "ticket", "Duke", None);
-            att.state = state;
+            att.state = state.clone();
             let card = BoruVideoFileCard::new(
                 0,
                 false,
@@ -3156,17 +3147,40 @@ mod tests {
             measured.push(measure_outer_bounds(&mut element, (900.0, 1600.0)));
         }
 
-        let (w0, h0) = measured[0];
+        let (w0, h0) = measured[0]; // Ready
+        // Compact terminal states must be SHORTER than Ready (policy row),
+        // Active/Paused (progress + detail rows) and Failed (failure block).
+        for i in [3usize, 4, 6] {
+            let h = measured[i].1;
+            assert!(
+                h < h0 - 10.0,
+                "state {i}: terminal height {h} must be shorter than Ready {h0} (no reserved blank)"
+            );
+            assert!(
+                h < measured[1].1,
+                "state {i}: terminal height {h} must be shorter than Active {}",
+                measured[1].1
+            );
+            assert!(
+                h < measured[5].1,
+                "state {i}: terminal height {h} must be shorter than Failed {}",
+                measured[5].1
+            );
+        }
+        // No state may keep the old reserved-slot footprint (~810 px): the
+        // card must end shortly after its action row (media frame ~344 px
+        // plus ~200 px of chrome at this band).
         for (i, (w, h)) in measured.iter().enumerate() {
             assert!(
                 (w - w0).abs() < 0.5,
                 "state {i}: width {w} differs from Ready width {w0}"
             );
             assert!(
-                (h - h0).abs() < 0.5,
-                "state {i}: height {h} differs from Ready height {h0}"
+                *h < 700.0,
+                "state {i}: height {h} exceeds the content-sized budget (blank space reserved?)"
             );
         }
-        assert!(w0 > 200.0 && h0 > 200.0, "card box implausibly small: {w0}x{h0}");
+        // Sanity: the media frame still dominates — the card is never tiny.
+        assert!(h0 > 400.0, "card box implausibly small: {w0}x{h0}");
     }
 }

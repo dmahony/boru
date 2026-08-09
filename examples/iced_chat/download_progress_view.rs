@@ -88,10 +88,6 @@ pub(crate) const DETAIL_SLOT_HEIGHT: f32 = 18.0;
 /// Reserved height (px) of the always-present FS-26 overwrite-policy slot.
 pub(crate) const POLICY_SLOT_HEIGHT: f32 = 30.0;
 
-/// Reserved height (px) of the always-present metadata line slot
-/// (video card status groups; one wrapped line).
-pub(crate) const METADATA_SLOT_HEIGHT: f32 = 36.0;
-
 /// Cap on the displayed failure diagnostics line.  The raw error text is
 /// unbounded; capping the on-card rendering keeps the failure block inside
 /// the card's fixed error slot (shape stability) while the full detail
@@ -138,21 +134,22 @@ pub(crate) fn error_slot_height(inner_width: f32) -> f32 {
     text_lines * 15.0 + 12.0 + 2.0 + 18.0 // text + padding + border + spacing
 }
 
-/// Render a fixed-height row slot.  `content` is the slot's state-dependent
-/// content (top-aligned); when `None` the slot renders an empty spacer of
-/// the same height so the card box stays identical across states.
-pub(crate) fn fixed_slot<'a>(
-    height: f32,
-    content: Option<iced::Element<'a, AppMessage>>,
+/// Render a card section at its natural (content) height, bounded to
+/// `width` so long wrapped content can never widen the card.
+///
+/// The caller includes the section only when the current state actually
+/// renders content for it, so the card sizes itself from its real contents
+/// instead of reserving fixed-height blank space (e.g. the failure block
+/// must not leave a 100+ px empty region inside a completed card).
+pub(crate) fn content_slot<'a>(
+    width: Length,
+    content: iced::Element<'a, AppMessage>,
 ) -> iced::Element<'a, AppMessage> {
-    container(
-        content.unwrap_or_else(|| iced::widget::Space::new().into()),
-    )
-    .width(Length::Fill)
-    .height(Length::Fixed(height))
-    .align_y(Alignment::Start)
-    .clip(true)
-    .into()
+    container(content)
+        .width(width)
+        .align_y(Alignment::Start)
+        .clip(true)
+        .into()
 }
 
 /// Build the bordered failure-reason block shared by the generic download
@@ -910,10 +907,6 @@ fn view_download_progress_inner<'a>(
     let muted = text_system(&theme);
     let name_str = attachment.name.clone();
     let error_color = color_error(&theme);
-    // Inner content width available to the fixed-width card (card width
-    // minus the card's horizontal padding) — drives the reserved slot
-    // heights (shape stability).
-    let inner_width = (download_card_width(timeline_width) - 2.0 * SPACE_16).max(0.0);
 
     // ── Row 1: State badge + filename + total size ──────────────────────
     let size_text = match &state {
@@ -1048,44 +1041,48 @@ fn view_download_progress_inner<'a>(
         _ => None,
     };
 
-    // ── Assemble the card (shape-stable row slots) ─────────────────────
-    // Every DownloadState renders the SAME set of rows; state-dependent
-    // rows are fixed-height slots that either show their content or an
-    // empty spacer of the same height.  Combined with the fixed card width
-    // below, the card's outer box (width, height, border radius) is
-    // identical in every state — only the content inside a slot changes.
-    let mut body = Column::new().push(title_row).spacing(SPACE_6);
-
+    // ── Assemble the card (content-sized rows) ─────────────────────────
+    // The card sizes itself from its actual contents: rows that the current
+    // DownloadState does not render (progress/detail unless active/paused,
+    // the overwrite policy unless ready, the failure block unless failed)
+    // are omitted entirely instead of reserving fixed-height blank space.
+    // State transitions re-measure the card and invalidate the chat layout
+    // cache, so the virtualized list stays consistent with the new height.
+    let mut rows: Vec<iced::Element<'a, AppMessage>> = vec![title_row.into()];
     if let Some(src) = source_row {
-        body = body.push(src);
+        rows.push(src.into());
     }
     if let Some(folder_info) = folder_info_row {
-        body = body.push(folder_info);
+        rows.push(folder_info.into());
     }
-    // Progress bar row — reserved in every state; content only Active/Paused.
-    body = body.push(fixed_slot(PROGRESS_SLOT_HEIGHT, progress_row));
-    // In-flight detail line — reserved in every state.
-    body = body.push(fixed_slot(DETAIL_SLOT_HEIGHT, progress_detail_row));
-    // Action row — always present, fixed height so the button count per
-    // state (1-5 buttons) can never re-measure the card box.
-    let action_slot_h = action_slot_height(inner_width);
-    body = body.push(fixed_slot(action_slot_h, Some(action_row)));
+    // Progress bar row — only Active/Paused renders one.
+    if let Some(progress) = progress_row {
+        rows.push(content_slot(Length::Fill, progress));
+    }
+    // In-flight detail line — only Active/Paused renders one.
+    if let Some(detail) = progress_detail_row {
+        rows.push(content_slot(Length::Fill, detail));
+    }
+    // Action row — always present; wraps at the card width, height is
+    // content so a 1-line or 2-line row never leaves blank space.
+    rows.push(content_slot(Length::Fill, action_row));
     if let Some(playback_actions) = playback_action_row {
-        body = body.push(playback_actions);
+        rows.push(playback_actions);
     }
     // FS-26 overwrite-conflict policy: while the download is ready to start,
     // surface the policy that decides what happens when the destination file
     // already exists. Default is Keep Both — never silently overwrite.
-    // Reserved in every state; content only Ready (visibility preserved).
-    let policy = if matches!(state, DownloadState::Ready { .. }) {
-        Some(policy_selector(entry_index, attachment.overwrite_policy))
-    } else {
-        None
-    };
-    body = body.push(fixed_slot(POLICY_SLOT_HEIGHT, policy));
-    // Failure reason — reserved in every state; content only Failed.
-    body = body.push(fixed_slot(error_slot_height(inner_width), error_row));
-    body = body.spacing(SPACE_6);
+    if matches!(state, DownloadState::Ready { .. }) {
+        rows.push(content_slot(
+            Length::Fill,
+            policy_selector(entry_index, attachment.overwrite_policy),
+        ));
+    }
+    // Failure reason — only the Failed state renders the bordered block.
+    if let Some(error) = error_row {
+        rows.push(content_slot(Length::Fill, error));
+    }
+    let mut body = Column::with_children(rows).spacing(SPACE_6);
 
     // Card container with state-coloured border.  Fixed width (derived from
     // the measured chat timeline) so the card never re-measures when the
@@ -1944,20 +1941,22 @@ mod tests {
         (bounds.width, bounds.height)
     }
 
-    /// Build a generic (non-video) attachment in the given state for shape
+    /// Build a generic (non-video) attachment in the given state for height
     /// measurement.  The generic card path is what this module owns; the
-    /// video card has its own shape-stability test in video_file_card.rs.
+    /// video card has its own content-sizing test in video_file_card.rs.
     fn generic_attachment_in(state: DownloadState) -> DownloadAttachment {
         let mut att = DownloadAttachment::new(TransferKind::File, "report.pdf", "ticket", "Duke", None);
         att.state = state;
         att
     }
 
-    /// Assert the generic download card keeps IDENTICAL outer dimensions
-    /// (width, height) across every DownloadState — the Failed card must be
-    /// the same shape as the downloading card.
+    /// Assert the generic download card is content-sized: states that render
+    /// extra rows (Active/Paused: progress + detail; Ready: policy; Failed:
+    /// failure block) are TALLER than the compact terminal states
+    /// (Completed/Shared/Cancelled), and every state stays well under the
+    /// old fixed-height footprint that reserved blank space.
     #[test]
-    fn card_outer_bounds_are_identical_across_all_states() {
+    fn card_heights_are_content_sized_across_states() {
         let states = [
             DownloadState::Ready { total: Some(44_000_000) },
             DownloadState::Active {
@@ -1995,19 +1994,41 @@ mod tests {
             measured.push(measure_outer_bounds(&mut element, (900.0, 1600.0)));
         }
 
-        let (w0, h0) = measured[0];
+        let (w0, h0) = measured[0]; // Ready
+        // Content-sized invariants (the old fixed-slot card measured ~390 px
+        // in every state): no state may reserve blank space, Failed carries
+        // the failure block, and Cancelled (a single Remove action, no
+        // policy row) is the shortest state.  Completed/Shared wrap 5 action
+        // buttons (two lines here), so they are NOT asserted against Ready —
+        // only the content-sized ceiling applies.
         for (i, (w, h)) in measured.iter().enumerate() {
             assert!(
                 (w - w0).abs() < 0.5,
                 "state {i}: width {w} differs from Ready width {w0}"
             );
             assert!(
-                (h - h0).abs() < 0.5,
-                "state {i}: height {h} differs from Ready height {h0}"
+                *h < 320.0,
+                "state {i}: height {h} exceeds the content-sized budget (blank space reserved?)"
             );
         }
-        // Sanity: the shape is non-trivial (not a degenerate zero box).
-        assert!(w0 > 100.0 && h0 > 100.0, "card box implausibly small: {w0}x{h0}");
+        // Failed is the tallest state (the failure block sits below actions).
+        for (i, (_, h)) in measured.iter().enumerate() {
+            if i != 5 {
+                assert!(
+                    *h < measured[5].1,
+                    "state {i}: height {h} must be shorter than Failed {}",
+                    measured[5].1
+                );
+            }
+        }
+        // Cancelled (single Remove button, no policy) is the shortest.
+        assert!(
+            measured[6].1 < h0,
+            "Cancelled height {} must be shorter than Ready {h0}",
+            measured[6].1
+        );
+        // Ready sanity: the card is still substantial.
+        assert!(h0 > 100.0, "card box implausibly small: {w0}x{h0}");
     }
 
     /// The fixed width helper is state-independent by construction (it only

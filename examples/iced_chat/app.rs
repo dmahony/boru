@@ -2459,32 +2459,53 @@ impl DownloadAttachment {
     }
 
     fn estimated_height(&self, timeline_width: f32) -> f32 {
-        // Rows: title + action + spacing. Active adds progress + source rows.
-        // Error state adds a failure-title, action, and detail rows.
-        let base = match self.state {
-            DownloadState::Ready { .. } => 84.0,
-            DownloadState::Active { total: Some(_), .. } | DownloadState::Paused { .. } => 112.0,
-            DownloadState::Active { total: None, .. } => 176.0,
-            DownloadState::Completed { .. } => 92.0,
-            DownloadState::Shared { .. } => 92.0,
-            DownloadState::Failed { .. } => 176.0,
-            DownloadState::Cancelled => 84.0,
-        };
-
         if self.kind == TransferKind::Video {
-            // Video cards replace the generic download body with a bounded
-            // poster/player plus stable header/status/action slots.  Keep the
-            // chrome conservative: an underestimate corrupts the virtualized
-            // prefix sums and causes overlap, while a small overestimate only
-            // adds harmless overscan space.
+            // Video cards render a bounded poster/player (aspect-ratio-aware,
+            // sized from the measured chat width) plus a compact chrome of
+            // header/status/metadata/actions.  Keep the chrome conservative:
+            // an underestimate corrupts the virtualized prefix sums and
+            // causes overlap, while a small overestimate only adds harmless
+            // overscan space.
             const VIDEO_CARD_CHROME_H: f32 = 320.0;
-            base + VIDEO_CARD_CHROME_H
+            VIDEO_CARD_CHROME_H
                 + crate::video_file_card::estimated_media_frame_height(
                     self.poster_dimensions,
                     timeline_width,
                 )
         } else {
-            base
+            // Generic (image/file/audio) download cards are content-sized:
+            // title + optional source/folder rows + optional progress/detail
+            // rows + the wrapping action row + optional policy (Ready) +
+            // optional failure block (Failed).  Reuse the same estimators the
+            // rendered rows wrap at so the estimate tracks the real content
+            // height per state — the old flat constants (84-176) badly
+            // underestimated the rendered cards, corrupting the prefix sums.
+            let inner_width =
+                (crate::download_progress_view::download_card_width(timeline_width) - 2.0 * SPACE_16)
+                    .max(0.0);
+            let mut h = 40.0; // title row
+            if !self.source_peer.is_empty() {
+                h += 16.0; // "From:" source row
+            }
+            if self.is_folder && self.collection_entries > 0 {
+                h += 16.0; // folder entry-count row
+            }
+            match &self.state {
+                DownloadState::Active { .. } | DownloadState::Paused { .. } => {
+                    h += crate::download_progress_view::PROGRESS_SLOT_HEIGHT
+                        + crate::download_progress_view::DETAIL_SLOT_HEIGHT;
+                }
+                DownloadState::Ready { .. } => {
+                    h += crate::download_progress_view::POLICY_SLOT_HEIGHT;
+                }
+                DownloadState::Failed { .. } => {
+                    h += crate::download_progress_view::error_slot_height(inner_width);
+                }
+                _ => {}
+            }
+            // Action row (wraps at narrow widths) + row gaps + card padding.
+            h += crate::download_progress_view::action_slot_height(inner_width) + 36.0 + 24.0;
+            h
         }
     }
 }
@@ -48952,53 +48973,89 @@ mod tests {
         ));
     }
 
-    /// Verify that the constant width layout estimates stay within documented
-    /// tolerances for each download state.
+    /// Verify that the content-sized layout estimates stay within documented
+    /// tolerances for each download state.  The estimates deliberately
+    /// overestimate the rendered card (an underestimate corrupts the
+    /// virtualized prefix sums) and track the state-dependent rows: the
+    /// compact terminal states (Completed/Cancelled) are the shortest, the
+    /// policy row (Ready), the progress/detail rows (Active/Paused) and the
+    /// failure block (Failed) each add their real footprint.
     #[test]
     fn download_estimated_height_fits_each_state() {
         let mut attachment =
             DownloadAttachment::new(TransferKind::File, "demo.bin", "ticket", "", None);
+        let inner = (crate::download_progress_view::download_card_width(1024.0) - 2.0 * SPACE_16)
+            .max(0.0);
 
-        // Ready
-        assert!((attachment.estimated_height(1024.0) - 84.0).abs() < 1.0);
+        // Ready — adds the FS-26 overwrite-policy row.
+        let ready = attachment.estimated_height(1024.0);
+        assert!(
+            (ready - (40.0 + 30.0 + crate::download_progress_view::action_slot_height(inner) + 60.0))
+                .abs() < 1.0,
+            "ready estimate {ready} must track title + policy + action + chrome"
+        );
 
-        // Active with known total
+        // Active with known total — adds progress + detail rows.
         attachment.state = DownloadState::Active {
             bytes: 500,
             total: Some(1000),
         };
+        let active = attachment.estimated_height(1024.0);
         assert!(
-            (attachment.estimated_height(1024.0) - 112.0).abs() < 1.0,
-            "active+total height expected ~112, got {}",
-            attachment.estimated_height(1024.0)
+            (active
+                - (40.0
+                    + crate::download_progress_view::PROGRESS_SLOT_HEIGHT
+                    + crate::download_progress_view::DETAIL_SLOT_HEIGHT
+                    + crate::download_progress_view::action_slot_height(inner)
+                    + 60.0))
+                .abs() < 1.0,
+            "active estimate {active} must track title + progress + detail + action + chrome"
         );
 
-        // Active with unknown total
+        // Active with unknown total — same rows as known-total Active.
         attachment.state = DownloadState::Active {
             bytes: 500,
             total: None,
         };
-        assert!((attachment.estimated_height(1024.0) - 176.0).abs() < 1.0);
+        assert!((attachment.estimated_height(1024.0) - active).abs() < 1.0);
 
-        // Completed
+        // Completed — compact terminal state (no progress, policy or failure).
         attachment.state = DownloadState::Completed {
             saved_name: "demo.bin".into(),
             saved_path: None,
             total_size: None,
         };
-        assert!((attachment.estimated_height(1024.0) - 92.0).abs() < 1.0);
+        let completed = attachment.estimated_height(1024.0);
+        assert!(
+            (completed - (40.0 + crate::download_progress_view::action_slot_height(inner) + 60.0))
+                .abs() < 1.0,
+            "completed estimate {completed} must track title + action + chrome"
+        );
+        assert!(
+            completed < ready && completed < active,
+            "terminal Completed ({completed}) must be shorter than Ready ({ready}) and Active ({active})"
+        );
 
-        // Failed
+        // Failed — adds the failure block.
         attachment.state = DownloadState::Failed {
             failure: DownloadFailure::Other {
                 detail: "err".into(),
             },
         };
-        assert!((attachment.estimated_height(1024.0) - 176.0).abs() < 1.0);
+        let failed = attachment.estimated_height(1024.0);
+        assert!(
+            (failed
+                - (40.0
+                    + crate::download_progress_view::error_slot_height(inner)
+                    + crate::download_progress_view::action_slot_height(inner)
+                    + 60.0))
+                .abs() < 1.0,
+            "failed estimate {failed} must track title + failure block + action + chrome"
+        );
 
-        // Cancelled
+        // Cancelled — compact terminal state like Completed.
         attachment.state = DownloadState::Cancelled;
-        assert!((attachment.estimated_height(1024.0) - 84.0).abs() < 1.0);
+        assert!((attachment.estimated_height(1024.0) - completed).abs() < 1.0);
     }
 
     #[test]
