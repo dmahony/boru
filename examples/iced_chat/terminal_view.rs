@@ -50,21 +50,37 @@ impl TerminalTab {
         )
     }
 
-    /// Spawn a terminal running `$SHELL` (fallback `/bin/sh`).
+    /// Spawn a terminal running the platform shell.
+    ///
+    /// On Unix this runs `$SHELL` (fallback `/bin/sh`) with `-c` so the MOTD
+    /// banner prints before the interactive shell takes over. On Windows the
+    /// POSIX `printf`/`exec` startup command does not exist, so we spawn the
+    /// user's console (`%COMSPEC%`, fallback `cmd.exe`) interactively and
+    /// skip the banner.
     ///
     /// Mirrors the `iced_term` `full_screen` example: `Terminal::new`
     /// immediately creates the PTY and starts the shell's event loop, so the
-    /// shell process exists even before the tab is first shown. The shell is
-    /// launched with `-c` so the MOTD banner prints before the interactive
-    /// shell takes over.
+    /// shell process exists even before the tab is first shown.
     pub fn new() -> std::io::Result<Self> {
-        let system_shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        #[cfg(windows)]
+        let (program, args): (String, Vec<String>) = {
+            let comspec = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
+            (comspec, Vec::new())
+        };
+        #[cfg(not(windows))]
+        let (program, args): (String, Vec<String>) = {
+            let system_shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+            (
+                system_shell.clone(),
+                vec!["-c".to_string(), Self::startup_command(&system_shell)],
+            )
+        };
         let settings = iced_term::settings::Settings {
             font: iced_term::settings::FontSettings::default(),
             theme: iced_term::settings::ThemeSettings::default(),
             backend: iced_term::settings::BackendSettings {
-                program: system_shell.clone(),
-                args: vec!["-c".to_string(), Self::startup_command(&system_shell)],
+                program,
+                args,
                 ..Default::default()
             },
         };

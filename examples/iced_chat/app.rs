@@ -3486,9 +3486,11 @@ pub struct IcedChat {
     // ── Navigation ──
     pub screen: Screen,
     /// Embedded terminal tab (feature `terminal`). Spawned eagerly with the
-    /// user's `$SHELL` so the tab is ready the first time it is opened.
+    /// platform shell so the tab is ready the first time it is opened.
+    /// `None` when the PTY/shell could not be spawned (e.g. a missing shell
+    /// on Windows) — the rest of the app must still run normally.
     #[cfg(feature = "terminal")]
-    pub terminal: TerminalTab,
+    pub terminal: Option<TerminalTab>,
     /// Track which image is currently shown in the full-screen lightbox overlay.
     lightbox_image: Option<usize>,
     /// Guard counter for the stale-`Scrolled` race when the lightbox closes.
@@ -7980,7 +7982,7 @@ impl IcedChat {
         Self {
             screen: Screen::ChatList,
             #[cfg(feature = "terminal")]
-            terminal: TerminalTab::new().expect("failed to create embedded terminal"),
+            terminal: TerminalTab::new().ok(),
             splash_start_time: std::time::Instant::now(),
             splash_has_rendered: false,
             splash_spinner_frame: 0,
@@ -15304,15 +15306,17 @@ impl IcedChat {
 
             #[cfg(feature = "terminal")]
             AppMessage::TerminalEvent(iced_term::Event::BackendCall(_, cmd)) => {
-                match self.terminal.update(cmd) {
-                    iced_term::actions::Action::Shutdown => {
-                        // The embedded shell exited — leave the terminal tab.
-                        if matches!(self.screen, Screen::Terminal) {
-                            self.screen = Screen::ChatList;
+                if let Some(term) = self.terminal.as_mut() {
+                    match term.update(cmd) {
+                        iced_term::actions::Action::Shutdown => {
+                            // The embedded shell exited — leave the terminal tab.
+                            if matches!(self.screen, Screen::Terminal) {
+                                self.screen = Screen::ChatList;
+                            }
                         }
+                        iced_term::actions::Action::ChangeTitle(_)
+                        | iced_term::actions::Action::Ignore => {}
                     }
-                    iced_term::actions::Action::ChangeTitle(_)
-                    | iced_term::actions::Action::Ignore => {}
                 }
                 iced::Task::none()
             }
@@ -26533,7 +26537,16 @@ impl IcedChat {
             Screen::Discover => self.serve_prewarmed(Screen::Discover, || self.view_discover()),
             Screen::Groups => self.serve_prewarmed(Screen::Groups, || self.view_groups_screen()),
             #[cfg(feature = "terminal")]
-            Screen::Terminal => self.terminal.view().map(AppMessage::TerminalEvent),
+            Screen::Terminal => match self.terminal.as_ref() {
+                Some(term) => term.view().map(AppMessage::TerminalEvent),
+                // Terminal could not be spawned (e.g. no shell on this
+                // platform) — show a plain notice instead of a blank pane.
+                None => crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::Body,
+                    "Terminal unavailable on this platform.",
+                )
+                .into(),
+            },
             Screen::Gallery => crate::component_gallery::view_gallery(),
         };
 

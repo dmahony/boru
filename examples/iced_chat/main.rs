@@ -1686,12 +1686,12 @@ fn main() -> Result<()> {
         }
 
         #[cfg(feature = "terminal")]
-        subs.push(
-            state
-                .terminal
-                .subscription()
-                .map(app::AppMessage::TerminalEvent),
-        );
+        if let Some(term) = &state.terminal {
+            subs.push(
+                term.subscription()
+                    .map(app::AppMessage::TerminalEvent),
+            );
+        }
 
         subs.extend(vec![
             IcedChat::subscription(
