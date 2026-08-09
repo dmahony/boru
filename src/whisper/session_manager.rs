@@ -19,13 +19,23 @@
 //! the peer with the higher key closes its outgoing connection and keeps the
 //! incoming one. Both converge on exactly one connection.
 
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
 
 use iroh::PublicKey;
 use tokio::sync::mpsc;
 use tracing::{debug, info, trace, warn};
 
 use crate::whisper::{WhisperEvent, WhisperHandle};
+
+/// Counter of session state events (`StatusChanged`) that could not be
+/// delivered to the frontend because the event channel was full or its
+/// receiver was dropped.  A non-zero value is observable overload
+/// (BORU-AUDIT-08).
+static SESSION_EVENT_SEND_FAILURES: AtomicU64 = AtomicU64::new(0);
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -104,6 +114,19 @@ struct PeerSession {
     backoff: Duration,
 }
 
+/// Forward a correctness-critical session state event to the frontend.
+///
+/// `StatusChanged` events drive the GUI's session indicator, so they must not
+/// be silently dropped under load: await the bounded channel (backpressure)
+/// and count/log any failure.  The only failure mode is a dropped frontend
+/// receiver.
+async fn forward_session_event(event_tx: &mpsc::Sender<SessionEvent>, event: SessionEvent) {
+    if let Err(e) = event_tx.send(event).await {
+        SESSION_EVENT_SEND_FAILURES.fetch_add(1, Ordering::Relaxed);
+        warn!(error = %e, "session event dropped: frontend receiver gone");
+    }
+}
+
 impl PeerSession {
     fn new() -> Self {
         Self {
@@ -113,7 +136,7 @@ impl PeerSession {
         }
     }
 
-    fn set_state(
+    async fn set_state(
         &mut self,
         state: SessionState,
         event_tx: &mpsc::Sender<SessionEvent>,
@@ -122,7 +145,11 @@ impl PeerSession {
         if self.state != state {
             debug!(%peer, old = ?self.state, new = ?state, "session state transition");
             self.state = state;
-            let _ = event_tx.try_send(SessionEvent::StatusChanged { peer, state });
+            forward_session_event(
+                event_tx,
+                SessionEvent::StatusChanged { peer, state },
+            )
+            .await;
         }
     }
 
@@ -227,7 +254,7 @@ impl SessionManagerActor {
                 cmd = self.cmd_rx.recv() => {
                     match cmd {
                         None => break,
-                        Some(cmd) => self.handle_cmd(cmd),
+                        Some(cmd) => self.handle_cmd(cmd).await,
                     }
                 }
             }
@@ -235,7 +262,7 @@ impl SessionManagerActor {
         debug!("session manager actor stopped");
     }
 
-    fn handle_cmd(&mut self, cmd: Cmd) {
+    async fn handle_cmd(&mut self, cmd: Cmd) {
         match cmd {
             Cmd::StartSession { peer } => {
                 // Avoid dialing our own public key.
@@ -247,7 +274,7 @@ impl SessionManagerActor {
                 info!(%peer, state = ?entry.state, "session manager starting session");
                 match entry.state {
                     SessionState::Disconnected | SessionState::Reconnecting => {
-                        entry.set_state(SessionState::Connecting, &self.event_tx, peer);
+                        entry.set_state(SessionState::Connecting, &self.event_tx, peer).await;
                         let wh = self.whisper_handle.clone();
                         let event_tx = self.event_tx.clone();
                         // Spawn the actual connection attempt so we don't block
@@ -265,10 +292,14 @@ impl SessionManagerActor {
                                 }
                                 Err(e) => {
                                     warn!(%peer_send, "session connect failed: {e:#}");
-                                    let _ = event_tx.try_send(SessionEvent::StatusChanged {
-                                        peer: peer_send,
-                                        state: SessionState::Disconnected,
-                                    });
+                                    forward_session_event(
+                                        &event_tx,
+                                        SessionEvent::StatusChanged {
+                                            peer: peer_send,
+                                            state: SessionState::Disconnected,
+                                        },
+                                    )
+                                    .await;
                                 }
                             }
                         });
@@ -283,7 +314,7 @@ impl SessionManagerActor {
                 if let Some(entry) = self.sessions.get_mut(&peer) {
                     entry.reconnect_attempt = 0;
                     entry.backoff = BACKOFF_BASE;
-                    entry.set_state(SessionState::Disconnected, &self.event_tx, peer);
+                    entry.set_state(SessionState::Disconnected, &self.event_tx, peer).await;
                 }
                 let wh = self.whisper_handle.clone();
                 tokio::task::spawn(async move {
@@ -336,7 +367,7 @@ impl SessionManagerActor {
 
                         entry.reconnect_attempt = 0;
                         entry.backoff = BACKOFF_BASE;
-                        entry.set_state(SessionState::Connected, &self.event_tx, peer);
+                        entry.set_state(SessionState::Connected, &self.event_tx, peer).await;
                     }
                     WhisperEvent::Disconnected { peer } => {
                         if peer == self.local_public {
@@ -352,7 +383,7 @@ impl SessionManagerActor {
                                             SessionState::Reconnecting,
                                             &self.event_tx,
                                             peer,
-                                        );
+                                        ).await;
                                         let initial_delay = entry.backoff;
                                         let remaining_attempts =
                                             MAX_RECONNECT_ATTEMPTS - entry.reconnect_attempt;
@@ -381,13 +412,15 @@ impl SessionManagerActor {
                                                         attempts += 1;
                                                         if attempts >= remaining_attempts {
                                                             warn!(peer = %peer.fmt_short(), attempts, "reconnect exhausted");
-                                                            let _ = event_tx.try_send(
+                                                            forward_session_event(
+                                                                &event_tx,
                                                                 SessionEvent::StatusChanged {
                                                                     peer,
                                                                     state:
                                                                         SessionState::Disconnected,
                                                                 },
-                                                            );
+                                                            )
+                                                            .await;
                                                             break;
                                                         }
                                                         delay = delay
@@ -406,7 +439,7 @@ impl SessionManagerActor {
                                             SessionState::Disconnected,
                                             &self.event_tx,
                                             peer,
-                                        );
+                                        ).await;
                                     }
                                 }
                                 _ => {
@@ -786,5 +819,64 @@ mod tests {
         let builder = WhisperBuilder::new(endpoint.clone(), sk);
         let (handle, event_rx) = builder.spawn();
         (handle, event_rx)
+    }
+
+    /// Regression (BORU-AUDIT-08): a session `StatusChanged` event must not be
+    /// silently dropped when the bounded event channel is full.  `set_state`
+    /// applies backpressure (awaited send); the event must arrive once the
+    /// receiver drains — the old `try_send` implementation returned `Full`
+    /// and discarded the event.
+    #[tokio::test]
+    async fn set_state_delivers_under_backpressure() {
+        let peer = SecretKey::generate().public();
+        let (tx, mut rx) = mpsc::channel::<SessionEvent>(1);
+
+        // Fill the channel to capacity.
+        tx.send(SessionEvent::StatusChanged {
+            peer,
+            state: SessionState::Connecting,
+        })
+        .await
+        .unwrap();
+        assert!(
+            tx.try_send(SessionEvent::StatusChanged {
+                peer,
+                state: SessionState::Connecting,
+            })
+            .is_err(),
+            "channel must be full"
+        );
+
+        // Spawn the awaited send; it must block, not drop.
+        let mut session = PeerSession::new();
+        let tx2 = tx.clone();
+        let sender = tokio::task::spawn(async move {
+            session
+                .set_state(SessionState::Connected, &tx2, peer)
+                .await;
+        });
+
+        // Drain one slot; the blocked send must complete and the event must
+        // arrive.
+        let first = rx.recv().await.expect("first event");
+        assert!(matches!(first, SessionEvent::StatusChanged { .. }));
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            let second = rx.recv().await.expect("second event");
+            assert!(
+                matches!(
+                    second,
+                    SessionEvent::StatusChanged {
+                        state: SessionState::Connected,
+                        ..
+                    }
+                ),
+                "event was dropped instead of delivered"
+            );
+        })
+        .await
+        .expect("awaited send never completed");
+
+        sender.await.expect("sender task panicked");
     }
 }

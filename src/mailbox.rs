@@ -1187,7 +1187,11 @@ mod tests {
         };
         // Rewind the clock to make the envelope look perpetually fresh —
         // the old code accepted this and could keep a message alive forever.
-        inner.created_at = now_ms().saturating_sub(1);
+        // Rewind relative to the *sealed* timestamp: rewriting from the live
+        // clock is racy — when `seal` and this line straddle a millisecond
+        // boundary the tampered value equals the original and the signature
+        // still verifies (flaky test failure).
+        inner.created_at = inner.created_at.saturating_sub(1);
         let tampered = MailboxEnvelope::V2(inner);
 
         // The signature no longer verifies: created_at is part of the

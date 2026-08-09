@@ -20,7 +20,10 @@ pub mod session_manager;
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, RwLock},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, RwLock,
+    },
 };
 
 use bytes::Bytes;
@@ -32,7 +35,7 @@ use iroh::{
 use n0_error::Result;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, Mutex};
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::mailbox::{MailboxAck, MailboxEnvelope};
 
@@ -43,6 +46,16 @@ pub const WHISPER_ALPN: &[u8] = b"/iroh-gossip-chat/whisper/1";
 
 /// Default capacity for the command channel.
 const CMD_CHANNEL_CAP: usize = 256;
+
+/// Counter of correctness-critical whisper state events (`Connected`,
+/// `Disconnected`) that could not be delivered to the frontend because the
+/// event channel was full or its receiver was dropped.  A non-zero value is
+/// observable overload (BORU-AUDIT-08).
+static WHISPER_STATE_EVENT_SEND_FAILURES: AtomicU64 = AtomicU64::new(0);
+
+/// Counter of `RevokePeer` commands that could not be queued on the first
+/// attempt and had to be retried asynchronously (BORU-AUDIT-08).
+static WHISPER_REVOKE_SEND_FAILURES: AtomicU64 = AtomicU64::new(0);
 
 /// Maximum payload size for a single whisper message (16 MB).
 const MAX_WHISPER_PAYLOAD: usize = 16 * 1024 * 1024;
@@ -162,6 +175,51 @@ enum ConnectionEvent {
 
 // ── WhisperHandle ──────────────────────────────────────────────────────────────
 
+/// Queue a `RevokePeer` command without silently dropping it.
+///
+/// `set_peer_authorized` is a synchronous API (called from UI code), so this
+/// cannot await the bounded command channel.  We fast-path `try_send`; if the
+/// queue is full or closed, we count the failure and spawn a best-effort task
+/// to deliver the revocation when a runtime is available.  Revocation is
+/// security-critical: silently dropping it would leave a revoked peer's
+/// channel open.
+fn enqueue_revoke(cmd_tx: &mpsc::Sender<Cmd>, peer: PublicKey) {
+    if cmd_tx.try_send(Cmd::RevokePeer(peer)).is_ok() {
+        return;
+    }
+    WHISPER_REVOKE_SEND_FAILURES.fetch_add(1, Ordering::Relaxed);
+    warn!(
+        peer = %peer.fmt_short(),
+        "whisper revoke command queue full; retrying asynchronously"
+    );
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        let cmd_tx = cmd_tx.clone();
+        handle.spawn(async move {
+            if let Err(e) = cmd_tx.send(Cmd::RevokePeer(peer)).await {
+                warn!(
+                    peer = %peer.fmt_short(),
+                    error = %e,
+                    "whisper revoke command lost: actor dropped"
+                );
+            }
+        });
+    }
+}
+
+/// Forward a correctness-critical whisper event to the frontend.
+///
+/// State events (`Connected`/`Disconnected`) drive the session manager's
+/// reconnect state machine and messages carry user data, so they must not be
+/// silently dropped under load: we await the bounded channel (backpressure)
+/// and count/log any failure.  The only failure mode is a dropped frontend
+/// receiver.
+async fn forward_event(event_tx: &mpsc::Sender<WhisperEvent>, event: WhisperEvent) {
+    if let Err(e) = event_tx.send(event).await {
+        WHISPER_STATE_EVENT_SEND_FAILURES.fetch_add(1, Ordering::Relaxed);
+        warn!(error = %e, "whisper event dropped: frontend receiver gone");
+    }
+}
+
 /// Handle to send commands to a running whisper actor.
 ///
 /// Clone this freely — all clones share the same background task.
@@ -187,7 +245,7 @@ impl WhisperHandle {
             peers.insert(peer);
             // Adding a key must also tear down an already-established channel
             // so revoked peers cannot continue messaging.
-            let _ = self.cmd_tx.try_send(Cmd::RevokePeer(peer));
+            enqueue_revoke(&self.cmd_tx, peer);
         }
     }
 
@@ -454,20 +512,20 @@ async fn run_actor(
                             // channel too; otherwise its reader could continue
                             // delivering messages after authorization was removed.
                             connection.close(0u32.into(), b"whisper authorization revoked");
-                            let _ = event_tx.try_send(WhisperEvent::Disconnected { peer });
+                            forward_event(&event_tx, WhisperEvent::Disconnected { peer }).await;
                         }
                         let _ = reply.send(removed);
                     }
                     Some(Cmd::RevokePeer(peer)) => {
                         if let Some(connection) = connected.lock().await.remove(&peer) {
                             connection.close(0u32.into(), b"whisper authorization revoked");
-                            let _ = event_tx.try_send(WhisperEvent::Disconnected { peer });
+                            forward_event(&event_tx, WhisperEvent::Disconnected { peer }).await;
                         }
                     }
                     Some(Cmd::IncomingConnection(conn)) => {
                         let remote_id = conn.remote_id();
                         connected.lock().await.insert(remote_id, conn.clone());
-                        let _ = event_tx.try_send(WhisperEvent::Connected { peer: remote_id });
+                        forward_event(&event_tx, WhisperEvent::Connected { peer: remote_id }).await;
                         let msg_tx = msg_tx.clone();
                         tokio::task::spawn(read_connection_loop(remote_id, conn, msg_tx));
                     }
@@ -479,10 +537,14 @@ async fn run_actor(
                         // Try to decode as a wire message for structured handling.
                         match postcard::from_bytes::<WhisperWireMessage>(&content) {
                             Ok(WhisperWireMessage::Text { text, .. }) => {
-                                let _ = event_tx.send(WhisperEvent::Message {
-                                    from,
-                                    content: Bytes::from(text),
-                                }).await;
+                                forward_event(
+                                    &event_tx,
+                                    WhisperEvent::Message {
+                                        from,
+                                        content: Bytes::from(text),
+                                    },
+                                )
+                                .await;
                             }
 
                             Ok(WhisperWireMessage::Control { payload }) => {
@@ -491,35 +553,42 @@ async fn run_actor(
                                     payload_len = payload.len(),
                                     "whisper control message received"
                                 );
-                                let _ = event_tx.send(WhisperEvent::Control {
-                                    from,
-                                    content: Bytes::from(payload),
-                                }).await;
+                                forward_event(
+                                    &event_tx,
+                                    WhisperEvent::Control {
+                                        from,
+                                        content: Bytes::from(payload),
+                                    },
+                                )
+                                .await;
                             }
                             Ok(WhisperWireMessage::MailboxEnvelope { envelope }) => {
-                                let _ = event_tx.send(WhisperEvent::MailboxEnvelope {
-                                    from,
-                                    envelope,
-                                }).await;
+                                forward_event(
+                                    &event_tx,
+                                    WhisperEvent::MailboxEnvelope { from, envelope },
+                                )
+                                .await;
                             }
                             Ok(WhisperWireMessage::MailboxAck { ack }) => {
-                                let _ = event_tx.send(WhisperEvent::MailboxAck {
-                                    from,
-                                    ack,
-                                }).await;
+                                forward_event(&event_tx, WhisperEvent::MailboxAck { from, ack })
+                                    .await;
                             }
                             Err(_) => {
                                 // Fallback: forward raw bytes as a Message event.
-                                let _ = event_tx.send(WhisperEvent::Message {
-                                    from,
-                                    content: content.clone(),
-                                }).await;
+                                forward_event(
+                                    &event_tx,
+                                    WhisperEvent::Message {
+                                        from,
+                                        content: content.clone(),
+                                    },
+                                )
+                                .await;
                             }
                         }
                     }
                     ConnectionEvent::Disconnected(peer) => {
                         connected.lock().await.remove(&peer);
-                        let _ = event_tx.try_send(WhisperEvent::Disconnected { peer });
+                        forward_event(&event_tx, WhisperEvent::Disconnected { peer }).await;
                     }
                 }
             }
@@ -529,7 +598,7 @@ async fn run_actor(
     // Clean shutdown: close all connections.
     let peers: Vec<PublicKey> = connected.lock().await.keys().copied().collect();
     for peer in &peers {
-        let _ = event_tx.try_send(WhisperEvent::Disconnected { peer: *peer });
+        forward_event(&event_tx, WhisperEvent::Disconnected { peer: *peer }).await;
     }
 }
 
@@ -619,7 +688,7 @@ async fn connect_to_peer(
     info!(peer = %remote_id.fmt_short(), "whisper connected to peer");
 
     connected.lock().await.insert(remote_id, conn.clone());
-    let _ = event_tx.try_send(WhisperEvent::Connected { peer: remote_id });
+    forward_event(&event_tx, WhisperEvent::Connected { peer: remote_id }).await;
 
     // Spawn a reader for this connection.
     let msg_tx = msg_tx.clone();
@@ -809,7 +878,13 @@ async fn read_connection_loop(
         }
     }
 
-    let _ = msg_tx.try_send(ConnectionEvent::Disconnected(remote_id));
+    // Notify the actor that the connection dropped.  This is correctness-
+    // critical: if it were silently dropped the actor would keep the peer in
+    // its `connected` map and reuse a dead connection.  Await the bounded
+    // channel; the only failure is the actor itself being gone.
+    if msg_tx.send(ConnectionEvent::Disconnected(remote_id)).await.is_err() {
+        debug!(peer = %remote_id.fmt_short(), "whisper actor dropped; disconnect notification not delivered");
+    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
@@ -1045,5 +1120,43 @@ mod tests {
     fn whisper_protocol_is_handler() {
         fn _assert(_h: impl ProtocolHandler) {}
         // We can't construct one without an endpoint, but the types check.
+    }
+
+    /// Regression (BORU-AUDIT-08): a correctness-critical whisper event must
+    /// not be silently dropped when the bounded frontend channel is full.
+    /// `forward_event` applies backpressure (awaited send) and the event must
+    /// arrive once the receiver drains — the old `try_send` implementation
+    /// returned `Full` and discarded the event.
+    #[tokio::test]
+    async fn forward_event_delivers_under_backpressure() {
+        let peer = SecretKey::generate().public();
+        let (tx, mut rx) = mpsc::channel::<WhisperEvent>(1);
+
+        // Fill the channel to capacity.
+        tx.send(WhisperEvent::Connected { peer }).await.unwrap();
+        assert!(tx.try_send(WhisperEvent::Connected { peer }).is_err(), "channel must be full");
+
+        // Spawn the awaited send; it must block, not drop.
+        let tx2 = tx.clone();
+        let sender = tokio::task::spawn(async move {
+            forward_event(&tx2, WhisperEvent::Disconnected { peer }).await;
+        });
+
+        // Drain one slot; the blocked send must complete and the event must
+        // arrive.
+        let first = rx.recv().await.expect("first event");
+        assert!(matches!(first, WhisperEvent::Connected { .. }));
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let second = rx.recv().await.expect("second event");
+            assert!(
+                matches!(second, WhisperEvent::Disconnected { .. }),
+                "event was dropped instead of delivered"
+            );
+        })
+        .await
+        .expect("awaited send never completed");
+
+        sender.await.expect("sender task panicked");
     }
 }

@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, RwLock,
 };
 use std::time::{Duration, Instant};
@@ -21,6 +21,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 
 use super::adaptation::{AdaptationController, AdaptationDecision};
 use super::media::{media_reader, MediaDatagram, MediaReaderEvent};
@@ -48,10 +49,45 @@ pub fn resolve_collision(local: &PublicKey, remote: &PublicKey) -> CollisionWinn
     }
 }
 
+/// Queue a `RevokePeer` command without silently dropping it.
+///
+/// `set_peer_authorized` is a synchronous API (called from UI code), so this
+/// cannot await the bounded command channel.  We fast-path `try_send`; if the
+/// queue is full or closed, we count the failure and spawn a best-effort task
+/// to deliver the revocation when a runtime is available.  Revocation is
+/// security-critical: silently dropping it would leave a revoked peer's call
+/// channel open.
+fn enqueue_revoke_peer(command_tx: &mpsc::Sender<Command>, peer: PublicKey) {
+    if command_tx.try_send(Command::RevokePeer(peer)).is_ok() {
+        return;
+    }
+    CALL_REVOKE_SEND_FAILURES.fetch_add(1, Ordering::Relaxed);
+    warn!(
+        peer = %peer.fmt_short(),
+        "call revoke command queue full; retrying asynchronously"
+    );
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        let command_tx = command_tx.clone();
+        handle.spawn(async move {
+            if let Err(e) = command_tx.send(Command::RevokePeer(peer)).await {
+                warn!(
+                    peer = %peer.fmt_short(),
+                    error = %e,
+                    "call revoke command lost: actor dropped"
+                );
+            }
+        });
+    }
+}
+
 /// ALPN used by call-control connections.
 pub const CALL_ALPN: &[u8] = b"/boru-call/1";
 const COMMAND_CAPACITY: usize = 256;
 const EVENT_CAPACITY: usize = 256;
+
+/// Counter of `RevokePeer` commands that could not be queued on the first
+/// attempt and had to be retried asynchronously (BORU-AUDIT-08).
+static CALL_REVOKE_SEND_FAILURES: AtomicU64 = AtomicU64::new(0);
 const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(5);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const STATS_INTERVAL: Duration = Duration::from_secs(1);
@@ -466,7 +502,7 @@ impl CallHandle {
             }
         };
         if changed && !authorized {
-            let _ = self.command_tx.try_send(Command::RevokePeer(peer));
+            enqueue_revoke_peer(&self.command_tx, peer);
         }
     }
 

@@ -446,7 +446,12 @@ impl Actor {
             // Initial delay before first check.
             tokio::time::sleep(Duration::from_secs(STALE_DIAL_CHECK_INTERVAL_S)).await;
             loop {
-                let _ = local_tx.try_send(LocalActorMessage::CleanupStaleDials);
+                // Periodic maintenance tick.  A dropped tick is self-healing
+                // (the next interval fires again), but it must be observable,
+                // not silent (BORU-AUDIT-08).
+                if let Err(e) = local_tx.try_send(LocalActorMessage::CleanupStaleDials) {
+                    debug!(error = %e, "gossip actor local queue full; stale-dial cleanup deferred to next tick");
+                }
                 tokio::time::sleep(Duration::from_secs(STALE_DIAL_CHECK_INTERVAL_S)).await;
             }
         });

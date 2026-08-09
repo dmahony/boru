@@ -23,10 +23,14 @@ use std::{
     future::Future,
     num::NonZeroUsize,
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{mpsc, Semaphore};
+use tracing::{debug, warn};
 
 /// Source of a peer-online notification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +57,12 @@ pub struct PeerReachable {
     /// The subsystem that established reachability.
     pub source: ReachabilitySource,
 }
+
+/// Counter of reconnect-hint notifications dropped because the bounded hint
+/// queue was full (BORU-AUDIT-08).  The hint channel is intentionally lossy —
+/// the worker also runs a periodic recovery tick — but the drop must be
+/// observable, not silent.
+static RECONNECT_TRIGGER_QUEUE_FULL: AtomicU64 = AtomicU64::new(0);
 
 /// Non-blocking, debounced reconnect notification sender.
 #[derive(Clone, Debug)]
@@ -82,6 +92,12 @@ impl ReconnectDeliveryTrigger {
     }
     /// Submit a peer-online event without blocking the network event loop.
     /// Returns false when it was debounced or the bounded queue is full.
+    ///
+    /// This channel is **intentionally lossy** (telemetry/hint): a dropped
+    /// notification only delays an immediate retry — the worker also runs a
+    /// periodic recovery tick — so no queued message is ever lost.  When the
+    /// queue itself is full the drop is counted in [`RECONNECT_TRIGGER_QUEUE_FULL`]
+    /// and logged, so overload is observable rather than silent.
     pub fn notify(&self, event: PeerReachable) -> bool {
         let now = Instant::now();
         let mut state = self.state.lock().unwrap();
@@ -95,7 +111,17 @@ impl ReconnectDeliveryTrigger {
         } else {
             state.insert(event.peer, (now, event.clone()));
         }
-        self.tx.try_send(event).is_ok()
+        match self.tx.try_send(event) {
+            Ok(()) => true,
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                RECONNECT_TRIGGER_QUEUE_FULL.fetch_add(1, Ordering::Relaxed);
+                debug!(
+                    "reconnect trigger hint queue full; peer will be retried by the periodic tick"
+                );
+                false
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => false,
+        }
     }
     /// Return the latest address/source snapshot for a peer.
     pub fn latest(&self, peer: PublicKey) -> Option<PeerReachable> {
