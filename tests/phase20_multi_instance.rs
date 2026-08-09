@@ -70,7 +70,7 @@ fn event(
     id: u8,
     payload: GroupEventPayload,
 ) -> Vec<u8> {
-    GroupEvent::sign_with_id(key, group, [id; 16], epoch, now_secs(), payload)
+    GroupEvent::sign_with_nonce(key, group, epoch, now_secs(), [id; 16], payload)
         .expect("sign group event")
         .encode()
         .expect("encode group event")

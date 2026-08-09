@@ -288,16 +288,27 @@ is wrapped in a `GroupEventEnvelope`:
 
 ```rust
 pub struct GroupEventEnvelope {
-    version: u8,                      // GROUP_EVENT_VERSION = 1
+    version: u8,                      // GROUP_EVENT_VERSION = 2
     group_id: TopicId,                // gossip topic (epoch-scoped)
     event_id: [u8; 16],               // BLAKE3 hash for replay protection
+    nonce: [u8; 16],                  // fresh per-event cryptographic nonce
     epoch: u64,                       // current group epoch
     actor: PublicKey,                 // signing peer
-    timestamp: u64,                   // UNIX seconds
+    timestamp: u64,                   // UNIX seconds (ordering/freshness only)
     payload: GroupEventPayload,       // the operation
     signature: [u8; 64],             // Ed25519 over all other fields
 }
 ```
+
+The `event_id` is a domain-separated BLAKE3 hash of the complete canonical
+signed event contents — version, actor, group, epoch, timestamp, the fresh
+128-bit `nonce`, and the payload. The nonce is generated randomly at signing
+time, so event uniqueness never depends on wall-clock seconds: repeated
+identical actions in the same second still produce distinct events. The nonce
+is covered by the signature, and the validator recomputes the event ID from
+the signed contents, so the ID-to-contents relationship is mandatory.
+All event classes use this nonce-based constructor; there is no
+deterministic-ID event class in the protocol today.
 
 ### Event Types
 
@@ -314,7 +325,7 @@ pub struct GroupEventEnvelope {
 
 Every event passes through `GroupEvent::verify()` which checks in order:
 
-1. **Version** — must match `GROUP_EVENT_VERSION` (1)
+1. **Version** — must match `GROUP_EVENT_VERSION` (2)
 2. **Group** — `envelope.group_id` must match `state.group_id`
 3. **Epoch** — `envelope.epoch` must match `state.epoch` (or be strictly greater for
    `EpochChanged` payloads)
@@ -322,9 +333,12 @@ Every event passes through `GroupEvent::verify()` which checks in order:
 5. **Payload size** — encoded payload must not exceed 16 KiB
 6. **Timestamp** — must be within 24 hours of the local clock
 7. **Signature** — Ed25519 signature verification against the actor's public key
-8. **Replay** — event ID must not have been seen before
-9. **Membership** — actor must be in the appropriate role for the operation
-10. **Permission** — actor must be authorised to perform the operation (owner-only
+   (covers the nonce, so mutating it invalidates the event)
+8. **Event ID** — `envelope.event_id` must equal the domain-separated BLAKE3
+   hash of the signed contents (including the nonce); mismatches are rejected
+9. **Replay** — event ID must not have been seen before
+10. **Membership** — actor must be in the appropriate role for the operation
+11. **Permission** — actor must be authorised to perform the operation (owner-only
     operations require `Role::Owner`)
 
 ### Authoritative State
@@ -350,10 +364,11 @@ membership. The roster is never consulted to grant access.
 
 | Constant | Value | Purpose |
 |----------|-------|---------|
-| `GROUP_EVENT_VERSION` | 1 | Current wire format version |
+| `GROUP_EVENT_VERSION` | 2 | Current wire format version |
 | `MAX_GROUP_EVENT_PAYLOAD` | 16 KiB | Maximum encoded payload size |
 | `MAX_GROUP_EVENT_CLOCK_SKEW_SECS` | 86,400 (24h) | Allowed clock drift |
-| Event ID length | 16 bytes | BLAKE3 truncated hash |
+| Event ID length | 16 bytes | BLAKE3 truncated hash (domain-separated) |
+| Nonce length | 16 bytes | Fresh per-event cryptographic nonce |
 
 ## Relationship Summary
 

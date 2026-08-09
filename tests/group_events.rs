@@ -200,12 +200,12 @@ fn replayed_invite_and_membership_events_are_rejected() {
     let owner = SecretKey::generate();
     let member = SecretKey::generate();
     let mut state = GroupState::new(group_id(), owner.public());
-    let invite = GroupEvent::sign_with_id(
+    let invite = GroupEvent::sign_with_nonce(
         &owner,
         group_id(),
-        [1; 16],
         0,
         now_secs(),
+        [1; 16],
         GroupEventPayload::MemberInvited {
             member: member.public(),
         },
@@ -217,12 +217,12 @@ fn replayed_invite_and_membership_events_are_rejected() {
         Err(GroupValidationError::Replay)
     ));
 
-    let join = GroupEvent::sign_with_id(
+    let join = GroupEvent::sign_with_nonce(
         &member,
         group_id(),
-        [2; 16],
         0,
         now_secs(),
+        [2; 16],
         GroupEventPayload::MemberJoined {
             member: member.public(),
         },
@@ -364,5 +364,100 @@ fn event_rejects_wrong_group_epoch_and_oversized_payload() {
     assert!(matches!(
         wrong_epoch.verify(&state),
         Err(GroupValidationError::WrongEpoch { .. })
+    ));
+}
+
+fn event_id(event: &GroupEvent) -> [u8; 16] {
+    match event {
+        GroupEvent::MemberInvited(e)
+        | GroupEvent::MemberJoined(e)
+        | GroupEvent::MemberLeft(e)
+        | GroupEvent::MemberRemoved(e)
+        | GroupEvent::MetadataChanged(e)
+        | GroupEvent::EpochChanged(e) => *e.event_id.as_ref(),
+    }
+}
+
+/// BORU-AUDIT-15: identical actions in the same wall-clock second must not
+/// collide. This failed on the old derivation, where the event ID was a hash
+/// of (actor, group, epoch, timestamp-seconds, payload) and two identical
+/// events within one second produced the same ID (making a legitimate event
+/// look like a replay).
+#[test]
+fn same_second_identical_payloads_get_distinct_event_ids() {
+    let owner = SecretKey::generate();
+    let member = SecretKey::generate().public();
+    let timestamp = 1_700_000_000u64; // fixed second for both events
+    let payload = GroupEventPayload::MemberInvited { member };
+
+    let a = GroupEvent::sign_at(&owner, group_id(), 0, timestamp, payload.clone()).unwrap();
+    let b = GroupEvent::sign_at(&owner, group_id(), 0, timestamp, payload).unwrap();
+
+    assert_ne!(
+        event_id(&a),
+        event_id(&b),
+        "two identical events in the same second must have distinct event IDs"
+    );
+}
+
+/// BORU-AUDIT-15: the nonce is part of the signed canonical payload, so
+/// mutating it invalidates the signature/event-ID relationship. The signature
+/// check runs first and must fail; the recomputed event-ID check would also
+/// fail if the checks were reordered.
+#[test]
+fn mutating_nonce_invalidates_signature_and_event_id_relationship() {
+    let owner = SecretKey::generate();
+    let state = GroupState::new(group_id(), owner.public());
+    let event = GroupEvent::sign(
+        &owner,
+        group_id(),
+        0,
+        GroupEventPayload::MemberInvited {
+            member: SecretKey::generate().public(),
+        },
+    )
+    .unwrap();
+    let tampered = match event {
+        GroupEvent::MemberInvited(mut envelope) => {
+            envelope.nonce[0] ^= 0x80;
+            GroupEvent::MemberInvited(envelope)
+        }
+        _ => unreachable!(),
+    };
+    assert!(matches!(
+        tampered.verify(&state),
+        Err(GroupValidationError::InvalidSignature) | Err(GroupValidationError::EventIdMismatch)
+    ));
+}
+
+/// BORU-AUDIT-15: an exact retransmission of the same serialized event keeps
+/// the same event ID and is recognized as a replay, so deduplication still
+/// works.
+#[test]
+fn exact_retransmission_keeps_same_event_id_and_is_replayed() {
+    let owner = SecretKey::generate();
+    let member = SecretKey::generate();
+    let mut state = GroupState::new(group_id(), owner.public());
+    let event = GroupEvent::sign(
+        &owner,
+        group_id(),
+        0,
+        GroupEventPayload::MemberInvited {
+            member: member.public(),
+        },
+    )
+    .unwrap();
+    let encoded = event.encode().unwrap();
+
+    let first = GroupEvent::decode(&encoded).unwrap();
+    assert_eq!(event_id(&first), event_id(&event), "same serialized event");
+    state.apply(first).unwrap();
+
+    // The exact same bytes arrive again (retransmission/replay).
+    let second = GroupEvent::decode(&encoded).unwrap();
+    assert_eq!(event_id(&second), event_id(&event), "same serialized event");
+    assert!(matches!(
+        state.apply(second),
+        Err(GroupValidationError::Replay)
     ));
 }
