@@ -23,7 +23,7 @@ use iroh::{
     protocol::{AcceptError, ProtocolHandler},
     PublicKey,
 };
-use iroh_blobs::api::blobs::{AddPathOptions, ImportMode};
+use iroh_blobs::api::blobs::{AddPathOptions, BlobStatus, ImportMode};
 use n0_error::Result;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::{debug, error, info, warn};
@@ -1019,6 +1019,13 @@ impl FileAccessHandler {
         let blob_store = self.blob_store.clone();
         let content_hash = row.content_hash.clone();
         let is_referenced = file_obj.source_path.is_some();
+        // The descriptor's signed size must come from metadata verified at
+        // request time.  Pass the DB-recorded size as the expected size so
+        // the referenced path cross-checks the on-disk file against it and
+        // the imported path cross-checks the content-addressed store
+        // (BORU-AUDIT-07).  A mismatch fails closed instead of signing a
+        // descriptor with stale or guessed metadata.
+        let expected_size = file_obj.size;
 
         let bounded_prepare = async move {
             if is_referenced {
@@ -1027,7 +1034,7 @@ impl FileAccessHandler {
                     &blob_store,
                     &content_hash,
                     None, // verify_hash — deferred to descriptor verification
-                    None, // verify_size — deferred to descriptor verification
+                    Some(expected_size), // verify_size — on-disk size must match the record
                 )
                 .await
             } else {
@@ -1036,7 +1043,7 @@ impl FileAccessHandler {
                     &blob_store,
                     &content_hash,
                     None, // verify_hash — deferred to descriptor verification
-                    None, // verify_size — deferred to descriptor verification
+                    Some(expected_size), // verify_size — blob-store size must match the record
                 )
                 .await
             }
@@ -1067,8 +1074,8 @@ impl FileAccessHandler {
             }
         };
 
-        match prepare_result {
-            Ok(_prepared) => {}
+        let prepared = match prepare_result {
+            Ok(prepared) => prepared,
             Err(e) => {
                 let msg = format!("{e:#}");
                 if msg.contains("not found") || msg.contains("missing") {
@@ -1098,7 +1105,7 @@ impl FileAccessHandler {
                 );
                 return FileAccessResponse::from(FileAccessErrorCode::InternalError);
             }
-        }
+        };
 
         // ── 6. Explicit denial check ──────────────────────────────────
         let permissions = match self
@@ -1269,15 +1276,13 @@ impl FileAccessHandler {
             .as_millis() as u64;
         let expires_at_ms = now_ms + DOWNLOAD_DESCRIPTOR_TTL.as_millis() as u64;
 
-        // Look up file size from the file_objects table.
-        let size_bytes = match self.storage.get_file_object(&row.content_hash) {
-            Ok(Some(fo)) => fo.size,
-            _ => {
-                // Should not happen since we checked existence above, but
-                // fall back to 0 rather than blocking the download.
-                0
-            }
-        };
+        // The size signed into the descriptor comes from the preparation
+        // result, which verified the file's metadata at request time
+        // (filesystem metadata for referenced files, the content-addressed
+        // blob store for imported files).  Never fall back to a guessed 0 —
+        // a signed capability must carry verified metadata only
+        // (BORU-AUDIT-07).
+        let size_bytes = prepared.size_bytes;
 
         // Convert the hex content_hash to raw 32 bytes for the descriptor.
         // This is the canonical blob hash that gets signed.  Fail closed: a
@@ -1562,7 +1567,11 @@ pub async fn prepare_imported_file(
         .unwrap_or(None);
 
     if let Some(ref hash_str) = blob_hash_str {
-        // Imported file — confirm the blob exists in the iroh-blobs store.
+        // Imported file — confirm the blob exists in the iroh-blobs store
+        // and that the content-addressed store's size matches the DB
+        // record.  The blob store is authoritative for imported content
+        // (BORU-AUDIT-07); a mismatch means the record is stale or corrupt
+        // and must not be signed under guessed metadata.
         let blob_hash: iroh_blobs::Hash = hash_str
             .parse()
             .map_err(|e| anyhow::anyhow!("invalid blob hash {hash_str}: {e}"))?;
@@ -1577,6 +1586,31 @@ pub async fn prepare_imported_file(
             return Err(anyhow::anyhow!(
                 "imported blob missing from store: {hash_str}"
             ));
+        }
+
+        match blob_store
+            .blobs()
+            .status(blob_hash)
+            .await
+            .map_err(|e| anyhow::anyhow!("blob_store.status failed: {e:#}"))?
+        {
+            BlobStatus::Complete { size } if size == file_obj.size => {}
+            BlobStatus::Complete { size } => {
+                return Err(anyhow::anyhow!(
+                    "imported blob size mismatch: store has {size}, DB records {}",
+                    file_obj.size
+                ));
+            }
+            BlobStatus::Partial { .. } => {
+                return Err(anyhow::anyhow!(
+                    "imported blob only partially stored: {hash_str}"
+                ));
+            }
+            BlobStatus::NotFound => {
+                return Err(anyhow::anyhow!(
+                    "imported blob missing from store: {hash_str}"
+                ));
+            }
         }
     } else if let Some(ref data) = file_obj.data {
         // Inline file — import into blob store if not already present.
@@ -1964,6 +1998,299 @@ mod tests {
             hex::encode(descriptor.blob_hash),
             content_hash,
             "descriptor blob_hash must hex-encode to the stored content hash"
+        );
+    }
+
+    // ── BORU-AUDIT-07: no guessed/fallback metadata in signed descriptors ──
+
+    /// A granted descriptor's size must exactly match the authoritative
+    /// store (the `file_objects` record that preparation verified), never a
+    /// guessed 0 or a stale re-query fallback.
+    #[tokio::test]
+    async fn descriptor_size_matches_authoritative_store() {
+        let metadata_id = "file-1";
+        let content_hash = "ef".repeat(32);
+        let (storage, friends) = setup_storage_with_file(metadata_id, &content_hash, true);
+        let (mut handler, _blob_store) = test_handler(storage, friends);
+        let requester = requester_pk();
+
+        add_friend(&mut handler, requester);
+
+        let row = handler
+            .storage
+            .get_shared_file_by_metadata_id("owner-profile-id", metadata_id)
+            .expect("get shared file")
+            .expect("shared file exists");
+        let stored = handler
+            .storage
+            .get_file_object(&content_hash)
+            .expect("get file object")
+            .expect("file object exists");
+
+        let request = make_request(metadata_id, &content_hash, row.version);
+        let response = handler.check_permission(&requester, &request).await;
+
+        let FileAccessResponse::Granted(descriptor) = response else {
+            panic!("expected Granted, got {response:?}");
+        };
+        assert_eq!(
+            descriptor.size_bytes, stored.size,
+            "descriptor size must exactly match the verified file object record"
+        );
+        assert_ne!(
+            descriptor.size_bytes, 0,
+            "descriptor must never carry a guessed zero size"
+        );
+    }
+
+    /// A shared-file row whose content record (file_objects) is missing is
+    /// corrupt/stale: no descriptor may be issued.  The availability check
+    /// fails closed with Unavailable instead of signing a size-0 descriptor.
+    /// The orphan state is simulated by dropping the content record after
+    /// the offer is created (foreign keys off), matching what a crash or
+    /// legacy schema can leave behind.
+    #[tokio::test]
+    async fn missing_file_object_issues_no_descriptor() {
+        let storage = Arc::new(Storage::memory().expect("in-memory storage"));
+        let metadata_id = "file-orphan";
+        let content_hash = "01".repeat(32);
+        // Create the offer normally (FK satisfied)…
+        storage
+            .put_file_object(
+                &content_hash,
+                10,
+                "text/plain",
+                "orphan.txt",
+                b"orphan data",
+            )
+            .expect("put file object");
+        storage
+            .upsert_shared_file(
+                &content_hash,
+                "owner-profile-id",
+                metadata_id,
+                "orphan.txt",
+                None,
+                true,
+            )
+            .expect("upsert shared file");
+        // …then lose the content record (corruption / legacy data).
+        storage
+            .with_conn(|conn| {
+                conn.execute_batch("PRAGMA foreign_keys = OFF;")
+                    .map_err(|e| anyhow::anyhow!("disable fk: {e}"))?;
+                conn.execute(
+                    "DELETE FROM file_objects WHERE content_hash = ?1",
+                    params![content_hash],
+                )
+                .map_err(|e| anyhow::anyhow!("delete file object: {e}"))?;
+                conn.execute_batch("PRAGMA foreign_keys = ON;")
+                    .map_err(|e| anyhow::anyhow!("re-enable fk: {e}"))?;
+                Ok(())
+            })
+            .expect("simulate corruption");
+
+        let friends = FriendsStore::default();
+        let (mut handler, _blob_store) = test_handler(storage, friends);
+        let requester = requester_pk();
+
+        add_friend(&mut handler, requester);
+
+        let row = handler
+            .storage
+            .get_shared_file_by_metadata_id("owner-profile-id", metadata_id)
+            .expect("get shared file")
+            .expect("shared file exists");
+
+        let request = make_request(metadata_id, &content_hash, row.version);
+        let response = handler.check_permission(&requester, &request).await;
+
+        assert_eq!(
+            response,
+            FileAccessResponse::Unavailable,
+            "missing file object must fail closed with Unavailable, got {response:?}"
+        );
+    }
+
+    /// A persisted content hash that is not canonical (not 32 raw bytes of
+    /// hex) must never produce a signed descriptor.
+    #[tokio::test]
+    async fn invalid_persisted_hash_issues_no_descriptor() {
+        let storage = Arc::new(Storage::memory().expect("in-memory storage"));
+        let metadata_id = "file-corrupt-hash";
+        // 64 chars but NOT valid hex ('z' is not a hex digit) — a corrupt
+        // catalogue record that must not be signed.
+        let corrupt_hash = "z".repeat(64);
+        storage
+            .put_file_object(
+                &corrupt_hash,
+                10,
+                "text/plain",
+                "corrupt.txt",
+                b"corrupt",
+            )
+            .expect("put file object");
+        storage
+            .upsert_shared_file(
+                &corrupt_hash,
+                "owner-profile-id",
+                metadata_id,
+                "corrupt.txt",
+                None,
+                true,
+            )
+            .expect("upsert shared file");
+
+        let friends = FriendsStore::default();
+        let (mut handler, _blob_store) = test_handler(storage, friends);
+        let requester = requester_pk();
+
+        add_friend(&mut handler, requester);
+
+        let row = handler
+            .storage
+            .get_shared_file_by_metadata_id("owner-profile-id", metadata_id)
+            .expect("get shared file")
+            .expect("shared file exists");
+
+        // The requester's expected hash is a valid canonical hash that no
+        // longer matches the corrupted record.
+        let valid_hash = "ab".repeat(32);
+        let request = make_request(metadata_id, &valid_hash, row.version);
+        let response = handler.check_permission(&requester, &request).await;
+
+        assert!(
+            !matches!(response, FileAccessResponse::Granted(_)),
+            "corrupt persisted hash must never yield a signed descriptor, got {response:?}"
+        );
+    }
+
+    /// A referenced file whose on-disk size no longer matches the DB record
+    /// must fail closed (Unavailable) instead of signing a descriptor with
+    /// stale size metadata (BORU-AUDIT-07).  Regression: the old code passed
+    /// `verify_size=None` and granted a descriptor with the old size.
+    #[tokio::test]
+    async fn referenced_file_resized_on_disk_issues_no_descriptor() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let original = b"original content";
+        let (file_path, hex_hash) = write_temp_file(tmp.path(), "resized.txt", original);
+
+        let storage = Arc::new(Storage::memory().expect("in-memory storage"));
+        storage
+            .put_file_object(
+                &hex_hash,
+                original.len() as u64,
+                "text/plain",
+                "resized.txt",
+                original,
+            )
+            .expect("put file object");
+        storage
+            .set_file_object_source_path(&hex_hash, Some(file_path.to_str().expect("utf-8 path")))
+            .expect("set source_path");
+        storage
+            .upsert_shared_file(
+                &hex_hash,
+                "owner-profile-id",
+                "file-resized",
+                "resized.txt",
+                None,
+                true,
+            )
+            .expect("upsert shared file");
+
+        // Replace the file with DIFFERENT-length content: the on-disk size
+        // now disagrees with the DB record.
+        let modified = b"original content, now much longer on disk";
+        assert_ne!(modified.len(), original.len(), "sizes must differ");
+        std::fs::write(&file_path, modified).expect("write modified file");
+
+        let friends = FriendsStore::default();
+        let (mut handler, _blob_store) = test_handler(storage, friends);
+        let requester = requester_pk();
+
+        add_friend(&mut handler, requester);
+
+        let row = handler
+            .storage
+            .get_shared_file_by_metadata_id("owner-profile-id", "file-resized")
+            .expect("get shared file")
+            .expect("shared file exists");
+
+        let request = make_request("file-resized", &hex_hash, row.version);
+        let response = handler.check_permission(&requester, &request).await;
+
+        assert_eq!(
+            response,
+            FileAccessResponse::Unavailable,
+            "on-disk size mismatch must fail closed, got {response:?}"
+        );
+    }
+
+    /// An imported file whose blob-store size disagrees with the DB record
+    /// must fail closed: the content-addressed store is authoritative for
+    /// imported content (BORU-AUDIT-07).
+    #[tokio::test]
+    async fn imported_blob_size_mismatch_issues_no_descriptor() {
+        let data = b"imported blob content";
+        let blob_hash = blake3::hash(data);
+        let hash_hex = hex::encode(blob_hash.as_bytes());
+
+        let storage = Arc::new(Storage::memory().expect("in-memory storage"));
+        // DB record claims a WRONG size for this content.
+        storage
+            .put_imported_file_object(
+                &hash_hex,
+                data.len() as u64 + 1000,
+                "application/octet-stream",
+                "imported.bin",
+                &hash_hex,
+                "some-peer",
+            )
+            .expect("put imported file object");
+        storage
+            .upsert_shared_file(
+                &hash_hex,
+                "owner-profile-id",
+                "file-imported",
+                "imported.bin",
+                None,
+                true,
+            )
+            .expect("upsert shared file");
+
+        // Blob store contains the real content with the real size.
+        let blob_store: Arc<iroh_blobs::api::Store> =
+            Arc::new(iroh_blobs::store::mem::MemStore::new().into());
+        let progress = blob_store.blobs().add_slice(data);
+        progress.await.expect("add blob");
+
+        let friends = FriendsStore::default();
+        let mut handler = FileAccessHandler::new(
+            storage,
+            iroh::SecretKey::generate(),
+            "owner-profile-id".to_string(),
+            friends,
+            Arc::new(NonceStore::new()),
+            Arc::clone(&blob_store),
+        );
+        let requester = requester_pk();
+
+        add_friend(&mut handler, requester);
+
+        let row = handler
+            .storage
+            .get_shared_file_by_metadata_id("owner-profile-id", "file-imported")
+            .expect("get shared file")
+            .expect("shared file exists");
+
+        let request = make_request("file-imported", &hash_hex, row.version);
+        let response = handler.check_permission(&requester, &request).await;
+
+        assert_eq!(
+            response,
+            FileAccessResponse::Unavailable,
+            "blob-store size mismatch must fail closed, got {response:?}"
         );
     }
 

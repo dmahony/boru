@@ -496,20 +496,30 @@ impl CatalogueHandler {
         }
 
         // ── Build RemoteSharedFile ─────────────────────────────────────
-        let fo = self
-            .storage
-            .get_file_object(&row.content_hash)
-            .ok()
-            .flatten()
-            .unwrap_or(crate::storage::FileObject {
-                content_hash: row.content_hash.clone(),
-                size: 0,
-                mime_type: String::new(),
-                filename: row.display_filename.clone(),
-                created_at_ms: row.created_at_ms,
-                data: None,
-                source_path: None,
-            });
+        // A shared-file row without its content record is corrupt or stale.
+        // Refuse to sign guessed metadata (size 0, empty MIME) into a
+        // file-details response (BORU-AUDIT-07).  Log the record identifier
+        // and error class only — never secret capability data or file
+        // contents.
+        let fo = match self.storage.get_file_object(&row.content_hash) {
+            Ok(Some(fo)) => fo,
+            Ok(None) => {
+                error!(
+                    shared_file_id = %shared_file_id,
+                    content_hash = %row.content_hash,
+                    "file details: shared file has no file object — refusing to sign guessed metadata"
+                );
+                return Err(CatalogErrorCode::InternalError);
+            }
+            Err(e) => {
+                error!(
+                    shared_file_id = %shared_file_id,
+                    content_hash = %row.content_hash,
+                    "file details: get_file_object failed: {e:#}"
+                );
+                return Err(CatalogErrorCode::InternalError);
+            }
+        };
 
         Ok(Some(crate::catalogue_model::RemoteSharedFile {
             shared_file_id: row.metadata_id.clone(),
@@ -1504,6 +1514,139 @@ mod tests {
         assert_eq!(file.display_name, "myfile.txt");
         assert_eq!(file.size_bytes, 1024);
         assert_eq!(file.mime_type, "application/octet-stream");
+    }
+
+    /// A shared-file row whose content record (file_objects) is missing is
+    /// corrupt/stale: file details must NOT return a signed entry with
+    /// guessed size 0 / empty MIME (BORU-AUDIT-07).  The availability check
+    /// treats the file as not available (None → NotFound), and the
+    /// descriptor-creation fallback that could fabricate a FileObject has
+    /// been removed.  The orphan state is simulated by dropping the content
+    /// record after the offer is created (foreign keys off), matching what a
+    /// crash or legacy schema can leave behind.
+    #[test]
+    fn test_get_file_details_missing_file_object_not_served() {
+        let storage = Arc::new(Storage::memory().expect("storage"));
+        let owner_sk = iroh::SecretKey::generate();
+        let profile_id = owner_sk.public().to_string();
+        let friend_pk = iroh::SecretKey::generate().public();
+
+        // Create the offer normally (FK satisfied)…
+        storage
+            .put_file_object("orphan-hash", 10, "text/plain", "orphan.txt", b"orphan data")
+            .expect("put file object");
+        storage
+            .upsert_shared_file(
+                "orphan-hash",
+                &profile_id,
+                "orphan-meta",
+                "orphan.txt",
+                None,
+                true,
+            )
+            .expect("upsert shared file");
+        // …then lose the content record (corruption / legacy data).
+        storage
+            .with_conn(|conn| {
+                conn.execute_batch("PRAGMA foreign_keys = OFF;")
+                    .map_err(|e| anyhow::anyhow!("disable fk: {e}"))?;
+                conn.execute(
+                    "DELETE FROM file_objects WHERE content_hash = 'orphan-hash'",
+                    [],
+                )
+                .map_err(|e| anyhow::anyhow!("delete file object: {e}"))?;
+                conn.execute_batch("PRAGMA foreign_keys = ON;")
+                    .map_err(|e| anyhow::anyhow!("re-enable fk: {e}"))?;
+                Ok(())
+            })
+            .expect("simulate corruption");
+
+        let friends = make_friends_store(&friend_pk, None);
+        let handler = build_handler(storage.clone(), owner_sk, profile_id.clone(), friends);
+
+        let result = handler
+            .get_file_details_for_requester(&friend_pk, "orphan-meta")
+            .expect("missing file object must not error the connection");
+        assert!(
+            result.is_none(),
+            "missing file object must not produce a signed details entry, got {result:?}"
+        );
+    }
+
+    /// A corrupt catalogue record (offer without content record) can be
+    /// repaired through the intended maintenance path — re-indexing the
+    /// file (put_file_object) restores it to the signed details response
+    /// with real metadata (BORU-AUDIT-07).
+    #[test]
+    fn test_get_file_details_corrupt_record_repairable_via_reindex() {
+        let storage = Arc::new(Storage::memory().expect("storage"));
+        let owner_sk = iroh::SecretKey::generate();
+        let profile_id = owner_sk.public().to_string();
+        let friend_pk = iroh::SecretKey::generate().public();
+
+        // Create the offer normally, then drop the content record to make
+        // the record corrupt (crash / legacy schema simulation).
+        storage
+            .put_file_object("orphan-hash", 10, "text/plain", "orphan.txt", b"orphan data")
+            .expect("put file object");
+        storage
+            .upsert_shared_file(
+                "orphan-hash",
+                &profile_id,
+                "orphan-meta",
+                "orphan.txt",
+                None,
+                true,
+            )
+            .expect("upsert shared file");
+        storage
+            .with_conn(|conn| {
+                conn.execute_batch("PRAGMA foreign_keys = OFF;")
+                    .map_err(|e| anyhow::anyhow!("disable fk: {e}"))?;
+                conn.execute(
+                    "DELETE FROM file_objects WHERE content_hash = 'orphan-hash'",
+                    [],
+                )
+                .map_err(|e| anyhow::anyhow!("delete file object: {e}"))?;
+                conn.execute_batch("PRAGMA foreign_keys = ON;")
+                    .map_err(|e| anyhow::anyhow!("re-enable fk: {e}"))?;
+                Ok(())
+            })
+            .expect("simulate corruption");
+
+        let friends = make_friends_store(&friend_pk, None);
+        let handler = build_handler(storage.clone(), owner_sk, profile_id.clone(), friends);
+
+        // Before reindex: not served (never a guessed size-0 entry).
+        let before = handler
+            .get_file_details_for_requester(&friend_pk, "orphan-meta")
+            .expect("corrupt record must not error the connection");
+        assert!(
+            before.is_none(),
+            "corrupt record must not produce a signed details entry before reindex"
+        );
+
+        // Maintenance path: re-index the file object (the same write the
+        // file indexer performs on a rescan).
+        storage
+            .put_file_object(
+                "orphan-hash",
+                512,
+                "text/plain",
+                "orphan.txt",
+                b"reindexed data",
+            )
+            .expect("put file object (reindex)");
+
+        // After reindex: the record is healthy and its metadata is real.
+        let after = handler
+            .get_file_details_for_requester(&friend_pk, "orphan-meta")
+            .expect("reindexed record should be servable")
+            .expect("file should be visible");
+        assert_eq!(after.shared_file_id, "orphan-meta");
+        assert_eq!(after.content_hash, "orphan-hash");
+        assert_eq!(after.size_bytes, 512, "size must come from the reindexed record");
+        assert_eq!(after.mime_type, "text/plain");
     }
 
     /// A file the requester cannot see (not a friend, no grant) returns None.

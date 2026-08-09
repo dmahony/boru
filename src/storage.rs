@@ -3683,17 +3683,14 @@ impl Storage {
             if denied || (!granted && (has_restricted_permissions || !is_friend)) {
                 continue;
             }
-            let object = self
-                .get_file_object(&row.content_hash)?
-                .unwrap_or(FileObject {
-                    content_hash: row.content_hash.clone(),
-                    size: 0,
-                    mime_type: String::new(),
-                    filename: row.display_filename.clone(),
-                    created_at_ms: row.created_at_ms,
-                    data: None,
-                    source_path: None,
-                });
+            // A shared-file row without its content record is corrupt or
+            // stale.  Skip it rather than advertising guessed metadata
+            // (size 0, empty MIME) in a signed catalogue (BORU-AUDIT-07).
+            // `file_object_exists` above is the fast path; this strict
+            // match closes the race and the record-without-object case.
+            let Some(object) = self.get_file_object(&row.content_hash)? else {
+                continue;
+            };
             let shared_file_id = if used_ids.insert(row.metadata_id.clone()) {
                 row.metadata_id
             } else {
@@ -8895,5 +8892,65 @@ mod tests {
             .unwrap();
         assert_eq!(view.files.len(), 1);
         assert_eq!(view.files[0].content_hash, "hash-y");
+    }
+
+    /// A shared-file row whose content record (file_objects) is missing is
+    /// corrupt/stale: it must NOT be advertised with guessed metadata (size
+    /// 0, empty MIME) in a signed catalogue (BORU-AUDIT-07).  The orphan
+    /// state is simulated by dropping the content record after the offer is
+    /// created (foreign keys off), matching what a crash or legacy schema
+    /// can leave behind.
+    #[test]
+    fn catalogue_entries_for_peer_skips_missing_file_object() {
+        let storage = Storage::memory().unwrap();
+        let peer = iroh::SecretKey::generate().public();
+        // Create the orphan offer normally, then lose its content record.
+        storage
+            .put_file_object("orphan-hash", 10, "text/plain", "orphan.txt", b"orphan")
+            .unwrap();
+        storage
+            .upsert_shared_file("orphan-hash", "owner", "meta-orphan", "orphan.txt", None, true)
+            .unwrap();
+        storage
+            .with_conn(|conn| {
+                conn.execute_batch("PRAGMA foreign_keys = OFF;")
+                    .map_err(|e| anyhow::anyhow!("disable fk: {e}"))?;
+                conn.execute(
+                    "DELETE FROM file_objects WHERE content_hash = 'orphan-hash'",
+                    [],
+                )
+                .map_err(|e| anyhow::anyhow!("delete file object: {e}"))?;
+                conn.execute_batch("PRAGMA foreign_keys = ON;")
+                    .map_err(|e| anyhow::anyhow!("re-enable fk: {e}"))?;
+                Ok(())
+            })
+            .unwrap();
+        // A healthy file alongside it stays visible (granted to the peer).
+        storage
+            .put_file_object("hash-z", 10, "text/plain", "z.txt", b"")
+            .unwrap();
+        storage
+            .upsert_shared_file("hash-z", "owner", "meta-z", "z.txt", None, true)
+            .unwrap();
+        storage
+            .grant_permission(
+                "hash-z",
+                "owner",
+                &peer.to_string(),
+                "read",
+                Some(now_ms() + 60_000),
+            )
+            .unwrap();
+
+        let friends = crate::friends::FriendsStore::default();
+        let view = storage
+            .catalogue_entries_for_peer("owner", &peer, &friends)
+            .unwrap();
+        assert_eq!(
+            view.files.len(),
+            1,
+            "the orphan record must be skipped, leaving only the healthy file"
+        );
+        assert_eq!(view.files[0].content_hash, "hash-z");
     }
 }
