@@ -697,9 +697,17 @@ pub fn spawn_conversation_forwarder(
                 .await
                 .is_err()
             {
+                tracing::warn!(
+                    topic = %topic.fmt_short(),
+                    "conversation forwarder: net_tx closed — forwarder bridge exiting"
+                );
                 break;
             }
         }
+        tracing::debug!(
+            topic = %topic.fmt_short(),
+            "conversation forwarder: bridge loop ended"
+        );
         // Wait for the underlying forwarder to finish (it will when the receiver closes)
         let _ = forward_handle.await;
     })

@@ -36292,7 +36292,13 @@ fn subscription_stream(
                         drop(rx_guard);
                         match event {
                             Some(e) => return Some((AppMessage::NetEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx, transfer_rx))),
-                            None => { rx_open = false; continue; }
+                            None => {
+                                tracing::warn!(
+                                    "subscription_stream: net_rx channel closed — net events permanently disabled"
+                                );
+                                rx_open = false;
+                                continue;
+                            }
                         }
                     }
                     event = friend_guard.recv(), if friend_open => {

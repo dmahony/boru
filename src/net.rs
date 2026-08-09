@@ -862,6 +862,17 @@ impl Actor {
                     };
                     self.topic_event_forwarders
                         .spawn(fut.instrument(tracing::Span::current()));
+                    debug!(
+                        topic = %topic_id.fmt_short(),
+                        neighbors = neighbors.len(),
+                        "gossip: subscriber loop spawned for topic"
+                    );
+                } else {
+                    warn!(
+                        topic = %topic_id.fmt_short(),
+                        neighbors = neighbors.len(),
+                        "gossip: subscriber loop NOT spawned — subscription channel closed/full at join (sender_dead)"
+                    );
                 }
                 let command_rx = TopicCommandStream::new(topic_id, Box::pin(rx.into_stream()));
                 let key = self.command_rx.insert(command_rx);
@@ -1407,7 +1418,10 @@ async fn topic_subscriber_loop(
            biased;
            msg = topic_events.recv() => {
                let event = match msg {
-                   Err(broadcast::error::RecvError::Closed) => break,
+                   Err(broadcast::error::RecvError::Closed) => {
+                       debug!(topic = %topic_id.fmt_short(), "gossip: subscriber loop exiting — topic event channel closed");
+                       break
+                   }
                    Err(broadcast::error::RecvError::Lagged(_)) => {
                        if crate::gossip_debug::is_enabled() {
                            crate::gossip_debug::log_event(
@@ -1422,10 +1436,14 @@ async fn topic_subscriber_loop(
                    Ok(event) => event.into(),
                };
                if sender.send(event).await.is_err() {
+                   debug!(topic = %topic_id.fmt_short(), "gossip: subscriber loop exiting — app-side receiver dropped");
                    break;
                }
            }
-           _ = sender.closed() => break,
+           _ = sender.closed() => {
+               debug!(topic = %topic_id.fmt_short(), "gossip: subscriber loop exiting — subscription channel closed (app receiver dropped)");
+               break
+           }
         }
     }
 }

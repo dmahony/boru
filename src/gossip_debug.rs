@@ -1,7 +1,10 @@
-//! Opt-in gossip debug tracing — append-only event log for diagnosing
+//! Gossip debug tracing — append-only event log for diagnosing
 //! mesh-forwarding bugs.
 //!
-//! Enable by setting the `BORU_DEBUG` environment variable to `1`.
+//! Enabled by default in **debug builds** so mesh issues can be diagnosed
+//! without relaunching with extra env vars.  In release builds it stays
+//! opt-in: set the `BORU_DEBUG` environment variable to `1` to enable.
+//! `BORU_DEBUG=0` always disables (including debug builds).
 //! The log is written to:
 //!
 //!   `~/.local/share/boru-chat/gossip-debug.log`
@@ -50,9 +53,10 @@ struct DebugLog {
 
 /// Initialise the gossip debug log.
 ///
-/// Called automatically by the gossip actor at startup when
-/// `BORU_DEBUG=1`.  Calling this more than once is a no-op (the first
-/// call wins).
+/// Called automatically by the gossip actor at startup.  Enabled by
+/// default in debug builds; opt-in (`BORU_DEBUG=1`) in release builds;
+/// `BORU_DEBUG=0` always disables.  Calling this more than once is a
+/// no-op (the first call wins).
 ///
 /// `local_id` should be the short-form peer ID of the local node
 /// (e.g. `endpoint.id().fmt_short()`).
@@ -135,8 +139,15 @@ pub fn log_event(kind: &str, topic: Option<&str>, peer: Option<&str>, size: Opti
 // ---------------------------------------------------------------------------
 
 /// Read `BORU_DEBUG` once per process.
+///
+/// Debug builds: enabled by default, disabled with `BORU_DEBUG=0`.
+/// Release builds: enabled only with `BORU_DEBUG=1`.
 fn env_is_enabled() -> bool {
-    std::env::var("BORU_DEBUG").as_deref() == Ok("1")
+    match std::env::var("BORU_DEBUG").as_deref() {
+        Ok("0") => false,
+        Ok("1") => true,
+        _ => cfg!(debug_assertions),
+    }
 }
 
 /// Determine the log file path.
@@ -345,10 +356,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_env_not_set_by_default() {
-        // BORU_DEBUG is not set in tests, so init should be a no-op.
+    fn test_env_not_set_defaults_to_debug_builds_enabled() {
+        // BORU_DEBUG unset: debug builds (where tests run) enable tracing,
+        // release builds disable it.
+        // Guard: this test runs in a debug build, so `init` should succeed.
+        // The state is a process-wide OnceLock — clear it to keep the test
+        // isolated from other tests that may have initialised the log.
+        let _ = DEBUG_STATE.take();
         init("test");
-        assert!(!is_enabled());
+        assert!(
+            is_enabled() == cfg!(debug_assertions),
+            "debug-build default mismatch"
+        );
+        let _ = DEBUG_STATE.take();
     }
 
     #[test]
