@@ -13039,31 +13039,20 @@ impl IcedChat {
                 // can be received even before the user opens each chat.
                 // Dispatch BackgroundSubscribe so the sender is properly
                 // stored in self.conversations via BackgroundSubscribed.
-                let store_topics: Vec<TopicId> = self
+                // Dedupe topics: a direct-chat topic can be both a stored
+                // conversation AND the deterministic topic of a friend.
+                // Dispatching two BackgroundSubscribe tasks for the same
+                // topic in one batch defeats the already-subscribed guard
+                // (both see no sender yet), creating two subscriptions to
+                // the same topic — duplicate-message floods and an orphan
+                // sender whose broadcasts are accepted but never delivered.
+                let mut bg_topics: std::collections::BTreeSet<TopicId> = self
                     .conversation_store
                     .active_iter()
                     .into_iter()
                     .map(|e| e.topic)
                     .filter(|t| *t != topic && !self.conversations.contains_key(t))
                     .collect();
-                let mut bg_tasks: Vec<iced::Task<AppMessage>> = Vec::new();
-                if !store_topics.is_empty() {
-                    let bootstrap_peers: Vec<PublicKey> = self.discovered_peers.clone();
-                    info!(
-                        count = store_topics.len(),
-                        bootstrap = bootstrap_peers.len(),
-                        "auto-subscribing to stored conversations"
-                    );
-                    bg_tasks = store_topics
-                        .into_iter()
-                        .map(|bg_topic| {
-                            iced::Task::done(AppMessage::BackgroundSubscribe(
-                                bg_topic,
-                                bootstrap_peers.clone(),
-                            ))
-                        })
-                        .collect();
-                }
                 // Also auto-subscribe to deterministic direct-chat topics
                 // for every known peer.  Direct-conversation state is not
                 // guaranteed to be symmetric or persisted on both sides
@@ -13073,21 +13062,33 @@ impl IcedChat {
                 // receive messages after a restart.
                 {
                     let local_pk = self.local_public;
-                    let bootstrap_peers: Vec<PublicKey> = self.discovered_peers.clone();
                     for (fid, _) in self.friends.iter() {
                         if let Some(peer_pk) = fid.parse_public_key().ok() {
                             let direct_topic = direct_topic(&local_pk, &peer_pk);
-                            if direct_topic != topic
-                                && !self.conversations.contains_key(&direct_topic)
+                            if direct_topic != topic && !self.conversations.contains_key(&direct_topic)
                             {
-                                let peers = bootstrap_peers.clone();
-                                bg_tasks.push(iced::Task::done(AppMessage::BackgroundSubscribe(
-                                    direct_topic,
-                                    peers,
-                                )));
+                                bg_topics.insert(direct_topic);
                             }
                         }
                     }
+                }
+                let mut bg_tasks: Vec<iced::Task<AppMessage>> = Vec::new();
+                if !bg_topics.is_empty() {
+                    let bootstrap_peers: Vec<PublicKey> = self.discovered_peers.clone();
+                    info!(
+                        count = bg_topics.len(),
+                        bootstrap = bootstrap_peers.len(),
+                        "auto-subscribing to stored conversations"
+                    );
+                    bg_tasks = bg_topics
+                        .into_iter()
+                        .map(|bg_topic| {
+                            iced::Task::done(AppMessage::BackgroundSubscribe(
+                                bg_topic,
+                                bootstrap_peers.clone(),
+                            ))
+                        })
+                        .collect();
                 }
                 self.push_system("Chat joined.");
                 self.push_system("Type a message and press Enter to send.  /help for commands.");
