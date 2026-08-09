@@ -191,34 +191,71 @@ pub(crate) fn view_status_card(
     let body: iced::Element<'static, AppMessage> = match tier {
         Tier::Full | Tier::Medium => {
             // [status icon] [status information] [network]
-            // Vertical rhythm of the info column (hd/divider/dd/description/
-            // dp/footer) trimmed for the compact height band (CONN-04).
-            // Horizontal gaps (icon-text, text-graph) tuned by CONN-05 to
-            // the spec §5 bands (Full ≈24px icon-text, 24–32px text-graph).
-            let (icon_text_gap, text_graph_gap, hd_gap, dd_gap, dp_gap) = match tier {
+            //
+            // CONN-11 (spec §15): the check indicator belongs to the
+            // HEADING ROW — `[✓] Boru is connected and ready.` reads as
+            // one composed unit, then the divider / description / pill
+            // flow below in the text column (the visual anchor). Before
+            // this pass the icon floated beside the WHOLE text column
+            // (its vertical centre sat between the description and the
+            // pill), which is the "scattered" look the spec calls out.
+            // The icon/heading row is exactly the MODE C pattern, applied
+            // to the horizontal tiers too.
+            //
+            // Vertical rhythm of the info column (hd/divider/dd/
+            // description/dp/footer) trimmed for the compact height band
+            // (CONN-04): the icon in the heading row adds ~44px vs the
+            // bare heading, so the sub-heading gaps are tightened to keep
+            // the card in the spec's 200-230px band. Horizontal gaps
+            // (icon-text, text-graph) tuned by CONN-05 to the spec §5
+            // bands (Full ≈24px icon-text, 24–32px text-graph).
+            let (icon_text_gap, text_graph_gap, dd_gap, dp_gap) = match tier {
                 Tier::Full => (
                     STATUS_ICON_TEXT_GAP_FULL,
                     STATUS_TEXT_GRAPH_GAP_FULL,
-                    16.0,
-                    12.0,
-                    20.0,
+                    10.0,
+                    18.0,
                 ),
                 _ => (
                     STATUS_ICON_TEXT_GAP_MEDIUM,
                     STATUS_TEXT_GRAPH_GAP_MEDIUM,
-                    12.0,
                     10.0,
                     16.0,
                 ),
             };
-            let info = Column::new()
+            let header_row = Row::new()
+                .push(indicator)
+                .push(Space::new().width(Length::Fixed(icon_text_gap)))
                 .push(heading)
-                .push(Space::new().height(Length::Fixed(hd_gap)))
+                .spacing(0)
+                .align_y(Alignment::Center)
+                .width(Length::Fill);
+            // The divider / description / pill share the HEADING's left
+            // edge (spec §15 sketch: `---` and the description and the
+            // pill all start under "Boru is connected and ready.") — the
+            // text block is the visual anchor, the icon sits off to its
+            // left. The indent is exactly the icon + icon-text gap, so
+            // the sub-heading content reads as one column with the
+            // heading.
+            let content = Column::new()
                 .push(divider)
                 .push(Space::new().height(Length::Fixed(dd_gap)))
                 .push(supporting)
                 .push(Space::new().height(Length::Fixed(dp_gap)))
                 .push(footer)
+                .spacing(0)
+                .width(Length::Fill);
+            let info = Column::new()
+                .push(header_row)
+                .push(
+                    Row::new()
+                        .push(Space::new().width(Length::Fixed(
+                            design_tokens::STATUS_INDICATOR_SIZE + icon_text_gap,
+                        )))
+                        .push(content)
+                        .spacing(0)
+                        .width(Length::Fill),
+                )
                 .spacing(0)
                 .width(Length::Fill);
             Row::new()
@@ -227,8 +264,6 @@ pub(crate) fn view_status_card(
                         .width(Length::Fixed(0.0))
                         .height(Length::Fixed(STATUS_CARD_MIN_CONTENT_HEIGHT)),
                 )
-                .push(indicator)
-                .push(Space::new().width(Length::Fixed(icon_text_gap)))
                 .push(info)
                 .push(Space::new().width(Length::Fixed(text_graph_gap)))
                 .push(network)
@@ -464,12 +499,16 @@ fn status_heading(dep: &StatusCardDependency, size: f32) -> iced::Element<'stati
 }
 
 /// Short accent divider under the heading (a small rounded green bar).
+/// CONN-11: widened to ~44px and slightly desaturated so it reads as a
+/// deliberate accent aligned under the heading text (it shares the text
+/// column's left edge), while staying subordinate to the status message
+/// (spec §17 — decorative elements must not compete).
 fn status_divider(accent: Color) -> iced::Element<'static, AppMessage> {
     container(Space::new().width(Length::Fill).height(Length::Fill))
-        .width(Length::Fixed(32.0))
+        .width(Length::Fixed(44.0))
         .height(Length::Fixed(3.0))
         .style(move |_t| container::Style {
-            background: Some(Background::Color(with_alpha(accent, 0.55))),
+            background: Some(Background::Color(with_alpha(accent, 0.45))),
             border: Border {
                 radius: 1.5.into(),
                 ..Default::default()

@@ -150,6 +150,89 @@ mod tests {
     use super::*;
 
     #[test]
+    fn conn11_icon_heading_row_and_text_block_align() {
+        // CONN-11 acceptance (spec §15): in the horizontal modes the
+        // check indicator belongs to the HEADING ROW — its vertical
+        // centre aligns with the heading's vertical centre — and the
+        // divider / description / pill share the HEADING's left edge.
+        // The text block is the visual anchor; the icon sits off to its
+        // left. This walks the real layout tree of the Ready card and
+        // asserts those shared alignment lines from the layout engine
+        // (ground truth, not pixel estimates).
+        load_font(include_bytes!("fonts/ArchivoSemiCondensed-Bold.ttf"));
+        load_font(include_bytes!("fonts/IBMPlexSans-Regular.ttf"));
+        load_font(include_bytes!("fonts/IBMPlexSans-Medium.ttf"));
+        load_font(include_bytes!("fonts/IBMPlexSans-SemiBold.ttf"));
+
+        for (width, label) in [(1215.0, "Full"), (679.0, "Medium")] {
+            let dep = dep(HomeConnectionVariant::Ready, width);
+            let renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
+                Font::default(),
+                Pixels(16.0),
+            ));
+            let mut element: iced::Element<'_, AppMessage> = view_status_card(&dep);
+            let mut tree = Tree::new(element.as_widget());
+            let limits = layout::Limits::new(Size::ZERO, Size::new(width, 320.0));
+            let node = element.as_widget_mut().layout(&mut tree, &renderer, &limits);
+
+            // Card container -> row -> info column.
+            let row = &node.children()[0];
+            let info = &row.children()[0];
+            // Info column children: [header_row, content_row].
+            let header_row = &info.children()[0];
+            let content_row = &info.children()[1];
+
+            // Header row: [icon][gap][heading]. Icon and heading centres
+            // must coincide vertically (the icon/heading row). The icon
+            // and heading are siblings in the header row, so their bounds
+            // share the same coordinate space — compare centres directly.
+            let icon = &header_row.children()[0];
+            let heading = &header_row.children()[2];
+            let icon_c = icon.bounds().center_y();
+            let heading_c = heading.bounds().center_y();
+            assert!(
+                (icon_c - heading_c).abs() < 1.0,
+                "{label}: icon centre {icon_c:.1}px must align with heading centre {heading_c:.1}px \
+                 (CONN-11 spec §15 icon/heading row)"
+            );
+
+            // Node bounds are parent-relative, so reconstruct the
+            // heading's absolute left edge by summing the ancestor row
+            // offsets, and do the same for the content elements.
+            let header_x = header_row.bounds().x;
+            let heading_left = header_x + heading.bounds().x;
+
+            // Content row: [indent spacer][content column]; the content
+            // column children are [divider, gap, description, gap,
+            // footer/pill]. All must share the heading's left edge.
+            let content_row_x = content_row.bounds().x;
+            let content_col = &content_row.children()[1];
+            let content_col_x = content_row_x + content_col.bounds().x;
+            let divider = &content_col.children()[0];
+            let description = &content_col.children()[2];
+            let footer = &content_col.children()[4];
+            for (name, el) in [
+                ("divider", divider),
+                ("description", description),
+                ("footer", footer),
+            ] {
+                let x = content_col_x + el.bounds().x;
+                assert!(
+                    (x - heading_left).abs() < 1.0,
+                    "{label}: {name} left edge {x:.1}px must share the heading's left edge \
+                     {heading_left:.1}px (text block is the visual anchor)"
+                );
+            }
+            // The icon must sit to the LEFT of the text block, not inside it.
+            let icon_x = header_x + icon.bounds().x;
+            assert!(
+                icon_x < heading_left,
+                "{label}: the icon must sit left of the heading"
+            );
+        }
+    }
+
+    #[test]
     fn capture_mesh_isolated_on_white() {
         let mut renderer = iced::Renderer::Secondary(iced_tiny_skia::Renderer::new(
             Font::default(),
@@ -227,10 +310,12 @@ mod tests {
         // the minimum supported window (Medium 679) allows some tolerance
         // above 230 because requirement 3 sanctions content-driven growth.
         // CONN-06: the heading is now 25px at Medium and no longer wraps
-        // at 679px, so the card's height is driven by the 136px mesh
-        // (136 + 48 padding ≈ 184px) — still compact, and the spec's
-        // "grow only when its content requires it" permits heights below
-        // the 200 target when the content genuinely fits on one line.
+        // at 679px. CONN-11: the check indicator now shares the heading
+        // row, so the card's height is driven by the 74px icon + heading
+        // row (159.9px content + 48px padding ≈ 208px at 679) — still
+        // inside the compact band, and the spec's "grow only when its
+        // content requires it" permits heights below the 200 target when
+        // the content genuinely fits on one line.
         load_font(include_bytes!("fonts/ArchivoSemiCondensed-Bold.ttf"));
         load_font(include_bytes!("fonts/IBMPlexSans-Regular.ttf"));
         load_font(include_bytes!("fonts/IBMPlexSans-Medium.ttf"));
