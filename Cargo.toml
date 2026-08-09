@@ -387,6 +387,15 @@ iroh-relay = { path = "patched/iroh-relay" }
 irpc = { path = "patched/irpc" }
 mainline = { path = "patched/mainline" }
 n0-mainline = { path = "patched/n0-mainline" }
+# ── iced_futures 0.14.0 subscription tracker instrumentation ──────────
+# Temporary diagnostic: ICED_TRACKER_* eprintln lines in Tracker::update
+# settle whether the combined subscription stream is re-spawned because
+# (A) the recipe vanishes for one update, (B) the Tracker instance changes,
+# or (C) the recipe hash changes. Also logs stream termination (iced does
+# NOT restart a stream that ends while its recipe stays registered).
+# See patched/iced_futures/src/subscription/tracker.rs. Remove once the
+# subscription churn cause is fixed.
+iced_futures = { path = "patched/iced_futures" }
 # ── iced_tiny_skia 0.14.0 geometry-clip double-transform fix ──────────
 # The 0.14.0 tiny-skia render loop computes the group clip bounds as
 # `clip_bounds * transformation * scale_factor`, but `draw_primitive_group`
