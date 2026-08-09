@@ -68,11 +68,26 @@ pub(crate) const STATUS_CARD_TEXT_MIN_WIDTH: f32 = 260.0;
 /// area at roughly 220-260px; 240 is the mid-band floor so the mesh still
 /// has room to stay visible at the bottom of the band.
 const STATUS_CARD_TEXT_MIN_WIDTH_MEDIUM: f32 = 240.0;
-/// Upper bound for the decorative mesh in the horizontal tiers (spec MODE A
-/// graph 170-190px). The mesh must NEVER consume width the heading needs:
-/// it only gets the leftover after the text minimum is satisfied.
-/// CONN-05 tunes the exact graph size; this card only enforces the bound.
-pub(crate) const STATUS_CARD_MESH_MAX_WIDTH: f32 = 190.0;
+/// Upper bound for the decorative mesh in the horizontal tiers (spec §5
+/// graph 150–180 px; CONN-05 tuned the exact size to 170). The mesh must
+/// NEVER consume width the heading needs: it only gets the leftover after
+/// the text minimum is satisfied.
+pub(crate) const STATUS_CARD_MESH_MAX_WIDTH: f32 = 170.0;
+
+/// Horizontal padding of the card (px), spec §5 band 24–28 px. CONN-05:
+/// reduced from 32 (CONN-04 had already trimmed the vertical padding to
+/// 24) so the content row gets more of the card's width. Shared with the
+/// mesh-width math below so the two can never drift apart.
+pub(crate) const STATUS_CARD_PADDING_X: f32 = design_tokens::SPACE_24;
+
+/// Horizontal gap between the status indicator and the text column (px).
+/// Full tier ≈ 24 px (spec §5); the Medium tier is slightly tighter.
+const STATUS_ICON_TEXT_GAP_FULL: f32 = 24.0;
+const STATUS_ICON_TEXT_GAP_MEDIUM: f32 = 20.0;
+/// Horizontal gap between the text column and the network graph (px),
+/// spec §5 band 24–32 px (CONN-05: down from 40 Full / 32 Medium).
+const STATUS_TEXT_GRAPH_GAP_FULL: f32 = 24.0;
+const STATUS_TEXT_GRAPH_GAP_MEDIUM: f32 = 24.0;
 
 /// Amber accent for connecting / degraded states on the dark panel.
 const STATUS_WARNING: Color = Color::from_rgb(
@@ -163,11 +178,23 @@ pub(crate) fn view_status_card(
             // [status icon] [status information] [network]
             // Vertical rhythm of the info column (hd/divider/dd/description/
             // dp/footer) trimmed for the compact height band (CONN-04).
-            // Horizontal gaps (icon-text, text-graph) stay — CONN-05 owns
-            // their tuning.
+            // Horizontal gaps (icon-text, text-graph) tuned by CONN-05 to
+            // the spec §5 bands (Full ≈24px icon-text, 24–32px text-graph).
             let (icon_text_gap, text_graph_gap, hd_gap, dd_gap, dp_gap) = match tier {
-                Tier::Full => (32.0, 40.0, 16.0, 12.0, 20.0),
-                _ => (28.0, 32.0, 12.0, 10.0, 16.0),
+                Tier::Full => (
+                    STATUS_ICON_TEXT_GAP_FULL,
+                    STATUS_TEXT_GRAPH_GAP_FULL,
+                    16.0,
+                    12.0,
+                    20.0,
+                ),
+                _ => (
+                    STATUS_ICON_TEXT_GAP_MEDIUM,
+                    STATUS_TEXT_GRAPH_GAP_MEDIUM,
+                    12.0,
+                    10.0,
+                    16.0,
+                ),
             };
             let info = Column::new()
                 .push(heading)
@@ -222,12 +249,13 @@ pub(crate) fn view_status_card(
 
     let opacity = dep.home_menu_opacity.clamp(0.0, 1.0);
 
-    // Vertical padding tightened to SPACE_24 for the compact height band
-    // (CONN-04; the spec's 24-28px padding target — CONN-05 owns the full
-    // pass). Horizontal stays SPACE_32 so the width math in
-    // `horizontal_mesh_width` (which subtracts 2 × SPACE_32) is unchanged.
+    // Outer padding: vertical and horizontal both SPACE_24 (24 px), inside
+    // the spec §5 24–28 px band (CONN-04 trimmed the vertical, CONN-05
+    // matched the horizontal so the padding is uniform and the content row
+    // gets more width). The mesh-width math below shares
+    // STATUS_CARD_PADDING_X so it always stays in sync.
     container(body)
-        .padding([design_tokens::SPACE_24, design_tokens::SPACE_32])
+        .padding([design_tokens::SPACE_24, STATUS_CARD_PADDING_X])
         .width(Length::Fill)
         .style(move |_t| {
             container::Style {
@@ -485,11 +513,19 @@ fn network_size(tier: Tier) -> (f32, f32) {
 /// section 11 priority order: heading > description > pill > graph).
 fn horizontal_mesh_width(content_width: f32, tier: Tier) -> f32 {
     let (text_min, icon_text_gap, text_graph_gap) = match tier {
-        Tier::Full => (STATUS_CARD_TEXT_MIN_WIDTH, 32.0, 40.0),
-        _ => (STATUS_CARD_TEXT_MIN_WIDTH_MEDIUM, 28.0, 32.0),
+        Tier::Full => (
+            STATUS_CARD_TEXT_MIN_WIDTH,
+            STATUS_ICON_TEXT_GAP_FULL,
+            STATUS_TEXT_GRAPH_GAP_FULL,
+        ),
+        _ => (
+            STATUS_CARD_TEXT_MIN_WIDTH_MEDIUM,
+            STATUS_ICON_TEXT_GAP_MEDIUM,
+            STATUS_TEXT_GRAPH_GAP_MEDIUM,
+        ),
     };
-    // Card inner width = content width minus the card's 32px padding.
-    let inner = (content_width - 2.0 * design_tokens::SPACE_32).max(0.0);
+    // Card inner width = content width minus the card's horizontal padding.
+    let inner = (content_width - 2.0 * STATUS_CARD_PADDING_X).max(0.0);
     let fixed =
         design_tokens::STATUS_INDICATOR_SIZE + icon_text_gap + text_graph_gap;
     let space = (inner - fixed).max(0.0);
@@ -778,9 +814,9 @@ mod tests {
             let (w, h) = network_size(tier);
             assert!(w > 0.0 && h > 0.0, "{tier:?} network size must be positive");
         }
-        // CONN-03: the horizontal tiers' nominal mesh width must respect
-        // the 190px bound (spec MODE A graph 170-190px; the exact size is
-        // CONN-05's job — this card never exceeds the bound).
+        // CONN-05: the horizontal tiers' nominal mesh width must respect
+        // the 170px bound (spec §5 graph 150-180px — CONN-05 tuned the
+        // exact size; this card never exceeds the bound).
         for tier in [Tier::Full, Tier::Medium] {
             let (w, _) = network_size(tier);
             assert!(
@@ -810,11 +846,19 @@ mod tests {
                 continue;
             }
             let (text_min, icon_gap, graph_gap) = match tier {
-                Tier::Full => (STATUS_CARD_TEXT_MIN_WIDTH, 32.0, 40.0),
-                _ => (STATUS_CARD_TEXT_MIN_WIDTH_MEDIUM, 28.0, 32.0),
+                Tier::Full => (
+                    STATUS_CARD_TEXT_MIN_WIDTH,
+                    STATUS_ICON_TEXT_GAP_FULL,
+                    STATUS_TEXT_GRAPH_GAP_FULL,
+                ),
+                _ => (
+                    STATUS_CARD_TEXT_MIN_WIDTH_MEDIUM,
+                    STATUS_ICON_TEXT_GAP_MEDIUM,
+                    STATUS_TEXT_GRAPH_GAP_MEDIUM,
+                ),
             };
             let mesh_w = horizontal_mesh_width(width, tier);
-            let inner = width - 2.0 * design_tokens::SPACE_32;
+            let inner = width - 2.0 * STATUS_CARD_PADDING_X;
             let text_w =
                 inner - design_tokens::STATUS_INDICATOR_SIZE - icon_gap - graph_gap - mesh_w;
             assert!(
@@ -841,10 +885,10 @@ mod tests {
             "at 520px the mesh should shrink ({tight}px) but stay visible"
         );
         let text_at_tight = 520.0
-            - 2.0 * design_tokens::SPACE_32
+            - 2.0 * STATUS_CARD_PADDING_X
             - design_tokens::STATUS_INDICATOR_SIZE
-            - 28.0
-            - 32.0
+            - STATUS_ICON_TEXT_GAP_MEDIUM
+            - STATUS_TEXT_GRAPH_GAP_MEDIUM
             - tight;
         assert!(
             text_at_tight + 0.01 >= STATUS_CARD_TEXT_MIN_WIDTH_MEDIUM,

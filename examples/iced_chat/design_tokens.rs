@@ -902,13 +902,14 @@ pub const STATUS_NETWORK_NODE: Color = Color::from_rgb(
 );
 
 /// Status card — outer outlined indicator diameter (px), plan band
-/// 90–110 px.
-pub const STATUS_INDICATOR_SIZE: f32 = 100.0;
+/// 70–78 px (CONN-05: reduced from 100 so the check reads as a status
+/// indicator, not the visual focal point — spec §6).
+pub const STATUS_INDICATOR_SIZE: f32 = 74.0;
 /// Status card — inner ring diameter (px); the ring + internal glow sit
-/// inside the outer outline.
-pub const STATUS_INDICATOR_RING: f32 = 82.0;
-/// Status card — checkmark glyph size (px), plan band 34–42 px.
-pub const STATUS_INDICATOR_GLYPH: f32 = 36.0;
+/// inside the outer outline (scaled proportionally with the outer size).
+pub const STATUS_INDICATOR_RING: f32 = 60.0;
+/// Status card — checkmark glyph size (px), plan band 22–30 px.
+pub const STATUS_INDICATOR_GLYPH: f32 = 26.0;
 
 // ── Tests ─────────────────────────────────────────────────────────────
 
@@ -1371,13 +1372,13 @@ mod tests {
             STATUS_CARD_RADIUS
         );
         assert!(
-            (90.0..=110.0).contains(&STATUS_INDICATOR_SIZE),
-            "status indicator {} px outside the 90–110 px band",
+            (70.0..=78.0).contains(&STATUS_INDICATOR_SIZE),
+            "status indicator {} px outside the 70–78 px band",
             STATUS_INDICATOR_SIZE
         );
         assert!(
-            (34.0..=42.0).contains(&STATUS_INDICATOR_GLYPH),
-            "status indicator glyph {} px outside the 34–42 px band",
+            (22.0..=30.0).contains(&STATUS_INDICATOR_GLYPH),
+            "status indicator glyph {} px outside the 22–30 px band",
             STATUS_INDICATOR_GLYPH
         );
         // The panel is a dark privacy surface in both themes: every
