@@ -1,6 +1,6 @@
-# File-access descriptor signing (BORU-AUDIT-05)
+# File-access descriptor signing (BORU-AUDIT-05 / BORU-AUDIT-06)
 
-Status: implemented 2026-08-09 (BORU-AUDIT-05)
+Status: implemented 2026-08-09 (BORU-AUDIT-05), single canonical hash enforced 2026-08-09 (BORU-AUDIT-06)
 
 ## Protocol
 
@@ -44,10 +44,11 @@ Rules that MUST hold for this struct:
    therefore MUST bump `DESCRIPTOR_SIGNED_PAYLOAD_VERSION`.  Old descriptors
    are then rejected as `DescriptorVerification::UnsupportedVersion` — never
    guessed.
-3. The hex display string `SignedDownloadDescriptor::content_hash` is NOT part
-   of the signed payload.  It is a derived, human-readable representation of
-   `blob_hash`; the strongly typed raw hash is the single authenticated
-   representation.  (BORU-AUDIT-06 removes the duplicate string entirely.)
+3. `SignedDownloadDescriptor` carries exactly ONE hash representation: the raw
+   `blob_hash: [u8; 32]`.  There is no hex display string on the descriptor.
+   The hex display hash previously stored in `content_hash` was removed by
+   BORU-AUDIT-06 — logs/UI derive a display hash from `blob_hash` (hex-encode)
+   when needed, so no independent copy can drift from the signed value.
 4. Both sign and verify must go through `canonical_bytes()`.  There is no other
    code path that constructs descriptor signature bytes.
 
@@ -58,6 +59,35 @@ Rules that MUST hold for this struct:
 - `version = 2` is embedded inside the signed structure, so it is
   authenticated.  The wire descriptor also carries `signed_version`, which is
   checked by `verify_download_descriptor` before any field layout is trusted.
+
+## Single canonical content hash (BORU-AUDIT-06)
+
+Before AUDIT-06 the descriptor carried a second, hex-string hash
+(`SignedDownloadDescriptor::content_hash`) and the file-access request carried
+another (`FileAccessRequest::content_hash`).  Those display strings could drift
+from the signed `blob_hash`, letting signing, permission, and transfer code
+refer to different objects.
+
+AUDIT-06 removes both duplicate strings:
+
+- `SignedDownloadDescriptor::blob_hash: [u8; 32]` is the ONLY hash on the
+  descriptor.  It is the value that is signed, the value the client's
+  authorization check compares against its expected hash, the value used for
+  the requested-blob lookup, and the value the final integrity check compares
+  against the computed hash of the downloaded bytes.  One source of truth.
+- `FileAccessRequest` carries only `expected_content_hash: [u8; 32]` (raw
+  bytes).  The server's `Changed` check and the descriptor it issues both
+  derive from this canonical value.
+- The server refuses to sign a descriptor if the stored hash is not valid hex
+  or not exactly 32 bytes (fail closed — a malformed stored hash can no longer
+  produce a silently zero/truncated signed `blob_hash`).
+- Display hashes in logs and progress events are derived from the canonical
+  bytes with `hex::encode(...)` at the point of use.
+
+Both peers ship the same protocol version in a coordinated deploy, so the
+removed wire fields simply fail closed on a mixed-version connection
+(deserialize error → `ProtocolError`), matching the AUDIT-05 migration policy
+for ephemeral descriptors.
 
 ## Migration
 
@@ -72,8 +102,18 @@ version in a coordinated deploy.
 - `descriptor_canonical_bytes_golden_vector` pins the exact canonical bytes
   for fixed fields (golden vector).
 - `descriptor_field_mutation_invalidates_signature` mutates every signed field
-  and asserts the descriptor is no longer `Valid`.
+  (including `blob_hash`) and asserts the descriptor is no longer `Valid`.
 - `descriptor_json_reorder_does_not_affect_canonical_bytes` proves JSON/map key
   order and display serialization cannot change the signed bytes.
 - `descriptor_unknown_version_rejected` proves unknown versions fail closed.
 - `descriptor_sign_verify_round_trip` proves the shared sign/verify path.
+- `descriptor_has_single_canonical_hash` (AUDIT-06) proves the descriptor has
+  exactly one hash representation and that mutating it invalidates the
+  descriptor.
+- `granted_descriptor_carries_requested_blob_hash` (AUDIT-06) proves the server
+  signs exactly the blob hash the requester authorized.
+- `handle_content_hash_mismatch_in_descriptor` (AUDIT-06) proves the client
+  rejects a descriptor whose `blob_hash` differs from the expected hash.
+- `hash_mismatch_rejected` (blob_transfer) proves downloaded content is verified
+  against the same canonical `blob_hash` used for the blob lookup and
+  authorization.

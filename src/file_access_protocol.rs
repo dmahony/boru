@@ -39,9 +39,10 @@
 //! [`DescriptorSignedPayloadV2::canonical_bytes`], so the signed bytes can
 //! never drift between signing and verification.  Unknown signed-payload
 //! versions are rejected as [`DescriptorVerification::UnsupportedVersion`].
-//! The hex display string `content_hash` is deliberately NOT signed — the
-//! strongly typed `blob_hash` is the single canonical hash representation
-//! (BORU-AUDIT-06 removes the duplicate string entirely).
+//! The strongly typed `blob_hash` is the single canonical hash representation
+//! (the hex display string was removed by BORU-AUDIT-06 — logs/UI derive a
+//! display hash from `blob_hash` when needed instead of carrying a second
+//! copy).
 //!
 //! # Feature flag
 //!
@@ -236,9 +237,10 @@ pub enum DescriptorVerification {
 /// canonical bytes and MUST bump [`DESCRIPTOR_SIGNED_PAYLOAD_VERSION`]; old
 /// descriptors are then rejected as [`DescriptorVerification::UnsupportedVersion`],
 /// which is fail-closed and never guesses the old layout.  Do NOT add
-/// display-only fields (e.g. the hex `content_hash`) here: the strongly typed
-/// `blob_hash` is the single canonical hash representation.  See
-/// `docs/file-access-descriptor-signing.md` for the full protocol note.
+/// display-only hash fields here: the strongly typed `blob_hash` is the
+/// single canonical hash representation (the hex display string was removed
+/// by BORU-AUDIT-06).  See `docs/file-access-descriptor-signing.md` for the
+/// full protocol note.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DescriptorSignedPayloadV2 {
     /// Protocol domain separator — always [`DESCRIPTOR_SIGNED_PROTOCOL`].
@@ -310,7 +312,6 @@ pub fn sign_download_descriptor(
     now_ms: u64,
     expires_at_ms: u64,
 ) -> SignedDownloadDescriptor {
-    let content_hash = hex::encode(blob_hash);
     let nonce = rand::random::<[u8; 32]>();
     let blob_ticket = Vec::new(); // populated by the blob-transfer layer
 
@@ -338,7 +339,6 @@ pub fn sign_download_descriptor(
         requester,
         shared_file_id,
         blob_hash,
-        content_hash,
         size_bytes,
         blob_ticket,
         nonce,
@@ -389,9 +389,8 @@ pub fn verify_download_descriptor(
     // ── 5. Reconstruct the canonical signing payload ────────────────────
     // The descriptor carries the same fields that were signed; serialize them
     // through the exact same helper as sign_download_descriptor so the bytes
-    // are guaranteed identical.  `content_hash` (a hex display string derived
-    // from `blob_hash`) is intentionally NOT part of the signed payload — the
-    // strongly typed `blob_hash` is the canonical hash representation.
+    // are guaranteed identical.  `blob_hash` (raw 32 bytes) is the single
+    // canonical hash representation — there is no separate display string.
     let payload = DescriptorSignedPayloadV2::from_descriptor(descriptor);
     let canonical = match payload.canonical_bytes() {
         Ok(bytes) => bytes,
@@ -418,8 +417,6 @@ pub fn verify_download_descriptor(
 /// A request to access (download) a file from a remote peer.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FileAccessRequest {
-    /// Blake3 content hash of the requested file (hex-encoded).
-    pub content_hash: String,
     /// Suggested filename (from the catalogue).
     pub filename: String,
     /// Expected file size in bytes (from the catalogue).
@@ -427,7 +424,8 @@ pub struct FileAccessRequest {
     /// Stable shared-file identifier from the catalogue.
     #[serde(default)]
     pub shared_file_id: String,
-    /// Expected content hash (raw 32 bytes).
+    /// Expected content hash (raw 32 bytes) — the single canonical hash
+    /// representation on the wire.
     #[serde(default)]
     pub expected_content_hash: [u8; 32],
     /// Expected version number (ms timestamp from catalogue).
@@ -443,7 +441,6 @@ impl FileAccessRequest {
         expected_version: u64,
     ) -> Self {
         Self {
-            content_hash: hex::encode(expected_content_hash),
             filename: "unknown".to_string(),
             expected_size: 0,
             shared_file_id: shared_file_id.to_string(),
@@ -460,7 +457,7 @@ impl FileAccessRequest {
                 "shared_file_id is empty",
             ));
         }
-        if self.content_hash.is_empty() && self.expected_content_hash == [0; 32] {
+        if self.expected_content_hash == [0; 32] {
             return Err((FileAccessErrorCode::InvalidRequest, "content hash is empty"));
         }
         // Validate filename: must not contain path separators or control chars.
@@ -510,10 +507,12 @@ pub struct SignedDownloadDescriptor {
     pub requester: PublicKey,
     /// Stable shared-file identifier from the catalogue.
     pub shared_file_id: String,
-    /// Blake3 content hash of the file (raw 32 bytes).
+    /// Blake3 content hash of the file (raw 32 bytes) — the single canonical
+    /// hash representation.  This is the value used for authorization,
+    /// signature verification, requested blob lookup, and final integrity
+    /// verification.  Display hashes are derived from it (hex-encode) rather
+    /// than stored as an independent copy (BORU-AUDIT-06).
     pub blob_hash: [u8; 32],
-    /// Hex-encoded blake3 content hash (for display/lookup).
-    pub content_hash: String,
     /// Expected file size in bytes.
     pub size_bytes: u64,
     /// Opaque blob ticket (iroh blob ticket bytes).
@@ -633,7 +632,6 @@ mod tests {
     #[test]
     fn file_access_request_valid_succeeds() {
         let req = FileAccessRequest {
-            content_hash: "abc123".into(),
             filename: "photo.png".into(),
             expected_size: 1024,
             shared_file_id: "file-001".into(),
@@ -704,7 +702,6 @@ mod tests {
     #[test]
     fn file_access_wire_request_round_trip() {
         let inner = FileAccessRequest {
-            content_hash: "deadbeef".into(),
             filename: "photo.png".into(),
             expected_size: 65536,
             shared_file_id: String::new(),
@@ -728,7 +725,6 @@ mod tests {
             requester: PublicKey::from_bytes(&[1u8; 32]).expect("valid key"),
             shared_file_id: "test-file".into(),
             blob_hash: [0u8; 32],
-            content_hash: "deadbeef".into(),
             size_bytes: 1024,
             blob_ticket: vec![1, 2, 3, 4],
             nonce: [0u8; 32],
@@ -761,7 +757,6 @@ mod tests {
     #[test]
     fn file_access_wire_request_rejects_unsupported_version() {
         let inner = FileAccessRequest {
-            content_hash: "abc".into(),
             filename: "f".into(),
             expected_size: 0,
             shared_file_id: String::new(),
@@ -793,7 +788,6 @@ mod tests {
     #[test]
     fn file_access_wire_request_current_version_is_valid() {
         let inner = FileAccessRequest {
-            content_hash: "abc".into(),
             filename: "f".into(),
             expected_size: 0,
             shared_file_id: String::new(),
@@ -809,7 +803,6 @@ mod tests {
     #[test]
     fn file_access_wire_request_truncated_fails() {
         let inner = FileAccessRequest {
-            content_hash: "abc".into(),
             filename: "f".into(),
             expected_size: 100,
             shared_file_id: String::new(),
@@ -849,7 +842,6 @@ mod tests {
     #[test]
     fn file_access_wire_request_trailing_data_rejected() {
         let inner = FileAccessRequest {
-            content_hash: "abc".into(),
             filename: "f".into(),
             expected_size: 100,
             shared_file_id: String::new(),
@@ -930,7 +922,6 @@ mod tests {
     #[test]
     fn file_access_wire_request_new_sets_current_version() {
         let inner = FileAccessRequest {
-            content_hash: "abc".into(),
             filename: "f".into(),
             expected_size: 0,
             shared_file_id: String::new(),
@@ -949,7 +940,6 @@ mod tests {
             requester: PublicKey::from_bytes(&[1u8; 32]).expect("valid key"),
             shared_file_id: "test".into(),
             blob_hash: [0u8; 32],
-            content_hash: "abc".into(),
             size_bytes: 512,
             blob_ticket: vec![],
             nonce: [0u8; 32],
@@ -1200,16 +1190,19 @@ mod tests {
         );
     }
 
-    /// The display `content_hash` is NOT part of the signed payload: only the
-    /// strongly typed `blob_hash` is authenticated.  (BORU-AUDIT-06 removes the
-    /// duplicate string entirely.)
+    /// The descriptor carries exactly ONE hash representation: the raw
+    /// `blob_hash` bytes.  There is no separate hex display string on the
+    /// descriptor (BORU-AUDIT-06), so a signed descriptor can never name a
+    /// different object than the one verified: the canonical bytes the
+    /// signature covers are derived from `descriptor.blob_hash` and the
+    /// client's authorization check compares `descriptor.blob_hash` directly.
     #[test]
-    fn descriptor_display_content_hash_not_signed() {
+    fn descriptor_has_single_canonical_hash() {
         let owner = iroh::SecretKey::generate();
         let owner_pk = owner.public();
         let requester = iroh::SecretKey::generate().public();
         let now = 1_700_000_000_000u64;
-        let mut descriptor = sign_download_descriptor(
+        let descriptor = sign_download_descriptor(
             &owner,
             requester,
             "shared-file-1".into(),
@@ -1219,12 +1212,27 @@ mod tests {
             now,
             now + 60_000,
         );
-        // Change only the display string; the signature must still verify
-        // because blob_hash (the canonical hash) is unchanged.
-        descriptor.content_hash = "deadbeef".into();
+
+        // The only hash on the descriptor is blob_hash, and it is exactly the
+        // hash that was signed: the reconstructed payload carries the same
+        // bytes the signature covered.
+        assert_eq!(descriptor.blob_hash, [7u8; 32]);
+        let payload = DescriptorSignedPayloadV2::from_descriptor(&descriptor);
+        assert_eq!(payload.blob_hash, descriptor.blob_hash);
         assert_eq!(
             verify_download_descriptor(&descriptor, &owner_pk, &requester, now),
             DescriptorVerification::Valid
+        );
+
+        // A descriptor cannot be mutated to change only a "display" hash —
+        // there is only one hash field, so any hash change alters the signed
+        // payload and invalidates the signature.
+        let mut mutated = descriptor.clone();
+        mutated.blob_hash = [8u8; 32];
+        assert_ne!(
+            verify_download_descriptor(&mutated, &owner_pk, &requester, now),
+            DescriptorVerification::Valid,
+            "changing the only hash field must invalidate the descriptor"
         );
     }
 

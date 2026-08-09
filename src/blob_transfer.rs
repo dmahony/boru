@@ -153,10 +153,11 @@ pub async fn transfer_blob_to_temp(
     mut on_progress: impl FnMut(BlobTransferProgress),
 ) -> Result<PathBuf> {
     let total_bytes = descriptor.size_bytes;
-    let blob_hash: iroh_blobs::Hash = descriptor
-        .content_hash
-        .parse()
-        .map_err(|e| anyhow::anyhow!("invalid blob hash in descriptor: {e}"))?;
+    // The blob lookup uses the descriptor's canonical raw hash.  This is the
+    // same value that was signed by the owner and checked by the client, so a
+    // transfer can never authorize one hash and download another
+    // (BORU-AUDIT-06).  iroh-blobs Hash from raw bytes cannot fail.
+    let blob_hash: iroh_blobs::Hash = descriptor.blob_hash.into();
 
     // ── 1. Record temp path in storage (crash recovery) ─────────────────
     let temp_str = temp_path.to_string_lossy().to_string();
@@ -224,7 +225,7 @@ pub async fn transfer_blob_to_temp(
     )
     .await;
 
-    let (bytes_written, hash_hex) = match result {
+    let (bytes_written, computed_hash) = match result {
         Ok(v) => v,
         Err(e) => {
             let _ = tokio::fs::remove_file(&temp_path).await;
@@ -259,8 +260,15 @@ pub async fn transfer_blob_to_temp(
     }
 
     // ── 6. Verify BLAKE3 hash ──────────────────────────────────────────
-    let expected_hex = descriptor.content_hash.clone();
-    if hash_hex != expected_hex {
+    // The computed hash of the downloaded content is compared byte-for-byte
+    // against the descriptor's canonical `blob_hash` — the same value that
+    // was signed by the owner, used for the blob lookup, and checked by the
+    // client's authorization step.  No transfer can authorize one hash and
+    // download another (BORU-AUDIT-06).
+    let expected_hash_bytes = descriptor.blob_hash;
+    if computed_hash != expected_hash_bytes {
+        let hash_hex = hex::encode(computed_hash);
+        let expected_hex = hex::encode(expected_hash_bytes);
         let _ = tokio::fs::remove_file(&temp_path).await;
         let msg = format!(
             "blob-transfer: content hash mismatch: computed {hash_hex}, expected {expected_hex}"
@@ -291,6 +299,7 @@ pub async fn transfer_blob_to_temp(
         Some(bytes_written),
         Some(total_bytes),
     );
+    let hash_hex = hex::encode(computed_hash);
     info!(
         download_id,
         bytes = bytes_written,
@@ -433,6 +442,10 @@ async fn stage_network_download(
 
 /// Stream the blob from the local iroh-blobs store to a temporary file,
 /// computing the BLAKE3 hash as we go.
+///
+/// Returns the number of bytes written and the raw 32-byte BLAKE3 hash of the
+/// copied content — the same representation as the descriptor's canonical
+/// `blob_hash`, so the final integrity check compares bytes directly.
 #[allow(clippy::too_many_arguments)]
 async fn stage_copy_to_temp(
     blob_store: &iroh_blobs::api::Store,
@@ -446,7 +459,7 @@ async fn stage_copy_to_temp(
     download_id: i64,
     initial_bytes: u64,
     on_progress: &mut impl FnMut(BlobTransferProgress),
-) -> Result<(u64, String)> {
+) -> Result<(u64, [u8; 32])> {
     let deadline = Instant::now() + config.transfer_timeout;
 
     // Ensure the parent directory exists.
@@ -564,8 +577,8 @@ async fn stage_copy_to_temp(
         }
     }
 
-    let hash_hex = hasher.finalize().to_hex().to_string();
-    Ok((bytes_written, hash_hex))
+    let hash_bytes = *hasher.finalize().as_bytes();
+    Ok((bytes_written, hash_bytes))
 }
 
 // ── Cancellable download with acceptance ───────────────────────────────────
@@ -634,15 +647,16 @@ pub async fn request_and_transfer_blob(
     // ── 2. Verify and accept the response ───────────────────────────
     // The expected owner is the peer we selected for this request
     // (`server_pk`, passed down from the connection/request state), never a
-    // key reconstructed from the response itself.
-    let expected_content_hash_hex = hex::encode(request.expected_content_hash);
+    // key reconstructed from the response itself.  The expected content hash
+    // is the request's canonical raw bytes — the same value the server must
+    // have signed into the descriptor's `blob_hash`.
     let descriptor = crate::file_access_client::handle_permission_response(
         storage,
         download_id,
         response,
         &server_pk,
         local_pk,
-        &expected_content_hash_hex,
+        request.expected_content_hash,
         expected_size,
     )?
     .ok_or_else(|| anyhow::anyhow!("permission denied or retryable error"))?;

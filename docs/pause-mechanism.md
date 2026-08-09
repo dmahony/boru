@@ -330,7 +330,7 @@ Worker picks up the resumed download:
   1. Resolve peer address (peer may be offline)
   2. Request new SignedDownloadDescriptor
      a. Open /boru-file-access/1 QUIC connection
-     b. Send FileAccessRequest { content_hash, expected_revision }
+     b. Send FileAccessRequest { expected_content_hash, expected_version }
      c. Receive signed descriptor (or error)
   3. Storage::accept_resumed_descriptor(id, content_hash, total_bytes)
      ├─ Hash match   → state = 'downloading', proceed to blob transfer

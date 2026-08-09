@@ -1280,10 +1280,28 @@ impl FileAccessHandler {
         };
 
         // Convert the hex content_hash to raw 32 bytes for the descriptor.
-        let mut raw_hash = [0u8; 32];
-        let hash_bytes = hex::decode(&row.content_hash).unwrap_or_default();
-        let copy_len = hash_bytes.len().min(32);
-        raw_hash[..copy_len].copy_from_slice(&hash_bytes[..copy_len]);
+        // This is the canonical blob hash that gets signed.  Fail closed: a
+        // malformed or non-32-byte stored hash must never produce a silently
+        // zero/truncated blob_hash in a signed descriptor (BORU-AUDIT-06).
+        let raw_hash: [u8; 32] = match hex::decode(&row.content_hash) {
+            Ok(bytes) => match <[u8; 32]>::try_from(bytes.as_slice()) {
+                Ok(arr) => arr,
+                Err(_) => {
+                    error!(
+                        peer = %requester.fmt_short(),
+                        "stored content hash is not 32 bytes: refusing to sign descriptor"
+                    );
+                    return FileAccessResponse::from(FileAccessErrorCode::InternalError);
+                }
+            },
+            Err(e) => {
+                error!(
+                    peer = %requester.fmt_short(),
+                    "stored content hash is not valid hex: refusing to sign descriptor: {e}"
+                );
+                return FileAccessResponse::from(FileAccessErrorCode::InternalError);
+            }
+        };
 
         let descriptor = sign_download_descriptor(
             &self.secret_key,
@@ -1907,6 +1925,45 @@ mod tests {
         assert!(
             matches!(response, FileAccessResponse::Granted(_)),
             "expected Granted, got {response:?}"
+        );
+    }
+
+    /// The descriptor the server issues must carry EXACTLY the canonical blob
+    /// hash the requester asked for (`request.expected_content_hash`).  There
+    /// is no second representation on the descriptor that could drift: the
+    /// signed `blob_hash` IS the authorization target (BORU-AUDIT-06).
+    #[tokio::test]
+    async fn granted_descriptor_carries_requested_blob_hash() {
+        let metadata_id = "file-1";
+        let content_hash = "cd".repeat(32);
+        let (storage, friends) = setup_storage_with_file(metadata_id, &content_hash, true);
+        let (mut handler, _blob_store) = test_handler(storage, friends);
+        let requester = requester_pk();
+
+        add_friend(&mut handler, requester);
+
+        let row = handler
+            .storage
+            .get_shared_file_by_metadata_id("owner-profile-id", metadata_id)
+            .expect("get shared file")
+            .expect("shared file exists");
+
+        let request = make_request(metadata_id, &content_hash, row.version);
+        let response = handler.check_permission(&requester, &request).await;
+
+        let FileAccessResponse::Granted(descriptor) = response else {
+            panic!("expected Granted, got {response:?}");
+        };
+        let mut expected_raw = [0u8; 32];
+        expected_raw.copy_from_slice(&hex::decode(&content_hash).expect("valid hex"));
+        assert_eq!(
+            descriptor.blob_hash, expected_raw,
+            "descriptor blob_hash must equal the requested content hash"
+        );
+        assert_eq!(
+            hex::encode(descriptor.blob_hash),
+            content_hash,
+            "descriptor blob_hash must hex-encode to the stored content hash"
         );
     }
 

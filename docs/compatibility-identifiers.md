@@ -63,6 +63,17 @@ Also preserve the exact signed-byte constructions in `src/mailbox.rs`, `src/inbo
 > concatenation is not retained and there is no V1 decode path. See
 > `docs/file-access-descriptor-signing.md`. This is a security-driven protocol
 > change, not a branding rename; the mailbox and inbox V1 paths are unaffected.
+>
+> **2026-08-09 (BORU-AUDIT-06):** the duplicate content-hash representations
+> were removed from the file-access pipeline. `SignedDownloadDescriptor` no
+> longer carries the hex `content_hash` display string and `FileAccessRequest`
+> no longer carries the `content_hash` string — `blob_hash` /
+> `expected_content_hash` (raw `[u8; 32]`) is the single canonical content
+> identity used for authorization, signature verification, blob lookup, and
+> final integrity verification. Display hashes are derived by hex-encoding the
+> canonical bytes. Because descriptors are ephemeral and both peers deploy
+> together, a mixed-version connection fails closed at deserialization; the
+> signed canonical bytes are unchanged (same golden vector).
 
 ## 4. Room identity and network namespaces — MUST NOT CHANGE
 

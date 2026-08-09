@@ -245,7 +245,8 @@ pub async fn request_download_permission(
 ///   itself — otherwise the owner check is self-referential and a third party
 ///   could substitute its own valid descriptor.
 /// * `local_pk` — Our own public key (to verify requester binding).
-/// * `expected_content_hash_hex` — The content hash we expect (hex string).
+/// * `expected_content_hash` — The content hash we expect (raw 32 bytes; the
+///   same canonical value the server must have signed into `blob_hash`).
 /// * `expected_size` — The expected file size in bytes.
 ///
 /// # Returns
@@ -263,7 +264,7 @@ pub fn handle_permission_response(
     response: FileAccessResponse,
     expected_server_pk: &PublicKey,
     local_pk: &PublicKey,
-    expected_content_hash_hex: &str,
+    expected_content_hash: [u8; 32],
     expected_size: u64,
 ) -> std::result::Result<Option<SignedDownloadDescriptor>, anyhow::Error> {
     match response {
@@ -273,7 +274,7 @@ pub fn handle_permission_response(
             *descriptor,
             expected_server_pk,
             local_pk,
-            expected_content_hash_hex,
+            expected_content_hash,
             expected_size,
         ),
         FileAccessResponse::PermissionDenied => {
@@ -424,7 +425,7 @@ fn handle_granted(
     descriptor: SignedDownloadDescriptor,
     expected_server_pk: &PublicKey,
     local_pk: &PublicKey,
-    expected_content_hash_hex: &str,
+    expected_content_hash: [u8; 32],
     expected_size: u64,
 ) -> std::result::Result<Option<SignedDownloadDescriptor>, anyhow::Error> {
     let now_ms = SystemTime::now()
@@ -577,8 +578,13 @@ fn handle_granted(
     }
 
     // ── 2. Verify content hash matches what we expect ───────────────────
-    let desc_hash_hex = &descriptor.content_hash;
-    if !desc_hash_hex.eq_ignore_ascii_case(expected_content_hash_hex) {
+    // Compare the descriptor's canonical raw hash directly against the raw
+    // expected hash.  There is no string representation to drift: the value
+    // used here is the same 32 bytes the server signed into the payload and
+    // that will later be used for the blob lookup and final integrity check.
+    if descriptor.blob_hash != expected_content_hash {
+        let desc_hash_hex = hex::encode(descriptor.blob_hash);
+        let expected_content_hash_hex = hex::encode(expected_content_hash);
         TRANSFER_TELEMETRY.failure(
             download_id,
             ErrorCategory::IntegrityMismatch,
@@ -624,7 +630,11 @@ fn handle_granted(
     }
 
     // ── 4. Persist transition to downloading ───────────────────────────
-    storage.accept_resumed_descriptor(download_id, expected_content_hash_hex, expected_size)?;
+    storage.accept_resumed_descriptor(
+        download_id,
+        &hex::encode(expected_content_hash),
+        expected_size,
+    )?;
 
     info!(
         download_id,
@@ -733,7 +743,7 @@ mod tests {
             response,
             &server_pk,
             &client_pk,
-            &content_hash,
+            hex_to_raw(&content_hash),
             total_bytes,
         )
         .expect("handle response");
@@ -797,7 +807,7 @@ mod tests {
             response,
             &expected_server_pk,
             &client_pk,
-            &content_hash,
+            hex_to_raw(&content_hash),
             total_bytes,
         )
         .expect("handle response");
@@ -866,7 +876,7 @@ mod tests {
             response,
             &server_pk,
             &client_pk,
-            &content_hash,
+            hex_to_raw(&content_hash),
             total_bytes,
         )
         .expect("handle response");
@@ -927,7 +937,7 @@ mod tests {
             FileAccessResponse::Granted(Box::new(good_descriptor)),
             &server_pk,
             &client_pk,
-            &content_hash,
+            hex_to_raw(&content_hash),
             total_bytes,
         )
         .expect("first handle response");
@@ -958,7 +968,7 @@ mod tests {
             FileAccessResponse::Granted(Box::new(attacker_descriptor)),
             &server_pk,
             &client_pk,
-            &content_hash,
+            hex_to_raw(&content_hash),
             total_bytes,
         )
         .expect("retry handle response");
@@ -1081,7 +1091,7 @@ mod tests {
             response,
             &server_pk,
             &client_pk,
-            &content_hash,
+            hex_to_raw(&content_hash),
             total_bytes,
         )
         .expect("handle response");
@@ -1118,7 +1128,7 @@ mod tests {
 
         let response = FileAccessResponse::PermissionDenied;
         let result =
-            handle_permission_response(&storage, id, response, &server_pk, &client_pk, &content_hash, 1024)
+            handle_permission_response(&storage, id, response, &server_pk, &client_pk, hex_to_raw(&content_hash), 1024)
                 .expect("handle response");
 
         assert!(result.is_none());
@@ -1152,7 +1162,7 @@ mod tests {
             current_version: 42,
         };
         let result =
-            handle_permission_response(&storage, id, response, &server_pk, &client_pk, &content_hash, 1024)
+            handle_permission_response(&storage, id, response, &server_pk, &client_pk, hex_to_raw(&content_hash), 1024)
                 .expect("handle response");
 
         assert!(result.is_none());
@@ -1206,7 +1216,7 @@ mod tests {
             response,
             &server_pk,
             &client_pk,
-            &content_hash,
+            hex_to_raw(&content_hash),
             total_bytes,
         )
         .expect("handle response");
@@ -1263,7 +1273,7 @@ mod tests {
             response,
             &server_pk,
             &client_pk,
-            &content_hash,
+            hex_to_raw(&content_hash),
             total_bytes,
         );
 
@@ -1304,7 +1314,7 @@ mod tests {
 
         let response = FileAccessResponse::NotFound;
         let result =
-            handle_permission_response(&storage, id, response, &server_pk, &client_pk, &content_hash, 1024)
+            handle_permission_response(&storage, id, response, &server_pk, &client_pk, hex_to_raw(&content_hash), 1024)
                 .expect("handle response");
 
         assert!(result.is_none());
@@ -1335,7 +1345,7 @@ mod tests {
 
         let response = FileAccessResponse::Changed;
         let result =
-            handle_permission_response(&storage, id, response, &server_pk, &client_pk, &content_hash, 1024)
+            handle_permission_response(&storage, id, response, &server_pk, &client_pk, hex_to_raw(&content_hash), 1024)
                 .expect("handle response");
 
         assert!(result.is_none());
@@ -1369,7 +1379,7 @@ mod tests {
 
         let response = FileAccessResponse::Busy;
         let result =
-            handle_permission_response(&storage, id, response, &server_pk, &client_pk, &content_hash, 1024)
+            handle_permission_response(&storage, id, response, &server_pk, &client_pk, hex_to_raw(&content_hash), 1024)
                 .expect("handle response");
 
         assert!(result.is_none());
