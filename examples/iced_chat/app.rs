@@ -3747,6 +3747,11 @@ pub struct IcedChat {
     ticket_needs_regeneration: bool,
     /// Guards against overlapping async ticket-peer resolution tasks.
     ticket_resolve_in_flight: bool,
+    /// Topics with a BackgroundSubscribe task currently in flight (single
+    /// flight: prevents duplicate subscriptions when a stored conversation,
+    /// a friend-direct topic, and an invite-accept all dispatch the same
+    /// topic before any sender is installed).
+    background_subscriptions_in_flight: std::collections::BTreeSet<TopicId>,
     /// Maps protocol message hashes to event_ids for delivery state resolution.
     self_sent_events: HashMap<MessageHash, u64>,
     /// Maintained indexes into the active conversation's entries.
@@ -8130,6 +8135,7 @@ impl IcedChat {
             pending_ticket_peers: Vec::new(),
             ticket_needs_regeneration: false,
             ticket_resolve_in_flight: false,
+            background_subscriptions_in_flight: std::collections::BTreeSet::new(),
             self_sent_events: HashMap::new(),
             event_id_to_index: HashMap::new(),
             message_hash_to_index: HashMap::new(),
@@ -13039,19 +13045,23 @@ impl IcedChat {
                 // can be received even before the user opens each chat.
                 // Dispatch BackgroundSubscribe so the sender is properly
                 // stored in self.conversations via BackgroundSubscribed.
-                // Dedupe topics: a direct-chat topic can be both a stored
-                // conversation AND the deterministic topic of a friend.
-                // Dispatching two BackgroundSubscribe tasks for the same
-                // topic in one batch defeats the already-subscribed guard
-                // (both see no sender yet), creating two subscriptions to
-                // the same topic — duplicate-message floods and an orphan
-                // sender whose broadcasts are accepted but never delivered.
+                // Only skip topics with a LIVE sender (already actively
+                // subscribed) or a subscription already in flight — a
+                // conversation merely being loaded must never suppress
+                // subscription (persistent state ≠ live network state).
                 let mut bg_topics: std::collections::BTreeSet<TopicId> = self
                     .conversation_store
                     .active_iter()
                     .into_iter()
                     .map(|e| e.topic)
-                    .filter(|t| *t != topic && !self.conversations.contains_key(t))
+                    .filter(|t| {
+                        *t != topic
+                            && !self
+                                .conversations
+                                .get(t)
+                                .is_some_and(|c| c.sender.is_some())
+                            && !self.background_subscriptions_in_flight.contains(t)
+                    })
                     .collect();
                 // Also auto-subscribe to deterministic direct-chat topics
                 // for every known peer.  Direct-conversation state is not
@@ -19907,19 +19917,23 @@ impl IcedChat {
                 )
             }
             AppMessage::BackgroundSubscribe(topic, bootstrap_peers) => {
-                // Already subscribed — skip. The active conversation is not
-                // in self.conversations (switch_to_conversation removed it),
-                // so also treat a live sender on the active topic as already
-                // subscribed — otherwise a duplicate subscription to the same
-                // topic is created, which floods the mesh with duplicate
-                // messages and leaves an orphan sender whose broadcasts are
-                // accepted but never delivered.
-                if (self.conversations.contains_key(&topic)
-                    && self.conversations[&topic].sender.is_some())
-                    || (topic == self.topic && self.sender.is_some())
-                {
+                // Already actively subscribed — skip. Persistent conversation
+                // state and live network state are distinct: a conversation
+                // loaded from storage has `sender == None` until the gossip
+                // subscription completes, so `contains_key` alone must never
+                // suppress a subscription.
+                let already_subscribed = self
+                    .conversations
+                    .get(&topic)
+                    .is_some_and(|c| c.sender.is_some())
+                    || (topic == self.topic && self.sender.is_some());
+                let subscribing = self
+                    .background_subscriptions_in_flight
+                    .contains(&topic);
+                if already_subscribed || subscribing {
                     return iced::Task::none();
                 }
+                self.background_subscriptions_in_flight.insert(topic);
                 let gossip = self.gossip.clone();
                 let net_tx = self.net_tx.clone();
                 let sk = self.secret_key.clone();
@@ -20104,6 +20118,10 @@ impl IcedChat {
                 conv.sender_ready = false;
                 conv.forward_handle =
                     forward_handle_slot.and_then(|slot| slot.lock().unwrap().take());
+                // Subscription creation finished (success or failure) — the
+                // single-flight slot is released so a later event can retry
+                // if no sender was installed.
+                self.background_subscriptions_in_flight.remove(&topic);
                 if conv.sender.is_some() {
                     info!("background subscribed to {topic}");
                 } else {

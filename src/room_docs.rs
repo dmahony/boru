@@ -1052,14 +1052,25 @@ pub fn spawn_room_event_forwarder(
     tokio::task::spawn(async move {
         let mut receiver = gossip_receiver;
         while let Some(event_result) = receiver.next().await {
-            // Inspect the marker byte before consuming the event.
+            // Inspect the marker byte before consuming the event. The marker
+            // is only a fast hint: a valid SignedMessage may begin with 0xFE
+            // or 0xFF. Only consume as metadata/roster when the full envelope
+            // structurally decodes; otherwise forward as chat.
             let is_metadata = matches!(&event_result,
                 Ok(GossipEvent::Received(msg))
                     if msg.content.first() == Some(&METADATA_MARKER));
 
             if is_metadata {
-                let _ = process_gossip_event(&metadata_doc, event_result).await;
-                continue;
+                let decodes_as_metadata = match &event_result {
+                    Ok(GossipEvent::Received(msg)) => {
+                        decode_wire(&msg.content).is_ok_and(|r| r.is_some())
+                    }
+                    _ => false,
+                };
+                if decodes_as_metadata {
+                    let _ = process_gossip_event(&metadata_doc, event_result).await;
+                    continue;
+                }
             }
 
             // Check for roster marker
@@ -1068,8 +1079,16 @@ pub fn spawn_room_event_forwarder(
                     if msg.content.first() == Some(&ROSTER_MARKER));
 
             if is_roster {
-                let _ = process_roster_event(&roster_doc, event_result).await;
-                continue;
+                let decodes_as_roster = match &event_result {
+                    Ok(GossipEvent::Received(msg)) => {
+                        decode_roster_wire(&msg.content).is_ok_and(|r| r.is_some())
+                    }
+                    _ => false,
+                };
+                if decodes_as_roster {
+                    let _ = process_roster_event(&roster_doc, event_result).await;
+                    continue;
+                }
             }
 
             // Not a room-doc message — forward for chat/neighbor processing.
@@ -1124,8 +1143,22 @@ pub async fn forward_room_events_for_chat(
             GossipEvent::Received(msg) if msg.content.first() == Some(&METADATA_MARKER)
         );
         if is_metadata {
-            let _ = process_gossip_event(&metadata_doc, Ok(event)).await;
-            continue;
+            // The marker byte is only a fast hint, never authoritative: a
+            // valid SignedMessage may legitimately begin with 0xFE. Only
+            // consume as metadata when the full envelope structurally
+            // decodes (marker + wire version + complete decode). On decode
+            // failure, fall through to SignedMessage decoding below.
+            let decodes_as_metadata = match &event {
+                GossipEvent::Received(msg) => {
+                    decode_wire(&msg.content).is_ok_and(|r| r.is_some())
+                }
+                _ => false,
+            };
+            if decodes_as_metadata {
+                let _ = process_gossip_event(&metadata_doc, Ok(event)).await;
+                continue;
+            }
+            // Not actually a metadata envelope — continue to SignedMessage.
         }
 
         let is_roster = matches!(
@@ -1133,8 +1166,18 @@ pub async fn forward_room_events_for_chat(
             GossipEvent::Received(msg) if msg.content.first() == Some(&ROSTER_MARKER)
         );
         if is_roster {
-            let _ = process_roster_event(&roster_doc, Ok(event)).await;
-            continue;
+            // Same principle: only consume as roster when the envelope
+            // structurally decodes; otherwise fall through to SignedMessage.
+            let decodes_as_roster = match &event {
+                GossipEvent::Received(msg) => {
+                    decode_roster_wire(&msg.content).is_ok_and(|r| r.is_some())
+                }
+                _ => false,
+            };
+            if decodes_as_roster {
+                let _ = process_roster_event(&roster_doc, Ok(event)).await;
+                continue;
+            }
         }
 
         match event {
