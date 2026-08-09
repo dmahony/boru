@@ -19,10 +19,32 @@
 //!   can deliver envelopes to this node.
 //! * Received envelopes are forwarded via an mpsc channel to the frontend,
 //!   which stores them in the local MailboxStore and broadcasts acknowledgements.
+//!
+//! # Event-channel semantics (BORU-AUDIT-08)
+//!
+//! All [`InboxEvent`]s are **correctness-critical**: a silently dropped
+//! `EnvelopeReceived`, `AckReceived`, `SyncRequested` or
+//! `DeleteTombstoneReceived` would lose protocol state that the frontend
+//! can only recover by a full resync.  Every event therefore goes through
+//! [`emit_inbox_event`], which never ignores a channel failure:
+//!
+//! * a **full** channel rejects the request with an explicit Busy error so
+//!   the peer can retry later (`TrySendError::Full`),
+//! * a **closed** channel surfaces as an explicit channel-closed error
+//!   (`TrySendError::Closed`).
+//!
+//! Both increment [`INBOX_EVENT_SEND_FAILURES`] so overload is observable
+//! and deterministic.  Deliberately lossy channels elsewhere in the app
+//! (discovery/UI telemetry, MCP request channels, debounced reconnect
+//! notifications) keep `try_send` semantics by design and are documented
+//! at their call sites; this list is intentionally small and telemetry-only.
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -329,6 +351,47 @@ pub enum InboxEvent {
 
 // ── Inbox handle (frontend API) ────────────────────────────────────────────────
 
+/// Default capacity of the inbox→frontend event channel.
+///
+/// The channel is bounded so a stalled frontend cannot grow memory without
+/// limit; correctness-critical events are deliberately rejected with an
+/// explicit Busy error when it is full instead of being silently dropped.
+const DEFAULT_INBOX_EVENT_CAPACITY: usize = 1024;
+
+/// Total number of correctness-critical inbox events that were rejected
+/// because the event channel was full or closed (observable overload
+/// counter; a zero value means no event was ever silently lost).
+pub static INBOX_EVENT_SEND_FAILURES: AtomicU64 = AtomicU64::new(0);
+
+/// Forward a correctness-critical inbox event to the frontend.
+///
+/// This is the single choke point for all [`InboxEvent`] deliveries.  It
+/// never ignores a channel failure: a full channel is surfaced as an
+/// explicit Busy error (so the caller can reject the request and the peer
+/// can retry later) and a closed channel is surfaced as a channel-closed
+/// error.  Both increment [`INBOX_EVENT_SEND_FAILURES`] so overload is
+/// observable and deterministic.
+fn emit_inbox_event(
+    envelope_tx: &mpsc::Sender<InboxEvent>,
+    event: InboxEvent,
+) -> Result<()> {
+    match envelope_tx.try_send(event) {
+        Ok(()) => Ok(()),
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            INBOX_EVENT_SEND_FAILURES.fetch_add(1, Ordering::Relaxed);
+            Err(n0_error::anyerr!(
+                "inbox event channel full: request rejected, peer should retry"
+            ))
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            INBOX_EVENT_SEND_FAILURES.fetch_add(1, Ordering::Relaxed);
+            Err(n0_error::anyerr!(
+                "inbox event channel closed: cannot deliver event"
+            ))
+        }
+    }
+}
+
 /// Handle for interacting with the inbox protocol from the frontend.
 #[derive(Debug, Clone)]
 pub struct InboxHandle {
@@ -338,7 +401,15 @@ pub struct InboxHandle {
 impl InboxHandle {
     /// Create a new inbox handle.
     pub fn new() -> (Self, mpsc::Receiver<InboxEvent>) {
-        let (envelope_tx, envelope_rx) = mpsc::channel(1024);
+        Self::with_capacity(DEFAULT_INBOX_EVENT_CAPACITY)
+    }
+
+    /// Create a new inbox handle with a custom event-channel capacity.
+    ///
+    /// Tests use a small capacity to exercise the full/busy path without
+    /// having to fill a 1024-slot channel.
+    pub fn with_capacity(capacity: usize) -> (Self, mpsc::Receiver<InboxEvent>) {
+        let (envelope_tx, envelope_rx) = mpsc::channel(capacity);
         let inner = Arc::new(Mutex::new(InboxInner {
             allowed_senders: HashSet::new(),
             authorization_fn: None,
@@ -625,10 +696,13 @@ impl InboxProtocol {
                     // its durable state and re-acknowledge it.  This is
                     // essential when the original acknowledgement was lost
                     // after the recipient committed the message.
-                    let _ = guard.envelope_tx.try_send(InboxEvent::EnvelopeReceived {
-                        from: verified_sender,
-                        envelope,
-                    });
+                    emit_inbox_event(
+                        &guard.envelope_tx,
+                        InboxEvent::EnvelopeReceived {
+                            from: verified_sender,
+                            envelope,
+                        },
+                    )?;
                     return Ok(None);
                 }
                 // Prune stale dedup entries.
@@ -638,6 +712,19 @@ impl InboxProtocol {
                     .as_secs()
                     .saturating_sub(MAX_CLOCK_SKEW.as_secs());
                 guard.seen_message_ids.retain(|_, ts| *ts > cutoff);
+
+                // Emit BEFORE recording dedup: if the event channel is full
+                // we must reject the request so the peer retries later, and
+                // the message must not be marked seen (otherwise a retry
+                // would take the duplicate path while the event was never
+                // actually delivered).
+                emit_inbox_event(
+                    &guard.envelope_tx,
+                    InboxEvent::EnvelopeReceived {
+                        from: verified_sender,
+                        envelope,
+                    },
+                )?;
                 guard.seen_message_ids.insert(
                     mid,
                     SystemTime::now()
@@ -645,11 +732,6 @@ impl InboxProtocol {
                         .unwrap_or_default()
                         .as_secs(),
                 );
-
-                let _ = guard.envelope_tx.try_send(InboxEvent::EnvelopeReceived {
-                    from: verified_sender,
-                    envelope,
-                });
                 Ok(None)
             }
             InboxPayload::Ack(ack) => {
@@ -657,10 +739,13 @@ impl InboxProtocol {
                 ack.verify(verified_sender).map_err(|e| {
                     n0_error::anyerr!("inbox: rejecting ack with invalid signature: {e}")
                 })?;
-                let _ = guard.envelope_tx.try_send(InboxEvent::AckReceived {
-                    from: verified_sender,
-                    ack,
-                });
+                emit_inbox_event(
+                    &guard.envelope_tx,
+                    InboxEvent::AckReceived {
+                        from: verified_sender,
+                        ack,
+                    },
+                )?;
                 Ok(None)
             }
             InboxPayload::SyncRequest { since_ms } => {
@@ -686,10 +771,13 @@ impl InboxProtocol {
                     Ok(Some((envelopes, has_more)))
                 } else {
                     // Fall back to emitting an event when no provider is set.
-                    let _ = guard.envelope_tx.try_send(InboxEvent::SyncRequested {
-                        from: verified_sender,
-                        since_ms: effective_since,
-                    });
+                    emit_inbox_event(
+                        &guard.envelope_tx,
+                        InboxEvent::SyncRequested {
+                            from: verified_sender,
+                            since_ms: effective_since,
+                        },
+                    )?;
                     Ok(None)
                 }
             }
@@ -728,6 +816,20 @@ impl InboxProtocol {
                     .as_secs()
                     .saturating_sub(MAX_CLOCK_SKEW.as_secs());
                 guard.seen_message_ids.retain(|_, ts| *ts > cutoff);
+
+                // 4. Emit the event so the frontend can apply the tombstone
+                // to the store.  Emit BEFORE recording dedup: if the event
+                // channel is full the request is rejected and the peer can
+                // retry; marking the tombstone seen while never delivering
+                // it would make the retry fail as a "duplicate" and the
+                // tombstone would be permanently lost.
+                emit_inbox_event(
+                    &guard.envelope_tx,
+                    InboxEvent::DeleteTombstoneReceived {
+                        from: verified_sender,
+                        proof,
+                    },
+                )?;
                 guard.seen_message_ids.insert(
                     mid,
                     SystemTime::now()
@@ -735,14 +837,6 @@ impl InboxProtocol {
                         .unwrap_or_default()
                         .as_secs(),
                 );
-
-                // 4. Emit event so the frontend can apply the tombstone to the store.
-                let _ = guard
-                    .envelope_tx
-                    .try_send(InboxEvent::DeleteTombstoneReceived {
-                        from: verified_sender,
-                        proof,
-                    });
                 Ok(None)
             }
         }
@@ -1500,5 +1594,165 @@ mod tests {
             protocol_id, id3,
             "inbox_message_id must differ for different envelopes"
         );
+    }
+
+    // ── BORU-AUDIT-08: explicit backpressure on the event channel ──────
+
+    /// Regression (BORU-AUDIT-08): when the inbox→frontend event channel is
+    /// full, a correctness-critical `Deliver` must be rejected with an
+    /// explicit error (Busy/retry) instead of being silently dropped.  The
+    /// old implementation ignored the `try_send` result and returned Ok, so
+    /// valid envelopes vanished under load.
+    #[tokio::test]
+    async fn delivery_rejected_when_event_channel_full() {
+        let sender_sk = test_secret_key();
+        let recipient_sk = test_secret_key();
+        let recipient = MailboxIdentity::from_secret(&recipient_sk);
+        let (handle, mut events) = InboxHandle::with_capacity(1);
+        handle.add_allowed_sender(sender_sk.public()).await;
+
+        // First delivery fills the channel.
+        let e1 = recipient.seal(&sender_sk, b"first").unwrap();
+        let wire1 =
+            SignedInboxMessage::sign(&sender_sk, InboxPayload::Deliver(e1.clone())).unwrap();
+        InboxProtocol::handle_request(&handle.inner(), sender_sk.public(), &wire1)
+            .await
+            .expect("first delivery should succeed");
+
+        // Second delivery while the channel is full: explicit rejection.
+        let e2 = recipient.seal(&sender_sk, b"second").unwrap();
+        let wire2 =
+            SignedInboxMessage::sign(&sender_sk, InboxPayload::Deliver(e2.clone())).unwrap();
+        let before = INBOX_EVENT_SEND_FAILURES.load(Ordering::Relaxed);
+        let err = InboxProtocol::handle_request(&handle.inner(), sender_sk.public(), &wire2)
+            .await
+            .expect_err("full channel must reject, not silently drop");
+        assert!(
+            err.to_string().contains("full"),
+            "error should mention the full channel: {err}"
+        );
+        // The counter is a process-wide static shared with other tests that
+        // run in parallel, so assert monotonic increase, not exact value.
+        assert!(
+            INBOX_EVENT_SEND_FAILURES.load(Ordering::Relaxed) >= before + 1,
+            "the failure counter must observe the rejection"
+        );
+        // The rejected message must NOT be marked seen, so a retry after
+        // the channel drains takes the fresh path and delivers.
+        let seen = handle.inner().lock().await.seen_message_ids.clone();
+        let mid2 = inbox_message_id(&postcard::to_stdvec(&e2).unwrap());
+        assert!(
+            !seen.contains_key(&mid2),
+            "rejected delivery must not be recorded as seen"
+        );
+
+        // Drain the channel, then retry: the event is delivered (not lost).
+        let got = events.recv().await.expect("first event");
+        assert!(matches!(got, InboxEvent::EnvelopeReceived { .. }));
+        InboxProtocol::handle_request(&handle.inner(), sender_sk.public(), &wire2)
+            .await
+            .expect("retry after drain should succeed");
+        match events.recv().await.expect("second event") {
+            InboxEvent::EnvelopeReceived { envelope, .. } => {
+                assert_eq!(envelope.message_id(), e2.message_id());
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    /// Regression (BORU-AUDIT-08): an `Ack` must also be rejected explicitly
+    /// when the event channel is full, not silently dropped.
+    #[tokio::test]
+    async fn ack_rejected_when_event_channel_full() {
+        let sender_sk = test_secret_key();
+        let recipient_sk = test_secret_key();
+        let recipient = MailboxIdentity::from_secret(&recipient_sk);
+        let (handle, _events) = InboxHandle::with_capacity(1);
+        handle.add_allowed_sender(sender_sk.public()).await;
+
+        // Fill the channel with a delivery first.
+        let e1 = recipient.seal(&sender_sk, b"fill").unwrap();
+        let wire1 =
+            SignedInboxMessage::sign(&sender_sk, InboxPayload::Deliver(e1.clone())).unwrap();
+        InboxProtocol::handle_request(&handle.inner(), sender_sk.public(), &wire1)
+            .await
+            .expect("delivery should fill the channel");
+
+        // An ack while the channel is full must fail explicitly.
+        let ack = MailboxAck::sign(&sender_sk, e1.message_id(), sender_sk.public());
+        let wire_ack = SignedInboxMessage::sign(&sender_sk, InboxPayload::Ack(ack)).unwrap();
+        let err = InboxProtocol::handle_request(&handle.inner(), sender_sk.public(), &wire_ack)
+            .await
+            .expect_err("full channel must reject ack");
+        assert!(err.to_string().contains("full"));
+    }
+
+    /// Regression (BORU-AUDIT-08): a `DeleteTombstone` must be rejected
+    /// explicitly when the channel is full, and the tombstone must not be
+    /// marked seen — a retry after the channel drains applies it.
+    #[tokio::test]
+    async fn tombstone_rejected_when_channel_full_then_delivered_on_retry() {
+        let author_sk = test_secret_key();
+        let sender_sk = test_secret_key();
+        let recipient = MailboxIdentity::from_secret(&test_secret_key());
+        let (handle, mut events) = InboxHandle::with_capacity(1);
+        handle.add_allowed_sender(sender_sk.public()).await;
+
+        // Fill the channel with a delivery.
+        let e1 = recipient.seal(&sender_sk, b"fill").unwrap();
+        let wire1 =
+            SignedInboxMessage::sign(&sender_sk, InboxPayload::Deliver(e1.clone())).unwrap();
+        InboxProtocol::handle_request(&handle.inner(), sender_sk.public(), &wire1)
+            .await
+            .expect("delivery should fill the channel");
+
+        // Tombstone while the channel is full: explicit rejection.
+        let msg_id = [7u8; 32];
+        let proof = AuthorDeleteProof::sign(&author_sk, msg_id, [9u8; 32]);
+        let wire_ts = SignedInboxMessage::sign(
+            &sender_sk,
+            InboxPayload::DeleteTombstone(proof.clone()),
+        )
+        .unwrap();
+        let err = InboxProtocol::handle_request(&handle.inner(), sender_sk.public(), &wire_ts)
+            .await
+            .expect_err("full channel must reject tombstone");
+        assert!(err.to_string().contains("full"));
+
+        // The rejected tombstone must not be marked seen — otherwise a
+        // retry would fail as a "duplicate" and the tombstone would be
+        // permanently lost.
+        let seen = handle.inner().lock().await.seen_message_ids.clone();
+        assert!(
+            !seen.contains_key(&msg_id),
+            "rejected tombstone must not be marked seen"
+        );
+
+        // Drain and retry: the tombstone is delivered.
+        let _ = events.recv().await.expect("first event");
+        InboxProtocol::handle_request(&handle.inner(), sender_sk.public(), &wire_ts)
+            .await
+            .expect("tombstone retry should succeed");
+        match events.recv().await.expect("tombstone event") {
+            InboxEvent::DeleteTombstoneReceived { proof: got, .. } => {
+                assert_eq!(got.msg_id, msg_id);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    /// The event-channel capacity default is large enough that ordinary
+    /// single-event tests never hit the busy path, but small-capacity
+    /// handles exercise it deterministically.
+    #[tokio::test]
+    async fn with_capacity_controls_event_channel_size() {
+        let (handle, _rx) = InboxHandle::with_capacity(3);
+        let inner = handle.inner();
+        let mut guard = inner.lock().await;
+        let sent = guard.envelope_tx.try_send(InboxEvent::SyncRequested {
+            from: test_secret_key().public(),
+            since_ms: 0,
+        });
+        assert!(sent.is_ok());
     }
 }

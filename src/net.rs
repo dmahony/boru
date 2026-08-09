@@ -675,7 +675,12 @@ impl Actor {
             tokio::task::spawn(async move {
                 n0_future::time::sleep(Duration::from_secs(delay)).await;
                 let msg = LocalActorMessage::RetryDial(addr, alpn);
-                let _ = local_tx.try_send(msg);
+                // A scheduled dial retry is correctness-critical: if it were
+                // silently dropped the peer would never be re-dialed.  The
+                // spawned task can safely await the bounded channel.
+                if let Err(e) = local_tx.send(msg).await {
+                    warn!(%e, "failed to schedule dial retry: local actor channel closed");
+                }
             });
         } else {
             // After exhausting retries, disconnect from the protocol and
@@ -695,7 +700,11 @@ impl Actor {
             tokio::task::spawn(async move {
                 n0_future::time::sleep(Duration::from_secs(RETRY_COOLDOWN_S)).await;
                 let msg = LocalActorMessage::RetryDial(addr, alpn);
-                let _ = local_tx.try_send(msg);
+                // Correctness-critical: a dropped cooldown retry would leave
+                // the peer undialed indefinitely.  Await the bounded channel.
+                if let Err(e) = local_tx.send(msg).await {
+                    warn!(%e, "failed to schedule cooldown dial retry: local actor channel closed");
+                }
             });
         }
     }
