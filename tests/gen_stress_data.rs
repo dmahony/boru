@@ -101,7 +101,14 @@ fn generate_stress_data() {
             image_identifier: None,
         });
     }
-    history_store.save().unwrap();
+    // Chat history is SQLite-only in the running app; `save()` is a
+    // deprecated no-op. This generator's job is to produce the legacy JSON
+    // fixture for startup-loading stress tests, so write it directly.
+    std::fs::write(
+        history_store.file_path(),
+        serde_json::to_vec(&history_store).unwrap(),
+    )
+    .unwrap();
     eprintln!("  chat_history.json: {} entries", history_store.len());
 
     eprintln!("\nDone. Data at {data_dir}");

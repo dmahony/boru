@@ -86,7 +86,14 @@ impl TestInstance {
             "text",
             text,
         ));
-        self.history.save().expect("receiver history must persist");
+        // `save()` is a deprecated no-op (chat history is SQLite-only).  Write
+        // the legacy JSON fixture directly so the restart-reload assertion
+        // below still exercises the migration/read path.
+        std::fs::write(
+            self.history.file_path(),
+            serde_json::to_vec(&self.history).expect("serialize history"),
+        )
+        .expect("receiver history must persist");
     }
 }
 

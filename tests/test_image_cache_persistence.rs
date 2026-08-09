@@ -58,6 +58,13 @@ fn image_cache_round_trip_rehydrates_after_restart_and_blocks_other_users() {
     entry.image_identifier = Some(image_id.clone());
     entry.image_bytes = Some(image_bytes.clone());
     history.push_with_id(entry);
+    // Chat history persistence is SQLite-only; write the legacy JSON fixture
+    // directly so the reload assertions below exercise the read path.
+    std::fs::write(
+        history.file_path(),
+        serde_json::to_vec(&history).expect("serialize history"),
+    )
+    .expect("write history fixture");
     let history_path = history.file_path();
     assert!(history_path.is_file());
 

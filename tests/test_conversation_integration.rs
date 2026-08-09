@@ -96,7 +96,14 @@ impl PeerStores {
         self.friends.save().expect("save friends");
         self.conversations.save().expect("save conversations");
         self.friend_requests.save().expect("save friend_requests");
-        self.history.save().expect("save history");
+        // Chat history is SQLite-only now; `save()` is a deprecated no-op.
+        // Write the legacy JSON fixture directly so `load_all` can round-trip
+        // the migration/read path.
+        std::fs::write(
+            self.history.file_path(),
+            serde_json::to_vec(&self.history).expect("serialize history"),
+        )
+        .expect("write history fixture");
     }
 
     fn load_all(dir: &PathBuf) -> Self {

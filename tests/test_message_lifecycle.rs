@@ -1055,8 +1055,13 @@ fn mailbox_replay_persists_before_acknowledgement() {
     );
 
     // A mailbox ack would be sent after this persistence.  Verify a
-    // restart still finds the entry.
-    history.file_path();
+    // restart still finds the entry.  `save()` is a deprecated no-op, so
+    // write the legacy JSON fixture directly to exercise the read path.
+    std::fs::write(
+        history.file_path(),
+        serde_json::to_vec(&history).expect("serialize history"),
+    )
+    .expect("write history fixture");
     let loaded = ChatHistoryStore::load(&dir)
         .expect("load")
         .expect("should exist after save");

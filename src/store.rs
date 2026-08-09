@@ -9,7 +9,9 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use crate::chat_core::DIAGNOSTICS;
+use crate::chat_history::{DeliveryState, HistoryEntry};
 use crate::diagnostics::DiagnosticEventKind;
+use std::str::FromStr;
 
 /// Helper: produce a stable 8-char hex prefix from a 32-byte hash.
 fn short_id(id: &[u8; 32]) -> String {
@@ -1098,6 +1100,109 @@ impl MessageStore {
         }
 
         Ok(is_new)
+    }
+
+    /// One-time legacy import of `chat_history.json` entries into the
+    /// `messages` table.
+    ///
+    /// This is the migration entry point used by
+    /// [`ChatHistoryStore::migrate_legacy_json`](crate::chat_history::ChatHistoryStore::migrate_legacy_json)
+    /// — **not** a live write path.  It runs in a single transaction so a
+    /// failure mid-import rolls back and leaves the legacy JSON file intact.
+    ///
+    /// Merge policy (documented, deterministic):
+    /// - SQLite is authoritative.  Rows are keyed by content hash
+    ///   (`msg_hash` UNIQUE + `INSERT OR IGNORE`), so an entry already in
+    ///   SQLite always wins; legacy entries with new hashes are added.
+    /// - After a successful import the caller renames the JSON file to a
+    ///   backup (`chat_history.json.imported`), which doubles as the
+    ///   "migration completed" marker.
+    ///
+    /// Returns the number of newly-inserted rows (duplicates are not counted).
+    pub fn import_legacy_history(
+        &self,
+        entries: &[HistoryEntry],
+        local_user_id: &[u8; 32],
+    ) -> Result<usize> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .std_context("begin legacy chat history import")?;
+        let mut inserted = 0usize;
+        for entry in entries {
+            let hash_vec = hex::decode(&entry.hash).unwrap_or_default();
+            let hash = if hash_vec.len() == 32 {
+                let mut value = [0u8; 32];
+                value.copy_from_slice(&hash_vec);
+                value
+            } else {
+                *blake3::hash(&entry.signed_bytes).as_bytes()
+            };
+            // Fail closed on a malformed sender: the JSON was written by the
+            // app itself, so an unparseable key means the legacy file is
+            // corrupt — roll back the whole import rather than write a
+            // placeholder row.
+            let sender = PublicKey::from_str(&entry.sender)
+                .with_std_context(|_| format!("invalid legacy sender '{}'", entry.sender))?
+                .as_bytes()
+                .to_owned();
+            let state = match entry.delivery_state {
+                DeliveryState::Queued => "queued",
+                DeliveryState::Sent => "sent",
+                DeliveryState::Delivered => "delivered",
+                DeliveryState::Seen => "seen",
+                DeliveryState::Failed => "failed",
+            };
+            let is_new = tx
+                .execute(
+                    "INSERT OR IGNORE INTO messages
+                     (msg_hash, topic, sender, timestamp_ms, kind, body, signed_bytes, delivery_state, image_identifier)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![
+                        hash.as_slice(),
+                        entry.topic.as_bytes().as_slice(),
+                        sender.as_slice(),
+                        entry.timestamp as i64,
+                        entry.kind.as_str(),
+                        entry.text_preview.as_str(),
+                        entry.signed_bytes.as_slice(),
+                        state,
+                        entry.image_identifier.as_deref(),
+                    ],
+                )
+                .std_context("insert legacy chat message")?;
+            if is_new > 0 {
+                inserted += 1;
+                // Mirror `insert_chat_message`: keep the sidebar chat list
+                // (conversation_meta) in sync for imported history.
+                let is_local = sender == *local_user_id;
+                let unread_increment = if is_local { 0 } else { 1 };
+                tx.execute(
+                    "INSERT INTO conversation_meta
+                     (conversation_id, last_message_id, last_activity_at_ms,
+                      last_message_preview, last_author_user_id, unread_count)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                     ON CONFLICT(conversation_id) DO UPDATE SET
+                        last_message_id = excluded.last_message_id,
+                        last_activity_at_ms = excluded.last_activity_at_ms,
+                        last_message_preview = excluded.last_message_preview,
+                        last_author_user_id = excluded.last_author_user_id,
+                        unread_count = conversation_meta.unread_count + excluded.unread_count",
+                    params![
+                        entry.topic.as_bytes().as_slice(),
+                        hash.as_slice(),
+                        entry.timestamp as i64,
+                        entry.text_preview.as_str(),
+                        sender.as_slice(),
+                        unread_increment,
+                    ],
+                )
+                .std_context("update conversation meta for legacy chat message")?;
+            }
+        }
+        tx.commit()
+            .std_context("commit legacy chat history import")?;
+        Ok(inserted)
     }
 
     /// Register an epoch's topic for a stable group identity.

@@ -1,10 +1,13 @@
 //! Durable chat history storage for Boru.
 //!
 //! **DEPRECATED** — chat messages are now stored in the SQLite database
-//! via the unified storage layer.  This JSON file is retained only for
-//! backward-compatible reads during a transition period.
+//! (`message_store.db`, `messages` table) via the unified storage layer.
+//! This JSON module is retained only for backward-compatible reads during a
+//! transition period: `load`/`load_or_default` feed the one-time migration
+//! (`migrate_legacy_json`), and `save` is a deprecated no-op that never
+//! writes `chat_history.json`.
 //!
-//! Chat messages are persisted atomically so room history remains available
+//! Chat messages are persisted in SQLite so room history remains available
 //! after restart. Outgoing messages additionally live in the durable outbox
 //! until transport delivery has been observed.
 use std::{
@@ -16,8 +19,8 @@ use std::{
 use n0_error::{Result, StdResultExt};
 use serde::{Deserialize, Serialize};
 
-use crate::chat_core::atomic_write::atomic_write_json;
 use crate::proto::TopicId;
+use crate::store::MessageStore;
 use crate::video_playback::MediaMetadata;
 
 /// Current schema version — bump on breaking format changes.
@@ -342,17 +345,63 @@ impl ChatHistoryStore {
 
     /// Persist chat history using an atomic replacement.
     ///
-    /// **DEPRECATED:** chat messages are now in the SQLite
-    /// inbox/outbox tables. This method logs a warning and returns the
-    /// legacy path without writing to disk.
+    /// **DEPRECATED:** chat messages are now stored in the SQLite
+    /// `messages` table (`message_store.db`). This method logs a warning and
+    /// returns the legacy path **without writing to disk** — SQLite is the
+    /// only live history source of truth.
     #[deprecated(
         since = "0.21.0",
-        note = "SQLite inbox/outbox tables replace chat_history.json writes"
+        note = "SQLite messages table replaces chat_history.json writes"
     )]
     pub fn save(&self) -> Result<PathBuf> {
         let path = self.file_path();
-        atomic_write_json(&path, self, "chat history")?;
+        tracing::warn!(
+            path = %path.display(),
+            "save() called on deprecated JSON chat-history store — no data written; \
+             use SQLite messages table instead"
+        );
         Ok(path)
+    }
+
+    /// One-time migration of a legacy `chat_history.json` into the SQLite
+    /// `messages` table (`message_store.db`).
+    ///
+    /// **This is the migration path, not a live write.**  After a successful
+    /// import the legacy file is renamed to `chat_history.json.imported` —
+    /// a user-safe backup that also records that migration completed (its
+    /// absence means "already migrated" on the next start).  If the import
+    /// fails, the SQLite transaction rolls back and the legacy file is left
+    /// untouched.
+    ///
+    /// Conflict policy (documented, deterministic): SQLite is authoritative.
+    /// Rows are keyed by content hash (`msg_hash` UNIQUE), so on a hash
+    /// collision the existing SQLite row wins and the JSON copy is dropped;
+    /// JSON entries whose hash is missing from SQLite are inserted.  Re-running
+    /// the migration after a partial/crash state is therefore safe.
+    ///
+    /// Returns the number of entries imported.
+    pub fn migrate_legacy_json(
+        &self,
+        message_store_path: &Path,
+        local_user_id: &[u8; 32],
+    ) -> Result<usize> {
+        let store = MessageStore::open(message_store_path)?;
+        let imported = store.import_legacy_history(&self.entries, local_user_id)?;
+
+        let json_path = self.file_path();
+        let backup_path = json_path.with_extension("json.imported");
+        if let Err(err) = fs::rename(&json_path, &backup_path) {
+            // The import already committed; a rename failure only means the
+            // next start re-runs the (idempotent) import.  Log loudly so the
+            // operator knows the backup marker is missing.
+            tracing::warn!(
+                err = %err,
+                from = %json_path.display(),
+                to = %backup_path.display(),
+                "legacy chat history imported to SQLite but backup rename failed"
+            );
+        }
+        Ok(imported)
     }
 
     /// Append a new entry.  Does **not** automatically save — call
@@ -1309,8 +1358,10 @@ mod tests {
     #[test]
     fn stored_shared_gif_message_remains_readable_after_save_load() {
         // KLIPY-11 message test: a stored SharedGif message (raw signed bytes
-        // in a HistoryEntry) must survive a ChatHistoryStore save/load
-        // round-trip and still decode through the standard verify path.
+        // in a HistoryEntry) must survive the legacy JSON round-trip and
+        // still decode through the standard verify path.  `save()` is a no-op
+        // now (SQLite is the live store), so the legacy fixture is written
+        // directly — exactly what a pre-migration version produced on disk.
         let dir = temp_dir("shared_gif");
         std::fs::create_dir_all(&dir).unwrap();
         let mut store = ChatHistoryStore::empty_at(&dir);
@@ -1327,11 +1378,20 @@ mod tests {
             },
         };
         let signed = crate::chat_core::SignedMessage::sign_and_encode(&key, &msg).unwrap();
-        let entry = HistoryEntry::new(topic, key.public().to_string(), signed.to_vec(), "gif", "GIF");
+        let entry = HistoryEntry::new(
+            topic,
+            key.public().to_string(),
+            signed.to_vec(),
+            "gif",
+            "GIF",
+        );
         store.push_with_id(entry);
-        store.save().unwrap();
+        // Write the legacy fixture directly; `save()` is deprecated/no-op.
+        std::fs::write(store.file_path(), serde_json::to_vec(&store).unwrap()).unwrap();
 
-        let reloaded = ChatHistoryStore::load(&dir).unwrap().expect("history file exists");
+        let reloaded = ChatHistoryStore::load(&dir)
+            .unwrap()
+            .expect("history file exists");
         assert_eq!(reloaded.len(), 1);
         let stored = &reloaded.entries()[0];
         let (pk, decoded, _sent_at) =
@@ -1346,5 +1406,189 @@ mod tests {
             }
             other => panic!("expected SharedGif, got {other:?}"),
         }
+    }
+
+    // ── BORU-AUDIT-19: SQLite-only history + legacy migration ─────────
+
+    /// Build a deterministic legacy `HistoryEntry` with a real PublicKey
+    /// sender (the migration fails closed on unparseable senders).
+    fn legacy_entry(topic: TopicId, key: &iroh::SecretKey, idx: u8) -> HistoryEntry {
+        let signed_bytes = vec![idx; 64];
+        HistoryEntry::new(
+            topic,
+            key.public().to_string(),
+            signed_bytes,
+            "text",
+            format!("hello {idx}"),
+        )
+    }
+
+    /// Write a legacy `chat_history.json` fixture for a store.
+    fn write_legacy_fixture(dir: &Path, store: &ChatHistoryStore) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(store.file_path(), serde_json::to_vec(store).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn fresh_profile_creates_no_legacy_json_write() {
+        // Regression: `save()` is a deprecated no-op. A fresh profile must
+        // never produce a chat_history.json file.
+        let dir = temp_dir("fresh-no-legacy-json");
+        let topic = make_topic(0xE1);
+        let key = iroh::SecretKey::generate();
+        let mut store = ChatHistoryStore::empty_at(&dir);
+        store.push_with_id(legacy_entry(topic, &key, 1));
+
+        #[allow(deprecated)]
+        let path = store.save().unwrap();
+        assert_eq!(path, store.file_path());
+        assert!(
+            !path.exists(),
+            "save() must not write legacy chat_history.json (SQLite-only)"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_only_fixture_imports_into_sqlite_exactly_once() {
+        // Regression: a legacy-only install (JSON present, SQLite empty)
+        // imports exactly once; the JSON is renamed to a backup afterwards.
+        let dir = temp_dir("legacy-import-once");
+        let topic = make_topic(0xE2);
+        let key = iroh::SecretKey::generate();
+        let mut store = ChatHistoryStore::empty_at(&dir);
+        store.push_with_id(legacy_entry(topic, &key, 1));
+        store.push_with_id(legacy_entry(topic, &key, 2));
+        write_legacy_fixture(&dir, &store);
+
+        let ms_path = dir.join("message_store.db");
+        let imported = store
+            .migrate_legacy_json(&ms_path, key.public().as_bytes())
+            .unwrap();
+        assert_eq!(imported, 2, "both legacy entries imported");
+
+        // Migration completion marker: JSON renamed to backup.
+        assert!(!store.file_path().exists(), "legacy JSON renamed away");
+        assert!(
+            dir.join("chat_history.json.imported").exists(),
+            "backup file exists after migration"
+        );
+
+        // SQLite now has exactly the two imported rows.
+        let ms = MessageStore::open(&ms_path).unwrap();
+        assert_eq!(ms.get_all_messages().unwrap().len(), 2);
+
+        // Re-running the migration on an already-migrated store imports
+        // nothing new (INSERT OR IGNORE is idempotent by content hash).
+        let store2 = ChatHistoryStore::empty_at(&dir);
+        let imported_again = store2
+            .migrate_legacy_json(&ms_path, key.public().as_bytes())
+            .unwrap();
+        assert_eq!(imported_again, 0, "no duplicate rows after re-import");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restart_after_migration_reads_sqlite_only() {
+        // Regression: after migration the JSON is gone; SQLite is the only
+        // read source (ChatHistoryStore::load returns None).
+        let dir = temp_dir("restart-reads-sqlite");
+        let topic = make_topic(0xE3);
+        let key = iroh::SecretKey::generate();
+        let mut store = ChatHistoryStore::empty_at(&dir);
+        store.push_with_id(legacy_entry(topic, &key, 1));
+        write_legacy_fixture(&dir, &store);
+
+        let ms_path = dir.join("message_store.db");
+        store
+            .migrate_legacy_json(&ms_path, key.public().as_bytes())
+            .unwrap();
+
+        // Legacy read path sees nothing (file renamed).
+        assert!(ChatHistoryStore::load(&dir).unwrap().is_none());
+        // SQLite holds the row.
+        let ms = MessageStore::open(&ms_path).unwrap();
+        assert_eq!(ms.get_all_messages().unwrap().len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failed_import_rolls_back_and_leaves_legacy_intact() {
+        // Regression: a corrupt legacy entry (unparseable sender) fails the
+        // whole import transactionally and leaves the JSON source intact.
+        let dir = temp_dir("failed-import-rollback");
+        let topic = make_topic(0xE4);
+        let key = iroh::SecretKey::generate();
+        let mut store = ChatHistoryStore::empty_at(&dir);
+        store.push_with_id(legacy_entry(topic, &key, 1));
+        // Corrupt second entry: sender is not a valid public key.
+        let mut bad = legacy_entry(topic, &key, 2);
+        bad.sender = "not-a-valid-public-key".to_string();
+        store.push_with_id(bad);
+        write_legacy_fixture(&dir, &store);
+
+        let ms_path = dir.join("message_store.db");
+        let result = store.migrate_legacy_json(&ms_path, key.public().as_bytes());
+        assert!(result.is_err(), "migration must fail on corrupt sender");
+        // Legacy source untouched; no backup rename.
+        assert!(store.file_path().exists(), "legacy JSON left intact");
+        assert!(!dir.join("chat_history.json.imported").exists());
+        // Transaction rolled back: nothing in SQLite.
+        let ms = MessageStore::open(&ms_path).unwrap();
+        assert_eq!(
+            ms.get_all_messages().unwrap().len(),
+            0,
+            "rollback left no rows"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn conflict_fixture_follows_merge_policy() {
+        // Regression: when both stores already contain data, SQLite wins on
+        // hash collision and JSON fills gaps; the file is still backed up.
+        let dir = temp_dir("conflict-merge-policy");
+        let topic = make_topic(0xE5);
+        let key = iroh::SecretKey::generate();
+        let public = key.public();
+        let local = public.as_bytes();
+
+        // Pre-seed SQLite with an entry whose hash collides with entry 1.
+        let ms_path = dir.join("message_store.db");
+        let ms = MessageStore::open(&ms_path).unwrap();
+        let seed = legacy_entry(topic, &key, 1);
+        let seed_hash = *blake3::hash(&seed.signed_bytes).as_bytes();
+        ms.insert_chat_message(
+            &seed_hash,
+            topic.as_bytes(),
+            key.public().as_bytes(),
+            1_000,
+            "text",
+            "sqlite copy",
+            Some(&seed.signed_bytes),
+            None,
+            local,
+        )
+        .unwrap();
+
+        // Legacy JSON has entries 1 and 2; entry 1 collides with SQLite.
+        let mut store = ChatHistoryStore::empty_at(&dir);
+        store.push_with_id(seed);
+        store.push_with_id(legacy_entry(topic, &key, 2));
+        write_legacy_fixture(&dir, &store);
+
+        let imported = store.migrate_legacy_json(&ms_path, local).unwrap();
+        assert_eq!(imported, 1, "only the non-colliding entry is inserted");
+
+        let rows = ms.get_all_messages().unwrap();
+        assert_eq!(rows.len(), 2);
+        // SQLite copy wins the collision; body preserved from SQLite.
+        let seeded = rows.iter().find(|r| r.msg_hash == seed_hash).unwrap();
+        assert_eq!(seeded.body, "sqlite copy", "SQLite wins on hash collision");
+        assert!(
+            !store.file_path().exists(),
+            "legacy JSON renamed to backup after merge"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }

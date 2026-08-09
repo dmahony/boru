@@ -888,6 +888,26 @@ fn main() -> Result<()> {
 
         // ── Persistent history stores ────────────────────────────────
         let room_history = RoomHistoryStore::empty_at(&data_dir);
+
+        // One-time legacy migration: import chat_history.json into the
+        // SQLite `messages` table (message_store.db), then rename the JSON
+        // to `chat_history.json.imported` as a backup + completion marker.
+        // After this runs, SQLite is the only live history source and the
+        // in-memory store starts empty; RoomOpened replays from SQLite.
+        if let Ok(Some(legacy)) = ChatHistoryStore::load(&data_dir) {
+            match legacy.migrate_legacy_json(
+                &data_dir.join("message_store.db"),
+                local_public.as_bytes(),
+            ) {
+                Ok(imported) => {
+                    info!("legacy chat history migration: imported {imported} entries to SQLite");
+                }
+                Err(err) => {
+                    warn!("legacy chat history migration failed (keeping JSON for retry): {err}");
+                }
+            }
+        }
+
         let chat_history = Arc::new(std::sync::Mutex::new(
             ChatHistoryStore::load_or_default(&data_dir),
         ));
