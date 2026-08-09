@@ -1575,6 +1575,13 @@ fn peer_id_short_form(full_key: &str) -> String {
     }
 }
 
+/// Whether call actions may be offered for the active conversation.
+/// Call actions are restricted to established, unblocked direct friends, and
+/// a second call must not be started while another call is active.
+fn call_buttons_enabled(is_direct_friend: bool, is_blocked: bool, call_in_progress: bool) -> bool {
+    is_direct_friend && !is_blocked && !call_in_progress
+}
+
 /// A bounded, presentation-ready mesh event with a real capture time.
 #[derive(Debug, Clone)]
 struct MeshEvent {
@@ -31939,6 +31946,40 @@ impl IcedChat {
             Some(AppMessage::ToggleChatOptions),
         );
 
+        // Calls are available only for direct, unblocked friends and only
+        // while no other call is active.  Groups and public rooms get no call
+        // buttons in the header.
+        let is_blocked = peer.is_some_and(|key| {
+            self.friends
+                .get(&FriendId::from_public_key(key))
+                .is_some_and(|record| record.relationship == FriendRelationship::Blocked)
+        });
+        let call_enabled = call_buttons_enabled(
+            peer.is_some() && !is_group,
+            is_blocked,
+            self.active_call_id.is_some(),
+        );
+        let voice_call: iced::Element<'_, AppMessage> = peer
+            .filter(|_| call_enabled)
+            .map(|key| {
+                tool_btn(
+                    Icon::Phone.build().size(IconSize::Sm).build().into(),
+                    "Start voice call",
+                    Some(AppMessage::StartVoiceCall(key)),
+                )
+            })
+            .unwrap_or_else(|| iced::widget::Space::new().width(Length::Fixed(0.0)).into());
+        let video_call: iced::Element<'_, AppMessage> = peer
+            .filter(|_| call_enabled)
+            .map(|key| {
+                tool_btn(
+                    Icon::VideoCamera.build().size(IconSize::Sm).build().into(),
+                    "Start video call",
+                    Some(AppMessage::StartVideoCall(key)),
+                )
+            })
+            .unwrap_or_else(|| iced::widget::Space::new().width(Length::Fixed(0.0)).into());
+
         // ── Header area (left): back button, avatar, identity ─────────
         // Identity receives Fill so it shrinks when the toolbar needs
         // space. Wrapping in a clipping container ensures long peer IDs
@@ -31960,7 +32001,7 @@ impl IcedChat {
         // ── Toolbar (right): fixed natural width, never shrinks ──────
         // Shrink ensures action buttons stay fully visible at any window
         // size. The header area absorbs the remaining space instead.
-        let toolbar = row![search, delete, copy, share, overflow,]
+        let toolbar = row![voice_call, video_call, search, delete, copy, share, overflow,]
             .spacing(SPACE_4)
             .width(Length::Shrink)
             .align_y(Alignment::Center);

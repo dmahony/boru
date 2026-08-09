@@ -62,6 +62,8 @@ const SVG_CHEVRON_RIGHT: &[u8] = include_bytes!("../../assets/icons/lucide/chevr
 const SVG_HOME: &[u8] = include_bytes!("../../assets/icons/lucide/home.svg");
 const SVG_FOLDER: &[u8] = include_bytes!("../../assets/icons/lucide/folder.svg");
 const SVG_FILM: &[u8] = include_bytes!("../../assets/icons/lucide/film.svg");
+const SVG_PHONE: &[u8] = include_bytes!("../../assets/icons/lucide/phone.svg");
+const SVG_VIDEO_CAMERA: &[u8] = include_bytes!("../../assets/icons/lucide/video-camera.svg");
 // Re-export the app-level constants for the Lucide icons that were already
 // embedded there.  We keep them in app.rs so app-level code that already
 // references ICON_CHAT etc. doesn't break, but the Icon enum uses them
@@ -96,6 +98,8 @@ pub enum Icon {
     Plus,
     Search,
     Settings,
+    /// Start a voice call with a direct friend.
+    Phone,
 
     // Social
     Friend,
@@ -111,6 +115,8 @@ pub enum Icon {
     Image,
     /// A video file (film/clapperboard glyph) — used for video cards.
     Video,
+    /// Start a video call with a direct friend.
+    VideoCamera,
     Play,
     Pause,
     Volume1,
@@ -167,6 +173,7 @@ impl Icon {
             Icon::Plus => ICON_PLUS,
             Icon::Search => ICON_SEARCH,
             Icon::Settings => ICON_SETTINGS,
+            Icon::Phone => SVG_PHONE,
 
             // Social
             Icon::Friend => ICON_FRIEND,
@@ -180,6 +187,7 @@ impl Icon {
             Icon::Paperclip => ICON_PAPERCLIP,
             Icon::Image => SVG_IMAGE,
             Icon::Video => SVG_FILM,
+            Icon::VideoCamera => SVG_VIDEO_CAMERA,
             Icon::Play => SVG_PLAY,
             Icon::Pause => SVG_PAUSE,
             Icon::Volume1 => SVG_VOLUME_1,
