@@ -54,6 +54,21 @@ pub(crate) const STATUS_CARD_MEDIUM_CONTENT: f32 = 760.0;
 /// the network graphic below).
 pub(crate) const STATUS_CARD_NARROW_CONTENT: f32 = 520.0;
 
+/// Minimum width the text (heading/description) column is guaranteed in the
+/// Full tier. Mirrors the spec's `minmax(260px, 1fr)` text column — the
+/// heading must never be squeezed below ~260px while a horizontal layout is
+/// active (spec sections 2, 3, 18).
+pub(crate) const STATUS_CARD_TEXT_MIN_WIDTH: f32 = 260.0;
+/// Same guarantee for the Medium tier. The spec's MODE B keeps the text
+/// area at roughly 220-260px; 240 is the mid-band floor so the mesh still
+/// has room to stay visible at the bottom of the band.
+const STATUS_CARD_TEXT_MIN_WIDTH_MEDIUM: f32 = 240.0;
+/// Upper bound for the decorative mesh in the horizontal tiers (spec MODE A
+/// graph 170-190px). The mesh must NEVER consume width the heading needs:
+/// it only gets the leftover after the text minimum is satisfied.
+/// CONN-05 tunes the exact graph size; this card only enforces the bound.
+pub(crate) const STATUS_CARD_MESH_MAX_WIDTH: f32 = 190.0;
+
 /// Amber accent for connecting / degraded states on the dark panel.
 const STATUS_WARNING: Color = Color::from_rgb(
     0xE8 as f32 / 255.0,
@@ -127,7 +142,16 @@ pub(crate) fn view_status_card(
         Space::new().height(Length::Fixed(0.0)).into()
     };
 
-    let network = network_mesh(dep, tier);
+    // The decorative mesh yields before the text column: in the horizontal
+    // tiers its width is the leftover AFTER the text minimum is satisfied
+    // (bounded to [0, STATUS_CARD_MESH_MAX_WIDTH]); the narrow stacked tier
+    // keeps the fixed per-tier size.
+    let network = match tier {
+        Tier::Full | Tier::Medium => {
+            network_mesh(dep, tier, horizontal_mesh_width(dep.content_width, tier))
+        }
+        Tier::Narrow => network_mesh(dep, tier, network_size(tier).0),
+    };
 
     let body: iced::Element<'static, AppMessage> = match tier {
         Tier::Full | Tier::Medium => {
@@ -328,7 +352,7 @@ fn status_heading(
                 .size(size)
                 .color(design_tokens::STATUS_PRIMARY_TEXT)
                 .width(Length::Fill)
-                .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+                .wrapping(iced::widget::text::Wrapping::Word),
             )
             .spacing(0)
             .align_y(Alignment::Center)
@@ -343,7 +367,7 @@ fn status_heading(
         .size(size)
         .color(variant_accent(dep.variant))
         .width(Length::Fill)
-        .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+        .wrapping(iced::widget::text::Wrapping::Word)
         .into()
     }
 }
@@ -424,27 +448,55 @@ fn actions_row(show_retry: bool, show_details: bool) -> iced::Element<'static, A
     row.into()
 }
 
-/// Size of the network mesh per layout tier (width, height).
+/// Size of the network mesh per layout tier (width, height). The
+/// horizontal tiers cap the width at [`STATUS_CARD_MESH_MAX_WIDTH`] — the
+/// exact value used in the row comes from [`horizontal_mesh_width`] (the
+/// mesh yields space to the text column); this only bounds the nominal
+/// size. The narrow stacked tier keeps its own fixed size.
 fn network_size(tier: Tier) -> (f32, f32) {
     match tier {
-        Tier::Full => (250.0, 170.0),
-        Tier::Medium => (200.0, 136.0),
+        Tier::Full => (STATUS_CARD_MESH_MAX_WIDTH, 170.0),
+        Tier::Medium => (STATUS_CARD_MESH_MAX_WIDTH, 136.0),
         Tier::Narrow => (190.0, 130.0),
     }
 }
 
-/// Build the native canvas peer-to-peer mesh for the current tier.
+/// Width of the decorative mesh in the horizontal (Full/Medium) tiers.
+///
+/// Implements the spec's `auto minmax(260px, 1fr) minmax(150px, 190px)`
+/// grid for the card's row: the icon keeps its fixed size, the text
+/// column is flexible but never below its guaranteed minimum, and the
+/// mesh gets only the REMAINDER after that minimum is satisfied — bounded
+/// to `[0, STATUS_CARD_MESH_MAX_WIDTH]`. When space is tight the mesh
+/// shrinks (and can reach 0) instead of starving the heading (spec
+/// section 11 priority order: heading > description > pill > graph).
+fn horizontal_mesh_width(content_width: f32, tier: Tier) -> f32 {
+    let (text_min, icon_text_gap, text_graph_gap) = match tier {
+        Tier::Full => (STATUS_CARD_TEXT_MIN_WIDTH, 32.0, 40.0),
+        _ => (STATUS_CARD_TEXT_MIN_WIDTH_MEDIUM, 28.0, 32.0),
+    };
+    // Card inner width = content width minus the card's 32px padding.
+    let inner = (content_width - 2.0 * design_tokens::SPACE_32).max(0.0);
+    let fixed =
+        design_tokens::STATUS_INDICATOR_SIZE + icon_text_gap + text_graph_gap;
+    let space = (inner - fixed).max(0.0);
+    (space - text_min).clamp(0.0, STATUS_CARD_MESH_MAX_WIDTH)
+}
+
+/// Build the native canvas peer-to-peer mesh at the given width (the
+/// height comes from the tier's nominal size).
 fn network_mesh(
     dep: &StatusCardDependency,
     tier: Tier,
+    width: f32,
 ) -> iced::Element<'static, AppMessage> {
-    let (w, h) = network_size(tier);
+    let (_, h) = network_size(tier);
     canvas(NetworkMesh {
         pulse: dep.pulse_frame % STATUS_CARD_PULSE_PHASES,
         animate: dep.animate_mesh,
         dimmed: dep.dimmed_mesh,
     })
-    .width(Length::Fixed(w))
+    .width(Length::Fixed(width))
     .height(Length::Fixed(h))
     .into()
 }
@@ -713,6 +765,85 @@ mod tests {
             let (w, h) = network_size(tier);
             assert!(w > 0.0 && h > 0.0, "{tier:?} network size must be positive");
         }
+        // CONN-03: the horizontal tiers' nominal mesh width must respect
+        // the 190px bound (spec MODE A graph 170-190px; the exact size is
+        // CONN-05's job — this card never exceeds the bound).
+        for tier in [Tier::Full, Tier::Medium] {
+            let (w, _) = network_size(tier);
+            assert!(
+                w <= STATUS_CARD_MESH_MAX_WIDTH + f32::EPSILON,
+                "{tier:?} mesh width {w} exceeds the {STATUS_CARD_MESH_MAX_WIDTH}px bound"
+            );
+        }
+    }
+
+    #[test]
+    fn text_column_keeps_minimum_width_in_horizontal_tiers() {
+        // CONN-03 spec sections 2/3/18: while ANY horizontal layout is
+        // active the heading must never be squeezed below ~220-260px.
+        // Sweep the tier boundary bands (the spec's manual test widths:
+        // 400/450/500/550/600/700/800/900+). For every width that selects
+        // a horizontal tier, the mesh must yield enough space that the
+        // text column (icon + gaps + mesh removed from the card inner
+        // width) stays at or above its tier minimum.
+        let widths = [
+            400.0, 450.0, 500.0, 520.0, 550.0, 560.0, 600.0, 650.0, 700.0,
+            759.0, 760.0, 800.0, 900.0, 1024.0, 1215.0,
+        ];
+        for width in widths {
+            let tier = layout_tier(width);
+            if tier == Tier::Narrow {
+                // Stacked layout — no horizontal text minimum applies.
+                continue;
+            }
+            let (text_min, icon_gap, graph_gap) = match tier {
+                Tier::Full => (STATUS_CARD_TEXT_MIN_WIDTH, 32.0, 40.0),
+                _ => (STATUS_CARD_TEXT_MIN_WIDTH_MEDIUM, 28.0, 32.0),
+            };
+            let mesh_w = horizontal_mesh_width(width, tier);
+            let inner = width - 2.0 * design_tokens::SPACE_32;
+            let text_w =
+                inner - design_tokens::STATUS_INDICATOR_SIZE - icon_gap - graph_gap - mesh_w;
+            assert!(
+                text_w + 0.01 >= text_min,
+                "at card width {width}px ({tier:?}) the text column is {text_w}px \
+                 but must stay >= {text_min}px (mesh took {mesh_w}px)"
+            );
+            assert!(
+                mesh_w <= STATUS_CARD_MESH_MAX_WIDTH + 0.01,
+                "at card width {width}px ({tier:?}) the mesh ({mesh_w}px) exceeds the \
+                 {STATUS_CARD_MESH_MAX_WIDTH}px bound"
+            );
+        }
+    }
+
+    #[test]
+    fn mesh_yields_before_text_when_space_is_tight() {
+        // At the bottom of the Medium band (520px) the decorative mesh
+        // must shrink well below its cap so the text keeps its minimum —
+        // the spec's priority order (heading > description > pill > graph).
+        let tight = horizontal_mesh_width(520.0, Tier::Medium);
+        assert!(
+            tight > 0.0 && tight < STATUS_CARD_MESH_MAX_WIDTH,
+            "at 520px the mesh should shrink ({tight}px) but stay visible"
+        );
+        let text_at_tight = 520.0
+            - 2.0 * design_tokens::SPACE_32
+            - design_tokens::STATUS_INDICATOR_SIZE
+            - 28.0
+            - 32.0
+            - tight;
+        assert!(
+            text_at_tight + 0.01 >= STATUS_CARD_TEXT_MIN_WIDTH_MEDIUM,
+            "text {text_at_tight}px must keep the Medium minimum"
+        );
+        // At a wide Full tier the mesh hits its cap and the text takes all
+        // remaining space.
+        let wide = horizontal_mesh_width(1215.0, Tier::Full);
+        assert!(
+            (wide - STATUS_CARD_MESH_MAX_WIDTH).abs() < 0.01,
+            "at 1215px the mesh should be capped at {STATUS_CARD_MESH_MAX_WIDTH}px, got {wide}px"
+        );
     }
 
     #[test]
