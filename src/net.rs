@@ -711,6 +711,7 @@ impl Actor {
             debug!(
                 peer = %peer_id.fmt_short(),
                 ?origin,
+                conn_id,
                 "session collision: rejecting new connection, keeping existing one",
             );
             // Close the rejected connection so the remote peer gets a signal.
@@ -736,7 +737,7 @@ impl Actor {
                 .await;
                 (peer_id, conn, res)
             }
-            .instrument(error_span!("conn", peer = %peer_id.fmt_short())),
+            .instrument(error_span!("conn", peer = %peer_id.fmt_short(), conn_id)),
         );
     }
 
@@ -843,37 +844,37 @@ impl Actor {
                     event_sender,
                     command_rx_keys,
                 } = self.topics.entry(topic_id).or_default();
-                let mut sender_dead = false;
-                if !neighbors.is_empty() {
-                    for neighbor in neighbors.iter() {
-                        if let Err(_err) = tx.try_send(Event::NeighborUp(*neighbor)).await {
-                            sender_dead = true;
-                            break;
+                // Always spawn the permanent subscriber loop.  The initial
+                // NeighborUp replay is sent inside the loop task so that a
+                // failed replay (channel already closed/full at join) cannot
+                // permanently suppress event forwarding for a topic the
+                // application has successfully joined.  If the replay send
+                // fails, the app-side receiver is gone and the task exits —
+                // the loop itself never starts, which is correct in that
+                // case, but the decision is no longer made eagerly on the
+                // actor's Join path.
+                let initial_neighbors = neighbors.iter().copied().collect::<Vec<_>>();
+                let subscriber_rx = event_sender.subscribe();
+                let fut = async move {
+                    for neighbor in initial_neighbors {
+                        if tx.send(Event::NeighborUp(neighbor)).await.is_err() {
+                            warn!(
+                                topic = %topic_id.fmt_short(),
+                                "gossip: subscriber loop exiting — initial NeighborUp replay failed (app-side receiver dropped)"
+                            );
+                            return topic_id;
                         }
                     }
-                }
-
-                if !sender_dead {
-                    let subscriber_fut =
-                        topic_subscriber_loop(topic_id, tx, event_sender.subscribe());
-                    let fut = async move {
-                        subscriber_fut.await;
-                        topic_id
-                    };
-                    self.topic_event_forwarders
-                        .spawn(fut.instrument(tracing::Span::current()));
-                    debug!(
-                        topic = %topic_id.fmt_short(),
-                        neighbors = neighbors.len(),
-                        "gossip: subscriber loop spawned for topic"
-                    );
-                } else {
-                    warn!(
-                        topic = %topic_id.fmt_short(),
-                        neighbors = neighbors.len(),
-                        "gossip: subscriber loop NOT spawned — subscription channel closed/full at join (sender_dead)"
-                    );
-                }
+                    topic_subscriber_loop(topic_id, tx, subscriber_rx).await;
+                    topic_id
+                };
+                self.topic_event_forwarders
+                    .spawn(fut.instrument(tracing::Span::current()));
+                debug!(
+                    topic = %topic_id.fmt_short(),
+                    neighbors = neighbors.len(),
+                    "gossip: subscriber loop spawned for topic"
+                );
                 let command_rx = TopicCommandStream::new(topic_id, Box::pin(rx.into_stream()));
                 let key = self.command_rx.insert(command_rx);
                 command_rx_keys.insert(key);
@@ -932,7 +933,17 @@ impl Actor {
                     }
                     let state = self.peers.entry(peer_id).or_default();
                     match state {
-                        PeerState::Active { active_send_tx, .. } => {
+                        PeerState::Active {
+                            active_send_tx,
+                            active_conn_id,
+                            ..
+                        } => {
+                            debug!(
+                                peer = %peer_id.fmt_short(),
+                                conn_id = *active_conn_id,
+                                topic = %message.topic.fmt_short(),
+                                "SEND_ROUTE: routing message to active connection",
+                            );
                             if let Err(_err) = active_send_tx.send(message).await {
                                 // Removing the peer is handled by the in_event PeerDisconnected sent
                                 // in [`Self::handle_connection_task_finished`].
@@ -1251,6 +1262,12 @@ impl PeerState {
                     // close the QUIC connection, disconnecting the remote peer.
                     let old_tx = std::mem::replace(active_send_tx, send_tx);
                     other_conns.push((*active_conn_id, old_tx));
+                    tracing::debug!(
+                        conn_id,
+                        previous_active = *active_conn_id,
+                        ?origin,
+                        "CONN_REGISTER: replacing active connection",
+                    );
                     *active_conn_id = conn_id;
                     *old_origin = origin;
                     Some(Vec::new())
@@ -1259,6 +1276,12 @@ impl PeerState {
                     // Dropping `send_tx` closes the channel so the caller's connection_loop
                     // won't be spawned meaningfully — the caller is responsible for closing
                     // the connection.
+                    tracing::debug!(
+                        conn_id,
+                        active = *active_conn_id,
+                        ?origin,
+                        "CONN_REGISTER: rejecting new connection, keeping existing active",
+                    );
                     None
                 }
             }

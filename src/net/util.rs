@@ -143,6 +143,10 @@ impl RecvLoop {
                     match msg {
                         None => debug!(topic=%state.header.topic_id.fmt_short(), "stream closed"),
                         Some(msg) => {
+                            debug!(
+                                topic = %state.header.topic_id.fmt_short(),
+                                "STREAM_READ_OK: frame received on QUIC stream",
+                            );
                             if self.in_event_tx.send(InEvent::RecvMessage(self.remote_endpoint_id, msg)).await.is_err() {
                                 debug!("stop recv loop: actor closed");
                                 break;
@@ -290,7 +294,23 @@ impl SendLoop {
         };
         let stream = entry.get_mut();
 
-        write_frame(stream, message, &mut self.buffer, self.max_message_size).await?;
+        match write_frame(stream, message, &mut self.buffer, self.max_message_size).await {
+            Ok(()) => {
+                debug!(
+                    topic = %topic_id.fmt_short(),
+                    bytes = self.buffer.len(),
+                    "STREAM_WRITE_OK: frame written to QUIC stream",
+                );
+            }
+            Err(err) => {
+                debug!(
+                    topic = %topic_id.fmt_short(),
+                    error = %err,
+                    "STREAM_WRITE_ERR: frame write failed",
+                );
+                return Err(err);
+            }
+        }
 
         if is_last {
             trace!(topic=%topic_id.fmt_short(), "stream closing");
