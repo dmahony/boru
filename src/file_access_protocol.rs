@@ -268,10 +268,15 @@ pub fn verify_download_descriptor(
     payload.extend_from_slice(&descriptor.issued_at_ms.to_le_bytes());
     payload.extend_from_slice(&descriptor.expires_at_ms.to_le_bytes());
 
-    // ── 6. Verify the signature ──────────────────────────────────────────
+    // ── 6. Verify the signature with the expected owner's key ─────────
+    // The verification key MUST come from the caller (the peer we
+    // selected/connected to), not from `descriptor.owner_id`.  At this
+    // point the owner check above guarantees they are equal, but verifying
+    // against `expected_owner` keeps the trusted identity anchored outside
+    // the response so a substituted descriptor can never self-validate.
     let sig_bytes = *descriptor.signature.as_ref();
     let sig = iroh::Signature::from_bytes(&sig_bytes);
-    if descriptor.owner_id.verify(&payload, &sig).is_ok() {
+    if expected_owner.verify(&payload, &sig).is_ok() {
         DescriptorVerification::Valid
     } else {
         DescriptorVerification::InvalidSignature

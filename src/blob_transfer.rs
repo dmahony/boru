@@ -632,11 +632,15 @@ pub async fn request_and_transfer_blob(
             })?;
 
     // ── 2. Verify and accept the response ───────────────────────────
+    // The expected owner is the peer we selected for this request
+    // (`server_pk`, passed down from the connection/request state), never a
+    // key reconstructed from the response itself.
     let expected_content_hash_hex = hex::encode(request.expected_content_hash);
     let descriptor = crate::file_access_client::handle_permission_response(
         storage,
         download_id,
         response,
+        &server_pk,
         local_pk,
         &expected_content_hash_hex,
         expected_size,

@@ -72,6 +72,31 @@ impl From<Box<dyn std::error::Error + Send + Sync>> for FileAccessRequestError {
     }
 }
 
+/// Assert that the transport-authenticated remote identity of a connection
+/// equals the peer we originally selected for the request.
+///
+/// The selected peer key MUST come from the caller's request state (the
+/// download row / user choice), never from a response.  If the transport
+/// ever hands us a different authenticated identity, that is a security
+/// error: a redirect/retry must not silently swap the expected peer without
+/// restarting authorization and permission negotiation.
+fn assert_connected_peer_matches(
+    selected_peer: &PublicKey,
+    connected_peer: &PublicKey,
+) -> std::result::Result<(), FileAccessRequestError> {
+    if connected_peer != selected_peer {
+        warn!(
+            selected_peer = %selected_peer.fmt_short(),
+            connected_peer = %connected_peer.fmt_short(),
+            "file-access: connected peer identity does not match selected peer (security error)"
+        );
+        return Err(FileAccessRequestError::ProtocolError {
+            details: "connected peer identity does not match selected peer".to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// Connect to a remote peer and request a fresh download descriptor.
 ///
 /// # Arguments
@@ -108,6 +133,13 @@ pub async fn request_download_permission(
     .map_err(|e| FileAccessRequestError::ConnectionFailed {
         details: format!("connect: {e}"),
     })?;
+
+    // ── 1a. Assert transport-authenticated remote identity ─────────────
+    // iroh QUIC connections authenticate the remote node id.  The connected
+    // identity MUST equal the peer we selected for this request; if the
+    // transport ever hands us a different authenticated identity, treat it
+    // as a security error before any descriptor data is read.
+    assert_connected_peer_matches(&server_pk, &conn.remote_id())?;
 
     // ── 2. Open a bi-directional stream ────────────────────────────────
     let (mut send, mut recv) =
@@ -207,6 +239,11 @@ pub async fn request_download_permission(
 /// * `storage` — The storage layer.
 /// * `download_id` — The download id whose state to transition.
 /// * `response` — The [`FileAccessResponse`] from the server.
+/// * `expected_server_pk` — The public key of the peer we *selected and
+///   connected to* for this request.  This value MUST originate outside the
+///   response (from the connection/request state), never from the descriptor
+///   itself — otherwise the owner check is self-referential and a third party
+///   could substitute its own valid descriptor.
 /// * `local_pk` — Our own public key (to verify requester binding).
 /// * `expected_content_hash_hex` — The content hash we expect (hex string).
 /// * `expected_size` — The expected file size in bytes.
@@ -224,6 +261,7 @@ pub fn handle_permission_response(
     storage: &Storage,
     download_id: i64,
     response: FileAccessResponse,
+    expected_server_pk: &PublicKey,
     local_pk: &PublicKey,
     expected_content_hash_hex: &str,
     expected_size: u64,
@@ -233,6 +271,7 @@ pub fn handle_permission_response(
             storage,
             download_id,
             *descriptor,
+            expected_server_pk,
             local_pk,
             expected_content_hash_hex,
             expected_size,
@@ -376,10 +415,14 @@ pub fn handle_permission_response(
 
 /// Process a `Granted` response: verify the [`SignedDownloadDescriptor`] and
 /// persist the transition to `downloading` if every check passes.
+///
+/// `expected_server_pk` is the peer we selected/connected to for this request
+/// and MUST come from outside the descriptor (connection/request state).
 fn handle_granted(
     storage: &Storage,
     download_id: i64,
     descriptor: SignedDownloadDescriptor,
+    expected_server_pk: &PublicKey,
     local_pk: &PublicKey,
     expected_content_hash_hex: &str,
     expected_size: u64,
@@ -390,10 +433,15 @@ fn handle_granted(
         .as_millis() as u64;
 
     // ── 1. Verify the descriptor integrity and lifetime ─────────────────
+    // The expected owner is the peer we chose to connect to, NOT the owner
+    // claimed inside the descriptor.  A descriptor is only accepted if it is
+    // owned AND signed by exactly that peer (verify_download_descriptor
+    // checks owner_id against expected_owner and verifies the signature with
+    // expected_owner's key).
     let verification = verify_download_descriptor(
         &descriptor,
-        &descriptor.owner_id, // expected owner = the signer
-        local_pk,             // we are the expected requester
+        expected_server_pk,
+        local_pk, // we are the expected requester
         now_ms,
     );
 
@@ -666,6 +714,7 @@ mod tests {
             &storage,
             id,
             response,
+            &server_pk,
             &client_pk,
             &content_hash,
             total_bytes,
@@ -681,6 +730,307 @@ mod tests {
         assert_eq!(
             download.state, "downloading",
             "download should transition to downloading"
+        );
+    }
+
+    // ── BORU-AUDIT-03 regression: descriptor must be bound to the ─────
+    // ── peer we selected, not to a key claimed inside the response.  ─────
+
+    /// A descriptor signed by a *different* peer (B) must be rejected when
+    /// we expected server A.  The old implementation passed
+    /// `&descriptor.owner_id` as the expected owner, which made this check
+    /// self-referential: an attacker's own valid descriptor would pass.
+    #[test]
+    fn handle_granted_rejects_descriptor_signed_by_different_peer() {
+        let storage = Storage::memory().expect("memory storage");
+        let content_hash = "11".repeat(32);
+        let total_bytes = 4096;
+        let expected_server_sk = iroh::SecretKey::generate();
+        let expected_server_pk = expected_server_sk.public();
+        let attacker_sk = iroh::SecretKey::generate();
+        let attacker_pk = attacker_sk.public();
+        let client_sk = iroh::SecretKey::generate();
+        let client_pk = client_sk.public();
+
+        let id = setup_download_in_permission_state(
+            &storage,
+            &content_hash,
+            &expected_server_pk.to_string(),
+            total_bytes,
+        );
+
+        let now = now_ms();
+        // Attacker B signs a perfectly valid descriptor for our requested
+        // content, but it is NOT the peer we connected to.
+        let descriptor = sign_download_descriptor(
+            &attacker_sk,
+            client_pk,
+            "test-shared-file-id".into(),
+            hex_to_raw(&content_hash),
+            total_bytes,
+            BlobFormat::Raw,
+            now.saturating_sub(1000),
+            now + 60_000,
+        );
+
+        let response = FileAccessResponse::Granted(Box::new(descriptor));
+        let result = handle_permission_response(
+            &storage,
+            id,
+            response,
+            &expected_server_pk,
+            &client_pk,
+            &content_hash,
+            total_bytes,
+        )
+        .expect("handle response");
+
+        assert!(
+            result.is_none(),
+            "descriptor from a different peer must be rejected"
+        );
+
+        let download = storage
+            .get_download(id)
+            .expect("get download")
+            .expect("exists");
+        assert_eq!(
+            download.state, "failed",
+            "owner mismatch should fail the download (security error)"
+        );
+        let err = download.last_error.unwrap_or_default();
+        assert!(
+            err.contains("owner does not match"),
+            "error should describe the owner mismatch: {err}"
+        );
+    }
+
+    /// If the descriptor's `owner_id` field is swapped to B while the
+    /// signature was made by A, the descriptor must be rejected: either the
+    /// owner check (owner_id != expected server A) or the signature check
+    /// (payload includes owner_id) fails.
+    #[test]
+    fn handle_granted_rejects_descriptor_with_swapped_owner_id() {
+        let storage = Storage::memory().expect("memory storage");
+        let content_hash = "22".repeat(32);
+        let total_bytes = 4096;
+        let server_sk = iroh::SecretKey::generate();
+        let server_pk = server_sk.public();
+        let other_sk = iroh::SecretKey::generate();
+        let other_pk = other_sk.public();
+        let client_sk = iroh::SecretKey::generate();
+        let client_pk = client_sk.public();
+
+        let id = setup_download_in_permission_state(
+            &storage,
+            &content_hash,
+            &server_pk.to_string(),
+            total_bytes,
+        );
+
+        let now = now_ms();
+        let mut descriptor = sign_download_descriptor(
+            &server_sk,
+            client_pk,
+            "test-shared-file-id".into(),
+            hex_to_raw(&content_hash),
+            total_bytes,
+            BlobFormat::Raw,
+            now.saturating_sub(1000),
+            now + 60_000,
+        );
+        // Tamper: claim the descriptor belongs to a different owner.
+        descriptor.owner_id = other_pk;
+
+        let response = FileAccessResponse::Granted(Box::new(descriptor));
+        let result = handle_permission_response(
+            &storage,
+            id,
+            response,
+            &server_pk,
+            &client_pk,
+            &content_hash,
+            total_bytes,
+        )
+        .expect("handle response");
+
+        assert!(
+            result.is_none(),
+            "descriptor with swapped owner_id must be rejected"
+        );
+        let download = storage
+            .get_download(id)
+            .expect("get download")
+            .expect("exists");
+        assert_eq!(
+            download.state, "failed",
+            "owner tampering should fail the download (security error)"
+        );
+    }
+
+    /// Retry path: a second permission attempt for the same download must
+    /// still bind to the originally selected peer.  After a first attempt
+    /// with server A, a retry that receives a descriptor from B (even a
+    /// valid one) must be rejected — the expected peer is not weakened or
+    /// replaced by a previous response.
+    #[test]
+    fn handle_granted_retry_preserves_expected_peer_binding() {
+        let storage = Storage::memory().expect("memory storage");
+        let content_hash = "33".repeat(32);
+        let total_bytes = 4096;
+        let server_sk = iroh::SecretKey::generate();
+        let server_pk = server_sk.public();
+        let attacker_sk = iroh::SecretKey::generate();
+        let attacker_pk = attacker_sk.public();
+        let client_sk = iroh::SecretKey::generate();
+        let client_pk = client_sk.public();
+
+        let id = setup_download_in_permission_state(
+            &storage,
+            &content_hash,
+            &server_pk.to_string(),
+            total_bytes,
+        );
+
+        let now = now_ms();
+        // First attempt: the real server A returns a valid descriptor.
+        let good_descriptor = sign_download_descriptor(
+            &server_sk,
+            client_pk,
+            "test-shared-file-id".into(),
+            hex_to_raw(&content_hash),
+            total_bytes,
+            BlobFormat::Raw,
+            now.saturating_sub(1000),
+            now + 60_000,
+        );
+        let first = handle_permission_response(
+            &storage,
+            id,
+            FileAccessResponse::Granted(Box::new(good_descriptor)),
+            &server_pk,
+            &client_pk,
+            &content_hash,
+            total_bytes,
+        )
+        .expect("first handle response");
+        assert!(first.is_some(), "first attempt with server A should pass");
+
+        // Retry on a fresh download row (simulating a later retry after the
+        // first failed downstream, e.g. transfer failure): the expected peer
+        // binding must still be the original server A.
+        let id2 = setup_download_in_permission_state(
+            &storage,
+            &content_hash,
+            &server_pk.to_string(),
+            total_bytes,
+        );
+        let attacker_descriptor = sign_download_descriptor(
+            &attacker_sk,
+            client_pk,
+            "test-shared-file-id".into(),
+            hex_to_raw(&content_hash),
+            total_bytes,
+            BlobFormat::Raw,
+            now.saturating_sub(1000),
+            now + 60_000,
+        );
+        let retry = handle_permission_response(
+            &storage,
+            id2,
+            FileAccessResponse::Granted(Box::new(attacker_descriptor)),
+            &server_pk,
+            &client_pk,
+            &content_hash,
+            total_bytes,
+        )
+        .expect("retry handle response");
+        assert!(
+            retry.is_none(),
+            "retry must still reject a descriptor from a different peer"
+        );
+        let download = storage
+            .get_download(id2)
+            .expect("get download")
+            .expect("exists");
+        assert_eq!(
+            download.state, "failed",
+            "retry owner mismatch should fail the download"
+        );
+    }
+
+    /// Transport identity: the connected peer must equal the peer we
+    /// originally selected.  If the transport hands us a different
+    /// authenticated identity, the request must fail before any descriptor
+    /// data is used.
+    #[test]
+    fn connected_peer_identity_must_match_selected_peer() {
+        let a = iroh::SecretKey::generate().public();
+        let b = iroh::SecretKey::generate().public();
+
+        // Same peer: OK.
+        assert_connected_peer_matches(&a, &a).expect("same peer must match");
+
+        // Different peer: security error.
+        let err = assert_connected_peer_matches(&a, &b).expect_err("must reject mismatch");
+        let FileAccessRequestError::ProtocolError { details } = err else {
+            panic!("mismatch must surface as a ProtocolError");
+        };
+        assert!(
+            details.contains("does not match selected peer"),
+            "error should name the binding violation: {details}"
+        );
+    }
+
+    /// The signature-verification key must be the *expected* owner supplied
+    /// by the caller, never a key chosen from the response.  A descriptor
+    /// whose claimed owner is A but which was actually signed by B must fail
+    /// verification even when the caller expected A.
+    #[test]
+    fn verify_uses_expected_owner_key_not_response_key() {
+        use crate::file_access_protocol::verify_download_descriptor;
+
+        let server_sk = iroh::SecretKey::generate();
+        let server_pk = server_sk.public();
+        let attacker_sk = iroh::SecretKey::generate();
+        let client_pk = iroh::SecretKey::generate().public();
+        let now = now_ms();
+
+        let mut descriptor = sign_download_descriptor(
+            &server_sk,
+            client_pk,
+            "test-shared-file-id".into(),
+            [7u8; 32],
+            1024,
+            BlobFormat::Raw,
+            now.saturating_sub(1000),
+            now + 60_000,
+        );
+        // Replace the signature with one made by a different key.  Even if
+        // owner_id still claims A, verification against the expected owner A
+        // must fail.
+        let payload = {
+            let mut p = Vec::new();
+            p.extend_from_slice(descriptor.owner_id.as_bytes());
+            p.extend_from_slice(descriptor.requester.as_bytes());
+            p.extend_from_slice(descriptor.shared_file_id.as_bytes());
+            p.extend_from_slice(&descriptor.blob_hash);
+            p.extend_from_slice(descriptor.content_hash.as_bytes());
+            p.extend_from_slice(&descriptor.size_bytes.to_le_bytes());
+            p.extend_from_slice(&descriptor.blob_ticket);
+            p.extend_from_slice(&descriptor.nonce);
+            p.extend_from_slice(&descriptor.issued_at_ms.to_le_bytes());
+            p.extend_from_slice(&descriptor.expires_at_ms.to_le_bytes());
+            p
+        };
+        let forged = attacker_sk.sign(&payload);
+        descriptor.signature = serde_byte_array::ByteArray::from(forged.to_bytes());
+
+        let outcome = verify_download_descriptor(&descriptor, &server_pk, &client_pk, now);
+        assert_eq!(
+            outcome,
+            crate::file_access_protocol::DescriptorVerification::InvalidSignature,
+            "signature must be verified against the expected owner's key"
         );
     }
 
@@ -721,6 +1071,7 @@ mod tests {
             &storage,
             id,
             response,
+            &server_pk,
             &client_pk,
             &content_hash,
             total_bytes,
@@ -759,7 +1110,7 @@ mod tests {
 
         let response = FileAccessResponse::PermissionDenied;
         let result =
-            handle_permission_response(&storage, id, response, &client_pk, &content_hash, 1024)
+            handle_permission_response(&storage, id, response, &server_pk, &client_pk, &content_hash, 1024)
                 .expect("handle response");
 
         assert!(result.is_none());
@@ -793,7 +1144,7 @@ mod tests {
             current_version: 42,
         };
         let result =
-            handle_permission_response(&storage, id, response, &client_pk, &content_hash, 1024)
+            handle_permission_response(&storage, id, response, &server_pk, &client_pk, &content_hash, 1024)
                 .expect("handle response");
 
         assert!(result.is_none());
@@ -845,6 +1196,7 @@ mod tests {
             &storage,
             id,
             response,
+            &server_pk,
             &client_pk,
             &content_hash,
             total_bytes,
@@ -901,6 +1253,7 @@ mod tests {
             &storage,
             id,
             response,
+            &server_pk,
             &client_pk,
             &content_hash,
             total_bytes,
@@ -943,7 +1296,7 @@ mod tests {
 
         let response = FileAccessResponse::NotFound;
         let result =
-            handle_permission_response(&storage, id, response, &client_pk, &content_hash, 1024)
+            handle_permission_response(&storage, id, response, &server_pk, &client_pk, &content_hash, 1024)
                 .expect("handle response");
 
         assert!(result.is_none());
@@ -974,7 +1327,7 @@ mod tests {
 
         let response = FileAccessResponse::Changed;
         let result =
-            handle_permission_response(&storage, id, response, &client_pk, &content_hash, 1024)
+            handle_permission_response(&storage, id, response, &server_pk, &client_pk, &content_hash, 1024)
                 .expect("handle response");
 
         assert!(result.is_none());
@@ -1008,7 +1361,7 @@ mod tests {
 
         let response = FileAccessResponse::Busy;
         let result =
-            handle_permission_response(&storage, id, response, &client_pk, &content_hash, 1024)
+            handle_permission_response(&storage, id, response, &server_pk, &client_pk, &content_hash, 1024)
                 .expect("handle response");
 
         assert!(result.is_none());
