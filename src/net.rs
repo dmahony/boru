@@ -1148,7 +1148,13 @@ impl Actor {
                         }
                         _ => {}
                     }
-                    event_sender.send(event).ok();
+                    if let Err(err) = event_sender.send(event) {
+                        warn!(
+                            topic = %topic_id.fmt_short(),
+                            error = %err,
+                            "gossip: event_sender.send failed — event dropped (broadcast channel closed or no receivers)"
+                        );
+                    }
                     if !state.still_needed() {
                         self.quit_queue.push_back(topic_id);
                     }

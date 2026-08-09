@@ -36273,23 +36273,26 @@ fn subscription_stream(
             let mut discovered_open = true;
             let mut gui_action_open = true;
             let mut transfer_open = true;
+            // Identify this stream instance so duplicate/competing consumers
+            // (two live subscription streams fighting over the same receiver
+            // mutexes would wedge both) are visible in logs.
+            static STREAM_INSTANCE: std::sync::atomic::AtomicUsize =
+                std::sync::atomic::AtomicUsize::new(0);
+            let instance = STREAM_INSTANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::debug!(
+                instance,
+                net_rx = format!("{:p}", rx.as_ref() as *const _),
+                "SUBSCRIPTION_STREAM_START: combined subscription stream running",
+            );
             loop {
-                let mut rx_guard = rx.lock().await;
-                let mut friend_guard = friend_rx.lock().await;
-                let mut whisper_guard = whisper_rx.lock().await;
-                let mut inbox_guard = inbox_rx.lock().await;
-                let mut discovered_guard = discovered_rx.lock().await;
-                let mut gui_action_guard = gui_action_rx.lock().await;
-                let mut transfer_guard = transfer_rx.lock().await;
+                // Each branch acquires its own receiver mutex inside its own
+                // select arm.  Locking all receivers serially before select!
+                // turns the independent channels into one lock chain: if any
+                // mutex is held by another task (e.g. a diagnostic tool or a
+                // competing stream), the stream blocks before ever reaching
+                // select! and ALL channels go silent — the observed wedge.
                 tokio::select! {
-                    event = rx_guard.recv(), if rx_open => {
-                        drop(whisper_guard);
-                        drop(friend_guard);
-                        drop(inbox_guard);
-                        drop(discovered_guard);
-                        drop(gui_action_guard);
-                        drop(transfer_guard);
-                        drop(rx_guard);
+                    event = async { rx.lock().await.recv().await }, if rx_open => {
                         match event {
                             Some(e) => return Some((AppMessage::NetEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx, transfer_rx))),
                             None => {
@@ -36301,66 +36304,31 @@ fn subscription_stream(
                             }
                         }
                     }
-                    event = friend_guard.recv(), if friend_open => {
-                        drop(whisper_guard);
-                        drop(rx_guard);
-                        drop(inbox_guard);
-                        drop(discovered_guard);
-                        drop(gui_action_guard);
-                        drop(transfer_guard);
-                        drop(friend_guard);
+                    event = async { friend_rx.lock().await.recv().await }, if friend_open => {
                         match event {
                             Some(e) => return Some((AppMessage::FriendEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx, transfer_rx))),
                             None => { friend_open = false; continue; }
                         }
                     }
-                    event = whisper_guard.recv(), if whisper_open => {
-                        drop(friend_guard);
-                        drop(rx_guard);
-                        drop(inbox_guard);
-                        drop(discovered_guard);
-                        drop(gui_action_guard);
-                        drop(transfer_guard);
-                        drop(whisper_guard);
+                    event = async { whisper_rx.lock().await.recv().await }, if whisper_open => {
                         match event {
                             Some(e) => return Some((AppMessage::WhisperEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx, transfer_rx))),
                             None => { whisper_open = false; continue; }
                         }
                     }
-                    event = inbox_guard.recv(), if inbox_open => {
-                        drop(friend_guard);
-                        drop(rx_guard);
-                        drop(whisper_guard);
-                        drop(discovered_guard);
-                        drop(gui_action_guard);
-                        drop(transfer_guard);
-                        drop(inbox_guard);
+                    event = async { inbox_rx.lock().await.recv().await }, if inbox_open => {
                         match event {
                             Some(e) => return Some((AppMessage::InboxEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx, transfer_rx))),
                             None => { inbox_open = false; continue; }
                         }
                     }
-                    peers = discovered_guard.recv(), if discovered_open => {
-                        drop(friend_guard);
-                        drop(rx_guard);
-                        drop(whisper_guard);
-                        drop(inbox_guard);
-                        drop(gui_action_guard);
-                        drop(transfer_guard);
-                        drop(discovered_guard);
+                    peers = async { discovered_rx.lock().await.recv().await }, if discovered_open => {
                         match peers {
                             Some(peers) => return Some((AppMessage::NewDiscoveredPeers(peers), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx, transfer_rx))),
                             None => { discovered_open = false; continue; }
                         }
                     }
-                    action = gui_action_guard.recv(), if gui_action_open => {
-                        drop(friend_guard);
-                        drop(rx_guard);
-                        drop(whisper_guard);
-                        drop(inbox_guard);
-                        drop(discovered_guard);
-                        drop(transfer_guard);
-                        drop(gui_action_guard);
+                    action = async { gui_action_rx.lock().await.recv().await }, if gui_action_open => {
                         match action {
                             Some(a) => return Some((
                                 map_gui_action(a),
@@ -36375,14 +36343,7 @@ fn subscription_stream(
                             }
                         }
                     }
-                    transfer_update = transfer_guard.recv(), if transfer_open => {
-                        drop(friend_guard);
-                        drop(rx_guard);
-                        drop(whisper_guard);
-                        drop(inbox_guard);
-                        drop(discovered_guard);
-                        drop(gui_action_guard);
-                        drop(transfer_guard);
+                    transfer_update = async { transfer_rx.lock().await.recv().await }, if transfer_open => {
                         match transfer_update {
                             Ok(update) => return Some((AppMessage::TransferProjectionUpdate(update), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx, transfer_rx))),
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
