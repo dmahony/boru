@@ -653,17 +653,23 @@ impl canvas::Program<AppMessage> for NetworkMesh {
             (0.0, 0.0)
         };
 
+        // Alpha bands (CONN-08: the mesh was "too dark and subtle" — spec
+        // section 10; brightened while staying secondary to the status):
+        //   Ready (idle / animated) — nodes 0.70-0.90, lines 0.25-0.35.
+        //   Dimmed (non-Ready)      — nodes ~0.45-0.55, lines ~0.18:
+        //     quiet enough to never compete with amber/red signals, but
+        //     still perceptible on the near-black card gradient.
         let (node_a, node_b, other, line_a) = if self.dimmed {
-            (0.35, 0.35, 0.30, 0.12)
+            (0.52, 0.52, 0.46, 0.18)
         } else if self.animate {
             (
-                0.55 + 0.25 * (0.5 + 0.5 * sin_t),
-                0.55 + 0.20 * (0.5 + 0.5 * cos_t),
-                0.42 + 0.08 * (0.5 + 0.5 * sin_t),
-                0.18 + 0.07 * (0.5 + 0.5 * cos_t),
+                0.80 + 0.10 * (0.5 + 0.5 * sin_t),
+                0.75 + 0.10 * (0.5 + 0.5 * cos_t),
+                0.70 + 0.06 * (0.5 + 0.5 * sin_t),
+                0.26 + 0.06 * (0.5 + 0.5 * cos_t),
             )
         } else {
-            (0.65, 0.65, 0.50, 0.22)
+            (0.85, 0.85, 0.72, 0.30)
         };
 
         let pos = |i: usize| {
