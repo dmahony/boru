@@ -11,6 +11,7 @@ use crate::{BoxStream, MaybeSend};
 
 use std::any::TypeId;
 use std::hash::Hash;
+use std::hash::Hasher as _;
 
 /// A subscription event.
 #[derive(Debug, Clone, PartialEq)]
@@ -489,6 +490,16 @@ where
     }
 
     fn stream(self: Box<Self>, input: EventStream) -> BoxStream<Self::Output> {
+        static RUNNER_STREAM_COUNTER: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(0);
+        let n = RUNNER_STREAM_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let this = Box::as_ref(&self) as *const Self as usize;
+        let mut hasher = Hasher::default();
+        <Self as Recipe>::hash(&self, &mut hasher);
+        let recipe_id = hasher.finish();
+        eprintln!(
+            "ICED_RUNNER_STREAM n={n} runner={this:x} recipe={recipe_id:016x} — Runner::stream invoked"
+        );
         crate::boxed_stream((self.spawn)(&self.data, input))
     }
 }
