@@ -1,0 +1,42 @@
+# local hardware probe
+Sat 08 Aug 2026 19:44:26 UTC
+Linux 7070 6.8.0-136-generic #136-Ubuntu SMP PREEMPT_DYNAMIC Wed Jul  1 21:53:05 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+/usr/bin/ffmpeg
+/usr/bin/gst-inspect-1.0
+video devices:
+/dev/video*
+sound devices:
+/dev/snd/by-path
+/dev/snd/controlC0
+/dev/snd/hwC0D0
+/dev/snd/hwC0D2
+/dev/snd/pcmC0D0c
+/dev/snd/pcmC0D0p
+/dev/snd/pcmC0D2c
+/dev/snd/pcmC0D3p
+/dev/snd/pcmC0D7p
+/dev/snd/pcmC0D8p
+/dev/snd/seq
+/dev/snd/timer
+# remote machine probes
+
+[172.16.0.54]
+Linux 6.17.0-41-generic x86_64
+/usr/bin/ffmpeg
+/usr/bin/gst-inspect-1.0
+video: /dev/video* 
+sound: /dev/snd/by-path /dev/snd/controlC0 /dev/snd/hwC0D0 /dev/snd/pcmC0D0c /dev/snd/pcmC0D0p /dev/snd/seq /dev/snd/timer 
+
+[172.16.0.55]
+Linux 6.17.0-41-generic x86_64
+/usr/bin/ffmpeg
+/usr/bin/gst-inspect-1.0
+video: /dev/video* 
+sound: /dev/snd/by-path /dev/snd/controlC0 /dev/snd/hwC0D0 /dev/snd/pcmC0D0c /dev/snd/pcmC0D0p /dev/snd/seq /dev/snd/timer 
+
+[172.16.0.118]
+Linux 6.17.1-2-qcom aarch64
+/usr/bin/ffmpeg
+/usr/bin/arecord
+video: /dev/video0 /dev/video1 
+sound: /dev/snd/by-path /dev/snd/controlC0 /dev/snd/pcmC0D0p /dev/snd/pcmC0D1p /dev/snd/pcmC0D2c /dev/snd/timer 
