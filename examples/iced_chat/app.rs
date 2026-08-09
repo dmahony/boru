@@ -41761,22 +41761,26 @@ mod tests {
     fn sidebar_identity_name_wraps_inside_sidebar() {
         // UI-HOME-10: the pinned sidebar identity block must not use a
         // non-wrapping shrink-width display name that overflows the sidebar;
-        // a long local label wraps inside the sidebar width.
+        // a long local label stays inside the sidebar width.
+        // (SIDEBAR-02 later resolved the mechanism: the name is single-line
+        // `Wrapping::None` inside a `.clip(true)` width-Fill column, so a
+        // long label is clipped at the available width instead of wrapping
+        // or widening the sidebar — see sidebar_profile_name_is_single_line.)
         let src = include_str!("app.rs");
         let profile =
             method_source(src, "fn view_local_profile_block(", "fn profile_identity_card(");
         assert!(
-            !profile.contains("Wrapping::None"),
-            "identity display name must wrap, not overflow the sidebar"
-        );
-        assert!(
-            profile.contains("Wrapping::WordOrGlyph"),
-            "identity display name must glyph-wrap long peer-key labels"
+            !profile.contains("Wrapping::WordOrGlyph"),
+            "identity display name must not glyph-wrap (SIDEBAR-02 keeps it single-line, clipped)"
         );
         assert!(
             profile.contains("name_col")
                 && profile[profile.find("name_col").unwrap()..].contains(".width(Length::Fill)"),
-            "identity name column must be width-Fill so the name wraps inside the sidebar"
+            "identity name column must be width-Fill so the name stays inside the sidebar"
+        );
+        assert!(
+            profile.contains(".clip(true)"),
+            "identity name column must clip overflow so a long name can never widen the sidebar"
         );
     }
 
@@ -42293,6 +42297,7 @@ mod tests {
         // name in IBM Plex Sans (Body / SectionTitle / FONTS-06
         // sidebar_name_text) or Figtree (ChatSender), never in JetBrains
         // Mono, even when the name is an alphanumeric raw key.
+        let src = include_str!("app.rs");
         let sidebar_src = include_str!("app/sidebar.rs");
         let friends = method_source(
             sidebar_src,

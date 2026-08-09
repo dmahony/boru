@@ -11,16 +11,16 @@ use super::*;
 /// Cached dependency for the sidebar's Chats section.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct SidebarChatsRow {
-    topic: TopicId,
-    name: String,
-    preview: String,
-    preview_sender: String,
-    unread: u64,
-    last_seen_at_unix_ms: u64,
-    online: bool,
-    avatar: SidebarAvatarHandle,
-    profile_version: u64,
-    is_group: bool,
+    pub(crate) topic: TopicId,
+    pub(crate) name: String,
+    pub(crate) preview: String,
+    pub(crate) preview_sender: String,
+    pub(crate) unread: u64,
+    pub(crate) last_seen_at_unix_ms: u64,
+    pub(crate) online: bool,
+    pub(crate) avatar: SidebarAvatarHandle,
+    pub(crate) profile_version: u64,
+    pub(crate) is_group: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,109 +37,109 @@ impl std::hash::Hash for SidebarAvatarHandle {
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct SidebarChatsDependency {
-    dark_mode: bool,
-    conversations: Vec<SidebarChatsRow>,
-    is_empty: bool,
-    room_delete_confirm_topic: Option<TopicId>,
+    pub(crate) dark_mode: bool,
+    pub(crate) conversations: Vec<SidebarChatsRow>,
+    pub(crate) is_empty: bool,
+    pub(crate) room_delete_confirm_topic: Option<TopicId>,
 }
 
 /// Cached dependency for the sidebar's Discovered Peers section.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct SidebarDiscoveredPeerRow {
-    peer: PublicKey,
-    display_name: String,
-    avatar: SidebarAvatarHandle,
-    online: bool,
-    is_friend: bool,
-    request_state: Option<OutgoingRequestState>,
-    profile_version: u64,
+    pub(crate) peer: PublicKey,
+    pub(crate) display_name: String,
+    pub(crate) avatar: SidebarAvatarHandle,
+    pub(crate) online: bool,
+    pub(crate) is_friend: bool,
+    pub(crate) request_state: Option<OutgoingRequestState>,
+    pub(crate) profile_version: u64,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct SidebarDiscoveredPeersDependency {
-    dark_mode: bool,
-    peers: Vec<SidebarDiscoveredPeerRow>,
+    pub(crate) dark_mode: bool,
+    pub(crate) peers: Vec<SidebarDiscoveredPeerRow>,
 }
 
 /// A single public room advertisement shown in the sidebar.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct SidebarPublicRoomRow {
-    room_name: String,
-    member_count: u32,
-    author: PublicKey,
-    advertisement: RoomAdvertisement,
+    pub(crate) room_name: String,
+    pub(crate) member_count: u32,
+    pub(crate) author: PublicKey,
+    pub(crate) advertisement: RoomAdvertisement,
 }
 
 /// Cached dependency for the sidebar's Public Rooms section.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct SidebarPublicRoomsDependency {
-    dark_mode: bool,
-    local_public: PublicKey,
-    rooms: Vec<SidebarPublicRoomRow>,
+    pub(crate) dark_mode: bool,
+    pub(crate) local_public: PublicKey,
+    pub(crate) rooms: Vec<SidebarPublicRoomRow>,
 }
 
 /// Cached dependency for the sidebar's Friends section.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct SidebarFriendRow {
-    peer: PublicKey,
-    label: String,
-    avatar: SidebarAvatarHandle,
-    presence: PeerPresence,
-    profile_version: u64,
+    pub(crate) peer: PublicKey,
+    pub(crate) label: String,
+    pub(crate) avatar: SidebarAvatarHandle,
+    pub(crate) presence: PeerPresence,
+    pub(crate) profile_version: u64,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct SidebarFriendsDependency {
-    dark_mode: bool,
-    sidebar_revision: u64,
-    friend_request_search_input: String,
-    friend_request_error: String,
+    pub(crate) dark_mode: bool,
+    pub(crate) sidebar_revision: u64,
+    pub(crate) friend_request_search_input: String,
+    pub(crate) friend_request_error: String,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct SidebarFriendsRowsDependency {
-    dark_mode: bool,
-    sidebar_revision: u64,
-    friends: Vec<SidebarFriendRow>,
+    pub(crate) dark_mode: bool,
+    pub(crate) sidebar_revision: u64,
+    pub(crate) friends: Vec<SidebarFriendRow>,
 }
 
 /// Cached dependency for the sidebar's Friend Requests section.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct SidebarRequestRow {
-    request_id: String,
-    requester: PublicKey,
-    label: String,
+    pub(crate) request_id: String,
+    pub(crate) requester: PublicKey,
+    pub(crate) label: String,
 }
 
 /// A pending group-invite row displayed in the REQUESTS sidebar section.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct SidebarGroupInviteRow {
-    invite_id: Vec<u8>,
-    inviter_public_key: Vec<u8>,
-    group_name: String,
-    ticket: String,
-    inviter_label: String,
+    pub(crate) invite_id: Vec<u8>,
+    pub(crate) inviter_public_key: Vec<u8>,
+    pub(crate) group_name: String,
+    pub(crate) ticket: String,
+    pub(crate) inviter_label: String,
 }
 
 
 /// A tunnel request row rendered in the REQUESTS sidebar section.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct SidebarTunnelRequestRow {
-    peer: PublicKey,
-    tunnel_id: String,
-    label: String,
+    pub(crate) peer: PublicKey,
+    pub(crate) tunnel_id: String,
+    pub(crate) label: String,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct SidebarRequestsDependency {
-    dark_mode: bool,
+    pub(crate) dark_mode: bool,
     /// Changes whenever the persistent request store changes so iced::lazy
     /// cannot retain a stale list after an incoming request arrives.
-    requests_revision: u64,
-    incoming: Vec<SidebarRequestRow>,
-    friend_request_error: String,
-    group_invites: Vec<SidebarGroupInviteRow>,
-    tunnel_requests: Vec<SidebarTunnelRequestRow>,
+    pub(crate) requests_revision: u64,
+    pub(crate) incoming: Vec<SidebarRequestRow>,
+    pub(crate) friend_request_error: String,
+    pub(crate) group_invites: Vec<SidebarGroupInviteRow>,
+    pub(crate) tunnel_requests: Vec<SidebarTunnelRequestRow>,
 }
 
 impl IcedChat {
