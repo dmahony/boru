@@ -29,7 +29,11 @@
 
 use std::{
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
+    time::Instant,
 };
 
 use anyhow::anyhow;
@@ -37,7 +41,7 @@ use iroh::{PublicKey, SecretKey};
 use n0_error::{Result, StdResultExt};
 use rusqlite::{params, Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::catalogue_limits::CatalogueLimitsConfig;
 use crate::catalogue_model::{CatalogueView, RemoteSharedFile, SignedFileCatalogue};
@@ -522,6 +526,71 @@ pub struct GroupInviteRow {
 pub struct Storage {
     conn: Arc<Mutex<Connection>>,
     catalogue_limits: CatalogueLimitsConfig,
+    /// Async-facade activity tracker.  Tracks in-flight blocking operations
+    /// so `flush`/`shutdown` can wait for queued writes deterministically.
+    /// Only present when the `net` feature (Tokio) is enabled.
+    #[cfg(feature = "net")]
+    activity: Arc<DbActivity>,
+}
+
+/// Threshold (milliseconds) above which a blocking storage operation is
+/// logged as slow.  Instrumentation only records the operation label and
+/// elapsed time — never message contents.
+#[cfg(feature = "net")]
+const SLOW_STORAGE_OP_MS: u64 = 100;
+
+/// Tracks in-flight blocking database operations.
+///
+/// The async facade runs repository work on the Tokio blocking pool via
+/// `spawn_blocking`.  This counter lets `flush`/`shutdown` wait until every
+/// queued write has completed (or failed explicitly) before returning.
+#[cfg(feature = "net")]
+#[derive(Debug, Default)]
+struct DbActivity {
+    /// Number of blocking operations currently queued or executing.
+    in_flight: AtomicUsize,
+    /// Set by `shutdown`; new operations fail fast once set.
+    closed: AtomicBool,
+    /// Signalled when `in_flight` drops to zero.
+    drained: tokio::sync::Notify,
+}
+
+#[cfg(feature = "net")]
+impl DbActivity {
+    /// Reserve a slot for one blocking operation.
+    ///
+    /// Returns `false` when the store is shut down; the caller must fail
+    /// explicitly instead of queueing more work.
+    fn begin(&self) -> bool {
+        if self.closed.load(Ordering::SeqCst) {
+            return false;
+        }
+        self.in_flight.fetch_add(1, Ordering::SeqCst);
+        true
+    }
+
+    /// Release the slot after a blocking operation finished (or panicked).
+    fn end(&self) {
+        if self.in_flight.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.drained.notify_waiters();
+        }
+    }
+
+    /// Wait until every in-flight operation has finished.
+    async fn wait_idle(&self) {
+        loop {
+            if self.in_flight.load(Ordering::SeqCst) == 0 {
+                return;
+            }
+            let notified = self.drained.notified();
+            // Re-check after creating the future so a decrement between the
+            // load and `await` cannot be missed (classic Notify race guard).
+            if self.in_flight.load(Ordering::SeqCst) == 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
 }
 
 /// Durable result of creating an outgoing direct message.
@@ -688,6 +757,8 @@ impl Storage {
         let storage = Self {
             conn: Arc::new(Mutex::new(conn)),
             catalogue_limits,
+            #[cfg(feature = "net")]
+            activity: Arc::new(DbActivity::default()),
         };
 
         // Check DB integrity before touching any data.
@@ -718,6 +789,8 @@ impl Storage {
         let storage = Self {
             conn: Arc::new(Mutex::new(conn)),
             catalogue_limits,
+            #[cfg(feature = "net")]
+            activity: Arc::new(DbActivity::default()),
         };
         storage.run_migrations()?;
         Ok(storage)
@@ -5800,6 +5873,75 @@ impl Storage {
         f(&conn)
     }
 
+    // ── Async facade (BORU-AUDIT-18) ───────────────────────────────────
+    //
+    // SQLite work is synchronous disk I/O.  Calling the repository methods
+    // directly from a Tokio task blocks a worker thread.  These methods run
+    // the same work on the Tokio blocking pool so worker threads are never
+    // stalled, and they expose explicit flush/shutdown semantics so queued
+    // writes either complete or fail visibly.
+
+    /// Run a blocking storage operation on the Tokio blocking pool.
+    ///
+    /// The closure receives the [`Storage`] clone owned by the blocking task
+    /// and may call any typed repository method (or [`with_conn`](Self::with_conn)
+    /// for raw SQL).  The connection is locked *inside* the blocking task —
+    /// this facade never holds it across an await point, and transactions
+    /// must be started and committed entirely inside the closure.
+    ///
+    /// Slow operations (>= [`SLOW_STORAGE_OP_MS`]) are logged with a label
+    /// and elapsed time only; message contents are never logged.
+    ///
+    /// If the store has been shut down, this fails fast instead of queueing.
+    ///
+    /// Returns `anyhow::Result`; repository errors (n0-error `AnyError`)
+    /// are converted so callers in either error convention can use `?`.
+    #[cfg(feature = "net")]
+    pub async fn run_blocking<F, T, E>(&self, op: &'static str, f: F) -> anyhow::Result<T>
+    where
+        F: FnOnce(&Storage) -> Result<T, E> + Send + 'static,
+        E: Into<anyhow::Error> + Send + 'static,
+        T: Send + 'static,
+    {
+        if !self.activity.begin() {
+            return Err(anyhow!("storage is shut down; refusing new operation '{op}'"));
+        }
+        let storage = self.clone();
+        let started = Instant::now();
+        let result = tokio::task::spawn_blocking(move || f(&storage)).await;
+        self.activity.end();
+        let elapsed = started.elapsed();
+        if elapsed.as_millis() as u64 >= SLOW_STORAGE_OP_MS {
+            warn!(
+                op,
+                elapsed_ms = elapsed.as_millis() as u64,
+                "slow storage operation"
+            );
+        }
+        match result {
+            Ok(Ok(r)) => Ok(r),
+            Ok(Err(e)) => Err(anyhow!("storage operation '{op}' failed: {:#}", e.into())),
+            Err(e) => Err(anyhow!("storage worker task failed for '{op}': {e}")),
+        }
+    }
+
+    /// Wait until every previously-queued blocking operation has completed.
+    ///
+    /// A write that was queued before `flush` is either fully applied or has
+    /// failed explicitly by the time this returns.
+    #[cfg(feature = "net")]
+    pub async fn flush(&self) {
+        self.activity.wait_idle().await;
+    }
+
+    /// Shut the store down: mark it closed so new operations fail fast, then
+    /// wait for all in-flight writes to complete or fail explicitly.
+    #[cfg(feature = "net")]
+    pub async fn shutdown(&self) {
+        self.activity.closed.store(true, Ordering::SeqCst);
+        self.flush().await;
+    }
+
     // ── Outgoing messages (Phase 10: SQLite replacement for outbox.json) ──
 
     /// Insert a new outgoing message entry (delivery_state starts as "queued").
@@ -8969,5 +9111,148 @@ mod tests {
             "the orphan record must be skipped, leaving only the healthy file"
         );
         assert_eq!(view.files[0].content_hash, "hash-z");
+    }
+
+    // ── Async facade (BORU-AUDIT-18) ─────────────────────────────────
+
+    /// A slow simulated SQLite query must not stall an independent Tokio
+    /// timer/network task: the query runs on the blocking pool, so a timer
+    /// fires long before the query completes.
+    #[cfg(feature = "net")]
+    #[tokio::test]
+    async fn slow_db_op_does_not_stall_independent_timer() {
+        let storage = Storage::memory().unwrap();
+
+        // Start a deliberately slow blocking "query" (300ms of fake work).
+        let slow_task = tokio::spawn({
+            let storage = storage.clone();
+            async move {
+                storage
+                    .run_blocking("test.slow_query", |_| {
+                        std::thread::sleep(std::time::Duration::from_millis(300));
+                        Ok::<_, anyhow::Error>(42u64)
+                    })
+                    .await
+            }
+        });
+
+        // Give the blocking op a head start so it is genuinely in flight.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        // An independent timer must fire well before the 300ms op completes.
+        // If the facade ran the query on this worker thread, the timeout
+        // would not be polled until ~300ms and this would panic.
+        let started = std::time::Instant::now();
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            async {
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            },
+        )
+        .await
+        .expect("independent timer stalled behind slow DB op");
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(80),
+            "timer took {:?} — worker thread was blocked by the DB op",
+            started.elapsed()
+        );
+
+        let value = slow_task.await.unwrap().unwrap();
+        assert_eq!(value, 42);
+    }
+
+    /// Concurrent repository requests through the async facade are
+    /// serialized safely and every request returns correct results.
+    #[cfg(feature = "net")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_facade_requests_serialize_and_return_correct_results() {
+        let storage = Storage::memory().unwrap();
+        let mut handles = Vec::new();
+        for i in 0..16u64 {
+            let storage = storage.clone();
+            handles.push(tokio::spawn(async move {
+                let hash = format!("concurrent-hash-{i}");
+                let result = storage
+                    .run_blocking("test.concurrent_write", move |s| {
+                        s.put_file_object(&hash, i, "text/plain", "f.txt", b"data")
+                            .map_err(|e| anyhow::anyhow!("{e:#}"))?;
+                        Ok::<_, anyhow::Error>(())
+                    })
+                    .await;
+                assert!(result.is_ok(), "write {i} failed: {result:?}");
+                i
+            }));
+        }
+        for handle in handles {
+            handle.await.unwrap();
+        }
+        // Every write landed with the right payload — serialization did not
+        // lose or corrupt any request.
+        for i in 0..16u64 {
+            let hash = format!("concurrent-hash-{i}");
+            let obj = storage
+                .get_file_object(&hash)
+                .expect("read failed")
+                .expect("object missing");
+            assert_eq!(obj.size, i, "concurrent write {i} had wrong payload");
+        }
+    }
+
+    /// Shutdown while writes are queued is deterministic: queued writes
+    /// complete (they were admitted before close), and operations submitted
+    /// after shutdown fail fast instead of queueing forever.
+    #[cfg(feature = "net")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn shutdown_flushes_queued_writes_and_rejects_new() {
+        let storage = Storage::memory().unwrap();
+        let mut handles = Vec::new();
+
+        // Queue a burst of writes, some still in flight when shutdown hits.
+        for i in 0..8u64 {
+            let storage = storage.clone();
+            handles.push(tokio::spawn(async move {
+                let hash = format!("shutdown-hash-{i}");
+                let result = storage
+                    .run_blocking("test.shutdown_write", move |s| {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            10 + (i % 3) * 10,
+                        ));
+                        s.put_file_object(&hash, i, "text/plain", "f.txt", b"data")
+                            .map_err(|e| anyhow::anyhow!("{e:#}"))?;
+                        Ok::<_, anyhow::Error>(hash)
+                    })
+                    .await;
+                (i, result)
+            }));
+        }
+
+        // Let every task pass the admission check so all writes are
+        // guaranteed to be in flight, then shut down mid-burst.
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        storage.shutdown().await;
+
+        // Every admitted write completed — none hung, none was lost.
+        for handle in handles {
+            let (i, result) = handle.await.unwrap();
+            assert!(result.is_ok(), "queued write {i} failed: {result:?}");
+        }
+        for i in 0..8u64 {
+            let hash = format!("shutdown-hash-{i}");
+            let obj = storage
+                .get_file_object(&hash)
+                .expect("read after shutdown failed")
+                .expect("queued write vanished after shutdown");
+            assert_eq!(obj.size, i);
+        }
+
+        // After shutdown, new operations fail fast instead of queueing.
+        let err = storage
+            .run_blocking("test.after_shutdown", |_| Ok::<_, anyhow::Error>(1u64))
+            .await;
+        assert!(err.is_err(), "operations after shutdown must fail fast");
+        assert!(
+            err.unwrap_err().to_string().contains("shut down"),
+            "error should name the shutdown state"
+        );
     }
 }

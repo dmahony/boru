@@ -552,6 +552,18 @@ impl BatchedProgressWriter {
         Ok(())
     }
 
+    /// Drain all pending updates and return them as owned data without
+    /// writing.  Used by async callers that must persist the batch on the
+    /// Tokio blocking pool (BORU-AUDIT-18) instead of blocking a worker
+    /// thread inside [`flush`](Self::flush).
+    pub fn drain(&self) -> Vec<(i64, u64, String)> {
+        let mut pending = self.pending.lock().expect("batched writer poisoned");
+        pending
+            .drain()
+            .map(|(id, (bytes, state))| (id, bytes, state))
+            .collect()
+    }
+
     /// Returns `true` when there are queued updates waiting to be flushed.
     pub fn has_pending(&self) -> bool {
         !self

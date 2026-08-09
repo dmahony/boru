@@ -709,7 +709,22 @@ async fn serve_catalogue(
             }
 
             // ── Build the signed catalogue for this requester ──────────
-            let catalogue = match handler.build_catalogue_for_requester(&remote_id) {
+            // `build_catalogue_for_requester` runs SQLite queries; execute
+            // on the blocking pool so the QUIC accept worker is never
+            // stalled (BORU-AUDIT-18).
+            let handler_clone = handler.clone();
+            let remote_id_clone = remote_id;
+            let catalogue = match tokio::task::spawn_blocking(move || {
+                handler_clone.build_catalogue_for_requester(&remote_id_clone)
+            })
+            .await
+            .map_err(|join_err| {
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("catalogue worker panicked: {join_err}"),
+                )) as Box<dyn std::error::Error + Send + Sync>
+            })?
+            {
                 Ok(cat) => cat,
                 Err(code) => {
                     let response = CatalogResponse::error(code, "request denied");
@@ -882,18 +897,30 @@ async fn serve_catalogue(
             // ── Get manifest revision for early check ──────────────────
             let current_revision = handler
                 .storage
-                .get_manifest_state(&handler.profile_user_id)
+                .run_blocking("catalogue.get_manifest_state", {
+                    let profile_user_id = handler.profile_user_id.clone();
+                    move |s| s.get_manifest_state(&profile_user_id)
+                })
+                .await
                 .ok()
                 .flatten()
                 .map(|m| m.revision)
                 .unwrap_or(0);
 
             // ── Build the requester-specific view ──────────────────────
-            let view = match handler.storage.catalogue_entries_for_peer(
-                &handler.profile_user_id,
-                &remote_id,
-                &handler.friends,
-            ) {
+            // `catalogue_entries_for_peer` runs a SQLite query; run it on the
+            // blocking pool so the QUIC accept worker is never stalled
+            // (BORU-AUDIT-18).
+            let view = match handler
+                .storage
+                .run_blocking("catalogue.entries_for_peer", {
+                    let profile_user_id = handler.profile_user_id.clone();
+                    let remote_id = remote_id;
+                    let friends = handler.friends.clone();
+                    move |s| s.catalogue_entries_for_peer(&profile_user_id, &remote_id, &friends)
+                })
+                .await
+            {
                 Ok(v) => v,
                 Err(e) => {
                     error!(
@@ -978,7 +1005,22 @@ async fn serve_catalogue(
             send.finish()?;
         }
         CatalogRequest::GetFileDetails { shared_file_id } => {
-            match handler.get_file_details_for_requester(&remote_id, &shared_file_id) {
+            // `get_file_details_for_requester` runs SQLite queries; execute
+            // on the blocking pool so the QUIC accept worker is never
+            // stalled (BORU-AUDIT-18).
+            let handler_clone = handler.clone();
+            let shared_file_id_clone = shared_file_id.clone();
+            match tokio::task::spawn_blocking(move || {
+                handler_clone.get_file_details_for_requester(&remote_id, &shared_file_id_clone)
+            })
+            .await
+            .map_err(|join_err| {
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("catalogue file-details worker panicked: {join_err}"),
+                )) as Box<dyn std::error::Error + Send + Sync>
+            })?
+            {
                 Ok(Some(file)) => {
                     // ── Validate the file entry before sending ────────
                     if let Err(e) = file.validate() {

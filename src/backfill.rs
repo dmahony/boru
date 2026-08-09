@@ -418,7 +418,9 @@ async fn serve_backfill(
             postcard::from_bytes(&req_buf).map_err(|e| n0_error::anyerr!("decode request: {e}"))?;
 
         // Authorization gate — runs before any storage query.  A remote
-        // request without a concrete topic is never served.
+        // request without a concrete topic is never served.  The
+        // authorization queries read SQLite; run them on the blocking pool
+        // so the QUIC accept worker is never stalled (BORU-AUDIT-18).
         let topic = match request.topic {
             Some(t) => t,
             None => {
@@ -429,7 +431,17 @@ async fn serve_backfill(
                 bail_any!("backfill: topic required");
             }
         };
-        if !authorizer.authorize(&remote_id, &topic) {
+        let authorized = {
+            let authorizer = authorizer.clone();
+            let remote_id = remote_id;
+            let topic = topic;
+            tokio::task::spawn_blocking(move || authorizer.authorize(&remote_id, &topic))
+                .await
+                .map_err(|join_err| {
+                    n0_error::anyerr!("backfill: authorize worker panicked: {join_err}")
+                })?
+        };
+        if !authorized {
             // Audit log: remote peer id + safe topic identifier only.
             // Message contents are never logged.
             warn!(
@@ -452,14 +464,30 @@ async fn serve_backfill(
         // Query storage for recent messages for the authorized topic.
         let (resp_bytes, count) = {
             // Determine the total available count for accurate `skipped`.
+            // SQLite read — run on the blocking pool so the QUIC accept
+            // worker is never stalled (BORU-AUDIT-18).
             let total_available = storage
-                .count_chat_messages_for_topic(&topic)
+                .run_blocking("backfill.count_messages", {
+                    let topic = topic;
+                    move |s| {
+                        s.count_chat_messages_for_topic(&topic)
+                            .map_err(|e| anyhow::anyhow!("{e:#}"))
+                    }
+                })
+                .await
                 .unwrap_or(0);
 
             // Collect entries — bounded topic query only; the unscoped
             // recent-history query is never reachable from the network.
             let entries: Vec<_> = storage
-                .get_recent_chat_messages_for_topic(&topic, max_messages as usize)
+                .run_blocking("backfill.recent_messages", {
+                    let topic = topic;
+                    move |s| {
+                        s.get_recent_chat_messages_for_topic(&topic, max_messages as usize)
+                            .map_err(|e| anyhow::anyhow!("{e:#}"))
+                    }
+                })
+                .await
                 .unwrap_or_default()
                 .into_iter()
                 .map(|(ts, bytes)| (ts, bytes))

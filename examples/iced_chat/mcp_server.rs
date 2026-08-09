@@ -3462,8 +3462,13 @@ async fn handle_download_file(req: &JsonRpcRequest, state: &McpAppState) -> Resu
 
     // Mark the durable row as actively downloading, then run the transfer in
     // the background. The MCP response returns immediately so the harness can
-    // poll progress via `boru_get_download_status`.
-    let _ = storage.update_download_progress(download_id, 0, "downloading");
+    // poll progress via `boru_get_download_status`.  Storage writes run on
+    // the blocking pool (BORU-AUDIT-18).
+    let _ = storage
+        .run_blocking("mcp.update_download_progress", move |s| {
+            s.update_download_progress(download_id, 0, "downloading")
+        })
+        .await;
     tokio::spawn(async move {
         let progress_storage = storage_task.clone();
         let result = download_blob_to_file(
@@ -3478,8 +3483,16 @@ async fn handle_download_file(req: &JsonRpcRequest, state: &McpAppState) -> Resu
                 use boru_core::chat_callbacks::TransferProgress;
                 match ev {
                     TransferProgress::Progress { bytes, .. } => {
-                        let _ = progress_storage
-                            .update_download_progress(download_id, bytes, "downloading");
+                        // Progress callback is synchronous; defer the SQLite
+                        // write to the blocking pool via a dedicated task.
+                        let stg = progress_storage.clone();
+                        tokio::spawn(async move {
+                            let _ = stg
+                                .run_blocking("mcp.update_download_progress", move |s| {
+                                    s.update_download_progress(download_id, bytes, "downloading")
+                                })
+                                .await;
+                        });
                     }
                     _ => {}
                 }
@@ -3490,7 +3503,12 @@ async fn handle_download_file(req: &JsonRpcRequest, state: &McpAppState) -> Resu
 
         match result {
             Ok(()) => {
-                if let Err(e) = storage_task.complete_download(download_id, max_bytes.unwrap_or(0)) {
+                if let Err(e) = storage_task
+                    .run_blocking("mcp.complete_download", move |s| {
+                        s.complete_download(download_id, max_bytes.unwrap_or(0))
+                    })
+                    .await
+                {
                     tracing::warn!(
                         download_id,
                         "boru_download_file: complete_download failed: {e}"
@@ -3500,7 +3518,13 @@ async fn handle_download_file(req: &JsonRpcRequest, state: &McpAppState) -> Resu
             }
             Err(e) => {
                 let msg = format!("{e:#}");
-                if let Err(e2) = storage_task.fail_download(download_id, &msg, None) {
+                let msg_cl = msg.clone();
+                if let Err(e2) = storage_task
+                    .run_blocking("mcp.fail_download", move |s| {
+                        s.fail_download(download_id, &msg_cl, None)
+                    })
+                    .await
+                {
                     tracing::warn!(
                         download_id,
                         "boru_download_file: fail_download failed: {e2}"

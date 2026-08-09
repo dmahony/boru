@@ -1000,7 +1000,7 @@ dependencies = [
 
 [[package]]
 name = "boru-core"
-version = "0.176.7"
+version = "0.176.28"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1082,6 +1082,7 @@ dependencies = [
  "url",
  "walkdir",
  "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]

@@ -7529,7 +7529,19 @@ async fn generate_shared_by_me_thumbnail(
     is_video: bool,
     cache_dir: &std::path::Path,
 ) -> Option<iced::widget::image::Handle> {
-    let object = storage.get_file_object(content_hash).ok().flatten()?;
+    // SQLite read — run on the blocking pool so the Task::perform worker
+    // never blocks on disk I/O (BORU-AUDIT-18).
+    let object = storage
+        .run_blocking("app.thumbnail.get_file_object", {
+            let content_hash = content_hash.to_owned();
+            move |s| {
+                s.get_file_object(&content_hash)
+                    .map_err(|e| anyhow::anyhow!("{e:#}"))
+            }
+        })
+        .await
+        .ok()
+        .flatten()?;
     if is_video {
         let path = std::path::PathBuf::from(object.source_path.as_deref()?);
         let cache_dir = cache_dir.to_path_buf();
@@ -16145,14 +16157,22 @@ impl IcedChat {
                             let peer2 = peer;
                             return iced::Task::perform(
                                 async move {
-                                    // Open storage for durable cursor persistence.
-                                    let storage = Storage::open(&dd).ok();
-                                    // Read the last-synced cursor position, or 0 if none.
-                                    let since_ms = storage
-                                        .as_ref()
-                                        .and_then(|s| s.get_sync_cursor(&peer2).ok().flatten())
-                                        .map(|c| c.last_sync_at_ms)
-                                        .unwrap_or(0);
+                                    // Open storage + read the last-synced cursor
+                                    // position on the blocking pool — Storage::open
+                                    // and get_sync_cursor are synchronous SQLite
+                                    // I/O that must not run on a Tokio worker
+                                    // (BORU-AUDIT-18).
+                                    let dd_cursor = dd.clone();
+                                    let since_ms = tokio::task::spawn_blocking(move || {
+                                        let storage = Storage::open(&dd_cursor).ok();
+                                        storage
+                                            .as_ref()
+                                            .and_then(|s| s.get_sync_cursor(&peer2).ok().flatten())
+                                            .map(|c| c.last_sync_at_ms)
+                                            .unwrap_or(0)
+                                    })
+                                    .await
+                                    .unwrap_or(0);
 
                                     let identity = MailboxIdentity::from_secret(&sk);
                                     let mut store =
@@ -16210,13 +16230,18 @@ impl IcedChat {
                                     // Save is a no-op — SQLite unified storage handles persistence.
 
                                     // Persist the cursor so subsequent reconnects resume from here.
-                                    if let Some(stg) = &storage {
-                                        let _ = stg.upsert_sync_cursor(
-                                            &peer2,
-                                            None,
-                                            now_ms().max(0) as u64,
-                                        );
-                                    }
+                                    // Storage::open + upsert_sync_cursor are synchronous SQLite
+                                    // I/O — run on the blocking pool (BORU-AUDIT-18).
+                                    let _ = tokio::task::spawn_blocking(move || {
+                                        if let Some(stg) = Storage::open(&dd).ok() {
+                                            let _ = stg.upsert_sync_cursor(
+                                                &peer2,
+                                                None,
+                                                now_ms().max(0) as u64,
+                                            );
+                                        }
+                                    })
+                                    .await;
                                     // Send acks for all processed envelopes (new + replayed).
                                     for msg_id in &ack_ids {
                                         let ack = MailboxAck::sign(&sk, msg_id, peer2);
@@ -16779,14 +16804,25 @@ impl IcedChat {
                             // the same file skips re-ingesting. ──
                             if let Some(stg) = storage.as_ref() {
                                 let hash_hex = blob_hash.to_hex().to_string();
-                                if let Err(e) = stg.record_local_file_object(
-                                    &hash_hex,
-                                    file_size,
-                                    "application/octet-stream",
-                                    &filename,
-                                    &abs_path,
-                                    &hash_hex,
-                                ) {
+                                // SQLite write — defer to the blocking pool
+                                // (BORU-AUDIT-18).
+                                let stg2 = stg.clone();
+                                let hash_hex_cl = hash_hex.clone();
+                                let filename_cl = filename.clone();
+                                let abs_path_cl = abs_path.clone();
+                                if let Err(e) = stg2
+                                    .run_blocking("app.record_local_file_object", move |s| {
+                                        s.record_local_file_object(
+                                            &hash_hex_cl,
+                                            file_size,
+                                            "application/octet-stream",
+                                            &filename_cl,
+                                            &abs_path_cl,
+                                            &hash_hex_cl,
+                                        )
+                                    })
+                                    .await
+                                {
                                     tracing::warn!(
                                         name = %filename,
                                         error = %e,
@@ -17043,12 +17079,25 @@ impl IcedChat {
                         // after the announcement is out. A failure here must
                         // not fail the send — the image is already delivered.
                         if let Some(storage) = storage.as_ref() {
-                            if let Err(e) = storage.register_chat_upload(
-                                &local_pk.to_string(),
-                                &wire_name,
-                                mime_type,
-                                &opt_bytes,
-                            ) {
+                            // SQLite write — defer to the blocking pool so
+                            // the Task::perform worker never blocks on disk
+                            // I/O (BORU-AUDIT-18).
+                            let stg = storage.clone();
+                            let local_pk_str = local_pk.to_string();
+                            let wire_name_cl = wire_name.clone();
+                            let mime_cl = mime_type.to_string();
+                            let bytes_cl = opt_bytes.clone();
+                            if let Err(e) = stg
+                                .run_blocking("app.register_chat_upload", move |s| {
+                                    s.register_chat_upload(
+                                        &local_pk_str,
+                                        &wire_name_cl,
+                                        &mime_cl,
+                                        &bytes_cl,
+                                    )
+                                })
+                                .await
+                            {
                                 tracing::warn!(
                                     name = %wire_name,
                                     error = %e,
@@ -19358,10 +19407,18 @@ impl IcedChat {
                                 // makes the durable Downloading/Downloaded views
                                 // consistent with what the user browsed.
                                 if let Some(storage) = storage.as_ref() {
-                                    if let Err(e) =
-                                        boru_core::catalogue_client::process_and_store_remote_catalogue(
-                                            storage, &catalogue,
-                                        )
+                                    // SQLite write — defer to the blocking pool
+                                    // (BORU-AUDIT-18).
+                                    let stg = storage.clone();
+                                    let catalogue = catalogue.clone();
+                                    if let Err(e) = stg
+                                        .run_blocking("app.store_remote_catalogue", move |s| {
+                                            boru_core::catalogue_client::process_and_store_remote_catalogue(
+                                                s, &catalogue,
+                                            )
+                                            .map_err(|e| anyhow::anyhow!("{e}"))
+                                        })
+                                        .await
                                     {
                                         tracing::warn!(
                                             peer = %peer.fmt_short(),

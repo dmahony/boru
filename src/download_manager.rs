@@ -127,7 +127,14 @@ impl DownloadManager {
             "downloading",
             "verifying",
         ] {
-            interrupted.extend(self.storage.list_downloads_by_state(state)?);
+            let storage = self.storage.clone();
+            interrupted.extend(
+                storage
+                    .run_blocking("download_manager.list_by_state", move |s| {
+                        s.list_downloads_by_state(state)
+                    })
+                    .await?,
+            );
         }
         // Recovery validates and re-installs interrupted downloads, which
         // stats, opens, reads, and renames temporary files — all blocking
@@ -145,7 +152,14 @@ impl DownloadManager {
         // Create startup admissions and push them into the scheduler.
         let mut items: Vec<(i64, QueuedDownload)> = Vec::new();
         for download in &interrupted {
-            let Some(restored) = self.storage.get_download(download.id)? else {
+            let storage = self.storage.clone();
+            let download_id = download.id;
+            let restored = storage
+                .run_blocking("download_manager.get_download", move |s| {
+                    s.get_download(download_id)
+                })
+                .await?;
+            let Some(restored) = restored else {
                 continue;
             };
 
@@ -308,17 +322,22 @@ impl DownloadManager {
         // referenced in a sub-SELECT.
         //
         // Skip downloads that are already managed by the startup scheduler.
-        let maybe_id: Option<(i64, String)> = self.storage.with_conn(|conn| {
-            let id_and_peer: Option<(i64, String)> = conn
-                .query_row(
-                    "SELECT id, remote_peer FROM downloads WHERE state = 'queued'
-                     ORDER BY created_at_ms ASC LIMIT 1",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .ok();
-            Ok(id_and_peer)
-        })?;
+        let maybe_id: Option<(i64, String)> = self
+            .storage
+            .run_blocking("download_manager.claim_queued", |s| {
+                s.with_conn(|conn| {
+                    let id_and_peer: Option<(i64, String)> = conn
+                        .query_row(
+                            "SELECT id, remote_peer FROM downloads WHERE state = 'queued'
+                             ORDER BY created_at_ms ASC LIMIT 1",
+                            [],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .ok();
+                    Ok(id_and_peer)
+                })
+            })
+            .await?;
 
         let Some((download_id, _remote_peer)) = maybe_id else {
             return Ok(false);
@@ -335,16 +354,21 @@ impl DownloadManager {
             }
         }
 
-        let changed = self.storage.with_conn(|conn| {
-            let n = conn
-                .execute(
-                    "UPDATE downloads SET state = 'resolving_peer', updated_at_ms = ?1
-                     WHERE id = ?2 AND state = 'queued'",
-                    params![now, download_id],
-                )
-                .std_context("claim queued download")?;
-            Ok(n)
-        })?;
+        let changed = self
+            .storage
+            .run_blocking("download_manager.claim_update", move |s| {
+                s.with_conn(|conn| {
+                    let n = conn
+                        .execute(
+                            "UPDATE downloads SET state = 'resolving_peer', updated_at_ms = ?1
+                             WHERE id = ?2 AND state = 'queued'",
+                            params![now, download_id],
+                        )
+                        .std_context("claim queued download")?;
+                    Ok(n)
+                })
+            })
+            .await?;
 
         if changed == 0 {
             // Another worker claimed it first — nothing to do this tick.

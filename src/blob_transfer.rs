@@ -39,6 +39,44 @@ use crate::download_limits::{BatchedProgressWriter, DownloadLimiter};
 use crate::file_access_protocol::SignedDownloadDescriptor;
 use crate::storage::Storage;
 
+/// Persist a download failure on the Tokio blocking pool.
+///
+/// Direct `storage.fail_download` calls from async transfer tasks block a
+/// worker thread (BORU-AUDIT-18); route them through the async facade so
+/// the SQLite write runs on the blocking pool instead.
+async fn fail_download_blocking(storage: &Storage, download_id: i64, msg: &str) -> Result<()> {
+    let msg_owned = msg.to_owned();
+    storage
+        .run_blocking("blob_transfer.fail_download", move |s| {
+            s.fail_download(download_id, &msg_owned, None)
+        })
+        .await
+}
+
+/// Persist a progress batch on the Tokio blocking pool.
+///
+/// Drains the batcher locally (a cheap in-memory lock) and runs the SQLite
+/// write on the blocking pool so async transfer tasks never block a worker
+/// thread (BORU-AUDIT-18).
+async fn flush_progress_blocking(
+    batcher: &BatchedProgressWriter,
+    storage: &Storage,
+) -> Result<()> {
+    let batch = batcher.drain();
+    if batch.is_empty() {
+        return Ok(());
+    }
+    storage
+        .run_blocking("blob_transfer.flush_progress", move |s| {
+            let refs: Vec<(i64, u64, &str)> = batch
+                .iter()
+                .map(|(id, bytes, state)| (*id, *bytes, state.as_str()))
+                .collect();
+            s.flush_progress_batch(&refs)
+        })
+        .await
+}
+
 // ── Configuration ──────────────────────────────────────────────────────────
 
 /// Configuration for a blob transfer operation.
@@ -161,7 +199,12 @@ pub async fn transfer_blob_to_temp(
 
     // ── 1. Record temp path in storage (crash recovery) ─────────────────
     let temp_str = temp_path.to_string_lossy().to_string();
-    storage.set_download_temp_path(download_id, &temp_str)?;
+    storage
+        .run_blocking("blob_transfer.set_temp_path", {
+            let temp = temp_str.clone();
+            move |s| s.set_download_temp_path(download_id, &temp)
+        })
+        .await?;
     debug!(download_id, path = %temp_str, "blob-transfer: recorded temp path");
 
     on_progress(BlobTransferProgress::Started { total_bytes });
@@ -254,7 +297,7 @@ pub async fn transfer_blob_to_temp(
             None,
             None,
         );
-        storage.fail_download(download_id, &msg, None)?;
+        fail_download_blocking(storage, download_id, &msg).await?;
         on_progress(BlobTransferProgress::Failed { error: msg.clone() });
         return Err(anyhow::anyhow!("{msg}"));
     }
@@ -288,7 +331,7 @@ pub async fn transfer_blob_to_temp(
             None,
             None,
         );
-        storage.fail_download(download_id, &msg, None)?;
+        fail_download_blocking(storage, download_id, &msg).await?;
         on_progress(BlobTransferProgress::Failed { error: msg.clone() });
         return Err(anyhow::anyhow!("{msg}"));
     }
@@ -362,7 +405,7 @@ async fn stage_network_download(
             );
             warn!(download_id, "{msg}");
             on_progress(BlobTransferProgress::Failed { error: msg.clone() });
-            storage.fail_download(download_id, &msg, None)?;
+            fail_download_blocking(storage, download_id, &msg).await?;
             return Err(anyhow::anyhow!("{msg}"));
         }
 
@@ -375,7 +418,7 @@ async fn stage_network_download(
             // Stream ended — network download completed successfully.
             // Force a final flush of any queued progress.
             if batcher.has_pending() {
-                if let Err(e) = batcher.flush(|batch| storage.flush_progress_batch(batch)) {
+                if let Err(e) = flush_progress_blocking(batcher, storage).await {
                     warn!(
                         download_id,
                         "blob-transfer: final progress persist failed: {e:#}"
@@ -391,7 +434,7 @@ async fn stage_network_download(
 
                 // Queue the progress update; flush if the interval has elapsed.
                 if batcher.submit(download_id, network_bytes, "downloading") {
-                    if let Err(e) = batcher.flush(|batch| storage.flush_progress_batch(batch)) {
+                    if let Err(e) = flush_progress_blocking(batcher, storage).await {
                         warn!(
                             download_id,
                             bytes = network_bytes,
@@ -422,14 +465,14 @@ async fn stage_network_download(
                 let msg = format!("blob-transfer: download error: {e}");
                 error!(download_id, "{msg}");
                 on_progress(BlobTransferProgress::Failed { error: msg.clone() });
-                storage.fail_download(download_id, &msg, None)?;
+                fail_download_blocking(storage, download_id, &msg).await?;
                 return Err(anyhow::anyhow!("{msg}"));
             }
             iroh_blobs::api::downloader::DownloadProgressItem::DownloadError => {
                 let msg = "blob-transfer: download error".to_string();
                 error!(download_id, "{msg}");
                 on_progress(BlobTransferProgress::Failed { error: msg.clone() });
-                storage.fail_download(download_id, &msg, None)?;
+                fail_download_blocking(storage, download_id, &msg).await?;
                 return Err(anyhow::anyhow!("{msg}"));
             }
             // Ignore TryProvider, ProviderFailed, PartComplete
@@ -497,7 +540,7 @@ async fn stage_copy_to_temp(
             );
             warn!(download_id, "{msg}");
             on_progress(BlobTransferProgress::Failed { error: msg.clone() });
-            storage.fail_download(download_id, &msg, None)?;
+            fail_download_blocking(storage, download_id, &msg).await?;
             return Err(anyhow::anyhow!("{msg}"));
         }
 
@@ -527,7 +570,7 @@ async fn stage_copy_to_temp(
         // ── Persist progress periodically via batched writer ──────
         let total_received = initial_bytes + bytes_written;
         if batcher.submit(download_id, total_received, "downloading") {
-            if let Err(e) = batcher.flush(|batch| storage.flush_progress_batch(batch)) {
+            if let Err(e) = flush_progress_blocking(batcher, storage).await {
                 warn!(
                     download_id,
                     bytes = total_received,
@@ -568,7 +611,7 @@ async fn stage_copy_to_temp(
     // Force a final progress persist.
     let total_received = initial_bytes + bytes_written;
     if batcher.submit(download_id, total_received, "downloading") || batcher.has_pending() {
-        if let Err(e) = batcher.flush(|batch| storage.flush_progress_batch(batch)) {
+        if let Err(e) = flush_progress_blocking(batcher, storage).await {
             warn!(
                 download_id,
                 bytes = total_received,
@@ -650,16 +693,29 @@ pub async fn request_and_transfer_blob(
     // key reconstructed from the response itself.  The expected content hash
     // is the request's canonical raw bytes — the same value the server must
     // have signed into the descriptor's `blob_hash`.
-    let descriptor = crate::file_access_client::handle_permission_response(
-        storage,
-        download_id,
-        response,
-        &server_pk,
-        local_pk,
-        request.expected_content_hash,
-        expected_size,
-    )?
-    .ok_or_else(|| anyhow::anyhow!("permission denied or retryable error"))?;
+    //
+    // `handle_permission_response` transitions the download row in SQLite;
+    // run it on the blocking pool so the async worker is never stalled
+    // (BORU-AUDIT-18).
+    let server_pk_owned = server_pk;
+    let local_pk_owned = *local_pk;
+    let response_owned = response;
+    let expected_hash_owned = request.expected_content_hash;
+    let descriptor = storage
+        .run_blocking("blob_transfer.handle_permission_response", move |s| {
+            crate::file_access_client::handle_permission_response(
+                s,
+                download_id,
+                response_owned,
+                &server_pk_owned,
+                &local_pk_owned,
+                expected_hash_owned,
+                expected_size,
+            )
+            .map_err(|e| n0_error::anyerr!("handle permission response: {e:#}"))
+        })
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("permission denied or retryable error"))?;
 
     // Grant TTL: not_after - current time, or None if unknown.
     let now_ms = std::time::SystemTime::now()

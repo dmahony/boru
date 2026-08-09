@@ -760,9 +760,16 @@ impl FileAccessHandler {
         }
 
         // ── 2. Look up the shared file by metadata_id ────────────────
+        // SQLite read — run on the blocking pool so the QUIC accept worker
+        // is never stalled (BORU-AUDIT-18).
+        let profile_user_id = self.profile_user_id.clone();
+        let shared_file_id = request.shared_file_id.clone();
         let row = match self
             .storage
-            .get_shared_file_by_metadata_id(&self.profile_user_id, &request.shared_file_id)
+            .run_blocking("file_access.get_shared_file_by_metadata_id", move |s| {
+                s.get_shared_file_by_metadata_id(&profile_user_id, &shared_file_id)
+            })
+            .await
         {
             Ok(Some(r)) => r,
             Ok(None) => {
@@ -837,12 +844,23 @@ impl FileAccessHandler {
         // access at request time; no cached catalogue state is trusted.
         // Resources with no ring association are implicitly denied by the
         // ring model (`check_ring_access` returns false).
-        let ring_allows_read = match self.storage.check_ring_access(
-            &self.profile_user_id,
-            requester_id.as_str(),
-            &row.content_hash,
-            RingPermission::Read,
-        ) {
+        let ring_allows_read = match self
+            .storage
+            .run_blocking("file_access.check_ring_access", {
+                let profile_user_id = self.profile_user_id.clone();
+                let requester_id_str = requester_id.as_str().to_owned();
+                let content_hash = row.content_hash.clone();
+                move |s| {
+                    s.check_ring_access(
+                        &profile_user_id,
+                        &requester_id_str,
+                        &content_hash,
+                        RingPermission::Read,
+                    )
+                }
+            })
+            .await
+        {
             Ok(allowed) => allowed,
             Err(e) => {
                 error!(
@@ -867,7 +885,11 @@ impl FileAccessHandler {
         // mismatch response even when the local object is unavailable.
         let permissions = match self
             .storage
-            .list_permissions_for_grantee(requester_id.as_str())
+            .run_blocking("file_access.list_permissions_for_grantee", {
+                let requester_id_str = requester_id.as_str().to_owned();
+                move |s| s.list_permissions_for_grantee(&requester_id_str)
+            })
+            .await
         {
             Ok(p) => p,
             Err(_) => return FileAccessResponse::from(FileAccessErrorCode::InternalError),
@@ -895,7 +917,12 @@ impl FileAccessHandler {
         }
         let has_any_read_grants = match self
             .storage
-            .count_read_grants_for_file(&row.content_hash, &self.profile_user_id)
+            .run_blocking("file_access.count_read_grants_for_file", {
+                let content_hash = row.content_hash.clone();
+                let profile_user_id = self.profile_user_id.clone();
+                move |s| s.count_read_grants_for_file(&content_hash, &profile_user_id)
+            })
+            .await
         {
             Ok(n) => n > 0,
             Err(_) => return FileAccessResponse::from(FileAccessErrorCode::InternalError),
@@ -927,7 +954,14 @@ impl FileAccessHandler {
         // Determine whether this is a referenced file (has source_path)
         // and call the appropriate preparation function, bounded by
         // the prepare limiter (concurrency, size, timeout).
-        let file_obj = match self.storage.get_file_object(&row.content_hash) {
+        let file_obj = match self
+            .storage
+            .run_blocking("file_access.get_file_object", {
+                let content_hash = row.content_hash.clone();
+                move |s| s.get_file_object(&content_hash)
+            })
+            .await
+        {
             Ok(Some(fo)) => fo,
             Ok(None) => {
                 Self::access_diag(
@@ -1110,7 +1144,11 @@ impl FileAccessHandler {
         // ── 6. Explicit denial check ──────────────────────────────────
         let permissions = match self
             .storage
-            .list_permissions_for_grantee(requester_id.as_str())
+            .run_blocking("file_access.list_permissions_for_grantee", {
+                let requester_id_str = requester_id.as_str().to_owned();
+                move |s| s.list_permissions_for_grantee(&requester_id_str)
+            })
+            .await
         {
             Ok(p) => p,
             Err(e) => {
@@ -1165,7 +1203,12 @@ impl FileAccessHandler {
         // ── 7. Visibility / permission mode check ─────────────────────
         let has_any_read_grants = match self
             .storage
-            .count_read_grants_for_file(&row.content_hash, &self.profile_user_id)
+            .run_blocking("file_access.count_read_grants_for_file", {
+                let content_hash = row.content_hash.clone();
+                let profile_user_id = self.profile_user_id.clone();
+                move |s| s.count_read_grants_for_file(&content_hash, &profile_user_id)
+            })
+            .await
         {
             Ok(n) => n > 0,
             Err(e) => {
@@ -1546,24 +1589,36 @@ pub async fn prepare_imported_file(
 ) -> Result<PreparedFile, anyhow::Error> {
     // ── 1. Look up the file object ───────────────────────────────────
     let file_obj = storage
-        .get_file_object(content_hash)
-        .map_err(|e| anyhow::anyhow!("db lookup failed: {e:#}"))?
+        .run_blocking("file_access.prepare_imported.get_file_object", {
+            let content_hash = content_hash.to_owned();
+            move |s| {
+                s.get_file_object(&content_hash)
+                    .map_err(|e| anyhow::anyhow!("db lookup failed: {e:#}"))
+            }
+        })
+        .await?
         .ok_or_else(|| anyhow::anyhow!("file not found: {content_hash}"))?;
 
     // ── 2. Check / import blob availability ─────────────────────────
     // Check if the file has a blob_hash (imported from a remote peer).
     let blob_hash_str: Option<String> = storage
-        .with_conn(|conn| {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT blob_hash FROM file_objects \
-                     WHERE content_hash = ?1 AND blob_hash IS NOT NULL",
-                )
-                .map_err(|e| anyhow::anyhow!("prepare blob_hash query: {e}"))?;
-            let result: Option<String> =
-                stmt.query_row(params![content_hash], |row| row.get(0)).ok();
-            Ok(result)
+        .run_blocking("file_access.prepare_imported.blob_hash", {
+            let content_hash = content_hash.to_owned();
+            move |s| {
+                s.with_conn(|conn| {
+                    let mut stmt = conn
+                        .prepare(
+                            "SELECT blob_hash FROM file_objects \
+                             WHERE content_hash = ?1 AND blob_hash IS NOT NULL",
+                        )
+                        .map_err(|e| anyhow::anyhow!("prepare blob_hash query: {e}"))?;
+                    let result: Option<String> =
+                        stmt.query_row(params![content_hash], |row| row.get(0)).ok();
+                    Ok(result)
+                })
+            }
         })
+        .await
         .unwrap_or(None);
 
     if let Some(ref hash_str) = blob_hash_str {
@@ -1707,8 +1762,14 @@ pub async fn prepare_referenced_file(
 
     // ── 1. Look up the file object ───────────────────────────────────
     let file_obj = storage
-        .get_file_object(content_hash)
-        .map_err(|e| anyhow::anyhow!("db lookup failed: {e:#}"))?
+        .run_blocking("file_access.prepare_referenced.get_file_object", {
+            let content_hash = content_hash.to_owned();
+            move |s| {
+                s.get_file_object(&content_hash)
+                    .map_err(|e| anyhow::anyhow!("db lookup failed: {e:#}"))
+            }
+        })
+        .await?
         .ok_or_else(|| anyhow::anyhow!("file not found: {content_hash}"))?;
 
     // ── 2. Get and validate the source path ──────────────────────────

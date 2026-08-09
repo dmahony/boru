@@ -32,6 +32,24 @@ use std::{
 use tokio::sync::{mpsc, Semaphore};
 use tracing::{debug, warn};
 
+/// Run a blocking outbox storage operation on the Tokio blocking pool.
+///
+/// The outbox worker is a long-lived Tokio task; calling the synchronous
+/// repository methods directly would block a worker thread on SQLite I/O
+/// (BORU-AUDIT-18).  Errors are returned as `Result` and must be handled by
+/// the caller (the worker intentionally ignores maintenance failures but
+/// propagates claim/record errors).
+async fn run_db<T, F>(storage: &Storage, op: &'static str, f: F) -> Result<T>
+where
+    F: FnOnce(&Storage) -> Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    storage
+        .run_blocking(op, f)
+        .await
+        .map_err(|e| n0_error::anyerr!("{e:#}"))
+}
+
 /// Source of a peer-online notification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReachabilitySource {
@@ -511,16 +529,27 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
     /// parallel while per-peer ordering is preserved.
     pub async fn run_once(&self) -> usize {
         let now = self.clock.now_ms();
-        let _ = self.storage.expire_outbox(now);
-        let _ = self.storage.recover_stale_outbox_leases(now);
-        let _ = self.storage.recover_stale_sending_deliveries(now);
+        let _ = run_db(&self.storage, "outbox.expire", move |s| {
+            s.expire_outbox(now)
+        })
+        .await;
+        let _ = run_db(&self.storage, "outbox.recover_leases", move |s| {
+            s.recover_stale_outbox_leases(now)
+        })
+        .await;
+        let _ = run_db(&self.storage, "outbox.recover_sending", move |s| {
+            s.recover_stale_sending_deliveries(now)
+        })
+        .await;
 
         if self.max_concurrent.get() <= 1 {
             // ── Sequential path ─────────────────────────────────────
-            let rows = self
-                .storage
-                .claim_pending_deliveries(self.claim_limit, now)
-                .unwrap_or_default();
+            let rows = run_db(&self.storage, "outbox.claim_pending", {
+                let claim_limit = self.claim_limit;
+                move |s| s.claim_pending_deliveries(claim_limit, now)
+            })
+            .await
+            .unwrap_or_default();
             let mut attempted = 0;
             for row in rows {
                 attempted += 1;
@@ -535,15 +564,21 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
         let mut total_attempted = 0usize;
 
         loop {
-            let batch = self
-                .storage
-                .claim_n_due_outbox(
-                    now,
-                    &self.lease_owner,
-                    self.lease_duration_ms,
-                    self.claim_batch_size,
-                )
-                .unwrap_or_default();
+            let batch = run_db(&self.storage, "outbox.claim_due", {
+                let lease_owner = self.lease_owner.clone();
+                let lease_duration_ms = self.lease_duration_ms;
+                let claim_batch_size = self.claim_batch_size;
+                move |s| {
+                    s.claim_n_due_outbox(
+                        now,
+                        &lease_owner,
+                        lease_duration_ms,
+                        claim_batch_size,
+                    )
+                }
+            })
+            .await
+            .unwrap_or_default();
 
             if batch.is_empty() {
                 break;
@@ -553,11 +588,13 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
             for row in batch {
                 if total_attempted >= self.claim_limit as usize {
                     // Release unprocessed claimed rows so they are due again.
-                    let _ = self.storage.release_outbox_lease(
-                        &row.msg_id,
-                        row.recipient_device_id,
-                        &self.lease_owner,
-                    );
+                    let _ = run_db(&self.storage, "outbox.release_lease", {
+                        let lease_owner = self.lease_owner.clone();
+                        let msg_id = row.msg_id;
+                        let recipient = row.recipient_device_id;
+                        move |s| s.release_outbox_lease(&msg_id, recipient, &lease_owner)
+                    })
+                    .await;
                     continue;
                 }
                 total_attempted += 1;
@@ -591,15 +628,21 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
                                     tokio::time::sleep(Duration::from_millis(interval_ms)).await;
                                     let now = unix_ms();
                                     let locked_until = now.saturating_add(lease_duration_ms);
-                                    let ok = storage_hb
-                                        .extend_outbox_lease(
-                                            &msg_id,
-                                            peer,
-                                            &lease_owner_hb,
-                                            now,
-                                            locked_until,
-                                        )
-                                        .unwrap_or(false);
+                                    let ok = run_db(&storage_hb, "outbox.extend_lease", {
+                                        let msg_id = msg_id;
+                                        let lease_owner_hb = lease_owner_hb.clone();
+                                        move |s| {
+                                            s.extend_outbox_lease(
+                                                &msg_id,
+                                                peer,
+                                                &lease_owner_hb,
+                                                now,
+                                                locked_until,
+                                            )
+                                        }
+                                    })
+                                    .await
+                                    .unwrap_or(false);
                                     if !ok {
                                         // Lease was lost (cancelled or claimed by another worker).
                                         break;
@@ -615,9 +658,12 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
                         if !authorized {
                             return Err(n0_error::anyerr!("recipient is no longer authorized"));
                         }
-                        let envelope = storage
-                            .get_inbox(&row.msg_id)?
-                            .ok_or_else(|| n0_error::anyerr!("outbox envelope is missing"))?;
+                        let envelope = run_db(&storage, "outbox.get_inbox", {
+                            let msg_id = row.msg_id;
+                            move |s| s.get_inbox(&msg_id)
+                        })
+                        .await?
+                        .ok_or_else(|| n0_error::anyerr!("outbox envelope is missing"))?;
                         if envelope.expires_at_ms <= unix_ms() {
                             return Err(n0_error::anyerr!("outbox envelope expired"));
                         }
@@ -639,24 +685,36 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
                     if success {
                         let jitter = (rand::random::<u64>() as f64) / (u64::MAX as f64);
                         let delay = retry_policy.delay_ms(row.attempts, jitter);
-                        let _ = storage.mark_sent(
-                            &row.msg_id,
-                            peer,
-                            now.saturating_add(delay),
-                        );
+                        let _ = run_db(&storage, "outbox.mark_sent", {
+                            let msg_id = row.msg_id;
+                            move |s| s.mark_sent(&msg_id, peer, now.saturating_add(delay))
+                        })
+                        .await;
                     } else {
                         let jitter = (rand::random::<u64>() as f64) / (u64::MAX as f64);
                         let delay = retry_policy.delay_ms(row.attempts, jitter);
-                        let _ = storage.record_attempt(
-                            &row.msg_id,
-                            peer,
-                            now.saturating_add(delay),
-                            error.as_deref(),
-                        );
+                        let _ = run_db(&storage, "outbox.record_attempt", {
+                            let msg_id = row.msg_id;
+                            let error = error.clone();
+                            move |s| {
+                                s.record_attempt(
+                                    &msg_id,
+                                    peer,
+                                    now.saturating_add(delay),
+                                    error.as_deref(),
+                                )
+                            }
+                        })
+                        .await;
                     }
 
                     // Release the leases explicitly.
-                    let _ = storage.release_outbox_lease(&row.msg_id, peer, &lease_owner);
+                    let _ = run_db(&storage, "outbox.release_lease", {
+                        let msg_id = row.msg_id;
+                        let lease_owner = lease_owner.clone();
+                        move |s| s.release_outbox_lease(&msg_id, peer, &lease_owner)
+                    })
+                    .await;
 
                     // Drop _peer_permit and permit implicitly.
                     drop(_peer_permit);
@@ -678,17 +736,34 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
     /// prevents an online event from monopolising the delivery worker.
     pub async fn run_once_for_peer(&self, peer: PublicKey, max_attempts: u32) -> usize {
         let now = unix_ms();
-        let _ = self.storage.recover_stale_outbox_leases(now);
-        let _ = self.storage.recover_stale_sending_deliveries(now);
-        let _ = self.storage.expire_outbox(now);
+        let _ = run_db(&self.storage, "outbox.recover_leases", move |s| {
+            s.recover_stale_outbox_leases(now)
+        })
+        .await;
+        let _ = run_db(&self.storage, "outbox.recover_sending", move |s| {
+            s.recover_stale_sending_deliveries(now)
+        })
+        .await;
+        let _ = run_db(&self.storage, "outbox.expire", move |s| {
+            s.expire_outbox(now)
+        })
+        .await;
         let mut attempted = 0;
         while attempted < max_attempts.max(1) {
-            let row = match self.storage.claim_due_outbox_for_peer(
-                now,
-                peer,
-                &self.lease_owner,
-                self.lease_duration_ms,
-            ) {
+            let row = match run_db(&self.storage, "outbox.claim_for_peer", {
+                let lease_owner = self.lease_owner.clone();
+                let lease_duration_ms = self.lease_duration_ms;
+                move |s| {
+                    s.claim_due_outbox_for_peer(
+                        now,
+                        peer,
+                        &lease_owner,
+                        lease_duration_ms,
+                    )
+                }
+            })
+            .await
+            {
                 Ok(Some(row)) => row,
                 Ok(None) | Err(_) => break,
             };
@@ -706,10 +781,12 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
             if !authorized {
                 return Err(n0_error::anyerr!("recipient is no longer authorized"));
             }
-            let envelope = self
-                .storage
-                .get_inbox(&msg_id)?
-                .ok_or_else(|| n0_error::anyerr!("outbox envelope is missing"))?;
+            let envelope = run_db(&self.storage, "outbox.get_inbox", {
+                let msg_id = msg_id;
+                move |s| s.get_inbox(&msg_id)
+            })
+            .await?
+            .ok_or_else(|| n0_error::anyerr!("outbox envelope is missing"))?;
             if envelope.expires_at_ms <= unix_ms() {
                 return Err(n0_error::anyerr!("outbox envelope expired"));
             }
@@ -724,16 +801,20 @@ impl<P: RecipientPolicy + 'static, T: DeliveryTransport + 'static> OutboxDeliver
         if success {
             let jitter = (rand::random::<u64>() as f64) / (u64::MAX as f64);
             let delay = self.retry_policy.delay_ms(row.attempts, jitter);
-            let _ = self.storage.mark_sent(&msg_id, peer, now.saturating_add(delay));
+            let _ = run_db(&self.storage, "outbox.mark_sent", move |s| {
+                s.mark_sent(&msg_id, peer, now.saturating_add(delay))
+            })
+            .await;
         } else {
             let jitter = (rand::random::<u64>() as f64) / (u64::MAX as f64);
             let delay = self.retry_policy.delay_ms(row.attempts, jitter);
-            let _ = self.storage.record_attempt(
-                &msg_id,
-                peer,
-                now.saturating_add(delay),
-                error.as_deref(),
-            );
+            let _ = run_db(&self.storage, "outbox.record_attempt", {
+                let error = error.clone();
+                move |s| {
+                    s.record_attempt(&msg_id, peer, now.saturating_add(delay), error.as_deref())
+                }
+            })
+            .await;
         }
     }
 
