@@ -54,6 +54,16 @@ These literals are domain separation values or inputs to deterministic keys/sign
 
 Also preserve the exact signed-byte constructions in `src/mailbox.rs`, `src/inbox.rs`, `src/file_access_protocol.rs`, and the `blake3` hash definition for message/file IDs. A branding rename must never be used as a new signature prefix or as a replacement for a legacy prefix. If a V2 cryptographic scheme is introduced, label it as V2 and retain V1 verification/decryption for existing records during migration.
 
+> **2026-08-09 (BORU-AUDIT-05):** `src/file_access_protocol.rs` descriptor
+> signing was deliberately upgraded to a canonical, domain-separated V2 scheme
+> (protocol `"boru/file-descriptor"`, signed payload version 2, postcard
+> serialization via `DescriptorSignedPayloadV2::canonical_bytes`, unknown
+> versions rejected as `UnsupportedVersion`). Descriptors are ephemeral
+> (60-second TTL, issued per request, never persisted), so the old raw
+> concatenation is not retained and there is no V1 decode path. See
+> `docs/file-access-descriptor-signing.md`. This is a security-driven protocol
+> change, not a branding rename; the mailbox and inbox V1 paths are unaffected.
+
 ## 4. Room identity and network namespaces — MUST NOT CHANGE
 
 - `src/public_room.rs`: `APPLICATION_NAMESPACE = "boru-chat"`, `PUBLIC_ROOM_NAME = "public-lobby"`, `PROTOCOL_VERSION = 1`, and `PublicNetwork` byte assignments (`Mainnet=0x00`, `Development=0x01`, `Test=0x02`) are identity inputs. Changing any one changes the public lobby topic and discovery key, causing peers to split into different rooms. Preserve the known-answer vectors in the module tests.

@@ -17,6 +17,32 @@
 //! changing the ALPN string.  Unknown versions MUST be rejected with
 //! [`FileAccessErrorCode::UnsupportedVersion`].
 //!
+//! # Descriptor signing (BORU-AUDIT-05)
+//!
+//! A [`SignedDownloadDescriptor`] is authenticated by an Ed25519 signature
+//! over the canonical serialization of a [`DescriptorSignedPayloadV2`]:
+//!
+//! ```text
+//! postcard::to_stdvec(DescriptorSignedPayloadV2 {
+//!   protocol: "boru/file-descriptor",  // domain separation
+//!   version:  2,                       // signed payload version
+//!   owner_id, requester, shared_file_id, blob_hash, size_bytes,
+//!   blob_ticket, nonce, issued_at_ms, expires_at_ms,
+//! })
+//! ```
+//!
+//! The struct field order IS the wire order: postcard serializes struct
+//! fields in declaration order and length-prefixes every variable-length
+//! field, so no two descriptors can encode the same byte string with
+//! different meanings.  [`sign_download_descriptor`] and
+//! [`verify_download_descriptor`] both call
+//! [`DescriptorSignedPayloadV2::canonical_bytes`], so the signed bytes can
+//! never drift between signing and verification.  Unknown signed-payload
+//! versions are rejected as [`DescriptorVerification::UnsupportedVersion`].
+//! The hex display string `content_hash` is deliberately NOT signed — the
+//! strongly typed `blob_hash` is the single canonical hash representation
+//! (BORU-AUDIT-06 removes the duplicate string entirely).
+//!
 //! # Feature flag
 //!
 //! Always available (no feature gate).  Only uses `serde` and `postcard`.
@@ -36,6 +62,20 @@ pub const FILE_ACCESS_WIRE_VERSION: u16 = 1;
 
 /// All wire versions that the current code understands.
 pub const SUPPORTED_FILE_ACCESS_VERSIONS: &[u16] = &[1];
+
+/// Protocol domain separator for signed download descriptors.
+///
+/// Domain separation prevents cross-protocol and cross-version signature
+/// confusion: a signature made over `boru/file-descriptor` bytes can never be
+/// replayed as a signature over any other Boru object.
+pub const DESCRIPTOR_SIGNED_PROTOCOL: &str = "boru/file-descriptor";
+
+/// Version of the canonical signed descriptor payload.
+///
+/// The descriptor signature always covers a payload with this version inside
+/// it.  Unknown versions are rejected by [`verify_download_descriptor`]
+/// instead of being guessed (BORU-AUDIT-05).
+pub const DESCRIPTOR_SIGNED_PAYLOAD_VERSION: u16 = 2;
 
 /// Maximum length (in bytes) for a filename received in a file-access request.
 const MAX_FILENAME_BYTES: usize = 512;
@@ -177,6 +217,82 @@ pub enum DescriptorVerification {
     OwnerMismatch,
     /// The descriptor's requester does not match our identity.
     RequesterMismatch,
+    /// The descriptor's signed-payload version is not supported.
+    UnsupportedVersion,
+}
+
+/// Canonical signed payload for a download descriptor (version 2).
+///
+/// This is the ONLY byte representation a descriptor signature covers.  All
+/// signed fields live here in a fixed semantic order, so sign and verify can
+/// never drift.  Variable-length fields (`shared_file_id`, `blob_ticket`) are
+/// length-prefixed by the deterministic serializer, so adjacent variable-length
+/// values can never be confused the way bare `extend_from_slice` concatenation
+/// allowed (BORU-AUDIT-05).
+///
+/// # Signed-field invariant
+/// The fields of this struct — and only these fields — are authenticated by
+/// `SignedDownloadDescriptor.signature`.  Adding a field here changes the
+/// canonical bytes and MUST bump [`DESCRIPTOR_SIGNED_PAYLOAD_VERSION`]; old
+/// descriptors are then rejected as [`DescriptorVerification::UnsupportedVersion`],
+/// which is fail-closed and never guesses the old layout.  Do NOT add
+/// display-only fields (e.g. the hex `content_hash`) here: the strongly typed
+/// `blob_hash` is the single canonical hash representation.  See
+/// `docs/file-access-descriptor-signing.md` for the full protocol note.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DescriptorSignedPayloadV2 {
+    /// Protocol domain separator — always [`DESCRIPTOR_SIGNED_PROTOCOL`].
+    pub protocol: String,
+    /// Signed payload version — always [`DESCRIPTOR_SIGNED_PAYLOAD_VERSION`].
+    pub version: u16,
+    /// Public key of the file owner (signer).
+    pub owner_id: PublicKey,
+    /// Public key of the authorised requester.
+    pub requester: PublicKey,
+    /// Stable shared-file identifier from the catalogue.
+    pub shared_file_id: String,
+    /// Blake3 content hash of the file (raw 32 bytes) — canonical hash.
+    pub blob_hash: [u8; 32],
+    /// Expected file size in bytes.
+    pub size_bytes: u64,
+    /// Opaque blob ticket (iroh blob ticket bytes).
+    pub blob_ticket: Vec<u8>,
+    /// Unique nonce for replay protection.
+    pub nonce: [u8; 32],
+    /// Timestamp when the descriptor was issued (ms since UNIX epoch).
+    pub issued_at_ms: u64,
+    /// Expiration timestamp (milliseconds since UNIX epoch).
+    pub expires_at_ms: u64,
+}
+
+impl DescriptorSignedPayloadV2 {
+    /// Build the canonical payload for a descriptor.
+    pub fn from_descriptor(descriptor: &SignedDownloadDescriptor) -> Self {
+        Self {
+            protocol: DESCRIPTOR_SIGNED_PROTOCOL.to_string(),
+            version: DESCRIPTOR_SIGNED_PAYLOAD_VERSION,
+            owner_id: descriptor.owner_id,
+            requester: descriptor.requester,
+            shared_file_id: descriptor.shared_file_id.clone(),
+            blob_hash: descriptor.blob_hash,
+            size_bytes: descriptor.size_bytes,
+            blob_ticket: descriptor.blob_ticket.clone(),
+            nonce: descriptor.nonce,
+            issued_at_ms: descriptor.issued_at_ms,
+            expires_at_ms: descriptor.expires_at_ms,
+        }
+    }
+
+    /// Serialize this payload to its canonical signed bytes.
+    ///
+    /// Uses the project's deterministic serializer (postcard) with the
+    /// field order fixed by the struct declaration.  Both
+    /// [`sign_download_descriptor`] and [`verify_download_descriptor`] call
+    /// this exact function, so signing and verification always agree on the
+    /// bytes being signed.
+    pub fn canonical_bytes(&self) -> std::result::Result<Vec<u8>, postcard::Error> {
+        postcard::to_stdvec(self)
+    }
 }
 
 /// Sign a [`SignedDownloadDescriptor`] with the owner's secret key.
@@ -198,19 +314,26 @@ pub fn sign_download_descriptor(
     let nonce = rand::random::<[u8; 32]>();
     let blob_ticket = Vec::new(); // populated by the blob-transfer layer
 
-    let mut payload = Vec::new();
-    payload.extend_from_slice(owner.public().as_bytes());
-    payload.extend_from_slice(requester.as_bytes());
-    payload.extend_from_slice(shared_file_id.as_bytes());
-    payload.extend_from_slice(&blob_hash);
-    payload.extend_from_slice(content_hash.as_bytes());
-    payload.extend_from_slice(&size_bytes.to_le_bytes());
-    payload.extend_from_slice(&blob_ticket);
-    payload.extend_from_slice(&nonce);
-    payload.extend_from_slice(&now_ms.to_le_bytes());
-    payload.extend_from_slice(&expires_at_ms.to_le_bytes());
-    let signature = owner.sign(&payload);
+    // Sign the canonical payload — the ONLY bytes the signature covers.
+    let payload = DescriptorSignedPayloadV2 {
+        protocol: DESCRIPTOR_SIGNED_PROTOCOL.to_string(),
+        version: DESCRIPTOR_SIGNED_PAYLOAD_VERSION,
+        owner_id: owner.public(),
+        requester,
+        shared_file_id: shared_file_id.clone(),
+        blob_hash,
+        size_bytes,
+        blob_ticket: blob_ticket.clone(),
+        nonce,
+        issued_at_ms: now_ms,
+        expires_at_ms,
+    };
+    let canonical = payload
+        .canonical_bytes()
+        .expect("postcard serialization of a fixed-size descriptor payload cannot fail");
+    let signature = owner.sign(&canonical);
     SignedDownloadDescriptor {
+        signed_version: DESCRIPTOR_SIGNED_PAYLOAD_VERSION,
         owner_id: owner.public(),
         requester,
         shared_file_id,
@@ -229,12 +352,20 @@ pub fn sign_download_descriptor(
 /// expiry.
 ///
 /// Returns [`DescriptorVerification::Valid`] on success, or a reason.
+/// Unknown signed-payload versions are rejected
+/// ([`DescriptorVerification::UnsupportedVersion`]) instead of being guessed.
 pub fn verify_download_descriptor(
     descriptor: &SignedDownloadDescriptor,
     expected_owner: &iroh::PublicKey,
     expected_requester: &iroh::PublicKey,
     now_ms: u64,
 ) -> DescriptorVerification {
+    // ── 0. Reject unknown signed-payload versions ──────────────────────
+    // Never guess a field layout for a version we do not understand.
+    if descriptor.signed_version != DESCRIPTOR_SIGNED_PAYLOAD_VERSION {
+        return DescriptorVerification::UnsupportedVersion;
+    }
+
     // ── 1. Check expiry (fast path) ──────────────────────────────────────
     if now_ms > descriptor.expires_at_ms {
         return DescriptorVerification::Expired;
@@ -255,18 +386,17 @@ pub fn verify_download_descriptor(
         return DescriptorVerification::RequesterMismatch;
     }
 
-    // ── 5. Reconstruct the signing payload ──────────────────────────────
-    let mut payload = Vec::new();
-    payload.extend_from_slice(descriptor.owner_id.as_bytes());
-    payload.extend_from_slice(descriptor.requester.as_bytes());
-    payload.extend_from_slice(descriptor.shared_file_id.as_bytes());
-    payload.extend_from_slice(&descriptor.blob_hash);
-    payload.extend_from_slice(descriptor.content_hash.as_bytes());
-    payload.extend_from_slice(&descriptor.size_bytes.to_le_bytes());
-    payload.extend_from_slice(&descriptor.blob_ticket);
-    payload.extend_from_slice(&descriptor.nonce);
-    payload.extend_from_slice(&descriptor.issued_at_ms.to_le_bytes());
-    payload.extend_from_slice(&descriptor.expires_at_ms.to_le_bytes());
+    // ── 5. Reconstruct the canonical signing payload ────────────────────
+    // The descriptor carries the same fields that were signed; serialize them
+    // through the exact same helper as sign_download_descriptor so the bytes
+    // are guaranteed identical.  `content_hash` (a hex display string derived
+    // from `blob_hash`) is intentionally NOT part of the signed payload — the
+    // strongly typed `blob_hash` is the canonical hash representation.
+    let payload = DescriptorSignedPayloadV2::from_descriptor(descriptor);
+    let canonical = match payload.canonical_bytes() {
+        Ok(bytes) => bytes,
+        Err(_) => return DescriptorVerification::InvalidSignature,
+    };
 
     // ── 6. Verify the signature with the expected owner's key ─────────
     // The verification key MUST come from the caller (the peer we
@@ -276,7 +406,7 @@ pub fn verify_download_descriptor(
     // the response so a substituted descriptor can never self-validate.
     let sig_bytes = *descriptor.signature.as_ref();
     let sig = iroh::Signature::from_bytes(&sig_bytes);
-    if expected_owner.verify(&payload, &sig).is_ok() {
+    if expected_owner.verify(&canonical, &sig).is_ok() {
         DescriptorVerification::Valid
     } else {
         DescriptorVerification::InvalidSignature
@@ -370,6 +500,10 @@ impl FileAccessRequest {
 /// starting the actual blob transfer.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SignedDownloadDescriptor {
+    /// Signed-payload version of this descriptor.  Must equal
+    /// [`DESCRIPTOR_SIGNED_PAYLOAD_VERSION`]; [`verify_download_descriptor`]
+    /// rejects any other value without guessing a field layout.
+    pub signed_version: u16,
     /// Public key of the file owner (signer).
     pub owner_id: PublicKey,
     /// Public key of the authorised requester.
@@ -589,6 +723,7 @@ mod tests {
     #[test]
     fn file_access_wire_response_round_trip_success() {
         let desc = SignedDownloadDescriptor {
+            signed_version: DESCRIPTOR_SIGNED_PAYLOAD_VERSION,
             owner_id: PublicKey::from_bytes(&[0u8; 32]).expect("valid key"),
             requester: PublicKey::from_bytes(&[1u8; 32]).expect("valid key"),
             shared_file_id: "test-file".into(),
@@ -809,6 +944,7 @@ mod tests {
     #[test]
     fn file_access_wire_response_success_sets_current_version() {
         let desc = SignedDownloadDescriptor {
+            signed_version: DESCRIPTOR_SIGNED_PAYLOAD_VERSION,
             owner_id: PublicKey::from_bytes(&[0u8; 32]).expect("valid key"),
             requester: PublicKey::from_bytes(&[1u8; 32]).expect("valid key"),
             shared_file_id: "test".into(),
@@ -853,5 +989,281 @@ mod tests {
             sorted.as_slice(),
             "SUPPORTED_FILE_ACCESS_VERSIONS must be sorted and unique"
         );
+    }
+
+    // ── BORU-AUDIT-05: canonical descriptor signing ────────────────────────
+
+    /// Fixed descriptor fields must produce the exact canonical bytes that the
+    /// signature covers.  This golden vector pins the encoding: postcard with
+    /// struct declaration order, domain separator first, then the version, then
+    /// every signed field.  If this test fails, someone changed the signed
+    /// payload layout without bumping [`DESCRIPTOR_SIGNED_PAYLOAD_VERSION`].
+    #[test]
+    fn descriptor_canonical_bytes_golden_vector() {
+        let payload = DescriptorSignedPayloadV2 {
+            protocol: DESCRIPTOR_SIGNED_PROTOCOL.to_string(),
+            version: DESCRIPTOR_SIGNED_PAYLOAD_VERSION,
+            owner_id: PublicKey::from_bytes(&[0u8; 32]).expect("valid key"),
+            requester: PublicKey::from_bytes(&[1u8; 32]).expect("valid key"),
+            shared_file_id: "file-001".into(),
+            blob_hash: [0xABu8; 32],
+            size_bytes: 1024,
+            blob_ticket: vec![1, 2, 3, 4],
+            nonce: [0xCDu8; 32],
+            issued_at_ms: 1000,
+            expires_at_ms: 2000,
+        };
+        let bytes = payload.canonical_bytes().expect("canonical bytes");
+        let expected = "\
+            14 62 6f 72 75 2f 66 69 6c 65 2d 64 65 73 63 72 69 70 74 6f 72 \
+            02 \
+            00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 \
+            01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 \
+            08 66 69 6c 65 2d 30 30 31 \
+            ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab \
+            80 08 \
+            04 01 02 03 04 \
+            cd cd cd cd cd cd cd cd cd cd cd cd cd cd cd cd cd cd cd cd cd cd cd cd cd cd cd cd cd cd cd cd \
+            e8 07 \
+            d0 0f";
+        let expected_bytes: Vec<u8> = expected
+            .split_whitespace()
+            .map(|b| u8::from_str_radix(b, 16).expect("hex byte"))
+            .collect();
+        assert_eq!(
+            bytes, expected_bytes,
+            "canonical descriptor payload bytes must be stable (BORU-AUDIT-05)"
+        );
+    }
+
+    /// A signed descriptor round-trips: sign with the owner key, verify with
+    /// the same owner key and requester.
+    #[test]
+    fn descriptor_sign_verify_round_trip() {
+        let owner = iroh::SecretKey::generate();
+        let requester = iroh::SecretKey::generate().public();
+        let now = 1_700_000_000_000u64;
+        let descriptor = sign_download_descriptor(
+            &owner,
+            requester,
+            "shared-file-1".into(),
+            [7u8; 32],
+            4096,
+            BlobFormat::Raw,
+            now,
+            now + 60_000,
+        );
+        let outcome = verify_download_descriptor(&descriptor, &owner.public(), &requester, now);
+        assert_eq!(outcome, DescriptorVerification::Valid);
+    }
+
+    /// Changing any single signed field must invalidate the signature.
+    #[test]
+    fn descriptor_field_mutation_invalidates_signature() {
+        let owner = iroh::SecretKey::generate();
+        let owner_pk = owner.public();
+        let requester = iroh::SecretKey::generate().public();
+        let now = 1_700_000_000_000u64;
+        let base = sign_download_descriptor(
+            &owner,
+            requester,
+            "shared-file-1".into(),
+            [7u8; 32],
+            4096,
+            BlobFormat::Raw,
+            now,
+            now + 60_000,
+        );
+        assert_eq!(
+            verify_download_descriptor(&base, &owner_pk, &requester, now),
+            DescriptorVerification::Valid
+        );
+
+        // Mutate each signed field one at a time; every one must break
+        // verification (either signature or a specific identity/version check).
+        let mut cases: Vec<(&str, SignedDownloadDescriptor)> = Vec::new();
+
+        let mut d = base.clone();
+        d.shared_file_id = "shared-file-2".into();
+        cases.push(("shared_file_id", d));
+
+        let mut d = base.clone();
+        d.blob_hash = [8u8; 32];
+        cases.push(("blob_hash", d));
+
+        let mut d = base.clone();
+        d.size_bytes = 9999;
+        cases.push(("size_bytes", d));
+
+        let mut d = base.clone();
+        d.blob_ticket = vec![9, 9, 9];
+        cases.push(("blob_ticket", d));
+
+        let mut d = base.clone();
+        d.nonce = [0xEEu8; 32];
+        cases.push(("nonce", d));
+
+        let mut d = base.clone();
+        d.issued_at_ms = now + 1;
+        cases.push(("issued_at_ms", d));
+
+        let mut d = base.clone();
+        d.expires_at_ms = now - 1;
+        cases.push(("expires_at_ms", d));
+
+        let mut d = base.clone();
+        d.requester = iroh::SecretKey::generate().public();
+        cases.push(("requester", d));
+
+        let mut d = base.clone();
+        d.owner_id = iroh::SecretKey::generate().public();
+        cases.push(("owner_id", d));
+
+        let mut d = base.clone();
+        d.signed_version = 999;
+        cases.push(("signed_version", d));
+
+        for (field, mutated) in cases {
+            let outcome = verify_download_descriptor(&mutated, &owner_pk, &requester, now);
+            assert_ne!(
+                outcome,
+                DescriptorVerification::Valid,
+                "mutating {field} must invalidate the descriptor"
+            );
+        }
+    }
+
+    /// Reordering JSON/map fields or changing display serialization must not
+    /// change the canonical signed bytes: the signature covers the postcard
+    /// struct bytes, not any JSON or human-readable representation.
+    #[test]
+    fn descriptor_json_reorder_does_not_affect_canonical_bytes() {
+        let payload = DescriptorSignedPayloadV2 {
+            protocol: DESCRIPTOR_SIGNED_PROTOCOL.to_string(),
+            version: DESCRIPTOR_SIGNED_PAYLOAD_VERSION,
+            owner_id: PublicKey::from_bytes(&[0u8; 32]).expect("valid key"),
+            requester: PublicKey::from_bytes(&[1u8; 32]).expect("valid key"),
+            shared_file_id: "file-001".into(),
+            blob_hash: [0xABu8; 32],
+            size_bytes: 1024,
+            blob_ticket: vec![1, 2, 3, 4],
+            nonce: [0xCDu8; 32],
+            issued_at_ms: 1000,
+            expires_at_ms: 2000,
+        };
+        let canonical = payload.canonical_bytes().expect("canonical bytes");
+
+        // Serialize to JSON (human-readable: PublicKey becomes a string) and
+        // back.  Even a JSON round-trip with keys in a different order must
+        // produce the same canonical signed bytes.
+        let json = serde_json::to_string(&payload).expect("json");
+        let decoded: DescriptorSignedPayloadV2 = serde_json::from_str(&json).expect("from json");
+        let canonical_again = decoded.canonical_bytes().expect("canonical bytes");
+        assert_eq!(
+            canonical, canonical_again,
+            "JSON round-trip must not alter signed bytes"
+        );
+
+        // Manually reorder the JSON object keys and re-decode.
+        let reordered_json = reorder_json_keys(&json);
+        let re_decoded: DescriptorSignedPayloadV2 =
+            serde_json::from_str(&reordered_json).expect("from reordered json");
+        let canonical_third = re_decoded.canonical_bytes().expect("canonical bytes");
+        assert_eq!(
+            canonical, canonical_third,
+            "JSON key order must not alter canonical signed bytes"
+        );
+    }
+
+    /// Unknown signed-payload versions are rejected instead of guessed.
+    #[test]
+    fn descriptor_unknown_version_rejected() {
+        let owner = iroh::SecretKey::generate();
+        let owner_pk = owner.public();
+        let requester = iroh::SecretKey::generate().public();
+        let now = 1_700_000_000_000u64;
+        let mut descriptor = sign_download_descriptor(
+            &owner,
+            requester,
+            "shared-file-1".into(),
+            [7u8; 32],
+            4096,
+            BlobFormat::Raw,
+            now,
+            now + 60_000,
+        );
+        descriptor.signed_version = DESCRIPTOR_SIGNED_PAYLOAD_VERSION + 1;
+        assert_eq!(
+            verify_download_descriptor(&descriptor, &owner_pk, &requester, now),
+            DescriptorVerification::UnsupportedVersion,
+            "unknown signed payload version must be rejected, not guessed"
+        );
+    }
+
+    /// The display `content_hash` is NOT part of the signed payload: only the
+    /// strongly typed `blob_hash` is authenticated.  (BORU-AUDIT-06 removes the
+    /// duplicate string entirely.)
+    #[test]
+    fn descriptor_display_content_hash_not_signed() {
+        let owner = iroh::SecretKey::generate();
+        let owner_pk = owner.public();
+        let requester = iroh::SecretKey::generate().public();
+        let now = 1_700_000_000_000u64;
+        let mut descriptor = sign_download_descriptor(
+            &owner,
+            requester,
+            "shared-file-1".into(),
+            [7u8; 32],
+            4096,
+            BlobFormat::Raw,
+            now,
+            now + 60_000,
+        );
+        // Change only the display string; the signature must still verify
+        // because blob_hash (the canonical hash) is unchanged.
+        descriptor.content_hash = "deadbeef".into();
+        assert_eq!(
+            verify_download_descriptor(&descriptor, &owner_pk, &requester, now),
+            DescriptorVerification::Valid
+        );
+    }
+
+    /// Helper: emit a JSON object with the top-level keys in reverse order.
+    ///
+    /// `serde_json::Map` is sorted by key, so rebuilding via `Map` cannot
+    /// produce a different textual key order; this hand-rolled writer emits the
+    /// same values with the keys genuinely reversed so the test proves key
+    /// order cannot affect the canonical signed bytes.  The payload's JSON is
+    /// flat (strings, numbers, arrays of numbers), which keeps the writer tiny.
+    fn reorder_json_keys(json: &str) -> String {
+        use serde_json::Value;
+        let value: Value = serde_json::from_str(json).expect("parse json");
+        let obj = value.as_object().expect("object");
+        let mut out = String::from("{");
+        let keys: Vec<&String> = obj.keys().collect();
+        for (i, key) in keys.iter().rev().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str(&format!("\"{key}\":"));
+            let v = &obj[*key];
+            match v {
+                Value::Number(n) => out.push_str(&n.to_string()),
+                Value::String(s) => out.push_str(&format!("\"{s}\"")),
+                Value::Array(items) => {
+                    out.push('[');
+                    for (j, item) in items.iter().enumerate() {
+                        if j > 0 {
+                            out.push(',');
+                        }
+                        out.push_str(&item.to_string());
+                    }
+                    out.push(']');
+                }
+                other => panic!("unexpected JSON value in payload: {other}"),
+            }
+        }
+        out.push('}');
+        out
     }
 }

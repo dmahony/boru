@@ -557,6 +557,23 @@ fn handle_granted(
             );
             return Ok(None);
         }
+        DescriptorVerification::UnsupportedVersion => {
+            warn!(download_id, "file-access: descriptor signed-payload version unsupported");
+            storage.fail_download(
+                download_id,
+                "descriptor uses an unsupported signed-payload version",
+                None,
+            )?;
+            TRANSFER_TELEMETRY.failure(
+                download_id,
+                ErrorCategory::ProtocolError,
+                false,
+                None,
+                Some(false),
+                None,
+            );
+            return Ok(None);
+        }
     }
 
     // ── 2. Verify content hash matches what we expect ───────────────────
@@ -1009,20 +1026,11 @@ mod tests {
         // Replace the signature with one made by a different key.  Even if
         // owner_id still claims A, verification against the expected owner A
         // must fail.
-        let payload = {
-            let mut p = Vec::new();
-            p.extend_from_slice(descriptor.owner_id.as_bytes());
-            p.extend_from_slice(descriptor.requester.as_bytes());
-            p.extend_from_slice(descriptor.shared_file_id.as_bytes());
-            p.extend_from_slice(&descriptor.blob_hash);
-            p.extend_from_slice(descriptor.content_hash.as_bytes());
-            p.extend_from_slice(&descriptor.size_bytes.to_le_bytes());
-            p.extend_from_slice(&descriptor.blob_ticket);
-            p.extend_from_slice(&descriptor.nonce);
-            p.extend_from_slice(&descriptor.issued_at_ms.to_le_bytes());
-            p.extend_from_slice(&descriptor.expires_at_ms.to_le_bytes());
-            p
-        };
+        let payload = crate::file_access_protocol::DescriptorSignedPayloadV2::from_descriptor(
+            &descriptor,
+        )
+        .canonical_bytes()
+        .expect("canonical bytes");
         let forged = attacker_sk.sign(&payload);
         descriptor.signature = serde_byte_array::ByteArray::from(forged.to_bytes());
 
