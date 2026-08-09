@@ -129,7 +129,15 @@ impl DownloadManager {
         ] {
             interrupted.extend(self.storage.list_downloads_by_state(state)?);
         }
-        self.storage.recover_downloads_from_restart()?;
+        // Recovery validates and re-installs interrupted downloads, which
+        // stats, opens, reads, and renames temporary files — all blocking
+        // filesystem work that must not run on a Tokio worker thread
+        // (BORU-AUDIT-12). Storage is cloneable, so move it into the
+        // blocking pool and await the join handle.
+        let storage = self.storage.clone();
+        tokio::task::spawn_blocking(move || storage.recover_downloads_from_restart())
+            .await
+            .map_err(|join_err| anyhow::anyhow!("download recovery task panicked: {join_err}"))??;
         // Recovery is ordered by the durable creation timestamp, not by the
         // order in which SQLite returned each state query.
         interrupted.sort_by_key(|download| (download.created_at_ms, download.id));

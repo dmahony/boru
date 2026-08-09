@@ -1033,7 +1033,7 @@ impl FileAccessHandler {
                     &storage,
                     &blob_store,
                     &content_hash,
-                    None, // verify_hash — deferred to descriptor verification
+                    None,                // verify_hash — deferred to descriptor verification
                     Some(expected_size), // verify_size — on-disk size must match the record
                 )
                 .await
@@ -1042,7 +1042,7 @@ impl FileAccessHandler {
                     &storage,
                     &blob_store,
                     &content_hash,
-                    None, // verify_hash — deferred to descriptor verification
+                    None,                // verify_hash — deferred to descriptor verification
                     Some(expected_size), // verify_size — blob-store size must match the record
                 )
                 .await
@@ -1704,7 +1704,6 @@ pub async fn prepare_referenced_file(
 ) -> Result<PreparedFile, anyhow::Error> {
     use std::fs;
     use std::io;
-    use std::path::Path;
 
     // ── 1. Look up the file object ───────────────────────────────────
     let file_obj = storage
@@ -1719,17 +1718,28 @@ pub async fn prepare_referenced_file(
         .ok_or_else(|| anyhow::anyhow!("file object {content_hash} has no source path"))?
         .to_owned();
 
-    let path = Path::new(&src);
-
     // Confirm the path exists and is a regular file (not a directory,
-    // not a symlink).
-    let metadata = fs::symlink_metadata(path).map_err(|e| {
-        if e.kind() == io::ErrorKind::NotFound {
-            anyhow::anyhow!("referenced source file not found: {src}")
-        } else {
-            anyhow::anyhow!("failed to stat referenced source {src}: {e:#}")
-        }
-    })?;
+    // not a symlink). stat + canonicalise are blocking filesystem calls;
+    // run them on the blocking pool so they never occupy a Tokio worker
+    // (BORU-AUDIT-12).
+    let (metadata, abs_path) = {
+        let src_for_worker = src.clone();
+        tokio::task::spawn_blocking(move || {
+            let metadata = fs::symlink_metadata(&src_for_worker).map_err(|e| {
+                if e.kind() == io::ErrorKind::NotFound {
+                    anyhow::anyhow!("referenced source file not found: {src_for_worker}")
+                } else {
+                    anyhow::anyhow!("failed to stat referenced source {src_for_worker}: {e:#}")
+                }
+            })?;
+            let abs_path = fs::canonicalize(&src_for_worker).map_err(|e| {
+                anyhow::anyhow!("failed to resolve referenced source {src_for_worker}: {e:#}")
+            })?;
+            Ok::<_, anyhow::Error>((metadata, abs_path))
+        })
+        .await
+        .map_err(|join_err| anyhow::anyhow!("referenced-source stat task panicked: {join_err}"))??
+    };
 
     if metadata.is_dir() {
         return Err(anyhow::anyhow!(
@@ -1791,9 +1801,8 @@ pub async fn prepare_referenced_file(
     // place instead of copying its bytes (avoids double-storing files
     // that already live on disk). Stores that cannot reference files
     // (e.g. the in-memory store) fall back to copying internally.
-    // `add_path_with_opts` requires an absolute path, so canonicalise.
-    let abs_path = fs::canonicalize(&src)
-        .map_err(|e| anyhow::anyhow!("failed to resolve referenced source {src}: {e:#}"))?;
+    // `add_path_with_opts` requires an absolute path — canonicalised on
+    // the blocking pool above.
     let progress = blob_store.blobs().add_path_with_opts(AddPathOptions {
         path: abs_path,
         mode: ImportMode::TryReference,
@@ -2122,13 +2131,7 @@ mod tests {
         // catalogue record that must not be signed.
         let corrupt_hash = "z".repeat(64);
         storage
-            .put_file_object(
-                &corrupt_hash,
-                10,
-                "text/plain",
-                "corrupt.txt",
-                b"corrupt",
-            )
+            .put_file_object(&corrupt_hash, 10, "text/plain", "corrupt.txt", b"corrupt")
             .expect("put file object");
         storage
             .upsert_shared_file(
@@ -3508,11 +3511,7 @@ mod tests {
 
     /// Helper: create a named ring for the profile, add the requester, and
     /// grant a Read association on the given content hash.
-    fn grant_ring_read(
-        storage: &Storage,
-        requester_id: &FriendId,
-        content_hash: &str,
-    ) -> i64 {
+    fn grant_ring_read(storage: &Storage, requester_id: &FriendId, content_hash: &str) -> i64 {
         let ring_id = storage
             .create_ring("owner-profile-id", "friends-ring", false)
             .expect("create ring");
