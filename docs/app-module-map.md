@@ -18,16 +18,8 @@ verified against a stable baseline.
 | (this run) | chat log/composer → `app/chat.rs` | 44,637 → 40,814 |
 | (this run) | discover + peer/friend profiles → `app/discover.rs` | 40,814 → 39,382 |
 | (this run) | call screens → `app/calls.rs` | 39,382 → 39,252 |
-
-Remaining per plan (view layer): the shared shell/dialog block still in
-app.rs (`view_incoming_call_overlay`, `view_expanded_inline_video`,
-`view_connection_details_dialog`, `view_image_lightbox`,
-`view_create_room_dialog`, `view_create_group_dialog`,
-`view_receive_ticket_dialog`, `view_short_code_dialog`,
-`view_redeem_code_dialog`, `view_create_tunnel_dialog`,
-`view_invite_member_dialog`) and the tunnels block
-(`view_share_local_service_dialog`, `view_local_service_suggestion_row`)
-→ candidate `app/dialogs.rs` / `app/tunnels.rs`.
+| 8523fce7 | shared shell/dialog overlays → `app/dialogs.rs` | 39,252 → 38,513 |
+| a0c2561c | tunnel share views → `app/tunnels.rs` | 38,513 → 38,266 |
 
 Remaining per plan (state layer, spec steps 4–6): feature state structs +
 feature-local message enums, moving `update()` arms into
