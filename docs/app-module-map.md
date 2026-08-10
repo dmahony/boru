@@ -17,6 +17,7 @@ verified against a stable baseline.
 | (this run) | file sharing dashboard → `app/files.rs` | 48,980 → 44,637 |
 | (this run) | chat log/composer → `app/chat.rs` | 44,637 → 40,814 |
 | (this run) | discover + peer/friend profiles → `app/discover.rs` | 40,814 → 39,382 |
+| (this run) | call screens → `app/calls.rs` | 39,382 → 39,252 |
 
 Remaining per plan: feature state structs / feature-local messages
 (spec steps 4–6) and per-feature subscriptions (spec step 7).
