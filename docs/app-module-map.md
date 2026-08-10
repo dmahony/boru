@@ -42,6 +42,9 @@ verified against a stable baseline.
 | a0cb2427 | group-created + send-message update arms → `update_groups`/`update_chat` | 30,094 → 29,880 |
 | 4de4be2d | friend-chat, join-ticket, groups nav, file-download, delete-room → feature modules | 29,880 → 29,658 |
 | d94741aa | new-discovered-peers update arm → `update_discover` | 29,658 → 29,625 |
+| a3d85712 | settings/terminal navigation update arms → `update_settings` | 29,625 → 29,587 |
+| aa8ad2f7 | friend confirm/block/rename update arms → `update_contacts` | 29,587 → 29,425 |
+| e4d27e85 | background subscription arms (SubscribeStoredConversations / BackgroundSubscribe / BackgroundSubscribed) → `update_discover` | 29,425 → 29,292 |
 
 State layer (spec steps 4–6) started: the calls, tunnels, contacts, files,
 discover, settings, groups, chat, home and media features' update arms were
@@ -53,10 +56,10 @@ those variants via combined match arms. State ownership stays on the root
 during the first pass). What remains inline in `update()` is mostly
 navigation/room-open/join-from-ticket arms, global keyboard shortcuts,
 dashboard tab navigation, GUI test actions, tick handlers (splash/activity/
-conn monitor/mesh watchdog/outbox retry), pre-warm, connection details,
-background subscriptions and generic shell helpers — the composition-layer
-surface per spec step 8. Remaining work: per-feature subscriptions (step 7)
-and optional feature state structs (steps 4–6).
+conn monitor/mesh watchdog/outbox retry), pre-warm, connection details and
+generic shell helpers — the composition-layer surface per spec step 8.
+Remaining work: per-feature subscriptions (step 7) and optional feature
+state structs (steps 4–6).
 
 ## Overview
 
