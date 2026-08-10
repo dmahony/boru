@@ -41,6 +41,7 @@ pub struct TransportCounters {
     pub frames_received: AtomicU64,
     pub late_frames_dropped: AtomicU64,
     pub decode_errors: AtomicU64,
+    pub bytes_in_flight: AtomicU64,
 }
 
 /// Compact media header. Payload bytes are kept outside the postcard header.
@@ -131,9 +132,11 @@ impl QuicScreenTransport {
     }
     pub async fn send_frame(&self, frame: &EncodedFrame) -> Result<(), ScreenShareError> {
         let unit = encode_media(self.session_id, frame)?;
+        self.counters.bytes_in_flight.fetch_add(unit.len() as u64, Ordering::Relaxed);
         let (mut send, _) = self.connection.open_bi().await.map_err(|e| ScreenShareError::new(e.to_string()))?;
         send.write_all(&unit).await.map_err(|e| ScreenShareError::new(e.to_string()))?;
         send.finish().map_err(|e| ScreenShareError::new(e.to_string()))?;
+        self.counters.bytes_in_flight.fetch_sub(unit.len() as u64, Ordering::Relaxed);
         self.counters.bytes_sent.fetch_add(unit.len() as u64, Ordering::Relaxed);
         self.counters.frames_sent.fetch_add(1, Ordering::Relaxed);
         Ok(())

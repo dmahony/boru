@@ -4,6 +4,7 @@
 //! Implementations can be added behind these small boundaries without coupling them
 //! to chat conversations.
 
+pub mod adaptation;
 pub mod capture;
 pub mod codec;
 pub mod host;
@@ -12,10 +13,12 @@ pub mod platform;
 pub mod protocol;
 pub mod remote_input;
 pub mod session;
+pub mod stats;
 pub mod transport;
 pub mod viewer;
 
 pub use capture::{CapturedFrame, FrameSink, PixelFormat, ScreenCapture, TestPatternCapture};
+pub use adaptation::{AdaptiveQuality, QualityDecision};
 pub use codec::{
     CodecConfig, CodecKind, CodecMetadata, EncodedFrame, OpenH264Decoder, OpenH264Encoder,
     ScreenShareCodec, VideoDecoder, VideoEncoder, DEFAULT_QUEUE_CAPACITY,
@@ -32,6 +35,7 @@ pub use session::{
 pub use transport::{decode_media, encode_media, LatestFrameQueue, MediaHeader, PathKind,
     QuicScreenTransport, ReadUnit, ScreenTransport, TransportCounters, MAX_MEDIA_FRAME};
 pub use viewer::{DecodedFrame, ViewerPipeline};
+pub use stats::{ScreenShareStats, ScreenShareStatsSnapshot};
 
 /// Error returned by a screen-sharing boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]

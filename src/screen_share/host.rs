@@ -11,15 +11,18 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 
 use super::{
+    adaptation::AdaptiveQuality,
     codec::{CodecConfig, OpenH264Encoder, VideoEncoder},
     protocol::{self, ControlMessage, SCREEN_SHARE_PROTOCOL_VERSION},
     session::{ScreenShareSessionId, SessionEvent, SessionManager, SessionState},
     transport::{read_unit, QuicScreenTransport, ReadUnit},
+    stats::ScreenShareStats,
     ScreenCapture, ScreenShareError, TestPatternCapture, SCREEN_SHARE_ALPN,
 };
 
@@ -140,7 +143,10 @@ pub async fn run_host_session(
         ..CodecConfig::default()
     };
     let Ok(mut capture) = TestPatternCapture::new(DEMO_WIDTH, DEMO_HEIGHT) else { return };
-    let Ok(mut encoder) = OpenH264Encoder::new(config) else { return };
+    let Ok(mut encoder) = OpenH264Encoder::new(config) else { return; };
+    let mut quality = AdaptiveQuality::new(config);
+    let mut stats = ScreenShareStats::new();
+    let mut adaptation_tick = 0u8;
     let mut interval = tokio::time::interval(Duration::from_micros(1_000_000 / DEMO_FPS as u64));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -174,14 +180,36 @@ pub async fn run_host_session(
             }
             _ = interval.tick() => {
                 match capture.capture() {
-                    Ok(Some(frame)) => match encoder.encode(&frame) {
+                    Ok(Some(frame)) => {
+                        stats.observe_capture();
+                        let started = Instant::now();
+                        match encoder.encode(&frame) {
                         Ok(encoded) => {
+                            stats.observe_encode(started.elapsed());
+                            stats.observe_send(encoded.bytes.len());
+                            let send_started = Instant::now();
                             if transport.send_frame(&encoded).await.is_err() {
                                 return;
                             }
+                            stats.observe_send_delay(send_started.elapsed());
+                            adaptation_tick = adaptation_tick.saturating_add(1);
+                            if adaptation_tick >= 15 {
+                                adaptation_tick = 0;
+                                stats.set_bytes_in_flight(
+                                    transport.counters.bytes_in_flight.load(std::sync::atomic::Ordering::Relaxed),
+                                );
+                                let snapshot = stats.snapshot();
+                                let decision = quality.update(snapshot);
+                                if decision.changed {
+                                    if encoder.reconfigure(decision.config).is_err() { return; }
+                                    encoder.request_keyframe();
+                                    stats.observe_media_reset();
+                                }
+                            }
                         }
-                        Err(_) => {}
-                    },
+                        Err(_) => { stats.observe_capture_drop(); }
+                        }
+                    }
                     Ok(None) => {}
                     Err(_) => return,
                 }
