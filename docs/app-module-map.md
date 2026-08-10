@@ -47,6 +47,8 @@ verified against a stable baseline.
 | e4d27e85 | background subscription arms (SubscribeStoredConversations / BackgroundSubscribe / BackgroundSubscribed) → `update_discover` | 29,425 → 29,292 |
 | c3b22772 | import-friend-from-file update arms → `update_contacts` | 29,292 → 29,258 |
 | dfe8b2a6 | catalogue error update arms → `update_discover` | 29,258 → 29,251 |
+| 4cb5e03b | call subscription + CallRxHandle → `app/calls.rs` (spec step 7) | 29,251 → 29,241 |
+| 1d8cae47 | link-preview update arm → `update_chat` | 29,241 → 29,206 |
 
 State layer (spec steps 4–6) started: the calls, tunnels, contacts, files,
 discover, settings, groups, chat, home and media features' update arms were
@@ -60,8 +62,11 @@ navigation/room-open/join-from-ticket arms, global keyboard shortcuts,
 dashboard tab navigation, GUI test actions, tick handlers (splash/activity/
 conn monitor/mesh watchdog/outbox retry), pre-warm, connection details and
 generic shell helpers — the composition-layer surface per spec step 8.
-Remaining work: per-feature subscriptions (step 7) and optional feature
-state structs (steps 4–6).
+Per-feature subscriptions (spec step 7) started: `call_subscription` +
+`CallRxHandle` now live in `app/calls.rs` and are re-exported through
+`use calls::*`; the root `subscription()` still batches the remaining
+timers/event-listen subs (shell) plus the combined channel stream.
+Remaining work: optional feature state structs (steps 4–6).
 
 ## Overview
 
