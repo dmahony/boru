@@ -173,10 +173,10 @@ pub fn quick_action_card<'a>(
 
     button(content)
         .on_press(action.message.clone())
-        // HOME-02 compact: 12 px vertical / 16 px horizontal padding (was
+        // HOME-02 compact: 16 px vertical / 16 px horizontal padding (was
         // 20 px / 24 px) — smaller card, denser grid, still an easy tap
         // target because the whole card is the button.
-        .padding([SPACE_12, SPACE_16])
+        .padding([SPACE_16, SPACE_16])
         // Content-driven height: no fixed box, no hidden overflow — the
         // card grows to contain icon + title + full description.
         .width(Length::Fill)
@@ -431,8 +431,8 @@ mod tests {
             "icon container must be 40 px (HOME-02 compact)"
         );
         assert!(
-            prod.contains(".padding([SPACE_12, SPACE_16])"),
-            "card padding must be 12 px vertical / 16 px horizontal (HOME-02 compact)"
+            prod.contains(".padding([SPACE_16, SPACE_16])"),
+            "card padding must be 16 px vertical / 16 px horizontal (HOME-02 compact)"
         );
         assert!(
             prod.contains("TypeRole::CardTitle"),
@@ -469,7 +469,7 @@ mod tests {
         // tightened 8/4/8 px gaps) must be noticeably shorter than the old
         // 200+ px band while still exceeding the removed 132 px fixed box —
         // i.e. content-driven (full description visible) but denser.
-        use crate::design_tokens::{SPACE_12, SPACE_4, SPACE_8};
+        use crate::design_tokens::{SPACE_16, SPACE_4, SPACE_8};
 
         let tile = super::QUICK_ACTION_ICON_SIZE;
         let title = super::QUICK_ACTION_TITLE_SIZE * 1.3; // single-line heading
@@ -477,7 +477,7 @@ mod tests {
             * super::QUICK_ACTION_DESCRIPTION_LINE_HEIGHT
             * 2.0;
         let indicator = crate::icon_system::IconSize::Xs.px() + SPACE_8;
-        let vertical_padding = 2.0 * SPACE_12;
+        let vertical_padding = 2.0 * SPACE_16;
         let gaps = SPACE_8 + SPACE_4;
         let natural = tile + gaps + title + description_two_lines + indicator + vertical_padding;
         assert!(

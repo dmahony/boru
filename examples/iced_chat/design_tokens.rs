@@ -40,9 +40,9 @@ const SURFACE_SELECTED: Color = Color::from_rgb(
     0xF1 as f32 / 255.0,
 );
 const BORDER_COLOR: Color = Color::from_rgb(
-    0xDC as f32 / 255.0,
-    0xE5 as f32 / 255.0,
-    0xDF as f32 / 255.0,
+    0xE8 as f32 / 255.0,
+    0xF0 as f32 / 255.0,
+    0xEB as f32 / 255.0,
 );
 const BORDER_STRONG: Color = Color::from_rgb(
     0xC8 as f32 / 255.0,
@@ -849,8 +849,9 @@ pub const STATUS_CARD_BORDER: Color = Color::from_rgba(
     0.22,
 );
 
-/// Status card corner radius (px) — plan band 20–24 px.
-pub const STATUS_CARD_RADIUS: f32 = 22.0;
+/// Status card corner radius (px) — matches RADIUS_CARD for consistent
+/// card geometry across the dashboard.
+pub const STATUS_CARD_RADIUS: f32 = RADIUS_CARD;
 
 /// Status card shadow — subtle dark outer shadow so the dark panel lifts
 /// off the canvas without a heavy drop shadow.
@@ -1367,9 +1368,9 @@ mod tests {
         // plan bands so the card cannot silently regress to the old
         // pale-green 48 px badge treatment.
         assert!(
-            (20.0..=24.0).contains(&STATUS_CARD_RADIUS),
-            "status card radius {} px outside the 20–24 px band",
-            STATUS_CARD_RADIUS
+            STATUS_CARD_RADIUS == RADIUS_CARD,
+            "status card radius {} px must match RADIUS_CARD ({}) for consistent card geometry",
+            STATUS_CARD_RADIUS, RADIUS_CARD
         );
         assert!(
             (70.0..=78.0).contains(&STATUS_INDICATOR_SIZE),
