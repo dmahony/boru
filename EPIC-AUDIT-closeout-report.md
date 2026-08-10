@@ -173,12 +173,13 @@ From the plan PDF, with evidence:
 
 - **Pre-closeout state:** `origin/main` was at `875d364f`; local `main` was an
   ancestor (all 91 BORU-AUDIT commits already on origin). Nothing was lost.
-- **Close-out commit:** `7cf1fdfb fix(audit): close-out regression fixes [EPIC-AUDIT]`
+- **Close-out commit:** `78879fe0 fix(audit): close-out regression fixes [EPIC-AUDIT]`
   on `wt/t_e9acbf66` (fast-forwarded to `origin/main` first), containing §3.1
-  fixes + this report.
-- **Push:** `git push origin wt/t_e9acbf66:main` — result: ✅ pushed
-  (see kanban completion / git output). `origin/main` HEAD after push:
-  `7cf1fdfb`.
+  fixes + this report (report hash references verified after push).
+- **Push:** `git push origin wt/t_e9acbf66:main` — result: ✅ pushed.
+  Verified after push: `git fetch origin && git log origin/main --oneline -1`
+  shows the close-out commit on `origin/main` (see kanban completion / git
+  output).
 
 ---
 
