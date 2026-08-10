@@ -318,7 +318,7 @@ pub(crate) fn view_status_card(
     // card's height always equal to its own content, never a taller
     // sibling, the right rail, or the outer Fill chain.
     container(body)
-        .padding([design_tokens::SPACE_24, STATUS_CARD_PADDING_X])
+        .padding([design_tokens::SPACE_12, STATUS_CARD_PADDING_X])
         .width(Length::Fill)
         .height(Length::Shrink)
         .style(move |_t| {
@@ -736,23 +736,23 @@ impl canvas::Program<AppMessage> for NetworkMesh {
             (0.0, 0.0)
         };
 
-        // Alpha bands (CONN-08: the mesh was "too dark and subtle" — spec
-        // section 10; brightened while staying secondary to the status):
-        //   Ready (idle / animated) — nodes 0.70-0.90, lines 0.25-0.35.
-        //   Dimmed (non-Ready)      — nodes ~0.45-0.55, lines ~0.18:
+        // Alpha bands — reduced ~20% from the original bright values so the
+        // mesh stays subordinate to the status content (POLISH-02 tightening pass):
+        //   Ready (idle / animated) — nodes 0.56-0.72, lines 0.19-0.26.
+        //   Dimmed (non-Ready)      — nodes ~0.34-0.42, lines ~0.14:
         //     quiet enough to never compete with amber/red signals, but
         //     still perceptible on the near-black card gradient.
         let (node_a, node_b, other, line_a) = if self.dimmed {
-            (0.52, 0.52, 0.46, 0.18)
+            (0.42, 0.42, 0.37, 0.14)
         } else if self.animate {
             (
-                0.80 + 0.10 * (0.5 + 0.5 * sin_t),
-                0.75 + 0.10 * (0.5 + 0.5 * cos_t),
-                0.70 + 0.06 * (0.5 + 0.5 * sin_t),
-                0.26 + 0.06 * (0.5 + 0.5 * cos_t),
+                0.64 + 0.08 * (0.5 + 0.5 * sin_t),
+                0.60 + 0.08 * (0.5 + 0.5 * cos_t),
+                0.56 + 0.05 * (0.5 + 0.5 * sin_t),
+                0.21 + 0.05 * (0.5 + 0.5 * cos_t),
             )
         } else {
-            (0.85, 0.85, 0.72, 0.30)
+            (0.68, 0.68, 0.58, 0.24)
         };
 
         let pos = |i: usize| {
@@ -760,13 +760,14 @@ impl canvas::Program<AppMessage> for NetworkMesh {
             iced::Point::new(n.x * w, n.y * h)
         };
 
-        // Thin low-opacity connection lines.
+        // Thin low-opacity connection lines — finer (0.7 px) so the mesh
+        // reads as a subtle diagram, not a bold network visualization.
         for (a, b) in MESH_EDGES {
             frame.stroke(
                 &Path::line(pos(a), pos(b)),
                 Stroke::default()
                     .with_color(with_alpha(design_tokens::STATUS_NETWORK_LINE, line_a))
-                    .with_width(1.0),
+                    .with_width(0.7),
             );
         }
 

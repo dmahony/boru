@@ -323,18 +323,12 @@ mod tests {
 
     #[test]
     fn ready_card_lands_in_compact_band() {
-        // CONN-04 acceptance (spec §4): the normal desktop Ready card must
-        // be ~200-230px tall — content-determined, not a fixed height.
-        // The Full tier (single-line heading) is held strictly to the band;
-        // the minimum supported window (Medium 679) allows some tolerance
-        // above 230 because requirement 3 sanctions content-driven growth.
-        // CONN-06: the heading is now 25px at Medium and no longer wraps
-        // at 679px. CONN-11: the check indicator now shares the heading
-        // row, so the card's height is driven by the 74px icon + heading
-        // row (159.9px content + 48px padding ≈ 208px at 679) — still
-        // inside the compact band, and the spec's "grow only when its
-        // content requires it" permits heights below the 200 target when
-        // the content genuinely fits on one line.
+        // POLISH-02 (spec §4): the tightened hero card must be
+        // ~180-210px tall at Full tier — content-determined, not fixed.
+        // The vertical padding was reduced from 24px to 12px, cutting
+        // ~24px from the total height (~11% reduction).
+        // Medium tier allows growth up to 220 for wrapped text; the card
+        // grows only when its content requires it (requirement 3).
         load_font(include_bytes!("fonts/RobotoCondensed-Bold.ttf"));
         load_font(include_bytes!("fonts/PublicSans-Regular.ttf"));
         load_font(include_bytes!("fonts/PublicSans-Medium.ttf"));
@@ -343,14 +337,14 @@ mod tests {
         // Wide desktop (1600 window → ~1215 content) — full three-region row.
         let full = measure_card_height(&dep(HomeConnectionVariant::Ready, 1215.0), 1215.0);
         assert!(
-            (200.0..=230.0).contains(&full),
-            "Ready Full card height {full:.1}px must land in the spec's 200-230px band"
+            (180.0..=210.0).contains(&full),
+            "Ready Full card height {full:.1}px must land in the tightened 180-210px band"
         );
         // Minimum supported window (1024 → ~679 content) — medium row.
         let medium = measure_card_height(&dep(HomeConnectionVariant::Ready, 679.0), 679.0);
         assert!(
-            (170.0..=240.0).contains(&medium),
-            "Ready Medium card height {medium:.1}px must stay compact (single-line heading at CONN-06 scale; wrapped-growth allowed to 240)"
+            (160.0..=220.0).contains(&medium),
+            "Ready Medium card height {medium:.1}px must stay compact (single-line heading; wrapped-growth allowed to 220)"
         );
     }
 
