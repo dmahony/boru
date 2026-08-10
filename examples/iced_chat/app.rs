@@ -18277,74 +18277,21 @@ impl IcedChat {
             }
 
             // ── Remote catalogue browsing ──
-            AppMessage::BrowsePeerCatalogue(peer) => {
-                self.catalogue_loading = true;
-                let endpoint = self.endpoint.clone();
-                let storage = self.storage.clone();
-                iced::Task::perform(
-                    async move {
-                        match fetch_paginated_remote_catalogue(&endpoint, peer, 500).await {
-                            Ok(catalogue) => {
-                                // Persist the validated, signed catalogue so the
-                                // backend download gate (validate_download_request /
-                                // initiate_download) can re-check the file against
-                                // the verified snapshot at download time. This also
-                                // makes the durable Downloading/Downloaded views
-                                // consistent with what the user browsed.
-                                if let Some(storage) = storage.as_ref() {
-                                    // SQLite write — defer to the blocking pool
-                                    // (BORU-AUDIT-18).
-                                    let stg = storage.clone();
-                                    let catalogue = catalogue.clone();
-                                    if let Err(e) = stg
-                                        .run_blocking("app.store_remote_catalogue", move |s| {
-                                            boru_core::catalogue_client::process_and_store_remote_catalogue(
-                                                s, &catalogue,
-                                            )
-                                            .map_err(|e| anyhow::anyhow!("{e}"))
-                                        })
-                                        .await
-                                    {
-                                        tracing::warn!(
-                                            peer = %peer.fmt_short(),
-                                            error = %e,
-                                            "failed to persist validated remote catalogue"
-                                        );
-                                    }
-                                }
-                                let files = catalogue.files;
-                                Ok((peer, files))
-                            }
-                            Err(e) => Err(e.to_string()),
-                        }
-                    },
-                    |result| match result {
-                        Ok((peer, files)) => AppMessage::PeerCatalogueReceived { peer, files },
-                        Err(e) => AppMessage::PeerCatalogueFailed(e),
-                    },
-                )
-            }
-            AppMessage::PeerCatalogueReceived { peer, files } => {
-                self.catalogue_loading = false;
-                self.peer_catalogue_view = Some((peer, files));
-                if !matches!(self.screen, Screen::PeerCatalogue(peer) | Screen::PeerProfile(peer)) {
-                    self.peer_profile_return_to = Some(self.screen.clone());
-                }
-                self.screen = Screen::PeerCatalogue(peer);
-                iced::Task::none()
-            }
-            AppMessage::PeerCatalogueFailed(error) => {
-                self.catalogue_loading = false;
-                self.push_system(format!("Catalogue fetch failed: {error}"));
-                iced::Task::none()
-            }
-            AppMessage::CatalogueScrolled(offset, vp_h) => {
-                self.catalogue_scroll_offset = offset;
-                self.catalogue_viewport_height = vp_h;
-                iced::Task::none()
-            }
 
             // ── Friend Profile Navigation ──
+            // ── Discover / directory (state layer) ─────────────────
+            AppMessage::BrowsePeerCatalogue(_)
+            | AppMessage::PeerCatalogueReceived { .. }
+            | AppMessage::PeerCatalogueFailed(_)
+            | AppMessage::CatalogueScrolled(..)
+            | AppMessage::ToggleAdvertiseRoom(_)
+            | AppMessage::SubscribeDirectoryTopic
+            | AppMessage::DirectorySubscribed(_)
+            | AppMessage::OpenDirectory
+            | AppMessage::CloseDiscover
+            | AppMessage::DirectoryRoomJoin(_)
+            | AppMessage::DeleteDirectoryRoom(_)
+            | AppMessage::DirectoryRoomUpdate(..) => self.update_discover(message),
             AppMessage::OpenFriendProfile(peer) => {
                 self.toast_message = None;
                 self.friend_profile_menu_open = false;
@@ -18679,127 +18626,6 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
-            AppMessage::ToggleAdvertiseRoom(topic) => {
-                // Toggle advertising for this room.
-                if self.advertised_rooms.contains(&topic) {
-                    self.advertised_rooms.remove(&topic);
-                    info!(%topic, "room advertising disabled");
-                    iced::Task::none()
-                } else {
-                    self.advertised_rooms.insert(topic);
-                    info!(%topic, "room advertising enabled");
-                    let room_name = self
-                        .conversation_store
-                        .find(&topic)
-                        .map(|e| {
-                            if e.name.is_empty() {
-                                topic.to_string()
-                            } else {
-                                e.name.clone()
-                            }
-                        })
-                        .unwrap_or_else(|| topic.to_string());
-                    // PUBLIC-02: making a room public is a local
-                    // announcement — surface it in the Recent Activity feed.
-                    self.push_activity(
-                        format!("You announced public room \"{room_name}\""),
-                        ActivityKind::Generic,
-                    );
-                    // Broadcast an immediate RoomAdvertisement so the room
-                    // appears in the directory without waiting for the next
-                    // ~60s periodic tick.
-                    if let Some(ref dir_sender) = self.directory_sender {
-                        let sk = self.secret_key.clone();
-                        let s = dir_sender.clone();
-                        let neighbor_count = self
-                            .room_neighbor_counts
-                            .get(&topic)
-                            .copied()
-                            .unwrap_or_default();
-                        let ticket = self.room_ticket(topic, &[]).to_string();
-                        iced::Task::perform(
-                            async move {
-                                let ad = boru_core::chat_core::RoomAdvertisement {
-                                    room_name,
-                                    description: String::new(),
-                                    topic,
-                                    ticket,
-                                    member_count: neighbor_count,
-                                    last_activity: std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .unwrap_or_default()
-                                        .as_millis()
-                                        as u64,
-                                };
-                                let ad_bytes = postcard::to_stdvec(&ad).unwrap_or_default();
-                                let signature = sk.sign(&ad_bytes);
-                                let msg = crate::Message::RoomAdvertisement {
-                                    ad,
-                                    signature: signature.to_bytes().to_vec(),
-                                };
-                                let ok = match SignedMessage::sign_and_encode(&sk, &msg) {
-                                    Ok(encoded) => s.broadcast(encoded).await.is_ok(),
-                                    Err(_) => false,
-                                };
-                                ok
-                            },
-                            |ok| {
-                                if ok {
-                                    tracing::debug!("immediate room advertisement broadcast");
-                                } else {
-                                    tracing::warn!("immediate room advertisement broadcast failed");
-                                }
-                                AppMessage::Noop
-                            },
-                        )
-                    } else {
-                        iced::Task::done(AppMessage::SubscribeDirectoryTopic)
-                    }
-                }
-            }
-            AppMessage::SubscribeDirectoryTopic => {
-                let gossip = self.gossip.clone();
-                let topic = self.directory_topic;
-                info!(%topic, "subscribing to directory topic");
-                iced::Task::perform(
-                    async move {
-                        let sub = gossip
-                            .subscribe(topic, vec![])
-                            .await
-                            .map_err(|e| e.to_string())?;
-                        let (sender, _receiver) = sub.split();
-                        Ok::<_, String>(sender)
-                    },
-                    |result| match result {
-                        Ok(sender) => AppMessage::DirectorySubscribed(Some(sender)),
-                        Err(e) => {
-                            warn!("SubscribeDirectoryTopic failed: {e}");
-                            AppMessage::DirectorySubscribed(None)
-                        }
-                    },
-                )
-            }
-            AppMessage::DirectorySubscribed(sender) => {
-                self.directory_sender = sender;
-                if self.directory_sender.is_some() {
-                    info!("directory topic subscribed");
-                } else {
-                    warn!("directory topic subscription failed");
-                }
-                iced::Task::none()
-            }
-            // ── Room advertisement / Directory ──────────────────────────
-            AppMessage::OpenDirectory => {
-                if !matches!(self.screen, Screen::Discover) {
-                    self.discover_return_to = Some(self.screen.clone());
-                }
-                self.screen = Screen::Discover;
-                iced::Task::none()
-            }
-            AppMessage::CloseDiscover => {
-                self.screen = self.discover_return_to.take().unwrap_or(Screen::ChatList);
-                iced::Task::none()
-            }
             AppMessage::OpenGroups => {
                 if !matches!(self.screen, Screen::Groups) {
                     self.groups_return_to = Some(self.screen.clone());
@@ -18809,53 +18635,6 @@ impl IcedChat {
             }
             AppMessage::CloseGroups => {
                 self.screen = self.groups_return_to.take().unwrap_or(Screen::ChatList);
-                iced::Task::none()
-            }
-            AppMessage::DirectoryRoomJoin(ad) => {
-                // Parse the ticket from the advertisement and open the room.
-                match Ticket::from_str(&ad.ticket) {
-                    Ok(ticket) => {
-                        let topic = ticket.topic;
-                        info!(topic = %topic, "joining room from directory");
-                        iced::Task::done(AppMessage::OpenRoom(topic))
-                    }
-                    Err(e) => {
-                        warn!("failed to parse directory room ticket: {e}");
-                        self.push_system("Failed to join room: invalid ticket");
-                        iced::Task::none()
-                    }
-                }
-            }
-            AppMessage::DeleteDirectoryRoom(topic) => {
-                let local_author = self.local_public;
-                let removed = self
-                    .directory_store
-                    .lock()
-                    .map(|mut store| store.remove(topic, local_author))
-                    .unwrap_or(false);
-                if removed {
-                    if let Some(storage) = self.storage.as_ref() {
-                        if let Err(err) = storage.with_conn(|conn| {
-                            conn.execute(
-                                "DELETE FROM directory_ads WHERE topic = ?1 AND author = ?2",
-                                rusqlite::params![topic.as_bytes(), local_author.as_bytes()],
-                            )
-                            .map_err(n0_error::AnyError::from_std)?;
-                            Ok(())
-                        }) {
-                            warn!("failed to delete directory advertisement: {err}");
-                        }
-                    }
-                    self.advertised_rooms.remove(&topic);
-                    self.public_rooms_sidebar_revision =
-                        self.public_rooms_sidebar_revision.wrapping_add(1);
-                    self.refresh_sidebar_counts();
-                }
-                iced::Task::none()
-            }
-            AppMessage::DirectoryRoomUpdate(..) => {
-                // Room advertisements from the directory topic are drained
-                // directly from directory_room_rx on ConnMonitorTick.
                 iced::Task::none()
             }
             AppMessage::CloseConnectionDetails => self.close_connection_details_dialog(),
