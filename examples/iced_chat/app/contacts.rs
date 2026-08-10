@@ -1051,6 +1051,68 @@ impl IcedChat {
                 }
                 iced::Task::batch(tasks)
             }
+            // ── Friend confirm / block / rename (state layer) ──
+            AppMessage::ShowRemoveFriendConfirm => {
+                self.friend_remove_confirm = true;
+                self.friend_profile_menu_open = false;
+                iced::Task::none()
+            }
+            AppMessage::CancelRemoveFriend => {
+                self.friend_remove_confirm = false;
+                iced::Task::none()
+            }
+            AppMessage::ConfirmRemoveFriend => {
+                self.friend_remove_confirm = false;
+                if let Screen::FriendProfile(peer) = &self.screen {
+                    let mgr = self.friend_mgr.clone();
+                    let peer = *peer;
+                    let label = self.resolve_name(&peer);
+                    return iced::Task::perform(
+                        async move {
+                            let removed = mgr.remove_friend(&peer).await.unwrap_or(false);
+                            if removed {
+                                AppMessage::FriendRemoved { label }
+                            } else {
+                                AppMessage::FriendRemoved { label }
+                            }
+                        },
+                        |msg| msg,
+                    );
+                }
+                iced::Task::none()
+            }
+            AppMessage::ShowBlockFriendConfirm => {
+                self.friend_block_confirm = true;
+                self.friend_profile_menu_open = false;
+                iced::Task::none()
+            }
+            AppMessage::CancelBlockFriend => {
+                self.friend_block_confirm = false;
+                iced::Task::none()
+            }
+            AppMessage::ShowRenameFriendInput => {
+                self.friend_profile_renaming = true;
+                self.friend_profile_menu_open = false;
+                if let Screen::FriendProfile(peer) = &self.screen {
+                    self.friend_profile_rename_input = self.resolve_name(peer);
+                }
+                iced::Task::none()
+            }
+            AppMessage::ConfirmBlockFriend => {
+                self.friend_block_confirm = false;
+                if let Screen::FriendProfile(peer) = &self.screen {
+                    let fid = boru_core::friends::FriendId::from_public_key(*peer);
+                    if let Some(record) = self.friends.get_mut(&fid) {
+                        record.relationship = boru_core::friends::FriendRelationship::Blocked;
+                        self.friends_sidebar_revision =
+                            self.friends_sidebar_revision.wrapping_add(1);
+                    }
+                    self.call_handle.set_peer_authorized(*peer, false);
+                    self.toast_message = Some(format!("Blocked {}", self.resolve_name(peer)));
+                    self.toast_counter = 120;
+                }
+                iced::Task::none()
+            }
             // update() only dispatches the contacts variants here; other
             // variants can never reach this method (defensive catch-all).
             _ => iced::Task::none(),
