@@ -14806,35 +14806,8 @@ impl IcedChat {
                 )
             }
 
-            AppMessage::LinkPreviewLoaded(idx, result) => {
-                tracing::info!(entry_index = idx, result = ?result, "LinkPreviewLoaded fired");
-                if idx >= self.entries.len() {
-                    tracing::warn!(entry_index = idx, "LinkPreviewLoaded: out of bounds");
-                    return iced::Task::none();
-                }
-                let entry = &mut self.entries[idx];
-                match result {
-                    link_preview::LinkPreviewResult::Success(data) => {
-                        entry.link_preview = Some(data);
-                        entry.link_preview_loading = false;
-                        entry.link_preview_error = false;
-                    }
-                    link_preview::LinkPreviewResult::Error(e) => {
-                        tracing::info!(entry_index = idx, error = %e, "link preview fetch failed");
-                        entry.link_preview_loading = false;
-                        entry.link_preview_error = true;
-                    }
-                    link_preview::LinkPreviewResult::Pending => {
-                        // Another task is already fetching this URL.
-                        // The first fetch will populate the cache and send
-                        // its own `LinkPreviewLoaded` message.
-                        return iced::Task::none();
-                    }
-                }
-                entry.bump_gen();
-                self.link_preview_fetch_index = None;
-                iced::Task::none()
-            }
+            // ── Link preview (state layer) ────────────────
+            AppMessage::LinkPreviewLoaded(..) => self.update_chat(message),
 
             // ── Pre-warm (PERF-4R-B) ───────────────────────────────────
             AppMessage::UserActivity => {
