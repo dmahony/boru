@@ -716,6 +716,255 @@ impl IcedChat {
                 self.friend_id_copied = false;
                 iced::Task::none()
             }
+            AppMessage::SendFriendRequest(peer) => {
+                // Prevent duplicate pending requests
+                let local_pk = self.local_public.to_string();
+                let peer_pk = peer.to_string();
+                match self
+                    .friend_request_store
+                    .send_request(&local_pk, &peer_pk, None)
+                {
+                    Ok(request) => {
+                        self.outgoing_request_states
+                            .insert(peer, OutgoingRequestState::Pending);
+                        self.rebuild_join_request_list();
+
+                        // Send the conversation invite via whisper
+                        let fid = FriendId::from_public_key(peer);
+                        let topic = direct_topic(&self.local_public, &peer);
+                        let known_addrs = self
+                            .friends
+                            .get(&fid)
+                            .map(|record| record.known_addrs.clone())
+                            .unwrap_or_default();
+                        let record = self.friends.ensure_friend(fid);
+                        record.set_direct_conversation(topic, DirectConversationState::Pending);
+                        let _room =
+                            RoomStore::with_peers(&self.data_dir, topic, known_addrs.clone());
+                        self.try_save_friends();
+                        self.send_save_friend_requests();
+
+                        let secret_key = self.secret_key.clone();
+                        let whisper_handle = self.whisper_handle.clone();
+                        // A friend request is a control-plane request, not a
+                        // conversation invite.  Keeping these actions distinct is
+                        // important: ConversationInvite is sent only after the
+                        // recipient accepts, while FriendRequest must remain
+                        // pending so it can be rendered and acted on locally.
+                        let action = ContactAction::FriendRequest { name: None };
+                        let payload = match SignedContactMessage::sign(&secret_key, &action) {
+                            Ok(payload) => payload.into(),
+                            Err(err) => {
+                                return iced::Task::done(AppMessage::FriendRequestFailed {
+                                    peer,
+                                    error: format!("Could not create contact invite: {err}"),
+                                });
+                            }
+                        };
+                        info!(
+                            peer = %peer.fmt_short(),
+                            "dispatching whisper send_control for friend request"
+                        );
+                        iced::Task::batch(vec![iced::Task::perform(
+                            async move { whisper_handle.send_control(peer, payload).await },
+                            move |result| match result {
+                                Ok(()) => AppMessage::FriendRequestSent {
+                                    peer,
+                                    request_id: request.id.clone(),
+                                },
+                                Err(e) => AppMessage::FriendRequestFailed {
+                                    peer,
+                                    error: e.to_string(),
+                                },
+                            },
+                        )])
+                    }
+                    Err(FriendRequestError::DuplicatePending { existing_id }) => {
+                        info!(
+                            %existing_id,
+                            peer = %peer.fmt_short(),
+                            "outgoing friend request is duplicate pending — ignoring"
+                        );
+                        self.outgoing_request_states
+                            .insert(peer, OutgoingRequestState::Pending);
+                        self.rebuild_join_request_list();
+                        iced::Task::none()
+                    }
+                    Err(err) => iced::Task::done(AppMessage::FriendRequestFailed {
+                        peer,
+                        error: err.to_string(),
+                    }),
+                }
+            }
+
+            AppMessage::FriendRequestSent {
+                peer: _,
+                request_id: _,
+            } => {
+                // Request was sent — keep state as Pending
+                // Future: when we hear back via whisper, update state to Accepted/Declined
+                // The pending request appears in the Friend Requests screen's
+                // outgoing list; drop the pre-warmed tree so it is rebuilt.
+                self.invalidate_prewarm(&[Screen::FriendRequests]);
+                iced::Task::none()
+            }
+
+            AppMessage::FriendRequestFailed { peer, error } => {
+                self.outgoing_request_states
+                    .insert(peer, OutgoingRequestState::Failed(error));
+                self.rebuild_join_request_list();
+                iced::Task::none()
+            }
+
+            AppMessage::FriendRequestReceived {
+                peer,
+                request_id: _,
+                status,
+            } => {
+                match status {
+                    FriendRequestStatus::Accepted => {
+                        self.outgoing_request_states
+                            .insert(peer, OutgoingRequestState::Accepted);
+                    }
+                    FriendRequestStatus::Declined => {
+                        self.outgoing_request_states
+                            .insert(peer, OutgoingRequestState::Declined);
+                    }
+                    _ => {}
+                }
+                self.rebuild_join_request_list();
+                // The incoming/outgoing request lists changed.
+                self.invalidate_prewarm(&[Screen::FriendRequests]);
+                iced::Task::none()
+            }
+
+            AppMessage::FriendRequestRetry(peer) => {
+                // Re-send the friend request
+                iced::Task::done(AppMessage::SendFriendRequest(peer))
+            }
+
+            AppMessage::IncomingFriendRequestAccept { request_id, peer } => {
+                let local_pk = self.local_public.to_string();
+                match self
+                    .friend_request_store
+                    .accept_request(&request_id, &local_pk)
+                {
+                    Ok(_) => {
+                        self.requests_sidebar_revision =
+                            self.requests_sidebar_revision.wrapping_add(1);
+                        self.send_save_friend_requests();
+                        iced::Task::done(AppMessage::IncomingFriendRequestProcessed {
+                            request_id,
+                            peer,
+                            status: FriendRequestStatus::Accepted,
+                        })
+                    }
+                    Err(err) => iced::Task::done(AppMessage::ErrorMsg(format!(
+                        "Failed to accept friend request: {err}"
+                    ))),
+                }
+            }
+
+            AppMessage::IncomingFriendRequestDecline { request_id, peer } => {
+                let local_pk = self.local_public.to_string();
+                match self
+                    .friend_request_store
+                    .decline_request(&request_id, &local_pk)
+                {
+                    Ok(_) => {
+                        self.requests_sidebar_revision =
+                            self.requests_sidebar_revision.wrapping_add(1);
+                        self.send_save_friend_requests();
+                        iced::Task::done(AppMessage::IncomingFriendRequestProcessed {
+                            request_id,
+                            peer,
+                            status: FriendRequestStatus::Declined,
+                        })
+                    }
+                    Err(err) => iced::Task::done(AppMessage::ErrorMsg(format!(
+                        "Failed to decline friend request: {err}"
+                    ))),
+                }
+            }
+
+            AppMessage::IncomingFriendRequestProcessed {
+                request_id: _,
+                peer,
+                status,
+            } => {
+                if status.is_accepted() {
+                    // Set up friend record with Active direct conversation
+                    let fid = FriendId::from_public_key(peer);
+                    let topic = direct_topic(&self.local_public, &peer);
+                    let known_addrs = self
+                        .friends
+                        .get(&fid)
+                        .map(|record| record.known_addrs.clone())
+                        .unwrap_or_default();
+                    let record = self.friends.ensure_friend(fid);
+                    record.set_direct_conversation(topic, DirectConversationState::Active);
+                    record.relationship = FriendRelationship::Friends;
+                    self.call_handle.set_peer_authorized(peer, true);
+                    let _room = RoomStore::with_peers(&self.data_dir, topic, known_addrs.clone());
+                    self.try_save_friends();
+
+                    // Show the accepted friend immediately in the sidebar.
+                    self.peer_presence_map.insert(peer, now_ms().max(0) as u64);
+                    self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
+                    self.mark_friends_sidebar_dirty();
+
+                    // Send a ConversationInvite back to the original requester
+                    // so they know the request was accepted and can join the topic.
+                    let secret_key = self.secret_key.clone();
+                    let whisper_handle = self.whisper_handle.clone();
+                    let local_addr = self.endpoint.addr();
+                    // Advertise our mailbox key alongside the invite.
+                    let mailbox_key = self.local_mailbox_key;
+                    let action = ContactAction::ConversationInvite {
+                        topic,
+                        addrs: vec![local_addr],
+                    };
+                    // Use BackgroundSubscribe for the direct conversation to avoid
+                    // slow-path gossip subscription with WAL replay storm on startup.
+                    // The conversation appears in the sidebar; user clicks to open.
+                    let bootstrap_peers = self.discovered_peers.clone();
+                    if let Ok(payload) = SignedContactMessage::sign(&secret_key, &action) {
+                        let mut tasks: Vec<iced::Task<AppMessage>> = vec![
+                            iced::Task::perform(
+                                async move {
+                                    let _ = whisper_handle.send_control(peer, payload.into()).await;
+                                },
+                                |_| AppMessage::Noop,
+                            ),
+                            iced::Task::done(AppMessage::BackgroundSubscribe(
+                                topic,
+                                bootstrap_peers.clone(),
+                            )),
+                        ];
+                        // Also advertise our mailbox key so the friend can
+                        // encrypt offline messages to us.
+                        if let Some(mailbox) = mailbox_key {
+                            let mb_action = ContactAction::MailboxAdvertise { mailbox };
+                            if let Ok(mb_payload) =
+                                SignedContactMessage::sign(&secret_key, &mb_action)
+                            {
+                                let wh = self.whisper_handle.clone();
+                                tasks.push(iced::Task::perform(
+                                    async move {
+                                        let _ = wh.send_control(peer, mb_payload.into()).await;
+                                    },
+                                    |_| AppMessage::Noop,
+                                ));
+                            }
+                        }
+                        iced::Task::batch(tasks)
+                    } else {
+                        iced::Task::done(AppMessage::BackgroundSubscribe(topic, bootstrap_peers))
+                    }
+                } else {
+                    iced::Task::none()
+                }
+            }
             // update() only dispatches the contacts variants here; other
             // variants can never reach this method (defensive catch-all).
             _ => iced::Task::none(),
