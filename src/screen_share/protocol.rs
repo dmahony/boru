@@ -11,6 +11,7 @@ use tokio::sync::{mpsc, Mutex};
 
 use super::session::{ScreenShareSessionId, SessionEvent, SessionManager};
 use super::transport::{MediaHeader, QuicScreenTransport, ReadUnit};
+use super::permissions::{Capability, MAX_CAPABILITIES};
 use super::ScreenShareError;
 
 /// ALPN registered on the shared Iroh endpoint router.
@@ -27,10 +28,13 @@ pub const MAX_CODEC_NAME: usize = 32;
 pub const MAX_REASON: usize = 256;
 
 /// A bounded, explicit view-only permission. Remote control is intentionally absent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Permission {
     /// The viewer may only receive frames.
     ViewOnly,
+    /// Explicit capabilities for a session. ViewScreen is the only capability
+    /// granted by the normal acceptance path; control requires a later grant.
+    Capabilities(Vec<Capability>),
 }
 
 /// Negotiation capabilities advertised by the host.
@@ -96,8 +100,16 @@ impl ControlMessage {
     pub fn validate(&self) -> Result<(), ProtocolError> {
         let version = match self {
             Self::Hello(message) => {
+                if message.session_id == ScreenShareSessionId::zero() {
+                    return Err(ProtocolError::Malformed("empty session id".into()));
+                }
                 if message.codecs.len() > MAX_CODECS { return Err(ProtocolError::Malformed("too many codec capabilities".into())); }
                 if message.codecs.iter().any(|codec| codec.is_empty() || codec.len() > MAX_CODEC_NAME || !codec.is_ascii()) { return Err(ProtocolError::Malformed("invalid codec capability".into())); }
+                if let Permission::Capabilities(capabilities) = &message.permission {
+                    if capabilities.is_empty() || capabilities.len() > MAX_CAPABILITIES || capabilities.iter().any(|capability| capabilities.iter().filter(|candidate| *candidate == capability).count() > 1) {
+                        return Err(ProtocolError::Malformed("invalid permission capability list".into()));
+                    }
+                }
                 if message.width == 0 || message.height == 0 || message.width > 16_384 || message.height > 16_384 { return Err(ProtocolError::Malformed("invalid dimensions".into())); }
                 if message.frame_rate == 0 || message.frame_rate > 240 { return Err(ProtocolError::Malformed("invalid frame rate".into())); }
                 message.version
@@ -257,10 +269,10 @@ mod tests {
     use iroh::endpoint::presets;
     use iroh::protocol::Router;
 
-    fn hello() -> Hello { Hello { version: 1, session_id: ScreenShareSessionId::zero(), host_id: iroh::SecretKey::generate().public(), conversation_id: 7, codecs: vec!["h264".into()], width: 1920, height: 1080, frame_rate: 30, permission: Permission::ViewOnly } }
+    fn hello() -> Hello { Hello { version: 1, session_id: ScreenShareSessionId::from_bytes([1; 16]), host_id: iroh::SecretKey::generate().public(), conversation_id: 7, codecs: vec!["h264".into()], width: 1920, height: 1080, frame_rate: 30, permission: Permission::ViewOnly } }
     #[test] fn round_trip() { let message = ControlMessage::Hello(hello()); assert_eq!(decode(&encode(&message).unwrap()).unwrap(), message); }
     #[test] fn malformed_and_unsupported_are_rejected() { assert!(decode(&[0xff]).is_err()); let mut message = hello(); message.version = 2; assert!(matches!(encode(&ControlMessage::Hello(message)), Err(ProtocolError::UnsupportedVersion { .. }))); }
-    #[test] fn accept_is_explicit() { let mut manager = SessionManager::default(); let id = ScreenShareSessionId::zero(); manager.start_invitation(id, hello().host_id, 7); assert_eq!(manager.state(id), Some(SessionState::AwaitingAcceptance)); }
+    #[test] fn accept_is_explicit() { let mut manager = SessionManager::default(); let id = ScreenShareSessionId::from_bytes([2; 16]); manager.start_invitation(id, hello().host_id, 7); assert_eq!(manager.state(id), Some(SessionState::AwaitingAcceptance)); }
 
     /// Full QUIC round trip: host dials the viewer, Hello → Invitation,
     /// viewer responds Accept on the inbound connection, host streams a

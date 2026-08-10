@@ -47,9 +47,14 @@ struct Record { state: SessionState, host_id: iroh::PublicKey, peer_id: Option<i
 #[derive(Debug, Default)]
 pub struct SessionManager { sessions: HashMap<ScreenShareSessionId, Record> }
 
+pub const MAX_ACTIVE_SESSIONS: usize = 8;
+
 impl SessionManager {
     /// Start a local invitation. The caller must send the corresponding Hello.
-    pub fn start_invitation(&mut self, id: ScreenShareSessionId, host_id: iroh::PublicKey, conversation_id: u64) { self.sessions.insert(id, Record { state: SessionState::AwaitingAcceptance, host_id, peer_id: None, conversation_id }); }
+    pub fn start_invitation(&mut self, id: ScreenShareSessionId, host_id: iroh::PublicKey, conversation_id: u64) {
+        if id == ScreenShareSessionId::zero() || self.sessions.len() >= MAX_ACTIVE_SESSIONS { return; }
+        self.sessions.insert(id, Record { state: SessionState::AwaitingAcceptance, host_id, peer_id: None, conversation_id });
+    }
     /// Return a session state, if the session is known.
     pub fn state(&self, id: ScreenShareSessionId) -> Option<SessionState> { self.sessions.get(&id).map(|record| record.state) }
     /// Build a default, view-only Hello for a locally initiated session.
@@ -79,6 +84,9 @@ impl SessionManager {
     pub fn apply_remote(&mut self, peer_id: iroh::PublicKey, message: ControlMessage, events: &tokio::sync::mpsc::Sender<SessionEvent>) -> Option<ControlMessage> {
         match message {
             ControlMessage::Hello(hello) => {
+                if hello.session_id == ScreenShareSessionId::zero() || self.sessions.len() >= MAX_ACTIVE_SESSIONS {
+                    return Some(ControlMessage::Reject { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: hello.session_id, reason: "session is not available".into() });
+                }
                 if hello.host_id != peer_id {
                     return Some(ControlMessage::Reject {
                         version: SCREEN_SHARE_PROTOCOL_VERSION,
@@ -87,6 +95,9 @@ impl SessionManager {
                     });
                 }
                 if hello.permission != Permission::ViewOnly { return Some(ControlMessage::Reject { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: hello.session_id, reason: "unsupported permission".into() }); }
+                if self.sessions.contains_key(&hello.session_id) {
+                    return Some(ControlMessage::Reject { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: hello.session_id, reason: "session already exists".into() });
+                }
                 self.sessions.insert(hello.session_id, Record { state: SessionState::Connecting, host_id: hello.host_id, peer_id: Some(peer_id), conversation_id: hello.conversation_id });
                 let _ = events.try_send(SessionEvent::Invitation { session_id: hello.session_id, host_id: hello.host_id, conversation_id: hello.conversation_id, hello });
                 None
@@ -95,8 +106,20 @@ impl SessionManager {
                 if let Some(record) = self.sessions.get_mut(&session_id) { if record.host_id == peer_id && matches!(record.state, SessionState::AwaitingAcceptance | SessionState::Connecting) { record.state = SessionState::Streaming; let _ = events.try_send(SessionEvent::Accepted { session_id, peer_id }); } }
                 None
             }
-            ControlMessage::Reject { session_id, reason, .. } => { if self.sessions.remove(&session_id).is_some() { let _ = events.try_send(SessionEvent::Rejected { session_id, reason }); } None }
-            ControlMessage::EndSession { session_id, .. } => { if let Some(record) = self.sessions.get_mut(&session_id) { record.state = SessionState::Ended; let _ = events.try_send(SessionEvent::Ended { session_id }); } None }
+            ControlMessage::Reject { session_id, reason, .. } => {
+                if let Some(record) = self.sessions.get(&session_id) {
+                    if record.host_id != peer_id && record.peer_id != Some(peer_id) { return None; }
+                }
+                if self.sessions.remove(&session_id).is_some() { let _ = events.try_send(SessionEvent::Rejected { session_id, reason }); }
+                None
+            }
+            ControlMessage::EndSession { session_id, .. } => {
+                if let Some(record) = self.sessions.get_mut(&session_id) {
+                    if record.host_id != peer_id && record.peer_id != Some(peer_id) { return None; }
+                    if record.state != SessionState::Ended { record.state = SessionState::Ended; let _ = events.try_send(SessionEvent::Ended { session_id }); }
+                }
+                None
+            }
         }
     }
 }
