@@ -14762,15 +14762,8 @@ impl IcedChat {
             | AppMessage::ActivityLogClearConfirmed
             | AppMessage::DashboardConnectivityDismissed
             | AppMessage::DashboardDownloadingRefresh => self.update_files(message),
-            AppMessage::CatalogueFetchFailed(message) => {
-                self.catalogue_loading = false;
-                self.catalogue_error = Some(message);
-                iced::Task::none()
-            }
-            AppMessage::CatalogueErrorDismissed => {
-                self.catalogue_error = None;
-                iced::Task::none()
-            }
+            AppMessage::CatalogueFetchFailed(_)
+            | AppMessage::CatalogueErrorDismissed => self.update_discover(message),
             AppMessage::WindowResized(width) => {
                 let old_mode = ResponsiveMode::of(self.window_width);
                 self.window_width = width;

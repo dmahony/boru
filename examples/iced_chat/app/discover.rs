@@ -1974,6 +1974,16 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
+            // ── Catalogue errors (state layer) ──
+            AppMessage::CatalogueFetchFailed(message) => {
+                self.catalogue_loading = false;
+                self.catalogue_error = Some(message);
+                iced::Task::none()
+            }
+            AppMessage::CatalogueErrorDismissed => {
+                self.catalogue_error = None;
+                iced::Task::none()
+            }
             // update() only dispatches the discover variants here; other
             // variants can never reach this method (defensive catch-all).
             _ => iced::Task::none(),
