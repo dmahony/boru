@@ -21,16 +21,16 @@ verified against a stable baseline.
 | 8523fce7 | shared shell/dialog overlays → `app/dialogs.rs` | 39,252 → 38,513 |
 | a0c2561c | tunnel share views → `app/tunnels.rs` | 38,513 → 38,266 |
 | f6bae940 | calls update arms → `update_calls` in `app/calls.rs` | 38,266 → 38,102 |
+| 3dfd10f3 | tunnels update arms → `update_tunnels` in `app/tunnels.rs` | 38,102 → 37,591 |
 
-State layer (spec steps 4–6) started: the calls feature's update arms were
-moved into a per-feature `update_calls(&mut self, AppMessage) ->
-Task<AppMessage>` method in `app/calls.rs`; app.rs's `update()` now
-dispatches those variants via a combined match arm. State ownership stays
-on the root `IcedChat` for now (spec step 3 constraint: keep state
-ownership unchanged during the first pass); remaining feature update arms
-(chat, files, discover, contacts, settings, tunnels, groups, home) can be
-extracted the same way, then feature state structs (steps 4–6) and
-per-feature subscriptions (step 7) afterwards.
+State layer (spec steps 4–6) started: the calls and tunnels features' update
+arms were moved into per-feature `update_calls` / `update_tunnels` methods;
+app.rs's `update()` now dispatches those variants via combined match arms.
+State ownership stays on the root `IcedChat` for now (spec step 3
+constraint: keep state ownership unchanged during the first pass); remaining
+feature update arms (chat, files, discover, contacts, settings, groups,
+home) can be extracted the same way, then feature state structs (steps 4–6)
+and per-feature subscriptions (step 7) afterwards.
 
 ## Overview
 
