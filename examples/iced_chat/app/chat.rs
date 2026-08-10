@@ -6771,6 +6771,221 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
+            AppMessage::OpenImageLightbox(entry_index) => {
+                self.lightbox_image = Some(entry_index);
+                iced::Task::none()
+            }
+            AppMessage::CloseImageLightbox => {
+                self.lightbox_image = None;
+                // Requirement (CHAT-SCROLL): closing the lightbox must
+                // ALWAYS return the chat log to the latest message (bottom),
+                // like a normal messenger — even when the user had scrolled
+                // up before opening the image.  Force follow-latest, re-arm
+                // the f32::MAX bottom sentinel, and queue the snap.
+                self.follow_latest = true;
+                self.scroll_offset = f32::MAX;
+                self.scroll_to_bottom_pending = true;
+                // The lightbox overlay is a `stack![base, overlay]` wrapper;
+                // removing it re-creates the windowed scrollable, whose
+                // first `Scrolled(0, vp)` event would clobber the sentinel
+                // before the snap task lands.  Arm the stale-event guard so
+                // non-bottom events keep the sentinel and re-queue the snap
+                // until a bottom event confirms arrival.
+                self.lightbox_close_snap_guard = 3;
+                iced::Task::none()
+            }
+            AppMessage::ClearHistoryRequested => {
+                if self.history_clear_pending {
+                    return iced::Task::none();
+                }
+                self.history_clear_feedback = None;
+                self.history_clear_feedback_is_error = false;
+                self.history_confirm_clear = !self.history_confirm_clear;
+                if !self.history_confirm_clear {
+                    self.complete_close_dialog_action();
+                }
+                iced::Task::none()
+            }
+
+            AppMessage::ConfirmClearHistory => {
+                if self.history_clear_pending {
+                    return iced::Task::none();
+                }
+                self.history_clear_pending = true;
+                self.history_clear_feedback = None;
+                self.history_clear_feedback_is_error = false;
+                let topic = self.topic;
+                let room_history = self.room_history.clone();
+                let chat_history = self.chat_history.clone();
+                if let Some(storage) = &self.storage {
+                    let _ = storage.delete_outgoing_for_topic(&topic);
+                }
+                iced::Task::perform(
+                    async move {
+                        let mut room_history = room_history;
+                        let mut chat_history = chat_history.lock().unwrap();
+                        let report =
+                            clear_room_history(topic, &mut room_history, &mut chat_history, None)
+                                .map_err(|err| err.to_string())?;
+                        Ok::<_, String>((topic, room_history, report))
+                    },
+                    move |result| match result {
+                        Ok((topic, room_history, report)) => AppMessage::ClearHistoryFinished {
+                            topic,
+                            room_history,
+                            report,
+                        },
+                        Err(error) => AppMessage::ClearHistoryFailed { topic, error },
+                    },
+                )
+            }
+
+            AppMessage::ClearHistoryFinished {
+                topic,
+                room_history: _,
+                report,
+            } => {
+                self.history_clear_pending = false;
+                self.history_confirm_clear = false;
+                self.history_clear_feedback_is_error = false;
+                self.history_clear_feedback = Some(format!(
+                    "Cleared {} messages from this chat.",
+                    report.chat_entries_removed
+                ));
+                self.clear_current_room_history_runtime(topic, &report);
+                iced::Task::none()
+            }
+
+            AppMessage::ClearHistoryFailed { topic: _, error } => {
+                self.history_clear_pending = false;
+                self.history_confirm_clear = true;
+                self.history_clear_feedback_is_error = true;
+                self.history_clear_feedback = Some(error.clone());
+                iced::Task::none()
+            }
+
+            AppMessage::DeleteRoomRequested(topic) => {
+                // Toggle confirmation for this topic.
+                self.room_delete_confirm_topic = if self.room_delete_confirm_topic == Some(topic) {
+                    None
+                } else {
+                    Some(topic)
+                };
+                if self.room_delete_confirm_topic.is_none() {
+                    self.complete_close_dialog_action();
+                }
+                iced::Task::none()
+            }
+
+            AppMessage::ConfirmDeleteRoom(topic) => {
+                self.room_delete_confirm_topic = None;
+                // Shutdown continuous DHT tracker for this room if one exists.
+                if let Some(tracker) = self.room_trackers.remove(&topic) {
+                    tracker.shutdown_shared();
+                }
+                if let Err(err) = self.purge_room_history(topic) {
+                    self.push_system(format!("Could not delete room history: {err}"));
+                }
+                // Remove from conversation store and persist so the deletion
+                // survives a restart.
+                self.conversations.remove(&topic);
+                self.conversation_store.remove(&topic);
+                self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
+                self.refresh_sidebar_counts();
+                // Also remove from the SQLite message store so the chat
+                // messages and conversation metadata don't linger on disk.
+                let store_path = self.data_dir.join("message_store.db");
+                if store_path.exists() {
+                    match MessageStore::open(&store_path) {
+                        Ok(store) => {
+                            let topic_bytes = topic.as_bytes();
+                            if let Err(err) = store.delete_messages_for_topic(topic_bytes) {
+                                warn!("failed to delete messages for topic: {err}");
+                            }
+                            // Remove conversation metadata so it cannot
+                            // resurrect after a backfill or restart.
+                            if let Err(err) = store.hard_delete_conversation(topic_bytes) {
+                                warn!("failed to delete conversation meta: {err}");
+                            }
+                        }
+                        Err(err) => {
+                            warn!("failed to open message store for cleanup: {err}");
+                        }
+                    }
+                }
+                if matches!(&self.screen, Screen::Chat { topic: t } if t == &topic) {
+                    self.screen = Screen::ChatList;
+                }
+                iced::Task::none()
+            }
+
+            AppMessage::MailboxReplayed { peer, texts } => {
+                let n = texts.len();
+                let label = self
+                    .names
+                    .get(&peer)
+                    .cloned()
+                    .unwrap_or_else(|| peer.fmt_short().to_string());
+                for (_msg_id, text) in texts {
+                    let entry = ChatEntry::remote(
+                        format!("Offline DM from {label}"),
+                        text,
+                        None,
+                        None,
+                        Some(peer),
+                    );
+                    self.entries_push(entry);
+                }
+                if n > 0 {
+                    self.push_system(format!(
+                        "[Offline DM sync: received {n} message{} from {label}]",
+                        if n == 1 { "" } else { "s" }
+                    ));
+                }
+                iced::Task::none()
+            }
+
+            // ── Conversation selection / management ─────────────────
+            AppMessage::OpenConversation(peer) => {
+                // Derive topic, ensure conversation record exists, and select.
+                let topic = direct_topic(&self.local_public, &peer);
+                let fid = FriendId::from_public_key(peer);
+                let record = self.friends.ensure_friend(fid);
+                record.set_direct_conversation(topic, DirectConversationState::Active);
+                self.conversation_store
+                    .upsert(boru_core::conversations::ConversationEntry::new(
+                        topic,
+                        peer.to_string(),
+                        peer.fmt_short().to_string(),
+                    ));
+                self.try_save_friends();
+                iced::Task::done(AppMessage::OpenRoom(topic))
+            }
+
+            AppMessage::SelectConversation(topic) => {
+                // UI-only switch — does NOT create or subscribe.
+                iced::Task::done(AppMessage::OpenRoom(topic))
+            }
+
+            AppMessage::CloseConversation(topic) => {
+                // Remove conversation from local list without affecting friendship,
+                // subscriptions, or the live forwarder. The conversation stays
+                // subscribed in the background.
+                self.save_room_to_history();
+                self.room_history.remove(&topic);
+                self.room_history_dirty = true;
+                self.persist_room_history();
+                // Archive in conversation store
+                if let Some(entry) = self.conversation_store.find_mut(&topic) {
+                    entry.archived = true;
+                    self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
+                }
+                // If this was the displayed conversation, go back to chat list
+                if topic == self.topic {
+                    self.screen = Screen::ChatList;
+                }
+                iced::Task::none()
+            }
             // update() only dispatches the chat variants here; other
             // variants can never reach this method (defensive catch-all).
             _ => iced::Task::none(),
