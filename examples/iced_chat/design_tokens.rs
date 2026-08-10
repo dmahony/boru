@@ -275,8 +275,8 @@ pub const HOME_TWO_COL_CONTENT: f32 = 720.0;
 /// right activity rail is stacked below the main column (narrow band,
 /// `content_width < HOME_TWO_COL_CONTENT`) the card spans the full
 /// dashboard content width; when the rail sits beside it the left column
-/// is `FillPortion(2)` of a two-column row with a 24 px gap, so the card
-/// gets two-thirds of `content_width − SPACE_24`.
+/// is `FillPortion(5)` of a two-column row with a 24 px gap, so the card
+/// gets 5/8 of `content_width − SPACE_24`.
 ///
 /// CONN-02: the card's responsive tier must be chosen from THIS width, not
 /// the raw window-derived `content_width`. iced has no container queries,
@@ -289,7 +289,7 @@ pub fn status_card_content_width(content_width: f32) -> f32 {
     if content_width < HOME_TWO_COL_CONTENT {
         content_width
     } else {
-        (content_width - SPACE_24) * 2.0 / 3.0
+        (content_width - SPACE_24) * 5.0 / 8.0
     }
 }
 
@@ -1203,13 +1203,13 @@ mod tests {
         // CONN-02 regression: the connection card's responsive tier must be
         // chosen from the card's ACTUAL width, not the window-derived
         // dashboard width. With the right rail open the card is only
-        // FillPortion(2) of (content − 24): ~2/3 of the dashboard width.
+        // FillPortion(5) of (content − 24): 5/8 of the dashboard width.
         // At the 1280 reference window the dashboard is 919 px but the card
-        // is (919−24)×2/3 = 596.7 px.
+        // is (919−24)×5/8 = 559.4 px.
         let content = home_content_width(VIEWPORT_REF_WIDTH);
         assert!(content >= HOME_TWO_COL_CONTENT, "precondition: rail open at 1280");
         let card = status_card_content_width(content);
-        assert!((card - (content - SPACE_24) * 2.0 / 3.0).abs() < 0.01);
+        assert!((card - (content - SPACE_24) * 5.0 / 8.0).abs() < 0.01);
         assert!(card < content, "card must be narrower than the dashboard when the rail is open");
         // When the rail stacks (narrow band) the card spans the full width.
         let narrow = home_content_width(VIEWPORT_MIN_WIDTH);
