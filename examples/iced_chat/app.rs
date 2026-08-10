@@ -14356,29 +14356,17 @@ impl IcedChat {
             }
 
             // ── Friend Requests ───────────────────────────────────────
-            AppMessage::OpenFriendRequests => {
-                // FILES-04: remember where the user came from so the back
-                // button returns to the File Sharing dashboard (or whatever
-                // screen the user was on) instead of always dumping to the
-                // chat list.
-                if !matches!(self.screen, Screen::FriendRequests) {
-                    self.friend_requests_return_to = Some(self.screen.clone());
-                }
-                self.screen = Screen::FriendRequests;
-                if let Some(action_id) = self.pending_open_friends_action.take() {
-                    let _ = self
-                        .gui_action_history
-                        .set_state(&action_id, GuiActionState::AppMessageHandled);
-                    let _ = self
-                        .gui_action_history
-                        .set_state(&action_id, GuiActionState::Completed);
-                }
-                // Load the durable Recent Download Activity card data whenever
-                // the dashboard becomes visible.
-                self.refresh_dashboard_activity()
-                    .chain(self.refresh_shared_by_me())
-                    .chain(self.refresh_sharing_summary())
-            }
+            // ── Friend Requests (state layer) ───────────────────────
+            AppMessage::OpenFriendRequests
+            | AppMessage::CloseFriendRequests
+            | AppMessage::FriendRequestSearchChanged(_)
+            | AppMessage::FriendRequestSend(_)
+            | AppMessage::FriendRequestAccept(_)
+            | AppMessage::FriendRequestDecline(_)
+            | AppMessage::FriendRequestCancel(_)
+            | AppMessage::FriendRequestSentResult(_)
+            | AppMessage::FriendRequestActionResult(_)
+            | AppMessage::FriendEvent(_) => self.update_contacts(message),
 
             AppMessage::OpenFileSharing => {
                 // Navigation only — the shared shell, networking services, and
@@ -14433,150 +14421,13 @@ impl IcedChat {
                 iced::Task::none()
             }
 
-            AppMessage::CloseFriendRequests => {
-                self.screen = self.friend_requests_return_to.take().unwrap_or(Screen::ChatList);
-                iced::Task::none()
-            }
 
-            AppMessage::FriendRequestSearchChanged(text) => {
-                self.friend_request_search_input = text;
-                iced::Task::none()
-            }
 
-            AppMessage::FriendRequestSend(peer_key) => {
-                // Parse the public key from the input text
-                match PublicKey::from_str(&peer_key) {
-                    Ok(peer) => {
-                        self.friend_request_search_input.clear();
-                        iced::Task::done(AppMessage::SendFriendRequest(peer))
-                    }
-                    Err(_) => {
-                        self.friend_request_error = format!("Invalid public key: {peer_key}");
-                        iced::Task::none()
-                    }
-                }
-            }
 
-            AppMessage::FriendRequestAccept(request_id) => {
-                // Forward to the existing IncomingFriendRequestAccept handler
-                // by looking up the request to get the peer key
-                let local_pk = self.local_public.to_string();
-                let req_opt = self
-                    .friend_request_store
-                    .list_incoming_by_status(&local_pk, FriendRequestStatus::Pending)
-                    .into_iter()
-                    .find(|r| r.id == request_id)
-                    .cloned();
-                match req_opt {
-                    Some(req) => {
-                        let req_id = req.id.clone();
-                        match self.friend_request_store.accept_request(&req_id, &local_pk) {
-                            Ok(_) => {
-                                self.requests_sidebar_revision =
-                                    self.requests_sidebar_revision.wrapping_add(1);
-                                self.send_save_friend_requests();
-                                if let Ok(peer) = PublicKey::from_str(&req.requester) {
-                                    iced::Task::done(AppMessage::IncomingFriendRequestProcessed {
-                                        request_id: req_id,
-                                        peer,
-                                        status: FriendRequestStatus::Accepted,
-                                    })
-                                } else {
-                                    iced::Task::none()
-                                }
-                            }
-                            Err(err) => iced::Task::done(AppMessage::ErrorMsg(format!(
-                                "Failed to accept friend request: {err}"
-                            ))),
-                        }
-                    }
-                    None => iced::Task::done(AppMessage::ErrorMsg(
-                        "Friend request not found".to_string(),
-                    )),
-                }
-            }
 
-            AppMessage::FriendRequestDecline(request_id) => {
-                let local_pk = self.local_public.to_string();
-                let req_opt = self
-                    .friend_request_store
-                    .list_incoming_by_status(&local_pk, FriendRequestStatus::Pending)
-                    .into_iter()
-                    .find(|r| r.id == request_id)
-                    .cloned();
-                match req_opt {
-                    Some(req) => {
-                        let req_id = req.id.clone();
-                        match self
-                            .friend_request_store
-                            .decline_request(&req_id, &local_pk)
-                        {
-                            Ok(_) => {
-                                self.requests_sidebar_revision =
-                                    self.requests_sidebar_revision.wrapping_add(1);
-                                self.send_save_friend_requests();
-                                if let Ok(peer) = PublicKey::from_str(&req.requester) {
-                                    iced::Task::done(AppMessage::IncomingFriendRequestProcessed {
-                                        request_id: req_id,
-                                        peer,
-                                        status: FriendRequestStatus::Declined,
-                                    })
-                                } else {
-                                    iced::Task::none()
-                                }
-                            }
-                            Err(err) => iced::Task::done(AppMessage::ErrorMsg(format!(
-                                "Failed to decline friend request: {err}"
-                            ))),
-                        }
-                    }
-                    None => iced::Task::done(AppMessage::ErrorMsg(
-                        "Friend request not found".to_string(),
-                    )),
-                }
-            }
 
-            AppMessage::FriendRequestCancel(request_id) => {
-                let local_pk = self.local_public.to_string();
-                match self
-                    .friend_request_store
-                    .cancel_request(&request_id, &local_pk)
-                {
-                    Ok(_) => {
-                        self.send_save_friend_requests();
-                        iced::Task::none()
-                    }
-                    Err(err) => iced::Task::done(AppMessage::ErrorMsg(format!(
-                        "Failed to cancel friend request: {err}"
-                    ))),
-                }
-            }
 
-            AppMessage::FriendRequestSentResult(result) => {
-                match result {
-                    Ok(request) => {
-                        // Request was sent successfully (this is from the earlier
-                        // simple UI flow; the full whisper-based flow uses SendFriendRequest)
-                        if let Ok(peer) = PublicKey::from_str(&request.recipient) {
-                            self.outgoing_request_states
-                                .insert(peer, OutgoingRequestState::Pending);
-                        }
-                        self.send_save_friend_requests();
-                        self.rebuild_join_request_list();
-                    }
-                    Err(error) => {
-                        self.friend_request_error = error;
-                    }
-                }
-                iced::Task::none()
-            }
 
-            AppMessage::FriendRequestActionResult(result) => {
-                if let Err(error) = result {
-                    self.friend_request_error = error;
-                }
-                iced::Task::none()
-            }
 
             AppMessage::ReplayPendingEvents(topic) => self.replay_pending_events_batch(topic),
 
@@ -14744,11 +14595,6 @@ impl IcedChat {
                 }
             }
 
-            AppMessage::FriendEvent(event) => {
-                self.handle_friend_event(event);
-                self.try_save_friends();
-                iced::Task::none()
-            }
 
             AppMessage::WhisperEvent(event) => {
                 info!(variant = ?event, "WhisperEvent received in iced handler");
