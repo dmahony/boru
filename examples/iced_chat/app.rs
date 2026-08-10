@@ -12680,92 +12680,7 @@ impl IcedChat {
             | AppMessage::IncomingFriendRequestDecline { .. }
             | AppMessage::IncomingFriendRequestProcessed { .. } => self.update_contacts(message),
 
-            AppMessage::OpenFriendChat(peer) => {
-                // A Chat click is an explicit direct-chat invitation.  Do not
-                // require a prior friend-request round trip: the recipient
-                // treats this authenticated invitation as acceptance and opens
-                // the same deterministic room automatically.
-                let fid = FriendId::from_public_key(peer);
-                let topic = direct_topic(&self.local_public, &peer);
-                let known_addrs = self
-                    .friends
-                    .get(&fid)
-                    .map(|record| record.known_addrs.clone())
-                    .unwrap_or_default();
-                let record = self.friends.ensure_friend(fid.clone());
-                record.set_direct_conversation(topic, DirectConversationState::Active);
-                // Opening a chat is NOT a friendship signal.  The peer stays in
-                // the Discover section until a friend request is explicitly
-                // accepted by both sides.  Do NOT set relationship=Friends here.
-                self.conversation_store.upsert(ConversationEntry::new(
-                    topic,
-                    peer.to_string(),
-                    record.display_label(&fid, &peer),
-                ));
-                self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
-                let _room = RoomStore::with_peers(&self.data_dir, topic, known_addrs.clone());
-                self.mark_friends_sidebar_dirty();
-                self.discovered_sidebar_revision = self.discovered_sidebar_revision.wrapping_add(1);
-                self.try_save_friends();
-                let action = ContactAction::ConversationInvite {
-                    topic,
-                    addrs: vec![self.endpoint.addr()],
-                };
-                let payload = match SignedContactMessage::sign(&self.secret_key, &action) {
-                    Ok(payload) => payload,
-                    Err(err) => {
-                        return iced::Task::done(AppMessage::ErrorMsg(format!(
-                            "Could not create chat invite: {err}"
-                        )));
-                    }
-                };
-                let whisper_handle = self.whisper_handle.clone();
-                // Advertise our mailbox key alongside the chat invite so
-                // the peer can encrypt offline messages to us.
-                let mailbox_task: Option<iced::Task<AppMessage>> =
-                    self.local_mailbox_key.map(|mailbox| {
-                        let mailbox_action = ContactAction::MailboxAdvertise { mailbox };
-                        match SignedContactMessage::sign(&self.secret_key, &mailbox_action) {
-                            Ok(mailbox_payload) => {
-                                let wh = whisper_handle.clone();
-                                iced::Task::perform(
-                                    async move { wh.send_control(peer, mailbox_payload.into()).await },
-                                    |r| match r {
-                                        Ok(()) => AppMessage::Noop,
-                                        Err(_) => AppMessage::Noop,
-                                    },
-                                )
-                            }
-                            Err(_) => iced::Task::none(),
-                        }
-                    });
-                let mut tasks: Vec<iced::Task<AppMessage>> = vec![
-                    iced::Task::perform(
-                        async move { whisper_handle.send_control(peer, payload.into()).await },
-                        |result| match result {
-                            Ok(()) => AppMessage::Noop,
-                            Err(err) => {
-                                AppMessage::ErrorMsg(format!("Could not send chat invite: {err}"))
-                            }
-                        },
-                    ),
-                    iced::Task::done(AppMessage::BackgroundSubscribe(
-                        topic,
-                        self.discovered_peers.clone(),
-                    )),
-                    // Do NOT also dispatch OpenRoom here: the slow-path
-                    // subscription replays the gossip WAL for this topic,
-                    // and combined with the BackgroundSubscribe above it
-                    // double-subscribes the direct topic (WAL-replay storm,
-                    // pending-events cap reached).  The conversation is
-                    // already in the sidebar via conversation_store.upsert;
-                    // the user opens it with a click, using the fast path.
-                ];
-                if let Some(t) = mailbox_task {
-                    tasks.push(t);
-                }
-                iced::Task::batch(tasks)
-            }
+            AppMessage::OpenFriendChat(_) => self.update_contacts(message),
 
             AppMessage::RoomSelected(topic) => iced::Task::done(AppMessage::OpenRoom(topic)),
             AppMessage::OpenGroupChat(topic) => iced::Task::done(AppMessage::OpenRoom(topic)),
@@ -12775,13 +12690,7 @@ impl IcedChat {
             AppMessage::GroupCreated { .. } => self.update_groups(message),
 
             // ── ChatList ─────────────────────────────────────────────
-            AppMessage::JoinTicketInputChanged(text) => {
-                self.join_ticket_input = text;
-                if !self.chat_list_error.is_empty() {
-                    self.chat_list_error.clear();
-                }
-                iced::Task::none()
-            }
+            AppMessage::JoinTicketInputChanged(_) => self.update_home(message),
 
             // ── Chat ─────────────────────────────────────────────────
             // ── Calls (state layer) ──────────────────────────────
@@ -13474,17 +13383,8 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
-            AppMessage::OpenGroups => {
-                if !matches!(self.screen, Screen::Groups) {
-                    self.groups_return_to = Some(self.screen.clone());
-                }
-                self.screen = Screen::Groups;
-                iced::Task::none()
-            }
-            AppMessage::CloseGroups => {
-                self.screen = self.groups_return_to.take().unwrap_or(Screen::ChatList);
-                iced::Task::none()
-            }
+            AppMessage::OpenGroups
+            | AppMessage::CloseGroups => self.update_groups(message),
             AppMessage::CloseConnectionDetails => self.close_connection_details_dialog(),
             // ── Invite Member / Accept Group Invite (state layer) ──
             AppMessage::ShowInviteMemberDialog
@@ -13574,116 +13474,7 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
-            AppMessage::RequestFileDownload { peer, file } => {
-                // Transition to AppMessageHandled if initiated by a GUI test action.
-                // Keep the action_id stored — it's consumed when the download
-                // completes (DownloadDonePeerFile or DownloadFailed).
-                if let Some(ref action_id) = self.pending_download_action {
-                    let _ = self
-                        .gui_action_history
-                        .set_state(action_id, GuiActionState::AppMessageHandled);
-                }
-                let display_name = file.display_name.clone();
-                let content_hash = file.content_hash.clone();
-                // FS-20 security hardening: backend-authoritative gate. The
-                // verified, stored catalogue decides whether this download may
-                // start — not UI state. A stale in-memory row for a file the
-                // backend no longer advertises is refused with the backend's
-                // reason. (When storage is unavailable the legacy behaviour is
-                // preserved; there is no backend state to enforce.)
-                if let Some(storage) = self.storage.as_ref() {
-                    if let Err(e) = boru_core::download_initiation::validate_download_request(
-                        storage,
-                        &file.content_hash,
-                        &peer.to_string(),
-                    ) {
-                        self.catalogue_downloads.insert(
-                            content_hash,
-                            CatalogueDownloadState::Failed(e.to_string()),
-                        );
-                        self.push_system(format!("Download blocked: {e}"));
-                        return iced::Task::none();
-                    }
-                }
-                self.catalogue_downloads
-                    .insert(content_hash.clone(), CatalogueDownloadState::Pending);
-                // Clone the shared state needed for the async download task.
-                let endpoint = self.endpoint.clone();
-                let blob_store = self.blob_store.clone();
-                let neighbors = self.neighbors.clone();
-                let dl_dir = self.boru_downloads_dir.clone();
-                let progress_queue = self.download_progress_queue.clone();
-                let dn_for_err = display_name.clone();
-                let content_hash = file.content_hash.clone();
-                let size_bytes = file.size_bytes;
-                // If size_bytes is 0 (unknown/uncached metadata), pass None
-                // to avoid an immediate "blob too large" failure on the first byte.
-                let max_bytes = if size_bytes > 0 {
-                    Some(size_bytes)
-                } else {
-                    None
-                };
-                iced::Task::perform(
-                    async move {
-                        let _ = tokio::fs::create_dir_all(&dl_dir).await;
-                        let hash: iroh_blobs::Hash = content_hash
-                            .parse()
-                            .map_err(|e| format!("Invalid content hash: {e}"))?;
-                        let candidates =
-                            boru_core::chat_core::download_candidates(peer, &neighbors);
-                        // FS-20 hardening: derive the destination through the
-                        // shared safe-destination helper (strip separators,
-                        // reject traversal) even though the catalogue
-                        // validation already rejects unsafe names.  Falls
-                        // back to a content-hash stem when the display name
-                        // is empty or reserved.  BORU-AUDIT-21: reservation
-                        // fuses validation + atomic creation (O_EXCL).
-                        let mut destination = match boru_core::safe_destination::reserve_download_destination(
-                            &dl_dir,
-                            &display_name,
-                            &content_hash,
-                            boru_core::safe_destination::OverwritePolicy::KeepBoth,
-                        )
-                        .map_err(|e| format!("Unsafe download name: {e}"))?
-                        {
-                            boru_core::safe_destination::Reservation::Use(dest) => dest,
-                            boru_core::safe_destination::Reservation::Skip => {
-                                return Err("Download skipped: destination name already exists".into());
-                            }
-                        };
-                        let kind = boru_core::chat_callbacks::TransferKind::File;
-                        download_blob_to_file(
-                            &blob_store,
-                            &endpoint,
-                            hash,
-                            candidates,
-                            display_name.clone(),
-                            kind,
-                            &mut destination,
-                            Some(&content_hash),
-                            {
-                                let queue = progress_queue.clone();
-                                move |ev| {
-                                    if let Ok(mut q) = queue.lock() {
-                                        q.push_back(ev);
-                                    }
-                                }
-                            },
-                            max_bytes,
-                        )
-                        .await
-                        .map_err(|e| format!("Download failed: {e}"))?;
-                        let save_path = destination
-                            .publish()
-                            .map_err(|e| format!("Publish failed: {e}"))?;
-                        Ok::<_, String>((display_name, save_path))
-                    },
-                    move |r| match r {
-                        Ok((name, path)) => AppMessage::DownloadDonePeerFile(name, path),
-                        Err(e) => AppMessage::DownloadFailed(format!("{} : {e}", dn_for_err)),
-                    },
-                )
-            }
+            AppMessage::RequestFileDownload { .. } => self.update_files(message),
             // ── Image lightbox (state layer) ──────────────────
             AppMessage::OpenImageLightbox(_)
             | AppMessage::CloseImageLightbox => self.update_chat(message),
@@ -14337,20 +14128,7 @@ impl IcedChat {
 
             AppMessage::FriendRemoved { .. } => self.update_contacts(message),
 
-            AppMessage::DeleteRoom(topic) => {
-                #[cfg(feature = "video-playback")]
-                if self.topic == topic {
-                    self.stop_inline_video();
-                }
-                // Shutdown continuous DHT tracker for this room if one exists.
-                if let Some(tracker) = self.room_trackers.remove(&topic) {
-                    tracker.shutdown_shared();
-                }
-                if let Err(err) = self.purge_room_history(topic) {
-                    self.push_system(format!("Could not delete room history: {err}"));
-                }
-                iced::Task::none()
-            }
+            AppMessage::DeleteRoom(_) => self.update_chat(message),
 
             AppMessage::FriendListResult(_) => self.update_contacts(message),
 

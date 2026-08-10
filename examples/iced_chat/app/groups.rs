@@ -592,6 +592,17 @@ impl IcedChat {
 
                 return iced::Task::batch(tasks);
             }
+            AppMessage::OpenGroups => {
+                if !matches!(self.screen, Screen::Groups) {
+                    self.groups_return_to = Some(self.screen.clone());
+                }
+                self.screen = Screen::Groups;
+                iced::Task::none()
+            }
+            AppMessage::CloseGroups => {
+                self.screen = self.groups_return_to.take().unwrap_or(Screen::ChatList);
+                iced::Task::none()
+            }
             // update() only dispatches the groups variants here; other
             // variants can never reach this method (defensive catch-all).
             _ => iced::Task::none(),

@@ -7182,6 +7182,116 @@ impl IcedChat {
                 self.push_system(msg);
                 iced::Task::none()
             }
+            AppMessage::RequestFileDownload { peer, file } => {
+                // Transition to AppMessageHandled if initiated by a GUI test action.
+                // Keep the action_id stored — it's consumed when the download
+                // completes (DownloadDonePeerFile or DownloadFailed).
+                if let Some(ref action_id) = self.pending_download_action {
+                    let _ = self
+                        .gui_action_history
+                        .set_state(action_id, GuiActionState::AppMessageHandled);
+                }
+                let display_name = file.display_name.clone();
+                let content_hash = file.content_hash.clone();
+                // FS-20 security hardening: backend-authoritative gate. The
+                // verified, stored catalogue decides whether this download may
+                // start — not UI state. A stale in-memory row for a file the
+                // backend no longer advertises is refused with the backend's
+                // reason. (When storage is unavailable the legacy behaviour is
+                // preserved; there is no backend state to enforce.)
+                if let Some(storage) = self.storage.as_ref() {
+                    if let Err(e) = boru_core::download_initiation::validate_download_request(
+                        storage,
+                        &file.content_hash,
+                        &peer.to_string(),
+                    ) {
+                        self.catalogue_downloads.insert(
+                            content_hash,
+                            CatalogueDownloadState::Failed(e.to_string()),
+                        );
+                        self.push_system(format!("Download blocked: {e}"));
+                        return iced::Task::none();
+                    }
+                }
+                self.catalogue_downloads
+                    .insert(content_hash.clone(), CatalogueDownloadState::Pending);
+                // Clone the shared state needed for the async download task.
+                let endpoint = self.endpoint.clone();
+                let blob_store = self.blob_store.clone();
+                let neighbors = self.neighbors.clone();
+                let dl_dir = self.boru_downloads_dir.clone();
+                let progress_queue = self.download_progress_queue.clone();
+                let dn_for_err = display_name.clone();
+                let content_hash = file.content_hash.clone();
+                let size_bytes = file.size_bytes;
+                // If size_bytes is 0 (unknown/uncached metadata), pass None
+                // to avoid an immediate "blob too large" failure on the first byte.
+                let max_bytes = if size_bytes > 0 {
+                    Some(size_bytes)
+                } else {
+                    None
+                };
+                iced::Task::perform(
+                    async move {
+                        let _ = tokio::fs::create_dir_all(&dl_dir).await;
+                        let hash: iroh_blobs::Hash = content_hash
+                            .parse()
+                            .map_err(|e| format!("Invalid content hash: {e}"))?;
+                        let candidates =
+                            boru_core::chat_core::download_candidates(peer, &neighbors);
+                        // FS-20 hardening: derive the destination through the
+                        // shared safe-destination helper (strip separators,
+                        // reject traversal) even though the catalogue
+                        // validation already rejects unsafe names.  Falls
+                        // back to a content-hash stem when the display name
+                        // is empty or reserved.  BORU-AUDIT-21: reservation
+                        // fuses validation + atomic creation (O_EXCL).
+                        let mut destination = match boru_core::safe_destination::reserve_download_destination(
+                            &dl_dir,
+                            &display_name,
+                            &content_hash,
+                            boru_core::safe_destination::OverwritePolicy::KeepBoth,
+                        )
+                        .map_err(|e| format!("Unsafe download name: {e}"))?
+                        {
+                            boru_core::safe_destination::Reservation::Use(dest) => dest,
+                            boru_core::safe_destination::Reservation::Skip => {
+                                return Err("Download skipped: destination name already exists".into());
+                            }
+                        };
+                        let kind = boru_core::chat_callbacks::TransferKind::File;
+                        download_blob_to_file(
+                            &blob_store,
+                            &endpoint,
+                            hash,
+                            candidates,
+                            display_name.clone(),
+                            kind,
+                            &mut destination,
+                            Some(&content_hash),
+                            {
+                                let queue = progress_queue.clone();
+                                move |ev| {
+                                    if let Ok(mut q) = queue.lock() {
+                                        q.push_back(ev);
+                                    }
+                                }
+                            },
+                            max_bytes,
+                        )
+                        .await
+                        .map_err(|e| format!("Download failed: {e}"))?;
+                        let save_path = destination
+                            .publish()
+                            .map_err(|e| format!("Publish failed: {e}"))?;
+                        Ok::<_, String>((display_name, save_path))
+                    },
+                    move |r| match r {
+                        Ok((name, path)) => AppMessage::DownloadDonePeerFile(name, path),
+                        Err(e) => AppMessage::DownloadFailed(format!("{} : {e}", dn_for_err)),
+                    },
+                )
+            }
             // update() only dispatches the files variants here; other
             // variants can never reach this method (defensive catch-all).
             _ => iced::Task::none(),

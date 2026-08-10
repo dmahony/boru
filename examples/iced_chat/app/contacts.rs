@@ -965,6 +965,92 @@ impl IcedChat {
                     iced::Task::none()
                 }
             }
+            AppMessage::OpenFriendChat(peer) => {
+                // A Chat click is an explicit direct-chat invitation.  Do not
+                // require a prior friend-request round trip: the recipient
+                // treats this authenticated invitation as acceptance and opens
+                // the same deterministic room automatically.
+                let fid = FriendId::from_public_key(peer);
+                let topic = direct_topic(&self.local_public, &peer);
+                let known_addrs = self
+                    .friends
+                    .get(&fid)
+                    .map(|record| record.known_addrs.clone())
+                    .unwrap_or_default();
+                let record = self.friends.ensure_friend(fid.clone());
+                record.set_direct_conversation(topic, DirectConversationState::Active);
+                // Opening a chat is NOT a friendship signal.  The peer stays in
+                // the Discover section until a friend request is explicitly
+                // accepted by both sides.  Do NOT set relationship=Friends here.
+                self.conversation_store.upsert(ConversationEntry::new(
+                    topic,
+                    peer.to_string(),
+                    record.display_label(&fid, &peer),
+                ));
+                self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
+                let _room = RoomStore::with_peers(&self.data_dir, topic, known_addrs.clone());
+                self.mark_friends_sidebar_dirty();
+                self.discovered_sidebar_revision = self.discovered_sidebar_revision.wrapping_add(1);
+                self.try_save_friends();
+                let action = ContactAction::ConversationInvite {
+                    topic,
+                    addrs: vec![self.endpoint.addr()],
+                };
+                let payload = match SignedContactMessage::sign(&self.secret_key, &action) {
+                    Ok(payload) => payload,
+                    Err(err) => {
+                        return iced::Task::done(AppMessage::ErrorMsg(format!(
+                            "Could not create chat invite: {err}"
+                        )));
+                    }
+                };
+                let whisper_handle = self.whisper_handle.clone();
+                // Advertise our mailbox key alongside the chat invite so
+                // the peer can encrypt offline messages to us.
+                let mailbox_task: Option<iced::Task<AppMessage>> =
+                    self.local_mailbox_key.map(|mailbox| {
+                        let mailbox_action = ContactAction::MailboxAdvertise { mailbox };
+                        match SignedContactMessage::sign(&self.secret_key, &mailbox_action) {
+                            Ok(mailbox_payload) => {
+                                let wh = whisper_handle.clone();
+                                iced::Task::perform(
+                                    async move { wh.send_control(peer, mailbox_payload.into()).await },
+                                    |r| match r {
+                                        Ok(()) => AppMessage::Noop,
+                                        Err(_) => AppMessage::Noop,
+                                    },
+                                )
+                            }
+                            Err(_) => iced::Task::none(),
+                        }
+                    });
+                let mut tasks: Vec<iced::Task<AppMessage>> = vec![
+                    iced::Task::perform(
+                        async move { whisper_handle.send_control(peer, payload.into()).await },
+                        |result| match result {
+                            Ok(()) => AppMessage::Noop,
+                            Err(err) => {
+                                AppMessage::ErrorMsg(format!("Could not send chat invite: {err}"))
+                            }
+                        },
+                    ),
+                    iced::Task::done(AppMessage::BackgroundSubscribe(
+                        topic,
+                        self.discovered_peers.clone(),
+                    )),
+                    // Do NOT also dispatch OpenRoom here: the slow-path
+                    // subscription replays the gossip WAL for this topic,
+                    // and combined with the BackgroundSubscribe above it
+                    // double-subscribes the direct topic (WAL-replay storm,
+                    // pending-events cap reached).  The conversation is
+                    // already in the sidebar via conversation_store.upsert;
+                    // the user opens it with a click, using the fast path.
+                ];
+                if let Some(t) = mailbox_task {
+                    tasks.push(t);
+                }
+                iced::Task::batch(tasks)
+            }
             // update() only dispatches the contacts variants here; other
             // variants can never reach this method (defensive catch-all).
             _ => iced::Task::none(),

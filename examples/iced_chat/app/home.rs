@@ -1489,4 +1489,22 @@ impl IcedChat {
             .height(Length::Fill)
             .into()
     }
+    /// State-layer update for the home/chat-list surface (BORU-AUDIT-22 spec step 5).
+    ///
+    /// Handles the chat-list join-ticket input. The root `update()`
+    /// dispatches these variants here via combined match arms.
+    pub(crate) fn update_home(&mut self, message: AppMessage) -> iced::Task<AppMessage> {
+        match message {
+            AppMessage::JoinTicketInputChanged(text) => {
+                self.join_ticket_input = text;
+                if !self.chat_list_error.is_empty() {
+                    self.chat_list_error.clear();
+                }
+                iced::Task::none()
+            }
+            // update() only dispatches the home variants here; other
+            // variants can never reach this method (defensive catch-all).
+            _ => iced::Task::none(),
+        }
+    }
 }

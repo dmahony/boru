@@ -7111,6 +7111,20 @@ impl IcedChat {
                     }
                 }
             }
+            AppMessage::DeleteRoom(topic) => {
+                #[cfg(feature = "video-playback")]
+                if self.topic == topic {
+                    self.stop_inline_video();
+                }
+                // Shutdown continuous DHT tracker for this room if one exists.
+                if let Some(tracker) = self.room_trackers.remove(&topic) {
+                    tracker.shutdown_shared();
+                }
+                if let Err(err) = self.purge_room_history(topic) {
+                    self.push_system(format!("Could not delete room history: {err}"));
+                }
+                iced::Task::none()
+            }
             // update() only dispatches the chat variants here; other
             // variants can never reach this method (defensive catch-all).
             _ => iced::Task::none(),
