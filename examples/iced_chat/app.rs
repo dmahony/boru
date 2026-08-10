@@ -13552,46 +13552,8 @@ impl IcedChat {
                 iced::Task::none()
             }
 
-            AppMessage::OpenPeerProfile(peer) => {
-                if !matches!(self.screen, Screen::PeerProfile(peer) | Screen::PeerCatalogue(peer)) {
-                    self.peer_profile_return_to = Some(self.screen.clone());
-                }
-                if !self.profile_cache.contains_key(&peer) {
-                    // Create a minimal profile from the friend record as fallback,
-                    // so the profile page is accessible even without gossip ProfileUpdate data.
-                    let fid = FriendId::from_public_key(peer);
-                    if let Some(record) = self.friends.get(&fid) {
-                        self.profile_cache.insert(
-                            peer,
-                            PeerProfileData {
-                                display_name: record.display_label(&fid, &peer),
-                                bio: String::new(),
-                                last_updated: SystemTime::UNIX_EPOCH,
-                            },
-                        );
-                    }
-                }
-                self.screen = Screen::PeerProfile(peer);
-                if self
-                    .pending_select_peer_action
-                    .as_ref()
-                    .is_some_and(|(_, expected)| *expected == peer)
-                {
-                    if let Some((action_id, _)) = self.pending_select_peer_action.take() {
-                        let _ = self
-                            .gui_action_history
-                            .set_state(&action_id, GuiActionState::AppMessageHandled);
-                        let _ = self
-                            .gui_action_history
-                            .set_state(&action_id, GuiActionState::Completed);
-                    }
-                }
-                iced::Task::none()
-            }
-            AppMessage::ClosePeerProfile => {
-                self.screen = self.peer_profile_return_to.take().unwrap_or(Screen::ChatList);
-                iced::Task::none()
-            }
+            AppMessage::OpenPeerProfile(_) => self.update_contacts(message),
+            AppMessage::ClosePeerProfile => self.update_contacts(message),
 
             // ── Remote catalogue browsing ──
 
@@ -13609,31 +13571,9 @@ impl IcedChat {
             | AppMessage::DirectoryRoomJoin(_)
             | AppMessage::DeleteDirectoryRoom(_)
             | AppMessage::DirectoryRoomUpdate(..) => self.update_discover(message),
-            AppMessage::OpenFriendProfile(peer) => {
-                self.toast_message = None;
-                self.friend_profile_menu_open = false;
-                self.friend_remove_confirm = false;
-                self.friend_block_confirm = false;
-                self.friend_profile_renaming = false;
-                if !matches!(self.screen, Screen::FriendProfile(peer)) {
-                    self.friend_profile_return_to = Some(self.screen.clone());
-                }
-                self.screen = Screen::FriendProfile(peer);
-                iced::Task::none()
-            }
-            AppMessage::CloseFriendProfile => {
-                self.toast_message = None;
-                self.friend_profile_menu_open = false;
-                self.friend_remove_confirm = false;
-                self.friend_block_confirm = false;
-                self.friend_profile_renaming = false;
-                self.screen = self.friend_profile_return_to.take().unwrap_or(Screen::ChatList);
-                iced::Task::none()
-            }
-            AppMessage::ToggleFriendProfileMenu => {
-                self.friend_profile_menu_open = !self.friend_profile_menu_open;
-                iced::Task::none()
-            }
+            AppMessage::OpenFriendProfile(_) => self.update_contacts(message),
+            AppMessage::CloseFriendProfile => self.update_contacts(message),
+            AppMessage::ToggleFriendProfileMenu => self.update_contacts(message),
             // ── Tunnels share-local-service (state layer) ──────────
             AppMessage::OpenShareLocalService
             | AppMessage::ShareLocalServiceNameChanged(_)
@@ -13655,31 +13595,9 @@ impl IcedChat {
             | AppMessage::StopSharingTunnel(_)
             | AppMessage::OpenReceivedTunnel(_)
             | AppMessage::CopyReceivedTunnelAddress(_) => self.update_tunnels(message),
-            AppMessage::FriendRenameInputChanged(value) => {
-                self.friend_profile_rename_input = value;
-                iced::Task::none()
-            }
-            AppMessage::FriendRenameConfirm => {
-                // Rename logic
-                let new_name = self.friend_profile_rename_input.trim().to_string();
-                if !new_name.is_empty() {
-                    if let Screen::FriendProfile(peer) = &self.screen {
-                        let fid = boru_core::friends::FriendId::from_public_key(*peer);
-                        self.friends.set_label(fid, &new_name);
-                        self.friends_sidebar_revision =
-                            self.friends_sidebar_revision.wrapping_add(1);
-                    }
-                }
-                self.friend_profile_renaming = false;
-                iced::Task::none()
-            }
-            AppMessage::CopyPeerId(peer) => {
-                let peer_str = peer.to_string();
-                self.toast_message = Some("Peer ID copied to clipboard".to_string());
-                self.toast_counter = 120; // ~2 seconds at 60fps
-                self.friend_profile_menu_open = false;
-                return iced::clipboard::write(peer_str);
-            }
+            AppMessage::FriendRenameInputChanged(_) => self.update_contacts(message),
+            AppMessage::FriendRenameConfirm => self.update_contacts(message),
+            AppMessage::CopyPeerId(_) => self.update_contacts(message),
             AppMessage::OpenConnectionDetails => {
                 self.show_create_room_dialog = false;
                 self.friend_profile_menu_open = false;
@@ -14800,62 +14718,11 @@ impl IcedChat {
                 iced::Task::none()
             }
 
-            AppMessage::FriendAdded {
-                fid,
-                label,
-                was_new,
-            } => {
-                self.first_run = false;
-                let friend_id = FriendId::new(fid);
-                self.friends.ensure_friend(friend_id.clone());
-                if let Ok(peer) = friend_id.parse_public_key() {
-                    let authorized = self
-                        .friends
-                        .get(&friend_id)
-                        .is_some_and(|record| record.relationship.can_message());
-                    self.call_handle.set_peer_authorized(peer, authorized);
-                }
-                if self
-                    .friends
-                    .get(&friend_id)
-                    .and_then(|r| r.label.clone())
-                    .is_some()
-                {
-                    // Already has a label
-                } else if label != friend_id.as_str().chars().take(12).collect::<String>() {
-                    self.friends.set_label(friend_id, &label);
-                }
-                self.mark_friends_sidebar_dirty();
-                if was_new {
-                    self.push_system(format!("Added friend: {label}"));
-                } else {
-                    self.push_system(format!("Updated friend: {label}"));
-                }
-                self.try_save_friends();
-                iced::Task::none()
-            }
+            AppMessage::FriendAdded { .. } => self.update_contacts(message),
 
-            AppMessage::RemoveFriend(peer) => {
-                self.call_handle.set_peer_authorized(peer, false);
-                let mgr = self.friend_mgr.clone();
-                iced::Task::perform(
-                    async move {
-                        let removed = mgr.remove_friend(&peer).await.unwrap_or(false);
-                        let label = if removed {
-                            peer.fmt_short().to_string()
-                        } else {
-                            peer.to_string()
-                        };
-                        AppMessage::FriendRemoved { label }
-                    },
-                    |msg| msg,
-                )
-            }
+            AppMessage::RemoveFriend(_) => self.update_contacts(message),
 
-            AppMessage::FriendRemoved { label } => {
-                self.push_system(format!("Removed friend: {label}"));
-                iced::Task::none()
-            }
+            AppMessage::FriendRemoved { .. } => self.update_contacts(message),
 
             AppMessage::DeleteRoom(topic) => {
                 #[cfg(feature = "video-playback")]
@@ -14872,17 +14739,7 @@ impl IcedChat {
                 iced::Task::none()
             }
 
-            AppMessage::FriendListResult(items) => {
-                if items.is_empty() {
-                    self.push_system("No friends tracked yet.");
-                } else {
-                    self.push_system(format!("Friends ({}):", items.len()));
-                    for (peer, status) in &items {
-                        self.push_system(format!("  {peer}: {status}"));
-                    }
-                }
-                iced::Task::none()
-            }
+            AppMessage::FriendListResult(_) => self.update_contacts(message),
 
             AppMessage::SplashTick => {
                 // Skip animations when OS reduced-motion is preferred.
@@ -16064,20 +15921,9 @@ impl IcedChat {
             | AppMessage::GifLoadMore
             | AppMessage::SendGif(_) => self.update_chat(message),
 
-            AppMessage::CopyFriendId => {
-                let pk = self.local_public.to_string();
-                self.friend_id_copied = true;
-                let clear_task = iced::Task::perform(
-                    tokio::time::sleep(std::time::Duration::from_secs(2)),
-                    |_| AppMessage::FriendIdCopiedClear,
-                );
-                return iced::Task::batch(vec![iced::clipboard::write(pk), clear_task]);
-            }
+            AppMessage::CopyFriendId => self.update_contacts(message),
 
-            AppMessage::FriendIdCopiedClear => {
-                self.friend_id_copied = false;
-                iced::Task::none()
-            }
+            AppMessage::FriendIdCopiedClear => self.update_contacts(message),
 
             // ── SENDME-02: BlobTicket wormhole sharing ────────────────────
             // ── SENDME-02 ticket sharing (state layer) ─────────
