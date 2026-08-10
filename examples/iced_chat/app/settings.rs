@@ -1750,6 +1750,49 @@ impl IcedChat {
                 iced::Task::none()
             }
 
+            AppMessage::OpenSettings => {
+                if !matches!(self.screen, Screen::Settings) {
+                    self.settings_return_to = Some(self.screen.clone());
+                    self.screen = Screen::Settings;
+                }
+                if let Some(action_id) = self.pending_open_settings_action.take() {
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageHandled);
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::Completed);
+                }
+                iced::Task::none()
+            }
+
+            AppMessage::CloseSettings => {
+                self.screen = self.settings_return_to.take().unwrap_or(Screen::ChatList);
+                iced::Task::none()
+            }
+
+            #[cfg(feature = "terminal")]
+            AppMessage::OpenTerminal => {
+                self.screen = Screen::Terminal;
+                iced::Task::none()
+            }
+
+            #[cfg(feature = "terminal")]
+            AppMessage::TerminalEvent(iced_term::Event::BackendCall(_, cmd)) => {
+                if let Some(term) = self.terminal.as_mut() {
+                    match term.update(cmd) {
+                        iced_term::actions::Action::Shutdown => {
+                            // The embedded shell exited — leave the terminal tab.
+                            if matches!(self.screen, Screen::Terminal) {
+                                self.screen = Screen::ChatList;
+                            }
+                        }
+                        iced_term::actions::Action::ChangeTitle(_)
+                        | iced_term::actions::Action::Ignore => {}
+                    }
+                }
+                iced::Task::none()
+            }
             // update() only dispatches the settings variants here; other
             // variants can never reach this method (defensive catch-all).
             _ => iced::Task::none(),
