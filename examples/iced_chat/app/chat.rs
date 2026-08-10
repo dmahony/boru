@@ -91,16 +91,18 @@ impl IcedChat {
         // composer, separated by a small gap, and reports complementary
         // route/peer state — the header already owns presence + encryption
         // (direct) or member count (group), so nothing is duplicated.
-        let content = widget::column![
-            self.view_chat_header(),
-            divider(&self.theme()),
-            widget::responsive(|size: iced::Size| {
-                self.view_chat_log(size.width, size.height).into()
-            }),
-            self.view_composer(),
-            widget::Space::new().height(Length::Fixed(SPACE_8)),
-            self.view_chat_footer(),
-        ]
+        let mut content = widget::column![self.view_chat_header(), divider(&self.theme())];
+        #[cfg(feature = "screen-sharing")]
+        {
+            content = content.push(self.view_screen_share_panel());
+        }
+        let content = content
+        .push(widget::responsive(|size: iced::Size| {
+            self.view_chat_log(size.width, size.height).into()
+        }))
+        .push(self.view_composer())
+        .push(widget::Space::new().height(Length::Fixed(SPACE_8)))
+        .push(self.view_chat_footer())
         // Make the column itself participate in the parent height
         // negotiation. The responsive timeline can then consume exactly the
         // remaining space after the fixed header and composer have been
@@ -341,6 +343,62 @@ impl IcedChat {
                 }
             }
         }
+    }
+
+    #[cfg(feature = "screen-sharing")]
+    /// Conversation-local screen-share controls. Playback pauses when the
+    /// viewer navigates away; no media is retained in the background.
+    pub(crate) fn view_screen_share_panel(&self) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{button, column, container, row, text};
+        use iced::Length;
+        let body = if let Some((inviter, _)) = &self.screen_share_invite {
+            column![
+                text(format!("{inviter} wants to share their screen")),
+                row![
+                    button(text("Accept")).on_press(AppMessage::AcceptScreenShare),
+                    button(text("Decline")).on_press(AppMessage::DeclineScreenShare),
+                ].spacing(SPACE_8),
+            ].spacing(SPACE_6)
+        } else if self.screen_share_host_state != ScreenShareHostState::Idle {
+            let state = match self.screen_share_host_state {
+                ScreenShareHostState::Inviting => "Waiting for the viewer to accept…",
+                ScreenShareHostState::Streaming => "Screen sharing active",
+                ScreenShareHostState::Idle => unreachable!(),
+            };
+            column![
+                text(state),
+                button(text("Stop Sharing")).on_press(AppMessage::StopScreenShare),
+            ].spacing(SPACE_6)
+        } else if self.screen_share_viewing {
+            let video: iced::Element<'_, AppMessage> = if let Some(handle) = &self.screen_share_frame_handle {
+                iced::widget::Image::new(handle.clone())
+                    .width(Length::Fill)
+                    .height(Length::Fixed(if self.screen_share_fullscreen { 480.0 } else { 240.0 }))
+                    .content_fit(iced::ContentFit::Contain)
+                    .into()
+            } else {
+                text("Waiting for the next decoded frame…").into()
+            };
+            column![
+                video,
+                row![
+                    button(text(if self.screen_share_fullscreen { "Inline" } else { "Fullscreen" }))
+                        .on_press(AppMessage::ToggleScreenShareFullscreen),
+                    button(text("Stop Viewing")).on_press(AppMessage::StopScreenShare),
+                ].spacing(SPACE_8),
+            ].spacing(SPACE_6)
+        } else {
+            return iced::widget::Space::new().height(Length::Fixed(0.0)).into();
+        };
+        container(body)
+            .padding(SPACE_8)
+            .width(Length::Fill)
+            .style(|t| iced::widget::container::Style {
+                background: Some(iced::Background::Color(bg_surface_secondary(t))),
+                border: iced::Border { color: border_muted(t), width: 1.0, radius: SPACE_8.into() },
+                ..Default::default()
+            })
+            .into()
     }
 
     // ── Chat screen view ─────────────────────────────────────────────
@@ -1206,6 +1264,18 @@ impl IcedChat {
             })
             .unwrap_or_else(|| iced::widget::Space::new().width(Length::Fixed(0.0)).into());
 
+        #[cfg(feature = "screen-sharing")]
+        let screen_share: iced::Element<'_, AppMessage> = peer
+            .filter(|_| {
+                !is_group && !is_blocked && self.screen_share_host_state == ScreenShareHostState::Idle
+            })
+            .map(|key| tool_btn(
+                Icon::VideoCamera.build().size(IconSize::Sm).build().into(),
+                "Share screen",
+                Some(AppMessage::StartScreenShare(key)),
+            ))
+            .unwrap_or_else(|| iced::widget::Space::new().width(Length::Fixed(0.0)).into());
+
         // ── Header area (left): back button, avatar, identity ─────────
         // Identity receives Fill so it shrinks when the toolbar needs
         // space. Wrapping in a clipping container ensures long peer IDs
@@ -1227,7 +1297,17 @@ impl IcedChat {
         // ── Toolbar (right): fixed natural width, never shrinks ──────
         // Shrink ensures action buttons stay fully visible at any window
         // size. The header area absorbs the remaining space instead.
-        let toolbar = row![voice_call, video_call, search, delete, copy, share, overflow,]
+        let mut toolbar = row![voice_call, video_call];
+        #[cfg(feature = "screen-sharing")]
+        {
+            toolbar = toolbar.push(screen_share);
+        }
+        let toolbar = toolbar
+            .push(search)
+            .push(delete)
+            .push(copy)
+            .push(share)
+            .push(overflow)
             .spacing(SPACE_4)
             .width(Length::Shrink)
             .align_y(Alignment::Center);

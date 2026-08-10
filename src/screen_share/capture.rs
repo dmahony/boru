@@ -140,6 +140,58 @@ pub trait ScreenCapture: Send {
     fn capture(&mut self) -> Result<Option<CapturedFrame>, ScreenShareError>;
 }
 
+/// Synthetic moving test-pattern capture source.
+///
+/// This is the milestone-7 capture backend: it produces real RGBA frames on
+/// any platform without a portal/PipeWire session, so the full
+/// capture → encode → transport → decode → render chain can be exercised and
+/// verified before real screen capture is wired (platform backends in
+/// `platform/`). The pattern changes every frame so motion is visible.
+pub struct TestPatternCapture {
+    width: u32,
+    height: u32,
+    timestamp_us: u64,
+    frame: u64,
+}
+
+impl TestPatternCapture {
+    /// Create a source producing `width`×`height` RGBA frames at ~30 fps.
+    pub fn new(width: u32, height: u32) -> Result<Self, ScreenShareError> {
+        if width == 0 || height == 0 || width % 2 != 0 || height % 2 != 0 {
+            return Err(ScreenShareError::new(
+                "test pattern dimensions must be non-zero even values",
+            ));
+        }
+        Ok(Self { width, height, timestamp_us: 0, frame: 0 })
+    }
+}
+
+impl ScreenCapture for TestPatternCapture {
+    fn capture(&mut self) -> Result<Option<CapturedFrame>, ScreenShareError> {
+        let width = self.width;
+        let height = self.height;
+        let timestamp_us = self.timestamp_us;
+        let frame = self.frame;
+        self.timestamp_us = self.timestamp_us.saturating_add(33_333);
+        self.frame = self.frame.saturating_add(1);
+        let mut pixels = Vec::with_capacity((width as usize) * (height as usize) * 4);
+        for y in 0..height {
+            for x in 0..width {
+                let dx = ((x + frame as u32) % width) as u8;
+                let dy = ((y + frame as u32) % height) as u8;
+                pixels.extend_from_slice(&[
+                    dx.wrapping_mul(3),
+                    dy.wrapping_mul(3),
+                    (dx ^ dy).wrapping_add(frame as u8),
+                    255,
+                ]);
+            }
+        }
+        CapturedFrame::cpu(timestamp_us, width, height, PixelFormat::Rgba8, pixels)
+            .map(Some)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,5 +214,19 @@ mod tests {
     #[test]
     fn invalid_cpu_payload_is_rejected() {
         assert!(CapturedFrame::cpu(0, 2, 2, PixelFormat::Bgra8, vec![0; 4]).is_err());
+    }
+
+    #[test]
+    fn test_pattern_capture_produces_moving_rgba_frames() {
+        let mut capture = TestPatternCapture::new(4, 4).unwrap();
+        assert!(TestPatternCapture::new(3, 3).is_err());
+        let first = capture.capture().unwrap().unwrap();
+        let second = capture.capture().unwrap().unwrap();
+        assert_eq!(first.pixel_format, PixelFormat::Rgba8);
+        assert_eq!(first.pixels.len(), 4 * 4 * 4);
+        assert_eq!(second.width, 4);
+        assert_eq!(second.height, 4);
+        assert_ne!(first.pixels, second.pixels, "pattern must move between frames");
+        assert!(second.timestamp_us > first.timestamp_us);
     }
 }

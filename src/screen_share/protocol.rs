@@ -1,6 +1,7 @@
 //! Versioned, bounded control protocol for screen-sharing negotiation.
 #![allow(missing_docs)]
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,7 +10,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, Mutex};
 
 use super::session::{ScreenShareSessionId, SessionEvent, SessionManager};
-use super::transport::ReadUnit;
+use super::transport::{MediaHeader, QuicScreenTransport, ReadUnit};
+use super::ScreenShareError;
 
 /// ALPN registered on the shared Iroh endpoint router.
 pub const SCREEN_SHARE_ALPN: &[u8] = b"boru/screen-share/1";
@@ -124,30 +126,106 @@ pub fn decode(bytes: &[u8]) -> Result<ControlMessage, ProtocolError> {
     Ok(message)
 }
 
+/// One validated media unit forwarded from an inbound connection to the app.
+#[derive(Debug, Clone)]
+pub struct InboundMedia {
+    /// Session the media belongs to; the app's decode worker filters on this.
+    pub session_id: ScreenShareSessionId,
+    /// Validated media header.
+    pub header: MediaHeader,
+    /// Payload bytes (already bounded by transport validation).
+    pub payload: Vec<u8>,
+}
+
 /// Iroh protocol handler for `boru/screen-share/1`.
 #[derive(Debug, Clone)]
 pub struct ScreenShareProtocol {
     manager: Arc<Mutex<SessionManager>>,
     events: mpsc::Sender<SessionEvent>,
+    media_tx: mpsc::Sender<InboundMedia>,
+    /// Inbound connections per session so the app can respond (Accept/Reject/
+    /// EndSession) on the same connection the invitation arrived on.
+    connections: Arc<Mutex<HashMap<ScreenShareSessionId, (usize, iroh::endpoint::Connection)>>>,
 }
 
 impl ScreenShareProtocol {
-    /// Create a handler and its session state store.
-    pub fn new(events: mpsc::Sender<SessionEvent>) -> Self { Self { manager: Arc::new(Mutex::new(SessionManager::default())), events } }
+    /// Create a handler and its session state store. Media units are dropped.
+    pub fn new(events: mpsc::Sender<SessionEvent>) -> Self {
+        let (media_tx, _dropped_rx) = mpsc::channel(1);
+        Self::with_channels(events, media_tx)
+    }
+
+    /// Create a handler that forwards inbound media to `media_tx`.
+    pub fn with_channels(
+        events: mpsc::Sender<SessionEvent>,
+        media_tx: mpsc::Sender<InboundMedia>,
+    ) -> Self {
+        Self {
+            manager: Arc::new(Mutex::new(SessionManager::default())),
+            events,
+            media_tx,
+            connections: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
     /// Access the state machine for locally initiated sessions.
     pub fn manager(&self) -> Arc<Mutex<SessionManager>> { Arc::clone(&self.manager) }
+
+    /// Send one control message on the inbound connection for `session_id`.
+    ///
+    /// Used by the app to respond to an invitation (Accept/Reject) or end a
+    /// session on the same connection the peer dialed in on.
+    pub async fn send_control(
+        &self,
+        session_id: ScreenShareSessionId,
+        message: ControlMessage,
+    ) -> Result<(), ScreenShareError> {
+        let connection = {
+            let connections = self.connections.lock().await;
+            connections.get(&session_id).map(|(_, connection)| connection.clone())
+        };
+        let Some(connection) = connection else {
+            return Err(ScreenShareError::new(
+                "no inbound connection for screen-share session",
+            ));
+        };
+        let transport = QuicScreenTransport::new(connection, *session_id.as_bytes())?;
+        transport.send_control(&message).await
+    }
 }
 
 impl iroh::protocol::ProtocolHandler for ScreenShareProtocol {
     async fn accept(&self, connection: iroh::endpoint::Connection) -> Result<(), iroh::protocol::AcceptError> {
+        let stable_id = connection.stable_id();
         loop {
             let (mut send, recv) = connection.accept_bi().await.map_err(iroh::protocol::AcceptError::from)?;
             let message = match super::transport::read_unit(recv).await {
                 Ok(ReadUnit::Control(message)) => message,
-                Ok(ReadUnit::Media(_, _)) => continue,
+                Ok(ReadUnit::Media(header, payload)) => {
+                    let _ = self.media_tx.try_send(InboundMedia {
+                        session_id: ScreenShareSessionId::from_bytes(header.session_id),
+                        header,
+                        payload,
+                    });
+                    continue;
+                }
                 Err(_error) => { let _ = send.reset(0u32.into()); continue; }
             };
-            let response = { self.manager.lock().await.apply_remote(connection.remote_id(), message, &self.events) };
+            let response = { self.manager.lock().await.apply_remote(connection.remote_id(), message.clone(), &self.events) };
+            match &message {
+                ControlMessage::Hello(hello) => {
+                    // Keep the inbound connection so the app can respond to the
+                    // invitation (Accept/Reject) on the same connection.
+                    if response.is_none() {
+                        self.connections.lock().await.insert(hello.session_id, (stable_id, connection.clone()));
+                    }
+                }
+                ControlMessage::EndSession { session_id, .. } | ControlMessage::Reject { session_id, .. } => {
+                    // The session ended or was refused; release its connection slot.
+                    self.connections.lock().await.remove(session_id);
+                }
+                ControlMessage::Accept { .. } => {}
+            }
             if let Some(response) = response { let _ = write_message(&mut send, &response).await; }
         }
     }
@@ -169,9 +247,113 @@ pub const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(30);
 mod tests {
     use super::*;
     use crate::screen_share::session::SessionState;
+    use crate::screen_share::{
+        codec::{CodecConfig, OpenH264Decoder, OpenH264Encoder, VideoEncoder, DEFAULT_QUEUE_CAPACITY},
+        capture::{PixelFormat, ScreenCapture},
+        transport::{read_unit, QuicScreenTransport, ReadUnit},
+        viewer::ViewerPipeline,
+        TestPatternCapture,
+    };
+    use iroh::endpoint::presets;
+    use iroh::protocol::Router;
 
     fn hello() -> Hello { Hello { version: 1, session_id: ScreenShareSessionId::zero(), host_id: iroh::SecretKey::generate().public(), conversation_id: 7, codecs: vec!["h264".into()], width: 1920, height: 1080, frame_rate: 30, permission: Permission::ViewOnly } }
     #[test] fn round_trip() { let message = ControlMessage::Hello(hello()); assert_eq!(decode(&encode(&message).unwrap()).unwrap(), message); }
     #[test] fn malformed_and_unsupported_are_rejected() { assert!(decode(&[0xff]).is_err()); let mut message = hello(); message.version = 2; assert!(matches!(encode(&ControlMessage::Hello(message)), Err(ProtocolError::UnsupportedVersion { .. }))); }
     #[test] fn accept_is_explicit() { let mut manager = SessionManager::default(); let id = ScreenShareSessionId::zero(); manager.start_invitation(id, hello().host_id, 7); assert_eq!(manager.state(id), Some(SessionState::AwaitingAcceptance)); }
+
+    /// Full QUIC round trip: host dials the viewer, Hello → Invitation,
+    /// viewer responds Accept on the inbound connection, host streams a
+    /// synthetic H.264 frame, and the viewer decodes it through the pipeline.
+    #[tokio::test]
+    async fn end_to_end_invite_accept_media_decode() {
+        // Viewer endpoint with the protocol handler registered on the router.
+        let viewer = iroh::Endpoint::bind(presets::Minimal).await.unwrap();
+        let (events_tx, mut events_rx) = mpsc::channel(32);
+        let (media_tx, mut media_rx) = mpsc::channel(64);
+        let protocol = ScreenShareProtocol::with_channels(events_tx, media_tx);
+        let router = Router::builder(viewer.clone())
+            .accept(SCREEN_SHARE_ALPN, protocol.clone())
+            .spawn();
+
+        // Host endpoint dials the viewer with the screen-share ALPN.
+        let host = iroh::Endpoint::bind(presets::Minimal).await.unwrap();
+        let host_pk = host.secret_key().public();
+        let connection = host.connect(viewer.addr(), SCREEN_SHARE_ALPN).await.unwrap();
+        let session_id = ScreenShareSessionId::generate();
+        let transport = QuicScreenTransport::new(connection.clone(), *session_id.as_bytes()).unwrap();
+
+        // Host sends the Hello; viewer emits an Invitation event.
+        let hello = Hello {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id,
+            host_id: host_pk,
+            conversation_id: 7,
+            codecs: vec!["h264".into()],
+            width: 640,
+            height: 360,
+            frame_rate: 15,
+            permission: Permission::ViewOnly,
+        };
+        transport.send_control(&ControlMessage::Hello(hello)).await.unwrap();
+        let event = events_rx.recv().await.unwrap();
+        let SessionEvent::Invitation { session_id: got_id, host_id, .. } = event else {
+            panic!("expected Invitation, got {event:?}");
+        };
+        assert_eq!(got_id, session_id);
+        assert_eq!(host_id, host_pk);
+
+        // Viewer explicitly accepts on the same inbound connection.
+        protocol
+            .send_control(session_id, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id })
+            .await
+            .unwrap();
+
+        // Host reads the Accept response through its own accept loop.
+        let (mut send, recv) = connection.accept_bi().await.unwrap();
+        match read_unit(recv).await.unwrap() {
+            ReadUnit::Control(ControlMessage::Accept { session_id: id, .. }) => {
+                assert_eq!(id, session_id);
+            }
+            other => panic!("expected Accept control, got {other:?}"),
+        }
+        drop(send);
+
+        // Host captures + encodes one synthetic frame and streams it.
+        let config = CodecConfig {
+            width: 640,
+            height: 360,
+            target_fps: 15,
+            ..CodecConfig::default()
+        };
+        let mut capture = TestPatternCapture::new(640, 360).unwrap();
+        let mut encoder = OpenH264Encoder::new(config).unwrap();
+        let frame = capture.capture().unwrap().unwrap();
+        let encoded = encoder.encode(&frame).unwrap();
+        assert!(encoded.keyframe, "first encoded frame must be a keyframe");
+        transport.send_frame(&encoded).await.unwrap();
+
+        // Viewer protocol forwards the media unit to the app-facing channel.
+        let media = media_rx.recv().await.unwrap();
+        assert_eq!(media.session_id, session_id);
+        assert_eq!(media.header.sequence, encoded.sequence);
+        assert_eq!(media.header.width as u32, 640);
+        assert_eq!(media.header.height as u32, 360);
+
+        // Viewer decodes through the production pipeline into an RGBA frame.
+        let mut pipeline = ViewerPipeline::new(
+            OpenH264Decoder::default_profile().unwrap(),
+            *session_id.as_bytes(),
+            DEFAULT_QUEUE_CAPACITY,
+        )
+        .unwrap();
+        pipeline.enqueue(media.header, media.payload).unwrap();
+        pipeline.process();
+        let decoded = pipeline.take_frame().expect("decoded frame available");
+        assert_eq!((decoded.width, decoded.height), (640, 360));
+        assert_eq!(decoded.pixel_format, PixelFormat::Rgba8);
+        assert_eq!(decoded.pixels.len(), 640 * 360 * 4);
+
+        router.shutdown().await.unwrap();
+    }
 }
