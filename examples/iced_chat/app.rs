@@ -12841,8 +12841,10 @@ impl IcedChat {
 
             // ── Settings / terminal navigation (state layer) ──
             AppMessage::OpenSettings
-            | AppMessage::CloseSettings
-            | AppMessage::OpenTerminal
+            | AppMessage::CloseSettings => self.update_settings(message),
+
+            #[cfg(feature = "terminal")]
+            AppMessage::OpenTerminal
             | AppMessage::TerminalEvent(_) => self.update_settings(message),
 
             // ── Friend Requests ───────────────────────────────────────
@@ -12955,12 +12957,14 @@ impl IcedChat {
             // ── Inline video playback (state layer) ───────────
             AppMessage::PlayInlineVideo(_)
             | AppMessage::StreamInlineVideo(_)
-            | AppMessage::StreamingServerReady { .. }
-            | AppMessage::StreamingServerFailed { .. }
             | AppMessage::StreamUrl(_)
+            | AppMessage::InlineVideoShowControls => self.update_chat(message),
+
+            #[cfg(feature = "video-playback")]
+            AppMessage::StreamingServerReady { .. }
+            | AppMessage::StreamingServerFailed { .. }
             | AppMessage::CloseInlineVideo
             | AppMessage::InlineVideoTick
-            | AppMessage::InlineVideoShowControls
             | AppMessage::InlineVideoControlsFocused(_)
             | AppMessage::InlineVideoSeekChanged(_)
             | AppMessage::InlineVideoSeekReleased
@@ -29127,6 +29131,7 @@ fn vr_create_tunnel_picker_port_validation() {
                 "Alice",
                 None,
             );
+            #[cfg(feature = "video-playback")]
             let card = crate::video_file_card::BoruVideoFileCard::new(
                 0,
                 false,
@@ -29136,6 +29141,16 @@ fn vr_create_tunnel_picker_port_validation() {
                 None,
                 false,
                 true,
+                Some(now_ms() as i64),
+                720.0,
+            );
+            #[cfg(not(feature = "video-playback"))]
+            let card = crate::video_file_card::BoruVideoFileCard::new(
+                0,
+                false,
+                false,
+                (),
+                false,
                 Some(now_ms() as i64),
                 720.0,
             );
