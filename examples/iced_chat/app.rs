@@ -6474,7 +6474,7 @@ struct SidebarIdentityCacheKey {
 /// band (15 px) so row heights don't shift; `BodyEmphasised` would be too
 /// heavy (SemiBold) and `Body` too light (Regular), so the approved Medium
 /// weight resolves through the central family constructor
-/// (`ibm_plex_sans(Weight::Medium)`) exactly as `TypeRole::font()` does.
+/// (`public_sans(Weight::Medium)`) exactly as `TypeRole::font()` does.
 const SIDEBAR_NAME_SIZE: f32 = 15.0;
 
 /// Build a sidebar contact/peer name in IBM Plex Sans Medium (FONTS-06).
@@ -6489,7 +6489,7 @@ fn sidebar_name_text<'a>(
     content: impl iced::widget::text::IntoFragment<'a>,
 ) -> iced::widget::text::Text<'a, iced::Theme, iced::Renderer> {
     iced::widget::text(content)
-        .font(crate::fonts::ibm_plex_sans(iced::font::Weight::Medium))
+        .font(crate::fonts::public_sans(iced::font::Weight::Medium))
         .size(SIDEBAR_NAME_SIZE)
 }
 
@@ -20128,8 +20128,8 @@ mod tests {
             "type_role_text_lh must apply a relative line height"
         );
         assert!(
-            !home.contains("archivo_semi_condensed("),
-            "home screen must not hardcode Archivo locally; it may only arrive via TypeRole::DisplayHeading"
+            !home.contains("roboto_condensed("),
+            "home screen must not hardcode Roboto Condensed locally; it may only arrive via TypeRole::DisplayHeading"
         );
     }
 
@@ -20860,8 +20860,8 @@ mod tests {
             "sidebar name helper must exist"
         );
         assert!(
-            src.contains("ibm_plex_sans(iced::font::Weight::Medium)"),
-            "sidebar names must use IBM Plex Sans Medium"
+            src.contains("public_sans(iced::font::Weight::Medium)"),
+            "sidebar names must use Public Sans Medium"
         );
         // Every sidebar section renderer routes its primary name through the
         // helper instead of the Body role.  (The groups screen renderers live
@@ -28841,11 +28841,10 @@ fn vr_create_tunnel_picker_port_validation() {
                 include_bytes!("fonts/Raleway-ExtraBold.ttf"),
                 include_bytes!("fonts/JetBrainsMono-Regular.ttf"),
                 include_bytes!("fonts/JetBrainsMono-Medium.ttf"),
-                include_bytes!("fonts/ArchivoSemiCondensed-SemiBold.ttf"),
-                include_bytes!("fonts/ArchivoSemiCondensed-Bold.ttf"),
-                include_bytes!("fonts/IBMPlexSans-Regular.ttf"),
-                include_bytes!("fonts/IBMPlexSans-Medium.ttf"),
-                include_bytes!("fonts/IBMPlexSans-SemiBold.ttf"),
+                include_bytes!("fonts/RobotoCondensed-Bold.ttf"),
+                include_bytes!("fonts/PublicSans-Regular.ttf"),
+                include_bytes!("fonts/PublicSans-Medium.ttf"),
+                include_bytes!("fonts/PublicSans-SemiBold.ttf"),
             ];
             for bytes in fonts {
                 fs.load_font(Cow::Borrowed(*bytes));

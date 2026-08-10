@@ -8,8 +8,8 @@
 //!
 //! | Family          | Weights loaded               | Scope                          | Fallback chain (FONTS-14)          |
 //! |-----------------|------------------------------|--------------------------------|------------------------------------|
-//! | Archivo SemiCondensed | 600 (SemiBold) · 700 (Bold) | Major display/page headings (DisplayHeading, PageTitle) | Arial Narrow → generic sans-serif |
-//! | IBM Plex Sans   | 400 (Regular) · 500 (Medium) · 600 (SemiBold) | Primary app UI: sections, cards, body, buttons, metadata | Arial → system sans-serif |
+//! | Roboto Condensed | 700 (Bold)                  | Major display/page headings (DisplayHeading, PageTitle) | Arial Narrow → generic sans-serif |
+//! | Public Sans     | 400 (Regular) · 500 (Medium) · 600 (SemiBold) | Primary app UI: sections, cards, body, buttons, metadata | Arial → system sans-serif |
 //! | Figtree         | 400 · 500 · 600               | Chat messages, sender, metadata, composer | Arial → system sans-serif |
 //! | JetBrains Mono  | 400 · 500                     | Technical/code values           | Consolas → monospace               |
 //! | Raleway         | 800 (ExtraBold)               | BORU wordmark / branding only   | Raleway (bundled — unchanged)      |
@@ -23,11 +23,11 @@
 //!
 //! ## Licence
 //!
-//! Figtree, Raleway, JetBrains Mono, Archivo SemiCondensed, and IBM
-//! Plex Sans are licensed under the SIL Open Font License 1.1. See
+//! Figtree, Raleway, JetBrains Mono, Roboto Condensed, and Public
+//! Sans are licensed under the SIL Open Font License 1.1. See
 //! fonts/OFL.txt and the per-family OFL records (fonts/Figtree-OFL.txt,
 //! fonts/JetBrainsMono-OFL.txt, fonts/Raleway-OFL.txt,
-//! fonts/Archivo-OFL.txt, fonts/IBMPlexSans-OFL.txt) plus
+//! fonts/RobotoCondensed-OFL.txt, fonts/PublicSans-OFL.txt) plus
 //! fonts/THIRD_PARTY_NOTICES.md for exact sources and versions.
 
 use iced::font::{self, Family, Weight};
@@ -62,22 +62,17 @@ const JETBRAINS_MONO_REGULAR_BYTES: &[u8] = include_bytes!("fonts/JetBrainsMono-
 /// JetBrains Mono Medium (500) — emphasised technical values.
 const JETBRAINS_MONO_MEDIUM_BYTES: &[u8] = include_bytes!("fonts/JetBrainsMono-Medium.ttf");
 
-/// Archivo SemiCondensed SemiBold (600) — display headings (width axis 87.5).
-const ARCHIVO_SEMI_CONDENSED_SEMI_BOLD_BYTES: &[u8] =
-    include_bytes!("fonts/ArchivoSemiCondensed-SemiBold.ttf");
+/// Roboto Condensed Bold (700) — major display/page headings.
+const ROBOTO_CONDENSED_BOLD_BYTES: &[u8] = include_bytes!("fonts/RobotoCondensed-Bold.ttf");
 
-/// Archivo SemiCondensed Bold (700) — major display headings (width axis 87.5).
-const ARCHIVO_SEMI_CONDENSED_BOLD_BYTES: &[u8] =
-    include_bytes!("fonts/ArchivoSemiCondensed-Bold.ttf");
+/// Public Sans Regular (400) — general app UI body text.
+const PUBLIC_SANS_REGULAR_BYTES: &[u8] = include_bytes!("fonts/PublicSans-Regular.ttf");
 
-/// IBM Plex Sans Regular (400) — general app UI (static instance, wdth 100).
-const IBM_PLEX_SANS_REGULAR_BYTES: &[u8] = include_bytes!("fonts/IBMPlexSans-Regular.ttf");
+/// Public Sans Medium (500) — general app UI emphasis.
+const PUBLIC_SANS_MEDIUM_BYTES: &[u8] = include_bytes!("fonts/PublicSans-Medium.ttf");
 
-/// IBM Plex Sans Medium (500) — general app UI emphasis (static instance, wdth 100).
-const IBM_PLEX_SANS_MEDIUM_BYTES: &[u8] = include_bytes!("fonts/IBMPlexSans-Medium.ttf");
-
-/// IBM Plex Sans SemiBold (600) — general app UI headings/labels (static instance, wdth 100).
-const IBM_PLEX_SANS_SEMI_BOLD_BYTES: &[u8] = include_bytes!("fonts/IBMPlexSans-SemiBold.ttf");
+/// Public Sans SemiBold (600) — general app UI headings/labels.
+const PUBLIC_SANS_SEMI_BOLD_BYTES: &[u8] = include_bytes!("fonts/PublicSans-SemiBold.ttf");
 
 // ── Font family names ────────────────────────────────────────────────
 
@@ -90,14 +85,14 @@ pub const RALEWAY: &str = "Raleway";
 /// Internal family name for JetBrains Mono.
 pub const JETBRAINS_MONO: &str = "JetBrains Mono";
 
-/// Internal family name for Archivo SemiCondensed (display headings).
-pub const ARCHIVO_SEMI_CONDENSED: &str = "Archivo SemiCondensed";
+/// Internal family name for Roboto Condensed (display headings).
+pub const ROBOTO_CONDENSED: &str = "Roboto Condensed";
 
-/// Internal family name for IBM Plex Sans (general app UI).
-pub const IBM_PLEX_SANS: &str = "IBM Plex Sans";
+/// Internal family name for Public Sans (general app UI).
+pub const PUBLIC_SANS: &str = "Public Sans";
 
 /// Platform fallback family for display/page-heading roles (FONTS Task 14:
-/// Archivo SemiCondensed → Arial Narrow → generic sans-serif).
+/// Roboto Condensed → Arial Narrow → generic sans-serif).
 pub const ARIAL_NARROW: &str = "Arial Narrow";
 
 // ── Font constructors ────────────────────────────────────────────────
@@ -132,27 +127,27 @@ pub fn jetbrains_mono(weight: Weight) -> Font {
     }
 }
 
-/// Return a `Font` for Archivo SemiCondensed at the given weight.
+/// Return a `Font` for Roboto Condensed at the given weight.
 ///
-/// Registered weights: 600 (SemiBold) and 700 (Bold). The family's width
-/// axis is pinned at 87.5 (SemiCondensed) in the bundled static instances.
-pub fn archivo_semi_condensed(weight: Weight) -> Font {
+/// Registered weight: 700 (Bold). The bundled static instance is generated
+/// from the official variable font with wght pinned at 700.
+pub fn roboto_condensed(weight: Weight) -> Font {
     Font {
-        family: Family::Name(ARCHIVO_SEMI_CONDENSED),
+        family: Family::Name(ROBOTO_CONDENSED),
         weight,
         stretch: iced::font::Stretch::Normal,
         style: iced::font::Style::Normal,
     }
 }
 
-/// Return a `Font` for IBM Plex Sans at the given weight.
+/// Return a `Font` for Public Sans at the given weight.
 ///
 /// Registered weights: 400 (Regular), 500 (Medium), and 600 (SemiBold).
-/// The bundled static instances are normal-width (wdth 100) statics
-/// generated from the official variable font.
-pub fn ibm_plex_sans(weight: Weight) -> Font {
+/// The bundled static instances are generated from the official variable
+/// font with wght pinned at the requested weight — permitted under OFL-1.1.
+pub fn public_sans(weight: Weight) -> Font {
     Font {
-        family: Family::Name(IBM_PLEX_SANS),
+        family: Family::Name(PUBLIC_SANS),
         weight,
         stretch: iced::font::Stretch::Normal,
         style: iced::font::Style::Normal,
@@ -216,15 +211,15 @@ pub use sizes::*;
 //
 // Sizes follow the Boru plan's approved mapping (UI-HOME-12/13) and the
 // FONTS Task 16 baseline (all values are within the approved ranges):
-//   display_heading  Archivo SemiCondensed Bold 32   page greeting / hero
-//   page_title       Archivo SemiCondensed Bold 28   application page title
-//   section_title    IBM Plex Sans SemiBold 20       section heading (creation-dialog titles use PageTitle family @ DIALOG_TITLE — FONTS-11)
-//   card_title       IBM Plex Sans SemiBold 18       dashboard card title
-//   body             IBM Plex Sans Regular 15        body copy and descriptions
-//   body_emphasised  IBM Plex Sans SemiBold 15       emphasised body copy
-//   button_label     IBM Plex Sans SemiBold 14       buttons and interactive labels
-//   supporting_text  IBM Plex Sans Regular 13        supporting / secondary copy
-//   metadata         IBM Plex Sans Regular 12        timestamps, counts, small metadata
+//   display_heading  Roboto Condensed Bold 32     page greeting / hero
+//   page_title       Roboto Condensed Bold 28     application page title
+//   section_title    Public Sans SemiBold 20      section heading (creation-dialog titles use PageTitle family @ DIALOG_TITLE — FONTS-11)
+//   card_title       Public Sans SemiBold 18      dashboard card title
+//   body             Public Sans Regular 15       body copy and descriptions
+//   body_emphasised  Public Sans SemiBold 15      emphasised body copy
+//   button_label     Public Sans SemiBold 14      buttons and interactive labels
+//   supporting_text  Public Sans Regular 13       supporting / secondary copy
+//   metadata         Public Sans Regular 12       timestamps, counts, small metadata
 //   chat_message     Figtree Regular 15   chat message body
 //   chat_sender      Figtree SemiBold 14  sender name
 //   chat_metadata    Figtree Regular 12  message timestamps / status
@@ -235,25 +230,25 @@ pub use sizes::*;
 /// Canonical semantic typography roles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypeRole {
-    /// Hero / page greeting — Archivo SemiCondensed Bold 32.
+    /// Hero / page greeting — Roboto Condensed Bold 32.
     DisplayHeading,
-    /// Application page title — Archivo SemiCondensed Bold 28.
+    /// Application page title — Roboto Condensed Bold 28.
     PageTitle,
-    /// Section heading — IBM Plex Sans SemiBold 20.
+    /// Section heading — Public Sans SemiBold 20.
     /// (Creation-dialog titles use the PageTitle family at the DIALOG_TITLE
-    /// scale — Archivo SemiCondensed Bold 26 px, FONTS-11.)
+    /// scale — Roboto Condensed Bold 26 px, FONTS-11.)
     SectionTitle,
-    /// Card title — IBM Plex Sans SemiBold 18.
+    /// Card title — Public Sans SemiBold 18.
     CardTitle,
-    /// Body copy / descriptions — IBM Plex Sans Regular 15.
+    /// Body copy / descriptions — Public Sans Regular 15.
     Body,
-    /// Emphasised body copy — IBM Plex Sans SemiBold 15.
+    /// Emphasised body copy — Public Sans SemiBold 15.
     BodyEmphasised,
-    /// Button and interactive label — IBM Plex Sans SemiBold 14.
+    /// Button and interactive label — Public Sans SemiBold 14.
     ButtonLabel,
-    /// Supporting / secondary copy — IBM Plex Sans Regular 13.
+    /// Supporting / secondary copy — Public Sans Regular 13.
     SupportingText,
-    /// Metadata (timestamps, counts) — IBM Plex Sans Regular 12.
+    /// Metadata (timestamps, counts) — Public Sans Regular 12.
     Metadata,
     /// Chat message body — Figtree Regular 15.
     ChatMessage,
@@ -273,15 +268,17 @@ impl TypeRole {
     /// Primary font family name for this role.
     pub fn family_name(self) -> &'static str {
         match self {
-            Self::DisplayHeading | Self::PageTitle => ARCHIVO_SEMI_CONDENSED,
+            Self::DisplayHeading | Self::PageTitle => ROBOTO_CONDENSED,
             Self::SectionTitle
             | Self::CardTitle
             | Self::Body
             | Self::BodyEmphasised
             | Self::ButtonLabel
             | Self::SupportingText
-            | Self::Metadata => IBM_PLEX_SANS,
-            Self::ChatMessage | Self::ChatSender | Self::ChatMetadata | Self::ComposerText => FIGTREE,
+            | Self::Metadata => PUBLIC_SANS,
+            Self::ChatMessage | Self::ChatSender | Self::ChatMetadata | Self::ComposerText => {
+                FIGTREE
+            }
             Self::TechnicalValue => JETBRAINS_MONO,
             Self::BrandWordmark => RALEWAY,
         }
@@ -326,13 +323,13 @@ impl TypeRole {
     /// Return an `iced::Font` for this role.
     pub fn font(self) -> Font {
         match self.family_name() {
-            ARCHIVO_SEMI_CONDENSED => archivo_semi_condensed(self.weight()),
-            IBM_PLEX_SANS => ibm_plex_sans(self.weight()),
+            ROBOTO_CONDENSED => roboto_condensed(self.weight()),
+            PUBLIC_SANS => public_sans(self.weight()),
             FIGTREE => figtree(self.weight()),
             JETBRAINS_MONO => jetbrains_mono(self.weight()),
             RALEWAY => raleway_extra_bold(),
             // Defensive default: the UI family (kept in sync with family_name()).
-            _ => ibm_plex_sans(self.weight()),
+            _ => public_sans(self.weight()),
         }
     }
 
@@ -452,9 +449,9 @@ pub fn type_role_text_lh<'a>(
 /// loading result can be ignored (errors are non-fatal — the system falls
 /// back to the default sans-serif font).
 ///
-/// Loads Archivo SemiCondensed (display/page headings), IBM Plex Sans
-/// (primary UI), Figtree (chat), Raleway ExtraBold (wordmark), and
-/// JetBrains Mono (technical values).
+/// Loads Roboto Condensed (display/page headings), Public Sans (primary
+/// UI), Figtree (chat), Raleway ExtraBold (wordmark), and JetBrains Mono
+/// (technical values).
 pub fn load_fonts() -> iced::Task<crate::app::AppMessage> {
     iced::Task::batch(vec![
         // iced_aw's embedded icon font (Modal/Card close glyph, ColorPicker
@@ -470,13 +467,12 @@ pub fn load_fonts() -> iced::Task<crate::app::AppMessage> {
         // JetBrains Mono — 400 · 500 (technical values).
         font::load(JETBRAINS_MONO_REGULAR_BYTES).map(|_| crate::app::AppMessage::Noop),
         font::load(JETBRAINS_MONO_MEDIUM_BYTES).map(|_| crate::app::AppMessage::Noop),
-        // Archivo SemiCondensed — 600 · 700 (display headings).
-        font::load(ARCHIVO_SEMI_CONDENSED_SEMI_BOLD_BYTES).map(|_| crate::app::AppMessage::Noop),
-        font::load(ARCHIVO_SEMI_CONDENSED_BOLD_BYTES).map(|_| crate::app::AppMessage::Noop),
-        // IBM Plex Sans — 400 · 500 · 600 (general app UI).
-        font::load(IBM_PLEX_SANS_REGULAR_BYTES).map(|_| crate::app::AppMessage::Noop),
-        font::load(IBM_PLEX_SANS_MEDIUM_BYTES).map(|_| crate::app::AppMessage::Noop),
-        font::load(IBM_PLEX_SANS_SEMI_BOLD_BYTES).map(|_| crate::app::AppMessage::Noop),
+        // Roboto Condensed — 700 (display headings).
+        font::load(ROBOTO_CONDENSED_BOLD_BYTES).map(|_| crate::app::AppMessage::Noop),
+        // Public Sans — 400 · 500 · 600 (general app UI).
+        font::load(PUBLIC_SANS_REGULAR_BYTES).map(|_| crate::app::AppMessage::Noop),
+        font::load(PUBLIC_SANS_MEDIUM_BYTES).map(|_| crate::app::AppMessage::Noop),
+        font::load(PUBLIC_SANS_SEMI_BOLD_BYTES).map(|_| crate::app::AppMessage::Noop),
     ])
 }
 
@@ -500,13 +496,12 @@ mod tests {
         // JetBrains Mono statics
         assert!(!JETBRAINS_MONO_REGULAR_BYTES.is_empty());
         assert!(!JETBRAINS_MONO_MEDIUM_BYTES.is_empty());
-        // Archivo SemiCondensed statics
-        assert!(!ARCHIVO_SEMI_CONDENSED_SEMI_BOLD_BYTES.is_empty());
-        assert!(!ARCHIVO_SEMI_CONDENSED_BOLD_BYTES.is_empty());
-        // IBM Plex Sans statics
-        assert!(!IBM_PLEX_SANS_REGULAR_BYTES.is_empty());
-        assert!(!IBM_PLEX_SANS_MEDIUM_BYTES.is_empty());
-        assert!(!IBM_PLEX_SANS_SEMI_BOLD_BYTES.is_empty());
+        // Roboto Condensed static
+        assert!(!ROBOTO_CONDENSED_BOLD_BYTES.is_empty());
+        // Public Sans statics
+        assert!(!PUBLIC_SANS_REGULAR_BYTES.is_empty());
+        assert!(!PUBLIC_SANS_MEDIUM_BYTES.is_empty());
+        assert!(!PUBLIC_SANS_SEMI_BOLD_BYTES.is_empty());
     }
 
     #[test]
@@ -514,15 +509,14 @@ mod tests {
         // The FONTS-04 token families, each at the exact weights the roles
         // request.
         let expectations: &[(&str, Weight)] = &[
-            (ARCHIVO_SEMI_CONDENSED, Weight::Semibold), // 600
-            (ARCHIVO_SEMI_CONDENSED, Weight::Bold),     // 700
-            (IBM_PLEX_SANS, Weight::Normal),     // 400
-            (IBM_PLEX_SANS, Weight::Medium),     // 500
-            (IBM_PLEX_SANS, Weight::Semibold),   // 600
-            (FIGTREE, Weight::Normal),     // 400
-            (FIGTREE, Weight::Medium),     // 500
-            (FIGTREE, Weight::Semibold),   // 600
-            (RALEWAY, Weight::ExtraBold),  // 800
+            (ROBOTO_CONDENSED, Weight::Bold), // 700
+            (PUBLIC_SANS, Weight::Normal),    // 400
+            (PUBLIC_SANS, Weight::Medium),    // 500
+            (PUBLIC_SANS, Weight::Semibold),  // 600
+            (FIGTREE, Weight::Normal),        // 400
+            (FIGTREE, Weight::Medium),        // 500
+            (FIGTREE, Weight::Semibold),      // 600
+            (RALEWAY, Weight::ExtraBold),     // 800
             (JETBRAINS_MONO, Weight::Normal), // 400
             (JETBRAINS_MONO, Weight::Medium), // 500
         ];
@@ -533,11 +527,10 @@ mod tests {
             (RALEWAY, Weight::ExtraBold),
             (JETBRAINS_MONO, Weight::Normal),
             (JETBRAINS_MONO, Weight::Medium),
-            (ARCHIVO_SEMI_CONDENSED, Weight::Semibold),
-            (ARCHIVO_SEMI_CONDENSED, Weight::Bold),
-            (IBM_PLEX_SANS, Weight::Normal),
-            (IBM_PLEX_SANS, Weight::Medium),
-            (IBM_PLEX_SANS, Weight::Semibold),
+            (ROBOTO_CONDENSED, Weight::Bold),
+            (PUBLIC_SANS, Weight::Normal),
+            (PUBLIC_SANS, Weight::Medium),
+            (PUBLIC_SANS, Weight::Semibold),
         ];
         for (family, weight) in expectations {
             assert!(
@@ -549,21 +542,21 @@ mod tests {
 
     #[test]
     fn type_role_uses_approved_families() {
-        // FONTS-04 approved mapping: Archivo SemiCondensed for display/page
-        // headings, IBM Plex Sans for general UI, Figtree for chat,
+        // FONTS-04 approved mapping: Roboto Condensed for display/page
+        // headings, Public Sans for general UI, Figtree for chat,
         // JetBrains Mono for technical values, Raleway for the wordmark.
-        assert_eq!(TypeRole::DisplayHeading.family_name(), ARCHIVO_SEMI_CONDENSED);
+        assert_eq!(TypeRole::DisplayHeading.family_name(), ROBOTO_CONDENSED);
         assert_eq!(TypeRole::DisplayHeading.weight(), Weight::Bold);
-        assert_eq!(TypeRole::PageTitle.family_name(), ARCHIVO_SEMI_CONDENSED);
+        assert_eq!(TypeRole::PageTitle.family_name(), ROBOTO_CONDENSED);
         assert_eq!(TypeRole::PageTitle.weight(), Weight::Bold);
-        assert_eq!(TypeRole::SectionTitle.family_name(), IBM_PLEX_SANS);
+        assert_eq!(TypeRole::SectionTitle.family_name(), PUBLIC_SANS);
         assert_eq!(TypeRole::SectionTitle.weight(), Weight::Semibold);
-        assert_eq!(TypeRole::CardTitle.family_name(), IBM_PLEX_SANS);
-        assert_eq!(TypeRole::Body.family_name(), IBM_PLEX_SANS);
-        assert_eq!(TypeRole::BodyEmphasised.family_name(), IBM_PLEX_SANS);
-        assert_eq!(TypeRole::ButtonLabel.family_name(), IBM_PLEX_SANS);
-        assert_eq!(TypeRole::SupportingText.family_name(), IBM_PLEX_SANS);
-        assert_eq!(TypeRole::Metadata.family_name(), IBM_PLEX_SANS);
+        assert_eq!(TypeRole::CardTitle.family_name(), PUBLIC_SANS);
+        assert_eq!(TypeRole::Body.family_name(), PUBLIC_SANS);
+        assert_eq!(TypeRole::BodyEmphasised.family_name(), PUBLIC_SANS);
+        assert_eq!(TypeRole::ButtonLabel.family_name(), PUBLIC_SANS);
+        assert_eq!(TypeRole::SupportingText.family_name(), PUBLIC_SANS);
+        assert_eq!(TypeRole::Metadata.family_name(), PUBLIC_SANS);
         assert_eq!(TypeRole::ChatMessage.family_name(), FIGTREE);
         assert_eq!(TypeRole::ChatSender.family_name(), FIGTREE);
         assert_eq!(TypeRole::ChatMetadata.family_name(), FIGTREE);
@@ -580,13 +573,13 @@ mod tests {
             let family = role.family_name();
             let weight = role.weight();
             match family {
-                ARCHIVO_SEMI_CONDENSED => assert!(
-                    weight == Weight::Semibold || weight == Weight::Bold,
-                    "Archivo role {role:?} requests unsupported weight {weight:?}"
+                ROBOTO_CONDENSED => assert!(
+                    weight == Weight::Bold,
+                    "Roboto Condensed role {role:?} requests unsupported weight {weight:?}"
                 ),
-                IBM_PLEX_SANS => assert!(
+                PUBLIC_SANS => assert!(
                     matches!(weight, Weight::Normal | Weight::Medium | Weight::Semibold),
-                    "IBM Plex Sans role {role:?} requests unsupported weight {weight:?}"
+                    "Public Sans role {role:?} requests unsupported weight {weight:?}"
                 ),
                 FIGTREE => assert!(
                     matches!(weight, Weight::Normal | Weight::Medium | Weight::Semibold),
@@ -722,8 +715,8 @@ mod tests {
     }
 
     #[test]
-    fn ui_roles_use_ibm_plex_sans() {
-        // FONTS-04: every general-UI role maps to IBM Plex Sans (never the
+    fn ui_roles_use_public_sans() {
+        // FONTS-04: every general-UI role maps to Public Sans (never the
         // legacy default font, removed in FONTS-12).
         let roles: &[TypeRole] = &[
             TypeRole::SectionTitle,
@@ -737,8 +730,8 @@ mod tests {
         for role in roles {
             assert_eq!(
                 role.family_name(),
-                IBM_PLEX_SANS,
-                "{role:?} should use IBM Plex Sans"
+                PUBLIC_SANS,
+                "{role:?} should use Public Sans"
             );
         }
     }
@@ -783,8 +776,8 @@ mod tests {
 
     #[test]
     fn dialog_size_tokens_fit_task11_bands() {
-        // FONTS Task 11: dialog title Archivo SemiCondensed Bold 24–28 px,
-        // subtitle IBM Plex Sans Regular 14–15 px. The DIALOG_TITLE /
+        // FONTS Task 11: dialog title Roboto Condensed Bold 24–28 px,
+        // subtitle Public Sans Regular 14–15 px. The DIALOG_TITLE /
         // DIALOG_SUBTITLE scale tokens must sit inside those approved bands.
         assert!(
             (24.0..=28.0).contains(&DIALOG_TITLE),
@@ -794,10 +787,10 @@ mod tests {
             (14.0..=15.0).contains(&DIALOG_SUBTITLE),
             "DIALOG_SUBTITLE {DIALOG_SUBTITLE} must be within 14–15 px"
         );
-        // The dialog title must resolve to the Archivo SemiCondensed Bold
+        // The dialog title must resolve to the Roboto Condensed Bold
         // family — the same family the PageTitle role uses — so callers can
         // apply `TypeRole::PageTitle.font()` with the DIALOG_TITLE size.
-        assert_eq!(TypeRole::PageTitle.family_name(), ARCHIVO_SEMI_CONDENSED);
+        assert_eq!(TypeRole::PageTitle.family_name(), ROBOTO_CONDENSED);
         assert_eq!(TypeRole::PageTitle.weight(), Weight::Bold);
     }
 
@@ -808,11 +801,11 @@ mod tests {
         for role in TypeRole::ALL {
             let font = role.font();
             match role.family_name() {
-                ARCHIVO_SEMI_CONDENSED => {
-                    assert_eq!(font.family, iced::font::Family::Name(ARCHIVO_SEMI_CONDENSED));
+                ROBOTO_CONDENSED => {
+                    assert_eq!(font.family, iced::font::Family::Name(ROBOTO_CONDENSED));
                 }
-                IBM_PLEX_SANS => {
-                    assert_eq!(font.family, iced::font::Family::Name(IBM_PLEX_SANS));
+                PUBLIC_SANS => {
+                    assert_eq!(font.family, iced::font::Family::Name(PUBLIC_SANS));
                 }
                 FIGTREE => assert_eq!(font.family, iced::font::Family::Name(FIGTREE)),
                 JETBRAINS_MONO => {

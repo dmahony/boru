@@ -14,6 +14,8 @@ License texts:
 | Raleway       | `Raleway-OFL.txt`       | 4497  |
 | Archivo SemiCondensed | `Archivo-OFL.txt` | 4388  |
 | IBM Plex Sans | `IBMPlexSans-OFL.txt` | 4456  |
+| Public Sans    | `PublicSans-OFL.txt`    | 4389  |
+| Roboto Condensed | `RobotoCondensed-OFL.txt` | 4351  |
 | Combined      | `OFL.txt`               | 4985  (multi-family notice kept for legacy) |
 
 ---
@@ -85,6 +87,35 @@ License texts:
   uses 500, Body/Metadata use 400). Registered in FONTS-03 for general app UI; no UI usage yet
   (token remap is FONTS-04). Static instances are normal-width (wdth=100, usWidthClass 5) with
   clean family/subfamily naming so iced/fontdb resolves "IBM Plex Sans" + exact weight.
+
+---
+
+## Public Sans — OFL-1.1
+
+- Version: **2.001**
+- Copyright: Copyright 2021 The Public Sans Project Authors (https://github.com/uswds/public-sans)
+- Source: Google Fonts — `https://github.com/google/fonts` (`ofl/publicsans/PublicSans[wght].ttf`),
+  variable font (wght 100–900). Static instances generated with fontTools
+  `varLib.instancer` from the official variable font above — permitted under OFL-1.1.
+- Bundled weights (static): `PublicSans-Regular.ttf` (400), `PublicSans-Medium.ttf` (500),
+  `PublicSans-SemiBold.ttf` (600)
+- License: `PublicSans-OFL.txt`
+- Note: Replaces IBM Plex Sans as the primary app UI font in FONT-SWAP-01.
+  Static instances have clean family/subfamily naming so iced/fontdb resolves
+  "Public Sans" + exact weight.
+
+## Roboto Condensed — OFL-1.1
+
+- Version: **2.003**
+- Copyright: Copyright 2011 Google Inc. All Rights Reserved.
+- Source: Google Fonts — `https://github.com/google/fonts` (`ofl/robotocondensed/RobotoCondensed[wght].ttf`),
+  variable font (wght 100–900). Static instance generated with fontTools
+  `varLib.instancer` from the official variable font above — permitted under OFL-1.1.
+- Bundled weight (static): `RobotoCondensed-Bold.ttf` (700)
+- License: `RobotoCondensed-OFL.txt`
+- Note: Replaces Archivo SemiCondensed as the display/page heading font in FONT-SWAP-01.
+  Only Bold (700) is bundled — it is the sole weight the DisplayHeading and PageTitle
+  roles request.
 
 ---
 

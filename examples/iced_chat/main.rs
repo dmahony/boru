@@ -1668,7 +1668,7 @@ fn main() -> Result<()> {
     )
     .title(|_: &IcedChat| format!("Boru — {}", app::version_tag()))
     .default_font(iced::Font {
-        family: iced::font::Family::Name(crate::fonts::IBM_PLEX_SANS),
+        family: iced::font::Family::Name(crate::fonts::PUBLIC_SANS),
         weight: iced::font::Weight::Normal,
         stretch: iced::font::Stretch::Normal,
         style: iced::font::Style::Normal,

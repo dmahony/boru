@@ -1627,7 +1627,7 @@ fn typography_gallery() -> Element<'static, AppMessage> {
             TypeRole::PageTitle => "Boru Settings",
             TypeRole::SectionTitle => "Connection Overview",
             TypeRole::CardTitle => "Mesh Health",
-            TypeRole::Body => "Body copy and descriptions use IBM Plex Sans at fifteen pixels.",
+            TypeRole::Body => "Body copy and descriptions use Public Sans at fifteen pixels.",
             TypeRole::BodyEmphasised => {
                 "Emphasised body copy stands out without synthetic bolding."
             }
@@ -1642,15 +1642,15 @@ fn typography_gallery() -> Element<'static, AppMessage> {
             TypeRole::BrandWordmark => "BORU",
         };
         let family_weight = match role {
-            TypeRole::DisplayHeading => "Archivo SemiCondensed Bold 700",
-            TypeRole::PageTitle => "Archivo SemiCondensed Bold 700",
-            TypeRole::SectionTitle => "IBM Plex Sans SemiBold 600",
-            TypeRole::CardTitle => "IBM Plex Sans SemiBold 600",
-            TypeRole::Body => "IBM Plex Sans Regular 400",
-            TypeRole::BodyEmphasised => "IBM Plex Sans SemiBold 600",
-            TypeRole::ButtonLabel => "IBM Plex Sans SemiBold 600",
-            TypeRole::SupportingText => "IBM Plex Sans Regular 400",
-            TypeRole::Metadata => "IBM Plex Sans Regular 400",
+            TypeRole::DisplayHeading => "Roboto Condensed Bold 700",
+            TypeRole::PageTitle => "Roboto Condensed Bold 700",
+            TypeRole::SectionTitle => "Public Sans SemiBold 600",
+            TypeRole::CardTitle => "Public Sans SemiBold 600",
+            TypeRole::Body => "Public Sans Regular 400",
+            TypeRole::BodyEmphasised => "Public Sans SemiBold 600",
+            TypeRole::ButtonLabel => "Public Sans SemiBold 600",
+            TypeRole::SupportingText => "Public Sans Regular 400",
+            TypeRole::Metadata => "Public Sans Regular 400",
             TypeRole::ChatMessage => "Figtree Regular 400",
             TypeRole::ChatSender => "Figtree SemiBold 600",
             TypeRole::ChatMetadata => "Figtree Regular 400",

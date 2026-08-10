@@ -162,10 +162,10 @@ mod tests {
         // left. This walks the real layout tree of the Ready card and
         // asserts those shared alignment lines from the layout engine
         // (ground truth, not pixel estimates).
-        load_font(include_bytes!("fonts/ArchivoSemiCondensed-Bold.ttf"));
-        load_font(include_bytes!("fonts/IBMPlexSans-Regular.ttf"));
-        load_font(include_bytes!("fonts/IBMPlexSans-Medium.ttf"));
-        load_font(include_bytes!("fonts/IBMPlexSans-SemiBold.ttf"));
+        load_font(include_bytes!("fonts/RobotoCondensed-Bold.ttf"));
+        load_font(include_bytes!("fonts/PublicSans-Regular.ttf"));
+        load_font(include_bytes!("fonts/PublicSans-Medium.ttf"));
+        load_font(include_bytes!("fonts/PublicSans-SemiBold.ttf"));
 
         for (width, label) in [(1215.0, "Full"), (679.0, "Medium")] {
             let dep = dep(HomeConnectionVariant::Ready, width);
@@ -279,10 +279,10 @@ mod tests {
     fn capture_status_card_states() {
         // Fonts used by the status card: Archivo SemiCondensed Bold
         // (DisplayHeading) + IBM Plex Sans Regular/Medium/SemiBold.
-        load_font(include_bytes!("fonts/ArchivoSemiCondensed-Bold.ttf"));
-        load_font(include_bytes!("fonts/IBMPlexSans-Regular.ttf"));
-        load_font(include_bytes!("fonts/IBMPlexSans-Medium.ttf"));
-        load_font(include_bytes!("fonts/IBMPlexSans-SemiBold.ttf"));
+        load_font(include_bytes!("fonts/RobotoCondensed-Bold.ttf"));
+        load_font(include_bytes!("fonts/PublicSans-Regular.ttf"));
+        load_font(include_bytes!("fonts/PublicSans-Medium.ttf"));
+        load_font(include_bytes!("fonts/PublicSans-SemiBold.ttf"));
 
         // CONN-12 width sweep (spec §18 "Test widths manually"): capture
         // the Ready card at every test width, width-tagged so the user
@@ -335,10 +335,10 @@ mod tests {
         // inside the compact band, and the spec's "grow only when its
         // content requires it" permits heights below the 200 target when
         // the content genuinely fits on one line.
-        load_font(include_bytes!("fonts/ArchivoSemiCondensed-Bold.ttf"));
-        load_font(include_bytes!("fonts/IBMPlexSans-Regular.ttf"));
-        load_font(include_bytes!("fonts/IBMPlexSans-Medium.ttf"));
-        load_font(include_bytes!("fonts/IBMPlexSans-SemiBold.ttf"));
+        load_font(include_bytes!("fonts/RobotoCondensed-Bold.ttf"));
+        load_font(include_bytes!("fonts/PublicSans-Regular.ttf"));
+        load_font(include_bytes!("fonts/PublicSans-Medium.ttf"));
+        load_font(include_bytes!("fonts/PublicSans-SemiBold.ttf"));
 
         // Wide desktop (1600 window → ~1215 content) — full three-region row.
         let full = measure_card_height(&dep(HomeConnectionVariant::Ready, 1215.0), 1215.0);
@@ -362,7 +362,7 @@ mod tests {
         // and MUST NEVER grow taller (wrap into a second line / a vertical
         // column) when the available width shrinks — the card switches to
         // the stacked layout (CONN-09) instead of squeezing the pill.
-        load_font(include_bytes!("fonts/IBMPlexSans-Regular.ttf"));
+        load_font(include_bytes!("fonts/PublicSans-Regular.ttf"));
 
         // Measure at an unconstrained width first — the natural, hugging
         // size of the pill (icon 14 + gap 8 + text + padding 8/12).
@@ -406,7 +406,7 @@ mod tests {
         // narrow fixed container and asserts the laid-out height is
         // identical to the natural single-row height (the wrapped pill
         // would grow vertically; the stacked pill would be a column).
-        load_font(include_bytes!("fonts/IBMPlexSans-Regular.ttf"));
+        load_font(include_bytes!("fonts/PublicSans-Regular.ttf"));
 
         let (_, natural_h) = measure_pill(1000.0);
         // The tightest horizontal tier the card supports before switching
@@ -582,10 +582,10 @@ mod tests {
         // than the whole left column) and with the rail CLOSED (empty),
         // and assert the hero card's laid-out height is identical in both
         // — and equal to the standalone content-determined height.
-        load_font(include_bytes!("fonts/ArchivoSemiCondensed-Bold.ttf"));
-        load_font(include_bytes!("fonts/IBMPlexSans-Regular.ttf"));
-        load_font(include_bytes!("fonts/IBMPlexSans-Medium.ttf"));
-        load_font(include_bytes!("fonts/IBMPlexSans-SemiBold.ttf"));
+        load_font(include_bytes!("fonts/RobotoCondensed-Bold.ttf"));
+        load_font(include_bytes!("fonts/PublicSans-Regular.ttf"));
+        load_font(include_bytes!("fonts/PublicSans-Medium.ttf"));
+        load_font(include_bytes!("fonts/PublicSans-SemiBold.ttf"));
 
         // Maximized window (~1600 → content 1215 → card (1215-24)*2/3 =
         // 794, Full tier).

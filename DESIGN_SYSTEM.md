@@ -16,8 +16,8 @@ This document specifies every visual token, component, and behaviour in the Boru
 
 | Family | Weights loaded | Scope |
 |---|---|---|
-| **Archivo SemiCondensed** | 600 (SemiBold), 700 (Bold) | Major display/page headings |
-| **IBM Plex Sans** | 400 (Regular), 500 (Medium), 600 (SemiBold) | Primary app UI — nav, forms, buttons, supporting text |
+| **Roboto Condensed** | 700 (Bold) | Major display/page headings |
+| **Public Sans** | 400 (Regular), 500 (Medium), 600 (SemiBold) | Primary app UI — nav, forms, buttons, supporting text |
 | **Figtree** | 400 (Regular), 500 (Medium), 600 (SemiBold) | Chat messages, sender names, message metadata, composer |
 | **Raleway** | 800 (ExtraBold) | BORU wordmark / branding only |
 | **JetBrains Mono** | 400 (Regular), 500 (Medium) | Technical/code values |
@@ -30,15 +30,15 @@ Fonts are bundled at compile time via `include_bytes!` in `fonts.rs` and loaded 
 
 | Role | Family | Weight | px |
 |---|---|---|---|
-| `display_heading` | Archivo SemiCondensed | Bold (700) | 32 |
-| `page_title` | Archivo SemiCondensed | Bold (700) | 28 |
-| `section_title` | IBM Plex Sans | SemiBold (600) | 20 |
-| `card_title` | IBM Plex Sans | SemiBold (600) | 18 |
-| `body` | IBM Plex Sans | Regular (400) | 15 |
-| `body_emphasised` | IBM Plex Sans | SemiBold (600) | 15 |
-| `button_label` | IBM Plex Sans | SemiBold (600) | 14 |
-| `supporting_text` | IBM Plex Sans | Regular (400) | 13 |
-| `metadata` | IBM Plex Sans | Regular (400) | 12 |
+| `display_heading` | Roboto Condensed | Bold (700) | 32 |
+| `page_title` | Roboto Condensed | Bold (700) | 28 |
+| `section_title` | Public Sans | SemiBold (600) | 20 |
+| `card_title` | Public Sans | SemiBold (600) | 18 |
+| `body` | Public Sans | Regular (400) | 15 |
+| `body_emphasised` | Public Sans | SemiBold (600) | 15 |
+| `button_label` | Public Sans | SemiBold (600) | 14 |
+| `supporting_text` | Public Sans | Regular (400) | 13 |
+| `metadata` | Public Sans | Regular (400) | 12 |
 | `chat_message` | Figtree | Regular (400) | 15 |
 | `chat_sender` | Figtree | SemiBold (600) | 14 |
 | `chat_metadata` | Figtree | Regular (400) | 12 |
@@ -1107,7 +1107,7 @@ One `Icon` enum maps every semantic action to a Lucide SVG asset; `IconSize` nam
 
 ### 19.4 `fonts.rs` — typography
 
-`TypeRole` enum provides semantic roles (DisplayHeading, PageTitle, SectionTitle, ChatMessage, …) with correct family/weight/size; `load_fonts()` registers Archivo SemiCondensed, IBM Plex Sans, Figtree, Raleway, and JetBrains Mono at startup.
+`TypeRole` enum provides semantic roles (DisplayHeading, PageTitle, SectionTitle, ChatMessage, …) with correct family/weight/size; `load_fonts()` registers Roboto Condensed, Public Sans, Figtree, Raleway, and JetBrains Mono at startup.
 
 ### 19.5 Responsive breakpoints
 
