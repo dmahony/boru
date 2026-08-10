@@ -14,11 +14,13 @@ pub mod session;
 pub mod transport;
 pub mod viewer;
 
-pub use capture::{CapturedFrame, ScreenCapture};
+pub use capture::{CapturedFrame, FrameSink, PixelFormat, ScreenCapture};
 pub use codec::{EncodedFrame, ScreenShareCodec, VideoDecoder, VideoEncoder};
-pub use remote_input::{InputEvent, RemoteInput};
 pub use protocol::{ControlMessage, Hello, Permission, ScreenShareProtocol, SCREEN_SHARE_ALPN};
-pub use session::{ScreenShareSession, ScreenShareSessionId, SessionEvent, SessionManager, SessionState};
+pub use remote_input::{InputEvent, RemoteInput};
+pub use session::{
+    ScreenShareSession, ScreenShareSessionId, SessionEvent, SessionManager, SessionState,
+};
 pub use transport::ScreenTransport;
 
 /// Error returned by a screen-sharing boundary.
@@ -66,7 +68,11 @@ mod tests {
         fn decode(&mut self, frame: &EncodedFrame) -> Result<CapturedFrame, ScreenShareError> {
             Ok(CapturedFrame {
                 timestamp_us: frame.timestamp_us,
+                width: 1,
+                height: 1,
+                pixel_format: PixelFormat::Bgra8,
                 pixels: frame.bytes.clone(),
+                gpu_handle: None,
             })
         }
     }
@@ -86,7 +92,11 @@ mod tests {
         let mut capture = FakeCapture {
             next: Some(CapturedFrame {
                 timestamp_us: 7,
+                width: 1,
+                height: 1,
+                pixel_format: PixelFormat::Bgra8,
                 pixels: vec![1, 2, 3],
+                gpu_handle: None,
             }),
         };
         let frame = capture.capture().unwrap().unwrap();
