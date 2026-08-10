@@ -14,9 +14,9 @@ verified against a stable baseline.
 | 0888c101 | fix: sidebar snapshot fields pub(crate) + stale UI-HOME-10 test | — |
 | ce1e87c5 | settings screen → `app/settings.rs` | 50,532 → 49,320 |
 | 77dd716b | friend requests screen → `app/contacts.rs` | 49,320 → 48,980 |
+| (this run) | file sharing dashboard → `app/files.rs` | 48,980 → 44,637 |
 
-Remaining per plan: file sharing dashboard → `app/files.rs`, chat log/composer
-→ `app/chat.rs`, then feature state structs / feature-local messages
+Remaining per plan: chat log/composer → `app/chat.rs`, then feature state structs / feature-local messages
 (spec steps 4–6) and per-feature subscriptions (spec step 7).
 
 ## Overview
