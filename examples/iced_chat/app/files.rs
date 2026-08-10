@@ -5868,6 +5868,784 @@ impl IcedChat {
                 // refresh triggers a re-read of the current projection state.
                 iced::Task::none()
             }
+            AppMessage::OpenDownloadedFile(name) => {
+                self.video_card_menu_open = None;
+                if let Err(error) = self.open_downloaded_file(&name) {
+                    if error.starts_with("File not found:") {
+                        for (idx, entry) in self.entries.iter_mut().enumerate() {
+                            if let Some(download) = entry.download.as_mut() {
+                                if matches!(download.state, DownloadState::Completed { .. })
+                                    && download.name == name
+                                {
+                                    download.state = DownloadState::Failed {
+                                        failure: DownloadFailure::FileRemoved,
+                                    };
+                                    self.layout_cache.borrow_mut().invalidate_from(idx);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    self.push_system(format!("Open failed: {error}"));
+                }
+                iced::Task::none()
+            }
+            AppMessage::ReshareFile(entry_index) => {
+                self.video_card_menu_open = None;
+                if let Some(entry) = self.entries.get(entry_index) {
+                    if let Some(dl) = &entry.download {
+                        if let DownloadState::Completed {
+                            ref saved_name,
+                            ref saved_path,
+                            ..
+                        } = dl.state
+                        {
+                            if let Some(path) = saved_path {
+                                let encoded =
+                                    format!("{}|{}|{}", saved_name, path.display(), path.display());
+                                return self.update(AppMessage::ExecuteFileSend(encoded));
+                            }
+                        }
+                    }
+                }
+                iced::Task::none()
+            }
+            AppMessage::MintShortCode(entry_index) => {
+                // Mint a short code for the download card's ticket, subscribe
+                // to the code-derived rendezvous topic, and open the dialog
+                // showing the code. The subscription is held (sender half
+                // stored) so the code's topic stays alive while the dialog is
+                // open — the ephemeral subscribe-broadcast-drop pattern is
+                // broken (the mesh must form before the receiver subscribes).
+                if self.short_code_minting {
+                    return iced::Task::none();
+                }
+                let Some(entry) = self.entries.get(entry_index) else {
+                    return iced::Task::none();
+                };
+                let Some(dl) = &entry.download else {
+                    return iced::Task::none();
+                };
+                let ticket = dl.ticket.clone();
+                let name = dl.name.clone();
+                let size = match &dl.state {
+                    DownloadState::Completed { total_size, .. } => total_size.unwrap_or(0),
+                    DownloadState::Shared { size, .. } => size.unwrap_or(0),
+                    DownloadState::Ready { total } | DownloadState::Active { total, .. } => {
+                        total.unwrap_or(0)
+                    }
+                    _ => 0,
+                };
+                if ticket.is_empty() {
+                    self.short_code_dialog_error =
+                        Some("This card has no share ticket yet.".to_string());
+                    self.show_short_code_dialog = true;
+                    return iced::Task::none();
+                }
+                self.short_code_minting = true;
+                self.short_code_dialog_error = None;
+                let data_dir = self.data_dir.clone();
+                let gossip = self.gossip.clone();
+                iced::Task::perform(
+                    async move {
+                        // Load the store (creating the file on first mint).
+                        let mut store =
+                            boru_core::short_code::ShortCodeStore::load_or_default(&data_dir)
+                                .map_err(|e| format!("failed to open short-code store: {e}"))?;
+                        let code = store
+                            .mint(
+                                &ticket,
+                                &name,
+                                size,
+                                boru_core::short_code::DEFAULT_SHORT_CODE_TTL,
+                            )
+                            .map_err(|e| format!("failed to mint short code: {e}"))?;
+                        let topic = boru_core::short_code::derive_shortcode_topic(&code);
+                        let sub = gossip
+                            .subscribe(topic, Vec::new())
+                            .await
+                            .map_err(|e| format!("failed to join short-code topic: {e}"))?;
+                        let (sender, _receiver) = sub.split();
+                        Ok::<_, String>((code, sender))
+                    },
+                    |result| match result {
+                        Ok((code, sender)) => AppMessage::ShortCodeMinted(Ok((code, sender))),
+                        Err(e) => AppMessage::ShortCodeMinted(Err(e)),
+                    },
+                )
+            }
+            AppMessage::ShortCodeMinted(result) => {
+                self.short_code_minting = false;
+                match result {
+                    Ok((code, sender)) => {
+                        let share = self
+                            .short_code_active
+                            .clone()
+                            .or_else(|| {
+                                self.entries
+                                    .iter()
+                                    .find_map(|entry| {
+                                        entry.download.as_ref().map(|dl| ShortCodeActiveShare {
+                                            code: code.clone(),
+                                            ticket: dl.ticket.clone(),
+                                            name: dl.name.clone(),
+                                            size: match &dl.state {
+                                                DownloadState::Completed { total_size, .. } => {
+                                                    total_size.unwrap_or(0)
+                                                }
+                                                DownloadState::Shared { size, .. } => {
+                                                    size.unwrap_or(0)
+                                                }
+                                                _ => 0,
+                                            },
+                                        })
+                                    })
+                            });
+                        self.short_code_active = share;
+                        self.short_code_sender = Some(sender);
+                        self.short_code_dialog_code = Some(code.clone());
+                        self.show_short_code_dialog = true;
+                        tracing::info!(code = %code, "short-code share minted");
+                    }
+                    Err(e) => {
+                        self.short_code_dialog_error = Some(e);
+                        self.show_short_code_dialog = true;
+                    }
+                }
+                iced::Task::none()
+            }
+            AppMessage::CloseShortCodeDialog => {
+                // Dropping the sender leaves the code's rendezvous topic,
+                // stopping the periodic re-broadcast.
+                self.short_code_sender = None;
+                self.short_code_active = None;
+                self.short_code_dialog_code = None;
+                self.short_code_dialog_error = None;
+                self.show_short_code_dialog = false;
+                iced::Task::none()
+            }
+            AppMessage::CopyShortCode(code) => {
+                self.toast_message = Some("Short code copied to clipboard".to_string());
+                iced::clipboard::write(code)
+            }
+            AppMessage::OpenRedeemCodeDialog => {
+                self.show_redeem_code_dialog = true;
+                self.redeem_code_input = String::new();
+                self.redeem_code_error = None;
+                self.redeem_code_busy = false;
+                iced::Task::none()
+            }
+            AppMessage::CloseRedeemCodeDialog => {
+                self.show_redeem_code_dialog = false;
+                self.redeem_code_input = String::new();
+                self.redeem_code_error = None;
+                self.redeem_code_busy = false;
+                iced::Task::none()
+            }
+            AppMessage::RedeemCodeInputChanged(text) => {
+                self.redeem_code_input = text;
+                self.redeem_code_error = None;
+                iced::Task::none()
+            }
+            AppMessage::RedeemShortCode => {
+                let input = self.redeem_code_input.trim().to_string();
+                let code = boru_core::short_code::normalise_code(&input);
+                if code.is_empty() {
+                    self.redeem_code_error = Some("Type a short code first.".to_string());
+                    return iced::Task::none();
+                }
+                if code.len() != boru_core::short_code::SHORT_CODE_LEN {
+                    self.redeem_code_error = Some(format!(
+                        "Short codes are {} characters.",
+                        boru_core::short_code::SHORT_CODE_LEN
+                    ));
+                    return iced::Task::none();
+                }
+                if self.redeemed_codes.contains(&code) {
+                    self.redeem_code_error =
+                        Some("This code was already redeemed in this session.".to_string());
+                    return iced::Task::none();
+                }
+                self.redeem_code_busy = true;
+                self.redeem_code_error = None;
+                let gossip = self.gossip.clone();
+                let topic = boru_core::short_code::derive_shortcode_topic(&code);
+                iced::Task::perform(
+                    async move {
+                        // Subscribe to the rendezvous topic and wait for a
+                        // signed announcement matching the code. The
+                        // subscription is held for the whole wait so the mesh
+                        // has time to form.
+                        let sub = gossip
+                            .subscribe(topic, Vec::new())
+                            .await
+                            .map_err(|e| format!("failed to join short-code topic: {e}"))?;
+                        let (mut _sender, mut receiver) = sub.split();
+                        use n0_future::StreamExt;
+                        let deadline = std::time::Instant::now()
+                            + std::time::Duration::from_secs(60);
+                        loop {
+                            if std::time::Instant::now() >= deadline {
+                                return Err(
+                                    "Timed out waiting for the sharing peer. Make sure \
+                                     both peers are on the same relay."
+                                        .to_string(),
+                                );
+                            }
+                            let remaining =
+                                deadline.saturating_duration_since(std::time::Instant::now());
+                            let item = tokio::time::timeout(remaining, receiver.next())
+                                .await
+                                .map_err(|_| {
+                                    "Timed out waiting for the sharing peer.".to_string()
+                                })?;
+                            let Some(Ok(boru_core::api::Event::Received(msg))) = item else {
+                                continue;
+                            };
+                            let Ok((from, announcement)) = boru_core::short_code::
+                                SignedShortCodeAnnouncement::verify(&msg.content, &code)
+                            else {
+                                continue;
+                            };
+                            let redemption = ShortCodeRedemption {
+                                code: announcement.code.clone(),
+                                name: announcement.name.clone(),
+                                ticket: announcement.ticket.clone(),
+                                size: announcement.size,
+                                node_short: from.fmt_short().to_string(),
+                            };
+                            return Ok(redemption);
+                        }
+                    },
+                    AppMessage::ShortCodeRedeemed,
+                )
+            }
+            AppMessage::ShortCodeRedeemed(result) => {
+                self.redeem_code_busy = false;
+                match result {
+                    Ok(redemption) => {
+                        self.redeemed_codes.insert(redemption.code.clone());
+                        self.show_redeem_code_dialog = false;
+                        // Create the same download card as pasting a ticket.
+                        self.download_entry_index = Some(self.entries.len());
+                        self.entries_push(ChatEntry::system_download(
+                            format!("Receiving via short code: {}", redemption.name),
+                            TransferKind::File,
+                            redemption.name.clone(),
+                            redemption.ticket.clone(),
+                            &redemption.node_short,
+                            None,
+                        ));
+                        if let Some(idx) = self.download_entry_index {
+                            if let Some(entry) = self.entries.get_mut(idx) {
+                                if let Some(dl) = entry.download.as_mut() {
+                                    dl.state = DownloadState::Ready {
+                                        total: Some(redemption.size),
+                                    };
+                                }
+                            }
+                        }
+                        self.toast_message = Some(format!(
+                            "Short code {} resolved — ready to download {}",
+                            redemption.code, redemption.name
+                        ));
+                    }
+                    Err(e) => {
+                        self.redeem_code_error = Some(e);
+                    }
+                }
+                iced::Task::none()
+            }
+            AppMessage::SetOverwritePolicy(entry_index, policy) => {
+                if let Some(entry) = self.entries.get_mut(entry_index) {
+                    if let Some(dl) = entry.download.as_mut() {
+                        dl.overwrite_policy = policy;
+                        self.layout_cache.borrow_mut().invalidate_from(entry_index);
+                    }
+                }
+                iced::Task::none()
+            }
+            AppMessage::ImageDownloaded {
+                sender,
+                name,
+                display_name: _,
+                image_bytes,
+                message_hash,
+                image_identifier,
+                generation,
+            } => {
+                // State-safety: an image download started in a previous
+                // conversation must not push its entry into the currently
+                // active conversation's display. Detect stale completions in
+                // debug builds before entries_push mutates the wrong room.
+                debug_assert_eq!(
+                    self.conversation_generation, generation,
+                    "stale ImageDownloaded for {name}: completion generation {generation} \
+                     != current conversation generation {}",
+                    self.conversation_generation,
+                );
+                info!(
+                    ?sender,
+                    name = %name,
+                    image_size = image_bytes.len(),
+                    ?message_hash,
+                    has_identifier = image_identifier.is_some(),
+                    "image download completed",
+                );
+                self.pending_image_upload = None;
+                if sender == self.local_public && image_identifier.is_none() {
+                    let mut profile_file = SharedFile::new(
+                        &name,
+                        image_bytes.len() as u64,
+                        "image/webp",
+                        SystemTime::now(),
+                    );
+                    profile_file.id = hex::encode(message_hash);
+                    profile_file.hash = Some(message_hash);
+                    self.profile_store
+                        .shared_files_mut()
+                        .retain(|file| file.id != profile_file.id);
+                    self.profile_store.add_shared_file(profile_file);
+                }
+                if self.has_message(&message_hash) {
+                    return self.drain_pending_transfers();
+                }
+                let sender_name = if sender == self.local_public {
+                    self.local_label.clone()
+                } else {
+                    self.names
+                        .get(&sender)
+                        .cloned()
+                        .unwrap_or_else(|| sender.fmt_short().to_string())
+                };
+                // The image was already saved to the per-user store by the
+                // async download task. Use the pre-saved identifier.
+                let image_error = match &image_identifier {
+                    Some(_) => None,
+                    None => Some("Image could not be saved to local store".to_string()),
+                };
+                let kind = Self::image_chat_kind(sender, self.local_public);
+                let mut entry = ChatEntry::image(
+                    kind,
+                    &sender_name,
+                    String::new(),
+                    image_bytes,
+                    Some(message_hash),
+                    None,
+                    Some(sender),
+                    image_identifier,
+                    image_error,
+                );
+                if entry.image_handle.is_none() && entry.image_error.is_none() {
+                    entry.image_error = Some("Image preview unavailable".to_string());
+                    entry.bump_gen();
+                }
+                self.entries_push(entry);
+                // Persist to chat_history so images survive restarts.
+                // Store image_bytes (in-memory, #[serde(skip)]) and
+                // image_identifier (persisted) so history replay can
+                // reconstruct a renderable ChatEntry.
+                {
+                    let topic = self.topic;
+                    let local_hex = hex::encode(self.local_public.as_bytes());
+                    let mut store = self.chat_history.lock().unwrap();
+                    let mut hist_entry =
+                        HistoryEntry::new(topic, local_hex, Vec::new(), "image", name.clone());
+                    // Reference the just-pushed entry's stored bytes and
+                    // identifier so the HistoryEntry carries enough data for
+                    // history_entry_to_chat_entry to produce a renderable entry.
+                    if let Some(last) = self.entries.last() {
+                        hist_entry.image_bytes = last.image_bytes.clone();
+                        hist_entry.image_identifier = last.image_identifier.clone();
+                    }
+                    store.push_with_id(hist_entry);
+                }
+                self.drain_pending_transfers()
+            }
+            AppMessage::GifMediaFetched {
+                sender,
+                gif,
+                message_hash,
+                bytes,
+                generation,
+            } => {
+                // State-safety: a GIF media fetch started in a previous
+                // conversation must not push its entry into the currently
+                // active conversation's display.  Unlike ImageDownloaded we
+                // warn + early-return rather than debug_assert: room switches
+                // are fast and a stale fetch is a normal race, not a bug.
+                if self.conversation_generation != generation {
+                    warn!(
+                        ?sender,
+                        gif_id = %gif.provider_id,
+                        current = self.conversation_generation,
+                        expected = generation,
+                        "stale GIF media fetch ignored after room switch",
+                    );
+                    return iced::Task::none();
+                }
+                if self.has_message(&message_hash) {
+                    return self.drain_pending_transfers();
+                }
+                let sender_name = if sender == self.local_public {
+                    self.local_label.clone()
+                } else {
+                    self.names
+                        .get(&sender)
+                        .cloned()
+                        .unwrap_or_else(|| sender.fmt_short().to_string())
+                };
+                let kind = Self::image_chat_kind(sender, self.local_public);
+                match bytes {
+                    Ok(media_bytes) => {
+                        info!(
+                            ?sender,
+                            gif_id = %gif.provider_id,
+                            media_size = media_bytes.len(),
+                            "external GIF media fetched",
+                        );
+                        // MP4 playback renditions play through the inline
+                        // video player: save the rendition to the managed
+                        // downloads dir and render a Ready video card whose
+                        // Play button verifies + opens the local file.
+                        // GIF/WebP renditions keep the image path below.
+                        if gif.format == GifMediaFormat::Mp4 && cfg!(feature = "video-playback") {
+                            let hash_hex = blake3::hash(&media_bytes).to_hex().to_string();
+                            let file_stem: String = gif
+                                .provider_id
+                                .chars()
+                                .map(|c| {
+                                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.'
+                                    {
+                                        c
+                                    } else {
+                                        '-'
+                                    }
+                                })
+                                .collect();
+                            let file_name = if file_stem.is_empty() {
+                                format!("klipy-gif-{}.mp4", &hash_hex[..12])
+                            } else {
+                                format!("{file_stem}.mp4")
+                            };
+                            let dl_dir = self.data_dir.join("downloads");
+                            let save_path = dl_dir.join(&file_name);
+                            let saved = std::fs::create_dir_all(&dl_dir)
+                                .and_then(|_| std::fs::write(&save_path, &media_bytes))
+                                .is_ok();
+                            let mut entry = ChatEntry::system_download(
+                                format!("Video received: {file_name}"),
+                                TransferKind::Video,
+                                file_name.clone(),
+                                String::new(), // content already local — no ticket
+                                sender_name.clone(),
+                                None,
+                            );
+                            // Present like a chat message (remote/local), not
+                            // a system notice.
+                            entry.kind = kind;
+                            entry.label = sender_name.clone();
+                            entry.message_hash = Some(message_hash);
+                            entry.sender_key = Some(sender);
+                            if let Some(dl) = entry.download.as_mut() {
+                                dl.expected_content_hash = Some(hash_hex);
+                                if saved {
+                                    dl.state = DownloadState::Shared {
+                                        name: file_name,
+                                        path: save_path,
+                                        size: Some(media_bytes.len() as u64),
+                                    };
+                                } else {
+                                    dl.state = DownloadState::Failed {
+                                        failure: DownloadFailure::Other {
+                                            detail: "could not save shared MP4 GIF to downloads"
+                                                .to_string(),
+                                        },
+                                    };
+                                    warn!(
+                                        gif_id = %gif.provider_id,
+                                        ?save_path,
+                                        "failed to save shared MP4 GIF for video playback",
+                                    );
+                                }
+                            }
+                            let entry_index = self.entries_push(entry);
+                            // Fetch the Klipy preview rendition (GIF/WebP) as
+                            // the card thumbnail, mirroring the file-share
+                            // poster path. Best-effort: on failure the card
+                            // keeps its video placeholder.
+                            if saved {
+                                if let Some(preview_url) = gif.preview_url.as_ref() {
+                                    let url = preview_url.clone();
+                                    return iced::Task::batch(vec![
+                                        self.drain_pending_transfers(),
+                                        iced::Task::perform(
+                                            async move {
+                                                fetch_gif_media_bytes(&url)
+                                                    .await
+                                                    .map(|bytes| (entry_index, bytes))
+                                            },
+                                            |result| match result {
+                                                Ok((idx, bytes)) => {
+                                                    AppMessage::ThumbnailFetched {
+                                                        entry_index: idx,
+                                                        thumbnail_bytes: bytes,
+                                                    }
+                                                }
+                                                Err(error) => {
+                                                    warn!(
+                                                        %error,
+                                                        "klipy preview thumbnail fetch failed",
+                                                    );
+                                                    AppMessage::Noop
+                                                }
+                                            },
+                                        ),
+                                    ]);
+                                }
+                            }
+                            return self.drain_pending_transfers();
+                        }
+                        // Reuse the standard image rendering path (GIF
+                        // frames decode automatically for animated GIFs).
+                        let mut entry = ChatEntry::image(
+                            kind,
+                            &sender_name,
+                            String::new(),
+                            media_bytes,
+                            Some(message_hash),
+                            None,
+                            Some(sender),
+                            None,
+                            None,
+                        );
+                        if entry.image_handle.is_none() && entry.image_error.is_none() {
+                            entry.image_error =
+                                Some("GIF media could not be decoded".to_string());
+                            entry.bump_gen();
+                        }
+                        self.entries_push(entry);
+                        self.drain_pending_transfers()
+                    }
+                    Err(error) => {
+                        // Missing or expired media URL → render a clear
+                        // fallback card instead of a broken/blank image.
+                        warn!(
+                            ?sender,
+                            gif_id = %gif.provider_id,
+                            %error,
+                            "external GIF media unavailable",
+                        );
+                        let mut entry = ChatEntry::image(
+                            kind,
+                            &sender_name,
+                            String::new(),
+                            Vec::new(),
+                            Some(message_hash),
+                            None,
+                            Some(sender),
+                            None,
+                            Some(format!("GIF unavailable: {error}")),
+                        );
+                        // No bytes → no decodable handle; the view renders
+                        // the image_error fallback placeholder.
+                        entry.image_handle = None;
+                        entry.image_bytes = None;
+                        entry.bump_gen();
+                        self.entries_push(entry);
+                        self.drain_pending_transfers()
+                    }
+                }
+            }
+            AppMessage::ProfileImageDownloaded(peer, image_bytes) => {
+                let size = image_bytes.len();
+                if image_bytes.is_empty() || size > 2 * 1024 * 1024 {
+                    debug!(
+                        %peer,
+                        size,
+                        reason = if image_bytes.is_empty() { "empty" } else { "oversized" },
+                        "profile image download rejected",
+                    );
+                    // Ignore empty or oversized images (>2MB) and clear cached ticket
+                    // so the next AboutMe broadcast can retry.
+                    self.friend_image_tickets.remove(&peer);
+                    return iced::Task::none();
+                }
+                // Persist to disk cache so the image survives restarts and is
+                // available even when the peer is offline.
+                save_friend_profile_image(&self.data_dir, &peer, &image_bytes);
+                let handle = iced::widget::image::Handle::from_bytes(image_bytes);
+                self.friend_image_handles.insert(peer, Some(handle.clone()));
+                self.enforce_profile_image_cap();
+                // Backfill existing chat entries that were pushed before the async
+                // profile image download completed.  Without this, the first message
+                // from a peer forever shows the "?" fallback because entries_push
+                // only copies avatar_handle at push time, when friend_image_handles
+                // still contains `Some(None)` (seeded by record_profile_image_ticket).
+                for entry in &mut self.entries {
+                    if entry.sender_key == Some(peer) && entry.avatar_handle.is_none() {
+                        entry.avatar_handle = Some(handle.clone());
+                        entry.bump_gen();
+                    }
+                }
+                // Trigger UI re-draw by marking friends dirty so the sidebar
+                // re-renders with the updated profile image.
+                self.mark_friends_sidebar_dirty();
+                debug!(%peer, size, "profile image loaded and cached");
+                iced::Task::none()
+            }
+            AppMessage::ProfileImageDownloadFailed(peer) => {
+                warn!(%peer, "profile image download failed");
+                // Download failed (e.g. peer temporarily unreachable).  Remove
+                // the cached ticket so the next periodic AboutMe re-broadcast
+                // can retry the download.  Without this, the dedup guard in
+                // record_profile_image_ticket would skip all future AboutMe
+                // messages with the same ticket string, leaving the avatar
+                // stuck on the 👤 fallback permanently.
+                self.friend_image_tickets.remove(&peer);
+                iced::Task::none()
+            }
+            AppMessage::ImageHydrated {
+                index,
+                handle,
+                error,
+            } => {
+                if let Some(entry) = self.entries.get_mut(index) {
+                    if let Some(h) = handle {
+                        entry.image_handle = Some(h);
+                        entry.image_error = None;
+                    } else if let Some(err) = error {
+                        entry.image_error = Some(err);
+                    }
+                    entry.bump_gen();
+                }
+                iced::Task::none()
+            }
+            AppMessage::ImageUploadFailed(error) => {
+                info!(%error, "image upload failed");
+                self.pending_image_upload = None;
+                self.push_system(format!("Image upload failed: {error}"));
+                iced::Task::none()
+            }
+            AppMessage::FileUploadFailed(error) => {
+                self.pending_file_upload = None;
+                tracing::error!(error = %error, "FileUploadFailed");
+                self.push_system(format!("File upload failed: {error}"));
+                iced::Task::none()
+            }
+            AppMessage::FileDownloaded {
+                name,
+                ticket,
+                thumbnail,
+                local_path,
+            } => {
+                self.pending_file_upload = None;
+                tracing::info!(
+                    name = %name,
+                    has_ticket = !ticket.is_empty(),
+                    has_thumbnail = thumbnail.is_some(),
+                    has_local_path = local_path.is_some(),
+                    thumbnail_len = thumbnail.as_ref().map(|b| b.len()).unwrap_or(0),
+                    "FileDownloaded"
+                );
+                // Update the upload-progress entry to Completed.
+                //
+                // Resolve the uploader's own card by NAME first (same
+                // pattern as DownloadDone): the shared download_entry_index
+                // can be clobbered while the async upload task is in flight
+                // by a remote FileShare (set_pending_file), a user-initiated
+                // ExecuteDownload, or a room switch — any of which would
+                // otherwise leave the uploader's own card without its
+                // thumbnail (VID-02).
+                let upload_idx = resolve_upload_card_index(
+                    &self.entries,
+                    &name,
+                    self.download_entry_index,
+                );
+                if let Some(idx) = upload_idx {
+                    if let Some(entry) = self.entries.get_mut(idx) {
+                        if let Some(dl) = entry.download.as_mut() {
+                            dl.ticket = ticket.clone();
+                            // VIDCARD-fix: the uploader's own card was created
+                            // with an empty ticket (ExecuteFileSend), so
+                            // expected_content_hash parsed at construction was
+                            // None. Re-derive it from the real ticket now —
+                            // otherwise PlayInlineVideo bails with "content
+                            // identity is missing" for the sender's own
+                            // uploads.
+                            dl.expected_content_hash = content_hash_from_ticket(&ticket);
+                            dl.thumbnail = thumbnail.clone();
+                            dl.thumbnail_handle = thumbnail.as_deref().map(|bytes| {
+                                iced::widget::image::Handle::from_bytes(bytes.to_vec())
+                            });
+                            // The uploader card was created with `None`
+                            // thumbnail, so poster_dimensions is still unset.
+                            // Decode it from the returned poster bytes so the
+                            // sender's own card gets the same ratio-exact
+                            // frame as the receiver's ThumbnailFetched path.
+                            dl.poster_dimensions = thumbnail.as_deref().and_then(|bytes| {
+                                image::ImageReader::new(std::io::Cursor::new(bytes))
+                                    .with_guessed_format()
+                                    .ok()
+                                    .and_then(|reader| reader.into_dimensions().ok())
+                            });
+                            dl.state = DownloadState::Shared {
+                                name: name.clone(),
+                                path: std::path::PathBuf::from(local_path.unwrap_or_default()),
+                                size: None,
+                            };
+                        }
+                        entry.body = format!("Shared: {name} ✓");
+                        self.layout_cache.borrow_mut().invalidate_from(idx);
+                    }
+                }
+                // Also set pending_file so the file can be re-downloaded.
+                self.pending_file = Some((name, ticket));
+                iced::Task::none()
+            }
+            AppMessage::ThumbnailFetched {
+                entry_index,
+                thumbnail_bytes,
+            } => {
+                if !thumbnail_bytes.is_empty() {
+                    // VIDCARD-18 guardrail: read the decoded poster dimensions
+                    // BEFORE handing the bytes to the image decoder, and
+                    // reject anything outside the accepted bounds. The
+                    // sender's poster is generated at MAX_POSTER_EDGE
+                    // (320 px); a hostile sender must not be able to force a
+                    // large surface allocation through the preview path.
+                    // Rejection keeps the file-type placeholder in place and
+                    // clears the pending hash so the label stays truthful.
+                    let dimensions =
+                        image::ImageReader::new(std::io::Cursor::new(&thumbnail_bytes))
+                            .with_guessed_format()
+                            .ok()
+                            .and_then(|reader| reader.into_dimensions().ok());
+                    if !video_poster::dimensions_within_bounds(dimensions) {
+                        tracing::warn!(
+                            entry_index,
+                            ?dimensions,
+                            "video thumbnail rejected: decoded dimensions outside poster bounds; keeping placeholder"
+                        );
+                        if let Some(entry) = self.entries.get_mut(entry_index) {
+                            if let Some(dl) = entry.download.as_mut() {
+                                dl.thumbnail_hash = None;
+                            }
+                        }
+                        return iced::Task::none();
+                    }
+                    if let Some(entry) = self.entries.get_mut(entry_index) {
+                        if let Some(dl) = entry.download.as_mut() {
+                            dl.thumbnail = Some(thumbnail_bytes.clone());
+                            dl.thumbnail_handle =
+                                Some(iced::widget::image::Handle::from_bytes(thumbnail_bytes));
+                            dl.poster_dimensions = dimensions;
+                        }
+                        self.layout_cache.borrow_mut().invalidate_from(entry_index);
+                    }
+                }
+                iced::Task::none()
+            }
             // update() only dispatches the files variants here; other
             // variants can never reach this method (defensive catch-all).
             _ => iced::Task::none(),
