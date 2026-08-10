@@ -4613,6 +4613,941 @@ impl IcedChat {
                 result
             }
 
+            AppMessage::NetEvent(conv_event) => {
+                let _timer = PerfTracker::timer("net_event", format!("topic={}", conv_event.topic));
+                let topic = conv_event.topic;
+                let event = conv_event.event;
+                // Only bump conversation to the top of the sidebar when there
+                // is an actual user-visible message (text, file, image).
+                // NeighborUp/Down, Presence, AboutMe, Closed, and Error events
+                // are network/gossip noise and should not reorder the list.
+                if Self::_is_user_visible_event(&event) {
+                    self.conversation_store.touch_and_bump(&topic);
+                    self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
+                }
+                // Update the sidebar preview BEFORE taking the mutable borrow
+                // on self.conversations (avoids borrow conflict).
+                let is_inactive =
+                    topic != self.topic || !matches!(self.screen, Screen::Chat { .. });
+                if is_inactive {
+                    self.update_room_preview(&topic, &event);
+                }
+                let conversation = self
+                    .conversations
+                    .entry(topic)
+                    .or_insert_with(|| ConversationLive::new(topic));
+                // Update per-conversation neighbor sets when NeighborUp/Down
+                // events arrive for any topic, not just the active one. This
+                // ensures that switching to a background conversation restores
+                // an accurate neighbor set rather than an empty one.
+                match &event {
+                    NetEvent::NeighborUp { peer } => {
+                        conversation.neighbors.insert(*peer);
+                        self.room_neighbor_counts
+                            .entry(topic)
+                            .and_modify(|count| *count = count.saturating_add(1))
+                            .or_insert(1);
+                        conversation.sender_ready = conversation.sender.is_some();
+                        if topic == self.topic {
+                            let was_ready = self.sender_ready;
+                            // Keep the active conversation's neighbor set in
+                            // sync with the per-conversation set. switch_to_
+                            // conversation only copies conversation.neighbors
+                            // once; a NeighborUp arriving after the switch
+                            // (e.g. direct chat opened via the fast path
+                            // before the direct-topic mesh formed) would
+                            // otherwise leave self.neighbors empty forever,
+                            // silently queueing every send (broadcast_or_queue
+                            // requires sender_ready && neighbor_count > 0) and
+                            // never retrying them (the retry loop also gates on
+                            // self.neighbors.len() for the active topic).
+                            self.neighbors.insert(*peer);
+                            self.sender_ready = self.sender.is_some();
+                            info!(
+                                %peer,
+                                topic = %topic,
+                                sender_some = self.sender.is_some(),
+                                sender_ready = self.sender_ready,
+                                was_ready,
+                                "NeighborUp: sender_ready updated"
+                            );
+                        }
+                    }
+                    NetEvent::NeighborDown { peer } => {
+                        conversation.neighbors.remove(peer);
+                        if let Some(count) = self.room_neighbor_counts.get_mut(&topic) {
+                            *count = count.saturating_sub(1);
+                        }
+                        conversation.sender_ready =
+                            !conversation.neighbors.is_empty() && conversation.sender.is_some();
+                        if topic == self.topic {
+                            self.neighbors.remove(peer);
+                            self.sender_ready =
+                                !conversation.neighbors.is_empty() && self.sender.is_some();
+                        }
+                        // NeighborDown is transient: the endpoint may still
+                        // have a usable relay/address record, so ask the
+                        // gossip actor to retry this peer instead of waiting
+                        // for the next DHT publication cycle.
+                        if let Some(sender) = conversation.sender.clone() {
+                            let peer = *peer;
+                            tokio::spawn(async move {
+                                tokio::time::sleep(Duration::from_millis(500)).await;
+                                if let Err(error) = sender.join_peers(vec![peer]).await {
+                                    debug!(%peer, %error, "room neighbor retry failed");
+                                }
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+                if is_inactive {
+                    // Only queue user-visible messages (chat text, file shares)
+                    // into the pending replay buffer.  Gossip protocol events
+                    // (AboutMe, Presence, Heartbeat, NeighborUp/Down,
+                    // announcements) are not renderable chat history — queueing
+                    // them fills the 256-event cap and triggers a warning storm
+                    // on dense public topics like the shared lobby.  They are
+                    // also excluded from the unread counter below.
+                    let should_count = Self::_is_user_visible_event(&event);
+                    if !should_count {
+                        return iced::Task::none();
+                    }
+                    // Emit a notification for user-visible messages on inactive
+                    // conversations — includes group-aware rendering.
+                    if let NetEvent::Message { .. } = &event {
+                        // Notification emit deferred — requires refactor to avoid
+                        // double-borrow with conversation entry above.
+                    }
+                    conversation.pending_events.push_back(event);
+                    // Cap the pending queue to prevent unbounded memory growth
+                    // and Iced event-loop starvation during replay.  When the
+                    // cap is exceeded we discard the oldest queued event and
+                    // adjust the unread counter if that event was visible.
+                    while conversation.pending_events.len() > MAX_PENDING_EVENTS {
+                        if let Some(dropped) = conversation.pending_events.pop_front() {
+                            if Self::_is_user_visible_event(&dropped) {
+                                conversation.unread = conversation.unread.saturating_sub(1);
+                            }
+                        }
+                        tracing::warn!(
+                            topic=%topic,
+                            total=conversation.pending_events.len(),
+                            "pending events cap reached, oldest event dropped"
+                        );
+                    }
+                    conversation.unread = conversation.unread.saturating_add(1);
+                    tracing::info!(topic=%topic, unread=conversation.unread, "queued event for inactive room");
+                    return iced::Task::none();
+                }
+                conversation.unread = 0;
+                let mut tasks: Vec<iced::Task<AppMessage>> = Vec::new();
+                if let Some(read_receipt_task) = self.process_net_event_sync(&topic, &event) {
+                    tasks.push(read_receipt_task);
+                }
+                if !self.pending_image.is_empty()
+                    || !self.pending_thumbnail_fetch.is_empty()
+                    || !self.pending_gif.is_empty()
+                {
+                    tasks.push(self.drain_pending_transfers());
+                }
+                // Check if a profile image ticket arrived from a remote peer
+                if let Some((peer, ticket_str)) = self.pending_profile_image_tickets.pop_front() {
+                    tasks.push(Self::download_profile_image_task(
+                        &self.blob_store,
+                        &self.endpoint,
+                        &self.memory_lookup,
+                        &self.neighbors,
+                        &self.public_room_safety,
+                        peer,
+                        ticket_str,
+                    ));
+                }
+                // Check if the last pushed entry has a URL that needs link preview
+                if !self.entries.is_empty() {
+                    let last_idx = self.entries.len() - 1;
+                    if let Some(pt) = self.maybe_fetch_link_preview(last_idx) {
+                        tasks.push(pt);
+                    }
+                }
+                if tasks.is_empty() {
+                    iced::Task::none()
+                } else {
+                    iced::Task::batch(tasks)
+                }
+            }
+
+
+            AppMessage::WhisperEvent(event) => {
+                info!(variant = ?event, "WhisperEvent received in iced handler");
+                match event {
+                    boru_core::whisper::WhisperEvent::Control { from, content } => {
+                        match SignedContactMessage::verify(&content, Some(from)) {
+                            Ok((sender, ContactAction::FriendRequest { name })) => {
+                                // Keep the request pending until the user explicitly
+                                // accepts or declines it.  Auto-accepting here made
+                                // incoming requests disappear from the sidebar.
+                                let local_str = self.local_public.to_string();
+                                if let Some(name) = name {
+                                    let record = self
+                                        .friends
+                                        .ensure_friend(FriendId::from_public_key(sender));
+                                    record.last_announced_name = Some(name);
+                                    self.try_save_friends();
+                                }
+                                match self.friend_request_store.send_request(
+                                    sender.to_string(),
+                                    local_str,
+                                    None,
+                                ) {
+                                    Ok(req) => {
+                                        info!(
+                                            request_id = %req.id,
+                                            from = %sender.fmt_short(),
+                                            "incoming friend request stored"
+                                        );
+                                        self.requests_sidebar_revision =
+                                            self.requests_sidebar_revision.wrapping_add(1);
+                                        self.refresh_sidebar_counts();
+                                        self.send_save_friend_requests();
+                                        // Notification emit deferred — requires name lifetime fix.
+                                    }
+                                    Err(FriendRequestError::DuplicatePending { existing_id }) => {
+                                        info!(
+                                            %existing_id,
+                                            from = %sender.fmt_short(),
+                                            "incoming friend request is duplicate pending — ignored"
+                                        );
+                                    }
+                                    Err(err) => {
+                                        info!(
+                                            error = %err,
+                                            from = %sender.fmt_short(),
+                                            "failed to store incoming friend request"
+                                        );
+                                    }
+                                }
+                            }
+                            Ok((sender, ContactAction::FriendRequestAccepted)) => {
+                                self.outgoing_request_states
+                                    .insert(sender, OutgoingRequestState::Accepted);
+                                self.rebuild_join_request_list();
+                                // Update the friend request store to reflect remote acceptance.
+                                let local_str = self.local_public.to_string();
+                                let sender_str = sender.to_string();
+                                if let Some(pending_id) = self
+                                    .friend_request_store
+                                    .list_outgoing_by_status(
+                                        &local_str,
+                                        FriendRequestStatus::Pending,
+                                    )
+                                    .into_iter()
+                                    .find(|r| r.recipient == sender_str)
+                                    .map(|r| r.id.clone())
+                                {
+                                    let _ = self
+                                        .friend_request_store
+                                        .confirm_outgoing_accepted(&pending_id, &local_str);
+                                }
+                                let fid = FriendId::from_public_key(sender);
+                                let record = self.friends.ensure_friend(fid);
+                                record.relationship = FriendRelationship::Friends;
+                                self.call_handle.set_peer_authorized(sender, true);
+                                if let Some(conversation) = record.direct_conversation.as_mut() {
+                                    conversation.state = DirectConversationState::Active;
+                                }
+                                // Show the accepted friend immediately in the sidebar.
+                                self.peer_presence_map
+                                    .insert(sender, now_ms().max(0) as u64);
+                                self.chats_sidebar_revision =
+                                    self.chats_sidebar_revision.wrapping_add(1);
+                                self.mark_friends_sidebar_dirty();
+                                self.try_save_friends();
+                                // Auto-subscribe to the deterministic direct-chat topic
+                                // so both peers are on the same gossip topic without
+                                // waiting for a whisper ConversationInvite.
+                                let friend_topic = direct_topic(&self.local_public, &sender);
+                                if !self.conversations.contains_key(&friend_topic) {
+                                    let bootstrap = self.discovered_peers.clone();
+                                    return iced::Task::done(AppMessage::BackgroundSubscribe(
+                                        friend_topic,
+                                        bootstrap,
+                                    ));
+                                }
+                            }
+                            Ok((sender, ContactAction::FriendRequestRejected)) => {
+                                self.outgoing_request_states
+                                    .insert(sender, OutgoingRequestState::Declined);
+                                self.rebuild_join_request_list();
+                            }
+                            Ok((sender, ContactAction::ConversationInvite { topic, addrs }))
+                                if addrs.iter().all(|addr| addr.id == sender) =>
+                            {
+                                // ConversationInvite is an authenticated, explicit
+                                // Chat click. Validate the stable topic before any
+                                // durable mutation, then auto-accept and open it.
+                                let Some(persisted_addrs) = confirmed_direct_invite_addrs(
+                                    self.local_public,
+                                    &self.friends,
+                                    sender,
+                                    topic,
+                                    &addrs,
+                                ) else {
+                                    debug!("ignoring contact invite with invalid direct topic");
+                                    return iced::Task::none();
+                                };
+                                let fid = FriendId::from_public_key(sender);
+                                let label = self
+                                    .friends
+                                    .get(&fid)
+                                    .map(|record| record.display_label(&fid, &sender))
+                                    .unwrap_or_else(|| sender.fmt_short().to_string());
+                                let record = self.friends.ensure_friend(fid.clone());
+                                record.record_addrs(persisted_addrs.clone());
+                                record.set_direct_conversation(
+                                    topic,
+                                    DirectConversationState::Active,
+                                );
+                                // Only establish the friendship when this invite is
+                                // the acceptance reply to a friend request WE sent
+                                // (pending outgoing request to this sender).  A bare
+                                // Chat click invite from a non-friend must NOT
+                                // auto-friend — the sender stays in Discover until
+                                // both sides explicitly accept a friend request.
+                                let is_acceptance_reply = self
+                                    .friend_request_store
+                                    .list_outgoing_by_status(
+                                        &self.local_public.to_string(),
+                                        FriendRequestStatus::Pending,
+                                    )
+                                    .into_iter()
+                                    .any(|r| r.recipient == sender.to_string());
+                                if is_acceptance_reply {
+                                    record.relationship = FriendRelationship::Friends;
+                                    self.call_handle.set_peer_authorized(sender, true);
+                                }
+                                self.conversation_store.upsert(ConversationEntry::new(
+                                    topic,
+                                    sender.to_string(),
+                                    label,
+                                ));
+                                self.chats_sidebar_revision =
+                                    self.chats_sidebar_revision.wrapping_add(1);
+                                let _room =
+                                    RoomStore::with_peers(&self.data_dir, topic, persisted_addrs);
+                                self.try_save_friends();
+                                self.peer_presence_map
+                                    .insert(sender, now_ms().max(0) as u64);
+                                self.chats_sidebar_revision =
+                                    self.chats_sidebar_revision.wrapping_add(1);
+                                self.mark_friends_sidebar_dirty();
+                                self.outgoing_request_states
+                                    .insert(sender, OutgoingRequestState::Accepted);
+                                self.rebuild_join_request_list();
+                                // Update the friend request store to reflect remote
+                                // acceptance — the ConversationInvite signals acceptance.
+                                let local_str = self.local_public.to_string();
+                                let sender_str = sender.to_string();
+                                if let Some(pending_id) = self
+                                    .friend_request_store
+                                    .list_outgoing_by_status(
+                                        &local_str,
+                                        FriendRequestStatus::Pending,
+                                    )
+                                    .into_iter()
+                                    .find(|r| r.recipient == sender_str)
+                                    .map(|r| r.id.clone())
+                                {
+                                    let _ = self
+                                        .friend_request_store
+                                        .confirm_outgoing_accepted(&pending_id, &local_str);
+                                }
+                                // Use BackgroundSubscribe instead of OpenRoom to avoid
+                                // slow-path gossip subscription with WAL replay storm.
+                                // The conversation appears in the sidebar; user clicks
+                                // to open it when ready.
+                                let bootstrap = self.discovered_peers.clone();
+                                return iced::Task::done(AppMessage::BackgroundSubscribe(
+                                    topic, bootstrap,
+                                ));
+                            }
+                            Ok((sender, ContactAction::AddressUpdate { addrs }))
+                                if addrs.iter().all(|addr| addr.id == sender) =>
+                            {
+                                let record = self
+                                    .friends
+                                    .ensure_friend(FriendId::from_public_key(sender));
+                                record.record_addrs(addrs);
+                                self.try_save_friends();
+                            }
+                            Ok((sender, ContactAction::MailboxAdvertise { mailbox })) => {
+                                let fid = FriendId::from_public_key(sender);
+                                let record = self.friends.ensure_friend(fid);
+                                record.set_mailbox_public_key(mailbox);
+                                self.try_save_friends();
+                            }
+                            Ok((sender, ContactAction::TunnelOffer { offer })) => {
+                                // Forward the incoming tunnel offer to the
+                                // sidebar Requests section so the user can
+                                // accept or decline it. The tunnel id is
+                                // hex-encoded so Accept/Decline can map it
+                                // back to a TunnelId.
+                                if let Some(tunnel_id) =
+                                    self.handle_received_tunnel_offer(sender, offer)
+                                {
+                                    return iced::Task::done(AppMessage::TunnelRequestReceived {
+                                        peer: sender,
+                                        tunnel_id: hex::encode(tunnel_id.0),
+                                    });
+                                }
+                            }
+                            Ok((_sender, _action)) => {
+                                self.push_system(
+                                    "Rejected invalid contact control message.".to_string(),
+                                );
+                            }
+                            Err(err) => {
+                                info!(
+                                    error = %err,
+                                    from = %from.fmt_short(),
+                                    "invalid contact control message"
+                                );
+                            }
+                        }
+                    }
+                    boru_core::whisper::WhisperEvent::Message { from, content } => {
+                        // The whisper session manager sends an empty DM for
+                        // connection establishment / address discovery; these
+                        // contain no user-readable text and should not create
+                        // chat entries or increment the unread counter.
+                        if content.is_empty() {
+                            return iced::Task::none();
+                        }
+                        let text = String::from_utf8_lossy(&content).to_string();
+                        let label = self
+                            .names
+                            .get(&from)
+                            .cloned()
+                            .unwrap_or_else(|| from.fmt_short().to_string());
+
+                        // A ticket-bearing invite gives the recipient the
+                        // route needed to bootstrap the deterministic private room.
+                        let invite_ticket = text
+                            .strip_prefix("\x00PRIVATE_CHAT:")
+                            .and_then(|raw| raw.parse::<Ticket>().ok());
+                        let is_invite = invite_ticket.is_some() || text == "\x00PRIVATE_CHAT";
+                        if is_invite {
+                            if let Some(ticket) = &invite_ticket {
+                                let room_label = self
+                                    .room_history
+                                    .find(&ticket.topic)
+                                    .map(|r| r.display_name())
+                                    .unwrap_or_else(|| {
+                                        let hex = ticket.topic.to_string();
+                                        format!("room {}", &hex[..8])
+                                    });
+                                self.push_system(format!("{label} invited you to {room_label}"));
+                            } else {
+                                self.push_system(format!(
+                                    "{label} opened a private chat with you."
+                                ));
+                            }
+                        }
+
+                        // ── Group invite parsing ────────────────────────
+                        let is_group_invite = text.starts_with("INVITE:");
+                        if is_group_invite {
+                            let parts: Vec<&str> = text.split(':').collect();
+                            if parts.len() >= 5 && parts[0] == "INVITE" {
+                                let invite_id_hex = parts[1];
+                                let inviter_pk_str = parts[2];
+                                let group_id_hex = parts[3];
+                                let group_name = parts[4];
+                                let ticket_str = parts.get(5).copied().unwrap_or("");
+
+                                // Decode invite_id from hex
+                                use data_encoding::HEXLOWER;
+                                let mut invite_id = [0u8; 32];
+                                if let Ok(decoded) = HEXLOWER.decode(invite_id_hex.as_bytes()) {
+                                    if decoded.len() == 32 {
+                                        invite_id.copy_from_slice(&decoded);
+                                    }
+                                }
+
+                                // Decode group_id from hex
+                                let mut group_id = [0u8; 32];
+                                if let Ok(decoded) = HEXLOWER.decode(group_id_hex.as_bytes()) {
+                                    if decoded.len() == 32 {
+                                        group_id.copy_from_slice(&decoded);
+                                    }
+                                }
+
+                                if let Ok(inviter_pk) = PublicKey::from_str(inviter_pk_str) {
+                                    self.push_system(format!(
+                                        "{label} invited you to group \"{group_name}\" (see REQUESTS section to accept)"
+                                    ));
+
+                                    // Persist in local invite inbox
+                                    if let Some(ref st) = self.storage {
+                                        let now_ms = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .as_millis()
+                                            as u64;
+                                        let expire_ms = now_ms + 7 * 24 * 60 * 60 * 1000;
+                                        let invite_row = boru_core::storage::GroupInviteRow {
+                                            invite_id,
+                                            group_id,
+                                            inviter_public_key: inviter_pk.to_vec(),
+                                            recipient_public_key: self.secret_key.public().to_vec(),
+                                            epoch: 1,
+                                            status: "Pending".into(),
+                                            created_at_ms: now_ms,
+                                            expires_at_ms: expire_ms,
+                                            ticket: ticket_str.to_string(),
+                                            group_name: group_name.to_string(),
+                                        };
+                                        let _ = st.create_group_invite(&invite_row);
+                                    }
+
+                                    // Bump sidebar so the REQUESTS section updates
+                                    self.requests_sidebar_revision =
+                                        self.requests_sidebar_revision.wrapping_add(1);
+                                    self.refresh_sidebar_counts();
+                                }
+                            }
+                        }
+
+                        let fid = FriendId::from_public_key(from);
+                        // Don't auto-open a private chat for group invites —
+                        // the user should explicitly accept the invite from the
+                        // REQUESTS sidebar to join the actual group room.
+                        let should_open_private =
+                            is_invite || (self.friends.get(&fid).is_some() && !is_group_invite);
+                        if should_open_private {
+                            let private_topic = private_topic(&self.local_public, &from);
+                            if let Some(ticket) = invite_ticket {
+                                let _room = RoomStore::with_peers(
+                                    &self.data_dir,
+                                    private_topic,
+                                    ticket.peers,
+                                );
+                            }
+                            let already_on_topic = matches!(
+                                self.screen,
+                                Screen::Chat { topic } if topic == private_topic
+                            );
+                            if !already_on_topic {
+                                self.save_room_to_history();
+                                // Use BackgroundSubscribe to avoid slow-path
+                                // subscription with WAL replay storm.
+                                let bootstrap = self.discovered_peers.clone();
+                                return iced::Task::done(AppMessage::BackgroundSubscribe(
+                                    private_topic,
+                                    bootstrap,
+                                ));
+                            }
+                        }
+
+                        if !is_invite {
+                            let entry = ChatEntry::remote(
+                                format!("Whisper from {label}"),
+                                text,
+                                None,
+                                None, // whisper events carry no sent_at
+                                Some(from),
+                            );
+                            self.entries_push(entry);
+                        }
+                    }
+
+                    boru_core::whisper::WhisperEvent::Connected { peer } => {
+                        let label = self
+                            .names
+                            .get(&peer)
+                            .cloned()
+                            .unwrap_or_else(|| peer.fmt_short().to_string());
+                        self.push_system(format!("[Whisper] Connected to {label}"));
+
+                        // On reconnect, sync any offline mailbox envelopes.
+                        let has_mailbox = self
+                            .friends
+                            .get(&FriendId::from_public_key(peer))
+                            .and_then(|r| r.mailbox_public_key)
+                            .is_some();
+                        if has_mailbox {
+                            let endpoint = self.endpoint.clone();
+                            let sk = self.secret_key.clone();
+                            let dd = self.data_dir.clone();
+                            let peer2 = peer;
+                            return iced::Task::perform(
+                                async move {
+                                    // Open storage + read the last-synced cursor
+                                    // position on the blocking pool — Storage::open
+                                    // and get_sync_cursor are synchronous SQLite
+                                    // I/O that must not run on a Tokio worker
+                                    // (BORU-AUDIT-18).
+                                    let dd_cursor = dd.clone();
+                                    let since_ms = tokio::task::spawn_blocking(move || {
+                                        let storage = Storage::open(&dd_cursor).ok();
+                                        storage
+                                            .as_ref()
+                                            .and_then(|s| s.get_sync_cursor(&peer2).ok().flatten())
+                                            .map(|c| c.last_sync_at_ms)
+                                            .unwrap_or(0)
+                                    })
+                                    .await
+                                    .unwrap_or(0);
+
+                                    let identity = MailboxIdentity::from_secret(&sk);
+                                    let mut store =
+                                        MailboxStore::load(&dd).ok().flatten().unwrap_or_else(
+                                            || MailboxStore::for_recipient(&dd, sk.public()),
+                                        );
+                                    let mut texts = Vec::new();
+                                    let mut ack_ids = Vec::new();
+                                    let mut cursor = since_ms;
+
+                                    loop {
+                                        match send_sync_request(&endpoint, &sk, peer2, cursor).await
+                                        {
+                                            Ok(page) => {
+                                                for env in page.envelopes {
+                                                    if let Ok((msg_id, plaintext, acceptance)) =
+                                                        store.accept_incoming_with_status(
+                                                            &identity,
+                                                            env,
+                                                            &[peer2],
+                                                        )
+                                                    {
+                                                        // Replayed envelopes must still be ACKed, but
+                                                        // only newly inserted messages may be surfaced
+                                                        // in the conversation UI.  Sync is a backfill
+                                                        // path, not permission to duplicate history.
+                                                        ack_ids.push(msg_id.clone());
+                                                        if acceptance
+                                                            == IncomingAcceptance::Inserted
+                                                        {
+                                                            if let Ok(text) =
+                                                                String::from_utf8(plaintext)
+                                                            {
+                                                                texts.push((msg_id, text));
+                                                            }
+                                                        }
+                                                    }
+                                                }
+
+                                                if page.has_more {
+                                                    cursor =
+                                                        page.last_created_at_ms.unwrap_or(cursor);
+                                                } else {
+                                                    break;
+                                                }
+                                            }
+                                            Err(e) => {
+                                                return AppMessage::ErrorMsg(format!(
+                                                    "Mailbox sync failed: {e}"
+                                                ));
+                                            }
+                                        }
+                                    }
+
+                                    // Save is a no-op — SQLite unified storage handles persistence.
+
+                                    // Persist the cursor so subsequent reconnects resume from here.
+                                    // Storage::open + upsert_sync_cursor are synchronous SQLite
+                                    // I/O — run on the blocking pool (BORU-AUDIT-18).
+                                    let _ = tokio::task::spawn_blocking(move || {
+                                        if let Some(stg) = Storage::open(&dd).ok() {
+                                            let _ = stg.upsert_sync_cursor(
+                                                &peer2,
+                                                None,
+                                                now_ms().max(0) as u64,
+                                            );
+                                        }
+                                    })
+                                    .await;
+                                    // Send acks for all processed envelopes (new + replayed).
+                                    for msg_id in &ack_ids {
+                                        let ack = MailboxAck::sign(&sk, msg_id, peer2);
+                                        let _ = send_ack(&endpoint, &sk, peer2, ack).await;
+                                    }
+                                    AppMessage::MailboxReplayed { peer: peer2, texts }
+                                },
+                                std::convert::identity,
+                            );
+                        }
+                    }
+                    boru_core::whisper::WhisperEvent::Disconnected { peer } => {
+                        let label = self
+                            .names
+                            .get(&peer)
+                            .cloned()
+                            .unwrap_or_else(|| peer.fmt_short().to_string());
+                        self.push_system(format!("[Whisper] Disconnected from {label}"));
+                    }
+                    boru_core::whisper::WhisperEvent::MailboxEnvelope { .. } => {
+                        // Mailbox envelopes are encrypted and processed by the mailbox
+                        // store — the GUI chat does not interpret them.
+                    }
+                    boru_core::whisper::WhisperEvent::MailboxAck { .. } => {
+                        // Mailbox acknowledgements are verified and removed by the
+                        // mailbox store — the GUI chat does not interpret them.
+                    }
+                }
+                iced::Task::none()
+            }
+
+            AppMessage::OfflineDMStatus {
+                message_id,
+                label,
+                status,
+            } => {
+                let status_text = match status {
+                    OfflineDeliveryStatus::Queued => "queued",
+                    OfflineDeliveryStatus::Delivered => "delivered",
+                };
+                let entry = ChatEntry::local(
+                    &self.local_label,
+                    format!("[Offline DM {status_text}] {label}"),
+                );
+                let idx = self.entries.len();
+                self.entries_push(entry);
+                self.pending_offline_ids.insert(message_id, idx);
+                iced::Task::none()
+            }
+
+            AppMessage::InboxEvent(event) => {
+                match event {
+                    InboxEvent::EnvelopeReceived { from, envelope } => {
+                        let label = self
+                            .names
+                            .get(&from)
+                            .cloned()
+                            .unwrap_or_else(|| from.fmt_short().to_string());
+
+                        // Load mailbox store, accept incoming (validates + persists).
+                        let s = MailboxStore::load(&self.data_dir)
+                            .ok()
+                            .flatten()
+                            .unwrap_or_else(|| {
+                                MailboxStore::for_recipient(
+                                    &self.data_dir,
+                                    self.secret_key.public(),
+                                )
+                            });
+                        let mut store = s;
+                        let identity = MailboxIdentity::from_secret(&self.secret_key);
+                        match store.accept_incoming_with_status(&identity, envelope, &[from]) {
+                            Ok((msg_id, plaintext, acceptance)) => {
+                                if acceptance == IncomingAcceptance::Duplicate {
+                                    let peer = from.to_string();
+                                    DIAGNOSTICS.record_with_peer(
+                                        None,
+                                        Some(&peer),
+                                        DiagnosticEventKind::DuplicateReceived {
+                                            message_id_short: Some(
+                                                msg_id.chars().take(12).collect(),
+                                            ),
+                                            conversation_id_prefix: None,
+                                            peer_id: Some(peer.clone()),
+                                        },
+                                    );
+                                } else if let Ok(text) = String::from_utf8(plaintext) {
+                                    let entry = ChatEntry::remote(
+                                        format!("Offline DM from {label}"),
+                                        text,
+                                        None,
+                                        None,
+                                        Some(from),
+                                    );
+                                    self.entries_push(entry);
+                                }
+                                // Persist accepted state. Duplicates remain
+                                // unchanged, but are acknowledged below.
+                                // Save is a no-op — SQLite unified storage handles persistence.
+                                // Send an acknowledgement for both new and
+                                // duplicate deliveries: the prior ack may have
+                                // been lost after durable acceptance.
+                                let endpoint = self.endpoint.clone();
+                                let sk = self.secret_key.clone();
+                                return iced::Task::perform(
+                                    async move {
+                                        let ack = MailboxAck::sign(&sk, &msg_id, from);
+                                        let _ = send_ack(&endpoint, &sk, from, ack).await;
+                                    },
+                                    |_| AppMessage::Noop,
+                                );
+                            }
+                            Err(e) => {
+                                self.push_system(format!(
+                                    "[Mailbox] Failed to accept envelope from {label}: {e}"
+                                ));
+                            }
+                        }
+                        iced::Task::none()
+                    }
+                    InboxEvent::AckReceived {
+                        from: _from,
+                        ack: _ack,
+                    } => {
+                        // Remove acknowledged envelope from local store.
+                        let s = MailboxStore::load(&self.data_dir)
+                            .ok()
+                            .flatten()
+                            .unwrap_or_else(|| MailboxStore::empty_at(&self.data_dir));
+                        let mut store = s;
+                        if let Ok(true) = store.acknowledge_outgoing_and_save(&_ack) {
+                            debug!(
+                                "mailbox: peer {} acknowledged envelope {}",
+                                _from.fmt_short(),
+                                _ack.message_id
+                            );
+                            // Update the in-memory ChatEntry to show delivered status.
+                            if let Some(&idx) = self.pending_offline_ids.get(&_ack.message_id) {
+                                if idx < self.entries.len() {
+                                    self.entries[idx].body = "[Offline DM acked]".to_string();
+                                    self.entries[idx].bump_gen();
+                                }
+                            }
+                        }
+                        iced::Task::none()
+                    }
+                    InboxEvent::SyncRequested { from, since_ms } => {
+                        debug!(
+                            "inbox: sync requested by {} since_ms={}",
+                            from.fmt_short(),
+                            since_ms
+                        );
+                        iced::Task::none()
+                    }
+                    InboxEvent::DeleteTombstoneReceived { from, proof } => {
+                        // A remote peer forwarded a signed deletion authorisation
+                        // from the original message author.  Apply the tombstone
+                        // to the local message store to remove the inbox row and
+                        // prevent resurrection by backfill/duplicates.
+                        let store_path = self.data_dir.join("message_store.db");
+                        match MessageStore::open(&store_path) {
+                            Ok(store) => {
+                                match store.insert_tombstone(
+                                    &proof.msg_id,
+                                    &proof.conversation_id,
+                                    &proof.author,
+                                    &*proof.author_signature,
+                                ) {
+                                    Ok(true) => {
+                                        debug!(
+                                            "inbox: applied delete tombstone from {} for msg {:?}",
+                                            from.fmt_short(),
+                                            proof.msg_id
+                                        );
+                                    }
+                                    Ok(false) => {
+                                        debug!(
+                                            "inbox: delete tombstone from {} for msg {:?} was already tombstoned",
+                                            from.fmt_short(),
+                                            proof.msg_id
+                                        );
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            "inbox: failed to apply delete tombstone from {}: {e}",
+                                            from.fmt_short()
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "inbox: failed to open message store for delete tombstone from {}: {e}",
+                                    from.fmt_short()
+                                );
+                            }
+                        }
+                        iced::Task::none()
+                    }
+                }
+            }
+
+            AppMessage::OutboxRetryResult(results) => {
+                // Only successful broadcasts advance a queued message. Failed
+                // attempts remain queued for the next periodic retry.
+                let mut changed = false;
+                {
+                    let mut history = self.chat_history.lock().unwrap();
+                    for (topic, event_id, delivered) in results {
+                        if let Some(storage) = &self.storage {
+                            let _ = storage.increment_outgoing_retry(event_id);
+                            if delivered {
+                                let _ = storage.update_outgoing_delivery_state(event_id, "sent");
+                            }
+                        }
+                        let message_hash = "unknown".to_string();
+                        info!(
+                            event_id,
+                            message_hash = %message_hash,
+                            topic = %topic,
+                            local_peer = %self.local_public.fmt_short(),
+                            neighbor_count = self.neighbors.len(),
+                            sender_ready = self.sender_ready,
+                            broadcast_result = if delivered { "accepted" } else { "failed" },
+                            persistence_result = "queued",
+                            "message delivery telemetry"
+                        );
+                        if delivered {
+                            let _ = history.update_delivery_state(event_id, DeliveryState::Sent);
+                            if let Some(&index) = self.event_id_to_index.get(&event_id) {
+                                if let Some(entry) = self.entries.get_mut(index) {
+                                    entry.delivery_state = DeliveryState::Sent;
+                                    entry.bump_gen();
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                if changed {
+                    self.layout_cache.borrow_mut().clear();
+                }
+                iced::Task::none()
+            }
+
+            AppMessage::MessageSent(_text, event_id, msg_hash) => {
+                if let Some(&index) = self.event_id_to_index.get(&event_id) {
+                    if let Some(entry) = self.entries.get_mut(index) {
+                        entry.delivery_state = DeliveryState::Sent;
+                        entry.message_hash = Some(msg_hash);
+                        entry.bump_gen();
+                    }
+                    self.message_hash_to_index.insert(msg_hash, index);
+                }
+                // Persist delivery state update in SQLite synchronously
+                // (quick UPDATE query) and offload chat_history.json save to
+                // background to avoid blocking the UI thread.
+                if let Some(storage) = &self.storage {
+                    let _ = storage.update_outgoing_delivery_state(event_id, "sent");
+                }
+                iced::Task::none()
+            }
+
+            AppMessage::RetryOutgoingMessage(event_id) => {
+                // User tapped a failed outgoing message to retry it.
+                // Transition state from "failed" back to "queued" in SQLite
+                // so the periodic retry loop picks it up.
+                if let Some(storage) = &self.storage {
+                    let _ = storage.update_outgoing_delivery_state(event_id, "queued");
+                }
+                // Update in-memory entry
+                if let Some(&index) = self.event_id_to_index.get(&event_id) {
+                    if let Some(entry) = self.entries.get_mut(index) {
+                        if entry.delivery_state == DeliveryState::Failed {
+                            entry.delivery_state = DeliveryState::Queued;
+                            entry.bump_gen();
+                        }
+                    }
+                }
+                iced::Task::none()
+            }
             // update() only dispatches the chat variants here; other
             // variants can never reach this method (defensive catch-all).
             _ => iced::Task::none(),
