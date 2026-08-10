@@ -5548,6 +5548,329 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
+            AppMessage::CopyMessage(idx) => {
+                if let Some(entry) = self.entries.get(idx) {
+                    // Truncate long messages in the toast
+                    let preview: String = if entry.body.len() > 60 {
+                        format!("{}…", &entry.body[..60])
+                    } else {
+                        entry.body.clone()
+                    };
+                    self.toast_message = Some(format!("Copied: {preview}"));
+                    return iced::clipboard::write(entry.body.clone());
+                }
+                iced::Task::none()
+            }
+
+            AppMessage::RightClickText(idx) => {
+                self.context_menu = Some((idx, 0.0, 0.0, ContextMenuKind::Text));
+                iced::Task::none()
+            }
+
+            AppMessage::RightClickImage(idx) => {
+                self.context_menu = Some((idx, 0.0, 0.0, ContextMenuKind::Image));
+                iced::Task::none()
+            }
+
+            AppMessage::ContextCopyText(idx) => {
+                self.context_menu = None;
+                if let Some(entry) = self.entries.get(idx) {
+                    let preview: String = if entry.body.len() > 60 {
+                        format!("{}…", &entry.body[..60])
+                    } else {
+                        entry.body.clone()
+                    };
+                    self.toast_message = Some(format!("Copied: {preview}"));
+                    return iced::clipboard::write(entry.body.clone());
+                }
+                iced::Task::none()
+            }
+
+            AppMessage::ContextCopyImage(idx) => {
+                self.context_menu = None;
+                // Image copy not yet implemented for system clipboard;
+                // the context menu still appears for future wiring.
+                self.toast_message = Some("Image copy not yet supported".to_string());
+                iced::Task::none()
+            }
+
+            AppMessage::CloseContextMenu => {
+                self.context_menu = None;
+                iced::Task::none()
+            }
+
+            AppMessage::ToggleVideoCardMenu(entry_index) => {
+                self.video_card_menu_open =
+                    if self.video_card_menu_open == Some(entry_index) {
+                        None
+                    } else {
+                        Some(entry_index)
+                    };
+                self.layout_cache.borrow_mut().invalidate_from(entry_index);
+                iced::Task::none()
+            }
+
+            AppMessage::ToggleEmojiPicker => {
+                self.show_emoji_picker = !self.show_emoji_picker;
+                iced::Task::none()
+            }
+
+            AppMessage::InsertEmoji(ch) => {
+                // Insert the emoji at the current cursor position
+                self.composer_text.push(ch);
+                iced::Task::none()
+            }
+
+            AppMessage::ToggleGifPicker => {
+                self.show_gif_picker = !self.show_gif_picker;
+                if self.show_gif_picker {
+                    // Reflect current provider configuration when the picker
+                    // opens, so the provider-not-configured state shows
+                    // immediately instead of on first search.
+                    self.gif_not_configured = boru_core::default_gif_provider().is_err();
+                    self.gif_results.clear();
+                    self.gif_preview_cache.clear();
+                    self.gif_error = None;
+                    self.gif_append_error = None;
+                    self.gif_has_searched = false;
+                    self.gif_next_cursor = None;
+                    if self.gif_not_configured {
+                        self.gif_loading = false;
+                        return iced::Task::none();
+                    }
+                    // Show trending GIFs as suggestions before any search.
+                    self.gif_showing_trending = true;
+                    return self.start_gif_trending(None);
+                }
+                self.gif_loading = false;
+                // User closed the picker while a request was in flight:
+                // invalidate the request sequence so the late response is
+                // dropped by the stale-guard instead of mutating hidden
+                // state (results, errors, or preview-download tasks) after
+                // the panel closed.
+                self.gif_request_seq = self.gif_request_seq.wrapping_add(1);
+                iced::Task::none()
+            }
+
+            AppMessage::GifSearchChanged(text) => {
+                self.gif_search_text = text;
+                if self.gif_search_text.trim().is_empty() {
+                    // Empty query: cancel pending work and show trending again.
+                    self.gif_has_searched = false;
+                    self.gif_results.clear();
+                    self.gif_preview_cache.clear();
+                    self.gif_error = None;
+                    self.gif_append_error = None;
+                    self.gif_next_cursor = None;
+                    if self.gif_not_configured {
+                        return iced::Task::none();
+                    }
+                    self.gif_showing_trending = true;
+                    return self.start_gif_trending(None);
+                }
+                // Debounce: schedule a search after a quiet period.  Each
+                // keystroke bumps the debounce seq so only the latest timer
+                // fires (older timers are ignored by the seq guard).
+                let seq = self.gif_debounce_seq.wrapping_add(1);
+                self.gif_debounce_seq = seq;
+                let task = iced::Task::perform(
+                    tokio::time::sleep(std::time::Duration::from_millis(400)),
+                    move |_| AppMessage::GifSearchDebounced(seq),
+                );
+                task
+            }
+
+            AppMessage::GifSearchDebounced(seq) => {
+                if seq != self.gif_debounce_seq {
+                    // A newer keystroke superseded this debounce timer.
+                    return iced::Task::none();
+                }
+                let query = self.gif_search_text.trim().to_string();
+                if query.is_empty() {
+                    return iced::Task::none();
+                }
+                self.gif_showing_trending = false;
+                self.gif_has_searched = true;
+                return self.start_gif_search(query, None);
+            }
+
+            AppMessage::GifSearchSubmit => {
+                let query = self.gif_search_text.trim().to_string();
+                if query.is_empty() {
+                    return iced::Task::none();
+                }
+                // Cancel any pending debounce timer.
+                self.gif_debounce_seq = self.gif_debounce_seq.wrapping_add(1);
+                self.gif_showing_trending = false;
+                self.gif_has_searched = true;
+                return self.start_gif_search(query, None);
+            }
+
+            AppMessage::GifRetry => {
+                // Re-run the request that failed.  `GifSearchSubmit` is a
+                // no-op for empty queries, so a dedicated retry is needed
+                // when a trending request failed before any query existed.
+                if self.gif_not_configured {
+                    return iced::Task::none();
+                }
+                self.gif_error = None;
+                self.gif_append_error = None;
+                self.gif_loading = false;
+                let query = self.gif_search_text.trim().to_string();
+                if query.is_empty() || self.gif_showing_trending {
+                    self.gif_showing_trending = true;
+                    return self.start_gif_trending(None);
+                }
+                self.gif_showing_trending = false;
+                self.gif_has_searched = true;
+                return self.start_gif_search(query, None);
+            }
+
+            AppMessage::GifSearchResults { seq, page } => {
+                // Stale-response guard: an older request completing late must
+                // not replace newer results.
+                if seq != self.gif_request_seq {
+                    return iced::Task::none();
+                }
+                self.gif_loading = false;
+                self.gif_error = None;
+                self.gif_append_error = None;
+                self.gif_showing_trending = false;
+                self.gif_has_searched = true;
+                if self.gif_appending {
+                    // Pagination: append, deduplicating by provider_id.
+                    let mut seen: HashSet<String> =
+                        self.gif_results.iter().map(|r| r.provider_id.clone()).collect();
+                    for item in page.items {
+                        if seen.insert(item.provider_id.clone()) {
+                            self.gif_results.push(item);
+                        }
+                    }
+                    self.gif_appending = false;
+                } else {
+                    self.gif_results = page.items;
+                }
+                self.gif_next_cursor = page.next_cursor;
+                return self.gif_preview_download_tasks();
+            }
+
+            AppMessage::GifTrendingResults { seq, page } => {
+                if seq != self.gif_request_seq {
+                    return iced::Task::none();
+                }
+                self.gif_loading = false;
+                self.gif_error = None;
+                self.gif_append_error = None;
+                self.gif_showing_trending = true;
+                if self.gif_appending {
+                    let mut seen: HashSet<String> =
+                        self.gif_results.iter().map(|r| r.provider_id.clone()).collect();
+                    for item in page.items {
+                        if seen.insert(item.provider_id.clone()) {
+                            self.gif_results.push(item);
+                        }
+                    }
+                    self.gif_appending = false;
+                } else {
+                    self.gif_results = page.items;
+                }
+                self.gif_next_cursor = page.next_cursor;
+                return self.gif_preview_download_tasks();
+            }
+
+            AppMessage::GifSearchFailed { seq, message } => {
+                if seq != self.gif_request_seq {
+                    return iced::Task::none();
+                }
+                self.gif_loading = false;
+                let was_appending = self.gif_appending;
+                self.gif_appending = false;
+                if was_appending {
+                    // Load-more failure: keep the already-loaded grid and
+                    // surface a compact note under it instead of replacing
+                    // results with the full-screen error state.
+                    self.gif_append_error = Some(message);
+                } else {
+                    self.gif_error = Some(message);
+                }
+                iced::Task::none()
+            }
+
+            AppMessage::GifPreviewLoaded(provider_id, bytes) => {
+                self.gif_preview_cache.insert(provider_id, bytes);
+                iced::Task::none()
+            }
+
+            AppMessage::GifLoadMore => {
+                if self.gif_loading {
+                    return iced::Task::none();
+                }
+                let Some(cursor) = self.gif_next_cursor.clone() else {
+                    return iced::Task::none();
+                };
+                self.gif_appending = true;
+                if self.gif_showing_trending {
+                    return self.start_gif_trending(Some(cursor));
+                }
+                let query = self.gif_search_text.trim().to_string();
+                if query.is_empty() {
+                    self.gif_appending = false;
+                    return iced::Task::none();
+                }
+                return self.start_gif_search(query, Some(cursor));
+            }
+
+            AppMessage::SendGif(gif) => {
+                // Provider-neutral handoff: `gif` is a GifSearchResult (not a
+                // KLIPY type).  Build KLIPY-06's SharedGif chat payload from
+                // it and broadcast the signed message — receivers fetch the
+                // rendition URLs directly (no sender-side full-size download,
+                // no API key, no search query on the wire).  The sender's own
+                // bubble renders through the same pending-GIF fetch path used
+                // for remote receipts (gossip does not echo own broadcasts).
+                let shared_gif =
+                    boru_core::gif_provider::SharedGif::from_search_result(&gif);
+                let message = crate::Message::SharedGif {
+                    gif: shared_gif.clone(),
+                };
+                let message_hash = message_hash(&message);
+                self.show_gif_picker = false;
+                self.gif_search_text.clear();
+                let encoded = match SignedMessage::sign_and_encode(&self.secret_key, &message) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        self.toast_counter = self.toast_counter.wrapping_add(1);
+                        self.toast_message = Some(format!("Failed to send GIF: {e}"));
+                        return iced::Task::none();
+                    }
+                };
+                let sender = self.sender.clone();
+                let sender_ready = self.sender_ready;
+                let neighbor_count = self.neighbors.len();
+                let broadcast_task = iced::Task::perform(
+                    async move {
+                        if sender_ready && neighbor_count > 0 {
+                            if let Some(sender) = sender {
+                                if sender.broadcast(encoded).await.is_err() {
+                                    warn!("SharedGif broadcast failed");
+                                }
+                            }
+                        } else {
+                            info!(
+                                sender_ready,
+                                neighbor_count,
+                                "SharedGif queued for retry (no mesh yet)"
+                            );
+                        }
+                    },
+                    |_| AppMessage::Noop,
+                );
+                // Local echo: render the sender's own bubble via the standard
+                // pending-GIF fetch path (same as a remote receipt).
+                self.set_pending_gif(shared_gif, self.local_public, message_hash);
+                let fetch_task = self.start_next_pending_gif_fetch();
+                iced::Task::batch([broadcast_task, fetch_task])
+            }
             // update() only dispatches the chat variants here; other
             // variants can never reach this method (defensive catch-all).
             _ => iced::Task::none(),
