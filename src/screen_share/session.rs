@@ -62,6 +62,8 @@ impl SessionManager {
     }
     /// Return a session state, if the session is known.
     pub fn state(&self, id: ScreenShareSessionId) -> Option<SessionState> { self.sessions.get(&id).map(|record| record.state) }
+    /// Return the permission record for a session, if known.
+    pub fn permissions(&self, id: ScreenShareSessionId) -> Option<&SessionPermissions> { self.permissions.get(&id) }
     /// Build a default, view-only Hello for a locally initiated session.
     pub fn hello(&self, id: ScreenShareSessionId, codecs: Vec<String>, width: u16, height: u16, frame_rate: u16) -> Option<Hello> {
         let record = self.sessions.get(&id)?;
@@ -84,6 +86,24 @@ impl SessionManager {
         if record.state == SessionState::Ended { return None; }
         record.state = SessionState::Ended;
         Some(ControlMessage::EndSession { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id })
+    }
+    /// Host-side grant of control capabilities. Generates the fresh nonce,
+    /// emits a local `ControlChanged` so the host UI shows the indicator, and
+    /// returns the wire GrantControl message to send to the viewer.
+    pub fn grant_control(&mut self, id: ScreenShareSessionId, capabilities: Vec<Capability>, events: &tokio::sync::mpsc::Sender<SessionEvent>) -> Option<ControlMessage> {
+        let permissions = self.permissions.get_mut(&id)?;
+        if !permissions.grant(capabilities.clone()) { return None; }
+        let nonce = *permissions.token()?.nonce();
+        let _ = events.try_send(SessionEvent::ControlChanged { session_id: id, active: true, capabilities: capabilities.clone() });
+        Some(ControlMessage::GrantControl { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id, capabilities, nonce })
+    }
+    /// Host-side revocation of control. Emits a local `ControlChanged` and
+    /// returns the wire RevokeControl message to send to the viewer.
+    pub fn revoke_control(&mut self, id: ScreenShareSessionId, events: &tokio::sync::mpsc::Sender<SessionEvent>) -> Option<ControlMessage> {
+        let permissions = self.permissions.get_mut(&id)?;
+        permissions.revoke_control();
+        let _ = events.try_send(SessionEvent::ControlChanged { session_id: id, active: false, capabilities: vec![Capability::ViewScreen] });
+        Some(ControlMessage::RevokeControl { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id })
     }
     /// Apply one validated remote control message. Hello never grants consent.
     pub fn apply_remote(&mut self, peer_id: iroh::PublicKey, message: ControlMessage, events: &tokio::sync::mpsc::Sender<SessionEvent>) -> Option<ControlMessage> {
@@ -118,8 +138,10 @@ impl SessionManager {
                 }
                 None
             }
-            ControlMessage::GrantControl { session_id, capabilities, .. } => {
-                if let Some(permissions) = self.permissions.get_mut(&session_id) { if permissions.peer_id() == peer_id { permissions.grant(capabilities.clone()); let _ = events.try_send(SessionEvent::ControlChanged { session_id, active: true, capabilities }); } }
+            ControlMessage::GrantControl { session_id, capabilities, nonce, .. } => {
+                // The viewer stores the HOST's nonce so it can echo it back in
+                // every Input message; host-side validation uses that nonce.
+                if let Some(permissions) = self.permissions.get_mut(&session_id) { if permissions.peer_id() == peer_id { permissions.grant_with_nonce(capabilities.clone(), nonce); let _ = events.try_send(SessionEvent::ControlChanged { session_id, active: true, capabilities }); } }
                 None
             }
             ControlMessage::RevokeControl { session_id, .. } => {

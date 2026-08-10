@@ -70,6 +70,18 @@ impl SessionPermissions {
         }
         true
     }
+    /// Grant control capabilities carrying a peer-provided nonce (the viewer
+    /// echoes the host's nonce back in every input message).
+    pub fn grant_with_nonce(&mut self, capabilities: impl IntoIterator<Item = Capability>, nonce: [u8; 16]) -> bool {
+        if !self.active { return false; }
+        for capability in capabilities {
+            if !self.granted.contains(&capability) && self.granted.len() < MAX_CAPABILITIES { self.granted.push(capability); }
+        }
+        if self.granted.iter().any(|c| matches!(c, Capability::ControlPointer | Capability::ControlKeyboard)) {
+            self.token = Some(ControlToken { nonce, issued_at: Instant::now() });
+        }
+        true
+    }
     pub fn revoke_control(&mut self) {
         self.granted.retain(|capability| *capability == Capability::ViewScreen);
         self.token = None;

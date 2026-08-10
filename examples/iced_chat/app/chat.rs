@@ -365,27 +365,101 @@ impl IcedChat {
                 ScreenShareHostState::Streaming => "Screen sharing active",
                 ScreenShareHostState::Idle => unreachable!(),
             };
-            column![
-                text(state),
-                button(text("Stop Sharing")).on_press(AppMessage::StopScreenShare),
-            ].spacing(SPACE_6)
+            let mut items: Vec<iced::Element<'_, AppMessage>> = vec![text(state).into()];
+            // Explicit consent prompt: the host picks the granted capabilities.
+            if let Some((_, viewer, capabilities)) = &self.screen_share_control_request {
+                let caps = capabilities
+                    .iter()
+                    .map(Self::capability_label)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                items.push(text(format!("{viewer} requests control: {caps}")).into());
+                items.push(
+                    row![
+                        button(text("Grant Pointer"))
+                            .on_press(AppMessage::ScreenShareGrantControl(vec![
+                                Capability::ControlPointer,
+                            ])),
+                        button(text("Grant Pointer + Keyboard"))
+                            .on_press(AppMessage::ScreenShareGrantControl(vec![
+                                Capability::ControlPointer,
+                                Capability::ControlKeyboard,
+                            ])),
+                        button(text("Deny")).on_press(AppMessage::ScreenShareDenyControl),
+                    ].spacing(SPACE_8).into(),
+                );
+            }
+            if self.screen_share_control_active {
+                items.push(
+                    text("Remote control active — the viewer is driving the pointer/keyboard")
+                        .into(),
+                );
+                items.push(
+                    button(text("Revoke Control"))
+                        .on_press(AppMessage::ScreenShareRevokeControl)
+                        .into(),
+                );
+            }
+            items.push(button(text("Stop Sharing")).on_press(AppMessage::StopScreenShare).into());
+            column(items).spacing(SPACE_6)
         } else if self.screen_share_viewing {
             let video: iced::Element<'_, AppMessage> = if let Some(handle) = &self.screen_share_frame_handle {
-                iced::widget::Image::new(handle.clone())
-                    .width(Length::Fill)
-                    .height(Length::Fixed(if self.screen_share_fullscreen { 480.0 } else { 240.0 }))
-                    .content_fit(iced::ContentFit::Contain)
-                    .into()
+                if self.screen_share_control_active {
+                    // Fixed 640x360 box matches the capture aspect exactly, so
+                    // the mouse_area Point maps 1:1 to normalized coordinates.
+                    let image = iced::widget::Image::new(handle.clone())
+                        .width(Length::Fixed(Self::SCREEN_SHARE_VIDEO_W))
+                        .height(Length::Fixed(Self::SCREEN_SHARE_VIDEO_H))
+                        .content_fit(iced::ContentFit::Contain);
+                    let last = self.screen_share_last_pointer_pos.unwrap_or((0.0, 0.0));
+                    iced::widget::mouse_area(image)
+                        .on_move(|pos| AppMessage::ScreenSharePointerMove {
+                            x: (pos.x / Self::SCREEN_SHARE_VIDEO_W).clamp(0.0, 1.0),
+                            y: (pos.y / Self::SCREEN_SHARE_VIDEO_H).clamp(0.0, 1.0),
+                        })
+                        .on_press(AppMessage::ScreenSharePointerButton {
+                            x: last.0,
+                            y: last.1,
+                            button: 1,
+                            pressed: true,
+                        })
+                        .on_release(AppMessage::ScreenSharePointerButton {
+                            x: last.0,
+                            y: last.1,
+                            button: 1,
+                            pressed: false,
+                        })
+                        .into()
+                } else {
+                    iced::widget::Image::new(handle.clone())
+                        .width(Length::Fill)
+                        .height(Length::Fixed(if self.screen_share_fullscreen { 480.0 } else { 240.0 }))
+                        .content_fit(iced::ContentFit::Contain)
+                        .into()
+                }
             } else {
                 text("Waiting for the next decoded frame…").into()
             };
+            let mut actions: Vec<iced::Element<'_, AppMessage>> = vec![
+                button(text(if self.screen_share_fullscreen { "Inline" } else { "Fullscreen" }))
+                    .on_press(AppMessage::ToggleScreenShareFullscreen)
+                    .into(),
+            ];
+            if self.screen_share_control_active {
+                actions.push(
+                    text("Control granted — move the mouse or type to control the host").into(),
+                );
+            } else {
+                actions.push(
+                    button(text("Request Control"))
+                        .on_press(AppMessage::ScreenShareRequestControl)
+                        .into(),
+                );
+            }
+            actions.push(button(text("Stop Viewing")).on_press(AppMessage::StopScreenShare).into());
             column![
                 video,
-                row![
-                    button(text(if self.screen_share_fullscreen { "Inline" } else { "Fullscreen" }))
-                        .on_press(AppMessage::ToggleScreenShareFullscreen),
-                    button(text("Stop Viewing")).on_press(AppMessage::StopScreenShare),
-                ].spacing(SPACE_8),
+                row(actions).spacing(SPACE_8),
             ].spacing(SPACE_6)
         } else {
             return iced::widget::Space::new().height(Length::Fixed(0.0)).into();
@@ -400,6 +474,24 @@ impl IcedChat {
             })
             .into()
     }
+
+    #[cfg(feature = "screen-sharing")]
+    /// Human label for a control capability (consent prompt).
+    fn capability_label(capability: &Capability) -> String {
+        match capability {
+            Capability::ControlPointer => "pointer".to_string(),
+            Capability::ControlKeyboard => "keyboard".to_string(),
+            _ => "other".to_string(),
+        }
+    }
+
+    #[cfg(feature = "screen-sharing")]
+    /// Fixed viewer video box size (matches the 640x360 capture aspect so the
+    /// mouse_area Point maps 1:1 to normalized coordinates).
+    const SCREEN_SHARE_VIDEO_W: f32 = 640.0;
+
+    #[cfg(feature = "screen-sharing")]
+    const SCREEN_SHARE_VIDEO_H: f32 = 360.0;
 
     // ── Chat screen view ─────────────────────────────────────────────
 

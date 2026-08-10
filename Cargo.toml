@@ -119,6 +119,12 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 async-trait = "0.1"
 iroh-blobs = { version = "0.103", default-features = false, optional = true, features = ["fs-store"] }
 
+# remote-control (M10) dependencies (optional, enabled by screen-sharing)
+# zbus: xdg-desktop-portal RemoteDesktop D-Bus client (Linux input backend).
+zbus = { version = "5", default-features = false, features = ["tokio"], optional = true }
+# windows-sys: SendInput user-session input injection (Windows backend).
+windows-sys = { version = "0.59", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_Foundation"], optional = true }
+
 # filesystem notification for shared folder monitoring
 notify = { version = "6", features = [] }
 
@@ -250,7 +256,7 @@ video-playback = ["gui", "dep:iced_video_player"]
 terminal = ["gui", "dep:iced_term"]
 # Screen sharing is deliberately opt-in while the subsystem is integrated.
 # Reuse the OpenH264 dependency already used by video-calls.
-screen-sharing = ["net", "dep:openh264"]
+screen-sharing = ["net", "dep:openh264", "dep:zbus", "dep:windows-sys"]
 # Developer-only fast screen-sharing prototype; reuses the existing tunnel.
 experimental-vnc = ["gui"]
 

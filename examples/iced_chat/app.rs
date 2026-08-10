@@ -88,9 +88,9 @@ use boru_core::call::history::{event_text as call_history_text, CallHistoryOutco
 use boru_core::call::{CallId, CallKind};
 #[cfg(feature = "screen-sharing")]
 use boru_core::screen_share::{
-    run_host_session, CapturedFrame, ControlMessage, InboundMedia, OpenH264Decoder, PixelFormat,
-    ScreenShareProtocol, ScreenShareSessionId, SessionEvent, ViewerPipeline,
-    DEFAULT_QUEUE_CAPACITY, SCREEN_SHARE_PROTOCOL_VERSION,
+    run_host_session, Capability, CapturedFrame, ControlMessage, HostCommand, InboundMedia,
+    OpenH264Decoder, PixelFormat, ScreenShareProtocol, ScreenShareSessionId, SessionEvent,
+    ViewerPipeline, DEFAULT_QUEUE_CAPACITY, SCREEN_SHARE_PROTOCOL_VERSION,
 };
 #[cfg(feature = "video-calls")]
 use boru_core::call::video::VideoFrame;
@@ -4010,6 +4010,21 @@ pub struct IcedChat {
     #[cfg(feature = "screen-sharing")]
     /// Rendered handle of the latest decoded frame (RGBA).
     screen_share_frame_handle: Option<iced::widget::image::Handle>,
+    #[cfg(feature = "screen-sharing")]
+    /// Host-side pending control request (session id, viewer label, caps).
+    screen_share_control_request: Option<(ScreenShareSessionId, String, Vec<Capability>)>,
+    #[cfg(feature = "screen-sharing")]
+    /// Control active on either side (drives the indicator + input capture).
+    screen_share_control_active: bool,
+    #[cfg(feature = "screen-sharing")]
+    /// Command sender into the host driver task (grants/revokes).
+    screen_share_host_cmd_tx: Option<tokio::sync::mpsc::Sender<HostCommand>>,
+    #[cfg(feature = "screen-sharing")]
+    /// Last pointer-move send time (throttles per-event QUIC streams).
+    screen_share_last_pointer_sent: Option<Instant>,
+    #[cfg(feature = "screen-sharing")]
+    /// Last pointer position sent, to skip near-identical moves.
+    screen_share_last_pointer_pos: Option<(f32, f32)>,
     /// Receiver for incoming inbox events.
     pub inbox_events_rx: Arc<Mutex<Receiver<InboxEvent>>>,
     /// Receiver for incoming whisper events.
@@ -5184,8 +5199,29 @@ pub enum AppMessage {
     /// Forward the latest decoded frame from the viewer decode worker.
     ScreenShareFrameReceived(Option<CapturedFrame>),
     #[cfg(feature = "screen-sharing")]
-    /// A screen-share control send finished (Accept/Reject/EndSession).
+    /// A screen-share control send finished (Accept/Reject/EndSession/Input).
     ScreenShareCommandFinished(Result<(), String>),
+    #[cfg(feature = "screen-sharing")]
+    /// Viewer requests explicit control (pointer + keyboard) from the host.
+    ScreenShareRequestControl,
+    #[cfg(feature = "screen-sharing")]
+    /// Host grants the given control capabilities to the viewer.
+    ScreenShareGrantControl(Vec<Capability>),
+    #[cfg(feature = "screen-sharing")]
+    /// Host declines the pending control request (no wire message).
+    ScreenShareDenyControl,
+    #[cfg(feature = "screen-sharing")]
+    /// Host revokes control while keeping view-only sharing active.
+    ScreenShareRevokeControl,
+    #[cfg(feature = "screen-sharing")]
+    /// Viewer pointer motion over the image (normalized 0..1, image-relative).
+    ScreenSharePointerMove { x: f32, y: f32 },
+    #[cfg(feature = "screen-sharing")]
+    /// Viewer pointer button state change over the image.
+    ScreenSharePointerButton { x: f32, y: f32, button: u32, pressed: bool },
+    #[cfg(feature = "screen-sharing")]
+    /// Viewer key press/release while control is active (code = X11 keysym).
+    ScreenShareKeyEvent { code: u32, pressed: bool },
     /// Forward one event from the call actor subscription.
     CallEventReceived(CallEvent),
     /// Update notification suppression state from the native window focus event.
@@ -7605,6 +7641,16 @@ impl IcedChat {
             screen_share_last_frame_ts: None,
             #[cfg(feature = "screen-sharing")]
             screen_share_frame_handle: None,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_control_request: None,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_control_active: false,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_host_cmd_tx: None,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_last_pointer_sent: None,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_last_pointer_pos: None,
             inbox_events_rx,
             whisper_events_rx,
             profile_image_handle,
@@ -9376,6 +9422,20 @@ impl IcedChat {
             AppMessage::ScreenShareFrameReceived(_) => "ScreenShareFrameReceived",
             #[cfg(feature = "screen-sharing")]
             AppMessage::ScreenShareCommandFinished(_) => "ScreenShareCommandFinished",
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareRequestControl => "ScreenShareRequestControl",
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareGrantControl(_) => "ScreenShareGrantControl",
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareDenyControl => "ScreenShareDenyControl",
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareRevokeControl => "ScreenShareRevokeControl",
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenSharePointerMove { .. } => "ScreenSharePointerMove",
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenSharePointerButton { .. } => "ScreenSharePointerButton",
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareKeyEvent { .. } => "ScreenShareKeyEvent",
             AppMessage::CallEventReceived(_) => "CallEventReceived",
             AppMessage::WindowFocusChanged(_) => "WindowFocusChanged",
             AppMessage::AcceptIncomingCall(_) => "AcceptIncomingCall",
@@ -12902,6 +12962,40 @@ impl IcedChat {
                     self.toast_message = Some(error);
                 }
                 iced::Task::none()
+            }
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareRequestControl => self.request_screen_share_control(),
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareGrantControl(capabilities) => {
+                if let Some(tx) = &self.screen_share_host_cmd_tx {
+                    let _ = tx.try_send(HostCommand::GrantControl(capabilities));
+                }
+                self.screen_share_control_request = None;
+                iced::Task::none()
+            }
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareDenyControl => {
+                self.screen_share_control_request = None;
+                iced::Task::none()
+            }
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareRevokeControl => {
+                if let Some(tx) = &self.screen_share_host_cmd_tx {
+                    let _ = tx.try_send(HostCommand::RevokeControl);
+                }
+                iced::Task::none()
+            }
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenSharePointerMove { x, y } => {
+                self.send_screen_share_input(Capability::ControlPointer, 0, x, y, false)
+            }
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenSharePointerButton { x, y, button, pressed } => {
+                self.send_screen_share_input(Capability::ControlPointer, button, x, y, pressed)
+            }
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareKeyEvent { code, pressed } => {
+                self.send_screen_share_input(Capability::ControlKeyboard, code, 0.0, 0.0, pressed)
             }
             AppMessage::WindowFocusChanged(focused) => {
                 if focused {
@@ -17354,6 +17448,69 @@ pub fn keyboard_shortcuts_subscription() -> iced::Subscription<AppMessage> {
 
 // ── Subscription ──────────────────────────────────────────────────────
 
+#[cfg(feature = "screen-sharing")]
+/// Forward key presses/releases to the viewer control path while the viewer
+/// has control active. The handler gates on `screen_share_control_active`.
+pub fn screen_share_keyboard_subscription() -> iced::Subscription<AppMessage> {
+    use iced::keyboard::{self, key};
+    keyboard::listen().filter_map(|event: keyboard::Event| -> Option<AppMessage> {
+        match event {
+            keyboard::Event::KeyPressed { key, .. } => key_to_keysym(&key)
+                .map(|code| AppMessage::ScreenShareKeyEvent { code, pressed: true }),
+            keyboard::Event::KeyReleased { key, .. } => key_to_keysym(&key)
+                .map(|code| AppMessage::ScreenShareKeyEvent { code, pressed: false }),
+            _ => None,
+        }
+    })
+}
+
+#[cfg(feature = "screen-sharing")]
+/// Map an iced `keyboard::Key` to a portable X11 keysym (the wire input code;
+/// the Linux portal passes it straight to NotifyKeyboardKeysym, Windows maps
+/// it to a virtual-key code). Unsupported keys map to None and are dropped.
+fn key_to_keysym(key: &iced::keyboard::Key) -> Option<u32> {
+    use iced::keyboard::key;
+    match key {
+        key::Key::Character(c) => c.chars().next().map(|ch| ch as u32),
+        key::Key::Named(named) => Some(match named {
+            key::Named::Enter => 0xFF0D,
+            key::Named::Backspace => 0xFF08,
+            key::Named::Tab => 0xFF09,
+            key::Named::Space => 0x20,
+            key::Named::Escape => 0xFF1B,
+            key::Named::ArrowUp => 0xFF52,
+            key::Named::ArrowDown => 0xFF54,
+            key::Named::ArrowLeft => 0xFF51,
+            key::Named::ArrowRight => 0xFF53,
+            key::Named::Home => 0xFF50,
+            key::Named::End => 0xFF57,
+            key::Named::PageUp => 0xFF55,
+            key::Named::PageDown => 0xFF56,
+            key::Named::Insert => 0xFF63,
+            key::Named::Delete => 0xFFFF,
+            key::Named::Shift => 0xFFE1,
+            key::Named::Control => 0xFFE3,
+            key::Named::Alt => 0xFFE9,
+            key::Named::AltGraph => 0xFFEA,
+            key::Named::CapsLock => 0xFFE5,
+            key::Named::F1 => 0xFFBE,
+            key::Named::F2 => 0xFFBF,
+            key::Named::F3 => 0xFFC0,
+            key::Named::F4 => 0xFFC1,
+            key::Named::F5 => 0xFFC2,
+            key::Named::F6 => 0xFFC3,
+            key::Named::F7 => 0xFFC4,
+            key::Named::F8 => 0xFFC5,
+            key::Named::F9 => 0xFFC6,
+            key::Named::F10 => 0xFFC7,
+            key::Named::F11 => 0xFFC8,
+            key::Named::F12 => 0xFFC9,
+            _ => return None,
+        }),
+        key::Key::Unidentified => None,
+    }
+}
+
 struct RxHandle(Arc<Mutex<Receiver<ConversationNetEvent>>>);
 
 impl std::hash::Hash for RxHandle {
@@ -17701,16 +17858,118 @@ impl IcedChat {
         self.screen_share_host_state = ScreenShareHostState::Inviting;
         let stop = Arc::new(AtomicBool::new(false));
         self.screen_share_host_stop = Some(stop.clone());
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(8);
+        self.screen_share_host_cmd_tx = Some(cmd_tx);
         let endpoint = self.endpoint.clone();
         let local_public = self.local_public;
         // conversation_id is informational in the protocol and not used for
         // media routing; M7 shows the invitation in the active conversation.
         let conversation_id = 0u64;
         self.runtime_handle.spawn(async move {
-            run_host_session(endpoint, peer, local_public, conversation_id, events_tx, stop)
+            run_host_session(endpoint, peer, local_public, conversation_id, events_tx, stop, cmd_rx)
                 .await;
         });
         iced::Task::none()
+    }
+
+    #[cfg(feature = "screen-sharing")]
+    /// Viewer requests explicit control (pointer + keyboard) from the host.
+    fn request_screen_share_control(&self) -> iced::Task<AppMessage> {
+        if self.screen_share_control_active {
+            return iced::Task::none();
+        }
+        let Some(protocol) = self.screen_share_protocol.clone() else {
+            return iced::Task::none();
+        };
+        let Some(session_id) = self.screen_share_view_session else {
+            return iced::Task::none();
+        };
+        iced::Task::perform(
+            async move {
+                protocol
+                    .send_control(
+                        session_id,
+                        ControlMessage::RequestControl {
+                            version: SCREEN_SHARE_PROTOCOL_VERSION,
+                            session_id,
+                            capabilities: vec![
+                                Capability::ControlPointer,
+                                Capability::ControlKeyboard,
+                            ],
+                        },
+                    )
+                    .await
+                    .map_err(|e| e.to_string())
+            },
+            |result| AppMessage::ScreenShareCommandFinished(result),
+        )
+    }
+
+    #[cfg(feature = "screen-sharing")]
+    /// Send one authorized input event viewer → host. Pointer moves are
+    /// throttled (~30/s) and near-identical points skipped; every event echoes
+    /// the host's grant nonce so stale input is rejected.
+    fn send_screen_share_input(
+        &mut self,
+        capability: Capability,
+        code: u32,
+        x: f32,
+        y: f32,
+        pressed: bool,
+    ) -> iced::Task<AppMessage> {
+        if !self.screen_share_viewing || !self.screen_share_control_active {
+            return iced::Task::none();
+        }
+        if capability == Capability::ControlPointer && !pressed {
+            let now = Instant::now();
+            let throttled = self
+                .screen_share_last_pointer_sent
+                .is_some_and(|t| now.duration_since(t) < Duration::from_millis(33));
+            let same = self.screen_share_last_pointer_pos.is_some_and(|(lx, ly)| {
+                (lx - x).abs() < 0.005 && (ly - y).abs() < 0.005
+            });
+            if throttled || same {
+                return iced::Task::none();
+            }
+            self.screen_share_last_pointer_sent = Some(now);
+            self.screen_share_last_pointer_pos = Some((x, y));
+        }
+        let Some(protocol) = self.screen_share_protocol.clone() else {
+            return iced::Task::none();
+        };
+        let Some(session_id) = self.screen_share_view_session else {
+            return iced::Task::none();
+        };
+        let manager = protocol.manager();
+        iced::Task::perform(
+            async move {
+                let nonce = manager
+                    .lock()
+                    .await
+                    .permissions(session_id)
+                    .and_then(|permissions| permissions.token().map(|token| *token.nonce()));
+                match nonce {
+                    Some(nonce) => protocol
+                        .send_control(
+                            session_id,
+                            ControlMessage::Input {
+                                version: SCREEN_SHARE_PROTOCOL_VERSION,
+                                session_id,
+                                capability,
+                                nonce,
+                                code,
+                                x,
+                                y,
+                                pressed,
+                            },
+                        )
+                        .await
+                        .map_err(|e| e.to_string()),
+                    None => Err("control not granted".to_string()),
+                }
+            },
+            |result| AppMessage::ScreenShareCommandFinished(result),
+        )
     }
 
     #[cfg(feature = "screen-sharing")]
@@ -17826,9 +18085,22 @@ impl IcedChat {
                     self.screen_share_host_stop = None;
                 }
             }
-            SessionEvent::ControlRequest { .. } | SessionEvent::ControlChanged { .. } => {
-                // Control requests and grants are intentionally surfaced to the
-                // host/viewer UI without changing view-only lifecycle state.
+            SessionEvent::ControlRequest {
+                session_id,
+                peer_id,
+                capabilities,
+            } => {
+                // Host side: show the explicit consent prompt with grant choices.
+                if self.screen_share_host_state != ScreenShareHostState::Idle {
+                    self.screen_share_control_request =
+                        Some((session_id, peer_id.fmt_short().to_string(), capabilities));
+                }
+            }
+            SessionEvent::ControlChanged { active, .. } => {
+                self.screen_share_control_active = active;
+                if !active {
+                    self.screen_share_control_request = None;
+                }
             }
         }
     }
@@ -17839,6 +18111,7 @@ impl IcedChat {
     fn reset_screen_share_state(&mut self) {
         self.screen_share_host_state = ScreenShareHostState::Idle;
         self.screen_share_host_stop = None;
+        self.screen_share_host_cmd_tx = None;
         self.screen_share_invite = None;
         self.screen_share_viewing = false;
         self.screen_share_view_session = None;
@@ -17847,6 +18120,10 @@ impl IcedChat {
         self.screen_share_last_frame_ts = None;
         self.screen_share_frame_handle = None;
         self.screen_share_frame_watch = None;
+        self.screen_share_control_request = None;
+        self.screen_share_control_active = false;
+        self.screen_share_last_pointer_sent = None;
+        self.screen_share_last_pointer_pos = None;
     }
 
     pub fn subscription(
@@ -17954,6 +18231,8 @@ impl IcedChat {
         subs.push(screen_share_events_subscription(screen_share_events_rx));
         #[cfg(feature = "screen-sharing")]
         subs.push(screen_share_frame_subscription(screen_share_frame_watch));
+        #[cfg(feature = "screen-sharing")]
+        subs.push(screen_share_keyboard_subscription());
         iced::Subscription::batch(subs)
     }
 

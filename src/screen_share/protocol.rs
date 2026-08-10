@@ -18,6 +18,8 @@ use super::ScreenShareError;
 pub const SCREEN_SHARE_ALPN: &[u8] = b"boru/screen-share/1";
 /// Current wire protocol version. Major versions are not compatible.
 pub const SCREEN_SHARE_PROTOCOL_VERSION: u16 = 1;
+/// Upper bound for the input `code` field (X11 keysyms live below 0xFFFF).
+pub const MAX_INPUT_CODE: u32 = 0xFFFF;
 /// Maximum encoded control frame, including no transport framing overhead.
 pub const MAX_CONTROL_FRAME: usize = 16 * 1024;
 /// Maximum codec names in one Hello.
@@ -61,7 +63,7 @@ pub struct Hello {
 }
 
 /// Recipient response to a Hello.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ControlMessage {
     /// Start negotiation; no capture starts merely because this is received.
     Hello(Hello),
@@ -78,7 +80,11 @@ pub enum ControlMessage {
     /// Host revokes control without ending view-only streaming.
     RevokeControl { version: u16, session_id: ScreenShareSessionId },
     /// Input always carries the current grant nonce; stale input is rejected.
-    Input { version: u16, session_id: ScreenShareSessionId, capability: Capability, nonce: [u8; 16], code: u32 },
+    /// `code` is a button id (1-3) for pointer events or an X11 keysym for
+    /// keyboard; `x`/`y` are normalized viewer coordinates (0..1 relative to
+    /// the image rect) for pointer events and 0 for keyboard; `pressed` is the
+    /// key/button state.
+    Input { version: u16, session_id: ScreenShareSessionId, capability: Capability, nonce: [u8; 16], code: u32, x: f32, y: f32, pressed: bool },
 }
 
 /// Stable user-facing protocol failure.
@@ -129,8 +135,10 @@ impl ControlMessage {
                 }
                 *version
             }
-            Self::Input { version, capability, .. } => {
+            Self::Input { version, capability, code, x, y, .. } => {
                 if !matches!(capability, Capability::ControlPointer | Capability::ControlKeyboard) { return Err(ProtocolError::Malformed("input requires a control capability".into())); }
+                if *code > MAX_INPUT_CODE { return Err(ProtocolError::Malformed("input code out of range".into())); }
+                if !x.is_finite() || !y.is_finite() || !(0.0..=1.0).contains(x) || !(0.0..=1.0).contains(y) { return Err(ProtocolError::Malformed("input coordinates out of range".into())); }
                 *version
             }
         };
@@ -289,6 +297,12 @@ mod tests {
 
     fn hello() -> Hello { Hello { version: 1, session_id: ScreenShareSessionId::from_bytes([1; 16]), host_id: iroh::SecretKey::generate().public(), conversation_id: 7, codecs: vec!["h264".into()], width: 1920, height: 1080, frame_rate: 30, permission: Permission::ViewOnly } }
     #[test] fn round_trip() { let message = ControlMessage::Hello(hello()); assert_eq!(decode(&encode(&message).unwrap()).unwrap(), message); }
+    #[test] fn input_wire_round_trip_carries_pointer_state() {
+        let message = ControlMessage::Input { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: ScreenShareSessionId::from_bytes([7; 16]), capability: Capability::ControlPointer, nonce: [3; 16], code: 1, x: 0.5, y: 0.25, pressed: true };
+        assert_eq!(decode(&encode(&message).unwrap()).unwrap(), message);
+        let bad_x = ControlMessage::Input { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: ScreenShareSessionId::from_bytes([7; 16]), capability: Capability::ControlPointer, nonce: [3; 16], code: 1, x: 1.5, y: 0.25, pressed: true };
+        assert!(encode(&bad_x).is_err());
+    }
     #[test] fn malformed_and_unsupported_are_rejected() { assert!(decode(&[0xff]).is_err()); let mut message = hello(); message.version = 2; assert!(matches!(encode(&ControlMessage::Hello(message)), Err(ProtocolError::UnsupportedVersion { .. }))); }
     #[test] fn accept_is_explicit() { let mut manager = SessionManager::default(); let id = ScreenShareSessionId::from_bytes([2; 16]); manager.start_invitation(id, hello().host_id, 7); assert_eq!(manager.state(id), Some(SessionState::AwaitingAcceptance)); }
 

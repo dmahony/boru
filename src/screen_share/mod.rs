@@ -23,13 +23,16 @@ pub use codec::{
     CodecConfig, CodecKind, CodecMetadata, EncodedFrame, OpenH264Decoder, OpenH264Encoder,
     ScreenShareCodec, VideoDecoder, VideoEncoder, DEFAULT_QUEUE_CAPACITY,
 };
-pub use host::{run_host_session, DEMO_FPS, DEMO_HEIGHT, DEMO_WIDTH};
+pub use host::{run_host_session, HostCommand, DEMO_FPS, DEMO_HEIGHT, DEMO_WIDTH};
 pub use protocol::{
     ControlMessage, Hello, InboundMedia, Permission, ScreenShareProtocol, SCREEN_SHARE_ALPN,
-    SCREEN_SHARE_PROTOCOL_VERSION,
+    SCREEN_SHARE_PROTOCOL_VERSION, MAX_INPUT_CODE,
 };
 pub use permissions::{Capability, ControlToken, RequestRateLimiter, SessionPermissions};
-pub use remote_input::{authorize_input, map_pointer, InputEvent, NormalizedPointer, RemoteInput, UnavailableInputBackend};
+pub use remote_input::{
+    authorize_input, authorize_nonce, map_pointer, normalize_to_capture, InputEvent,
+    NormalizedPointer, RemoteInput, UnavailableInputBackend,
+};
 pub use session::{
     ScreenShareSession, ScreenShareSessionId, SessionEvent, SessionManager, SessionState,
 };
