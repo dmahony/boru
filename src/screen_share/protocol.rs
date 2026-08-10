@@ -9,6 +9,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, Mutex};
 
 use super::session::{ScreenShareSessionId, SessionEvent, SessionManager};
+use super::transport::ReadUnit;
 
 /// ALPN registered on the shared Iroh endpoint router.
 pub const SCREEN_SHARE_ALPN: &[u8] = b"boru/screen-share/1";
@@ -140,17 +141,12 @@ impl ScreenShareProtocol {
 impl iroh::protocol::ProtocolHandler for ScreenShareProtocol {
     async fn accept(&self, connection: iroh::endpoint::Connection) -> Result<(), iroh::protocol::AcceptError> {
         loop {
-            let (mut send, mut recv) = connection.accept_bi().await.map_err(iroh::protocol::AcceptError::from)?;
-            let mut frame = vec![0u8; 4];
-            if let Err(error) = recv.read_exact(&mut frame).await { return Err(iroh::protocol::AcceptError::from(std::io::Error::other(error.to_string()))); }
-            let length = u32::from_be_bytes(frame.as_slice().try_into().expect("four-byte frame")) as usize;
-            if length == 0 || length > MAX_CONTROL_FRAME { let _ = send.reset(0u32.into()); continue; }
-            let mut bytes = vec![0u8; length];
-            if let Err(error) = recv.read_exact(&mut bytes).await { return Err(iroh::protocol::AcceptError::from(std::io::Error::other(error.to_string()))); }
-            let message = match decode(&bytes) { Ok(message) => message, Err(error) => {
-                let _ = write_message(&mut send, &ControlMessage::Reject { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: ScreenShareSessionId::zero(), reason: error.to_string() }).await;
-                continue;
-            }};
+            let (mut send, recv) = connection.accept_bi().await.map_err(iroh::protocol::AcceptError::from)?;
+            let message = match super::transport::read_unit(recv).await {
+                Ok(ReadUnit::Control(message)) => message,
+                Ok(ReadUnit::Media(_, _)) => continue,
+                Err(_error) => { let _ = send.reset(0u32.into()); continue; }
+            };
             let response = { self.manager.lock().await.apply_remote(connection.remote_id(), message, &self.events) };
             if let Some(response) = response { let _ = write_message(&mut send, &response).await; }
         }
@@ -159,6 +155,7 @@ impl iroh::protocol::ProtocolHandler for ScreenShareProtocol {
 
 async fn write_message(send: &mut iroh::endpoint::SendStream, message: &ControlMessage) -> Result<(), ProtocolError> {
     let bytes = encode(message)?;
+    send.write_u8(0x01).await.map_err(|e| ProtocolError::Io(e.to_string()))?;
     send.write_u32(bytes.len() as u32).await.map_err(|e| ProtocolError::Io(e.to_string()))?;
     send.write_all(&bytes).await.map_err(|e| ProtocolError::Io(e.to_string()))?;
     send.finish().map_err(|e| ProtocolError::Io(e.to_string()))?;

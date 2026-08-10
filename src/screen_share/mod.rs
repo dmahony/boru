@@ -24,7 +24,8 @@ pub use remote_input::{InputEvent, RemoteInput};
 pub use session::{
     ScreenShareSession, ScreenShareSessionId, SessionEvent, SessionManager, SessionState,
 };
-pub use transport::ScreenTransport;
+pub use transport::{decode_media, encode_media, LatestFrameQueue, MediaHeader, PathKind,
+    QuicScreenTransport, ReadUnit, ScreenTransport, TransportCounters, MAX_MEDIA_FRAME};
 
 /// Error returned by a screen-sharing boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
