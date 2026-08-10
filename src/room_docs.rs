@@ -1677,7 +1677,7 @@ mod tests {
         let msg = Message::Message {
             text: "hello from the marker test".into(),
         };
-        let encoded = SignedMessage::sign_and_encode(&key, &msg).unwrap();
+        let _encoded = SignedMessage::sign_and_encode(&key, &msg).unwrap();
         // SignedMessage wire format is postcard: from-key (32 bytes) +
         // signature (64 bytes) + sent_at + compression byte + data. The
         // first content byte is a signature byte — not the marker. To make

@@ -1875,7 +1875,7 @@ mod tests {
     async fn with_capacity_controls_event_channel_size() {
         let (handle, _rx) = InboxHandle::with_capacity(3);
         let inner = handle.inner();
-        let mut guard = inner.lock().await;
+        let guard = inner.lock().await;
         let sent = guard.envelope_tx.try_send(InboxEvent::SyncRequested {
             from: test_secret_key().public(),
             since_ms: 0,

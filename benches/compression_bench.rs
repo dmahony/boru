@@ -74,6 +74,8 @@ fn samples() -> Vec<Sample> {
             ticket: blob_ticket(),
             size: 4_194_304,
             thumbnail_hash: Some([0xab; 32]),
+            collection_hash: None,
+            collection_entries: 0,
         },
     });
     v.push(Sample {
@@ -83,6 +85,8 @@ fn samples() -> Vec<Sample> {
             ticket: blob_ticket(),
             size: 1024,
             thumbnail_hash: None,
+            collection_hash: None,
+            collection_entries: 0,
         },
     });
 

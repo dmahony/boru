@@ -12,7 +12,7 @@
     use serde_byte_array::ByteArray;
     use std::collections::HashMap;
     use std::str::FromStr;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     use crate::chat_core::protocol::Signature;
     use std::collections::HashSet;
@@ -794,6 +794,7 @@
         // and an *old* peer using the pre-compression 4-field struct must still
         // deserialize it.  Postcard ignores the trailing `compression` byte.
         #[derive(Deserialize)]
+        #[allow(dead_code)] // fields read via postcard deserialization in the legacy-compat test
         struct LegacyEnvelope {
             from: PublicKey,
             data: Bytes,

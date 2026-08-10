@@ -27,7 +27,7 @@
 //! | 8 | `sync_vs_retry_different_tables` | Sync queries dm_outbox; retry queries outbox (separate concerns) |
 //! | 9 | `sync_prune_does_not_remove_recent` | prune_sync_dedup leaves fresh entries intact |
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use iroh::{PublicKey, SecretKey};
@@ -137,7 +137,7 @@ fn sync_normal_retrieves_all() {
     // Verify each envelope addresses the correct recipient.
     for env in &page {
         assert_eq!(
-            env.recipient.identity, recipient_pk,
+            env.recipient().identity, recipient_pk,
             "envelope should be addressed to the recipient"
         );
     }
@@ -246,15 +246,20 @@ fn sync_size_limit_truncation() {
     let recipient_pk = recipient_sk.public();
     let conv_id = make_conv_id(0x03);
 
-    // Queue 5 messages.
+    // Queue 5 messages.  Space them 2 ms apart so each gets a distinct
+    // created_at_ms: the sync query orders by (created_at_ms, message_id),
+    // and the inclusive cursor re-returns the boundary envelope otherwise
+    // (dedup below removes it only when ids match in query order).
     let mb_pk = mailbox_pk(&recipient_sk);
+    let mut msg_ids = Vec::new();
     for i in 0..5u64 {
-        queue_dm(&storage, &sender_sk, mb_pk, conv_id, i);
+        msg_ids.push(queue_dm(&storage, &sender_sk, mb_pk, conv_id, i));
+        std::thread::sleep(Duration::from_millis(2));
     }
 
-    // Query with a tight byte budget (900 bytes — fits ~2 envelopes).
+    // Query with a tight byte budget (1500 bytes — well under the 5 queued).
     let (page, has_more) = storage
-        .query_pending_outbound_for_recipient(&recipient_pk, 0, 100, 900)
+        .query_pending_outbound_for_recipient(&recipient_pk, 0, 100, 1500)
         .expect("size-limited query");
     assert!(
         page.len() < 5,
@@ -270,20 +275,31 @@ fn sync_size_limit_truncation() {
         .map(|env| postcard::to_stdvec(env).unwrap_or_default().len())
         .sum();
     assert!(
-        encoded_size <= 900,
-        "response must fit within max_bytes: {encoded_size} <= 900"
+        encoded_size <= 1500,
+        "response must fit within max_bytes: {encoded_size} <= 1500"
     );
 
+    // Record the served envelopes, as the production sync responder does.
+    let served: Vec<MessageId> = msg_ids[..page.len()].to_vec();
+    storage
+        .record_sync_served(&recipient_pk, &served)
+        .expect("record page 1");
+
     // Second page should get the rest.
-    let cursor = page.last().unwrap().created_at;
+    let cursor = page.last().unwrap().created_at();
     let (page2, more2) = storage
-        .query_pending_outbound_for_recipient(&recipient_pk, cursor, 100, 900)
+        .query_pending_outbound_for_recipient(&recipient_pk, cursor, 100, 1500)
         .expect("page 2");
+    let served2: Vec<MessageId> = msg_ids[page.len()..page.len() + page2.len()].to_vec();
+    storage
+        .record_sync_served(&recipient_pk, &served2)
+        .expect("record page 2");
+
     let total = page.len() + page2.len();
     if more2 {
-        let cursor2 = page2.last().unwrap().created_at;
+        let cursor2 = page2.last().unwrap().created_at();
         let (page3, _) = storage
-            .query_pending_outbound_for_recipient(&recipient_pk, cursor2, 100, 300)
+            .query_pending_outbound_for_recipient(&recipient_pk, cursor2, 100, 1000)
             .expect("page 3");
         assert_eq!(page.len() + page2.len() + page3.len(), 5);
     } else {
@@ -321,7 +337,7 @@ fn sync_rejects_wrong_recipient() {
     assert_eq!(alice_page.len(), 2, "Alice should see only her 2 messages");
     for env in &alice_page {
         assert_eq!(
-            env.recipient.identity, alice_pk,
+            env.recipient().identity, alice_pk,
             "Alice's results should be addressed to Alice"
         );
     }
@@ -333,7 +349,7 @@ fn sync_rejects_wrong_recipient() {
     assert_eq!(bob_page.len(), 2, "Bob should see only his 2 messages");
     for env in &bob_page {
         assert_eq!(
-            env.recipient.identity, bob_pk,
+            env.recipient().identity, bob_pk,
             "Bob's results should be addressed to Bob"
         );
     }
@@ -431,7 +447,7 @@ fn sync_with_gaps() {
     storage
         .record_sync_served(&recipient_pk, &first_three)
         .expect("record first 3");
-    let cursor1 = page1.last().unwrap().created_at;
+    let cursor1 = page1.last().unwrap().created_at();
 
     // Round 2: sync with cursor → should get next 3 (messages 4, 5, 6).
     let (page2, more2) = storage
@@ -444,7 +460,7 @@ fn sync_with_gaps() {
     storage
         .record_sync_served(&recipient_pk, &mids)
         .expect("record next 3");
-    let cursor2 = page2.last().unwrap().created_at;
+    let cursor2 = page2.last().unwrap().created_at();
 
     // Round 3: sync with cursor → final 1 message.
     let (page3, more3) = storage
@@ -498,7 +514,7 @@ fn sync_full_lifecycle_with_cursor() {
             .expect("record page 1");
 
         // Advance cursor.
-        let cursor = page.last().unwrap().created_at;
+        let cursor = page.last().unwrap().created_at();
         storage
             .upsert_sync_cursor(&recipient_pk, Some(&cursor.to_be_bytes()), now_ms())
             .expect("upsert cursor after page 1");
@@ -536,7 +552,7 @@ fn sync_full_lifecycle_with_cursor() {
             .record_sync_served(&recipient_pk, &to_record)
             .expect("record page 2");
 
-        let new_cursor = page.last().unwrap().created_at;
+        let new_cursor = page.last().unwrap().created_at();
         storage
             .upsert_sync_cursor(&recipient_pk, Some(&new_cursor.to_be_bytes()), now_ms())
             .expect("upsert cursor after page 2");
@@ -570,7 +586,7 @@ fn sync_full_lifecycle_with_cursor() {
             .expect("record page 3");
 
         // Advance cursor to end.
-        let new_cursor = page.last().unwrap().created_at;
+        let new_cursor = page.last().unwrap().created_at();
         storage
             .upsert_sync_cursor(&recipient_pk, Some(&new_cursor.to_be_bytes()), now_ms())
             .expect("upsert cursor after page 3");
@@ -675,7 +691,7 @@ fn sync_vs_retry_different_tables() {
 
     // Sync envelopes are MailboxEnvelope objects (encrypted payloads).
     for env in &sync_page2 {
-        assert_eq!(env.recipient.identity, recipient_pk);
+        assert_eq!(env.recipient().identity, recipient_pk);
     }
 }
 

@@ -839,7 +839,11 @@ fn invalid_ack_for_unknown_hash_does_not_panic() {
 }
 
 #[test]
-fn valid_ack_for_known_message_produces_notification() {
+fn valid_ack_for_known_message_is_silent() {
+    // A valid ReadReceipt for a known message must be accepted without
+    // panicking and must NOT append a system notification: read receipts
+    // update delivery-state icons only (👁) — no system message is added
+    // since the UI change (see handle_net_event's ReadReceipt arm).
     let mut chat = TestChat::new(SecretKey::generate().public());
     let sender_key = SecretKey::generate();
 
@@ -862,14 +866,10 @@ fn valid_ack_for_known_message_produces_notification() {
         sent_at: now_secs(),
     };
     handle_net_event(ack_event, &mut chat).unwrap();
-    assert!(
-        chat.entries.len() >= 2,
-        "ack for known message must add a system notification"
-    );
-    let ack_body = &chat.entries[1].body;
-    assert!(
-        ack_body.contains("read"),
-        "ack notification should mention 'read': {ack_body}"
+    assert_eq!(
+        chat.entries.len(),
+        1,
+        "read receipt must not add a system notification entry"
     );
 }
 

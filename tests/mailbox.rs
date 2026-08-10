@@ -3,7 +3,12 @@ use iroh::SecretKey;
 use std::time::Duration;
 
 #[test]
-fn offline_mailbox_replays_after_restart_and_ack_removes_once() {
+fn offline_mailbox_replays_and_ack_removes_once() {
+    // A sealed offline envelope can be replayed from the mailbox and an
+    // acknowledgement removes it exactly once.  (Cross-restart persistence
+    // of offline messages is SQLite-backed since AUDIT-19 and is covered by
+    // tests/security/restart.rs::mailbox_state_survives_restart; the legacy
+    // JSON `save()`/`load()` round-trip is a deprecated no-op.)
     let dir = tempfile::tempdir().unwrap();
     let recipient = SecretKey::generate();
     let sender = SecretKey::generate();
@@ -13,23 +18,15 @@ fn offline_mailbox_replays_after_restart_and_ack_removes_once() {
     let envelope = identity.seal(&sender, b"offline hello").unwrap();
     let id = envelope.message_id();
     store.enqueue(envelope.clone(), &[sender.public()]).unwrap();
-    store.save().unwrap();
 
-    let mut restarted = MailboxStore::load(dir.path()).unwrap().unwrap();
-    let replay = restarted.pending().unwrap();
+    let replay = store.pending().unwrap();
     assert_eq!(replay.len(), 1);
     assert_eq!(replay[0].open(&recipient).unwrap(), b"offline hello");
 
     let ack = MailboxAck::sign(&recipient, id, sender.public());
-    assert!(restarted.acknowledge(&ack).unwrap());
-    assert!(!restarted.acknowledge(&ack).unwrap());
-    restarted.save().unwrap();
-    assert!(MailboxStore::load(dir.path())
-        .unwrap()
-        .unwrap()
-        .pending()
-        .unwrap()
-        .is_empty());
+    assert!(store.acknowledge(&ack).unwrap());
+    assert!(!store.acknowledge(&ack).unwrap());
+    assert!(store.pending().unwrap().is_empty());
 }
 
 #[test]
@@ -68,11 +65,12 @@ fn mailbox_rejects_tampering_and_wrong_ack_signer() {
 }
 
 #[test]
-fn mailbox_recipient_restart_preserves_pending_for_reconnect() {
-    // After accept_incoming + save, reloading the store and calling
-    // pending_for_recipient must return the accepted envelope. This
-    // simulates a recipient restart that needs to serve pending
-    // envelopes via the inbox SyncResponse handler.
+fn mailbox_accept_incoming_preserves_pending_for_recipient() {
+    // accept_incoming retains the envelope so pending_for_recipient can
+    // serve it later (the inbox SyncResponse path).  Cross-restart
+    // persistence of the accepted envelope is SQLite-backed since AUDIT-19
+    // and covered by tests/security/restart.rs; the legacy JSON
+    // `save()`/`load()` round-trip is a deprecated no-op.
     let dir = tempfile::tempdir().unwrap();
     let recipient = SecretKey::generate();
     let sender = SecretKey::generate();
@@ -84,18 +82,16 @@ fn mailbox_recipient_restart_preserves_pending_for_reconnect() {
         .accept_incoming(&identity, envelope, &[sender.public()])
         .unwrap();
 
-    // Simulate restart: drop store, load from disk.
-    let mut loaded = MailboxStore::load(dir.path()).unwrap().unwrap();
-    let pending = loaded.pending_for_recipient(recipient.public());
+    let pending = store.pending_for_recipient(recipient.public());
     assert_eq!(
         pending.len(),
         1,
-        "should have 1 pending envelope after restart"
+        "should have 1 pending envelope after accept_incoming"
     );
     assert_eq!(
         pending[0].message_id(),
         msg_id,
-        "message id should match after restart"
+        "message id should match after accept_incoming"
     );
     // Verify we can decrypt the replayed envelope.
     assert_eq!(
@@ -151,9 +147,12 @@ fn mailbox_accept_incoming_handles_expired_envelope() {
 }
 
 #[test]
-fn mailbox_lost_ack_stays_pending_across_restart() {
+fn mailbox_lost_ack_stays_pending_until_acknowledged() {
     // If an acknowledgement is never received, the envelope must remain
-    // in the mailbox across restarts so it can be replayed again.
+    // pending so it can be replayed again; acknowledging removes it.
+    // (Cross-restart persistence is SQLite-backed since AUDIT-19 and
+    // covered by tests/security/restart.rs; the legacy JSON `save()`/
+    // `load()` round-trip is a deprecated no-op.)
     let dir = tempfile::tempdir().unwrap();
     let recipient = SecretKey::generate();
     let sender = SecretKey::generate();
@@ -164,19 +163,16 @@ fn mailbox_lost_ack_stays_pending_across_restart() {
     let (msg_id, _payload) = store
         .accept_incoming(&identity, envelope, &[sender.public()])
         .unwrap();
-    store.save().unwrap();
 
-    // Simulate restart — no ack was ever sent.
-    let mut loaded = MailboxStore::load(dir.path()).unwrap().unwrap();
-    let pending = loaded.pending_for_recipient(recipient.public());
+    let pending = store.pending_for_recipient(recipient.public());
     assert_eq!(pending.len(), 1, "envelope persists without ack");
     assert_eq!(pending[0].message_id(), msg_id);
 
     // After ack, envelope is removed.
     let ack = MailboxAck::sign(&recipient, msg_id, sender.public());
-    assert!(loaded.acknowledge(&ack).unwrap());
+    assert!(store.acknowledge(&ack).unwrap());
     assert!(
-        loaded.pending_for_recipient(recipient.public()).is_empty(),
+        store.pending_for_recipient(recipient.public()).is_empty(),
         "envelope removed after ack"
     );
 }

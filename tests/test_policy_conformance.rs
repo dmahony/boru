@@ -16,7 +16,7 @@
 //! explicit.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use boru_core::catalogue_model::RemoteSharedFile;
 use boru_core::collection_transfer::validate_path_component;

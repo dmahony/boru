@@ -1115,8 +1115,11 @@ mod tests {
             ..RemoteSharedFile::new("hash", "name", None, 100, "text/plain", None, 1)
         };
         assert!(f.validate().is_err());
+        // Double the allowed skew so the value is deterministically beyond
+        // the bound even though validate() re-reads the clock moments later
+        // (adding exactly SKEW+1ms races the clock and flakes).
         let f = RemoteSharedFile {
-            updated_at_ms: now_ms().saturating_add(MAX_TIMESTAMP_FUTURE_SKEW_MS + 1),
+            updated_at_ms: now_ms().saturating_add(MAX_TIMESTAMP_FUTURE_SKEW_MS * 2),
             ..RemoteSharedFile::new("hash", "name", None, 100, "text/plain", None, 1)
         };
         assert!(f.validate().is_err());

@@ -747,9 +747,7 @@ mod tests {
     fn make_test_state() -> (GroupId, GroupEncryptionState) {
         use crate::group_encryption::encryption_state::EncryptionState;
         use crate::group_encryption::types::PeerId;
-        use p2panda_encryption::crypto::x25519::{
-            PublicKey as XPublicKey, SecretKey as XSecretKey,
-        };
+        use p2panda_encryption::crypto::x25519::SecretKey as XSecretKey;
         use p2panda_encryption::crypto::xeddsa::xeddsa_sign;
         use p2panda_encryption::crypto::Rng;
         use p2panda_encryption::key_bundle::{Lifetime, OneTimeKeyBundle, OneTimePreKey, PreKey};

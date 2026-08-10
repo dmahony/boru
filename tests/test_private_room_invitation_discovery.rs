@@ -70,7 +70,7 @@ fn tracker_from_invitation(
         .discovery_secret()
         .expect("stable invitation carries a discovery secret");
     let (sk, ep) = identity();
-    let tracker = PrivateRoomTracker::new(Box::new(backend.clone()), topic, *secret, ep, sk);
+    let tracker = PrivateRoomTracker::new(Box::new(backend.clone()), topic, secret.clone(), ep, sk);
     (tracker, ep)
 }
 
@@ -569,7 +569,7 @@ fn v1_wire_format_is_accepted() {
 fn v1_invitation_roundtrip() {
     let topic = test_topic();
     let secret = test_secret();
-    let invite = boru_core::chat_core::RoomInviteV2::new(topic, secret);
+    let invite = boru_core::chat_core::RoomInviteV2::new(topic, secret.clone());
     let encoded = invite.encode();
 
     // Parse.
@@ -599,7 +599,7 @@ fn v1_invitation_roundtrip() {
 fn v1_invitation_is_deterministic() {
     let topic = test_topic();
     let secret = test_secret();
-    let a = boru_core::chat_core::RoomInviteV2::new(topic, secret).encode();
+    let a = boru_core::chat_core::RoomInviteV2::new(topic, secret.clone()).encode();
     let b = boru_core::chat_core::RoomInviteV2::new(topic, secret).encode();
     assert_eq!(a, b, "V1 invitation must be deterministic");
 }

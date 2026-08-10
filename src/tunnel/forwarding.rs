@@ -388,7 +388,7 @@ mod tests {
         let mut response = Vec::new();
         local_client.read_to_end(&mut response).await?;
         assert_eq!(response, b"response");
-        timeout(Duration::from_secs(2), forwarding).await??;
+        let _ = timeout(Duration::from_secs(2), forwarding).await??;
         router.shutdown().await?;
         client.close().await;
         Ok(())
@@ -408,7 +408,7 @@ mod tests {
         ));
         sleep(Duration::from_millis(20)).await;
         cancellation.cancel();
-        timeout(Duration::from_secs(2), forwarding).await??;
+        let _ = timeout(Duration::from_secs(2), forwarding).await??;
         fixture.router.shutdown().await?;
         fixture.client.close().await;
         Ok(())
@@ -441,7 +441,7 @@ mod tests {
         remote_client_send.reset(iroh::endpoint::VarInt::from_u32(1))?;
         sleep(Duration::from_millis(20)).await;
         cancellation.cancel();
-        timeout(Duration::from_secs(2), forwarding).await??;
+        let _ = timeout(Duration::from_secs(2), forwarding).await??;
         router.shutdown().await?;
         client.close().await;
         Ok(())

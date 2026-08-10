@@ -19,7 +19,7 @@ struct TestFrontend {
 impl TestFrontend {
     fn save_if_dirty(&mut self) {
         if self.friends_dirty {
-            self.friends.file_path();
+            self.friends.save().expect("save friends store");
             self.friends_dirty = false;
         }
     }

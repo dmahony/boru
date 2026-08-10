@@ -775,7 +775,7 @@ mod tests {
         let expected_server_sk = iroh::SecretKey::generate();
         let expected_server_pk = expected_server_sk.public();
         let attacker_sk = iroh::SecretKey::generate();
-        let attacker_pk = attacker_sk.public();
+        let _attacker_pk = attacker_sk.public();
         let client_sk = iroh::SecretKey::generate();
         let client_pk = client_sk.public();
 
@@ -908,7 +908,7 @@ mod tests {
         let server_sk = iroh::SecretKey::generate();
         let server_pk = server_sk.public();
         let attacker_sk = iroh::SecretKey::generate();
-        let attacker_pk = attacker_sk.public();
+        let _attacker_pk = attacker_sk.public();
         let client_sk = iroh::SecretKey::generate();
         let client_pk = client_sk.public();
 

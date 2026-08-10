@@ -85,13 +85,14 @@ const URI_PREFIX: &str = "boru-chat://pair/";
 /// # Example
 ///
 /// ```rust
-/// use boru_chat::peer_invitation::PeerInvitation;
+/// use boru_core::peer_invitation::PeerInvitation;
 ///
 /// let inv = PeerInvitation::builder()
+///     .peer_id(iroh::SecretKey::generate().public())
 ///     .display_name("Alice")
 ///     .build();
 ///
-/// let uri = inv.to_uri();
+/// let uri = inv.to_uri().unwrap();
 /// let decoded = PeerInvitation::from_uri(&uri).unwrap();
 /// assert_eq!(inv, decoded);
 /// ```

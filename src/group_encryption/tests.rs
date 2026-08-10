@@ -12,7 +12,7 @@ use p2panda_encryption::traits::PreKeyManager;
 use rusqlite::{params, Connection};
 
 use crate::group_encryption::encryption_state::{
-    EncryptionError, EncryptionState, GroupAuthEvent, GroupStateLoadOutcome,
+    EncryptionError, EncryptionState, GroupStateLoadOutcome,
 };
 use crate::group_encryption::manager::Manager;
 use crate::group_encryption::membership::MemberRole;
@@ -26,6 +26,7 @@ use crate::group_id::GroupId;
 // ── Test helpers ─────────────────────────────────────────────────────
 
 /// Generate a valid OneTimeKeyBundle for testing.
+#[allow(dead_code)] // retained for future key-rotation tests (AUDIT-09 rewrote the suite)
 fn make_bundle(rng: &Rng) -> OneTimeKeyBundle {
     let secret_key = XSecretKey::from_rng(rng).unwrap();
     let identity_key = secret_key.verifying_key().unwrap();
@@ -1057,7 +1058,7 @@ mod integration {
     /// allowed).
     #[test]
     fn test_load_from_db_missing_permits_fresh_init() {
-        let (mut alice, _bob, alice_id, _bob_id, _registry) = setup_two_peers();
+        let (mut alice, _bob, _alice_id, _bob_id, _registry) = setup_two_peers();
         let group_id = GroupId::generate();
 
         let conn = Connection::open_in_memory().unwrap();

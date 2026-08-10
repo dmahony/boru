@@ -32,11 +32,11 @@ fn identity() -> (SecretKey, iroh::EndpointId) {
 fn tracker(
     backend: &InMemoryDiscoveryBackend,
     room_topic: TopicId,
-    secret: DiscoverySecret,
+    secret: &DiscoverySecret,
 ) -> (PrivateRoomTracker, iroh::EndpointId) {
     let (key, endpoint) = identity();
     (
-        PrivateRoomTracker::new(Box::new(backend.clone()), room_topic, secret, endpoint, key),
+        PrivateRoomTracker::new(Box::new(backend.clone()), room_topic, secret.clone(), endpoint, key),
         endpoint,
     )
 }
@@ -82,10 +82,15 @@ fn room_store_v2_migrates_without_secret() -> TestResult {
     assert_eq!(loaded.topic, topic(0x42));
     assert_eq!(loaded.discovery_secret, None);
 
-    let migrated: serde_json::Value =
+    // The v2→v3 migration is applied in memory only: the legacy JSON room
+    // file is deliberately NOT rewritten (SQLite room tables are the live
+    // source of truth; RoomStore::save() is a deprecated no-op).  The
+    // migration stays idempotent on every load until the legacy file is
+    // naturally removed.
+    let on_disk: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(dir.path().join("room.json"))?)?;
-    assert_eq!(migrated["schema_version"], 3);
-    assert!(migrated.get("discovery_secret").is_some());
+    assert_eq!(on_disk["schema_version"], 2, "legacy room file is not rewritten");
+    assert!(on_disk.get("discovery_secret").is_none());
     Ok(())
 }
 
@@ -93,8 +98,8 @@ fn room_store_v2_migrates_without_secret() -> TestResult {
 async fn two_peers_publish_and_discover_without_network() -> TestResult {
     let backend = InMemoryDiscoveryBackend::new();
     let secret = DiscoverySecret::generate();
-    let (alice, alice_id) = tracker(&backend, topic(1), secret);
-    let (bob, _) = tracker(&backend, topic(1), secret);
+    let (alice, alice_id) = tracker(&backend, topic(1), &secret);
+    let (bob, _) = tracker(&backend, topic(1), &secret);
 
     alice.publish_once().await?;
     assert_eq!(bob.discover_once().await?, vec![alice_id]);
@@ -105,9 +110,9 @@ async fn two_peers_publish_and_discover_without_network() -> TestResult {
 async fn three_peers_form_a_chain() -> TestResult {
     let backend = InMemoryDiscoveryBackend::new();
     let secret = DiscoverySecret::generate();
-    let (alice, alice_id) = tracker(&backend, topic(2), secret);
-    let (bob, bob_id) = tracker(&backend, topic(2), secret);
-    let (carol, carol_id) = tracker(&backend, topic(2), secret);
+    let (alice, alice_id) = tracker(&backend, topic(2), &secret);
+    let (bob, bob_id) = tracker(&backend, topic(2), &secret);
+    let (carol, carol_id) = tracker(&backend, topic(2), &secret);
 
     alice.publish_once().await?;
     bob.publish_once().await?;
@@ -126,12 +131,12 @@ async fn three_peers_form_a_chain() -> TestResult {
 async fn creator_offline_does_not_prevent_remaining_peers() -> TestResult {
     let backend = InMemoryDiscoveryBackend::new();
     let secret = DiscoverySecret::generate();
-    let (creator, _) = tracker(&backend, topic(3), secret);
+    let (creator, _) = tracker(&backend, topic(3), &secret);
     creator.publish_once().await?;
     drop(creator);
 
-    let (bob, bob_id) = tracker(&backend, topic(3), secret);
-    let (carol, carol_id) = tracker(&backend, topic(3), secret);
+    let (bob, bob_id) = tracker(&backend, topic(3), &secret);
+    let (carol, carol_id) = tracker(&backend, topic(3), &secret);
     bob.publish_once().await?;
     carol.publish_once().await?;
 
@@ -143,8 +148,8 @@ async fn creator_offline_does_not_prevent_remaining_peers() -> TestResult {
 #[tokio::test]
 async fn different_secrets_are_namespace_isolated() -> TestResult {
     let backend = InMemoryDiscoveryBackend::new();
-    let (room_a, _) = tracker(&backend, topic(4), DiscoverySecret::from_bytes([1; 32]));
-    let (room_b, _) = tracker(&backend, topic(4), DiscoverySecret::from_bytes([2; 32]));
+    let (room_a, _) = tracker(&backend, topic(4), &DiscoverySecret::from_bytes([1; 32]));
+    let (room_b, _) = tracker(&backend, topic(4), &DiscoverySecret::from_bytes([2; 32]));
     room_a.publish_once().await?;
     assert!(room_b.discover_once().await?.is_empty());
     Ok(())
@@ -154,8 +159,8 @@ async fn different_secrets_are_namespace_isolated() -> TestResult {
 async fn self_and_duplicate_records_are_filtered() -> TestResult {
     let backend = InMemoryDiscoveryBackend::new();
     let secret = DiscoverySecret::generate();
-    let (alice, alice_id) = tracker(&backend, topic(5), secret);
-    let (bob, _) = tracker(&backend, topic(5), secret);
+    let (alice, alice_id) = tracker(&backend, topic(5), &secret);
+    let (bob, _) = tracker(&backend, topic(5), &secret);
     alice.publish_once().await?;
     alice.publish_once().await?;
     assert_eq!(
@@ -167,7 +172,7 @@ async fn self_and_duplicate_records_are_filtered() -> TestResult {
         1
     );
 
-    let (self_tracker, _) = tracker(&backend, topic(6), secret);
+    let (self_tracker, _) = tracker(&backend, topic(6), &secret);
     self_tracker.publish_once().await?;
     assert!(self_tracker.discover_once().await?.is_empty());
     Ok(())
@@ -176,7 +181,7 @@ async fn self_and_duplicate_records_are_filtered() -> TestResult {
 #[tokio::test]
 async fn empty_discovery_leaves_ticket_bootstrap_fallback_available() -> TestResult {
     let backend = InMemoryDiscoveryBackend::new();
-    let (tracker, _) = tracker(&backend, topic(7), DiscoverySecret::generate());
+    let (tracker, _) = tracker(&backend, topic(7), &DiscoverySecret::generate());
     assert!(tracker.discover_once().await?.is_empty());
 
     let peer = EndpointAddr::new(identity().1);
@@ -188,7 +193,7 @@ async fn empty_discovery_leaves_ticket_bootstrap_fallback_available() -> TestRes
 #[tokio::test]
 async fn shutdown_is_idempotent_for_in_memory_backend_and_does_not_hang() -> TestResult {
     let backend = InMemoryDiscoveryBackend::new();
-    let (tracker, _) = tracker(&backend, topic(8), DiscoverySecret::generate());
+    let (tracker, _) = tracker(&backend, topic(8), &DiscoverySecret::generate());
     tokio::time::timeout(Duration::from_secs(1), tracker.shutdown()).await?;
     let _ = tokio::time::timeout(Duration::from_secs(1), backend.shutdown()).await?;
     assert!(backend

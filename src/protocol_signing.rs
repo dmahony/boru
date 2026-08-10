@@ -16,10 +16,10 @@
 //!   security-relevant fields (identity, routing/topic, timestamps, nonces,
 //!   hashes, capability scope, interpretation/version fields).
 //!
-//! Signing and verification MUST both go through [`canonical_signed_bytes`] so
+//! Signing and verification MUST both go through `canonical_signed_bytes` so
 //! the two sides can never drift.  During the migration window, verification
 //! additionally accepts the pre-AUDIT-27 legacy framing via
-//! [`verify_canonical_or_legacy`] — old persisted/wire objects keep verifying,
+//! `verify_canonical_or_legacy` — old persisted/wire objects keep verifying,
 //! while new objects get the full domain-separated layout.  New objects are
 //! always signed with the canonical layout.
 //!
