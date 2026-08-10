@@ -23,6 +23,7 @@ pub use codec::{
 pub use host::{run_host_session, DEMO_FPS, DEMO_HEIGHT, DEMO_WIDTH};
 pub use protocol::{
     ControlMessage, Hello, InboundMedia, Permission, ScreenShareProtocol, SCREEN_SHARE_ALPN,
+    SCREEN_SHARE_PROTOCOL_VERSION,
 };
 pub use remote_input::{InputEvent, RemoteInput};
 pub use session::{

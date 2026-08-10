@@ -3981,7 +3981,7 @@ pub struct IcedChat {
     pub screen_share_protocol: Option<ScreenShareProtocol>,
     #[cfg(feature = "screen-sharing")]
     /// Watch receiver delivering the latest decoded frame to the viewer panel.
-    pub screen_share_frame_watch: Option<Arc<Mutex<watch::Receiver<Option<CapturedFrame>>>>>,
+    pub screen_share_frame_watch: Option<Arc<Mutex<tokio::sync::watch::Receiver<Option<CapturedFrame>>>>>,
     #[cfg(feature = "screen-sharing")]
     /// Host-side sharing state; drives the persistent indicator.
     screen_share_host_state: ScreenShareHostState,
@@ -17449,13 +17449,17 @@ async fn decode_worker(
         if stop.load(Ordering::Relaxed) {
             break;
         }
+        // Hold the receiver guard across the select so the recv() future does
+        // not borrow a temporary guard (single media consumer in M7).
+        let mut guard = media_rx.lock().await;
         let unit = tokio::select! {
-            unit = media_rx.lock().await.recv() => match unit {
+            unit = guard.recv() => match unit {
                 Some(unit) => unit,
                 None => break,
             },
             _ = tokio::time::sleep(Duration::from_millis(50)) => continue,
         };
+        drop(guard);
         if unit.session_id != session_id {
             continue;
         }
