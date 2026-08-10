@@ -955,6 +955,9 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    use crate::catalogue_limits::{
+        MAX_CATALOGUE_FILES, MAX_COLLECTIONS, MAX_FILE_SIZE_BYTES,
+    };
     use crate::catalogue_model::SignedFileCatalogue;
     use crate::catalogue_protocol::CatalogErrorCode;
     use crate::catalogue_rate_limits::MAX_CONCURRENT_CATALOGUE_CONNECTIONS;

@@ -14,6 +14,9 @@
     use std::str::FromStr;
     use std::sync::{Arc, Mutex};
 
+    use crate::chat_core::protocol::Signature;
+    use std::collections::HashSet;
+
     // ── Composer tests ───────────────────────────────────────────────────
 
     #[test]

@@ -1,11 +1,22 @@
 //! Shared chat core — reusable state machine, protocol types, and network event handling.
 //!
-//! This module contains the protocol types (`Message`, `SignedMessage`, `Ticket`),
-//! the chat state machine (`AppState`, `Composer`, `ChatEntry`, `StatusContext`),
-//! and network event processing (`handle_net_event`, `forward_gossip_events`).
+//! This module is a thin composition surface over responsibility-scoped
+//! submodules (BORU-AUDIT-23):
 //!
-//! It has **no** terminal/ratatui/crossterm dependencies, making it usable from
-//! any frontend (TUI, GUI, headless).
+//! - [`protocol`] — pure wire types (`Message`, `SignedMessage`, `Ticket`,
+//!   `RoomInvitation`, `NetEvent`) and codec helpers.
+//! - [`composer`], [`entries`], [`status`], [`state`] — UI-free state types
+//!   (`Composer`, `ChatEntry`, `StatusContext`, `AppState`).
+//! - [`dedup`] — transport deduplication and signed-payload cache.
+//! - [`net_event`] — network event processing (`handle_net_event`,
+//!   `forward_gossip_events`, public-room safety filter).
+//! - [`downloads`] — blob transfer execution with progress reporting.
+//! - [`bootstrap`], [`util`] — bootstrap peer resolution and small helpers.
+//!
+//! Everything is re-exported at this level so existing import paths
+//! (`iroh_gossip::chat_core::Message`, `chat_core::handle_net_event`, …)
+//! keep working unchanged.  The module has **no** terminal/ratatui/crossterm
+//! dependencies, making it usable from any frontend (TUI, GUI, headless).
 //!
 //! The [`ChatCallbacks`] trait is defined in [`crate::chat_callbacks`].
 

@@ -317,20 +317,20 @@ pub fn verify_advertisement(ad: &RoomAdvertisement, signature: &[u8], author: Pu
 }
 
 const SIGNATURE_LENGTH: usize = iroh::Signature::LENGTH;
-type Signature = ByteArray<SIGNATURE_LENGTH>;
+pub(crate) type Signature = ByteArray<SIGNATURE_LENGTH>;
 
 /// A signed message envelope with sender identity and signature.
 #[derive(Debug, Serialize)]
 pub struct SignedMessage {
-    from: PublicKey,
-    data: Bytes,
-    signature: Signature,
+    pub(crate) from: PublicKey,
+    pub(crate) data: Bytes,
+    pub(crate) signature: Signature,
     /// Unix epoch seconds when the message was sent.
-    sent_at: u64,
+    pub(crate) sent_at: u64,
     /// Compression applied to `data`: `0` = none (legacy), `1` = deflate
     /// with the shared dictionary.  Envelopes produced before this field
     /// existed omit the byte entirely and decode as `0`.
-    compression: u8,
+    pub(crate) compression: u8,
 }
 
 /// Manual [`Deserialize`] so legacy envelopes (no trailing `compression`
