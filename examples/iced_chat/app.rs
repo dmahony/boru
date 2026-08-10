@@ -21079,339 +21079,48 @@ impl IcedChat {
                 )
             }
 
-            AppMessage::OpenDownloadsFolder => {
-                self.video_card_menu_open = None;
-                let dl_dir = self.data_dir.join("downloads");
-                let _ = std::fs::create_dir_all(&dl_dir);
-                iced::Task::perform(async move { open::that(dl_dir) }, |result| {
-                    if let Err(e) = result {
-                        AppMessage::ErrorMsg(format!("Could not open downloads folder: {e}"))
-                    } else {
-                        AppMessage::Noop
-                    }
-                })
-            }
-            AppMessage::DashboardSearchChanged(query) => {
-                self.dashboard_search_input = query;
-                // Close any half-open "Files I'm Sharing" interactions when
-                // the user leaves the Shared by Me tab.
-                self.shared_by_me_ui.clear();
-                // FS-18: keep the Shared by Me filtered projection in sync with
-                // the global query immediately (in-memory, no debounce).
-                self.refresh_shared_by_me_filter();
-                // Refreshing on tab selection keeps the Recent Download
-                // Activity card current when the user revisits the dashboard.
-                self.refresh_dashboard_activity()
-            }
-            AppMessage::DashboardSearchCleared => {
-                // One-action clear (header × button or Escape). The query is
-                // global across tabs, so clearing it restores every tab to its
-                // unfiltered rows; authoritative row buffers and summary
-                // metrics are untouched.
-                self.dashboard_search_input.clear();
-                self.shared_by_me_ui.clear();
-                self.refresh_shared_by_me_filter();
-                iced::Task::none()
-            }
-            AppMessage::DashboardSharedByMeSortClicked(key) => {
-                self.dashboard_shared_by_me_sort = self.dashboard_shared_by_me_sort.on_key_clicked(key);
-                self.refresh_shared_by_me_filter();
-                iced::Task::none()
-            }
-            AppMessage::DashboardDownloadedSortClicked(key) => {
-                self.dashboard_downloaded_sort = self.dashboard_downloaded_sort.on_key_clicked(key);
-                iced::Task::none()
-            }
-            AppMessage::DashboardActivitySortClicked(key) => {
-                self.dashboard_activity_sort = self.dashboard_activity_sort.on_key_clicked(key);
-                iced::Task::none()
-            }
-            AppMessage::TransferProjectionUpdate(update) => {
-                self.apply_transfer_update(update.transfer);
-                iced::Task::none()
-            }
-            AppMessage::TransferSnapshotResync => {
-                // The broadcast receiver lagged or was restarted: rebuild the
-                // panel maps from the projection snapshot so no row is stale
-                // or duplicated after event replay.
-                let snapshot = self.transfer_store.snapshot();
-                self.resync_outbound_panel(&snapshot);
-                self.resync_inbound_panel(&snapshot);
-                iced::Task::none()
-            }
-            AppMessage::DownloadingCancel(transfer_id) => {
-                self.cancel_inbound_transfer(&transfer_id);
-                iced::Task::none()
-            }
-            AppMessage::DownloadingPause(transfer_id) => {
-                self.pause_inbound_transfer(&transfer_id);
-                iced::Task::none()
-            }
-            AppMessage::DownloadingResume(transfer_id) => {
-                self.resume_inbound_transfer(&transfer_id);
-                iced::Task::none()
-            }
-            AppMessage::DownloadingStop(transfer_id) => {
-                self.stop_outbound_transfer(&transfer_id);
-                iced::Task::none()
-            }
-            AppMessage::OpenDownloadManager => {
-                // Navigation only — the shared shell, networking services, and
-                // conversation subscriptions stay alive; only the main panel
-                // swaps to the Download Manager screen. Remember where we came
-                // from so the back button returns to the previous screen.
-                if !matches!(self.screen, Screen::DownloadManager) {
-                    self.download_manager_return_to = Some(self.screen.clone());
-                    self.screen = Screen::DownloadManager;
-                }
-                iced::Task::none()
-            }
-            AppMessage::CloseDownloadManager => {
-                self.screen = self
-                    .download_manager_return_to
-                    .take()
-                    .unwrap_or(Screen::ChatList);
-                iced::Task::none()
-            }
-            AppMessage::SharedByMeMenuToggle(hash) => {
-                self.shared_by_me_ui.toggle_menu(&hash);
-                iced::Task::none()
-            }
-            AppMessage::SharedByMeDetails(hash) => {
-                self.shared_by_me_ui.open_details(&hash);
-                iced::Task::none()
-            }
-            AppMessage::SharedByMeCloseDetails => {
-                self.shared_by_me_ui.details_open = None;
-                iced::Task::none()
-            }
-            AppMessage::SharedByMeReveal(hash) => {
-                // Reveal the source file in the OS file manager. The full
-                // local path is used only here — it is never rendered in the
-                // table or in error copy.
-                let path = self
-                    .storage
-                    .as_ref()
-                    .and_then(|stg| stg.get_file_object(&hash).ok().flatten())
-                    .and_then(|object| object.source_path)
-                    .map(std::path::PathBuf::from);
-                match path {
-                    Some(path) => iced::Task::perform(async move { open::that(path) }, |result| {
-                        if let Err(e) = result {
-                            AppMessage::ErrorMsg(format!("Could not reveal file: {e}"))
-                        } else {
-                            AppMessage::Noop
-                        }
-                    }),
-                    None => iced::Task::done(AppMessage::ErrorMsg(
-                        "The local file is no longer available.".to_string(),
-                    )),
-                }
-            }
-            AppMessage::SharedByMeConfirmStopSharing(hash) => {
-                // First press opens the inline confirmation; the destructive
-                // action is only performed on the second press of the same
-                // message once the confirmation row is visible.
-                if self.shared_by_me_ui.confirm_stop.as_deref() == Some(hash.as_str()) {
-                    self.shared_by_me_ui.clear();
-                    self.shared_by_me_loading = true;
-                    return iced::Task::done(AppMessage::RemoveSharedFile(hash))
-                        .chain(self.refresh_shared_by_me());
-                }
-                self.shared_by_me_ui.clear();
-                self.shared_by_me_ui.confirm_stop = Some(hash);
-                iced::Task::none()
-            }
-            AppMessage::SharedByMeCancelStopSharing => {
-                self.shared_by_me_ui.confirm_stop = None;
-                iced::Task::none()
-            }
-            AppMessage::SharedByMeRevokeAccess(hash, grantee) => {
-                if let Some(ref stg) = self.storage {
-                    let user_id = self.local_public.to_string();
-                    match stg.revoke_permission(&hash, &user_id, &grantee, "read") {
-                        Ok(true) => {
-                            return iced::Task::done(AppMessage::SharedFileRemoved(
-                                "Access revoked.".to_string(),
-                            ));
-                        }
-                        Ok(false) => {
-                            return iced::Task::done(AppMessage::ErrorMsg(
-                                "That recipient no longer has access.".to_string(),
-                            ));
-                        }
-                        Err(e) => {
-                            return iced::Task::done(AppMessage::ErrorMsg(format!(
-                                "Failed to revoke access: {e}"
-                            )));
-                        }
-                    }
-                }
-                iced::Task::none()
-            }
-            AppMessage::SharedByMeLoaded(result) => {
-                match result {
-                    Ok(rows) => {
-                        self.shared_by_me_rows = rows;
-                        self.shared_by_me_error = None;
-                    }
-                    Err(message) => {
-                        self.shared_by_me_rows.clear();
-                        self.shared_by_me_error = Some(message);
-                    }
-                }
-                self.shared_by_me_loading = false;
-                // FS-18: rebuild the filtered/sorted projection from the
-                // freshly loaded authoritative rows.
-                self.refresh_shared_by_me_filter();
-                // UI-30: kick off uniform thumbnail generation for any
-                // image/video rows that don't have a handle yet.
-                self.kick_shared_by_me_thumbnails()
-            }
-            AppMessage::SharedByMeThumbnailReady {
-                content_hash,
-                handle,
-            } => {
-                self.shared_by_me_thumbnails.insert(content_hash, handle);
-                iced::Task::none()
-            }
-            AppMessage::DashboardRecentActivityLoaded(rows) => {
-                self.dashboard_recent_activity = rows;
-                iced::Task::none()
-            }
-            AppMessage::DashboardSharingSummaryLoaded(summary) => {
-                // `None` (storage unavailable / load error) keeps the card in
-                // its unknown state instead of flashing a fake zero.
-                self.dashboard_sharing_summary = summary;
-                iced::Task::none()
-            }
-            AppMessage::DashboardDownloadedRefresh => self.refresh_downloaded_history(),
-            AppMessage::DashboardDownloadedLoaded(result) => {
-                match result {
-                    Ok(rows) => {
-                        self.downloaded_history = rows;
-                        self.downloaded_history_error = None;
-                    }
-                    Err(message) => {
-                        self.downloaded_history.clear();
-                        self.downloaded_history_error = Some(message);
-                    }
-                }
-                self.downloaded_history_loaded = true;
-                iced::Task::none()
-            }
-            AppMessage::DownloadedOpen(id) => self.open_downloaded_item(id),
-            AppMessage::DownloadedReveal(id) => self.reveal_downloaded_item(id),
-            AppMessage::DownloadedRemoveHistory(id) => {
-                if let Some(storage) = self.storage.as_ref() {
-                    if let Err(error) = storage.delete_download_history(id) {
-                        return iced::Task::done(AppMessage::ErrorMsg(format!(
-                            "Could not remove download from history: {error}"
-                        )));
-                    }
-                }
-                // Removing history never deletes the local file; refresh the
-                // list so the record disappears immediately.
-                self.refresh_downloaded_history()
-            }
-            AppMessage::DashboardTabSelected(tab) => {
-                self.dashboard_active_tab = tab;
-                // Complete a GUI test action that requested this tab once the
-                // dashboard actually shows it.
-                if let Some(action_id) = self.pending_dashboard_tab_action.take() {
-                    let _ = self
-                        .gui_action_history
-                        .set_state(&action_id, GuiActionState::AppMessageHandled);
-                    let _ = self
-                        .gui_action_history
-                        .set_state(&action_id, GuiActionState::Completed);
-                }
-                // The Sharing Summary card is only visible on the Shared by Me
-                // tab; refresh it there so a freshly completed download or a
-                // newly granted share is reflected without a manual reload.
-                let mut tasks = Vec::new();
-                if tab == crate::dashboard_view_model::DashboardTab::SharedByMe {
-                    tasks.push(self.refresh_sharing_summary());
-                }
-                // Load the Downloaded tab's durable history the first time it
-                // is opened (and on every revisit, so newly completed files
-                // appear without a manual refresh).
-                if tab == crate::dashboard_view_model::DashboardTab::Downloaded {
-                    tasks.push(self.refresh_downloaded_history());
-                }
-                // Load the Activity Log projection whenever the tab is opened
-                // so freshly recorded lifecycle events appear immediately.
-                if tab == crate::dashboard_view_model::DashboardTab::ActivityLog {
-                    tasks.push(self.refresh_activity_log());
-                }
-                if tasks.is_empty() {
-                    iced::Task::none()
-                } else {
-                    iced::Task::batch(tasks)
-                }
-            }
-            AppMessage::ActivityLogLoaded(rows) => {
-                self.activity_log_rows = rows;
-                self.activity_log_error = None;
-                self.activity_log_loaded = true;
-                iced::Task::none()
-            }
-            AppMessage::ActivityLogRefresh => self.refresh_activity_log(),
-            AppMessage::ActivityLogFilterSelected(filter) => {
-                self.activity_log_filter = filter;
-                // A different filter can change the visible set dramatically;
-                // land on the first page so the new result is immediately
-                // visible (deterministic, never a stale empty page).
-                self.activity_log_page = 0;
-                self.activity_log_details_open = None;
-                iced::Task::none()
-            }
-            AppMessage::ActivityLogPageSelected(page) => {
-                self.activity_log_page = page;
-                iced::Task::none()
-            }
-            AppMessage::ActivityLogDetailsToggled(event_id) => {
-                self.activity_log_details_open = if self
-                    .activity_log_details_open
-                    .as_deref()
-                    == Some(event_id.as_str())
-                {
-                    None
-                } else {
-                    Some(event_id)
-                };
-                iced::Task::none()
-            }
-            AppMessage::ActivityLogClearRequested => {
-                self.activity_log_clear_confirm = true;
-                iced::Task::none()
-            }
-            AppMessage::ActivityLogClearCancelled => {
-                self.activity_log_clear_confirm = false;
-                iced::Task::none()
-            }
-            AppMessage::ActivityLogClearConfirmed => {
-                self.activity_log_clear_confirm = false;
-                if let Some(storage) = self.storage.as_ref() {
-                    if let Err(error) = storage.clear_transfer_activity() {
-                        return iced::Task::done(AppMessage::ErrorMsg(format!(
-                            "Could not clear activity history: {error}"
-                        )));
-                    }
-                }
-                // Clear History is projection-only: shared files, downloads,
-                // and permissions are untouched by design.
-                self.refresh_activity_log()
-            }
-            AppMessage::DashboardConnectivityDismissed => {
-                self.dashboard_connectivity_dismissed = true;
-                iced::Task::none()
-            }
-            AppMessage::DashboardDownloadingRefresh => {
-                // The Downloading tab is backed by live subscriptions — a
-                // refresh triggers a re-read of the current projection state.
-                iced::Task::none()
-            }
+            // ── File sharing dashboard (state layer) ────────────────
+            AppMessage::OpenDownloadsFolder
+            | AppMessage::DashboardSearchChanged(_)
+            | AppMessage::DashboardSearchCleared
+            | AppMessage::DashboardSharedByMeSortClicked(_)
+            | AppMessage::DashboardDownloadedSortClicked(_)
+            | AppMessage::DashboardActivitySortClicked(_)
+            | AppMessage::TransferProjectionUpdate(_)
+            | AppMessage::TransferSnapshotResync
+            | AppMessage::DownloadingCancel(_)
+            | AppMessage::DownloadingPause(_)
+            | AppMessage::DownloadingResume(_)
+            | AppMessage::DownloadingStop(_)
+            | AppMessage::OpenDownloadManager
+            | AppMessage::CloseDownloadManager
+            | AppMessage::SharedByMeMenuToggle(_)
+            | AppMessage::SharedByMeDetails(_)
+            | AppMessage::SharedByMeCloseDetails
+            | AppMessage::SharedByMeReveal(_)
+            | AppMessage::SharedByMeConfirmStopSharing(_)
+            | AppMessage::SharedByMeCancelStopSharing
+            | AppMessage::SharedByMeRevokeAccess(..)
+            | AppMessage::SharedByMeLoaded(_)
+            | AppMessage::SharedByMeThumbnailReady { .. }
+            | AppMessage::DashboardRecentActivityLoaded(_)
+            | AppMessage::DashboardSharingSummaryLoaded(_)
+            | AppMessage::DashboardDownloadedRefresh
+            | AppMessage::DashboardDownloadedLoaded(_)
+            | AppMessage::DownloadedOpen(_)
+            | AppMessage::DownloadedReveal(_)
+            | AppMessage::DownloadedRemoveHistory(_)
+            | AppMessage::DashboardTabSelected(_)
+            | AppMessage::ActivityLogLoaded(_)
+            | AppMessage::ActivityLogRefresh
+            | AppMessage::ActivityLogFilterSelected(_)
+            | AppMessage::ActivityLogPageSelected(_)
+            | AppMessage::ActivityLogDetailsToggled(_)
+            | AppMessage::ActivityLogClearRequested
+            | AppMessage::ActivityLogClearCancelled
+            | AppMessage::ActivityLogClearConfirmed
+            | AppMessage::DashboardConnectivityDismissed
+            | AppMessage::DashboardDownloadingRefresh => self.update_files(message),
             AppMessage::CatalogueFetchFailed(message) => {
                 self.catalogue_loading = false;
                 self.catalogue_error = Some(message);
