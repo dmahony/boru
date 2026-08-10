@@ -295,8 +295,42 @@ impl IcedChat {
                 iced::Task::perform(async move { handle.reject(call_id).await.map_err(|e| e.to_string()) }, AppMessage::CallCommandFinished)
             }
             AppMessage::HangUp(call_id) => {
+                // Clear call UI state synchronously so the caller leaves the
+                // ringing/active screen immediately (BORU-CALL-6.4 contract).
+                // The manager's later CallEvent::Ended is a no-op for this
+                // call because active_call_id has already been cleared, so
+                // call history is recorded here with the same outcome logic
+                // as the Ended handler (BORU-CALL-14).
+                if self.active_call_id == Some(call_id) {
+                    if let (Some(peer), Some(kind)) = (self.outgoing_call_peer, self.call_kind) {
+                        let duration = self.call_started_at.map(|started| started.elapsed());
+                        let outcome = if duration.is_some() {
+                            CallHistoryOutcome::Completed
+                        } else if self.call_declined {
+                            CallHistoryOutcome::Declined
+                        } else if self.call_was_incoming {
+                            CallHistoryOutcome::Missed
+                        } else {
+                            CallHistoryOutcome::Failed
+                        };
+                        self.record_call_history(peer, kind, outcome, duration);
+                    }
+                    self.active_call_id = None;
+                    self.outgoing_call_peer = None;
+                    self.outgoing_call_status = None;
+                    self.call_started_at = None;
+                    self.call_kind = None;
+                    self.call_was_incoming = false;
+                    self.call_declined = false;
+                    if let Some(screen) = self.call_return_screen.take() {
+                        self.screen = screen;
+                    }
+                }
                 let handle = self.call_handle.clone();
-                iced::Task::perform(async move { handle.hangup(call_id).await.map_err(|e| e.to_string()) }, AppMessage::CallCommandFinished)
+                iced::Task::perform(
+                    async move { handle.hangup(call_id).await.map_err(|e| e.to_string()) },
+                    AppMessage::CallCommandFinished,
+                )
             }
             AppMessage::ToggleCallMute => {
                 if let Some(call_id) = self.active_call_id {

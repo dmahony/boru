@@ -28384,8 +28384,8 @@ mod tests {
         );
         assert_eq!(
             conv.pending_events.len(),
-            2,
-            "gossip events are still queued (replayed as system chips)"
+            0,
+            "gossip protocol events are dropped, not queued (31cc58ac flood fix)"
         );
     }
 
