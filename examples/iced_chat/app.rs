@@ -15247,40 +15247,7 @@ impl IcedChat {
             | AppMessage::RemoveSharedFile(_)
             | AppMessage::SharedFileRemoved(_) => self.update_files(message),
 
-            AppMessage::NewDiscoveredPeers(peers) => {
-                // Capture newly-added peers before the update consumes `peers`.
-                let added = peers.added.clone();
-                apply_discovered_peers_update(&mut self.discovered_peers, peers);
-                // Retroactively join newly discovered peers to all background
-                // conversation subscriptions. Without this, a peer discovered
-                // after SubscribeStoredConversations ran will never be added
-                // to the direct-conversation gossip mesh, and messages will
-                // silently queue in the outbox.
-                if !added.is_empty() {
-                    let pending: Vec<PublicKey> = added
-                        .into_iter()
-                        .filter(|p| *p != self.local_public)
-                        .filter(|p| self.discovered_peers.contains(p))
-                        .collect();
-                    if !pending.is_empty() {
-                        for (_, conv) in &self.conversations {
-                            if let Some(ref sender) = conv.sender {
-                                let s = sender.clone();
-                                let peers = pending.clone();
-                                tokio::spawn(async move {
-                                    for peer in peers {
-                                        if let Err(e) = s.join_peers(vec![peer]).await {
-                                            warn!(peer = %peer, error = %e,
-                                                "new-discovered join_peers failed");
-                                        }
-                                    }
-                                });
-                            }
-                        }
-                    }
-                }
-                iced::Task::none()
-            }
+            AppMessage::NewDiscoveredPeers(_) => self.update_discover(message),
 
             // ── Chat log scroll (state layer) ──────────────────
             AppMessage::Scrolled(..) => self.update_chat(message),
