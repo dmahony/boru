@@ -20,14 +20,17 @@ verified against a stable baseline.
 | (this run) | call screens → `app/calls.rs` | 39,382 → 39,252 |
 | 8523fce7 | shared shell/dialog overlays → `app/dialogs.rs` | 39,252 → 38,513 |
 | a0c2561c | tunnel share views → `app/tunnels.rs` | 38,513 → 38,266 |
+| f6bae940 | calls update arms → `update_calls` in `app/calls.rs` | 38,266 → 38,102 |
 
-Remaining per plan (state layer, spec steps 4–6): feature state structs +
-feature-local message enums, moving `update()` arms into
-`update(&mut FeatureState, FeatureMessage, &mut Context)` style functions.
-Remaining per plan (spec step 7): per-feature subscriptions combined at the
-root. These are the higher-risk steps; the view extractions above proved the
-module seams and the compile/test gate (`rb check` + full example suite,
-1213/1215 with two pre-existing failures verified on base).
+State layer (spec steps 4–6) started: the calls feature's update arms were
+moved into a per-feature `update_calls(&mut self, AppMessage) ->
+Task<AppMessage>` method in `app/calls.rs`; app.rs's `update()` now
+dispatches those variants via a combined match arm. State ownership stays
+on the root `IcedChat` for now (spec step 3 constraint: keep state
+ownership unchanged during the first pass); remaining feature update arms
+(chat, files, discover, contacts, settings, tunnels, groups, home) can be
+extracted the same way, then feature state structs (steps 4–6) and
+per-feature subscriptions (step 7) afterwards.
 
 ## Overview
 
