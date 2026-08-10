@@ -17826,6 +17826,10 @@ impl IcedChat {
                     self.screen_share_host_stop = None;
                 }
             }
+            SessionEvent::ControlRequest { .. } | SessionEvent::ControlChanged { .. } => {
+                // Control requests and grants are intentionally surfaced to the
+                // host/viewer UI without changing view-only lifecycle state.
+            }
         }
     }
 

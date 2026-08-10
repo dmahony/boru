@@ -28,8 +28,8 @@ pub use protocol::{
     ControlMessage, Hello, InboundMedia, Permission, ScreenShareProtocol, SCREEN_SHARE_ALPN,
     SCREEN_SHARE_PROTOCOL_VERSION,
 };
-pub use permissions::{Capability, RequestRateLimiter, SessionPermissions};
-pub use remote_input::{authorize_input, InputEvent, RemoteInput};
+pub use permissions::{Capability, ControlToken, RequestRateLimiter, SessionPermissions};
+pub use remote_input::{authorize_input, map_pointer, InputEvent, NormalizedPointer, RemoteInput, UnavailableInputBackend};
 pub use session::{
     ScreenShareSession, ScreenShareSessionId, SessionEvent, SessionManager, SessionState,
 };

@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use super::protocol::{ControlMessage, Hello, Permission, SCREEN_SHARE_PROTOCOL_VERSION};
+use super::permissions::{Capability, SessionPermissions};
 
 /// Opaque identifier for one negotiation, independent of a conversation.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -38,6 +39,10 @@ pub enum SessionEvent {
     Rejected { session_id: ScreenShareSessionId, reason: String },
     /// A session ended or its connection disappeared.
     Ended { session_id: ScreenShareSessionId },
+    /// Viewer requested explicit control capabilities; host UI must decide.
+    ControlRequest { session_id: ScreenShareSessionId, peer_id: iroh::PublicKey, capabilities: Vec<Capability> },
+    /// Control became active or was revoked while viewing continues.
+    ControlChanged { session_id: ScreenShareSessionId, active: bool, capabilities: Vec<Capability> },
 }
 
 #[derive(Debug, Clone)]
@@ -45,7 +50,7 @@ struct Record { state: SessionState, host_id: iroh::PublicKey, peer_id: Option<i
 
 /// Bounded in-memory state for active sessions.
 #[derive(Debug, Default)]
-pub struct SessionManager { sessions: HashMap<ScreenShareSessionId, Record> }
+pub struct SessionManager { sessions: HashMap<ScreenShareSessionId, Record>, permissions: HashMap<ScreenShareSessionId, SessionPermissions> }
 
 pub const MAX_ACTIVE_SESSIONS: usize = 8;
 
@@ -99,13 +104,29 @@ impl SessionManager {
                     return Some(ControlMessage::Reject { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: hello.session_id, reason: "session already exists".into() });
                 }
                 self.sessions.insert(hello.session_id, Record { state: SessionState::Connecting, host_id: hello.host_id, peer_id: Some(peer_id), conversation_id: hello.conversation_id });
+                self.permissions.insert(hello.session_id, SessionPermissions::view_only(hello.session_id, peer_id));
                 let _ = events.try_send(SessionEvent::Invitation { session_id: hello.session_id, host_id: hello.host_id, conversation_id: hello.conversation_id, hello });
                 None
             }
             ControlMessage::Accept { session_id, .. } => {
-                if let Some(record) = self.sessions.get_mut(&session_id) { if record.host_id == peer_id && matches!(record.state, SessionState::AwaitingAcceptance | SessionState::Connecting) { record.state = SessionState::Streaming; let _ = events.try_send(SessionEvent::Accepted { session_id, peer_id }); } }
+                if let Some(record) = self.sessions.get_mut(&session_id) { if record.host_id == peer_id && matches!(record.state, SessionState::AwaitingAcceptance | SessionState::Connecting) { record.state = SessionState::Streaming; self.permissions.insert(session_id, SessionPermissions::view_only(session_id, peer_id)); let _ = events.try_send(SessionEvent::Accepted { session_id, peer_id }); } }
                 None
             }
+            ControlMessage::RequestControl { session_id, capabilities, .. } => {
+                if self.sessions.get(&session_id).and_then(|r| r.peer_id).is_some_and(|id| id == peer_id) {
+                    let _ = events.try_send(SessionEvent::ControlRequest { session_id, peer_id, capabilities });
+                }
+                None
+            }
+            ControlMessage::GrantControl { session_id, capabilities, .. } => {
+                if let Some(permissions) = self.permissions.get_mut(&session_id) { if permissions.peer_id() == peer_id { permissions.grant(capabilities.clone()); let _ = events.try_send(SessionEvent::ControlChanged { session_id, active: true, capabilities }); } }
+                None
+            }
+            ControlMessage::RevokeControl { session_id, .. } => {
+                if let Some(permissions) = self.permissions.get_mut(&session_id) { if permissions.peer_id() == peer_id { permissions.revoke_control(); let _ = events.try_send(SessionEvent::ControlChanged { session_id, active: false, capabilities: vec![Capability::ViewScreen] }); } }
+                None
+            }
+            ControlMessage::Input { .. } => None,
             ControlMessage::Reject { session_id, reason, .. } => {
                 if let Some(record) = self.sessions.get(&session_id) {
                     if record.host_id != peer_id && record.peer_id != Some(peer_id) { return None; }

@@ -71,6 +71,14 @@ pub enum ControlMessage {
     Reject { version: u16, session_id: ScreenShareSessionId, reason: String },
     /// End a session. Repeating this message is safe and has no effect.
     EndSession { version: u16, session_id: ScreenShareSessionId },
+    /// Viewer asks the host for one or more explicitly selected controls.
+    RequestControl { version: u16, session_id: ScreenShareSessionId, capabilities: Vec<Capability> },
+    /// Host grants the requested controls with a fresh session nonce.
+    GrantControl { version: u16, session_id: ScreenShareSessionId, capabilities: Vec<Capability>, nonce: [u8; 16] },
+    /// Host revokes control without ending view-only streaming.
+    RevokeControl { version: u16, session_id: ScreenShareSessionId },
+    /// Input always carries the current grant nonce; stale input is rejected.
+    Input { version: u16, session_id: ScreenShareSessionId, capability: Capability, nonce: [u8; 16], code: u32 },
 }
 
 /// Stable user-facing protocol failure.
@@ -114,7 +122,17 @@ impl ControlMessage {
                 if message.frame_rate == 0 || message.frame_rate > 240 { return Err(ProtocolError::Malformed("invalid frame rate".into())); }
                 message.version
             }
-            Self::Accept { version, .. } | Self::Reject { version, .. } | Self::EndSession { version, .. } => *version,
+            Self::Accept { version, .. } | Self::Reject { version, .. } | Self::EndSession { version, .. } | Self::RevokeControl { version, .. } => *version,
+            Self::RequestControl { version, capabilities, .. } | Self::GrantControl { version, capabilities, .. } => {
+                if capabilities.is_empty() || capabilities.len() > MAX_CAPABILITIES || capabilities.iter().any(|capability| *capability == Capability::ViewScreen) {
+                    return Err(ProtocolError::Malformed("invalid control capability request".into()));
+                }
+                *version
+            }
+            Self::Input { version, capability, .. } => {
+                if !matches!(capability, Capability::ControlPointer | Capability::ControlKeyboard) { return Err(ProtocolError::Malformed("input requires a control capability".into())); }
+                *version
+            }
         };
         if version != SCREEN_SHARE_PROTOCOL_VERSION { return Err(ProtocolError::UnsupportedVersion { received: version, supported: SCREEN_SHARE_PROTOCOL_VERSION }); }
         if let Self::Reject { reason, .. } = self { if reason.is_empty() || reason.len() > MAX_REASON { return Err(ProtocolError::Malformed("invalid rejection reason".into())); } }
@@ -236,7 +254,7 @@ impl iroh::protocol::ProtocolHandler for ScreenShareProtocol {
                     // The session ended or was refused; release its connection slot.
                     self.connections.lock().await.remove(session_id);
                 }
-                ControlMessage::Accept { .. } => {}
+                ControlMessage::Accept { .. } | ControlMessage::RequestControl { .. } | ControlMessage::GrantControl { .. } | ControlMessage::RevokeControl { .. } | ControlMessage::Input { .. } => {}
             }
             if let Some(response) = response { let _ = write_message(&mut send, &response).await; }
         }
