@@ -97,7 +97,7 @@ The dashboard persists only what the design requires:
 
 ### Schema and migration
 
-`CURRENT_SCHEMA_VERSION = 17` (`src/storage.rs`). The forward-only migration
+`CURRENT_SCHEMA_VERSION = 19` (`src/storage.rs`). The forward-only migration
 loop is versioned; a database with a higher version than the binary supports
 is refused (see `docs/troubleshooting.md`).
 

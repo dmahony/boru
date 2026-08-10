@@ -24,7 +24,7 @@ permissions: `0o700` for the directory, `0o600` for the database file.
 
 ```
 <data_dir>/
-├── boru.db               # SQLite authoritative store (V10 schema)
+├── boru.db               # SQLite authoritative store (V19 schema)
 ├── chat_history.json      # Legacy JSON — reads only (writes deprecated)
 ├── outbox.json            # Legacy JSON — reads only (writes deprecated)
 ├── conversations.json     # Legacy JSON — reads only (writes deprecated)
@@ -51,9 +51,9 @@ permissions: `0o700` for the directory, `0o600` for the database file.
 
 | File | Format | Module | Purpose | Status |
 |---|---|---|---|---|
-| `boru.db` | SQLite V10 | `storage::Storage` | **Authoritative** — inbox, outbox, contacts, sync cursors, file objects, attachments, DM messages, outgoing messages, shared files, collections, permissions, downloads, profile state, tombstones, sync dedup, acknowledgements | **Active** |
-| `message_store.db` | SQLite V1 | `store::MessageStore` | Legacy store, migration source. Read by `Storage::import_legacy_db()` | Legacy (read-only) |
-| `chat_history.json` | JSON V1 | `chat_history::ChatHistoryStore` | Per-room chat message history | Legacy (reads only) |
+| `boru.db` | SQLite V19 | `storage::Storage` | **Authoritative** — inbox, outbox, contacts, sync cursors, file objects, attachments, DM messages, outgoing messages, shared files, collections, permissions, downloads, profile state, tombstones, sync dedup, acknowledgements, groups, rings, directory ads, group encryption state, chat_messages (backfill history) | **Active** |
+| `message_store.db` | SQLite V1 | `store::MessageStore` | Live chat-message history (`messages` table) — written by the GUI on every message. Also the legacy envelope store read by `Storage::import_legacy_db()` | **Active (chat history)** / Legacy source (envelopes) |
+| `chat_history.json` | JSON V1 | `chat_history::ChatHistoryStore` | One-time migration input: `migrate_legacy_json()` imports entries into the SQLite `messages` table; `save()` is a deprecated no-op | Legacy (migration input only) |
 | `outbox.json` | JSON V1 | `outbox::OutboxStore` | Outgoing message queue and delivery state | Legacy (reads only) |
 | `conversations.json` | JSON V1 | `conversations::ConversationStore` | Conversation metadata (last message, unread count) | Legacy (reads only) |
 | `rooms.json` | JSON V1 | `room_history::RoomHistoryStore` | Room topic registry | Legacy (reads only) |
@@ -67,8 +67,11 @@ permissions: `0o700` for the directory, `0o600` for the database file.
 > **Legacy JSON status:** All JSON `save()` methods are `#[deprecated]` and are
 > no-ops that log a deprecation warning. The files remain on disk so existing
 > readers can still load historical data during a transition period.
-> `AppSettings` and `UserProfile` remain active JSON stores (they have no
-> SQLite equivalent).
+> `ChatHistoryStore` additionally exposes `migrate_legacy_json()`, a one-time
+> transactional import of `chat_history.json` into the SQLite `messages`
+> table; after a successful import the legacy file is renamed to
+> `chat_history.json.imported`. `AppSettings` and `UserProfile` remain active
+> JSON stores (they have no SQLite equivalent).
 
 ---
 
@@ -263,6 +266,23 @@ Replaces the GUI's dependency on `outbox.json` for the outgoing message queue:
   the raw signed message bytes for replay/retry.
 - `idx_outgoing_topic` — index on `outgoing_messages(topic_blob)`.
 
+### Schema: Versions 11–19 (groups, rings, durable chat history)
+
+Later migrations extended `boru.db` for group chat, rings, and the backfill
+history table. They follow the same forward-only, idempotent migration model.
+
+| Version | Adds | Purpose |
+|---|---|---|
+| V11 | `directory_ads` | Public-room directory advertisements |
+| V12 | `groups` | Group-chat persistence |
+| V13 | `group_encryption_state` | Encrypted group state blobs (fail-closed checksummed records) |
+| V14 | `group_invites.ticket` | Room ticket on pending group invites |
+| V15 | `group_invites.group_name` | Display name on pending group invites |
+| V16 | `shared_files.version`, `transfer_activity` | Shared-file revisions + bounded transfer activity projection |
+| V17 | `transfer_activity.direction` | Deterministic inbound/outbound transfer direction |
+| V18 | `rings`, `ring_members`, `ring_resource_permissions` | Named-ring permission groups |
+| V19 | `chat_messages` | Durable chat-message history (`msg_hash` UNIQUE, `(topic, timestamp_ms)` index) used by the backfill service |
+
 ### Remote catalogue projections
 
 Remote catalogue storage uses the V2 relational tables rather than creating a
@@ -293,7 +313,7 @@ rows and the descriptor itself has an enforced expiry.
 - Each migration runs in its own transaction.
 - **Forward-only** — no downgrade path.
 - **Future-schema guard** — opening a database with a version higher than
-  `CURRENT_SCHEMA_VERSION` (currently 10) returns a clear error:
+  `CURRENT_SCHEMA_VERSION` (currently 19) returns a clear error:
   ```
   Database has schema version <N>, but this application only supports up to
   version <MAX>. The database was created by a newer version. Upgrade the
@@ -303,7 +323,10 @@ rows and the descriptor itself has an enforced expiry.
   `open()` re-runs only the unapplied migrations (already-applied versions
   are skipped via `schema_version`).
 - **Current schema version** is defined in `src/storage.rs` as
-  `CURRENT_SCHEMA_VERSION: u32 = 10`.
+  `CURRENT_SCHEMA_VERSION: u32 = 19`. A doc-consistency test
+  (`docs_reference_current_schema_version` in `src/storage.rs`) fails when
+  this constant changes and the architecture docs are not updated, so the
+  documented schema version cannot drift silently.
 
 ### Legacy Migration
 
@@ -395,10 +418,10 @@ conversation-level deletion, and edge cases.
 
 | Protocol | ALPN | Purpose | Persistence |
 |---|---|---|---|
-| Gossip | `/iroh-chat-gossip/1` | Room-based broadcast | None (transient) |
+| Gossip | `/iroh-gossip/1` | Room-based broadcast | None (transient) |
 | Inbox | `/iroh-chat-inbox/1` | Direct message sync + signed deletions | Inbox event emission |
-| Backfill | `/iroh-chat-backfill/1` | Historical message requests | None (reads from SQLite) |
-| Whisper | `/iroh-chat-whisper/1` | Private 1:1 QUIC channels | None (transient) |
+| Backfill | `/iroh-gossip-chat/backfill/1` | Historical message requests | None (reads from SQLite) |
+| Whisper | `/iroh-gossip-chat/whisper/1` | Private 1:1 QUIC channels | None (transient) |
 
 ---
 

@@ -459,30 +459,30 @@ Implementation: `container_card` at `app.rs:462-472`.
 
 **Current state:** Unicode characters for online/offline, inline with text.
 
-| Property     | Value                          | File:Line |
-|-------------|--------------------------------|-----------|
-| Online       | "●" (filled circle), green    | `app.rs:10433` |
-| Offline      | "○" (hollow circle), grey     | `app.rs:10433` |
+| Property     | Value                          | Source |
+|-------------|--------------------------------|--------|
+| Online       | "●" (filled circle), green    | `design_tokens.rs` → `color_success(theme)` |
+| Offline      | "○" (hollow circle), grey     | `design_tokens.rs` → `text_muted(theme)` |
 | Idle         | Not yet implemented — planned: "◐" amber | |
 | Font size    | Inline with name text (inherits `TYPO_SM`) | |
-| Colour - Online (light)| `#1a8c33` -> `accent_green` | `app.rs:408` |
-| Colour - Online (dark) | `#3ddc84` -> `accent_green` | `app.rs:406` |
-| Colour - Offline (lt)  | Same as `text_muted` (`#64706A`) | `app.rs:10470` |
-| Colour - Offline (dk)  | Same as `text_muted` (`#999`)  | `app.rs:10470` |
+| Colour - Online (light)| `#1a8c33` -> `accent_green` | `design_tokens.rs` (`color_success`) |
+| Colour - Online (dark) | `#3ddc84` -> `accent_green` | `design_tokens.rs` (`color_success`) |
+| Colour - Offline (lt)  | Same as `text_muted` (`#64706A`) | `design_tokens.rs` (`text_muted`) |
+| Colour - Offline (dk)  | Same as `text_muted` (`#999`)  | `design_tokens.rs` (`text_muted`) |
 
 **Planned replacement:** Replace Unicode characters with a proper circle widget for better visual consistency. A solid circle of a fixed diameter (8px) with appropriate margin.
 
 ### 4.7 Avatars
 
-| Property         | Value                        | File:Line |
-|-----------------|------------------------------|-----------|
-| Sidebar size    | 24×24px                      | `app.rs:10620-10623` |
-| Chat bubble size| 48×48px                      | `app.rs:11325-11327` |
-| Fallback        | First char of `fmt_short()`  | `app.rs:10633` |
-| Fallback radius | 12px (fully circular)        | `app.rs:10647` |
-| Fallback bg     | Derived from peer key bytes  | `app.rs:10627-10630` |
-| Fallback text   | `TYPO_XS`, `Color::WHITE`    | `app.rs:10637-10638` |
-| Image fit       | `ScaleDown` for chat, raw for sidebar | `app.rs:11323-11324` |
+| Property         | Value                        | Source |
+|-----------------|------------------------------|--------|
+| Sidebar size    | 24×24px                      | `AVATAR_SM` token (`examples/iced_chat/design_tokens.rs`) |
+| Chat bubble size| 48×48px                      | `AVATAR_MD` token (`examples/iced_chat/design_tokens.rs`) |
+| Fallback        | First char of `fmt_short()`  | Avatar builder in `examples/iced_chat/ui_components.rs` |
+| Fallback radius | 12px (fully circular)        | Avatar builder (radius = half the avatar size) |
+| Fallback bg     | Derived from peer key bytes  | Avatar builder in `examples/iced_chat/ui_components.rs` |
+| Fallback text   | `TYPO_XS`, `Color::WHITE`    | Avatar builder in `examples/iced_chat/ui_components.rs` |
+| Image fit       | `ScaleDown` for chat, raw for sidebar | Chat/sidebar avatar call sites |
 
 ### 4.8 Context Menus
 

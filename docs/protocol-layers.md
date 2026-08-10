@@ -9,7 +9,7 @@ Boru uses multiple distinct QUIC-based protocols, each with its own ALPN
 |---------|------|------|---------|-------------|
 | Gossip | `/iroh-gossip/1` | Broadcast | Room-based message broadcasting via PlumTree; one independent mesh per room topic | None (transient) |
 | Inbox | `/iroh-chat-inbox/1` | Direct request/response | Offline message delivery, ACKs, sync responses, and deletion tombstones; not a gossip topic | InboxEvent emission |
-| Backfill | `/iroh-gossip-chat/backfill/1` | Direct | Historical message sync for late-joining peers | Reads ChatHistoryStore |
+| Backfill | `/iroh-gossip-chat/backfill/1` | Direct | Historical message sync for late-joining peers | Reads SQLite (`boru.db` `chat_messages`, v19) |
 | Whisper | `/iroh-gossip-chat/whisper/1` | Direct session | Online private 1:1 QUIC messages, control frames, and file transfer | None (transient) |
 | Friend Ping | `/iroh-gossip-chat/friend-ping/1` | Direct | Connectivity checks between friends | None (transient) |
 | Catalogue retrieval | `/boru-file-catalog/1` | Direct | Signed, requester-filtered file catalogue retrieval | Per-peer verified cache |
@@ -146,7 +146,9 @@ request missed message history from connected peers.
 
 1. Requester opens a bi-directional QUIC stream to a responder
 2. Sends a `BackfillRequest` (length-prefixed, postcard-encoded)
-3. Responder queries its `ChatHistoryStore` and replies with a
+3. Responder authorizes the request (`BackfillAuthorizer::authorize` against
+   the authenticated connection), queries its SQLite history
+   (`boru.db` `chat_messages` table) and replies with a
    `BackfillResponse` containing raw signed message bytes
 4. Requester verifies and decodes each message, feeding it through the
    normal `NetEvent` channel

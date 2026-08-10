@@ -153,6 +153,38 @@ threat model.
 
 ---
 
+## Protocol security invariants (Boru Code Audit Remediation Plan)
+
+These invariants were introduced/formalized by the audit remediation and are
+covered by regression tests; keep docs and tests in sync when they change.
+
+- **Backfill authorization** (`src/backfill.rs`): remote backfill requests
+  require a concrete topic and are authorized per request against the
+  authenticated peer (`Connection::remote_id` — never a payload-supplied
+  identity) via `BackfillAuthorizer::authorize`. Missing/unknown topics are
+  rejected before any storage query; paginated requests re-check
+  authorization; denied attempts emit an audit event with the remote peer id
+  but never message contents. There is no unscoped remote history query.
+- **Signed payload rules**: every protocol payload is wrapped in a canonical
+  `SignedMessage`; signing covers the complete serialized payload, and no
+  guessed or fallback file metadata is ever signed. Catalogue and descriptor
+  signatures are checked against the authenticated connection identity.
+- **Descriptor peer binding** (`src/file_access_handler.rs`):
+  `SignedDownloadDescriptor` is bound to both owner and requesting peer
+  (checked against `Connection::remote_id`), carries a random nonce, and is
+  rejected after its 60 s lifetime or on replay.
+- **Replay retention** (`src/group_replay.rs`): group event replay markers
+  are persisted in SQLite (`group_event_replay`, keyed by
+  `(group_id, event_id)`, indexed by `(group_id, epoch)`) and pruned in
+  bounded batches; the in-memory cache is capped and is an optimization only
+  — replay protection survives restart.
+- **Group-state fail-closed** (`src/group_encryption/persistence.rs`):
+  encrypted group state is stored with a BLAKE3 integrity checksum; corrupt
+  or undecodable state fails closed with an explicit recovery error and is
+  never silently re-saved or reinitialized over existing records.
+
+---
+
 ## What this model does not claim
 
 - The database is not encrypted at the SQLite file level. Files imported into

@@ -2,6 +2,15 @@
 
 ## Status
 
+> **Status: design completed.** This document is the Phase 2 design for the
+> unified storage work. The implementation is complete (BORU-AUDIT-18..21):
+> `boru.db` is at **schema V19**, the GUI outgoing queue reads/writes SQLite
+> `outgoing_messages` (V10), and chat history is persisted to
+> `message_store.db` (`messages` table). JSON stores listed below as "still
+> active" are now read-only migration inputs. See
+> [`message-storage-design.md`](message-storage-design.md) for the current
+> schema, migration model, and authority map.
+
 - **Phase 1** — Audit complete (`docs/storage-unification-audit.md`).
 - **Phase 2** — This document: define storage invariants, authority boundaries, and architecture.
 - **Phases 3–5** — Implementation (repository API, UI event wiring, lifecycle tests).

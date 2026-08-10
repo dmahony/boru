@@ -119,6 +119,25 @@ The PR title is validated by CI (`commit.yaml`).
 If CI rejects your PR title, edit it through the GitHub UI (not by pushing
 more commits). Use the correct type prefix from the table above.
 
+## Pull request checklist
+
+Before opening a PR, confirm:
+
+- [ ] `cargo fmt --check`, `cargo check`, `cargo clippy`, and the relevant
+      tests pass.
+- [ ] If the change alters **architecture, protocol, or persistence
+      behavior** (module layout, schema/migration, wire format, storage
+      source of truth, security invariants), the corresponding docs are
+      updated **in the same change** — `ARCHITECTURE.md`,
+      `docs/message-storage-design.md`, `docs/security-model.md`,
+      `docs/protocol-layers.md`, or the affected feature doc.
+- [ ] If the SQLite schema version (`CURRENT_SCHEMA_VERSION` in
+      `src/storage.rs`) changed, `docs/message-storage-design.md` and any
+      other schema references were updated; the
+      `docs_reference_current_schema_version` test enforces this.
+- [ ] Exact, volatile metrics (file/line counts, byte sizes) are not added
+      to long-lived docs — use qualitative descriptions or generated output.
+
 ## Squash merging
 
 Boru uses squash merging to keep the git history linear.

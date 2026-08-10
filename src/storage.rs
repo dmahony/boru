@@ -6404,6 +6404,56 @@ impl<T> OptionalExt<T> for Result<T, rusqlite::Error> {
 mod tests {
     use super::*;
 
+    // ── Documentation consistency ────────────────────────────────
+    //
+    // BORU-AUDIT-24: the architecture docs must reference the current
+    // SQLite schema version so maintainers and AI agents are not misled by
+    // a stale version number. When `CURRENT_SCHEMA_VERSION` is bumped, this
+    // test fails until the docs are updated in the same change.
+
+    fn read_repo_doc(rel: &str) -> String {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let path = Path::new(manifest).join(rel);
+        std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!(
+                "cannot read repo doc {rel} ({}): {e}; docs must be committed \
+                 alongside the schema constant so this check can run",
+                path.display()
+            )
+        })
+    }
+
+    #[test]
+    fn docs_reference_current_schema_version() {
+        let n = CURRENT_SCHEMA_VERSION;
+
+        // Canonical schema doc must pin the exact constant line.
+        let storage_doc = read_repo_doc("docs/message-storage-design.md");
+        assert!(
+            storage_doc.contains(&format!("CURRENT_SCHEMA_VERSION: u32 = {n}")),
+            "docs/message-storage-design.md does not state \
+             `CURRENT_SCHEMA_VERSION: u32 = {n}` — update it when bumping the schema"
+        );
+
+        // Top-level architecture doc must name the schema version.
+        let arch = read_repo_doc("ARCHITECTURE.md");
+        assert!(
+            arch.contains(&format!("schema v{n}")) || arch.contains(&format!("V{n} schema")),
+            "ARCHITECTURE.md does not mention schema v{n} — update the storage section"
+        );
+        assert!(
+            arch.contains("CURRENT_SCHEMA_VERSION"),
+            "ARCHITECTURE.md should point at CURRENT_SCHEMA_VERSION in src/storage.rs"
+        );
+
+        // Migration guide's before/after table must track the current version.
+        let migration = read_repo_doc("docs/migration-guide.md");
+        assert!(
+            migration.contains(&format!("V{n}")),
+            "docs/migration-guide.md schema-version row does not mention V{n}"
+        );
+    }
+
     // ── V1 message tables ──────────────────────────────────────────
 
     fn random_public_key() -> iroh::PublicKey {

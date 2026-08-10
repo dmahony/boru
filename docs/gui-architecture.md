@@ -40,7 +40,7 @@ Key subsystems within `app.rs`:
 | Peer overlay | Remote peer profiles (display names, shared files) |
 | Diagnostics | IcedMessageJournal, GuiActionHistory, failure analysis |
 
-### File Library (`file_library.rs`, `file_library_ops.rs`)
+### File Library (`file_library_ops.rs`, feature state in `app/files.rs`)
 
 The file library manages files the local user offers to peers. It provides:
 
@@ -155,8 +155,8 @@ no-ops that log deprecation warnings.
 
 | Store | Backend | Purpose | Status |
 |---|---|---|---|
-| `Storage` (SQLite) | `boru.db` (V17) | **Authoritative** — inbox, outbox, file objects, file library, shared files, permissions, downloads, transfer activity, operations progress, DM messages, outgoing messages | **Active** |
-| `ChatHistoryStore` (JSON) | `chat_history.json` | Per-room chat history | Legacy (reads only) |
+| `Storage` (SQLite) | `boru.db` (V19) | **Authoritative** — inbox, outbox, file objects, file library, shared files, permissions, downloads, transfer activity, operations progress, DM messages, outgoing messages, groups, rings | **Active** |
+| `ChatHistoryStore` (JSON) | `chat_history.json` | Per-room chat history (one-time migration input) | Legacy (reads only) |
 | `OutboxStore` (JSON) | `outbox.json` | Outgoing message delivery state | Legacy (reads only); replaced by SQLite `outgoing_messages` table (V10) |
 | `ConversationStore` (JSON) | `conversations.json` | Conversation metadata | Legacy (reads only) |
 | `FriendsStore` (JSON) | `friends.json` | Friend contact list | Legacy (reads only) |

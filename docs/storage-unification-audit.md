@@ -1,5 +1,13 @@
 # Storage Unification Audit — Phase 1
 
+> **Status: historical audit snapshot (2026-07-28).** This document records
+> the pre-migration state at schema V9. Since then the SQLite migration
+> (BORU-AUDIT-18..21) completed: `boru.db` is at **schema V19**, JSON stores
+> are read-only migration inputs (their `save()` methods are deprecated
+> no-ops), and chat history lives in `message_store.db`. See
+> [`message-storage-design.md`](message-storage-design.md) for the current
+> storage architecture and migration model.
+
 **Date:** 2026-07-28  
 **Schema version:** V9 (CURRENT_SCHEMA_VERSION = 9)  
 **Database:** `boru.db` (SQLite, WAL mode)  

@@ -1,5 +1,15 @@
 # LAN Conversation & History Persistence — Diagnosis
 
+> **Status: historical diagnosis.** This document describes persistence
+> defects found during LAN testing and proposes fixes. The storage layer has
+> since moved to SQLite (BORU-AUDIT-18..21): durable message history now lives
+> in `message_store.db` (`messages` table), and `chat_history.json` is a
+> read-only one-time migration input. Where this document's line numbers or
+> JSON-centric descriptions disagree with the current code, the current code
+> and [`docs/message-storage-design.md`](docs/message-storage-design.md)
+> win. The defect analysis below remains useful as a checklist for the SQLite
+> migration paths.
+
 ## Architecture Summary
 
 The chat has three tiers of conversation storage:
@@ -7,7 +17,7 @@ The chat has three tiers of conversation storage:
 | Tier | Module | Persistence | Granularity |
 |------|--------|-------------|-------------|
 | Durable conversation list | `ConversationStore` (conversations.rs) | `conversations.json` atomic JSON | Per-topic metadata (name, kind, last_seen, archived) |
-| Durable message history | `ChatHistoryStore` (chat_history.rs) | `chat_history.json` atomic JSON | Per-message entries with delivery state |
+| Durable message history | `MessageStore` (store.rs) | `message_store.db` SQLite `messages` table | Per-message entries with delivery state |
 | In-memory conversation state | `ConversationLive` (app.rs) | None (lost on restart) | Draft text, in-flight events, entries list |
 
 **Message delivery pipeline** (LAN/offline):

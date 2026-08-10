@@ -14,7 +14,7 @@ file-access / net, (3) Iced GUI event flow, (4) peer authorization lifecycle,
 
 ## 1. Whisper — the direct-QUIC private messaging subsystem
 
-Files: `src/whisper/mod.rs` (1049 lines), `src/whisper/session_manager.rs` (790 lines).
+Files: `src/whisper/mod.rs`, `src/whisper/session_manager.rs` (both multi-hundred-line modules).
 
 Whisper is the closest existing model for a call subsystem: a dedicated ALPN,
 a builder → handle + event-receiver actor, a ProtocolHandler registered on the
@@ -159,7 +159,7 @@ should either revive this pattern deliberately or not duplicate it.
 
 ## 2. Other protocol handlers — inbox, backfill, file-access, net
 
-### 2.1 Inbox (`src/inbox.rs`, 1504 lines)
+### 2.1 Inbox (`src/inbox.rs`)
 
 Offline-message delivery on its own ALPN `INBOX_ALPN = b"/iroh-chat-inbox/1"`
 (`inbox.rs:49`). Security: every message is a `SignedInboxMessage` (sender +
@@ -187,7 +187,7 @@ window 24 h (`inbox.rs:52`).
   Per-request dispatch is synchronous inside `handle_request` and produces an
   optional response written back on the same bi-stream (`inbox.rs:479-540`).
 
-### 2.2 Backfill (`src/backfill.rs`, 1011 lines)
+### 2.2 Backfill (`src/backfill.rs`)
 
 History backfill over `BACKFILL_ALPN`. Two sides:
 
@@ -208,7 +208,7 @@ History backfill over `BACKFILL_ALPN`. Two sides:
 - `try_backfill_from_peer` (`backfill.rs:480-501`) shows the
   remote-info → EndpointAddr path: `EndpointAddr::from_parts(peer, info.into_addrs())`.
 
-### 2.3 File access (`src/file_access_handler.rs`, 3314 lines)
+### 2.3 File access (`src/file_access_handler.rs`)
 
 Signed download-descriptor issuance on `FILE_ACCESS_ALPN` (`net.rs:52-58`).
 
@@ -225,7 +225,7 @@ Signed download-descriptor issuance on `FILE_ACCESS_ALPN` (`net.rs:52-58`).
   allow/deny from storage, then friend relationship before issuing a
   signed descriptor.
 
-### 2.4 Gossip/net (`src/net.rs`, 2788 lines)
+### 2.4 Gossip/net (`src/net.rs`)
 
 The core gossip subsystem; a different but instructive shape.
 
@@ -254,7 +254,7 @@ The core gossip subsystem; a different but instructive shape.
   `endpoint_loop(endpoint, gossip, cancel)` (`net.rs:2040-2070`) — select on
   `cancel.cancelled()` vs `endpoint.accept()`, then `gossip.handle_connection`.
 
-### 2.5 Tunnel (`src/tunnel.rs`, 1410 lines) — newest subsystem
+### 2.5 Tunnel (`src/tunnel.rs`) — newest subsystem
 
 `TunnelProtocol` (`tunnel.rs:421-451`) demonstrates connection-level admission
 control with a semaphore (`active_connections.try_acquire_owned()`,
@@ -287,7 +287,7 @@ for a call ALPN addition.
 
 ## 3. Iced GUI event flow — how async events reach the frontend
 
-Files: `examples/iced_chat/main.rs` (2585 lines), `examples/iced_chat/app.rs` (52833 lines).
+Files: `examples/iced_chat/main.rs`, `examples/iced_chat/app.rs` (root composition plus `examples/iced_chat/app/` feature modules).
 
 ### 3.1 Startup wiring (main.rs)
 
@@ -373,7 +373,7 @@ Arc<Mutex<Receiver<...>>> field on `IcedChat`, another branch in
 
 ## 4. Peer authorization lifecycle — block/unblock/friend/unfriend
 
-Files: `src/friends.rs` (770 lines), `src/chat_core/friend_ping.rs` (1006 lines),
+Files: `src/friends.rs`, `src/chat_core/friend_ping.rs`,
 wiring in `main.rs` and `app.rs`.
 
 ### 4.1 The friends store

@@ -139,10 +139,10 @@ The 15s dial cancellation and 5s direct→relay fallback are the two gossiplayer
 
 1. **Whisper `send_file()`** (`whisper/mod.rs:231`): sends a serialized `BlobTicket` (addr + hash + format) over a whisper DM session
 2. **Receiver** parses the `BlobTicket` and calls `iroh_blobs::downloader::Downloader::download()` with provider candidates
-3. **`download_blob_with_safety()`** in `chat_core.rs:2100+` wraps the download with progress events, safety checks, and cancellation
-4. **`download_candidates()`** in `chat_core.rs:1999` builds provider list: original sender first, then online neighbors
+3. **`download_blob_with_safety()`** in `src/chat_core/downloads.rs` wraps the download with progress events, safety checks, and cancellation
+4. **`download_candidates()`** in `src/chat_core/downloads.rs` builds provider list: original sender first, then online neighbors
 5. **Profile images** are uploaded to blob store, then their `BlobTicket` is embedded in `UserProfile` and broadcast via `Message::ProfileUpdate`
-6. **`SharedFileMeta`** (`chat_core.rs:917-932`): id, filename, size, mime_type, modified_time, hash — announced in `ProfileUpdate`
+6. **`SharedFileMeta`** (`src/chat_core/protocol.rs`): id, filename, size, mime_type, modified_time, hash — announced in `ProfileUpdate`
 7. **`user_profile.rs`**: on-disk `profile.json` controls max file size (100MB), shared folder path, file enable/disable
 
 ### Planned Implementation (Catalogue + File Access)
@@ -157,12 +157,12 @@ The design doc (`protocol-layers.md:232-275`) specifies: 64KiB request cap, 1MiB
 
 ## 7. Profile-Update Messages
 
-- **Variant**: `Message::ProfileUpdate(UserProfile)` at `chat_core.rs:914`
-- **Throttle**: 30-second minimum interval (`ProfileUpdateThrottle`, `chat_core.rs:934-961`)
+- **Variant**: `Message::ProfileUpdate(UserProfile)` at `src/chat_core/protocol.rs`; handled in `src/chat_core/net_event.rs`
+- **Throttle**: a 30-second minimum interval previously applied via `ProfileUpdateThrottle`; that throttle was removed with the full-catalogue gossip data-flow cleanup — profile updates are now rate-limited by the peer-safety/abuse-control layer where applicable
 - **Contents**: `UserProfile` (display name, bio, avatar blob_id, avatar ticket, shared files list, preferences)
 - **Transport**: Broadcast over gossip like any other room message
 - **Frontend callback**: `ChatCallbacks::on_profile_update(peer, profile)` (`chat_callbacks.rs:297`)
-- **Wire format**: Discriminant 13 (inserted mid-enum with backward-compat code at `chat_core.rs:4164-4167`)
+- **Wire format**: Discriminant 13 (inserted mid-enum with backward-compat codec handling in `src/wire_compression.rs`)
 
 ---
 
@@ -217,6 +217,6 @@ The design doc (`protocol-layers.md:232-275`) specifies: 64KiB request cap, 1MiB
 | `Diagnostics` singleton (diagnostics.rs) | Generic bounded event store with sequence numbering and probe tracking |
 | `Dialer` (net.rs:1237) | Direct-then-relay dial strategy with cancellation — reusable for any protocol that needs connect fallback |
 | Length-prefixed frame I/O (`net/util.rs:64-78`, `recv_loop`) | Reusable `read_frame`/`write_frame` primitives for postcard-over-stream |
-| `ProfileUpdateThrottle` (chat_core.rs:939) | General monotonic debounce pattern |
+| `ProfileUpdateThrottle` (removed; see §7) | General monotonic debounce pattern |
 | `DynamicPeerJoiner` (dynamic_joiner.rs) | Bounded peer join with dedup, backoff, and retry — room-agnostic |
 | `Event` enum with diagnostic probes | Pattern for in-band health/latency measurement (DiagnosticProbe variant) |

@@ -13,7 +13,7 @@ conversation metadata. This document focuses on Step 12: deletion semantics.
 |---|---|---|---|
 | 13 | V2 schema: content-addressed file objects | **Done** | `storage::Storage::migrate_v2` — 8 new tables (file_objects, message_attachments, shared_files, file_collections, file_collection_items, shared_file_permissions, downloads, profile_manifest_state) |
 | 14 | Legacy JSON → SQLite migration | **Done** | `storage::Storage::import_legacy_db()` copies inbox, outbox, contacts, sync_cursor; idempotent via ON CONFLICT DO NOTHING |
-| 15 | Schema versioning and migration framework | **Done** | `schema_version` table, `CURRENT_SCHEMA_VERSION=2`, forward-only, future-schema guard, partial-migration recovery |
+| 15 | Schema versioning and migration framework | **Done** | `schema_version` table, `CURRENT_SCHEMA_VERSION` (now 19), forward-only, future-schema guard, partial-migration recovery |
 | 16 | Crash and corruption resilience | **Done** | `PRAGMA integrity_check` on open, `recover_crash_state()` (Sent→Pending recovery, stale timestamp reset), `PRAGMA journal_mode=WAL`, `busy_timeout=5000`, `synchronous=NORMAL` |
 | 17 | Repository integration test suite | **Done** | `tests/test_storage_integration.rs` — 8 deterministic tests covering outgoing queue lifecycle, exactly-once, ordering, key rotation, deletion tombstone, legacy migration, attachment integrity, mixed operations |
 | 18 | Redirect legacy message-store access | **Done** | `Storage::open()` imports existing `message_store.db`; storage integration in GUI is deferred |
@@ -25,7 +25,7 @@ All legacy JSON stores have been replaced by SQLite unified storage:
 
 | Legacy Store | Source | Status |
 |---|---|---|
-| `ChatHistoryStore` (`chat_history.json`) | `src/chat_history.rs` | Writes disabled — reads only |
+| `ChatHistoryStore` (`chat_history.json`) | `src/chat_history.rs` | Writes disabled — one-time migration input via `migrate_legacy_json()` into SQLite `message_store.db` (`messages` table) |
 | `OutboxStore` (`outbox.json`) | `src/outbox.rs` | Writes disabled — reads only; replaced by SQLite `outgoing_messages` table (V10) |
 | `FriendsStore` (`friends.json`) | `src/friends.rs` | Writes disabled — reads only |
 | `ConversationStore` (`conversations.json`) | `src/conversations.rs` | Writes disabled — reads only |
@@ -48,7 +48,7 @@ handled directly via `AppSettings::save()`. The GUI outgoing queue now reads
 from the SQLite `outgoing_messages` table (V10) instead of `outbox.json`.
 
 See [`docs/message-storage-design.md`](message-storage-design.md) for the
-current schema (V10), delivery state machine (Pending→Sending→Sent→Acked),
+current schema (V19), delivery state machine (Pending→Sending→Sent→Acked),
 crash recovery details, and full table descriptions.
 
 ## Deletion and Tombstone Semantics (Step 12)

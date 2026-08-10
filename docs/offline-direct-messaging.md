@@ -187,7 +187,7 @@ Pending -> Sent -> Acked
 uses `ON CONFLICT(msg_id) DO NOTHING`; conversation metadata updates unread
 counts atomically; tombstones prevent resurrection; `mark_acked()` removes or
 marks the recipient-specific outbox row. `src/storage.rs` provides the newer
-`boru.db` repository and versioned migrations (currently schema version 4),
+`boru.db` repository and versioned migrations (currently schema version 19),
 but the current GUI DM path does not call these methods.
 
 ### RetryWorker

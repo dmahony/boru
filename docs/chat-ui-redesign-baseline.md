@@ -371,7 +371,7 @@ Integration tests (46+ files under `tests/`) require network-capable test enviro
 Per the safety preamble constraints:
 
 1. **Networking**: Gossip subscriptions, peer discovery (mDNS/DHT), address lookup, dial retry, QUIC connections
-2. **Storage**: SQLite `boru.db` (V10), JSON stores (friends, rooms, conversations, chat_history, outbox, mailbox), ImageStore
+2. **Storage**: SQLite `boru.db` (V19) + `message_store.db` (chat history), legacy JSON stores read-only (friends, rooms, conversations, chat_history, outbox, mailbox), ImageStore
 3. **Protocols**: Message serialization (postcard + ed25519 signing), whisper (friend requests/DMs), inbox (offline messages), backfill, catalogue, file access
 4. **Identity**: PublicKey/SecretKey handling, friend ID derivation, direct topic derivation
 5. **File transfer**: Blob upload/download, image optimization, content addressing

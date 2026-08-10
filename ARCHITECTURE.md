@@ -43,16 +43,20 @@ The project provides a Rust library (`boru_core`) and an example GUI application
 │  └──────────────────────────────────────────────────┘    │
 │                                                          │
 │  ┌──────────────────────────────────────────────────┐    │
-│  │        Storage Layer                              │    │
-│  │  ┌──────────────┐  ┌──────────┐  ┌───────────┐  │    │
-│  │  │ SQLite:      │  │ JSON:    │  │ ImageStore │  │    │
-│  │  │ Storage      │  │ Friends, │  │ (files/)   │  │    │
-│  │  │ (boru.db)    │  │ Chats,   │  └───────────┘  │    │
-│  │  │              │  │ Outbox,  │                 │    │
-│  │  │              │  │ Profile  │                 │    │
-│  │  └──────────────┘  └──────────┘                 │    │
-│  │  ┌──────────────────────────────────────────────────┐    │
-│  │        Discovery System                           │    │
+│  │                 Storage Layer                     │    │
+│  │  • SQLite `Storage` (boru.db) — core store,       │    │
+│  │    schema v19 (see `CURRENT_SCHEMA_VERSION` in    │    │
+│  │    `src/storage.rs`).                             │    │
+│  │  • SQLite `MessageStore` (message_store.db) —     │    │
+│  │    live chat-history `messages` table.            │    │
+│  │  • JSON files — legacy read-only migration        │    │
+│  │    inputs; Profile/Settings remain active JSON.   │    │
+│  │  • ImageStore (files/) — content-addressed        │    │
+│  │    images.                                        │    │
+│  └──────────────────────────────────────────────────┘    │
+│                                                          │
+│  ┌──────────────────────────────────────────────────┐    │
+│  │                 Discovery System                  │    │
 │  │  ┌──────────────┐  ┌────────────┐  ┌──────────┐ │    │
 │  │  │ Public Room  │  │ Private    │  │ DHT /    │ │    │
 │  │  │ Trackers     │  │ Room       │  │ mDNS     │ │    │
@@ -88,9 +92,36 @@ The IO-less protocol state machine implementing HyParView (membership) and PlumT
 
 Wraps the IO-less protocol state machine in a tokio-based actor that manages QUIC connections, serializes/deserializes messages, and emits events to subscribers. The primary entry point is `Gossip::spawn()`.
 
-### Chat Core (`src/chat_core.rs`)
+### Chat Core (`src/chat_core/`)
 
-Reusable state machine combining gossip networking with protocol message types (`Message`, `SignedMessage`, `Ticket`). Frontend-agnostic (no terminal/GUI dependencies). Used by both the iced GUI and headless tests.
+Reusable state machine combining gossip networking with protocol message types
+(`Message`, `SignedMessage`, `Ticket`). Frontend-agnostic (no terminal/GUI
+dependencies). Used by both the iced GUI and headless tests.
+
+`src/chat_core.rs` is a thin re-export composition surface (no function
+bodies); the implementation lives in responsibility-scoped submodules:
+
+| Module | Purpose |
+|--------|---------|
+| `chat_core/protocol.rs` | Protocol message types, `SignedMessage`, canonical signing rules |
+| `chat_core/state.rs` | UI-free chat/group state types |
+| `chat_core/composer.rs` | Outgoing message composition |
+| `chat_core/entries.rs` | Entry-list bookkeeping |
+| `chat_core/status.rs` | Delivery/status state mapping |
+| `chat_core/dedup.rs` | Message dedup cache |
+| `chat_core/net_event.rs` | Network-event handling for incoming gossip events |
+| `chat_core/downloads.rs` | Blob transfer execution (`download_candidates`, `download_blob_with_safety`) |
+| `chat_core/bootstrap.rs` | Bootstrap and formatting helpers |
+| `chat_core/util.rs` | Small shared helpers |
+| `chat_core/atomic_write.rs` | Crash-safe JSON write helpers |
+| `chat_core/friend_ping.rs` | Friend connectivity-ping handler |
+| `chat_core/tests.rs` | Unit tests for the above |
+
+### Catalogue handler (`src/catalogue_handler.rs`)
+
+Connection/session orchestration for the remote file catalogue. View policy
+and authorization live in `src/catalogue_policy.rs`; response wire codecs live
+in `src/catalogue_wire.rs`.
 
 ### Public Rooms (`src/public_room*.rs`)
 
@@ -156,8 +187,8 @@ and operator guidance.
 | Module | ALPN | Purpose |
 |--------|------|---------|
 | `inbox` | `/iroh-chat-inbox/1` | Offline message delivery with ACK and delete-tombstone support |
-| `backfill` | `/iroh-chat-backfill/1` | Late-joining peer history sync |
-| `whisper` | `/iroh-chat-whisper/1` | Private 1:1 QUIC channels for DMs and file transfer |
+| `backfill` | `/iroh-gossip-chat/backfill/1` | Late-joining peer history sync |
+| `whisper` | `/iroh-gossip-chat/whisper/1` | Private 1:1 QUIC channels for DMs and file transfer |
 | `net` (gossip) | `/iroh-gossip/1` | Room-based broadcast messaging |
 
 ### Friend & Contact System
@@ -171,19 +202,24 @@ and operator guidance.
 
 ### Storage Layer
 
+SQLite is the authoritative store. `boru.db` (schema v19, tracked by
+`CURRENT_SCHEMA_VERSION` in `src/storage.rs`) holds durable core state;
+`message_store.db` holds live chat-message history. Legacy JSON stores are
+read-only migration inputs: their `save()` methods are deprecated no-ops.
+
 | Module | Backend | Purpose |
 |--------|---------|---------|
-| `storage` | SQLite (`boru.db`) | Durable core store: inbox/outbox envelopes, file objects, profiles (V4 schema); independently authoritative for those records |
-| `store` | SQLite (`message_store.db`, inbox) | Inbox/outbox envelope storage, message tombstones |
-| `chat_history` | JSON | Per-room chat message history (active frontend) |
-| `conversations` | JSON | Conversation metadata (unread, mute, archive) |
-| `friends` | JSON | Friend contact list |
+| `storage` | SQLite (`boru.db`) | Durable core store: inbox/outbox envelopes, file objects, shared files, permissions, downloads, DM messages, outgoing messages, groups, rings, chat_messages (v19, used by backfill); forward-only versioned migrations (v1–v19) |
+| `store` | SQLite (`message_store.db`) | Live chat-message history (`messages` table) and inbox/outbox envelope storage; written by the GUI on every message |
+| `chat_history` | JSON (legacy) | One-time migration input (`migrate_legacy_json`) into `message_store.db`; `save()` is a no-op |
+| `conversations` | JSON | Conversation metadata (unread, mute, archive) — loaded at startup |
+| `friends` | JSON | Friend contact list with per-peer relationship state |
 | `friend_request` | JSON | Pending/accepted/declined/cancelled friend requests |
 | `mailbox` | Protocol types | Encrypted offline-message envelopes and signed ACKs; `mailbox.json` is legacy migration input |
-| `outbox` | JSON | GUI outgoing message queue (active frontend source of truth; SQLite outbox is the core delivery store) |
+| `outbox` | SQLite (`boru.db`) | GUI outgoing message queue lives in the `outgoing_messages` table (v10); `outbox.json` is legacy read-only |
 | `room` | JSON | Room topic + bootstrap peer persistence |
 | `room_history` | In-memory | Transient room list for navigation |
-| `user_profile` | JSON | Display name, sharing settings, shared file metadata |
+| `user_profile` | JSON | Display name, sharing settings, shared file metadata (no SQLite equivalent — active) |
 | `image_store` | Disk (`files/`) | Content-addressed image storage |
 
 ### Image Processing
@@ -219,18 +255,38 @@ and operator guidance.
 
 ## GUI Architecture (`examples/iced_chat/`)
 
-The GUI is a single Iced application (the `IcedChat` struct in `app.rs`) with:
+The GUI is an Iced application (the `IcedChat` struct in `app.rs`) split
+across a root composition module and feature modules. `app.rs` remains the
+root state/router (large, but feature state and update logic are extracted);
+feature modules under `examples/iced_chat/app/` own domain-specific state and
+views:
+
+| Feature module | Purpose |
+|----------------|---------|
+| `app/home.rs` | Home dashboard |
+| `app/sidebar.rs` | Sidebar/chat-list sections |
+| `app/chat.rs` | Chat panel |
+| `app/contacts.rs` | Contacts/discover |
+| `app/groups.rs` | Group conversations |
+| `app/files.rs` | File library |
+| `app/calls.rs` | Call lifecycle |
+| `app/tunnels.rs` | Secure tunnels |
+| `app/settings.rs` | Settings |
+| `app/dialogs.rs` | Dialog overlays |
+| `app/discover.rs` | Peer discovery UI |
+
+Other GUI modules:
 
 | Component | File | Purpose |
 |-----------|------|---------|
 | Main entry | `main.rs` | CLI args, endpoint setup, tokio runtime |
-| Application | `app.rs` (~16k lines) | Iced Application, screens, networking, state |
-| File library | `file_library.rs` | State types, filtering, sorting, validation |
+| Application | `app.rs` | Iced Application composition: screens, networking, state routing (large — feature logic is extracted into `app/`) |
 | File library ops | `file_library_ops.rs` | Hashing, import, reference, change detection |
 | Log viewer | `log_viewer.rs` | Standalone log file viewer |
 | MCP server | `mcp_server.rs` | JSON-RPC 2.0 diagnostic server over TCP |
 | Perf tracker | `perf_tracker.rs` | Non-invasive performance instrumentation |
 | GUI test actions | `gui_test_actions.rs` | Automated test actions for integration testing |
+| Shared UI | `ui_components.rs`, `design_tokens.rs`, `fonts.rs`, `icon_system.rs`, `focusable_button.rs`, `form_components.rs`, `boru_dialog.rs`, `card_shell.rs`, … | Reusable widget and token library |
 
 ## Build & Feature Flags
 
@@ -253,7 +309,7 @@ User types message → IcedChat::update() →
     gossip broadcast over PlumTree mesh →
       connected peers receive via GossipEvent →
         NetEvent delivered to IcedChat →
-          local ChatHistoryStore persisted (JSON) →
+          local chat history persisted to SQLite (message_store.db) →
             UI updated with new message
 ```
 
@@ -375,6 +431,36 @@ are exposed only through bounded protocol error categories.
   size and BLAKE3 hash before atomic installation
 - **Abuse resistance**: payload caps, pagination bounds, semaphores, timeouts,
   request rate limits, and upload preparation limits constrain untrusted peers
+
+### Security invariants (Boru Code Audit Remediation Plan)
+
+These invariants were introduced/formalized by the audit remediation and are
+covered by regression tests; keep docs and tests in sync when they change.
+
+- **Backfill authorization**: remote backfill requests require a concrete
+  topic and are authorized per request against the authenticated peer
+  (`Connection::remote_id` — never a payload-supplied identity) via
+  `BackfillAuthorizer::authorize`. Missing/unknown topics are rejected before
+  any storage query; paginated requests re-check authorization; denied
+  attempts emit an audit event with the remote peer id but never message
+  contents (`src/backfill.rs`).
+- **Signed payload rules**: every protocol payload is wrapped in a canonical
+  `SignedMessage`; signing covers the complete serialized payload (no
+  guessed or fallback file metadata is ever signed). Descriptor/catalogue
+  signatures are checked against the authenticated connection identity.
+- **Descriptor peer binding**: `SignedDownloadDescriptor` is bound to both
+  owner and requesting peer (checked against `Connection::remote_id`),
+  carries a random nonce, and is rejected after its 60 s lifetime or on
+  replay (`src/file_access_handler.rs`).
+- **Replay retention**: group event replay markers are persisted in SQLite
+  (`group_event_replay`, keyed by `(group_id, event_id)`, indexed by
+  `(group_id, epoch)`) and pruned in bounded batches; the in-memory cache is
+  capped and is an optimization only — replay protection survives restart
+  (`src/group_replay.rs`).
+- **Group-state fail-closed**: encrypted group state is stored with a BLAKE3
+  integrity checksum; corrupt or undecodable state fails closed with an
+  explicit recovery error and is never silently re-saved or reinitialized
+  over existing records (`src/group_encryption/persistence.rs`).
 
 ## Privacy Model
 
