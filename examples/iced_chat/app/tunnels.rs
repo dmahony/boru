@@ -375,6 +375,21 @@ impl IcedChat {
                     iced::widget::operation::focus(SHARE_SERVICE_NAME_INPUT),
                 ])
             }
+            AppMessage::OpenShareVncTunnel => {
+                self.friend_profile_menu_open = false;
+                self.share_local_service_open = true;
+                self.share_service_name = boru_core::vnc_tunnel::SERVICE_NAME.to_string();
+                self.share_service_port = "5900".to_string();
+                self.share_service_expiry = boru_core::tunnel::service::TunnelDuration::OneHour;
+                self.share_service_is_http = false;
+                self.share_service_submitting = false;
+                self.share_service_error = Some(
+                    "Experimental: run VNC on 127.0.0.1 only; Boru never carries VNC credentials."
+                        .to_string(),
+                );
+                self.share_service_scanning = false;
+                iced::widget::operation::focus(SHARE_SERVICE_PORT_INPUT)
+            }
             AppMessage::ShareLocalServiceNameChanged(value) => {
                 self.share_service_name = value;
                 self.share_service_error = None;
@@ -448,6 +463,21 @@ impl IcedChat {
                         Some("Enter a valid local port (1-65535) to share.".to_string());
                     self.toast_counter = 120;
                     return iced::Task::none();
+                }
+                if self.share_service_name == boru_core::vnc_tunnel::SERVICE_NAME {
+                    let source = std::net::SocketAddr::from((
+                        std::net::Ipv4Addr::LOCALHOST,
+                        port,
+                    ));
+                    if let Err(error) = (boru_core::vnc_tunnel::VncTunnelConfig {
+                        source,
+                        preferred_viewer_port: None,
+                    })
+                    .validate()
+                    {
+                        self.share_service_error = Some(error.to_string());
+                        return iced::Task::none();
+                    }
                 }
                 self.share_service_error = None;
                 // Tunnel creation is synchronous; the flag guards against

@@ -67,6 +67,10 @@ pub mod video_poster;
 /// Optional GStreamer runtime capability detection for inline video playback.
 pub mod video_runtime;
 
+/// Localhost-only configuration helpers for the experimental VNC tunnel.
+#[cfg(feature = "net")]
+pub mod vnc_tunnel;
+
 /// Public-room directory — topic derivation, advertisement store, and
 /// gossip subscription for discovering public rooms on the same relay.
 #[cfg(feature = "net")]

@@ -5412,6 +5412,8 @@ pub enum AppMessage {
     ToggleFriendProfileMenu,
     /// Open the "Share local service" dialog for the friend whose profile is open.
     OpenShareLocalService,
+    /// Open the experimental localhost-only VNC tunnel flow.
+    OpenShareVncTunnel,
     /// Service name changed in the share dialog.
     ShareLocalServiceNameChanged(String),
     /// Local port changed in the share dialog.
@@ -9392,6 +9394,7 @@ impl IcedChat {
             AppMessage::CloseFriendProfile => "CloseFriendProfile",
             AppMessage::ToggleFriendProfileMenu => "ToggleFriendProfileMenu",
             AppMessage::OpenShareLocalService => "OpenShareLocalService",
+            AppMessage::OpenShareVncTunnel => "OpenShareVncTunnel",
             AppMessage::ShareLocalServiceNameChanged(_) => "ShareLocalServiceNameChanged",
             AppMessage::ShareLocalServicePortChanged(_) => "ShareLocalServicePortChanged",
             AppMessage::ShareLocalServiceExpiryChanged(_) => "ShareLocalServiceExpiryChanged",
@@ -13030,6 +13033,7 @@ impl IcedChat {
             AppMessage::ToggleFriendProfileMenu => self.update_contacts(message),
             // ── Tunnels share-local-service (state layer) ──────────
             AppMessage::OpenShareLocalService
+            | AppMessage::OpenShareVncTunnel
             | AppMessage::ShareLocalServiceNameChanged(_)
             | AppMessage::ShareLocalServicePortChanged(_)
             | AppMessage::ShareLocalServiceExpiryChanged(_)

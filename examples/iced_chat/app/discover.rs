@@ -744,6 +744,8 @@ impl IcedChat {
                 ("Browse Files", AppMessage::BrowsePeerCatalogue(peer)),
                 ("Rename Friend", AppMessage::ShowRenameFriendInput),
                 ("Share local service", AppMessage::OpenShareLocalService),
+                #[cfg(feature = "experimental-vnc")]
+                ("Share desktop using VNC Tunnel", AppMessage::OpenShareVncTunnel),
                 ("Copy Public Key", AppMessage::CopyPeerId(peer)),
                 ("Remove Friend", AppMessage::ShowRemoveFriendConfirm),
                 ("Block Friend", AppMessage::ShowBlockFriendConfirm),
