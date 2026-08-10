@@ -26,17 +26,19 @@ verified against a stable baseline.
 | 0c4dab11 | file-sharing dashboard update arms → `update_files` in `app/files.rs` | 37,437 → 37,146 |
 | 164c76a3 | discover/directory update arms → `update_discover` in `app/discover.rs` | 37,146 → 36,925 |
 | 4b5e68a7 | settings update arms → `update_settings` in `app/settings.rs` | 36,925 → 36,434 |
+| 51daa14a | group creation update arms → `update_groups` in new `app/groups.rs` | 36,434 → 36,215 |
 
 State layer (spec steps 4–6) started: the calls, tunnels, contacts, files
-(dashboard), discover and settings features' update arms were moved into
-per-feature `update_calls` / `update_tunnels` / `update_contacts` /
-`update_files` / `update_discover` / `update_settings` methods; app.rs's
-`update()` now dispatches those variants via combined match arms. State
-ownership stays on the root `IcedChat` for now (spec step 3 constraint:
-keep state ownership unchanged during the first pass); remaining feature
-update arms (chat, groups, home, plus the non-dashboard file transfer
-arms) can be extracted the same way, then feature state structs (steps
-4–6) and per-feature subscriptions (step 7) afterwards.
+(dashboard), discover, settings and groups features' update arms were moved
+into per-feature `update_calls` / `update_tunnels` / `update_contacts` /
+`update_files` / `update_discover` / `update_settings` / `update_groups`
+methods (groups module newly created); app.rs's `update()` now dispatches
+those variants via combined match arms. State ownership stays on the root
+`IcedChat` for now (spec step 3 constraint: keep state ownership unchanged
+during the first pass); remaining feature update arms (chat, home, plus the
+non-dashboard file transfer arms) can be extracted the same way, then
+feature state structs (steps 4–6) and per-feature subscriptions (step 7)
+afterwards.
 
 ## Overview
 
