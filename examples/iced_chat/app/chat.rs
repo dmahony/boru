@@ -7042,6 +7042,75 @@ impl IcedChat {
                 self.reconcile_inline_video_viewport();
                 iced::Task::none()
             }
+            AppMessage::SendMessage {
+                conversation_topic,
+                content,
+            } => {
+                // Validate that this conversation exists
+                if !self.conversations.contains_key(&conversation_topic) {
+                    warn!("SendMessage: unknown conversation {conversation_topic:?}");
+                    return iced::Task::none();
+                }
+                // If sending to the active conversation, use the normal flow
+                if conversation_topic == self.topic {
+                    self.composer_text = content;
+                    // Fall through to SendPressed logic
+                    let trimmed = self.composer_text.trim().to_string();
+                    if trimmed.is_empty() {
+                        return iced::Task::none();
+                    }
+                    self.composer_text.clear();
+                    let text = trimmed.clone();
+                    match self.persist_outgoing_message(self.topic, &trimmed) {
+                        Ok((event_id, msg_hash, encoded)) => {
+                            self.self_sent_events.insert(msg_hash, event_id);
+                            let mut local_entry = ChatEntry::local(&self.local_label, &text);
+                            local_entry.event_id = event_id;
+                            local_entry.message_hash = Some(msg_hash);
+                            let _entry_idx = self.entries_push(local_entry);
+                            Self::broadcast_or_queue(
+                                encoded,
+                                self.sender.clone(),
+                                self.sender_ready,
+                                self.neighbors.len(),
+                                text,
+                                event_id,
+                                msg_hash,
+                                None,
+                            )
+                        }
+                        Err(e) => iced::Task::done(AppMessage::ErrorMsg(e)),
+                    }
+                } else {
+                    // For background conversations, use the ConversationLive's sender
+                    let text = content;
+                    match self.persist_outgoing_message(conversation_topic, &text) {
+                        Ok((event_id, msg_hash, encoded)) => {
+                            if let Some(conv) = self.conversations.get_mut(&conversation_topic) {
+                                conv.self_sent_events.insert(msg_hash, event_id);
+                                let mut local_entry = ChatEntry::local(&self.local_label, &text);
+                                local_entry.event_id = event_id;
+                                local_entry.message_hash = Some(msg_hash);
+                                conv.entries.push(local_entry);
+                                conv.unread = conv.unread.saturating_add(1);
+                                Self::broadcast_or_queue(
+                                    encoded,
+                                    conv.sender.clone(),
+                                    conv.sender_ready,
+                                    conv.neighbors.len(),
+                                    text,
+                                    event_id,
+                                    msg_hash,
+                                    None,
+                                )
+                            } else {
+                                iced::Task::none()
+                            }
+                        }
+                        Err(e) => iced::Task::done(AppMessage::ErrorMsg(e)),
+                    }
+                }
+            }
             // update() only dispatches the chat variants here; other
             // variants can never reach this method (defensive catch-all).
             _ => iced::Task::none(),

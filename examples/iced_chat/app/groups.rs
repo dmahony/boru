@@ -443,6 +443,155 @@ impl IcedChat {
                 iced::Task::none()
             }
 
+            AppMessage::GroupCreated {
+                sender,
+                topic,
+                ticket: ticket_str,
+                entry,
+                group_id,
+                name: display_name,
+                description,
+                members: friend_keys,
+                generation,
+            } => {
+                // The async creation completed: clear the in-flight flag and
+                // close the dialog so navigation to the new group proceeds.
+                self.create_group_submitting = false;
+                self.show_create_group_dialog = false;
+                self.create_group_error = None;
+                // State-safety: if the user opened another room while the
+                // group-creation task was in flight, this completion is stale
+                // and must not navigate the UI away from that room. Detect in
+                // debug builds.
+                debug_assert_eq!(
+                    self.room_generation, generation,
+                    "stale GroupCreated: completion generation {generation} \
+                     != current room generation {}",
+                    self.room_generation,
+                );
+                info!(
+                    ?group_id,
+                    name = %display_name,
+                    member_count = friend_keys.len(),
+                    ?topic,
+                    "group created",
+                );
+                // Save the current room state to the conversation cache so the
+                // user can switch back to it without a slow re-subscribe.
+                self.save_room_to_history();
+                self.leave_current_room();
+                // The new group appears in the Groups screen's group list.
+                self.invalidate_prewarm(&[Screen::Groups]);
+
+                // Apply the gossip sender for the new group room
+                self.sender = Some(*sender);
+                self.room_loading = false;
+
+                // Persist the conversation entry
+                self.conversation_store.upsert(*entry);
+                self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
+
+                // Set member count on room history entry (includes self + selected members)
+                let total_members = friend_keys.len() as u32 + 1; // +1 for self (creator)
+                self.room_history.upsert(topic, display_name.clone(), true);
+                self.room_history.update_member_count(&topic, total_members);
+                self.room_history_dirty = true;
+
+                // Navigate to the group room - emulate RoomOpened
+                self.topic = topic;
+                self.ticket_str = ticket_str.clone();
+                self.screen = Screen::Chat { topic };
+                // A new active conversation is being applied — bump the
+                // conversation ownership token so in-flight image downloads
+                // started for the previous conversation are detected.
+                self.conversation_generation = self.conversation_generation.wrapping_add(1);
+
+                // Build task list: clipboard write + invite DMs if members selected
+                let mut tasks: Vec<iced::Task<AppMessage>> =
+                    vec![iced::clipboard::write(ticket_str.clone())];
+
+                if !friend_keys.is_empty() {
+                    let mut group_id_bytes = [0u8; 32];
+                    let topic_str = topic.to_string();
+                    let topic_bytes = topic_str.as_bytes();
+                    let len = topic_bytes.len().min(32);
+                    group_id_bytes[..len].copy_from_slice(&topic_bytes[..len]);
+
+                    let whisper_handle = self.whisper_handle.clone();
+                    let storage = self.storage.clone();
+                    let sk = self.secret_key.clone();
+
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    let expire_ms = now_ms + 7 * 24 * 60 * 60 * 1000; // 7 days
+                    let group_name = display_name.clone();
+                    let member_count = friend_keys.len();
+
+                    let invite_task = iced::Task::perform(
+                        async move {
+                            let invite_id: [u8; 32] = rand::random();
+                            let inviter_pk_bytes = sk.public().to_vec();
+                            use data_encoding::HEXLOWER;
+                            let invite_id_hex = HEXLOWER.encode(&invite_id);
+                            let group_id_hex = HEXLOWER.encode(&group_id_bytes);
+                            let invite_text = format!(
+                                "INVITE:{invite_id_hex}:{}:{group_id_hex}:{group_name}:{ticket_str}",
+                                sk.public(),
+                            );
+
+                            for peer_key in &friend_keys {
+                                // Persist GroupInviteRow
+                                if let Some(ref st) = storage {
+                                    let invite_row = boru_core::storage::GroupInviteRow {
+                                        invite_id,
+                                        group_id: group_id_bytes,
+                                        inviter_public_key: inviter_pk_bytes.clone(),
+                                        recipient_public_key: peer_key.to_vec(),
+                                        epoch: 1,
+                                        status: "Pending".into(),
+                                        created_at_ms: now_ms,
+                                        expires_at_ms: expire_ms,
+                                        ticket: ticket_str.clone(),
+                                        group_name: group_name.clone(),
+                                    };
+                                    let _ = st.create_group_invite(&invite_row);
+                                }
+
+                                // Send whisper DM
+                                match whisper_handle.send_dm(*peer_key, invite_text.clone()).await {
+                                    Ok(()) => {
+                                        tracing::info!(
+                                            ?peer_key,
+                                            "whisper DM sent for group invite (auto on create)"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            ?peer_key,
+                                            error = %e,
+                                            "whisper DM failed for group invite (auto on create)"
+                                        );
+                                    }
+                                }
+                            }
+
+                            AppMessage::SystemMsg(format!(
+                                "Group \"{group_name}\" created with {member_count} member(s). Invites sent — ticket copied to clipboard."
+                            ))
+                        },
+                        |msg| msg,
+                    );
+                    tasks.push(invite_task);
+                } else {
+                    tasks.push(iced::Task::done(AppMessage::SystemMsg(format!(
+                        "Group \"{display_name}\" created. Ticket copied to clipboard — share it to invite others.",
+                    ))));
+                }
+
+                return iced::Task::batch(tasks);
+            }
             // update() only dispatches the groups variants here; other
             // variants can never reach this method (defensive catch-all).
             _ => iced::Task::none(),
