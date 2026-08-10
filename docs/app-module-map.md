@@ -15,8 +15,9 @@ verified against a stable baseline.
 | ce1e87c5 | settings screen → `app/settings.rs` | 50,532 → 49,320 |
 | 77dd716b | friend requests screen → `app/contacts.rs` | 49,320 → 48,980 |
 | (this run) | file sharing dashboard → `app/files.rs` | 48,980 → 44,637 |
+| (this run) | chat log/composer → `app/chat.rs` | 44,637 → 40,814 |
 
-Remaining per plan: chat log/composer → `app/chat.rs`, then feature state structs / feature-local messages
+Remaining per plan: feature state structs / feature-local messages
 (spec steps 4–6) and per-feature subscriptions (spec step 7).
 
 ## Overview
