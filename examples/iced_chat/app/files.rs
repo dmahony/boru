@@ -4358,6 +4358,1183 @@ impl IcedChat {
     /// combined match arms.
     pub(crate) fn update_files(&mut self, message: AppMessage) -> iced::Task<AppMessage> {
         match message {
+            AppMessage::ExecuteFileSend(encoded) => {
+                let parts: Vec<&str> = encoded.splitn(3, '|').collect();
+                if parts.len() < 3 {
+                    tracing::warn!(
+                        "ExecuteFileSend: invalid encoded payload ({} parts)",
+                        parts.len()
+                    );
+                    return iced::Task::none();
+                }
+                let filename = parts[0].to_string();
+                let abs_path = parts[1].to_string();
+                // Show spinner immediately while the file is uploading.
+                let abs_path_buf = std::path::PathBuf::from(&abs_path);
+                let file_size = std::fs::metadata(&abs_path_buf)
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                self.pending_file_upload = Some((filename.clone(), file_size));
+                self.file_upload_spinner_frame = 0;
+
+                let is_video = ChatEntry::is_video_file(&filename);
+                let transfer_kind = if is_video {
+                    TransferKind::Video
+                } else {
+                    TransferKind::File
+                };
+
+                // Create a download card immediately showing upload progress,
+                // rather than waiting for the upload to finish.
+                let local_label = self.local_label.clone();
+                self.download_entry_index = Some(self.entries.len());
+                self.entries_push(ChatEntry::system_download(
+                    String::new(),
+                    transfer_kind,
+                    filename.clone(),
+                    String::new(),
+                    &local_label,
+                    None,
+                ));
+                if let Some(idx) = self.download_entry_index {
+                    if let Some(entry) = self.entries.get_mut(idx) {
+                        if let Some(dl) = entry.download.as_mut() {
+                            dl.state = DownloadState::Active {
+                                bytes: 0,
+                                total: Some(file_size),
+                            };
+                        }
+                        entry.body = format!("Uploading: {filename}");
+                    }
+                }
+                // A fresh transfer id binds the upload-progress events to
+                // the card created above (Progress → Completed).
+                let transfer_id = TransferId::next();
+                // Bind the transfer id to the card NOW (before the async task
+                // runs) so progress events route deterministically to it. No
+                // `Started` event is emitted: the card is already Active, and
+                // a queued `Started` drained after `FileDownloaded` resolves
+                // the card would flip the terminal `Shared` state back to
+                // Active (the Started arm has no terminal guard, unlike
+                // Progress/Completed).
+                if let Some(idx) = self.download_entry_index {
+                    if let Some(entry) = self.entries.get_mut(idx) {
+                        if let Some(dl) = entry.download.as_mut() {
+                            dl.transfer_id = Some(transfer_id);
+                        }
+                    }
+                    self.transfer_id_to_index.insert(transfer_id, idx);
+                }
+
+                let blob_store = self.blob_store.clone();
+                let storage = self.storage.clone();
+                let sender = self.sender.clone();
+                let secret_key = self.secret_key.clone();
+                let endpoint_addr = self.endpoint.addr();
+                let poster_cache_dir = self.data_dir.join("cache").join("video-posters");
+                let progress_queue = self.download_progress_queue.clone();
+                let transfer_name = filename.clone();
+                // Cap large file uploads with a generous timeout so a stuck
+                // connection doesn't leave the spinner frozen forever.
+                let upload_timeout = std::time::Duration::from_secs(3600);
+                iced::Task::perform(
+                    async move {
+                        let result = tokio::time::timeout(upload_timeout, async move {
+                            // The upload card already carries this transfer
+                            // id (bound at creation), so the Progress and
+                            // Completed events below route to it directly.
+
+                            // Fast path: a file previously shared from this
+                            // exact source path may already be in the blob
+                            // store — skip re-ingesting it entirely.
+                            let known_blob = match storage.as_ref() {
+                                Some(stg) => {
+                                    let hash = stg
+                                        .file_object_hash_by_source_path(&abs_path)
+                                        .ok()
+                                        .flatten()
+                                        .and_then(|hash_hex| {
+                                            hash_hex.parse::<iroh_blobs::Hash>().ok()
+                                        });
+                                    match hash {
+                                        Some(hash)
+                                            if blob_store
+                                                .blobs()
+                                                .has(hash)
+                                                .await
+                                                .ok()
+                                                .unwrap_or(false) =>
+                                        {
+                                            Some((hash, iroh_blobs::BlobFormat::Raw))
+                                        }
+                                        _ => None,
+                                    }
+                                }
+                                None => None,
+                            };
+
+                            let (blob_hash, format) = match known_blob {
+                                Some(known) => known,
+                                None => {
+                                    let path_buf = std::path::PathBuf::from(&abs_path);
+                                    let metadata = tokio::fs::metadata(&path_buf)
+                                        .await
+                                        .map_err(|e| format!("Failed to inspect file: {e}"))?;
+                                    let _file_size = metadata.len();
+                                    // Stream the file into iroh blobs — no
+                                    // whole-file memory limit needed.
+                                    let file = tokio::fs::File::open(&path_buf)
+                                        .await
+                                        .map_err(|e| format!("Failed to open file: {e}"))?;
+                                    let stream = tokio_util::io::ReaderStream::new(file);
+                                    // Walk the import stream so CopyProgress
+                                    // events can drive the upload bar.
+                                    let import = blob_store
+                                        .blobs()
+                                        .add_stream(Box::pin(stream))
+                                        .await;
+                                    let mut add = import.stream().await;
+                                    let mut total: Option<u64> = None;
+                                    let mut temp_tag: Option<iroh_blobs::api::TempTag> = None;
+                                    while let Some(item) = add.next().await {
+                                        match item {
+                                            iroh_blobs::api::blobs::AddProgressItem::Size(s) => {
+                                                total = Some(s);
+                                            }
+                                            iroh_blobs::api::blobs::AddProgressItem::CopyProgress(
+                                                offset,
+                                            ) => {
+                                                let mut q = progress_queue.lock().unwrap();
+                                                q.push_back(TransferProgress::Progress {
+                                                    id: transfer_id,
+                                                    kind: transfer_kind,
+                                                    name: transfer_name.clone(),
+                                                    bytes: offset,
+                                                    total,
+                                                });
+                                            }
+                                            iroh_blobs::api::blobs::AddProgressItem::OutboardProgress(
+                                                _,
+                                            )
+                                            | iroh_blobs::api::blobs::AddProgressItem::CopyDone => {}
+                                            iroh_blobs::api::blobs::AddProgressItem::Done(tt) => {
+                                                temp_tag = Some(tt);
+                                            }
+                                            iroh_blobs::api::blobs::AddProgressItem::Error(e) => {
+                                                return Err(format!(
+                                                    "Failed to store file: {e}"
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    let tt = temp_tag.ok_or_else(|| {
+                                        "Failed to store file: import ended without a tag"
+                                            .to_string()
+                                    })?;
+                                    (tt.hash(), tt.format())
+                                }
+                            };
+                            let ticket_str = blob_ticket_string(endpoint_addr, blob_hash, format);
+
+                            // ── Announce immediately. The video poster is
+                            // generated afterwards and re-announced as a
+                            // follow-up, so the share never waits on it. ──
+                            let msg = crate::Message::FileShare {
+                                name: filename.clone(),
+                                ticket: ticket_str.clone(),
+                                size: file_size,
+                                thumbnail_hash: None,
+                                collection_hash: None,
+                                collection_entries: 0,
+                            };
+                            let encoded_msg = SignedMessage::sign_and_encode(&secret_key, &msg)
+                                .map_err(|e| format!("Failed to sign: {e}"))?;
+                            let _encoded_len = encoded_msg.len();
+                            if let Some(ref sender) = sender {
+                                match sender.broadcast(encoded_msg).await {
+                                    Ok(()) => tracing::info!(
+                                        name = %filename,
+                                        file_size,
+                                        encoded_len = _encoded_len,
+                                        "FileShare broadcast OK (poster deferred)"
+                                    ),
+                                    Err(e) => tracing::error!(
+                                        name = %filename,
+                                        file_size,
+                                        encoded_len = _encoded_len,
+                                        error = %e,
+                                        "FileShare broadcast FAILED"
+                                    ),
+                                }
+                            }
+
+                            // ── Video poster (off the broadcast critical
+                            // path). The cache key is the video's content
+                            // hash — known from the ingest — so no second
+                            // full-file read is needed. ──
+                            let thumbnail_bytes = if is_video {
+                                let poster_path = abs_path.clone();
+                                let cache_dir = poster_cache_dir.clone();
+                                let content_hash = blob_hash;
+                                tokio::task::spawn_blocking(move || {
+                                    video_poster::generate_with_content_hash(
+                                        std::path::Path::new(&poster_path),
+                                        &cache_dir,
+                                        &content_hash,
+                                    )
+                                    .ok()
+                                    .map(|poster| poster.bytes)
+                                })
+                                .await
+                                .ok()
+                                .flatten()
+                            } else {
+                                None
+                            };
+                            // Store the poster as a blob so receivers can
+                            // fetch it via iroh — keeps gossip messages
+                            // small — and re-announce the same ticket with
+                            // the hash so their pending card upgrades to
+                            // the poster.
+                            let thumbnail_hash = match thumbnail_bytes.as_ref() {
+                                Some(bytes) => blob_store
+                                    .blobs()
+                                    .add_bytes(bytes.clone())
+                                    .await
+                                    .ok()
+                                    .map(|tag| MessageHash::from(*tag.hash.as_bytes())),
+                                None => None,
+                            };
+                            if let Some(thumb) = thumbnail_hash {
+                                let msg2 = crate::Message::FileShare {
+                                    name: filename.clone(),
+                                    ticket: ticket_str.clone(),
+                                    size: file_size,
+                                    thumbnail_hash: Some(thumb),
+                                    collection_hash: None,
+                                    collection_entries: 0,
+                                };
+                                if let Ok(encoded2) =
+                                    SignedMessage::sign_and_encode(&secret_key, &msg2)
+                                {
+                                    if let Some(ref sender) = sender {
+                                        match sender.broadcast(encoded2).await {
+                                            Ok(()) => tracing::info!(
+                                                name = %filename,
+                                                "FileShare poster follow-up OK"
+                                            ),
+                                            Err(e) => tracing::error!(
+                                                name = %filename,
+                                                error = %e,
+                                                "FileShare poster follow-up FAILED"
+                                            ),
+                                        }
+                                    }
+                                }
+                            }
+
+                            // ── Sender-side bookkeeping (off the critical
+                            // path): remember path → blob so a re-share of
+                            // the same file skips re-ingesting. ──
+                            if let Some(stg) = storage.as_ref() {
+                                let hash_hex = blob_hash.to_hex().to_string();
+                                // SQLite write — defer to the blocking pool
+                                // (BORU-AUDIT-18).
+                                let stg2 = stg.clone();
+                                let hash_hex_cl = hash_hex.clone();
+                                let filename_cl = filename.clone();
+                                let abs_path_cl = abs_path.clone();
+                                if let Err(e) = stg2
+                                    .run_blocking("app.record_local_file_object", move |s| {
+                                        s.record_local_file_object(
+                                            &hash_hex_cl,
+                                            file_size,
+                                            "application/octet-stream",
+                                            &filename_cl,
+                                            &abs_path_cl,
+                                            &hash_hex_cl,
+                                        )
+                                    })
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        name = %filename,
+                                        error = %e,
+                                        "record_local_file_object failed after broadcast"
+                                    );
+                                }
+                            }
+
+                            // ── Progress: upload complete ──
+                            {
+                                let mut q = progress_queue.lock().unwrap();
+                                q.push_back(TransferProgress::Completed {
+                                    id: transfer_id,
+                                    kind: transfer_kind,
+                                    name: transfer_name,
+                                });
+                            }
+
+                            Ok::<_, String>((filename, ticket_str, thumbnail_bytes, abs_path))
+                        })
+                        .await;
+                        match result {
+                            Ok(Ok(v)) => Ok(v),
+                            Ok(Err(e)) => Err(e),
+                            Err(_elapsed) => Err("Upload timed out after 1 hour.".to_string()),
+                        }
+                    },
+                    |r: Result<(String, String, Option<Vec<u8>>, String), String>| match r {
+                        Ok((name, ticket, thumbnail, local_path)) => AppMessage::FileDownloaded {
+                            name,
+                            ticket,
+                            thumbnail,
+                            local_path: Some(local_path),
+                        },
+                        Err(e) => AppMessage::FileUploadFailed(e),
+                    },
+                )
+            }
+
+            AppMessage::ExecuteFolderSend(encoded) => {
+                let parts: Vec<&str> = encoded.splitn(3, '|').collect();
+                if parts.len() < 3 {
+                    return iced::Task::none();
+                }
+                let folder_name = parts[0].to_string();
+                let abs_path = parts[1].to_string();
+                self.pending_file_upload = Some((folder_name.clone(), 0));
+                self.file_upload_spinner_frame = 0;
+
+                // Create a local "sharing" card immediately so the user sees
+                // feedback while the directory is imported and broadcast.
+                let local_label = self.local_label.clone();
+                self.download_entry_index = Some(self.entries.len());
+                self.entries_push(ChatEntry::system_download(
+                    String::new(),
+                    TransferKind::File,
+                    folder_name.clone(),
+                    String::new(),
+                    &local_label,
+                    None,
+                ));
+                if let Some(idx) = self.download_entry_index {
+                    if let Some(entry) = self.entries.get_mut(idx) {
+                        if let Some(dl) = entry.download.as_mut() {
+                            dl.is_folder = true;
+                            dl.state = DownloadState::Active {
+                                bytes: 0,
+                                total: None,
+                            };
+                        }
+                        entry.body = format!("Sharing folder: {folder_name}");
+                    }
+                }
+
+                let blob_store = self.blob_store.clone();
+                let sender = self.sender.clone();
+                let secret_key = self.secret_key.clone();
+                let endpoint_addr = self.endpoint.addr();
+                let upload_timeout = std::time::Duration::from_secs(3600);
+                iced::Task::perform(
+                    async move {
+                        let result = tokio::time::timeout(upload_timeout, async move {
+                            let path_buf = std::path::PathBuf::from(&abs_path);
+                            if !path_buf.is_dir() {
+                                return Err("Selected path is not a directory".to_string());
+                            }
+                            // Import the whole directory into a HashSeq
+                            // collection (SENDME-01 pipeline).
+                            let (temp_tag, total_size, collection) = boru_core::collection_transfer::import_collection(
+                                &blob_store,
+                                &path_buf,
+                                8,
+                            )
+                            .await
+                            .map_err(|e| format!("Failed to import folder: {e}"))?;
+                            let hash = temp_tag.hash();
+                            let ticket_str = blob_ticket_string(
+                                endpoint_addr,
+                                hash,
+                                iroh_blobs::BlobFormat::HashSeq,
+                            );
+                            let collection_hash: MessageHash = *hash.as_bytes();
+                            let collection_entries = collection.len() as u64;
+                            let msg = crate::Message::FileShare {
+                                name: folder_name.clone(),
+                                ticket: ticket_str.clone(),
+                                size: total_size,
+                                thumbnail_hash: None,
+                                collection_hash: Some(collection_hash),
+                                collection_entries,
+                            };
+                            let encoded_msg =
+                                SignedMessage::sign_and_encode(&secret_key, &msg)
+                                    .map_err(|e| format!("Failed to sign: {e}"))?;
+                            if let Some(ref sender) = sender {
+                                match sender.broadcast(encoded_msg).await {
+                                    Ok(()) => tracing::info!(
+                                        name = %folder_name,
+                                        size = total_size,
+                                        entries = collection_entries,
+                                        "FolderShare broadcast OK"
+                                    ),
+                                    Err(e) => tracing::error!(
+                                        name = %folder_name,
+                                        size = total_size,
+                                        error = %e,
+                                        "FolderShare broadcast FAILED"
+                                    ),
+                                }
+                            }
+                            Ok::<_, String>((folder_name.clone(), ticket_str, abs_path))
+                        })
+                        .await;
+                        match result {
+                            Ok(Ok(v)) => Ok(v),
+                            Ok(Err(e)) => Err(e),
+                            Err(_elapsed) => Err("Folder upload timed out after 1 hour.".to_string()),
+                        }
+                    },
+                    |r: Result<(String, String, String), String>| match r {
+                        Ok((name, ticket, local_path)) => AppMessage::FileDownloaded {
+                            name,
+                            ticket,
+                            thumbnail: None,
+                            local_path: Some(local_path),
+                        },
+                        Err(e) => AppMessage::FileUploadFailed(e),
+                    },
+                )
+            }
+
+            AppMessage::ExecuteImageSend(encoded) => {
+                let parts: Vec<&str> = encoded.splitn(3, '|').collect();
+                if parts.len() < 3 {
+                    return iced::Task::none();
+                }
+                let filename = parts[0].to_string();
+                let abs_path = parts[1].to_string();
+                self.pending_image_upload = Some(filename.clone());
+                self.image_upload_spinner_frame = 0;
+                // Capture the conversation ownership token when the upload
+                // starts. If the user switches rooms while it is in flight,
+                // the completion's generation will not match and the stale
+                // local entry is caught in debug builds.
+                let generation = self.conversation_generation;
+
+                let blob_store = self.blob_store.clone();
+                let storage = self.storage.clone();
+                let sender = self.sender.clone();
+                let secret_key = self.secret_key.clone();
+                let _fname = filename.clone();
+                let local_pk = self.local_public;
+
+                iced::Task::perform(
+                    async move {
+                        let path_buf = std::path::PathBuf::from(&abs_path);
+                        // Validate file size before reading to avoid loading
+                        // a multi-GiB file into memory just to reject it.
+                        let metadata = tokio::fs::metadata(&path_buf)
+                            .await
+                            .map_err(|e| format!("Failed to inspect image: {e}"))?;
+                        if metadata.len() > CHAT_IMAGE_MAX_BYTES as u64 {
+                            return Err(format!(
+                                "Image must be {} MiB or smaller.",
+                                CHAT_IMAGE_MAX_BYTES / (1024 * 1024)
+                            ));
+                        }
+                        let full_bytes = tokio::fs::read(&path_buf)
+                            .await
+                            .map_err(|e| format!("Failed to read image: {e}"))?;
+                        // Detect GIF files: skip WebP conversion to preserve
+                        // animation frames.  The receiver-side decode_gif_frames
+                        // path handles both animated and static GIFs correctly.
+                        let is_gif = filename.to_lowercase().ends_with(".gif");
+                        let (opt_bytes, wire_name, mime_type, compression_note) = if is_gif {
+                            // Transmit GIF bytes unchanged — only enforce the
+                            // size cap.  Animated frames survive end-to-end.
+                            (
+                                full_bytes.clone(),
+                                filename.clone(),
+                                "image/gif",
+                                String::new(),
+                            )
+                        } else {
+                            // Convert to WebP: resize, strip metadata, encode as
+                            // lossless WebP.  Errors are reported to the user
+                            // rather than silently falling back to the original bytes,
+                            // because the original may be many MiB.
+                            let orig_size = full_bytes.len();
+                            let (opt_bytes, _orig_size, webp_size) =
+                                optimize_chat_image_to_webp(&full_bytes)
+                                    .map_err(|e| format!("WebP conversion failed: {e}"))?;
+                            // Append compression ratio to the image card label
+                            let compression_note = if orig_size > 0 && webp_size < orig_size {
+                                let saved_pct = (1.0 - webp_size as f64 / orig_size as f64) * 100.0;
+                                format!(" ({saved_pct:.0}% smaller)")
+                            } else {
+                                String::new()
+                            };
+                            // Rename the file with .webp extension
+                            let webp_name = {
+                                let path = std::path::Path::new(&filename);
+                                if let Some(stem) = path.file_stem() {
+                                    format!("{}.webp", stem.to_string_lossy())
+                                } else {
+                                    format!("{filename}.webp")
+                                }
+                            };
+                            (opt_bytes, webp_name, "image/webp", compression_note)
+                        };
+                        let fname = wire_name.clone();
+                        let display_name = format!("{wire_name}{compression_note}");
+                        // Add to blob store.  Both the sender's preview and the
+                        // receiver's inline display use these bytes.
+                        let tag = blob_store
+                            .blobs()
+                            .add_bytes(opt_bytes.clone())
+                            .await
+                            .map_err(|e| format!("Failed to hash image: {e}"))?;
+                        #[expect(unused_imports)]
+                        use iroh_blobs::api::proto::TagInfo;
+                        let hash: MessageHash = *tag.hash.as_bytes();
+                        let msg = crate::Message::ImageShare {
+                            name: wire_name.clone(),
+                            hash,
+                        };
+                        let encoded = SignedMessage::sign_and_encode(&secret_key, &msg)
+                            .map_err(|e| format!("Failed to sign: {e}"))?;
+                        if let Some(ref sender) = sender {
+                            sender.broadcast(encoded).await.ok();
+                        }
+                        // Sender-side bookkeeping off the broadcast critical
+                        // path: register the upload with the profile only
+                        // after the announcement is out. A failure here must
+                        // not fail the send — the image is already delivered.
+                        if let Some(storage) = storage.as_ref() {
+                            // SQLite write — defer to the blocking pool so
+                            // the Task::perform worker never blocks on disk
+                            // I/O (BORU-AUDIT-18).
+                            let stg = storage.clone();
+                            let local_pk_str = local_pk.to_string();
+                            let wire_name_cl = wire_name.clone();
+                            let mime_cl = mime_type.to_string();
+                            let bytes_cl = opt_bytes.clone();
+                            if let Err(e) = stg
+                                .run_blocking("app.register_chat_upload", move |s| {
+                                    s.register_chat_upload(
+                                        &local_pk_str,
+                                        &wire_name_cl,
+                                        &mime_cl,
+                                        &bytes_cl,
+                                    )
+                                })
+                                .await
+                            {
+                                tracing::warn!(
+                                    name = %wire_name,
+                                    error = %e,
+                                    "register_chat_upload failed after image broadcast"
+                                );
+                            }
+                        }
+                        Ok((local_pk, fname, display_name, opt_bytes, hash))
+                    },
+                    move |r: Result<(PublicKey, String, String, Vec<u8>, MessageHash), String>| {
+                        match r {
+                            Ok((sender_pk, name, display_name, bytes, hash)) => {
+                                AppMessage::ImageDownloaded {
+                                    sender: sender_pk,
+                                    name,
+                                    display_name,
+                                    image_bytes: bytes,
+                                    message_hash: hash,
+                                    image_identifier: None,
+                                    generation,
+                                }
+                            }
+                            Err(e) => AppMessage::ImageUploadFailed(e),
+                        }
+                    },
+                )
+            }
+
+            AppMessage::ExecuteDownload => match self.download_entry_index {
+                Some(entry_index) => {
+                    return self.update(AppMessage::ExecuteDownloadAt(entry_index))
+                }
+                None => {
+                    return iced::Task::done(AppMessage::ErrorMsg(
+                        "No pending file to download.".into(),
+                    ))
+                }
+            },
+            AppMessage::ExecuteDownloadAt(entry_index) => {
+                self.video_card_menu_open = None;
+                let Some(entry) = self.entries.get(entry_index) else {
+                    return iced::Task::done(AppMessage::ErrorMsg("Entry not found.".into()));
+                };
+                let Some(dl) = entry.download.clone() else {
+                    return iced::Task::done(AppMessage::ErrorMsg("No download attached.".into()));
+                };
+                // A download may be (re)started from a state where the user
+                // explicitly asked for it; see `download_restartable`.
+                if !download_restartable(&dl.state) {
+                    return iced::Task::none();
+                }
+                if let Err(error) = validate_attachment_filename(&dl.name) {
+                    return iced::Task::done(AppMessage::ErrorMsg(format!(
+                        "Download rejected: {error}"
+                    )));
+                }
+                if let Some(e) = self.entries.get_mut(entry_index) {
+                    if let Some(ref mut d) = e.download {
+                        // Carry forward the total from Ready or a re-download
+                        // so the progress bar appears immediately when the
+                        // user clicks Download / Retry.
+                        let total = match &d.state {
+                            DownloadState::Ready { total } => *total,
+                            DownloadState::Completed { total_size, .. } => *total_size,
+                            _ => None,
+                        };
+                        d.state = DownloadState::Active { bytes: 0, total };
+                    }
+                }
+                // The Active card is taller than the Ready card. Rebuild the
+                // virtualized layout immediately so the card and all later
+                // messages keep their correct positions before the first
+                // progress event arrives.
+                // This is a card reflow, not a new timeline entry.  Do not
+                // re-arm the bottom snap here: if the user has scrolled up,
+                // the Ready -> Active height change must preserve that reading
+                // position.  The append path already arms a single snap when
+                // a genuinely new entry arrives while following the latest.
+                self.layout_cache.borrow_mut().invalidate_from(entry_index);
+                self.download_entry_index = Some(entry_index);
+                let blob_store = self.blob_store.clone();
+                let endpoint = self.endpoint.clone();
+                let neighbors = self.neighbors.clone();
+                let _safety = self.public_room_safety.clone();
+                let ticket_str = dl.ticket.clone();
+                let name = dl.name.clone();
+                let kind = dl.kind;
+                let is_folder = dl.is_folder;
+                let overwrite_policy = dl.overwrite_policy;
+                let expected_hash = dl.expected_content_hash.clone();
+                let content_hash_fallback = dl
+                    .expected_content_hash
+                    .clone()
+                    .unwrap_or_else(|| "download".to_string());
+                let data_dir = self.data_dir.clone();
+                let progress_queue = self.download_progress_queue.clone();
+                iced::Task::perform(
+                    async move {
+                        let ticket: iroh_blobs::ticket::BlobTicket = ticket_str
+                            .parse()
+                            .map_err(|e| format!("Invalid ticket: {e}"))?;
+                        let (addr, hash, _format) = ticket.into_parts();
+                        let node_id = addr.id;
+                        let candidates = download_candidates(node_id, &neighbors);
+
+                        let dl_dir = data_dir.join("downloads");
+                        let _ = tokio::fs::create_dir_all(&dl_dir).await;
+                        if is_folder {
+                            // Whole-directory share (SENDME-01): download the
+                            // HashSeq collection and expand it into a folder
+                            // tree under the downloads directory.
+                            let save_dir = boru_core::collection_transfer::download_collection_to_dir(
+                                &blob_store,
+                                &endpoint,
+                                hash,
+                                candidates,
+                                &name,
+                                &dl_dir,
+                            )
+                            .await
+                            .map_err(|e| format!("Folder download failed: {e}"))?;
+                            return Ok::<_, String>((name.clone(), save_dir, false));
+                        }
+                        // BORU-AUDIT-21: fuse validation + creation into one
+                        // atomic reservation (O_EXCL + O_NOFOLLOW) instead of
+                        // checking a path and reopening it later.
+                        let mut destination =
+                            match boru_core::safe_destination::reserve_download_destination(
+                                &dl_dir,
+                                &name,
+                                &content_hash_fallback,
+                                overwrite_policy,
+                            )
+                            .map_err(|e| format!("Unsafe download name: {e}"))?
+                            {
+                                boru_core::safe_destination::Reservation::Use(dest) => dest,
+                                boru_core::safe_destination::Reservation::Skip => {
+                                    return Ok::<_, String>((name.clone(), dl_dir.join(&name), true));
+                                }
+                            };
+                        download_blob_to_file(
+                            &blob_store,
+                            &endpoint,
+                            hash,
+                            candidates,
+                            name.clone(),
+                            kind,
+                            &mut destination,
+                            expected_hash.as_deref(),
+                            {
+                                let queue = progress_queue.clone();
+                                move |ev| {
+                                    if let Ok(mut q) = queue.lock() {
+                                        q.push_back(ev);
+                                    }
+                                }
+                            },
+                            None,
+                        )
+                        .await
+                        .map_err(|e| format!("Download failed: {e}"))?;
+                        let save_path = destination
+                            .publish()
+                            .map_err(|e| format!("Publish failed: {e}"))?;
+                        Ok::<_, String>((name.clone(), save_path, false))
+                    },
+                    move |r| match r {
+                        Ok((name, path, skipped)) if skipped => {
+                            AppMessage::ErrorMsg(format!(
+                                "Skipped — {name} already exists (overwrite policy is Skip)."
+                            ))
+                        }
+                        Ok((name, path, _)) => AppMessage::DownloadDone(name, path),
+                        Err(e) => AppMessage::DownloadFailed(e),
+                    },
+                )
+            }
+
+            AppMessage::PauseDownloadAt(entry_index) => {
+                self.push_system("Pause requested — transfer suspension not yet implemented.");
+                if let Some(entry) = self.entries.get_mut(entry_index) {
+                    if let Some(download) = entry.download.as_mut() {
+                        if let DownloadState::Active { bytes, total } = &download.state {
+                            download.state = DownloadState::Paused {
+                                bytes: *bytes,
+                                total: *total,
+                            };
+                            self.layout_cache.borrow_mut().invalidate_from(entry_index);
+                        }
+                    }
+                }
+                iced::Task::none()
+            }
+            AppMessage::ResumeDownloadAt(entry_index) => {
+                self.push_system("Resume requested — transfer resumption not yet implemented.");
+                if let Some(entry) = self.entries.get_mut(entry_index) {
+                    if let Some(download) = entry.download.as_mut() {
+                        if matches!(download.state, DownloadState::Paused { .. }) {
+                            // Revert to Ready so the user can click Download again.
+                            // In a full implementation this would resume the transfer.
+                            download.state = DownloadState::Ready { total: None };
+                            self.layout_cache.borrow_mut().invalidate_from(entry_index);
+                        }
+                    }
+                }
+                iced::Task::none()
+            }
+            AppMessage::CancelDownloadAt(entry_index) => {
+                self.video_card_menu_open = None;
+                self.push_system(String::from("Cancel requested."));
+                if let Some(entry) = self.entries.get_mut(entry_index) {
+                    if let Some(download) = entry.download.as_mut() {
+                        if !matches!(download.state, DownloadState::Completed { .. }) {
+                            download.state = DownloadState::Cancelled;
+                            self.layout_cache.borrow_mut().invalidate_from(entry_index);
+                        }
+                    }
+                }
+                iced::Task::none()
+            }
+
+            AppMessage::DownloadInitiated {
+                content_hash,
+                peer,
+                download_id,
+            } => {
+                // Remove from pending set since the operation completed.
+                self.pending_downloads.remove(&(content_hash.clone(), peer));
+                let label = self
+                    .names
+                    .get(&peer)
+                    .cloned()
+                    .unwrap_or_else(|| peer.fmt_short().to_string());
+                self.push_system(format!("Download queued for *{label}* (id={download_id})"));
+                iced::Task::none()
+            }
+            AppMessage::DownloadInitiationFailed {
+                content_hash,
+                peer,
+                error,
+            } => {
+                // Remove from pending set since the operation completed (with error).
+                self.pending_downloads.remove(&(content_hash, peer));
+                self.push_system(format!("Download failed: {error}"));
+                iced::Task::none()
+            }
+
+
+
+            AppMessage::FileSent(name) => {
+                self.push_system(format!("Sharing: {name}"));
+                iced::Task::none()
+            }
+            AppMessage::DownloadDone(name, path) => {
+                tracing::info!(%name, path=%path.display(), "DownloadDone received");
+                self.push_system(format!("*{name}* is complete"));
+                let poster_path = path.clone();
+                let mut is_video = false;
+                let completed_idx = self
+                    .entries
+                    .iter()
+                    .position(|entry| {
+                        entry.download.as_ref().is_some_and(|download| {
+                            download.name == name
+                                && matches!(
+                                    download.state,
+                                    DownloadState::Active { .. } | DownloadState::Completed { .. }
+                                )
+                        })
+                    })
+                    .or(self.download_entry_index);
+                tracing::info!(
+                    idx=?completed_idx,
+                    download_entry_index=?self.download_entry_index,
+                    "DownloadDone: resolved entry index"
+                );
+                if let Some(idx) = completed_idx {
+                    if let Some(entry) = self.entries.get_mut(idx) {
+                        if let Some(download) = entry.download.as_mut() {
+                            tracing::info!(
+                                idx,
+                                prev_state=?download.state,
+                                "DownloadDone: before setting Completed"
+                            );
+                            is_video = download.kind == TransferKind::Video;
+                            // VIDCARD-20: a user-initiated Cancel (or
+                            // another genuinely user terminal state) must
+                            // not be overwritten by the late completion of
+                            // the transfer that was still running in the
+                            // background — the card would otherwise snap
+                            // back to "Ready to play" after the user
+                            // cancelled it.
+                            //
+                            // VID-01: `Completed { saved_path: None }` is
+                            // NOT such a state — it is the transient
+                            // "Verifying" placeholder set by the queued
+                            // TransferProgress::Completed event when it
+                            // beats this DownloadDone to the UI. It MUST
+                            // be upgraded with the real path, otherwise the
+                            // video card stays at "Verifying…" forever even
+                            // though the file exists on disk.
+                            if !download_done_can_complete(&download.state) {
+                                tracing::info!(
+                                    idx,
+                                    state=?download.state,
+                                    "DownloadDone: ignoring completion for user terminal state"
+                                );
+                                return iced::Task::none();
+                            }
+                            let total_size = match &download.state {
+                                DownloadState::Active { total, .. } => *total,
+                                DownloadState::Completed { total_size, .. } => *total_size,
+                                _ => None,
+                            };
+                            download.state = DownloadState::Completed {
+                                saved_name: name.clone(),
+                                saved_path: Some(path),
+                                total_size,
+                            };
+                            self.layout_cache.borrow_mut().invalidate_from(idx);
+                        }
+                    }
+                }
+                self.pending_file = None;
+                if is_video {
+                    // Mark the async metadata load as in-flight so the card
+                    // renders a stable loading placeholder at the bounded
+                    // default frame (VIDCARD-09).
+                    if let Some(idx) = completed_idx {
+                        if let Some(entry) = self.entries.get_mut(idx) {
+                            if let Some(download) = entry.download.as_mut() {
+                                download.metadata_loading = true;
+                            }
+                        }
+                    }
+                    let cache_dir = self.data_dir.join("cache").join("video-posters");
+                    let poster_name = name.clone();
+                    let metadata_name = name.clone();
+                    let probe_path = poster_path.clone();
+                    let poster_task = iced::Task::perform(
+                        async move {
+                            match tokio::task::spawn_blocking(move || {
+                                video_poster::generate(&poster_path, &cache_dir)
+                                    .map(|poster| (poster.bytes, poster.dimensions))
+                            })
+                            .await
+                            {
+                                Ok(result) => result,
+                                Err(error) => Err(format!("poster worker failed: {error}")),
+                            }
+                        },
+                        move |poster| AppMessage::PosterGenerated {
+                            name: poster_name,
+                            poster,
+                        },
+                    );
+                    let metadata_task = iced::Task::perform(
+                        async move {
+                            match tokio::task::spawn_blocking(move || {
+                                boru_core::video_playback::probe_local_video_metadata(&probe_path)
+                            })
+                            .await
+                            {
+                                Ok(result) => result,
+                                Err(error) => Err(format!("metadata worker failed: {error}")),
+                            }
+                        },
+                        move |metadata| AppMessage::VideoMetadataProbed {
+                            name: metadata_name,
+                            metadata,
+                        },
+                    );
+                    return iced::Task::batch(vec![poster_task, metadata_task]);
+                }
+                iced::Task::none()
+            }
+            AppMessage::DownloadDonePeerFile(name, path) => {
+                // Transition to Completed if initiated by a GUI test action.
+                if let Some(action_id) = self.pending_download_action.take() {
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::Completed);
+                }
+                self.push_system(format!("*{name}* is complete"));
+                if let Some(content_hash) = self.catalogue_name_to_hash(&name) {
+                    self.catalogue_downloads.insert(
+                        content_hash,
+                        CatalogueDownloadState::Completed { path: path.clone() },
+                    );
+                }
+                let poster_path = path.clone();
+                let mut is_video = false;
+                if let Some(idx) = self.download_entry_index {
+                    if let Some(entry) = self.entries.get_mut(idx) {
+                        if let Some(download) = entry.download.as_mut() {
+                            is_video = download.kind == TransferKind::Video;
+                            // VIDCARD-20: same terminal-state guard as
+                            // DownloadDone — a user-initiated cancel must not
+                            // be flipped back to Completed by a late peer-file
+                            // completion. VID-01: the transient
+                            // `Completed { saved_path: None }` "Verifying"
+                            // placeholder is NOT a user terminal state and
+                            // must still be upgraded with the real path.
+                            if !download_done_can_complete(&download.state) {
+                                tracing::info!(
+                                    idx,
+                                    state=?download.state,
+                                    "DownloadDonePeerFile: ignoring completion for user terminal state"
+                                );
+                                return iced::Task::none();
+                            }
+                            let total_size = match &download.state {
+                                DownloadState::Active { total, .. } => *total,
+                                DownloadState::Completed { total_size, .. } => *total_size,
+                                _ => None,
+                            };
+                            download.state = DownloadState::Completed {
+                                saved_name: name.clone(),
+                                saved_path: Some(path),
+                                total_size,
+                            };
+                            self.layout_cache.borrow_mut().invalidate_from(idx);
+                        }
+                    }
+                }
+                if is_video {
+                    // Mark the async metadata load as in-flight so the card
+                    // renders a stable loading placeholder at the bounded
+                    // default frame (VIDCARD-09).
+                    if let Some(idx) = self.download_entry_index {
+                        if let Some(entry) = self.entries.get_mut(idx) {
+                            if let Some(download) = entry.download.as_mut() {
+                                download.metadata_loading = true;
+                            }
+                        }
+                    }
+                    let cache_dir = self.data_dir.join("cache").join("video-posters");
+                    let poster_name = name.clone();
+                    let metadata_name = name.clone();
+                    let probe_path = poster_path.clone();
+                    let poster_task = iced::Task::perform(
+                        async move {
+                            match tokio::task::spawn_blocking(move || {
+                                video_poster::generate(&poster_path, &cache_dir)
+                                    .map(|poster| (poster.bytes, poster.dimensions))
+                            })
+                            .await
+                            {
+                                Ok(result) => result,
+                                Err(error) => Err(format!("poster worker failed: {error}")),
+                            }
+                        },
+                        move |poster| AppMessage::PosterGenerated {
+                            name: poster_name,
+                            poster,
+                        },
+                    );
+                    let metadata_task = iced::Task::perform(
+                        async move {
+                            match tokio::task::spawn_blocking(move || {
+                                boru_core::video_playback::probe_local_video_metadata(&probe_path)
+                            })
+                            .await
+                            {
+                                Ok(result) => result,
+                                Err(error) => Err(format!("metadata worker failed: {error}")),
+                            }
+                        },
+                        move |metadata| AppMessage::VideoMetadataProbed {
+                            name: metadata_name,
+                            metadata,
+                        },
+                    );
+                    return iced::Task::batch(vec![poster_task, metadata_task]);
+                }
+                iced::Task::none()
+            }
+            AppMessage::PosterGenerated { name, poster } => {
+                match poster {
+                    Ok((bytes, dimensions)) => {
+                        if let Some(entry) = self.entries.iter_mut().find(|entry| {
+                            entry.download.as_ref().is_some_and(|download| {
+                                download.name == name && download.kind == TransferKind::Video
+                            })
+                        }) {
+                            if let Some(download) = entry.download.as_mut() {
+                                download.poster_dimensions = dimensions;
+                                // Recreate the handle so the freshly generated
+                                // poster actually renders (the media frame
+                                // reads thumbnail_handle, not thumbnail bytes).
+                                download.thumbnail_handle = Some(
+                                    iced::widget::image::Handle::from_bytes(bytes.clone()),
+                                );
+                                download.thumbnail = Some(bytes);
+                                self.layout_cache.borrow_mut().clear();
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(file = %name, %error, "video poster generation failed; keeping video playable");
+                    }
+                }
+                iced::Task::none()
+            }
+            AppMessage::VideoMetadataProbed { name, metadata } => {
+                // VIDCARD-09: apply real intrinsic dimensions/duration once the
+                // async probe resolves. Success carries measurements only; a
+                // failed probe keeps the bounded generic contain frame and the
+                // problem is logged through the existing diagnostics system.
+                // Open File / Open Folder actions remain available.
+                match metadata {
+                    Ok(meta) => {
+                        if let Some(entry) = self.entries.iter_mut().find(|entry| {
+                            entry.download.as_ref().is_some_and(|download| {
+                                download.name == name && download.kind == TransferKind::Video
+                            })
+                        }) {
+                            if let Some(download) = entry.download.as_mut() {
+                                download.metadata_loading = false;
+                                download.metadata_failed = false;
+                                download.duration_ms = meta.duration_ms;
+                                // Prefer the real intrinsic dimensions when the
+                                // poster path did not already provide them.
+                                if download.poster_dimensions.is_none() {
+                                    if let (Some(width), Some(height)) = (meta.width, meta.height)
+                                    {
+                                        download.poster_dimensions = Some((width, height));
+                                    }
+                                }
+                                self.layout_cache.borrow_mut().clear();
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            file = %name,
+                            %error,
+                            "video metadata probe failed; keeping bounded generic media frame"
+                        );
+                        if let Some(entry) = self.entries.iter_mut().find(|entry| {
+                            entry.download.as_ref().is_some_and(|download| {
+                                download.name == name && download.kind == TransferKind::Video
+                            })
+                        }) {
+                            if let Some(download) = entry.download.as_mut() {
+                                download.metadata_loading = false;
+                                download.metadata_failed = true;
+                                self.layout_cache.borrow_mut().clear();
+                            }
+                        }
+                        // Log the metadata problem through the existing
+                        // diagnostics system (shared singleton, surfaced on the
+                        // dashboard/activity log like other UI-detectable issues).
+                        boru_core::chat_core::DIAGNOSTICS.record(
+                            None,
+                            boru_core::diagnostics::DiagnosticEventKind::Error(format!(
+                                "video metadata probe failed for {name}: {error}"
+                            )),
+                        );
+                    }
+                }
+                iced::Task::none()
+            }
+            AppMessage::DownloadFailed(error) => {
+                // Transition to Failed if initiated by a GUI test action.
+                if let Some(action_id) = self.pending_download_action.take() {
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::Failed);
+                }
+                self.push_system(format!("Download failed: {error}"));
+                // If the error carries a catalogue file name (format "name : error"),
+                // mark it as failed in the catalogue view.
+                if let Some(name_end) = error.find(" : ") {
+                    let cat_name = error[..name_end].to_string();
+                    if let Some(content_hash) = self.catalogue_name_to_hash(&cat_name) {
+                        self.catalogue_downloads
+                            .insert(content_hash, CatalogueDownloadState::Failed(error.clone()));
+                    }
+                }
+                let mut updated = false;
+                if let Some(idx) =
+                    self.current_download_entry_index(self.active_download_transfer_id)
+                {
+                    if let Some(entry) = self.entries.get_mut(idx) {
+                        if let Some(download) = entry.download.as_mut() {
+                            download.state = DownloadState::Failed {
+                                failure: DownloadFailure::from_error(error),
+                            };
+                            self.layout_cache.borrow_mut().invalidate_from(idx);
+                            updated = true;
+                        }
+                    }
+                }
+                if updated {
+                    self.active_download_transfer_id = None;
+                }
+                iced::Task::none()
+            }
+            AppMessage::DownloadProgress(progress) => {
+                self.handle_download_progress(progress);
+                iced::Task::none()
+            }
             AppMessage::OpenDownloadsFolder => {
                 self.video_card_menu_open = None;
                 let dl_dir = self.data_dir.join("downloads");
