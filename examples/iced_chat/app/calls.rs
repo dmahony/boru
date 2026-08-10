@@ -141,4 +141,197 @@ impl IcedChat {
             .width(Length::Fill).height(Length::Fill)
             .padding(SPACE_16).into()
     }
+
+    /// State-layer update for call screens (BORU-AUDIT-22 spec step 5).
+    ///
+    /// Handles every AppMessage variant owned by the calls feature: starting
+    /// voice/video calls, call lifecycle events, accept/reject/hangup, mute/
+    /// camera toggles, device selection and call command results. The root
+    /// `update()` dispatches these variants here via a combined match arm.
+    pub(crate) fn update_calls(&mut self, message: AppMessage) -> iced::Task<AppMessage> {
+        match message {
+            AppMessage::StartVoiceCall(peer) => {
+                self.call_return_screen = Some(self.screen.clone());
+                self.outgoing_call_peer = Some(peer);
+                self.call_kind = Some(CallKind::Voice);
+                self.call_was_incoming = false;
+                self.call_declined = false;
+                self.outgoing_call_status = Some(OutgoingCallStatus::Ringing);
+                self.screen = Screen::OutgoingCall;
+                let handle = self.call_handle.clone();
+                iced::Task::perform(
+                    async move { handle.start_voice_call(peer).await.map_err(|e| e.to_string()) },
+                    AppMessage::CallStarted,
+                )
+            }
+            AppMessage::StartVideoCall(peer) => {
+                self.call_return_screen = Some(self.screen.clone());
+                self.outgoing_call_peer = Some(peer);
+                self.call_kind = Some(CallKind::Video);
+                self.call_was_incoming = false;
+                self.call_declined = false;
+                self.outgoing_call_status = Some(OutgoingCallStatus::Ringing);
+                self.screen = Screen::OutgoingCall;
+                let handle = self.call_handle.clone();
+                iced::Task::perform(
+                    async move { handle.start_video_call(peer).await.map_err(|e| e.to_string()) },
+                    AppMessage::CallStarted,
+                )
+            }
+            AppMessage::CallStarted(result) => {
+                match result {
+                    Ok(call_id) => self.active_call_id = Some(call_id),
+                    Err(error) => {
+                        tracing::warn!(error = %error, "call start failed");
+                        self.outgoing_call_status = Some(OutgoingCallStatus::Failed);
+                        self.toast_message = Some(friendly_call_error_text(&error).to_string());
+                    }
+                }
+                iced::Task::none()
+            }
+                        AppMessage::CallEventReceived(event) => {
+                match &event {
+                    CallEvent::Incoming { call_id, peer, kind } => {
+                        self.active_call_id = Some(*call_id);
+                        self.outgoing_call_peer = Some(*peer);
+                        self.call_kind = Some(*kind);
+                        self.call_was_incoming = true;
+                        self.call_declined = false;
+                        self.incoming_call = Some(IncomingCall { call_id: *call_id, peer: *peer, kind: *kind });
+                        self.emit_incoming_call_notification(peer);
+                    }
+                    CallEvent::OutgoingRinging { peer, .. } => {
+                        self.outgoing_call_peer = Some(*peer);
+                        self.outgoing_call_status = Some(OutgoingCallStatus::Ringing);
+                        self.screen = Screen::OutgoingCall;
+                    }
+                    CallEvent::Connecting { call_id } => self.active_call_id = Some(*call_id),
+                    CallEvent::Active { call_id, peer, .. } => {
+                        self.active_call_id = Some(*call_id);
+                        self.outgoing_call_peer = Some(*peer);
+                        self.call_was_incoming = self.incoming_call.as_ref().is_some_and(|call| call.call_id == *call_id);
+                        self.call_started_at = Some(Instant::now());
+                        self.screen = Screen::ActiveCall;
+                        // The call is now in progress; the consent overlay is no longer needed.
+                        if self.incoming_call.as_ref().is_some_and(|call| call.call_id == *call_id) {
+                            self.incoming_call = None;
+                        }
+                    }
+                    CallEvent::MediaStateChanged { call_id, audio_muted, video_enabled } => {
+                        self.active_call_id = Some(*call_id);
+                        self.call_audio_muted = *audio_muted;
+                        self.call_camera_enabled = *video_enabled;
+                    }
+                    CallEvent::Ended { call_id, .. } => {
+                        if self.active_call_id == Some(*call_id) {
+                            if let CallEvent::Ended { reason, .. } = &event {
+                                self.toast_message = Some(friendly_call_end(reason).to_string());
+                            }
+                            if let (Some(peer), Some(kind)) = (self.outgoing_call_peer, self.call_kind) {
+                                let duration = self.call_started_at.map(|started| started.elapsed());
+                                let outcome = if duration.is_some() {
+                                    CallHistoryOutcome::Completed
+                                } else if self.call_declined {
+                                    CallHistoryOutcome::Declined
+                                } else if self.call_was_incoming {
+                                    CallHistoryOutcome::Missed
+                                } else {
+                                    CallHistoryOutcome::Failed
+                                };
+                                self.record_call_history(peer, kind, outcome, duration);
+                            }
+                            self.active_call_id = None;
+                            self.outgoing_call_peer = None;
+                            self.outgoing_call_status = None;
+                            self.call_started_at = None;
+                            self.call_kind = None;
+                            self.call_was_incoming = false;
+                            self.call_declined = false;
+                            if let Some(screen) = self.call_return_screen.take() { self.screen = screen; }
+                        }
+                        if self.incoming_call.as_ref().is_some_and(|call| call.call_id == *call_id) {
+                            self.incoming_call = None;
+                        }
+                    }
+                    CallEvent::Failed { call_id, reason } => {
+                        match call_id {
+                            Some(cid) => {
+                                if self.active_call_id == Some(*cid) {
+                                    if matches!(reason, boru_core::call::manager::CallError::Rejected) {
+                                        if let (Some(peer), Some(kind)) = (self.outgoing_call_peer, self.call_kind) {
+                                            self.record_call_history(peer, kind, CallHistoryOutcome::Declined, None);
+                                        }
+                                    }
+                                    self.active_call_id = None;
+                                    self.outgoing_call_status = Some(match reason {
+                                        boru_core::call::manager::CallError::Rejected => OutgoingCallStatus::Declined,
+                                        boru_core::call::manager::CallError::Busy => OutgoingCallStatus::Busy,
+                                        boru_core::call::manager::CallError::Connection => OutgoingCallStatus::Failed,
+                                        _ => OutgoingCallStatus::Failed,
+                                    });
+                                    self.toast_message = Some(friendly_call_error(reason).to_string());
+                                    self.call_kind = None;
+                                    self.call_was_incoming = false;
+                                    self.call_declined = false;
+                                }
+                                if self.incoming_call.as_ref().is_some_and(|call| call.call_id == *cid) {
+                                    self.incoming_call = None;
+                                }
+                            }
+                            None => { self.incoming_call = None; }
+                        }
+                    }
+                    _ => {}
+                }
+                iced::Task::none()
+            }
+            AppMessage::AcceptIncomingCall(call_id) => {
+                let handle = self.call_handle.clone();
+                iced::Task::perform(async move { handle.accept(call_id).await.map_err(|e| e.to_string()) }, AppMessage::CallCommandFinished)
+            }
+            AppMessage::RejectIncomingCall(call_id) => {
+                self.call_declined = true;
+                let handle = self.call_handle.clone();
+                iced::Task::perform(async move { handle.reject(call_id).await.map_err(|e| e.to_string()) }, AppMessage::CallCommandFinished)
+            }
+            AppMessage::HangUp(call_id) => {
+                let handle = self.call_handle.clone();
+                iced::Task::perform(async move { handle.hangup(call_id).await.map_err(|e| e.to_string()) }, AppMessage::CallCommandFinished)
+            }
+            AppMessage::ToggleCallMute => {
+                if let Some(call_id) = self.active_call_id {
+                    self.call_audio_muted = !self.call_audio_muted;
+                    let handle = self.call_handle.clone();
+                    let muted = self.call_audio_muted;
+                    iced::Task::perform(async move { handle.set_muted(call_id, muted).await.map_err(|e| e.to_string()) }, AppMessage::CallCommandFinished)
+                } else { iced::Task::none() }
+            }
+            AppMessage::ToggleCallCamera => {
+                if let Some(call_id) = self.active_call_id {
+                    self.call_camera_enabled = !self.call_camera_enabled;
+                    let handle = self.call_handle.clone();
+                    let enabled = self.call_camera_enabled;
+                    iced::Task::perform(async move {
+                        handle.set_camera_enabled(call_id, enabled).await.map_err(|e| e.to_string())
+                    }, AppMessage::CallCommandFinished)
+                } else { iced::Task::none() }
+            }
+            AppMessage::SelectCamera(selection) => {
+                self.call_camera_selection = if selection == "next" {
+                    if self.call_camera_selection == "Front camera" { "Back camera".to_string() } else { "Front camera".to_string() }
+                } else { selection };
+                iced::Task::none()
+            }
+            AppMessage::SelectMicrophone(_) | AppMessage::SelectSpeaker(_) | AppMessage::CallUiTick => iced::Task::none(),
+            AppMessage::CallCommandFinished(Err(error)) => {
+                tracing::warn!(error = %error, "call command failed");
+                self.toast_message = Some(friendly_call_error_text(&error).to_string());
+                iced::Task::none()
+            }
+            AppMessage::CallCommandFinished(Ok(())) => iced::Task::none(),
+            // update() only dispatches the calls variants here; other
+            // variants can never reach this method (defensive catch-all).
+            _ => iced::Task::none(),
+        }
+    }
 }
