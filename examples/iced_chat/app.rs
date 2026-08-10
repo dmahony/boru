@@ -3948,6 +3948,16 @@ pub struct IcedChat {
     /// Pending incoming call shown as an overlay; media is only activated
     /// when the user explicitly accepts.
     incoming_call: Option<IncomingCall>,
+    #[cfg(feature = "screen-sharing")]
+    /// Host-side persistent indicator and deterministic UI session state.
+    screen_share_active: bool,
+    #[cfg(feature = "screen-sharing")]
+    /// Incoming invitation text; no media is accepted until the user acts.
+    screen_share_invite: Option<String>,
+    #[cfg(feature = "screen-sharing")]
+    screen_share_viewing: bool,
+    #[cfg(feature = "screen-sharing")]
+    screen_share_fullscreen: bool,
     /// Receiver for incoming inbox events.
     pub inbox_events_rx: Arc<Mutex<Receiver<InboxEvent>>>,
     /// Receiver for incoming whisper events.
@@ -5100,6 +5110,21 @@ pub enum AppMessage {
     /// Start a call through the actor without doing network work in `update`.
     StartVoiceCall(PublicKey),
     StartVideoCall(PublicKey),
+    #[cfg(feature = "screen-sharing")]
+    /// Start sharing the current screen with the active direct conversation.
+    StartScreenShare,
+    #[cfg(feature = "screen-sharing")]
+    /// Stop the local screen-share session immediately.
+    StopScreenShare,
+    #[cfg(feature = "screen-sharing")]
+    /// Explicitly accept a pending screen-share invitation.
+    AcceptScreenShare,
+    #[cfg(feature = "screen-sharing")]
+    /// Explicitly decline a pending screen-share invitation.
+    DeclineScreenShare,
+    #[cfg(feature = "screen-sharing")]
+    /// Toggle the native viewer between inline and fullscreen presentation.
+    ToggleScreenShareFullscreen,
     /// Forward one event from the call actor subscription.
     CallEventReceived(CallEvent),
     /// Update notification suppression state from the native window focus event.
@@ -7491,6 +7516,14 @@ impl IcedChat {
             call_was_incoming: false,
             call_declined: false,
             incoming_call: None,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_active: false,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_invite: None,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_viewing: false,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_fullscreen: false,
             inbox_events_rx,
             whisper_events_rx,
             profile_image_handle,
@@ -9246,6 +9279,16 @@ impl IcedChat {
             AppMessage::OpenGroupChat(_) => "OpenGroupChat",
             AppMessage::StartVoiceCall(_) => "StartVoiceCall",
             AppMessage::StartVideoCall(_) => "StartVideoCall",
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::StartScreenShare => "StartScreenShare",
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::StopScreenShare => "StopScreenShare",
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::AcceptScreenShare => "AcceptScreenShare",
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::DeclineScreenShare => "DeclineScreenShare",
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ToggleScreenShareFullscreen => "ToggleScreenShareFullscreen",
             AppMessage::CallEventReceived(_) => "CallEventReceived",
             AppMessage::WindowFocusChanged(_) => "WindowFocusChanged",
             AppMessage::AcceptIncomingCall(_) => "AcceptIncomingCall",
@@ -12677,6 +12720,35 @@ impl IcedChat {
             | AppMessage::SelectSpeaker(_)
             | AppMessage::CallUiTick
             | AppMessage::CallCommandFinished(_) => self.update_calls(message),
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::StartScreenShare => {
+                self.screen_share_active = true;
+                self.screen_share_viewing = false;
+                iced::Task::none()
+            }
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::StopScreenShare => {
+                self.screen_share_active = false;
+                self.screen_share_viewing = false;
+                self.screen_share_fullscreen = false;
+                iced::Task::none()
+            }
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::AcceptScreenShare => {
+                self.screen_share_invite = None;
+                self.screen_share_viewing = true;
+                iced::Task::none()
+            }
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::DeclineScreenShare => {
+                self.screen_share_invite = None;
+                iced::Task::none()
+            }
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ToggleScreenShareFullscreen => {
+                self.screen_share_fullscreen = !self.screen_share_fullscreen;
+                iced::Task::none()
+            }
             AppMessage::WindowFocusChanged(focused) => {
                 if focused {
                     self.window_focus_tracker.on_focused();

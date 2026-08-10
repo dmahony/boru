@@ -26,6 +26,7 @@ pub use session::{
 };
 pub use transport::{decode_media, encode_media, LatestFrameQueue, MediaHeader, PathKind,
     QuicScreenTransport, ReadUnit, ScreenTransport, TransportCounters, MAX_MEDIA_FRAME};
+pub use viewer::{DecodedFrame, ViewerPipeline};
 
 /// Error returned by a screen-sharing boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
