@@ -105,6 +105,10 @@ impl<D: VideoDecoder> ViewerPipeline<D> {
             self.queue.pop_front();
             self.dropped_frames = self.dropped_frames.saturating_add(1);
         }
+        // Advance the ordering watermark at enqueue time so out-of-order
+        // arrivals are rejected promptly instead of queuing and possibly
+        // winning the decode race over newer frames.
+        self.last_sequence = Some(header.sequence);
         self.queue.push_back((header, payload));
         Ok(())
     }
