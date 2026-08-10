@@ -10973,42 +10973,8 @@ impl IcedChat {
             | AppMessage::CloseTunnel(_) => self.update_tunnels(message),
 
 
-            AppMessage::ImportFriendFromFile => iced::Task::perform(
-                rfd::AsyncFileDialog::new()
-                    .set_title("Select file with friend's public key")
-                    .pick_file(),
-                |file| {
-                    if let Some(file) = file {
-                        AppMessage::ImportFriendFromFilePicked(
-                            file.path().to_string_lossy().to_string(),
-                        )
-                    } else {
-                        AppMessage::Noop
-                    }
-                },
-            ),
-            AppMessage::ImportFriendFromFilePicked(path) => {
-                if path.is_empty() {
-                    return iced::Task::none();
-                }
-                // Read the file content (public key) and send a friend request
-                match std::fs::read_to_string(&path) {
-                    Ok(key) => {
-                        let trimmed = key.trim().to_string();
-                        if trimmed.is_empty() {
-                            self.chat_list_error =
-                                "File is empty — expected a public key.".to_string();
-                        } else {
-                            // Dispatch a FriendRequestSend with the key from the file
-                            return iced::Task::done(AppMessage::FriendRequestSend(trimmed));
-                        }
-                    }
-                    Err(e) => {
-                        self.chat_list_error = format!("Failed to read file: {e}");
-                    }
-                }
-                iced::Task::none()
-            }
+            AppMessage::ImportFriendFromFile
+            | AppMessage::ImportFriendFromFilePicked(_) => self.update_contacts(message),
 
             AppMessage::CreateNewRoomDhtToggled(enabled) => {
                 self.create_room_dht_enabled = enabled;

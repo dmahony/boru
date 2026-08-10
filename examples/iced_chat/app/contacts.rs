@@ -1113,6 +1113,43 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
+            // ── Import friend from file (state layer) ──
+            AppMessage::ImportFriendFromFile => iced::Task::perform(
+                rfd::AsyncFileDialog::new()
+                    .set_title("Select file with friend's public key")
+                    .pick_file(),
+                |file| {
+                    if let Some(file) = file {
+                        AppMessage::ImportFriendFromFilePicked(
+                            file.path().to_string_lossy().to_string(),
+                        )
+                    } else {
+                        AppMessage::Noop
+                    }
+                },
+            ),
+            AppMessage::ImportFriendFromFilePicked(path) => {
+                if path.is_empty() {
+                    return iced::Task::none();
+                }
+                // Read the file content (public key) and send a friend request
+                match std::fs::read_to_string(&path) {
+                    Ok(key) => {
+                        let trimmed = key.trim().to_string();
+                        if trimmed.is_empty() {
+                            self.chat_list_error =
+                                "File is empty — expected a public key.".to_string();
+                        } else {
+                            // Dispatch a FriendRequestSend with the key from the file
+                            return iced::Task::done(AppMessage::FriendRequestSend(trimmed));
+                        }
+                    }
+                    Err(e) => {
+                        self.chat_list_error = format!("Failed to read file: {e}");
+                    }
+                }
+                iced::Task::none()
+            }
             // update() only dispatches the contacts variants here; other
             // variants can never reach this method (defensive catch-all).
             _ => iced::Task::none(),
