@@ -67,6 +67,10 @@ pub mod video_poster;
 /// Optional GStreamer runtime capability detection for inline video playback.
 pub mod video_runtime;
 
+/// Feature-gated screen sharing subsystem boundary.
+#[cfg(feature = "screen-sharing")]
+pub mod screen_share;
+
 /// Localhost-only configuration helpers for the experimental VNC tunnel.
 #[cfg(feature = "net")]
 pub mod vnc_tunnel;
