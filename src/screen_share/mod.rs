@@ -15,7 +15,10 @@ pub mod transport;
 pub mod viewer;
 
 pub use capture::{CapturedFrame, FrameSink, PixelFormat, ScreenCapture};
-pub use codec::{EncodedFrame, ScreenShareCodec, VideoDecoder, VideoEncoder};
+pub use codec::{
+    CodecConfig, CodecKind, CodecMetadata, EncodedFrame, OpenH264Decoder, OpenH264Encoder,
+    ScreenShareCodec, VideoDecoder, VideoEncoder,
+};
 pub use protocol::{ControlMessage, Hello, Permission, ScreenShareProtocol, SCREEN_SHARE_ALPN};
 pub use remote_input::{InputEvent, RemoteInput};
 pub use session::{
@@ -58,23 +61,25 @@ mod tests {
     struct FakeCodec;
     impl VideoEncoder for FakeCodec {
         fn encode(&mut self, frame: &CapturedFrame) -> Result<EncodedFrame, ScreenShareError> {
-            Ok(EncodedFrame {
-                timestamp_us: frame.timestamp_us,
-                bytes: frame.pixels.clone(),
-            })
+            Ok(EncodedFrame { timestamp_us: frame.timestamp_us, sequence: 0, keyframe: true,
+                config_generation: 0, width: frame.width, height: frame.height,
+                bytes: frame.pixels.clone() })
         }
+        fn metadata(&self) -> CodecMetadata {
+            CodecMetadata { codec: CodecKind::H264,
+                config: CodecConfig { width: 2, height: 2, target_fps: 1, target_bitrate_bps: 1,
+                    keyframe_interval: 1, max_queue_depth: 1 }, generation: 0 }
+        }
+        fn request_keyframe(&mut self) {}
+        fn reconfigure(&mut self, _config: CodecConfig) -> Result<(), ScreenShareError> { Ok(()) }
     }
     impl VideoDecoder for FakeCodec {
-        fn decode(&mut self, frame: &EncodedFrame) -> Result<CapturedFrame, ScreenShareError> {
-            Ok(CapturedFrame {
-                timestamp_us: frame.timestamp_us,
-                width: 1,
-                height: 1,
-                pixel_format: PixelFormat::Bgra8,
-                pixels: frame.bytes.clone(),
-                gpu_handle: None,
-            })
+        fn decode(&mut self, frame: &EncodedFrame) -> Result<Option<CapturedFrame>, ScreenShareError> {
+            Ok(Some(CapturedFrame { timestamp_us: frame.timestamp_us, width: 1, height: 1,
+                pixel_format: PixelFormat::Bgra8, pixels: frame.bytes.clone(), gpu_handle: None }))
         }
+        fn metadata(&self) -> CodecMetadata { <Self as VideoEncoder>::metadata(self) }
+        fn reset(&mut self) -> Result<(), ScreenShareError> { Ok(()) }
     }
 
     struct FakeTransport {
@@ -105,7 +110,7 @@ mod tests {
         let decoded = codec.decode(&encoded).unwrap();
         let mut transport = FakeTransport { sent: Vec::new() };
         transport.send(encoded).unwrap();
-        assert_eq!(decoded, frame);
+        assert_eq!(decoded, Some(frame));
         assert_eq!(transport.sent.len(), 1);
     }
 
