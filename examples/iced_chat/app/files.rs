@@ -6852,6 +6852,336 @@ impl IcedChat {
                     },
                 )
             }
+            AppMessage::SharedByMeToggleShareMenu => {
+                self.shared_by_me_ui.toggle_share_menu();
+                iced::Task::none()
+            }
+
+            AppMessage::AddSharedFile => {
+                // Open the file picker — map result to SharedFilePicked(path) or Noop.
+                // Cancel is a no-op, never an error.
+                iced::Task::perform(
+                    rfd::AsyncFileDialog::new()
+                        .set_title("Select a file to share")
+                        .pick_file(),
+                    |file| {
+                        if let Some(file) = file {
+                            AppMessage::SharedFilePicked(file.path().to_string_lossy().to_string())
+                        } else {
+                            AppMessage::Noop
+                        }
+                    },
+                )
+            }
+
+            AppMessage::AddSharedFolder => {
+                // Native OS folder picker (FS-10). Cancel is a no-op.
+                iced::Task::perform(
+                    rfd::AsyncFileDialog::new()
+                        .set_title("Select a folder to share")
+                        .pick_folder(),
+                    |folder| {
+                        if let Some(folder) = folder {
+                            AppMessage::SharedFolderPicked(
+                                folder.path().to_string_lossy().to_string(),
+                            )
+                        } else {
+                            AppMessage::Noop
+                        }
+                    },
+                )
+            }
+
+            AppMessage::SharedFolderPicked(path) => {
+                self.shared_by_me_ui.close_share_menu();
+                if path.is_empty() {
+                    return iced::Task::none();
+                }
+                // The secure catalogue is file-based (content-addressed
+                // `file_objects` + `shared_files`): there is no folder object
+                // in the schema, so a directory cannot enter the signed,
+                // authorized share flow without inventing a second sharing
+                // subsystem. Make the limitation explicit instead of silently
+                // flattening the folder or faking a row. Only the display name
+                // is used — never the full local path.
+                let name = std::path::Path::new(&path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("folder")
+                    .to_string();
+                self.push_system(format!(
+                    "“{name}” can't be shared as a folder yet — the secure catalogue shares \
+                     individual files. Select files inside it instead."
+                ));
+                iced::Task::none()
+            }
+
+            AppMessage::SharedFilePicked(path) => {
+                if path.is_empty() {
+                    return iced::Task::none();
+                }
+                // Nonblocking progress: show only the display name while the
+                // file is read/hashed off the UI thread.
+                let display_name = std::path::Path::new(&path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("file")
+                    .to_string();
+                self.shared_by_me_ui.sharing_status =
+                    Some(format!("Registering {display_name}…"));
+                self.shared_by_me_ui.close_share_menu();
+                // Clone needed resources for the async task
+                let storage = self.storage.clone();
+                let user_id = self.local_public.to_string();
+                iced::Task::perform(
+                    async move {
+                        let stg = match storage {
+                            Some(ref stg) => stg.clone(),
+                            None => return Err("Storage is not available".to_string()),
+                        };
+                        // Read file on blocking thread
+                        let abs_path = std::path::PathBuf::from(&path);
+                        let (file_data, metadata) = tokio::task::spawn_blocking({
+                            let path = abs_path.clone();
+                            move || {
+                                let meta = std::fs::metadata(&path)
+                                    .map_err(|e| format!("Cannot read file: {e}"))?;
+                                let data = std::fs::read(&path)
+                                    .map_err(|e| format!("Cannot read file: {e}"))?;
+                                Ok::<_, String>((data, meta))
+                            }
+                        })
+                        .await
+                        .map_err(|e| format!("Task join error: {e}"))??;
+
+                        let filename = abs_path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        let size = metadata.len();
+                        // Compute blake3 content hash
+                        let hash = blake3::hash(&file_data);
+                        let hash_hex = hash.to_hex().to_string();
+
+                        // Compute metadata_id (same as SharedFile::new does)
+                        let modified_time =
+                            metadata.modified().unwrap_or(std::time::SystemTime::now());
+                        let ts = modified_time
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        let mut meta_hasher = blake3::Hasher::new();
+                        meta_hasher.update(filename.as_bytes());
+                        meta_hasher.update(&size.to_le_bytes());
+                        meta_hasher.update(&ts.to_le_bytes());
+                        let metadata_id = meta_hasher.finalize().to_hex().to_string();
+
+                        // Detect MIME type from file extension.  PAPIRUS-21:
+                        // cover the extensions the central resolver knows so
+                        // files shared through the UI are stored with a real
+                        // MIME and show the same type icon everywhere (the
+                        // MIME strings below are the exact ones
+                        // file_type_resolver.rs maps).  Unknown extensions
+                        // keep the octet-stream placeholder, which the
+                        // resolver treats as "no MIME info" and falls back
+                        // to the filename extension.
+                        let mime_type = match abs_path
+                            .extension()
+                            .and_then(|ext| ext.to_str())
+                            .unwrap_or_default()
+                            .to_ascii_lowercase()
+                            .as_str()
+                        {
+                            // Documents
+                            "txt" => "text/plain",
+                            "md" | "markdown" => "text/markdown",
+                            "log" => "text/x-log",
+                            "pdf" => "application/pdf",
+                            "doc" => "application/msword",
+                            "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            "odt" => "application/vnd.oasis.opendocument.text",
+                            "rtf" => "application/rtf",
+                            // Spreadsheets
+                            "xls" => "application/vnd.ms-excel",
+                            "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            "ods" => "application/vnd.oasis.opendocument.spreadsheet",
+                            "csv" => "text/csv",
+                            "tsv" => "text/tab-separated-values",
+                            // Presentations
+                            "ppt" => "application/vnd.ms-powerpoint",
+                            "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                            "odp" => "application/vnd.oasis.opendocument.presentation",
+                            // Images
+                            "png" => "image/png",
+                            "jpg" | "jpeg" => "image/jpeg",
+                            "gif" => "image/gif",
+                            "webp" => "image/webp",
+                            "svg" => "image/svg+xml",
+                            "bmp" => "image/bmp",
+                            "tiff" | "tif" => "image/tiff",
+                            // Video
+                            "mp4" | "m4v" => "video/mp4",
+                            "webm" => "video/webm",
+                            "mkv" => "video/x-matroska",
+                            "avi" => "video/x-msvideo",
+                            "mov" => "video/quicktime",
+                            "mpeg" | "mpg" => "video/mpeg",
+                            "ogv" => "video/ogg",
+                            // Audio
+                            "mp3" => "audio/mpeg",
+                            "flac" => "audio/flac",
+                            "wav" => "audio/x-wav",
+                            "ogg" => "audio/ogg",
+                            "m4a" => "audio/x-m4a",
+                            "wma" => "audio/x-ms-wma",
+                            "opus" => "audio/opus",
+                            "aac" => "audio/aac",
+                            // Archives
+                            "zip" => "application/zip",
+                            "7z" => "application/x-7z-compressed",
+                            "rar" => "application/vnd.rar",
+                            "tar" => "application/x-tar",
+                            "gz" | "gzip" => "application/gzip",
+                            "bz2" => "application/x-bzip2",
+                            "xz" => "application/x-xz-compressed-tar",
+                            "zst" => "application/zstd",
+                            // Source code
+                            "rs" => "text/x-rust",
+                            "py" => "text/x-python",
+                            "js" => "application/javascript",
+                            "ts" => "text/typescript",
+                            "html" | "htm" => "text/html",
+                            "css" => "text/css",
+                            "json" => "application/json",
+                            "xml" => "application/xml",
+                            "yaml" | "yml" => "application/yaml",
+                            "toml" => "application/toml",
+                            "sh" | "bash" | "zsh" | "fish" => "text/x-shellscript",
+                            "ps1" | "psm1" | "psd1" => "text/x-powershell",
+                            "java" => "text/x-java",
+                            "kt" | "kts" => "text/x-kotlin",
+                            "c" => "text/x-c",
+                            "cpp" | "cc" | "cxx" => "text/x-c++",
+                            "cs" => "text/x-csharp",
+                            "go" => "text/x-go",
+                            "sql" => "application/sql",
+                            // Executables / installers / disk images
+                            "exe" | "bat" | "cmd" => "application/x-ms-dos-executable",
+                            "elf" | "so" | "dll" | "dylib" => "application/x-executable",
+                            "deb" => "application/vnd.debian.binary-package",
+                            "rpm" => "application/x-rpm",
+                            "apk" => "application/vnd.android.package-archive",
+                            "msi" => "application/x-msi",
+                            "iso" => "application/x-cd-image",
+                            "img" => "application/x-raw-disk-image",
+                            "dmg" => "application/x-apple-diskimage",
+                            // Databases / fonts / keys
+                            "sqlite" | "sqlite3" | "db" | "dbf" => "application/x-sqlite3",
+                            "ttf" | "otf" | "ttc" => "application/x-font-ttf",
+                            "woff" | "woff2" => "font/woff",
+                            "pem" => "application/x-pem-key",
+                            "key" | "pub" | "asc" | "gpg" | "ppk" => "application/pgp-keys",
+                            // Ebooks / torrents / 3D
+                            "epub" | "mobi" => "application/epub+zip",
+                            "torrent" => "application/x-bittorrent",
+                            "stl" | "obj" | "fbx" | "glb" | "gltf" | "blend" | "3ds" => "model/stl",
+                            _ => "application/octet-stream",
+                        };
+
+                        // Store file object + source path + shared file entry
+                        stg.put_file_object(&hash_hex, size, mime_type, &filename, &file_data)
+                            .map_err(|e| format!("Failed to store file: {e}"))?;
+                        stg.set_file_object_source_path(&hash_hex, Some(&path))
+                            .map_err(|e| format!("Failed to set source path: {e}"))?;
+                        stg.upsert_shared_file(
+                            &hash_hex,
+                            &user_id,
+                            &metadata_id,
+                            &filename,
+                            None,
+                            true,
+                        )
+                        .map_err(|e| format!("Failed to register shared file: {e}"))?;
+
+                        Ok(format!("Shared file added: {filename} ({} bytes)", size))
+                    },
+                    |result: Result<String, String>| match result {
+                        Ok(msg) => AppMessage::SharedFileAdded(msg),
+                        Err(e) => AppMessage::SharedFileAddFailed(e),
+                    },
+                )
+            }
+
+            AppMessage::SharedFileAddFailed(msg) => {
+                self.shared_by_me_ui.sharing_status = None;
+                self.shared_by_me_ui.close_share_menu();
+                self.push_system(msg);
+                iced::Task::none()
+            }
+
+            AppMessage::SharedFileAdded(msg) => {
+                self.shared_by_me_ui.sharing_status = None;
+                self.shared_by_me_ui.close_share_menu();
+                // Complete a GUI test share-file action once the file has been
+                // registered through the normal sharing path.
+                if let Some(action_id) = self.pending_share_file_action.take() {
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageHandled);
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::Completed);
+                }
+                self.push_system(msg);
+                // Refresh the shared files list
+                if let Some(ref stg) = self.storage {
+                    if let Ok(rows) = stg.list_shared_files(&self.local_public.to_string(), true) {
+                        self.shared_files = rows;
+                    }
+                }
+                // The dashboard table must update from the authoritative
+                // projection, not a manually inserted row.
+                self.shared_by_me_loading = true;
+                self.refresh_shared_by_me()
+            }
+
+            AppMessage::RemoveSharedFile(hash) => {
+                if let Some(ref stg) = self.storage {
+                    let user_id = self.local_public.to_string();
+                    match stg.delete_shared_file(&hash, &user_id) {
+                        Ok(true) => {
+                            // Refresh the shared files list
+                            if let Ok(rows) =
+                                stg.list_shared_files(&self.local_public.to_string(), true)
+                            {
+                                self.shared_files = rows;
+                            }
+                            return iced::Task::done(AppMessage::SharedFileRemoved(
+                                "Shared file removed.".to_string(),
+                            ));
+                        }
+                        Ok(false) => {
+                            return iced::Task::done(AppMessage::ErrorMsg(
+                                "Shared file not found.".to_string(),
+                            ));
+                        }
+                        Err(e) => {
+                            return iced::Task::done(AppMessage::ErrorMsg(format!(
+                                "Failed to remove shared file: {e}"
+                            )));
+                        }
+                    }
+                }
+                iced::Task::done(AppMessage::ErrorMsg(
+                    "Storage is not available.".to_string(),
+                ))
+            }
+
+            AppMessage::SharedFileRemoved(msg) => {
+                self.push_system(msg);
+                iced::Task::none()
+            }
             // update() only dispatches the files variants here; other
             // variants can never reach this method (defensive catch-all).
             _ => iced::Task::none(),

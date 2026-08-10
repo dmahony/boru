@@ -6986,6 +6986,62 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
+            AppMessage::Scrolled(offset, vp_h) => {
+                // Mirror the scrollable's offset into the windowed-renderer
+                // state and track whether the user is at the bottom.
+                // total_content_height is set during view_chat_log() each
+                // frame via Cell interior mutability (allows &self reads in
+                // view()).
+                let total = self.total_content_height.get();
+                if total > 0.0 {
+                    self.viewport_height = vp_h;
+                    // Detect whether the user is at the bottom of the chat
+                    // log.  The 10px epsilon absorbs sub-pixel rounding and
+                    // viewport re-measurement during resize.
+                    if offset + vp_h >= total - 10.0 {
+                        self.follow_latest = true;
+                        self.scroll_offset = offset;
+                        // A bottom event confirms the lightbox-close snap
+                        // landed (or the user reached the bottom); the
+                        // stale-event guard is no longer needed.
+                        self.lightbox_close_snap_guard = 0;
+                    } else if self.lightbox_close_snap_guard > 0 {
+                        // Stale event from the freshly re-created scrollable
+                        // right after the lightbox overlay disappeared: the
+                        // fresh widget starts at the TOP (offset 0) and this
+                        // event would clobber the f32::MAX bottom sentinel
+                        // before the snap task lands.  Keep the sentinel
+                        // armed, stay in follow-latest, and re-queue the snap
+                        // (the update tail consumes the flag and re-emits
+                        // snap_to_end).  A genuine user scroll cannot arrive
+                        // in this window because the overlay removal and the
+                        // first layout happen in the same frame.
+                        self.scroll_offset = f32::MAX;
+                        self.scroll_to_bottom_pending = true;
+                        self.lightbox_close_snap_guard -= 1;
+                    } else {
+                        self.scroll_offset = offset;
+                        self.follow_latest = false;
+                        // A manual scroll away from the bottom cancels any
+                        // queued snap-to-bottom so a stale snap can never
+                        // steal the user's reading position.
+                        self.scroll_to_bottom_pending = false;
+                    }
+                } else {
+                    // Empty timeline: the anchor-bottom empty-state
+                    // scrollable reports offset 0 with no content.  Clobbering
+                    // `scroll_offset` here would destroy the `f32::MAX`
+                    // bottom sentinel that keeps follow-latest armed until the
+                    // first entry renders (RoomOpened history replay / live
+                    // append) — which is what landed fresh conversations at
+                    // the TOP of history instead of the latest message.  Only
+                    // learn the viewport height; leave the sentinel untouched.
+                    self.viewport_height = vp_h;
+                }
+                #[cfg(feature = "video-playback")]
+                self.reconcile_inline_video_viewport();
+                iced::Task::none()
+            }
             // update() only dispatches the chat variants here; other
             // variants can never reach this method (defensive catch-all).
             _ => iced::Task::none(),
