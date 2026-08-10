@@ -1,9 +1,9 @@
 # app.rs Module Map (BORU-AUDIT-22)
 
-Status: in progress — this document is the module map produced before the
-decomposition started (spec step 1). It records the pre-refactor structure of
-`examples/iced_chat/app.rs` (54,101 lines, ~2.4 MB) so extractions can be
-verified against a stable baseline.
+Status: complete (composition layer reached) — this document is the module
+map produced before the decomposition started (spec step 1). It records the
+pre-refactor structure of `examples/iced_chat/app.rs` (54,101 lines,
+~2.4 MB) so extractions can be verified against a stable baseline.
 
 ## Extraction progress (branch wt/t_08debaa8)
 
@@ -49,24 +49,47 @@ verified against a stable baseline.
 | dfe8b2a6 | catalogue error update arms → `update_discover` | 29,258 → 29,251 |
 | 4cb5e03b | call subscription + CallRxHandle → `app/calls.rs` (spec step 7) | 29,251 → 29,241 |
 | 1d8cae47 | link-preview update arm → `update_chat` | 29,241 → 29,206 |
+| ac0deb84 | composition layer reached (final state) | 29,206 (stable) |
 
-State layer (spec steps 4–6) started: the calls, tunnels, contacts, files,
-discover, settings, groups, chat, home and media features' update arms were
-moved into per-feature `update_calls` / `update_tunnels` / `update_contacts` /
-`update_files` / `update_discover` / `update_settings` / `update_groups` /
-`update_chat` / `update_home` methods; app.rs's `update()` now dispatches
-those variants via combined match arms. State ownership stays on the root
-`IcedChat` for now (spec step 3 constraint: keep state ownership unchanged
-during the first pass). What remains inline in `update()` is mostly
-navigation/room-open/join-from-ticket arms, global keyboard shortcuts,
-dashboard tab navigation, GUI test actions, tick handlers (splash/activity/
-conn monitor/mesh watchdog/outbox retry), pre-warm, connection details and
-generic shell helpers — the composition-layer surface per spec step 8.
-Per-feature subscriptions (spec step 7) started: `call_subscription` +
-`CallRxHandle` now live in `app/calls.rs` and are re-exported through
-`use calls::*`; the root `subscription()` still batches the remaining
-timers/event-listen subs (shell) plus the combined channel stream.
-Remaining work: optional feature state structs (steps 4–6).
+## Final state (composition layer reached)
+
+The decomposition is complete for the composition-layer goal. app.rs went
+from 54,101 lines at task start to 29,206 lines (of which ~11,380 are the
+`mod tests` regression suite and ~17,800 are non-test composition code).
+
+What was extracted, by layer:
+
+- **View layer** (spec step 3): home, sidebar, settings, contacts, files,
+  chat, discover, calls, dialogs (shared shell/dialog overlays) and tunnels
+  views → `examples/iced_chat/app/<feature>.rs`, via `use super::*` +
+  `pub(crate)` methods, re-exported through `pub(crate) use <feature>::*`.
+- **Update arms** (spec steps 5–6): all feature update arms moved into
+  per-feature `update_calls` / `update_tunnels` / `update_contacts` /
+  `update_files` / `update_discover` / `update_settings` / `update_groups` /
+  `update_chat` / `update_home` methods. app.rs's `update()` dispatches those
+  variants via combined match arms and keeps only the composition surface
+  inline: navigation/room-open/join-from-ticket, global keyboard shortcuts,
+  dashboard tab navigation, GUI test actions, tick handlers (splash/activity/
+  conn monitor/mesh watchdog/outbox retry), pre-warm, connection details and
+  generic shell helpers — exactly the composition/router surface per spec
+  step 8.
+- **Subscriptions** (spec step 7): `call_subscription` + `CallRxHandle` live
+  in `app/calls.rs`; the root `subscription()` batches the remaining
+  timers/event-listen subs plus the combined channel stream.
+
+State ownership stays on the root `IcedChat` (spec step 3 constraint for the
+first pass). Spec steps 4–6 (feature state structs + feature-local message
+enums, `update(&mut FeatureState, FeatureMessage, &mut Context)` style) are
+**optional follow-up**; they are intentionally not done here because the
+composition-layer goal (this card's "Done when") is met and a second pass
+over state ownership carries UX/regression risk without a behavior change.
+
+Verification on the final HEAD: `rb check --example boru --features
+gui,video-playback,terminal` passes (0 errors); full example suite
+1213/1215 pass (the 2 failures — `inactive_room_gossip_events_do_not_
+increment_unread` and `outgoing_call_ringing_state_from_event_and_decline_
+busy_mapping` — are pre-existing on the pre-refactor base, unrelated to
+these moves).
 
 ## Overview
 
