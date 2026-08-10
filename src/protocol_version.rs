@@ -32,7 +32,16 @@ pub const CATALOGUE_RETRIEVAL_V1: u16 = 1;
 pub const SUPPORTED_CATALOGUE_RETRIEVAL: &[u16] = &[1];
 
 /// Maximum frame payload size (8 MiB).
-const MAX_FRAME_PAYLOAD: usize = 8 * 1024 * 1024;
+pub const MAX_FRAME_PAYLOAD: usize = 8 * 1024 * 1024;
+
+/// Whether a frame payload length is within the protocol's hard cap.
+///
+/// This is the single pure gate every length-prefixed read/write consults, so
+/// a malicious advertised size is rejected *before* any buffer allocation
+/// (BORU-AUDIT-28).
+pub fn frame_payload_len_ok(len: usize) -> bool {
+    len <= MAX_FRAME_PAYLOAD
+}
 
 // ── write_frame ───────────────────────────────────────────────────────────
 
@@ -50,7 +59,7 @@ pub async fn write_frame(
     payload: &[u8],
 ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let len = payload.len();
-    if len > MAX_FRAME_PAYLOAD {
+    if !frame_payload_len_ok(len) {
         return Err(Box::new(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("payload too large: {len} > {MAX_FRAME_PAYLOAD}"),
@@ -104,7 +113,7 @@ pub async fn read_frame(
         Err(err) => return Err(Box::new(err)),
     };
 
-    if len > MAX_FRAME_PAYLOAD {
+    if !frame_payload_len_ok(len) {
         return Err(Box::new(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("{protocol_name}: frame payload too large: {len} > {MAX_FRAME_PAYLOAD}"),

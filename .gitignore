@@ -22,3 +22,8 @@ examples/lan_test.rs
 # Windows cross-build packaging output (scripts/package-windows.sh)
 dist-windows/
 boru-windows-x86_64.zip
+# cargo-fuzz artifacts (fuzz/ is a standalone workspace)
+fuzz/target/
+fuzz/Cargo.lock
+fuzz/corpus/
+fuzz/artifacts/

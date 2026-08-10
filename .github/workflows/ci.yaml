@@ -26,6 +26,30 @@ jobs:
     if: "github.event_name != 'pull_request' || ! contains(github.event.pull_request.labels.*.name, 'flaky-test')"
     uses: './.github/workflows/tests.yaml'
 
+  fuzz_smoke:
+    name: Fuzz Smoke (bounded)
+    timeout-minutes: 15
+    runs-on: [self-hosted, linux, X64]
+    env:
+      # Bounded on purpose: this is the deterministic adversarial/fuzz smoke
+      # suite (tests/security/*).  CI keeps the session short (200 iterations
+      # per fuzz test); a longer libFuzzer session runs locally or nightly
+      # via `cargo +nightly fuzz run` in fuzz/.
+      BORU_FUZZ_ITERATIONS: "200"
+      RUSTC_WRAPPER: "sccache"
+      SCCACHE_CACHE_SIZE: "50G"
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        submodules: recursive
+    - uses: dtolnay/rust-toolchain@stable
+    - name: Install sccache
+      uses: mozilla-actions/sccache-action@v0.0.9
+    - name: Run deterministic adversarial + fuzz smoke tests
+      run: cargo test --test security --release
+      env:
+        RUST_LOG: ${{ runner.debug && 'TRACE' || 'DEBUG'}}
+
   cross_build:
     name: Cross Build Only
     if: "github.event_name != 'pull_request' || ! contains(github.event.pull_request.labels.*.name, 'flaky-test')"

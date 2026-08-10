@@ -282,12 +282,17 @@ async fn handle_connection(
 /// so no unchecked or reversed range arithmetic can reach the file seek/read
 /// path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RangeRequest {
+pub enum RangeRequest {
     /// No Range header: serve the whole resource.
     Full,
     /// One satisfiable byte range, endpoints inclusive, already clamped to
     /// `[0, resource_length - 1]`.
-    Partial { start: u64, end: u64 },
+    Partial {
+        /// First byte to send (inclusive).
+        start: u64,
+        /// Last byte to send (inclusive), already clamped to the resource.
+        end: u64,
+    },
     /// Syntactically valid but unsatisfiable (start past EOF, reversed range,
     /// zero-length suffix, empty resource) — the server must answer 416.
     Unsatisfiable,
@@ -298,21 +303,21 @@ enum RangeRequest {
 
 /// The concrete byte range to serve once a request has been validated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ResolvedRange {
+pub struct ResolvedRange {
     /// First byte to send (inclusive).
-    start: u64,
+    pub start: u64,
     /// Last byte to send (inclusive), already clamped to the resource.
-    end: u64,
+    pub end: u64,
     /// Number of bytes to send (`end - start + 1`), computed with checked
     /// arithmetic only after validation.
-    length: u64,
+    pub length: u64,
 }
 
 impl RangeRequest {
     /// Resolve this request against `resource_length` into the concrete byte
     /// range to serve, or `None` when the request cannot be satisfied
     /// (unsatisfiable or malformed — the caller answers 416).
-    fn resolve(self, resource_length: u64) -> Option<ResolvedRange> {
+    pub fn resolve(self, resource_length: u64) -> Option<ResolvedRange> {
         match self {
             RangeRequest::Full => {
                 if resource_length == 0 {
@@ -341,7 +346,7 @@ impl RangeRequest {
 /// the single-range forms the streaming server needs — `bytes=start-end`,
 /// `bytes=start-`, and the suffix form `bytes=-N`. Multi-range requests and
 /// anything else are rejected.
-fn parse_range_header(line: &str, resource_length: u64) -> RangeRequest {
+pub fn parse_range_header(line: &str, resource_length: u64) -> RangeRequest {
     let Some(value) = line.split(':').nth(1) else {
         return RangeRequest::Malformed;
     };
