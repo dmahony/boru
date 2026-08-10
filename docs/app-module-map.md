@@ -45,6 +45,8 @@ verified against a stable baseline.
 | a3d85712 | settings/terminal navigation update arms → `update_settings` | 29,625 → 29,587 |
 | aa8ad2f7 | friend confirm/block/rename update arms → `update_contacts` | 29,587 → 29,425 |
 | e4d27e85 | background subscription arms (SubscribeStoredConversations / BackgroundSubscribe / BackgroundSubscribed) → `update_discover` | 29,425 → 29,292 |
+| c3b22772 | import-friend-from-file update arms → `update_contacts` | 29,292 → 29,258 |
+| dfe8b2a6 | catalogue error update arms → `update_discover` | 29,258 → 29,251 |
 
 State layer (spec steps 4–6) started: the calls, tunnels, contacts, files,
 discover, settings, groups, chat, home and media features' update arms were
