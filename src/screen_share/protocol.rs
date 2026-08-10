@@ -248,9 +248,9 @@ mod tests {
     use super::*;
     use crate::screen_share::session::SessionState;
     use crate::screen_share::{
-        codec::{CodecConfig, OpenH264Decoder, OpenH264Encoder, DEFAULT_QUEUE_CAPACITY},
-        capture::PixelFormat,
-        transport::{QuicScreenTransport, ReadUnit},
+        codec::{CodecConfig, OpenH264Decoder, OpenH264Encoder, VideoEncoder, DEFAULT_QUEUE_CAPACITY},
+        capture::{PixelFormat, ScreenCapture},
+        transport::{read_unit, QuicScreenTransport, ReadUnit},
         viewer::ViewerPipeline,
         TestPatternCapture,
     };

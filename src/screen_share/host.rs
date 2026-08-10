@@ -16,7 +16,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 
 use super::{
-    codec::{CodecConfig, OpenH264Encoder},
+    codec::{CodecConfig, OpenH264Encoder, VideoEncoder},
     protocol::{self, ControlMessage, SCREEN_SHARE_PROTOCOL_VERSION},
     session::{ScreenShareSessionId, SessionEvent, SessionManager, SessionState},
     transport::{read_unit, QuicScreenTransport, ReadUnit},
