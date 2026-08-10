@@ -395,6 +395,8 @@ pub mod catalogue_rate_limits;
 
 /// Catalogue retrieval protocol handler — server side.
 pub mod catalogue_handler;
+pub mod catalogue_policy;
+pub mod catalogue_wire;
 
 /// Catalogue retrieval client — fetches and verifies a signed catalogue
 /// from a remote peer.

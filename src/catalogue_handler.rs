@@ -26,14 +26,13 @@ use n0_error::Result;
 use tracing::{debug, error, warn};
 
 use crate::catalogue_limits::{
-    check_file_details_payload_size, check_page_payload_size, check_response_payload_size,
-    MAX_CATALOGUE_FILES, MAX_CATALOGUE_PAGE_SIZE, MAX_CATALOGUE_REQUEST_BYTES, MAX_COLLECTIONS,
-    MAX_ENTRIES_PER_COLLECTION, MAX_FILE_SIZE_BYTES,
+    MAX_CATALOGUE_PAGE_SIZE, MAX_CATALOGUE_REQUEST_BYTES,
 };
 use crate::catalogue_model::{
     CatalogueView, FileCatalogueCollection, RemoteCollection, SignedCatalogueCursor,
     SignedFileCatalogue,
 };
+use crate::catalogue_policy::{is_requester_blocked, validate_catalogue_view, ViewHashCache};
 use crate::catalogue_protocol::{
     CatalogErrorCode, CatalogRequest, CatalogResponse, CatalogWireRequest, CatalogWireResponse,
 };
@@ -41,124 +40,19 @@ use crate::catalogue_rate_limits::{
     write_busy_response, write_rate_limited_response, CatalogueAdmission,
     CatalogueConcurrencyLimiter, CatalogueRateConfig, PeerCatalogueAbuseLimiter,
 };
+use crate::catalogue_wire::{
+    write_catalogue_response, write_file_details_response, write_page_response,
+};
 use crate::chat_core::DIAGNOSTICS;
 use crate::diagnostics::DiagnosticEventKind;
 use crate::friends::{FriendId, FriendRelationship, FriendsStore};
-use crate::protocol_version::{
-    read_frame, write_frame, CATALOGUE_RETRIEVAL_V1, SUPPORTED_CATALOGUE_RETRIEVAL,
-};
+use crate::protocol_version::{read_frame, SUPPORTED_CATALOGUE_RETRIEVAL};
 use crate::storage::Storage;
 
-/// View hash cache type: maps (profile_user_id, requester_id) → (revision, view_hash).
-type ViewHashCache =
-    Arc<std::sync::Mutex<std::collections::HashMap<(String, FriendId), (u64, u64)>>>;
 
 /// Timeout for the entire catalogue protocol handler — a single request/response
 /// cycle must complete within this window or the connection is dropped.
 const CATALOGUE_HANDLER_TIMEOUT: Duration = Duration::from_secs(60);
-
-/// Serialize a [`CatalogResponse`], check its size against the catalogue
-/// response byte limit, and write it to `send` via [`write_frame`].
-///
-/// Returns an `io::Error` with `InvalidData` when the serialized response
-/// exceeds [`MAX_CATALOGUE_RESPONSE_BYTES`].
-async fn write_catalogue_response(
-    send: &mut iroh::endpoint::SendStream,
-    response: CatalogResponse,
-) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let wire_resp = CatalogWireResponse::new(response);
-    let resp_bytes = postcard::to_stdvec(&wire_resp)?;
-    check_response_payload_size(resp_bytes.len()).map_err(|msg| {
-        Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, msg))
-            as Box<dyn std::error::Error + Send + Sync>
-    })?;
-    write_frame(send, CATALOGUE_RETRIEVAL_V1, &resp_bytes).await?;
-    Ok(())
-}
-
-/// Serialize and write a paginated response under the stricter page-byte cap.
-async fn write_page_response(
-    send: &mut iroh::endpoint::SendStream,
-    response: CatalogResponse,
-) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let wire_resp = CatalogWireResponse::new(response);
-    let resp_bytes = postcard::to_stdvec(&wire_resp)?;
-    check_page_payload_size(resp_bytes.len()).map_err(|msg| {
-        Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, msg))
-            as Box<dyn std::error::Error + Send + Sync>
-    })?;
-    write_frame(send, CATALOGUE_RETRIEVAL_V1, &resp_bytes).await?;
-    Ok(())
-}
-
-/// Serialize a [`CatalogResponse`] that is a single file-details response,
-/// check its size, and write it.
-///
-/// Uses the stricter [`MAX_FILE_DETAILS_PAYLOAD_BYTES`] limit since
-/// FileDetails contains a single [`RemoteSharedFile`].
-async fn write_file_details_response(
-    send: &mut iroh::endpoint::SendStream,
-    response: CatalogResponse,
-) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let wire_resp = CatalogWireResponse::new(response);
-    let resp_bytes = postcard::to_stdvec(&wire_resp)?;
-    check_file_details_payload_size(resp_bytes.len()).map_err(|msg| {
-        Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, msg))
-            as Box<dyn std::error::Error + Send + Sync>
-    })?;
-    write_frame(send, CATALOGUE_RETRIEVAL_V1, &resp_bytes).await?;
-    Ok(())
-}
-
-/// Validate a [`CatalogueView`] against size and count limits, and validate
-/// every file and collection entry.
-///
-/// Returns `Some(error_message)` on the first violation, `None` when valid.
-fn validate_catalogue_view(view: &CatalogueView) -> Option<String> {
-    if view.files.len() > MAX_CATALOGUE_FILES {
-        return Some(format!(
-            "catalogue has {} files, exceeds maximum of {MAX_CATALOGUE_FILES}",
-            view.files.len()
-        ));
-    }
-    if view.collections.len() > MAX_COLLECTIONS {
-        return Some(format!(
-            "catalogue has {} collections, exceeds maximum of {MAX_COLLECTIONS}",
-            view.collections.len()
-        ));
-    }
-    for file in &view.files {
-        if file.size_bytes > MAX_FILE_SIZE_BYTES {
-            return Some(format!(
-                "file size_bytes {} exceeds maximum of {MAX_FILE_SIZE_BYTES}",
-                file.size_bytes
-            ));
-        }
-        if let Err(e) = file.validate() {
-            return Some(format!("invalid file in catalogue: {e}"));
-        }
-    }
-    let mut entries_per_collection = std::collections::HashMap::<&str, usize>::new();
-    for file in &view.files {
-        for collection_id in &file.collection_ids {
-            let count = entries_per_collection
-                .entry(collection_id.as_str())
-                .and_modify(|count| *count += 1)
-                .or_insert(1);
-            if *count > MAX_ENTRIES_PER_COLLECTION {
-                return Some(format!(
-                    "collection {collection_id} has more than {MAX_ENTRIES_PER_COLLECTION} entries"
-                ));
-            }
-        }
-    }
-    for col in &view.collections {
-        if let Err(e) = col.validate() {
-            return Some(format!("invalid collection in catalogue: {e}"));
-        }
-    }
-    None
-}
 
 // ── CatalogueHandler ───────────────────────────────────────────────────────
 ///
@@ -306,10 +200,8 @@ impl CatalogueHandler {
     ) -> std::result::Result<SignedFileCatalogue, CatalogErrorCode> {
         // ── Blocked check ──────────────────────────────────────────────
         let requester_id = FriendId::from_public_key(*requester);
-        if let Some(record) = self.friends.get(&requester_id) {
-            if record.relationship == FriendRelationship::Blocked {
-                return Err(CatalogErrorCode::PermissionDenied);
-            }
+        if is_requester_blocked(&self.friends, &requester_id) {
+            return Err(CatalogErrorCode::PermissionDenied);
         }
 
         // ── Get manifest revision ──────────────────────────────────────
@@ -384,10 +276,8 @@ impl CatalogueHandler {
     {
         // ── Blocked check ──────────────────────────────────────────────
         let requester_id = FriendId::from_public_key(*requester);
-        if let Some(record) = self.friends.get(&requester_id) {
-            if record.relationship == FriendRelationship::Blocked {
-                return Err(CatalogErrorCode::PermissionDenied);
-            }
+        if is_requester_blocked(&self.friends, &requester_id) {
+            return Err(CatalogErrorCode::PermissionDenied);
         }
 
         // ── Look up the shared file by metadata_id ─────────────────────
@@ -693,10 +583,7 @@ async fn serve_catalogue(
 
             // ── Blocked check (early) ──────────────────────────────────
             let requester_id = FriendId::from_public_key(remote_id);
-            let is_blocked = handler
-                .friends
-                .get(&requester_id)
-                .is_some_and(|r| r.relationship == FriendRelationship::Blocked);
+            let is_blocked = is_requester_blocked(&handler.friends, &requester_id);
 
             if is_blocked {
                 let response = CatalogResponse::Error {
@@ -879,10 +766,7 @@ async fn serve_catalogue(
         CatalogRequest::GetCatalogue { known_revision } => {
             // ── Blocked check ──────────────────────────────────────────
             let requester_id = FriendId::from_public_key(remote_id);
-            let is_blocked = handler
-                .friends
-                .get(&requester_id)
-                .is_some_and(|r| r.relationship == FriendRelationship::Blocked);
+            let is_blocked = is_requester_blocked(&handler.friends, &requester_id);
 
             if is_blocked {
                 let response = CatalogResponse::Error {
