@@ -90,6 +90,8 @@ use iroh_blobs::{
 };
 
 use boru_core::whisper::{WhisperBuilder, WHISPER_ALPN};
+#[cfg(feature = "screen-sharing")]
+use boru_core::screen_share::{ScreenShareProtocol, SCREEN_SHARE_ALPN};
 use iroh_mainline_address_lookup::DhtAddressLookup;
 
 use boru_core::public_room_continuous::{ContinuousTracker, ContinuousTrackerConfig};
@@ -1047,7 +1049,7 @@ fn main() -> Result<()> {
         let call_handler = call_builder.protocol_handler();
         let (call_handle, call_events_rx) = call_builder.spawn();
 
-        let router = iroh::protocol::Router::builder(endpoint.clone())
+        let router_builder = iroh::protocol::Router::builder(endpoint.clone())
             .accept(GOSSIP_ALPN, gossip.clone())
             .accept(iroh_blobs::ALPN, blobs_protocol.clone())
             .accept(FRIEND_PING_ALPN, PingHandler)
@@ -1057,8 +1059,13 @@ fn main() -> Result<()> {
             .accept(CATALOGUE_ALPN, catalogue_handler)
             .accept(boru_core::net::FILE_ACCESS_ALPN, file_access_handler)
             .accept(BORU_TUNNEL_ALPN, tunnel_handler)
-            .accept(boru_core::call::manager::CALL_ALPN, call_handler)
-            .spawn();
+            .accept(boru_core::call::manager::CALL_ALPN, call_handler);
+        #[cfg(feature = "screen-sharing")]
+        let router_builder = router_builder.accept(
+            SCREEN_SHARE_ALPN,
+            ScreenShareProtocol::new(tokio::sync::mpsc::channel(32).0),
+        );
+        let router = router_builder.spawn();
         splash_send("Protocol router ready");
 
         // Subscribe to the lobby topic so the gossip mesh is ready for

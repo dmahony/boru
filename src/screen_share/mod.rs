@@ -17,7 +17,8 @@ pub mod viewer;
 pub use capture::{CapturedFrame, ScreenCapture};
 pub use codec::{EncodedFrame, ScreenShareCodec, VideoDecoder, VideoEncoder};
 pub use remote_input::{InputEvent, RemoteInput};
-pub use session::{ScreenShareSession, ScreenShareSessionId};
+pub use protocol::{ControlMessage, Hello, Permission, ScreenShareProtocol, SCREEN_SHARE_ALPN};
+pub use session::{ScreenShareSession, ScreenShareSessionId, SessionEvent, SessionManager, SessionState};
 pub use transport::ScreenTransport;
 
 /// Error returned by a screen-sharing boundary.

@@ -249,7 +249,7 @@ gui = ["net", "dep:iced", "dep:iced_aw", "dep:iced_moving_picture", "dep:tokio",
 video-playback = ["gui", "dep:iced_video_player"]
 terminal = ["gui", "dep:iced_term"]
 # Screen sharing is deliberately opt-in while the subsystem is integrated.
-screen-sharing = []
+screen-sharing = ["net"]
 # Developer-only fast screen-sharing prototype; reuses the existing tunnel.
 experimental-vnc = ["gui"]
 
