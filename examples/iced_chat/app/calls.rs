@@ -335,3 +335,23 @@ impl IcedChat {
         }
     }
 }
+
+// ── Call subscription (spec step 7: per-feature subscriptions) ──
+
+struct CallRxHandle(Arc<Mutex<Receiver<CallEvent>>>);
+
+impl std::hash::Hash for CallRxHandle {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (Arc::as_ptr(&self.0) as usize).hash(state);
+    }
+}
+
+pub(crate) fn call_subscription(rx: Arc<Mutex<Receiver<CallEvent>>>) -> iced::Subscription<AppMessage> {
+    iced::Subscription::run_with(CallRxHandle(rx), |handle| {
+        let rx = Arc::clone(&handle.0);
+        Box::pin(n0_future::stream::unfold(rx, |rx| async move {
+            let event = rx.lock().await.recv().await?;
+            Some((AppMessage::CallEventReceived(event), rx))
+        }))
+    })
+}

@@ -17179,24 +17179,6 @@ impl std::hash::Hash for InboxRxHandle {
     }
 }
 
-struct CallRxHandle(Arc<Mutex<Receiver<CallEvent>>>);
-
-impl std::hash::Hash for CallRxHandle {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        (Arc::as_ptr(&self.0) as usize).hash(state);
-    }
-}
-
-fn call_subscription(rx: Arc<Mutex<Receiver<CallEvent>>>) -> iced::Subscription<AppMessage> {
-    iced::Subscription::run_with(CallRxHandle(rx), |handle| {
-        let rx = Arc::clone(&handle.0);
-        Box::pin(n0_future::stream::unfold(rx, |rx| async move {
-            let event = rx.lock().await.recv().await?;
-            Some((AppMessage::CallEventReceived(event), rx))
-        }))
-    })
-}
-
 /// Wrapper for the continuous tracker's discovered-peers channel.
 /// Uses a bounded mpsc receiver wrapped in Arc<Mutex<>>.
 struct DiscoveredPeersRxHandle(Arc<Mutex<tokio::sync::mpsc::Receiver<DiscoveredPeersUpdate>>>);
