@@ -19,8 +19,23 @@ verified against a stable baseline.
 | (this run) | discover + peer/friend profiles → `app/discover.rs` | 40,814 → 39,382 |
 | (this run) | call screens → `app/calls.rs` | 39,382 → 39,252 |
 
-Remaining per plan: feature state structs / feature-local messages
-(spec steps 4–6) and per-feature subscriptions (spec step 7).
+Remaining per plan (view layer): the shared shell/dialog block still in
+app.rs (`view_incoming_call_overlay`, `view_expanded_inline_video`,
+`view_connection_details_dialog`, `view_image_lightbox`,
+`view_create_room_dialog`, `view_create_group_dialog`,
+`view_receive_ticket_dialog`, `view_short_code_dialog`,
+`view_redeem_code_dialog`, `view_create_tunnel_dialog`,
+`view_invite_member_dialog`) and the tunnels block
+(`view_share_local_service_dialog`, `view_local_service_suggestion_row`)
+→ candidate `app/dialogs.rs` / `app/tunnels.rs`.
+
+Remaining per plan (state layer, spec steps 4–6): feature state structs +
+feature-local message enums, moving `update()` arms into
+`update(&mut FeatureState, FeatureMessage, &mut Context)` style functions.
+Remaining per plan (spec step 7): per-feature subscriptions combined at the
+root. These are the higher-risk steps; the view extractions above proved the
+module seams and the compile/test gate (`rb check` + full example suite,
+1213/1215 with two pre-existing failures verified on base).
 
 ## Overview
 
