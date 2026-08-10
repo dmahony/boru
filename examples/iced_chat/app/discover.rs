@@ -1729,6 +1729,251 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
+            // ── Background conversation subscriptions (startup auto-subscribe) ──
+            AppMessage::SubscribeStoredConversations => {
+                // Subscribe to all stored conversations at startup so messages
+                // can be received even before the user opens each chat.
+                let store_topics: Vec<TopicId> = self
+                    .conversation_store
+                    .active_iter()
+                    .into_iter()
+                    .map(|e| e.topic)
+                    .filter(|t| !self.conversations.contains_key(t))
+                    .collect();
+                if store_topics.is_empty() {
+                    return iced::Task::none();
+                }
+                // Include discovered peers as bootstrap so the gossip mesh has
+                // neighbors for the direct topic. Without this, background
+                // subscriptions have zero peers and broadcasts go nowhere.
+                let bootstrap_peers: Vec<PublicKey> = self.discovered_peers.clone();
+                info!(
+                    count = store_topics.len(),
+                    bootstrap = bootstrap_peers.len(),
+                    "startup: subscribing to stored conversations"
+                );
+                iced::Task::batch(
+                    store_topics
+                        .into_iter()
+                        .map(|topic| {
+                            AppMessage::BackgroundSubscribe(topic, bootstrap_peers.clone())
+                        })
+                        .map(iced::Task::done),
+                )
+            }
+            AppMessage::BackgroundSubscribe(topic, bootstrap_peers) => {
+                // Already actively subscribed — skip. Persistent conversation
+                // state and live network state are distinct: a conversation
+                // loaded from storage has `sender == None` until the gossip
+                // subscription completes, so `contains_key` alone must never
+                // suppress a subscription.
+                let already_subscribed = self
+                    .conversations
+                    .get(&topic)
+                    .is_some_and(|c| c.sender.is_some())
+                    || (topic == self.topic && self.sender.is_some());
+                let subscribing = self
+                    .background_subscriptions_in_flight
+                    .contains(&topic);
+                if already_subscribed || subscribing {
+                    return iced::Task::none();
+                }
+                self.background_subscriptions_in_flight.insert(topic);
+                let gossip = self.gossip.clone();
+                let net_tx = self.net_tx.clone();
+                let sk = self.secret_key.clone();
+                let label = self.local_label.clone();
+                let _endpoint = self.endpoint.clone();
+                let profile_image_ticket = self.profile_image_ticket.clone();
+                let forward_handle_slot = Arc::new(StdMutex::new(None));
+                let forward_handle_slot_task = forward_handle_slot.clone();
+                let bootstrap_peers: Vec<PublicKey> = bootstrap_peers
+                    .into_iter()
+                    .filter(|peer| *peer != self.local_public)
+                    .collect();
+                let peers_count = bootstrap_peers.len();
+                iced::Task::perform(
+                    async move {
+                        info!(topic=%topic, peers=peers_count, "BackgroundSubscribe: subscribing with bootstrap peers");
+                        let sub = gossip
+                            .subscribe(topic, bootstrap_peers)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        let (sender, receiver) = sub.split();
+                        let receiver_id = format!("{:p}", &receiver as *const _);
+                        let neighbors_before = receiver
+                            .neighbors()
+                            .map(|p| p.fmt_short().to_string())
+                            .collect::<Vec<_>>();
+                        info!(
+                            topic=%topic,
+                            receiver_id,
+                            neighbors = ?neighbors_before,
+                            "BACKGROUND_RX_CREATED: subscription split — receiver created, neighbors snapshot",
+                        );
+                        let _neighbor_count = neighbors_before.len();
+                        let metadata_doc = boru_core::room_docs::create_metadata_doc(
+                            topic,
+                            &sender,
+                            boru_core::room_docs::RoomMetadata {
+                                name: Some("boru-chat".to_string()),
+                                description: None,
+                                rules: None,
+                            },
+                        )
+                        .await
+                        .map_err(|e| e.to_string())?;
+                        let roster_doc = boru_core::room_docs::create_roster_doc(
+                            topic,
+                            &sender,
+                            sk.public().to_string(),
+                            label.clone(),
+                        )
+                        .await
+                        .map_err(|e| e.to_string())?;
+                        let forward_handle = spawn_conversation_forwarder(
+                            topic,
+                            metadata_doc,
+                            roster_doc,
+                            receiver,
+                            net_tx,
+                            None,
+                        );
+                        info!(
+                            topic=%topic,
+                            receiver_id,
+                            neighbors = ?neighbors_before,
+                            "FORWARDER_SPAWN: permanent forwarder spawned with receiver",
+                        );
+                        // Broadcast AboutMe so the peer knows we're here
+                        if let Ok(msg) = crate::SignedMessage::sign_and_encode(
+                            &sk,
+                            &crate::Message::AboutMe {
+                                name: label,
+                                profile_image_ticket,
+                            },
+                        ) {
+                            let _ = sender.broadcast(msg).await;
+                        }
+                        *forward_handle_slot_task.lock().unwrap() = Some(forward_handle);
+                        Ok::<_, String>((sender, topic))
+                    },
+                    |result| match result {
+                        Ok((sender, topic)) => AppMessage::BackgroundSubscribed(
+                            topic,
+                            Some(sender),
+                            Some(forward_handle_slot),
+                        ),
+                        Err(e) => {
+                            let fallback_topic = TopicId::from_bytes([0u8; 32]);
+                            warn!("BackgroundSubscribe failed: {e}");
+                            AppMessage::BackgroundSubscribed(fallback_topic, None, None)
+                        }
+                    },
+                )
+            }
+            AppMessage::BackgroundSubscribed(topic, sender, forward_handle_slot) => {
+                // A freshly background-subscribed conversation (startup
+                // auto-subscribe) has never been opened this session, so its
+                // in-memory timeline starts empty.  Replay the persisted
+                // local history (chat_history.json) into it now, so opening
+                // the chat later via the fast path shows the same messages a
+                // fresh subscription would have replayed — instead of an
+                // empty timeline until a network backfill happens to arrive.
+                // This mirrors the RoomOpened JSON replay for the slow path.
+                let local_hex = self.local_public.to_string();
+                let mut replayed: Vec<ChatEntry> = Vec::new();
+                {
+                    let store = self.chat_history.lock().unwrap();
+                    for hist in store
+                        .for_topic(&topic)
+                        .into_iter()
+                        // Skip placeholder rows that never got a real id
+                        // (mirrors the RoomOpened replay guard).
+                        .filter(|e| e.event_id != 0)
+                    {
+                        if let Some(mut chat) =
+                            self.history_entry_to_chat_entry(hist, &topic, &local_hex)
+                        {
+                            // Populate derived caches (label_text,
+                            // reactions_text, parsed_segments) exactly like
+                            // `entries_push` does — otherwise the windowed
+                            // renderer sees an empty segment list and draws
+                            // an empty bubble.
+                            chat.update_cache();
+                            replayed.push(chat);
+                        }
+                    }
+                }
+                let conv = self.conversations.entry(topic).or_insert_with(|| {
+                    let mut c = ConversationLive::new(topic);
+                    if !replayed.is_empty() {
+                        c.entries = replayed.clone();
+                        c.history_saved_count = replayed.len();
+                        c.history_loaded = true;
+                        // Follow-latest (the default) with the bottom
+                        // sentinel so the windowed renderer shows the
+                        // newest messages as soon as the chat opens,
+                        // matching the slow-path replay behaviour.
+                        c.scroll_offset = f32::MAX;
+                    }
+                    c
+                });
+                // The conversation-store loop and the friends loop can both
+                // subscribe the same direct topic, so a duplicate
+                // BackgroundSubscribed can arrive for a conversation that
+                // already replayed its history.  Fill the timeline only if
+                // the first completion never did (e.g. a raced first event).
+                if !conv.history_loaded {
+                    if conv.entries.is_empty() && !replayed.is_empty() {
+                        conv.entries = replayed;
+                        conv.history_saved_count = conv.entries.len();
+                        conv.scroll_offset = f32::MAX;
+                    }
+                    conv.history_loaded = true;
+                }
+                if let Some(ref s) = sender {
+                    // Retroactively join any discovered peers that were not part
+                    // of the bootstrap list at subscription time (e.g. peers that
+                    // were discovered via mDNS while the async subscribe was
+                    // in-flight, or peers discovered after a background subscribe
+                    // that ran before the peer was on any LAN).
+                    let pending: Vec<PublicKey> = self
+                        .discovered_peers
+                        .iter()
+                        .filter(|&&pk| pk != self.local_public)
+                        .copied()
+                        .collect();
+                    if !pending.is_empty() {
+                        let s = s.clone();
+                        tokio::spawn(async move {
+                            for peer in pending {
+                                if let Err(e) = s.join_peers(vec![peer]).await {
+                                    warn!(peer = %peer, error = %e,
+                                        "retroactive join_peers after bg subscribe failed");
+                                }
+                            }
+                        });
+                    }
+                }
+                conv.sender = sender.clone();
+                // A sender handle only means that the subscription was
+                // created. It is not room-ready until NeighborUp is observed.
+                // Keep the forwarder alive so that transition can arrive.
+                conv.sender_ready = false;
+                conv.forward_handle =
+                    forward_handle_slot.and_then(|slot| slot.lock().unwrap().take());
+                // Subscription creation finished (success or failure) — the
+                // single-flight slot is released so a later event can retry
+                // if no sender was installed.
+                self.background_subscriptions_in_flight.remove(&topic);
+                if conv.sender.is_some() {
+                    info!("background subscribed to {topic}");
+                } else {
+                    warn!("background subscribe failed for {topic}");
+                }
+                iced::Task::none()
+            }
             // update() only dispatches the discover variants here; other
             // variants can never reach this method (defensive catch-all).
             _ => iced::Task::none(),
