@@ -27,18 +27,36 @@ verified against a stable baseline.
 | 164c76a3 | discover/directory update arms → `update_discover` in `app/discover.rs` | 37,146 → 36,925 |
 | 4b5e68a7 | settings update arms → `update_settings` in `app/settings.rs` | 36,925 → 36,434 |
 | 51daa14a | group creation update arms → `update_groups` in new `app/groups.rs` | 36,434 → 36,215 |
+| faadb970 | non-dashboard file transfer update arms → `update_files` in `app/files.rs` | 36,215 → 35,065 |
+| 2b606724 | invite member + accept group invite update arms → `update_groups` | 35,065 → 34,868 |
+| f9695050 | chat composer/send update arms → `update_chat` in `app/chat.rs` | 34,868 → 34,128 |
+| acbdbeaf | conversation event update arms (net/whisper/inbox/outbox) → `update_chat` | 34,128 → 33,201 |
+| 314f6d42 | chat context menu + emoji/gif picker update arms → `update_chat` | 33,201 → 32,899 |
+| 20de6c8d | inline video playback update arms → `update_chat` | 32,899 → 32,017 |
+| 54cfb6ac | file/media state update arms (short codes, downloads, images) → `update_files` | 32,017 → 31,261 |
+| e59ea8bd | SENDME-02 ticket sharing update arms → `update_files` | 31,261 → 31,063 |
+| 15f4a568 | lightbox + history/conversation management update arms → `update_chat` | 31,063 → 30,862 |
+| 32bc067a | shared file catalogue + chat log scroll update arms → `update_files`/`update_chat` | 30,862 → 30,488 |
+| 8a7aaee4 | friend profile/management update arms → `update_contacts` | 30,488 → 30,334 |
+| b3e5da07 | friend request send/accept/decline update arms → `update_contacts` | 30,334 → 30,094 |
+| a0cb2427 | group-created + send-message update arms → `update_groups`/`update_chat` | 30,094 → 29,880 |
+| 4de4be2d | friend-chat, join-ticket, groups nav, file-download, delete-room → feature modules | 29,880 → 29,658 |
+| d94741aa | new-discovered-peers update arm → `update_discover` | 29,658 → 29,625 |
 
-State layer (spec steps 4–6) started: the calls, tunnels, contacts, files
-(dashboard), discover, settings and groups features' update arms were moved
-into per-feature `update_calls` / `update_tunnels` / `update_contacts` /
-`update_files` / `update_discover` / `update_settings` / `update_groups`
-methods (groups module newly created); app.rs's `update()` now dispatches
+State layer (spec steps 4–6) started: the calls, tunnels, contacts, files,
+discover, settings, groups, chat, home and media features' update arms were
+moved into per-feature `update_calls` / `update_tunnels` / `update_contacts` /
+`update_files` / `update_discover` / `update_settings` / `update_groups` /
+`update_chat` / `update_home` methods; app.rs's `update()` now dispatches
 those variants via combined match arms. State ownership stays on the root
 `IcedChat` for now (spec step 3 constraint: keep state ownership unchanged
-during the first pass); remaining feature update arms (chat, home, plus the
-non-dashboard file transfer arms) can be extracted the same way, then
-feature state structs (steps 4–6) and per-feature subscriptions (step 7)
-afterwards.
+during the first pass). What remains inline in `update()` is mostly
+navigation/room-open/join-from-ticket arms, global keyboard shortcuts,
+dashboard tab navigation, GUI test actions, tick handlers (splash/activity/
+conn monitor/mesh watchdog/outbox retry), pre-warm, connection details,
+background subscriptions and generic shell helpers — the composition-layer
+surface per spec step 8. Remaining work: per-feature subscriptions (step 7)
+and optional feature state structs (steps 4–6).
 
 ## Overview
 
