@@ -387,6 +387,10 @@ pub mod file_access_protocol;
 /// Versioned wire-frame protocol helpers — `read_frame` / `write_frame`.
 pub mod protocol_version;
 
+/// Canonical signed-object framing shared by every Ed25519-authenticated
+/// protocol object (BORU-AUDIT-27).
+pub mod protocol_signing;
+
 /// Central size and count limits for catalogue protocol traffic.
 pub mod catalogue_limits;
 

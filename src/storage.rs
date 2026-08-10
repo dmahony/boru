@@ -653,6 +653,11 @@ struct LogicalDm {
     signature: Vec<u8>,
 }
 
+/// Canonical protocol tag for signed logical DMs (BORU-AUDIT-27).
+const LOGICAL_DM_PROTOCOL: &str = "boru/logical-dm";
+/// Version of the signed logical-DM layout (BORU-AUDIT-27).
+const LOGICAL_DM_VERSION: u16 = 1;
+
 /// A row from the `downloads` table recovered during restart.
 struct RecoveryRow {
     id: i64,
@@ -1938,14 +1943,18 @@ impl Storage {
             });
         }
         let sequence = tx.query_row("SELECT next_sequence FROM dm_sender_sequences WHERE conversation_id = ?1 AND sender_id = ?2", params![conversation_id.as_slice(), sender.as_bytes()], |row| row.get::<_, i64>(0)).optional().std_context("read outgoing dm sequence")?.unwrap_or(1) as u64;
-        let unsigned = postcard::to_stdvec(&(
-            conversation_id,
-            sender,
-            recipient_id,
-            sequence,
-            message_id,
-            &plaintext,
-        ))
+        let unsigned = crate::protocol_signing::canonical_signed_bytes(
+            LOGICAL_DM_PROTOCOL,
+            LOGICAL_DM_VERSION,
+            &(
+                conversation_id,
+                sender,
+                recipient_id,
+                sequence,
+                message_id,
+                &plaintext,
+            ),
+        )
         .std_context("encode logical dm")?;
         let logical = LogicalDm {
             conversation_id,

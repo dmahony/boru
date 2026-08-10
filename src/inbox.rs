@@ -80,6 +80,15 @@ const MAX_SYNC_FUTURE_SKEW_MS: u64 = 300_000; // 5 minutes
 /// Max payload size for a single inbox message (10 MB).
 const MAX_INBOX_PAYLOAD: usize = 10 * 1024 * 1024;
 
+/// Canonical protocol tag for signed inbox messages (BORU-AUDIT-27).
+const INBOX_MESSAGE_PROTOCOL: &str = "boru/inbox";
+/// Version of the signed inbox-message payload layout (BORU-AUDIT-27).
+const INBOX_MESSAGE_VERSION: u16 = 1;
+/// Canonical protocol tag for author-delete proofs (BORU-AUDIT-27).
+const INBOX_DELETE_PROOF_PROTOCOL: &str = "boru/inbox-delete";
+/// Version of the signed author-delete-proof layout (BORU-AUDIT-27).
+const INBOX_DELETE_PROOF_VERSION: u16 = 1;
+
 /// Stable identifier for a message (blake3 hash of signed bytes).
 pub type InboxMessageId = [u8; 32];
 
@@ -106,13 +115,35 @@ pub struct AuthorDeleteProof {
     pub created_at_unix_secs: u64,
     /// Public key of the original message author (who authorized this deletion).
     pub author: PublicKey,
-    /// Signature by `author` over `msg_id || conversation_id || created_at_unix_secs`.
+    /// Signature by `author` over the canonical framing: `msg_id`,
+    /// `conversation_id`, `created_at_unix_secs` and `author` (BORU-AUDIT-27).
     pub author_signature: ByteArray<{ Signature::LENGTH }>,
 }
 
 impl AuthorDeleteProof {
     /// The bytes that the author's signature covers.
+    ///
+    /// BORU-AUDIT-27: the canonical framing authenticates the message id, the
+    /// conversation (routing/topic), the creation timestamp (freshness) and
+    /// the author identity.  Pre-AUDIT-27 raw concatenation is still accepted
+    /// during the migration window by [`Self::verify`].
     fn signing_bytes(&self) -> Vec<u8> {
+        crate::protocol_signing::canonical_signed_bytes(
+            INBOX_DELETE_PROOF_PROTOCOL,
+            INBOX_DELETE_PROOF_VERSION,
+            &(
+                self.msg_id,
+                self.conversation_id,
+                self.created_at_unix_secs,
+                self.author,
+            ),
+        )
+        .expect("postcard author-delete-proof encoding cannot fail")
+    }
+
+    /// Legacy pre-AUDIT-27 signing bytes: raw `msg_id || conversation_id ||
+    /// created_at` concatenation without domain separation.
+    fn legacy_signing_bytes(&self) -> Vec<u8> {
         let mut bytes = self.msg_id.to_vec();
         bytes.extend_from_slice(&self.conversation_id);
         bytes.extend_from_slice(&self.created_at_unix_secs.to_le_bytes());
@@ -123,11 +154,19 @@ impl AuthorDeleteProof {
     ///
     /// Returns `Ok(())` if the signature is valid, `Err` otherwise.
     pub fn verify(&self) -> std::result::Result<(), String> {
-        let sig = Signature::from_bytes(&self.author_signature);
-        let data = self.signing_bytes();
-        self.author
-            .verify(&data, &sig)
-            .map_err(|e| format!("invalid author delete proof signature: {e}"))
+        let canonical = self.signing_bytes();
+        let legacy = self.legacy_signing_bytes();
+        if !crate::protocol_signing::verify_canonical_or_legacy(
+            &self.author,
+            self.author_signature.as_ref(),
+            &canonical,
+            &legacy,
+        ) {
+            return Err("invalid author delete proof signature".to_string());
+        }
+        // The signature is over the author field itself, so a proof whose
+        // `author` was swapped is rejected (identity authenticated).
+        Ok(())
     }
 
     /// Create a new signed proof.
@@ -163,7 +202,8 @@ pub struct SignedInboxMessage {
     pub sent_at_unix_secs: u64,
     /// The inner protocol message.
     pub inner: InboxPayload,
-    /// Signature over `sent_at_unix_secs || inner` by the sender.
+    /// Signature over the canonical framing: `sent_at_unix_secs` and the
+    /// inner payload, domain-separated (BORU-AUDIT-27).
     pub signature: ByteArray<{ Signature::LENGTH }>,
 }
 
@@ -248,17 +288,37 @@ impl SignedInboxMessage {
             ));
         }
 
-        // Verify signature.
-        let signing_data = signing_bytes(msg.sent_at_unix_secs, &msg.inner);
-        msg.sender
-            .verify(&signing_data, &Signature::from_bytes(&msg.signature))
-            .map_err(|e| n0_error::anyerr!("verify inbox message signature: {e}"))?;
+        // Verify signature (BORU-AUDIT-27): canonical framing first, legacy
+        // pre-AUDIT-27 framing as a migration fallback.
+        let canonical = signing_bytes(msg.sent_at_unix_secs, &msg.inner);
+        let legacy = legacy_signing_bytes(msg.sent_at_unix_secs, &msg.inner);
+        if !crate::protocol_signing::verify_canonical_or_legacy(
+            &msg.sender,
+            msg.signature.as_ref(),
+            &canonical,
+            &legacy,
+        ) {
+            return Err(n0_error::anyerr!("verify inbox message signature"));
+        }
 
         Ok((msg.sender, msg.inner, msg.sent_at_unix_secs))
     }
 }
 
+/// Canonical signed bytes for an inbox message (BORU-AUDIT-27): domain tag,
+/// version, freshness timestamp and the inner payload, all in one postcard
+/// tuple.
 fn signing_bytes(timestamp: u64, inner: &InboxPayload) -> Vec<u8> {
+    crate::protocol_signing::canonical_signed_bytes(
+        INBOX_MESSAGE_PROTOCOL,
+        INBOX_MESSAGE_VERSION,
+        &(timestamp, inner),
+    )
+    .expect("postcard inbox message encoding cannot fail")
+}
+
+/// Legacy pre-AUDIT-27 signing bytes: `timestamp || inner` raw concatenation.
+fn legacy_signing_bytes(timestamp: u64, inner: &InboxPayload) -> Vec<u8> {
     let inner_bytes = postcard::to_stdvec(inner).expect("postcard encoding cannot fail");
     let mut bytes = timestamp.to_le_bytes().to_vec();
     bytes.extend_from_slice(&inner_bytes);
@@ -1349,6 +1409,73 @@ mod tests {
 
         // Verify still works after deserialization
         assert!(decoded.verify().is_ok());
+    }
+
+    // ── BORU-AUDIT-27: canonical inbox framing ─────────────────────────────
+
+    /// The canonical bytes an author-delete proof signs must be stable:
+    /// `postcard(("boru/inbox-delete", 1, msg_id, conversation_id,
+    /// created_at_unix_secs, author))`.
+    #[test]
+    fn author_delete_proof_canonical_bytes_golden_vector() {
+        let author_sk = test_secret_key();
+        let msg_id = [1u8; 32];
+        let conv_id = [2u8; 32];
+        let proof = AuthorDeleteProof::sign(&author_sk, msg_id, conv_id);
+        let canonical = proof.signing_bytes();
+        assert_eq!(canonical[0] as usize, INBOX_DELETE_PROOF_PROTOCOL.len());
+        assert_eq!(
+            &canonical[1..1 + INBOX_DELETE_PROOF_PROTOCOL.len()],
+            INBOX_DELETE_PROOF_PROTOCOL.as_bytes()
+        );
+        assert_eq!(canonical[1 + INBOX_DELETE_PROOF_PROTOCOL.len()], 0x01);
+        let decoded: (String, u16, [u8; 32], [u8; 32], u64, PublicKey) =
+            postcard::from_bytes(&canonical).expect("decode canonical proof bytes");
+        assert_eq!(decoded.0, INBOX_DELETE_PROOF_PROTOCOL);
+        assert_eq!(decoded.1, INBOX_DELETE_PROOF_VERSION);
+        assert_eq!(decoded.2, proof.msg_id);
+        assert_eq!(decoded.3, proof.conversation_id);
+        assert_eq!(decoded.4, proof.created_at_unix_secs);
+        assert_eq!(decoded.5, proof.author);
+    }
+
+    /// Cross-version: a pre-AUDIT-27 proof signed over the raw
+    /// `msg_id || conversation_id || created_at` concatenation still verifies
+    /// during the migration window.
+    #[test]
+    fn author_delete_proof_legacy_framing_still_verifies() {
+        let author_sk = test_secret_key();
+        let msg_id = [3u8; 32];
+        let conv_id = [4u8; 32];
+        let mut proof = AuthorDeleteProof::sign(&author_sk, msg_id, conv_id);
+        let legacy = proof.legacy_signing_bytes();
+        proof.author_signature = ByteArray::new(author_sk.sign(&legacy).to_bytes());
+        assert!(
+            proof.verify().is_ok(),
+            "legacy-framed delete proof must verify during migration (BORU-AUDIT-27)"
+        );
+    }
+
+    /// The canonical bytes a signed inbox message signs must be stable:
+    /// `postcard(("boru/inbox", 1, sent_at_unix_secs, inner))`.
+    #[test]
+    fn signed_inbox_message_canonical_bytes_golden_vector() {
+        let sk = test_secret_key();
+        let inner = InboxPayload::SyncRequest { since_ms: 42 };
+        let canonical = signing_bytes(1_700_000_000, &inner);
+        assert_eq!(canonical[0] as usize, INBOX_MESSAGE_PROTOCOL.len());
+        assert_eq!(
+            &canonical[1..1 + INBOX_MESSAGE_PROTOCOL.len()],
+            INBOX_MESSAGE_PROTOCOL.as_bytes()
+        );
+        assert_eq!(canonical[1 + INBOX_MESSAGE_PROTOCOL.len()], 0x01);
+        let decoded: (String, u16, u64, InboxPayload) =
+            postcard::from_bytes(&canonical).expect("decode canonical inbox bytes");
+        assert_eq!(decoded.0, INBOX_MESSAGE_PROTOCOL);
+        assert_eq!(decoded.1, INBOX_MESSAGE_VERSION);
+        assert_eq!(decoded.2, 1_700_000_000);
+        assert!(matches!(decoded.3, InboxPayload::SyncRequest { since_ms: 42 }));
+        let _ = sk;
     }
 
     #[test]

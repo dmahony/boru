@@ -568,13 +568,20 @@ impl SignedFileCatalogue {
     /// Verify that the signature is valid for the claimed `owner_id`.
     ///
     /// Returns `Ok(())` when the signature matches the serialised content,
-    /// or an error describing the failure.
+    /// or an error describing the failure.  Pre-AUDIT-27 signatures over the
+    /// bare tuple still verify during the migration window.
     pub fn verify(&self) -> Result<()> {
         let payload = signing_payload(self);
-        let sig = iroh::Signature::from_bytes(&self.signature);
-        self.owner_id
-            .verify(&payload, &sig)
-            .std_context("catalogue signature verification failed")
+        let legacy = legacy_signing_payload(self);
+        if !crate::protocol_signing::verify_canonical_or_legacy(
+            &self.owner_id,
+            self.signature.as_ref(),
+            &payload,
+            &legacy,
+        ) {
+            return Err(n0_error::anyerr!("catalogue signature verification failed"));
+        }
+        Ok(())
     }
 
     /// Validate all entries in the catalogue — files, collections, and signature.
@@ -602,12 +609,32 @@ impl SignedFileCatalogue {
     }
 }
 
+/// Canonical protocol tag for signed file catalogues (BORU-AUDIT-27).
+const CATALOGUE_PROTOCOL: &str = "boru/file-catalogue";
+/// Version of the signed catalogue payload layout (BORU-AUDIT-27).
+const CATALOGUE_VERSION: u16 = 1;
+
 /// Produce the canonical payload that is signed / verified.
 ///
-/// All fields except `signature` are serialised into a deterministic byte
-/// sequence via postcard.  The order and content of the tuple must remain
+/// BORU-AUDIT-27: the canonical framing authenticates the owner identity, the
+/// revision counter, the generation timestamp and the full catalogue content
+/// — every security-relevant field.  The field order and content must remain
 /// stable across versions.
 fn signing_payload(catalogue: &SignedFileCatalogue) -> Vec<u8> {
+    let digest = (
+        &catalogue.owner_id,
+        catalogue.revision,
+        catalogue.generated_at_ms,
+        &catalogue.collections,
+        &catalogue.files,
+    );
+    crate::protocol_signing::canonical_signed_bytes(CATALOGUE_PROTOCOL, CATALOGUE_VERSION, &digest)
+        .expect("postcard serialisation is infallible")
+}
+
+/// Legacy pre-AUDIT-27 signing bytes: bare postcard tuple without a domain
+/// separator.
+fn legacy_signing_payload(catalogue: &SignedFileCatalogue) -> Vec<u8> {
     let digest = (
         &catalogue.owner_id,
         catalogue.revision,
@@ -978,6 +1005,51 @@ mod tests {
         assert!(
             f.validate().is_err(),
             "oversized collection list must be rejected"
+        );
+    }
+
+    // ── BORU-AUDIT-27: canonical catalogue framing ─────────────────────────
+
+    /// The canonical bytes a catalogue signs must be stable: domain tag,
+    /// version, then every security-relevant field.
+    #[test]
+    fn signed_catalogue_canonical_bytes_golden_vector() {
+        let sk = SecretKey::generate();
+        let catalogue = SignedFileCatalogue::sign(&sk, 3, 1_700_000_000, vec![], vec![]);
+        let canonical = signing_payload(&catalogue);
+        assert_eq!(canonical[0] as usize, CATALOGUE_PROTOCOL.len());
+        assert_eq!(
+            &canonical[1..1 + CATALOGUE_PROTOCOL.len()],
+            CATALOGUE_PROTOCOL.as_bytes()
+        );
+        assert_eq!(canonical[1 + CATALOGUE_PROTOCOL.len()], 0x01);
+        let decoded: (
+            String,
+            u16,
+            PublicKey,
+            u64,
+            u64,
+            Vec<FileCatalogueCollection>,
+            Vec<RemoteSharedFile>,
+        ) = postcard::from_bytes(&canonical).expect("decode canonical catalogue bytes");
+        assert_eq!(decoded.0, CATALOGUE_PROTOCOL);
+        assert_eq!(decoded.1, CATALOGUE_VERSION);
+        assert_eq!(decoded.2, catalogue.owner_id);
+        assert_eq!(decoded.3, catalogue.revision);
+        assert_eq!(decoded.4, catalogue.generated_at_ms);
+    }
+
+    /// Cross-version: a pre-AUDIT-27 catalogue signed over the bare tuple
+    /// (no domain tag) still verifies during the migration window.
+    #[test]
+    fn signed_catalogue_legacy_framing_still_verifies() {
+        let sk = SecretKey::generate();
+        let mut catalogue = SignedFileCatalogue::sign(&sk, 3, 1_700_000_000, vec![], vec![]);
+        let legacy = legacy_signing_payload(&catalogue);
+        catalogue.signature = ByteArray::new(sk.sign(&legacy).to_bytes());
+        assert!(
+            catalogue.verify().is_ok(),
+            "legacy-framed catalogue must verify during migration (BORU-AUDIT-27)"
         );
     }
 

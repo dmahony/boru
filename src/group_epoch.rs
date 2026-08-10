@@ -24,6 +24,13 @@ use crate::{
 
 const SIGNATURE_LEN: usize = Signature::LENGTH;
 
+/// Canonical protocol tag for signed group-epoch removal events (BORU-AUDIT-27).
+const GROUP_EPOCH_REMOVED_PROTOCOL: &str = "boru/group-epoch-removed";
+/// Canonical protocol tag for signed group-epoch change events (BORU-AUDIT-27).
+const GROUP_EPOCH_CHANGED_PROTOCOL: &str = "boru/group-epoch-changed";
+/// Version of the signed group-epoch event layout (BORU-AUDIT-27).
+const GROUP_EPOCH_VERSION: u16 = 1;
+
 /// Credentials used to subscribe to one group epoch.
 ///
 /// The bundle contains the epoch's [`DiscoverySecret`], so it is treated as
@@ -208,11 +215,24 @@ impl EpochRotation {
 }
 
 impl MemberRemovedEvent {
-    /// Verify the owner signature without trusting the event contents.
-    pub fn verify(&self, owner: PublicKey) -> bool {
-        if self.actor != owner {
-            return false;
-        }
+    /// Canonical bytes covered by the owner signature (BORU-AUDIT-27).
+    fn signing_bytes(&self) -> Vec<u8> {
+        crate::protocol_signing::canonical_signed_bytes(
+            GROUP_EPOCH_REMOVED_PROTOCOL,
+            GROUP_EPOCH_VERSION,
+            &(
+                self.group_id,
+                self.epoch,
+                self.member,
+                self.actor,
+                self.timestamp,
+            ),
+        )
+        .expect("postcard member-removed signing bytes cannot fail")
+    }
+
+    /// Legacy pre-AUDIT-27 signing bytes: bare postcard tuple.
+    fn legacy_signing_bytes(&self) -> Vec<u8> {
         postcard::to_stdvec(&(
             self.group_id,
             self.epoch,
@@ -220,22 +240,42 @@ impl MemberRemovedEvent {
             self.actor,
             self.timestamp,
         ))
-        .ok()
-        .and_then(|bytes| {
-            owner
-                .verify(&bytes, &Signature::from_bytes(&self.signature))
-                .ok()
-        })
-        .is_some()
+        .expect("postcard member-removed signing bytes cannot fail")
     }
-}
 
-impl EpochChangedEvent {
     /// Verify the owner signature without trusting the event contents.
     pub fn verify(&self, owner: PublicKey) -> bool {
         if self.actor != owner {
             return false;
         }
+        crate::protocol_signing::verify_canonical_or_legacy(
+            &owner,
+            self.signature.as_ref(),
+            &self.signing_bytes(),
+            &self.legacy_signing_bytes(),
+        )
+    }
+}
+
+impl EpochChangedEvent {
+    /// Canonical bytes covered by the owner signature (BORU-AUDIT-27).
+    fn signing_bytes(&self) -> Vec<u8> {
+        crate::protocol_signing::canonical_signed_bytes(
+            GROUP_EPOCH_CHANGED_PROTOCOL,
+            GROUP_EPOCH_VERSION,
+            &(
+                self.group_id,
+                self.old_epoch,
+                self.new_epoch,
+                self.actor,
+                self.timestamp,
+            ),
+        )
+        .expect("postcard epoch-changed signing bytes cannot fail")
+    }
+
+    /// Legacy pre-AUDIT-27 signing bytes: bare postcard tuple.
+    fn legacy_signing_bytes(&self) -> Vec<u8> {
         postcard::to_stdvec(&(
             self.group_id,
             self.old_epoch,
@@ -243,13 +283,20 @@ impl EpochChangedEvent {
             self.actor,
             self.timestamp,
         ))
-        .ok()
-        .and_then(|bytes| {
-            owner
-                .verify(&bytes, &Signature::from_bytes(&self.signature))
-                .ok()
-        })
-        .is_some()
+        .expect("postcard epoch-changed signing bytes cannot fail")
+    }
+
+    /// Verify the owner signature without trusting the event contents.
+    pub fn verify(&self, owner: PublicKey) -> bool {
+        if self.actor != owner {
+            return false;
+        }
+        crate::protocol_signing::verify_canonical_or_legacy(
+            &owner,
+            self.signature.as_ref(),
+            &self.signing_bytes(),
+            &self.legacy_signing_bytes(),
+        )
     }
 }
 
@@ -388,15 +435,18 @@ fn sign_removed(
     timestamp: u64,
 ) -> Result<MemberRemovedEvent, EpochRotationError> {
     let actor = key.public();
-    let bytes = postcard::to_stdvec(&(group_id, epoch, member, actor, timestamp))
-        .map_err(|e| EpochRotationError::Encode(e.to_string()))?;
-    Ok(MemberRemovedEvent {
+    let event = MemberRemovedEvent {
         group_id,
         epoch,
         member,
         actor,
         timestamp,
+        signature: ByteArray::new([0u8; SIGNATURE_LEN]),
+    };
+    let bytes = event.signing_bytes();
+    Ok(MemberRemovedEvent {
         signature: ByteArray::new(key.sign(&bytes).to_bytes()),
+        ..event
     })
 }
 fn sign_epoch(
@@ -407,16 +457,18 @@ fn sign_epoch(
     timestamp: u64,
 ) -> Result<EpochChangedEvent, EpochRotationError> {
     let actor = key.public();
-    let bytes = postcard::to_stdvec(&(group_id, old_epoch, new_epoch, actor, timestamp))
-        .map_err(|e| EpochRotationError::Encode(e.to_string()))?;
-    Ok(EpochChangedEvent {
+    let event = EpochChangedEvent {
         group_id,
         old_epoch,
         new_epoch,
-
         actor,
         timestamp,
+        signature: ByteArray::new([0u8; SIGNATURE_LEN]),
+    };
+    let bytes = event.signing_bytes();
+    Ok(EpochChangedEvent {
         signature: ByteArray::new(key.sign(&bytes).to_bytes()),
+        ..event
     })
 }
 
@@ -471,5 +523,98 @@ mod tests {
         };
         let opened = delivery.open(&identity).unwrap();
         assert_eq!(opened, creds);
+    }
+
+    // ── BORU-AUDIT-27: canonical group-epoch signature framing ─────────────
+
+    /// The canonical bytes a member-removed event signs must be stable:
+    /// `boru/group-epoch-removed` domain tag + version + every
+    /// security-relevant field.
+    #[test]
+    fn member_removed_event_canonical_bytes_golden_vector() {
+        let owner = SecretKey::generate();
+        let removed = SecretKey::generate().public();
+        let group = GroupId::from_bytes([7; 32]);
+        let event = sign_removed(&owner, group, 3, removed, 1_700_000_000).unwrap();
+        let canonical = event.signing_bytes();
+        assert_eq!(canonical[0] as usize, GROUP_EPOCH_REMOVED_PROTOCOL.len());
+        assert_eq!(
+            &canonical[1..1 + GROUP_EPOCH_REMOVED_PROTOCOL.len()],
+            GROUP_EPOCH_REMOVED_PROTOCOL.as_bytes()
+        );
+        assert_eq!(canonical[1 + GROUP_EPOCH_REMOVED_PROTOCOL.len()], 0x01);
+        let decoded: (String, u16, GroupId, u64, PublicKey, PublicKey, u64) =
+            postcard::from_bytes(&canonical).expect("decode canonical removed bytes");
+        assert_eq!(decoded.0, GROUP_EPOCH_REMOVED_PROTOCOL);
+        assert_eq!(decoded.1, GROUP_EPOCH_VERSION);
+        assert_eq!(decoded.2, event.group_id);
+        assert_eq!(decoded.3, event.epoch);
+        assert_eq!(decoded.4, event.member);
+        assert_eq!(decoded.5, event.actor);
+        assert_eq!(decoded.6, event.timestamp);
+    }
+
+    /// The canonical bytes an epoch-changed event signs must be stable:
+    /// `boru/group-epoch-changed` domain tag + version + every
+    /// security-relevant field.
+    #[test]
+    fn epoch_changed_event_canonical_bytes_golden_vector() {
+        let owner = SecretKey::generate();
+        let group = GroupId::from_bytes([8; 32]);
+        let event = sign_epoch(&owner, group, 3, 4, 1_700_000_000).unwrap();
+        let canonical = event.signing_bytes();
+        assert_eq!(canonical[0] as usize, GROUP_EPOCH_CHANGED_PROTOCOL.len());
+        assert_eq!(
+            &canonical[1..1 + GROUP_EPOCH_CHANGED_PROTOCOL.len()],
+            GROUP_EPOCH_CHANGED_PROTOCOL.as_bytes()
+        );
+        assert_eq!(canonical[1 + GROUP_EPOCH_CHANGED_PROTOCOL.len()], 0x01);
+        let decoded: (String, u16, GroupId, u64, u64, PublicKey, u64) =
+            postcard::from_bytes(&canonical).expect("decode canonical epoch-changed bytes");
+        assert_eq!(decoded.0, GROUP_EPOCH_CHANGED_PROTOCOL);
+        assert_eq!(decoded.1, GROUP_EPOCH_VERSION);
+        assert_eq!(decoded.2, event.group_id);
+        assert_eq!(decoded.3, event.old_epoch);
+        assert_eq!(decoded.4, event.new_epoch);
+        assert_eq!(decoded.5, event.actor);
+        assert_eq!(decoded.6, event.timestamp);
+    }
+
+    /// Cross-version: pre-AUDIT-27 events signed over the bare tuple (no
+    /// domain tag) still verify during the migration window.
+    #[test]
+    fn group_epoch_legacy_framing_still_verifies() {
+        let owner = SecretKey::generate();
+        let removed = SecretKey::generate().public();
+        let group = GroupId::from_bytes([9; 32]);
+        let mut removed_event = sign_removed(&owner, group, 1, removed, 1_700_000_000).unwrap();
+        let legacy = postcard::to_stdvec(&(
+            removed_event.group_id,
+            removed_event.epoch,
+            removed_event.member,
+            removed_event.actor,
+            removed_event.timestamp,
+        ))
+        .unwrap();
+        removed_event.signature = ByteArray::new(owner.sign(&legacy).to_bytes());
+        assert!(
+            removed_event.verify(owner.public()),
+            "legacy-framed member-removed event must verify (BORU-AUDIT-27)"
+        );
+
+        let mut epoch_event = sign_epoch(&owner, group, 1, 2, 1_700_000_000).unwrap();
+        let legacy = postcard::to_stdvec(&(
+            epoch_event.group_id,
+            epoch_event.old_epoch,
+            epoch_event.new_epoch,
+            epoch_event.actor,
+            epoch_event.timestamp,
+        ))
+        .unwrap();
+        epoch_event.signature = ByteArray::new(owner.sign(&legacy).to_bytes());
+        assert!(
+            epoch_event.verify(owner.public()),
+            "legacy-framed epoch-changed event must verify (BORU-AUDIT-27)"
+        );
     }
 }

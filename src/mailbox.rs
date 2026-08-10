@@ -590,11 +590,15 @@ pub fn seal_for_at(
 /// Version of the signed acknowledgement wire contract.
 pub const ACKNOWLEDGEMENT_VERSION: u32 = 1;
 
+/// Canonical protocol tag for signed mailbox acknowledgements (BORU-AUDIT-27).
+pub const MAILBOX_ACK_PROTOCOL: &str = "boru/mailbox-ack";
+
 /// A recipient-signed acknowledgement for one envelope.
 ///
 /// The signature covers every field except `signature`, in this exact order:
-/// `(version, message_id, original_sender, recipient, acknowledged_at_ms,
-/// status)`, encoded with postcard.  Keeping the field order and encoding
+/// `(domain, version, message_id, original_sender, recipient,
+/// acknowledged_at_ms, status)`, encoded with postcard through the shared
+/// canonical framing (BORU-AUDIT-27).  Keeping the field order and encoding
 /// explicit makes verification deterministic across implementations.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MessageAcknowledgement {
@@ -618,7 +622,25 @@ pub struct MessageAcknowledgement {
 pub type MailboxAck = MessageAcknowledgement;
 
 impl MessageAcknowledgement {
+    /// Canonical bytes covered by the signature (BORU-AUDIT-27).
     fn signing_bytes(&self) -> Vec<u8> {
+        crate::protocol_signing::canonical_signed_bytes(
+            MAILBOX_ACK_PROTOCOL,
+            self.version as u16,
+            &(
+                &self.message_id,
+                self.original_sender,
+                self.recipient,
+                self.acknowledged_at_ms,
+                &self.status,
+            ),
+        )
+        .expect("postcard encoding cannot fail")
+    }
+
+    /// Legacy pre-AUDIT-27 signing bytes: bare postcard tuple without a
+    /// domain separator.
+    fn legacy_signing_bytes(&self) -> Vec<u8> {
         postcard::to_stdvec(&(
             self.version,
             &self.message_id,
@@ -680,12 +702,15 @@ impl MessageAcknowledgement {
         if self.recipient != expected {
             return Err(n0_error::anyerr!("mailbox acknowledgement signer mismatch"));
         }
-        self.recipient
-            .verify(
-                &self.signing_bytes(),
-                &Signature::from_bytes(&self.signature),
-            )
-            .map_err(|e| n0_error::anyerr!("verify mailbox acknowledgement: {e}"))
+        if !crate::protocol_signing::verify_canonical_or_legacy(
+            &self.recipient,
+            self.signature.as_ref(),
+            &self.signing_bytes(),
+            &self.legacy_signing_bytes(),
+        ) {
+            return Err(n0_error::anyerr!("verify mailbox acknowledgement"));
+        }
+        Ok(())
     }
 }
 
@@ -1172,6 +1197,80 @@ mod tests {
         ack = valid.clone();
         ack.status = Some("rejected".to_string());
         assert!(ack.verify(signer.public()).is_err());
+    }
+
+    // ── BORU-AUDIT-27: canonical acknowledgement framing ───────────────────
+
+    /// The canonical bytes a new ack signs must be stable.  This pins the
+    /// domain-separated framing `postcard(("boru/mailbox-ack", version,
+    /// message_id, original_sender, recipient, acknowledged_at_ms, status))`.
+    #[test]
+    fn acknowledgement_canonical_bytes_golden_vector() {
+        let signer = SecretKey::generate();
+        let original_sender = SecretKey::generate().public();
+        let ack = MailboxAck::sign_at(
+            &signer,
+            "msg-1",
+            original_sender,
+            1_700_000_000_000,
+            Some("accepted".to_string()),
+        );
+        let canonical = ack.signing_bytes();
+        // Postcard writes the length prefix, then the protocol tag, then the
+        // version byte.
+        assert_eq!(canonical[0] as usize, MAILBOX_ACK_PROTOCOL.len());
+        assert_eq!(
+            &canonical[1..1 + MAILBOX_ACK_PROTOCOL.len()],
+            MAILBOX_ACK_PROTOCOL.as_bytes()
+        );
+        assert_eq!(canonical[1 + MAILBOX_ACK_PROTOCOL.len()], 0x01);
+        // The framing must decode back to the exact signed fields.
+        let decoded: (
+            String,
+            u16,
+            String,
+            PublicKey,
+            PublicKey,
+            u64,
+            Option<String>,
+        ) = postcard::from_bytes(&canonical).expect("decode canonical ack bytes");
+        assert_eq!(decoded.0, MAILBOX_ACK_PROTOCOL);
+        assert_eq!(decoded.1, ACKNOWLEDGEMENT_VERSION as u16);
+        assert_eq!(decoded.2, ack.message_id);
+        assert_eq!(decoded.3, ack.original_sender);
+        assert_eq!(decoded.4, ack.recipient);
+        assert_eq!(decoded.5, ack.acknowledged_at_ms);
+        assert_eq!(decoded.6, ack.status);
+    }
+
+    /// Cross-version: a pre-AUDIT-27 ack signed over the bare tuple (no
+    /// domain tag) still verifies during the migration window.
+    #[test]
+    fn acknowledgement_legacy_framing_still_verifies() {
+        let signer = SecretKey::generate();
+        let original_sender = SecretKey::generate().public();
+        let mut ack = MailboxAck::sign_at(
+            &signer,
+            "legacy-ack",
+            original_sender,
+            1_700_000_000_000,
+            Some("accepted".to_string()),
+        );
+        // Rebuild the signature with the legacy pre-AUDIT-27 bytes.
+        let legacy = postcard::to_stdvec(&(
+            ack.version,
+            &ack.message_id,
+            ack.original_sender,
+            ack.recipient,
+            ack.acknowledged_at_ms,
+            &ack.status,
+        ))
+        .expect("legacy bytes");
+        ack.signature = ByteArray::new(signer.sign(&legacy).to_bytes());
+        assert!(
+            ack.verify(signer.public()).is_ok(),
+            "legacy-framed ack must verify during migration (BORU-AUDIT-27)"
+        );
     }
 
     // ── BORU-AUDIT-02 regression tests ─────────────────────────────────────

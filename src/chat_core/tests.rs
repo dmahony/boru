@@ -736,8 +736,11 @@
         let msg = Message::Message { text: "x".into() };
         let mut encoded = SignedMessage::sign_and_encode(&key, &msg).unwrap().to_vec();
         // The final byte is the `compression` field (0).  Flip it to an
-        // unknown value — the signature covers only `data`, so verification
-        // passes and the compression check must produce a clear error.
+        // unknown value.  Since BORU-AUDIT-27 the signature covers the
+        // `compression` byte too, so tampering is caught by verification
+        // before the compression check runs — strictly stronger than the
+        // pre-AUDIT-27 behavior where the compression check alone had to
+        // reject the forged value.
         if let Some(b) = encoded.last_mut() {
             *b = 7;
         }
@@ -746,8 +749,8 @@
             .expect("unknown compression must be an error");
         let msg = err.to_string();
         assert!(
-            msg.contains("compression"),
-            "error should mention compression: {msg}"
+            msg.contains("compression") || msg.contains("signature"),
+            "error should mention compression or signature: {msg}"
         );
     }
 
@@ -854,6 +857,177 @@
                 );
             }
         }
+    }
+
+    // ── BORU-AUDIT-27: canonical signed-message framing ────────────────────
+
+    /// The canonical bytes a new message signs must be stable.  This golden
+    /// vector pins `postcard((\"boru/chat-message\", 1, from, sent_at,
+    /// compression, data))` so a future refactor cannot silently change the
+    /// signed layout.
+    #[test]
+    fn signed_message_canonical_bytes_golden_vector() {
+        let key = SecretKey::generate();
+        let msg = Message::Message {
+            text: "golden".into(),
+        };
+        let raw = postcard::to_stdvec(&msg).unwrap();
+        let from = key.public();
+        let sent_at = 1_700_000_000u64;
+        let compression = 0u8;
+        let canonical = crate::protocol_signing::canonical_signed_bytes(
+            SIGNED_MESSAGE_PROTOCOL,
+            SIGNED_MESSAGE_VERSION,
+            &(from, sent_at, compression, &raw),
+        )
+        .expect("canonical bytes");
+        // Stable framing invariants: protocol tag first, then version.
+        assert_eq!(canonical[0] as usize, SIGNED_MESSAGE_PROTOCOL.len());
+        assert_eq!(
+            &canonical[1..1 + SIGNED_MESSAGE_PROTOCOL.len()],
+            SIGNED_MESSAGE_PROTOCOL.as_bytes()
+        );
+        assert_eq!(canonical[1 + SIGNED_MESSAGE_PROTOCOL.len()], 0x01);
+        // The remainder must decode back to the same signed fields.
+        let decoded: (String, u16, PublicKey, u64, u8, Vec<u8>) =
+            postcard::from_bytes(&canonical).expect("decode canonical");
+        assert_eq!(decoded.0, SIGNED_MESSAGE_PROTOCOL);
+        assert_eq!(decoded.1, SIGNED_MESSAGE_VERSION);
+        assert_eq!(decoded.2, from);
+        assert_eq!(decoded.3, sent_at);
+        assert_eq!(decoded.4, compression);
+        assert_eq!(decoded.5, raw);
+    }
+
+    /// Changing ANY security-relevant field (`from`, `data`, `sent_at`,
+    /// `compression`) must invalidate verification.  This fails on the old
+    /// implementation, which signed only `data` and left `sent_at` /
+    /// `compression` unauthenticated.
+    #[test]
+    fn signed_message_field_mutation_invalidates_signature() {
+        let key = SecretKey::generate();
+        let msg = Message::Message {
+            text: "original".into(),
+        };
+        let encoded = SignedMessage::sign_and_encode(&key, &msg).unwrap();
+        let envelope: SignedMessage = postcard::from_bytes(&encoded).unwrap();
+        // Sanity: the original verifies.
+        assert!(
+            SignedMessage::verify_and_decode(&encoded).is_ok(),
+            "original envelope must verify"
+        );
+
+        // Rebuild a tampered envelope with the SAME signature.  The signed
+        // fields are private, so we construct each mutation from the decoded
+        // envelope's fields directly.
+        let mk = |from, data, signature, sent_at, compression| {
+            let s = SignedMessage {
+                from,
+                data,
+                signature,
+                sent_at,
+                compression,
+            };
+            postcard::to_stdvec(&s).expect("encode tampered envelope")
+        };
+
+        // Mutate `data` (the payload).
+        let tampered_data: Bytes = postcard::to_stdvec(&Message::Message {
+            text: "tampered".into(),
+        })
+        .unwrap()
+        .into();
+        let bytes = mk(
+            envelope.from,
+            tampered_data,
+            envelope.signature,
+            envelope.sent_at,
+            envelope.compression,
+        );
+        assert!(
+            SignedMessage::verify_and_decode(&bytes).is_err(),
+            "mutating data must invalidate the signature (BORU-AUDIT-27)"
+        );
+
+        // Mutate `sent_at` (freshness — NOT signed before AUDIT-27).
+        let bytes = mk(
+            envelope.from,
+            envelope.data.clone(),
+            envelope.signature,
+            envelope.sent_at + 1,
+            envelope.compression,
+        );
+        assert!(
+            SignedMessage::verify_and_decode(&bytes).is_err(),
+            "mutating sent_at must invalidate the signature (BORU-AUDIT-27)"
+        );
+
+        // Mutate `compression` (interpretation — NOT signed before AUDIT-27).
+        let bytes = mk(
+            envelope.from,
+            envelope.data.clone(),
+            envelope.signature,
+            envelope.sent_at,
+            envelope.compression ^ 1,
+        );
+        assert!(
+            SignedMessage::verify_and_decode(&bytes).is_err(),
+            "mutating compression must invalidate the signature (BORU-AUDIT-27)"
+        );
+    }
+
+    /// The `from` field is bound by the signature: an envelope signed by one
+    /// key cannot be replayed with a different `from` and still verify.
+    #[test]
+    fn signed_message_from_is_authenticated() {
+        let key_a = SecretKey::generate();
+        let key_b = SecretKey::generate();
+        let msg = Message::Message {
+            text: "who am i".into(),
+        };
+        let encoded = SignedMessage::sign_and_encode(&key_a, &msg).unwrap();
+        let mut envelope: SignedMessage = postcard::from_bytes(&encoded).unwrap();
+        envelope.from = key_b.public();
+        let bytes = postcard::to_stdvec(&envelope).unwrap();
+        assert!(
+            SignedMessage::verify_and_decode(&bytes).is_err(),
+            "changing `from` must invalidate the signature (BORU-AUDIT-27)"
+        );
+    }
+
+    /// Cross-version: a pre-AUDIT-27 envelope whose signature covers only
+    /// `data` still verifies during the migration window.  This is the
+    /// compatibility contract for persisted WAL/replay bytes.
+    #[test]
+    fn signed_message_legacy_data_only_signature_still_verifies() {
+        #[derive(Serialize)]
+        struct LegacyEnvelope {
+            from: PublicKey,
+            data: Bytes,
+            signature: Signature,
+            sent_at: u64,
+            compression: u8,
+        }
+
+        let key = SecretKey::generate();
+        let msg = Message::Message {
+            text: "legacy framing".into(),
+        };
+        let data: Bytes = postcard::to_stdvec(&msg).unwrap().into();
+        // Pre-AUDIT-27 signing: signature over `data` alone.
+        let signature = key.sign(&data);
+        let legacy = LegacyEnvelope {
+            from: key.public(),
+            data,
+            signature: ByteArray::new(signature.to_bytes()),
+            sent_at: 42,
+            compression: 0,
+        };
+        let encoded = postcard::to_stdvec(&legacy).unwrap();
+        let (pk, decoded, sent_at) = SignedMessage::verify_and_decode(&encoded).unwrap();
+        assert_eq!(pk, key.public());
+        assert_eq!(sent_at, 42);
+        assert!(matches!(decoded, Message::Message { ref text } if text == "legacy framing"));
     }
 
     /// A representative value for every `Message` variant.

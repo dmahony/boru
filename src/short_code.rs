@@ -376,9 +376,15 @@ pub struct SignedShortCodeAnnouncement {
     pub sent_at_unix_secs: u64,
     /// Postcard-encoded [`ShortCodeAnnouncement`].
     pub data: Vec<u8>,
-    /// Signature over `sent_at_unix_secs || data`.
+    /// Signature over the canonical framing (BORU-AUDIT-27):
+    /// `("boru/short-code-announcement", 1, sent_at_unix_secs, data)`.
     pub signature: iroh::Signature,
 }
+
+/// Canonical protocol tag for signed short-code announcements (BORU-AUDIT-27).
+const SHORT_CODE_ANNOUNCEMENT_PROTOCOL: &str = "boru/short-code-announcement";
+/// Version of the signed short-code announcement layout (BORU-AUDIT-27).
+const SHORT_CODE_ANNOUNCEMENT_VERSION: u16 = 1;
 
 impl SignedShortCodeAnnouncement {
     /// Sign an announcement with the sender's secret key.
@@ -482,16 +488,19 @@ impl SignedShortCodeAnnouncement {
             tracing::debug!("short-code: decode envelope failed: {e}");
             ShortCodeError::UnknownCode
         })?;
-        envelope
-            .from
-            .verify(
-                &signing_bytes(envelope.sent_at_unix_secs, &envelope.data),
-                &envelope.signature,
-            )
-            .map_err(|e| {
-                tracing::debug!("short-code: signature verification failed: {e}");
-                ShortCodeError::UnknownCode
-            })?;
+        // BORU-AUDIT-27: canonical framing first, legacy `timestamp || data`
+        // concatenation as a migration fallback.
+        let canonical = signing_bytes(envelope.sent_at_unix_secs, &envelope.data);
+        let legacy = legacy_signing_bytes(envelope.sent_at_unix_secs, &envelope.data);
+        if !crate::protocol_signing::verify_canonical_or_legacy(
+            &envelope.from,
+            &envelope.signature.to_bytes(),
+            &canonical,
+            &legacy,
+        ) {
+            tracing::debug!("short-code: signature verification failed");
+            return Err(ShortCodeError::UnknownCode);
+        }
         let announcement: ShortCodeAnnouncement =
             postcard::from_bytes(&envelope.data).map_err(|e| {
                 tracing::debug!("short-code: decode announcement failed: {e}");
@@ -505,6 +514,16 @@ impl SignedShortCodeAnnouncement {
 }
 
 fn signing_bytes(timestamp: u64, data: &[u8]) -> Vec<u8> {
+    crate::protocol_signing::canonical_signed_bytes(
+        SHORT_CODE_ANNOUNCEMENT_PROTOCOL,
+        SHORT_CODE_ANNOUNCEMENT_VERSION,
+        &(timestamp, data),
+    )
+    .expect("postcard short-code signing bytes cannot fail")
+}
+
+/// Legacy pre-AUDIT-27 signing bytes: `timestamp || data` raw concatenation.
+fn legacy_signing_bytes(timestamp: u64, data: &[u8]) -> Vec<u8> {
     let mut bytes = timestamp.to_le_bytes().to_vec();
     bytes.extend_from_slice(data);
     bytes
@@ -744,6 +763,67 @@ mod tests {
             SignedShortCodeAnnouncement::verify(&bytes, "ABC2345").unwrap_err(),
             ShortCodeError::UnknownCode
         );
+    }
+
+    // ── BORU-AUDIT-27: canonical short-code announcement framing ───────────
+
+    /// The canonical bytes a short-code announcement signs must be stable:
+    /// `postcard(("boru/short-code-announcement", 1, sent_at_unix_secs,
+    /// data))`.
+    #[test]
+    fn short_code_announcement_canonical_bytes_golden_vector() {
+        let data = postcard::to_stdvec(&ShortCodeAnnouncement {
+            code: "ABC2345".to_string(),
+            name: "photo.jpg".to_string(),
+            ticket: sample_ticket(),
+            size: 8192,
+            created_at_ms: now_unix_ms(),
+        })
+        .unwrap();
+        let canonical = signing_bytes(1_700_000_000, &data);
+        assert_eq!(
+            canonical[0] as usize,
+            SHORT_CODE_ANNOUNCEMENT_PROTOCOL.len()
+        );
+        assert_eq!(
+            &canonical[1..1 + SHORT_CODE_ANNOUNCEMENT_PROTOCOL.len()],
+            SHORT_CODE_ANNOUNCEMENT_PROTOCOL.as_bytes()
+        );
+        assert_eq!(canonical[1 + SHORT_CODE_ANNOUNCEMENT_PROTOCOL.len()], 0x01);
+        let decoded: (String, u16, u64, Vec<u8>) =
+            postcard::from_bytes(&canonical).expect("decode canonical short-code bytes");
+        assert_eq!(decoded.0, SHORT_CODE_ANNOUNCEMENT_PROTOCOL);
+        assert_eq!(decoded.1, SHORT_CODE_ANNOUNCEMENT_VERSION);
+        assert_eq!(decoded.2, 1_700_000_000);
+        assert_eq!(decoded.3, data);
+    }
+
+    /// Cross-version: a pre-AUDIT-27 announcement signed over the raw
+    /// `timestamp || data` concatenation still verifies during migration.
+    #[test]
+    fn short_code_announcement_legacy_framing_still_verifies() {
+        let sk = iroh::SecretKey::generate();
+        let ann = ShortCodeAnnouncement {
+            code: "ABC2345".to_string(),
+            name: "photo.jpg".to_string(),
+            ticket: sample_ticket(),
+            size: 8192,
+            created_at_ms: now_unix_ms(),
+        };
+        let data = postcard::to_stdvec(&ann).unwrap();
+        let now = now_unix_ms() / 1000;
+        // Build the legacy envelope by hand (same wire shape, legacy sig).
+        let legacy_sig = legacy_signing_bytes(now, &data);
+        let envelope = super::SignedShortCodeAnnouncement {
+            from: sk.public(),
+            sent_at_unix_secs: now,
+            data,
+            signature: sk.sign(&legacy_sig),
+        };
+        let encoded = postcard::to_stdvec(&envelope).unwrap();
+        let (from, decoded) = SignedShortCodeAnnouncement::verify(&encoded, "ABC2345").unwrap();
+        assert_eq!(from, sk.public());
+        assert_eq!(decoded, ann);
     }
 
     // ── Freshness enforcement (BORU-AUDIT-14) ───────────────────────

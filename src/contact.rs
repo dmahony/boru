@@ -15,6 +15,11 @@ use crate::{mailbox::MailboxPublicKey, proto::TopicId};
 const SIGNATURE_LENGTH: usize = Signature::LENGTH;
 const MAX_CONTROL_CLOCK_SKEW_SECS: u64 = 24 * 60 * 60;
 
+/// Canonical protocol tag for signed contact messages (BORU-AUDIT-27).
+const CONTACT_MESSAGE_PROTOCOL: &str = "boru/contact";
+/// Version of the signed contact-message layout (BORU-AUDIT-27).
+const CONTACT_MESSAGE_VERSION: u16 = 1;
+
 /// A signed control-plane operation between two peers.
 ///
 /// Friend-request actions (`FriendRequest`, `FriendRequestAccepted`,
@@ -121,13 +126,18 @@ impl SignedContactMessage {
                 "contact message timestamp is outside replay window"
             ));
         }
-        envelope
-            .from
-            .verify(
-                &signing_bytes(envelope.sent_at_unix_secs, &envelope.data),
-                &Signature::from_bytes(&envelope.signature),
-            )
-            .map_err(|e| n0_error::anyerr!("verify contact signature: {e}"))?;
+        // BORU-AUDIT-27: canonical framing first, legacy `timestamp || data`
+        // concatenation as a migration fallback.
+        let canonical = signing_bytes(envelope.sent_at_unix_secs, &envelope.data);
+        let legacy = legacy_signing_bytes(envelope.sent_at_unix_secs, &envelope.data);
+        if !crate::protocol_signing::verify_canonical_or_legacy(
+            &envelope.from,
+            envelope.signature.as_ref(),
+            &canonical,
+            &legacy,
+        ) {
+            return Err(n0_error::anyerr!("verify contact signature"));
+        }
         let action = postcard::from_bytes(&envelope.data)
             .map_err(|e| n0_error::anyerr!("decode contact action: {e}"))?;
         Ok((envelope.from, action))
@@ -135,6 +145,16 @@ impl SignedContactMessage {
 }
 
 fn signing_bytes(timestamp: u64, data: &[u8]) -> Vec<u8> {
+    crate::protocol_signing::canonical_signed_bytes(
+        CONTACT_MESSAGE_PROTOCOL,
+        CONTACT_MESSAGE_VERSION,
+        &(timestamp, data),
+    )
+    .expect("postcard contact signing bytes cannot fail")
+}
+
+/// Legacy pre-AUDIT-27 signing bytes: `timestamp || data` raw concatenation.
+fn legacy_signing_bytes(timestamp: u64, data: &[u8]) -> Vec<u8> {
     let mut bytes = timestamp.to_le_bytes().to_vec();
     bytes.extend_from_slice(data);
     bytes
@@ -181,5 +201,61 @@ mod tests {
         let a = SecretKey::generate().public();
         let b = SecretKey::generate().public();
         assert_eq!(direct_topic(&a, &b), direct_topic(&b, &a));
+    }
+
+    // ── BORU-AUDIT-27: canonical contact-message framing ───────────────────
+
+    /// The canonical bytes a contact message signs must be stable:
+    /// `postcard(("boru/contact", 1, sent_at_unix_secs, data))`.
+    #[test]
+    fn contact_message_canonical_bytes_golden_vector() {
+        let key = SecretKey::generate();
+        let action = ContactAction::ConversationInvite {
+            topic: direct_topic(&key.public(), &SecretKey::generate().public()),
+            addrs: Vec::new(),
+        };
+        let data = postcard::to_stdvec(&action).unwrap();
+        let canonical = signing_bytes(1_700_000_000, &data);
+        assert_eq!(canonical[0] as usize, CONTACT_MESSAGE_PROTOCOL.len());
+        assert_eq!(
+            &canonical[1..1 + CONTACT_MESSAGE_PROTOCOL.len()],
+            CONTACT_MESSAGE_PROTOCOL.as_bytes()
+        );
+        assert_eq!(canonical[1 + CONTACT_MESSAGE_PROTOCOL.len()], 0x01);
+        let decoded: (String, u16, u64, Vec<u8>) =
+            postcard::from_bytes(&canonical).expect("decode canonical contact bytes");
+        assert_eq!(decoded.0, CONTACT_MESSAGE_PROTOCOL);
+        assert_eq!(decoded.1, CONTACT_MESSAGE_VERSION);
+        assert_eq!(decoded.2, 1_700_000_000);
+        assert_eq!(decoded.3, data);
+    }
+
+    /// Cross-version: a pre-AUDIT-27 contact message signed over the raw
+    /// `timestamp || data` concatenation still verifies during migration.
+    #[test]
+    fn contact_message_legacy_framing_still_verifies() {
+        let key = SecretKey::generate();
+        let action = ContactAction::ConversationInvite {
+            topic: direct_topic(&key.public(), &SecretKey::generate().public()),
+            addrs: Vec::new(),
+        };
+        let data = postcard::to_stdvec(&action).unwrap();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        // Hand-build a legacy envelope (same wire shape, legacy signature).
+        let legacy_sig = legacy_signing_bytes(now, &data);
+        let legacy_sig = key.sign(&legacy_sig);
+        let envelope = super::SignedContactMessage {
+            from: key.public(),
+            sent_at_unix_secs: now,
+            data,
+            signature: ByteArray::new(legacy_sig.to_bytes()),
+        };
+        let encoded = postcard::to_stdvec(&envelope).unwrap();
+        let (from, decoded) = SignedContactMessage::verify(&encoded, Some(key.public())).unwrap();
+        assert_eq!(from, key.public());
+        assert_eq!(decoded, action);
     }
 }

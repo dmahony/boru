@@ -81,6 +81,9 @@ pub struct TunnelId(pub [u8; 32]);
 /// Version of the signed capability contract.
 pub const TUNNEL_CAPABILITY_VERSION: u16 = 1;
 
+/// Canonical protocol tag for signed tunnel capabilities (BORU-AUDIT-27).
+pub const TUNNEL_CAPABILITY_PROTOCOL: &str = "boru/tunnel-capability";
+
 /// A recipient-bound, expiring authorisation to open one tunnel.
 ///
 /// The signature covers every field except `signature`.  No target address or
@@ -210,18 +213,40 @@ impl TunnelCapability {
         if now_ms > self.expires_at_ms {
             return Err(CapabilityVerificationError::Expired);
         }
-        let signature_bytes: [u8; 64] = self
-            .signature
-            .as_slice()
-            .try_into()
-            .map_err(|_| CapabilityVerificationError::InvalidSignature)?;
-        let signature = iroh::Signature::from_bytes(&signature_bytes);
-        self.owner_endpoint_id
-            .verify(&self.signing_bytes(), &signature)
-            .map_err(|_| CapabilityVerificationError::InvalidSignature)
+        if !crate::protocol_signing::verify_canonical_or_legacy(
+            &self.owner_endpoint_id,
+            &self.signature,
+            &self.signing_bytes(),
+            &self.legacy_signing_bytes(),
+        ) {
+            return Err(CapabilityVerificationError::InvalidSignature);
+        }
+        Ok(())
     }
 
     fn signing_bytes(&self) -> Vec<u8> {
+        // BORU-AUDIT-27: canonical framing — domain tag + version + every
+        // security-relevant field.  The signature covers exactly what
+        // `verify_for` recomputes; pre-AUDIT-27 framing (bare tuple, no
+        // domain) is accepted as a migration fallback.
+        crate::protocol_signing::canonical_signed_bytes(
+            TUNNEL_CAPABILITY_PROTOCOL,
+            self.version,
+            &(
+                self.tunnel_id,
+                self.owner_endpoint_id,
+                self.allowed_peer_endpoint_id,
+                self.created_at_ms,
+                self.expires_at_ms,
+                self.nonce,
+            ),
+        )
+        .expect("postcard capability encoding cannot fail")
+    }
+
+    /// Legacy pre-AUDIT-27 signing bytes: bare postcard tuple without a
+    /// domain separator.
+    fn legacy_signing_bytes(&self) -> Vec<u8> {
         postcard::to_stdvec(&(
             self.version,
             self.tunnel_id,
@@ -748,7 +773,8 @@ mod tests {
     use super::{
         connection_route, reject_for_protocol_version, CapabilityVerificationError,
         TunnelCapability, TunnelId, TunnelOffer, TunnelProtocol, TunnelRejectReason, TunnelRequest,
-        TunnelResponse, TunnelRoute, BORU_TUNNEL_ALPN, TUNNEL_PROTOCOL_VERSION,
+        TunnelResponse, TunnelRoute, BORU_TUNNEL_ALPN, TUNNEL_CAPABILITY_PROTOCOL,
+        TUNNEL_CAPABILITY_VERSION, TUNNEL_PROTOCOL_VERSION,
     };
 
     fn capability_fixture() -> (iroh::SecretKey, iroh::SecretKey, TunnelId, TunnelCapability) {
@@ -904,6 +930,68 @@ mod tests {
         assert_eq!(
             verify_fixture(&capability, &owner, &recipient, tunnel_id),
             Err(CapabilityVerificationError::InvalidSignature)
+        );
+    }
+
+    // ── BORU-AUDIT-27: canonical capability framing ────────────────────────
+
+    /// The canonical bytes a capability signs must be stable: domain tag
+    /// first, then version, then every security-relevant field.
+    #[test]
+    fn capability_canonical_bytes_golden_vector() {
+        let (_owner, recipient, tunnel_id, capability) = capability_fixture();
+        let canonical = capability.signing_bytes();
+        assert_eq!(canonical[0] as usize, TUNNEL_CAPABILITY_PROTOCOL.len());
+        assert_eq!(
+            &canonical[1..1 + TUNNEL_CAPABILITY_PROTOCOL.len()],
+            TUNNEL_CAPABILITY_PROTOCOL.as_bytes()
+        );
+        assert_eq!(canonical[1 + TUNNEL_CAPABILITY_PROTOCOL.len()], 0x01);
+        let decoded: (
+            String,
+            u16,
+            TunnelId,
+            iroh::PublicKey,
+            iroh::PublicKey,
+            u64,
+            u64,
+            [u8; 32],
+        ) = postcard::from_bytes(&canonical).expect("decode canonical capability bytes");
+        assert_eq!(decoded.0, TUNNEL_CAPABILITY_PROTOCOL);
+        assert_eq!(decoded.1, TUNNEL_CAPABILITY_VERSION);
+        assert_eq!(decoded.2, tunnel_id);
+        assert_eq!(decoded.3, capability.owner_endpoint_id);
+        assert_eq!(decoded.4, recipient.public());
+        assert_eq!(decoded.5, capability.created_at_ms);
+        assert_eq!(decoded.6, capability.expires_at_ms);
+        assert_eq!(decoded.7, capability.nonce);
+    }
+
+    /// Cross-version: a pre-AUDIT-27 capability signed over the bare tuple
+    /// (no domain tag) still verifies during the migration window.
+    #[test]
+    fn capability_legacy_framing_still_verifies() {
+        let owner = iroh::SecretKey::generate();
+        let recipient = iroh::SecretKey::generate();
+        let tunnel_id = TunnelId([9; 32]);
+        let mut capability =
+            TunnelCapability::sign(&owner, recipient.public(), tunnel_id, 100, 200);
+        // Re-sign with the legacy pre-AUDIT-27 bytes.
+        let legacy = postcard::to_stdvec(&(
+            capability.version,
+            capability.tunnel_id,
+            capability.owner_endpoint_id,
+            capability.allowed_peer_endpoint_id,
+            capability.created_at_ms,
+            capability.expires_at_ms,
+            capability.nonce,
+        ))
+        .expect("legacy bytes");
+        capability.signature = owner.sign(&legacy).to_bytes().to_vec();
+        assert_eq!(
+            verify_fixture(&capability, &owner, &recipient, tunnel_id),
+            Ok(()),
+            "legacy-framed capability must verify during migration (BORU-AUDIT-27)"
         );
     }
 

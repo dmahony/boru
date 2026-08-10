@@ -99,6 +99,9 @@ const METADATA_MARKER: u8 = 0xFE;
 const WIRE_VERSION: u8 = 0x01;
 const AUTHORIZED_WIRE_VERSION: u8 = 0x02;
 
+/// Canonical protocol tag for authorized room metadata (BORU-AUDIT-27).
+const ROOM_METADATA_PROTOCOL: &str = "boru/room-metadata";
+
 /// Authorization policy for security-sensitive room document changes.
 /// Public rooms retain the legacy unsigned wire format. Private rooms accept
 /// changes only when signed by the configured owner.
@@ -310,8 +313,19 @@ fn encode_wire(metadata: &RoomMetadata) -> Result<Bytes> {
 }
 
 fn metadata_signing_payload(owner: &PublicKey, metadata: &RoomMetadata) -> Vec<u8> {
+    crate::protocol_signing::canonical_signed_bytes(
+        ROOM_METADATA_PROTOCOL,
+        AUTHORIZED_WIRE_VERSION as u16,
+        &(owner, metadata),
+    )
+    .expect("postcard metadata signing bytes cannot fail")
+}
+
+/// Legacy pre-AUDIT-27 metadata signing bytes: bare `(version, owner,
+/// metadata)` tuple without a domain separator.
+fn legacy_metadata_signing_payload(owner: &PublicKey, metadata: &RoomMetadata) -> Vec<u8> {
     postcard::to_stdvec(&(AUTHORIZED_WIRE_VERSION, owner, metadata))
-        .expect("postcard serialization is infallible")
+        .expect("postcard metadata signing bytes cannot fail")
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -625,12 +639,12 @@ pub async fn process_gossip_event(
                     return Ok(true);
                 };
                 if signed_owner != *owner
-                    || signed_owner
-                        .verify(
-                            &metadata_signing_payload(&signed_owner, &signed_payload),
-                            &signature,
-                        )
-                        .is_err()
+                    || !crate::protocol_signing::verify_canonical_or_legacy(
+                        &signed_owner,
+                        &signature.to_bytes(),
+                        &metadata_signing_payload(&signed_owner, &signed_payload),
+                        &legacy_metadata_signing_payload(&signed_owner, &signed_payload),
+                    )
                 {
                     tracing::warn!("ignoring metadata update with invalid owner signature");
                     return Ok(true);
@@ -1620,9 +1634,15 @@ mod tests {
         let (owner, decoded, signature) = decode_authorized_wire(&wire).unwrap().unwrap();
         assert_eq!(owner, key.public());
         assert_eq!(decoded, metadata);
-        assert!(owner
-            .verify(&metadata_signing_payload(&owner, &decoded), &signature)
-            .is_ok());
+        assert!(
+            crate::protocol_signing::verify_canonical_or_legacy(
+                &owner,
+                &signature.to_bytes(),
+                &metadata_signing_payload(&owner, &decoded),
+                &legacy_metadata_signing_payload(&owner, &decoded),
+            ),
+            "authorized metadata signature must verify (BORU-AUDIT-27)"
+        );
     }
 
     #[test]

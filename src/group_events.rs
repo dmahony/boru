@@ -74,6 +74,9 @@ const NONCE_LEN: usize = 16;
 /// this protocol can never collide with hashes from other protocol objects.
 const EVENT_ID_DOMAIN: &[u8] = b"boru.group-event.id";
 
+/// Canonical protocol tag for the signed group-event envelope (BORU-AUDIT-27).
+const GROUP_EVENT_PROTOCOL: &str = "boru/group-event";
+
 /// The role an authenticated actor has in a group.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Role {
@@ -364,10 +367,24 @@ impl GroupEvent {
             envelope.timestamp,
             &envelope.payload,
         )?;
-        envelope
-            .actor
-            .verify(&unsigned, &Signature::from_bytes(&envelope.signature))
-            .map_err(|_| GroupValidationError::InvalidSignature)?;
+        let legacy = legacy_unsigned_bytes(
+            envelope.version,
+            &envelope.group_id,
+            &envelope.event_id,
+            &envelope.nonce,
+            envelope.epoch,
+            &envelope.actor,
+            envelope.timestamp,
+            &envelope.payload,
+        )?;
+        if !crate::protocol_signing::verify_canonical_or_legacy(
+            &envelope.actor,
+            envelope.signature.as_ref(),
+            &unsigned,
+            &legacy,
+        ) {
+            return Err(GroupValidationError::InvalidSignature);
+        }
         // The event ID must be exactly the domain-separated hash of the
         // complete canonical event contents (including the nonce). Recomputing
         // it here makes the ID-to-contents relationship a mandatory validation
@@ -646,6 +663,29 @@ fn unsigned_bytes(
     timestamp: u64,
     payload: &GroupEventPayload,
 ) -> Result<Vec<u8>, GroupValidationError> {
+    // BORU-AUDIT-27: canonical framing — domain tag + version + every
+    // security-relevant field (identity, routing, epoch, nonce, freshness).
+    crate::protocol_signing::canonical_signed_bytes(
+        GROUP_EVENT_PROTOCOL,
+        version as u16,
+        &(group_id, event_id, nonce, epoch, actor, timestamp, payload),
+    )
+    .map_err(|e| GroupValidationError::Decode(e.to_string()))
+}
+
+/// Legacy pre-AUDIT-27 unsigned bytes: bare postcard tuple without a domain
+/// separator.  Kept only for the migration window; new events are signed with
+/// the canonical framing.
+fn legacy_unsigned_bytes(
+    version: u8,
+    group_id: &TopicId,
+    event_id: &ByteArray<EVENT_ID_LEN>,
+    nonce: &ByteArray<NONCE_LEN>,
+    epoch: u64,
+    actor: &PublicKey,
+    timestamp: u64,
+    payload: &GroupEventPayload,
+) -> Result<Vec<u8>, GroupValidationError> {
     postcard::to_stdvec(&(
         version, group_id, event_id, nonce, epoch, actor, timestamp, payload,
     ))
@@ -775,6 +815,139 @@ mod tests {
             expected_id.encode_hex::<String>(),
             "0a20c18d01f858ffb8dfbfadce1720fe",
             "event ID derivation must be stable (BORU-AUDIT-15)"
+        );
+    }
+
+    // ── BORU-AUDIT-27: canonical group-event signature framing ─────────────
+
+    /// The canonical bytes a group event signs must be stable: the
+    /// `boru/group-event` domain tag, the version, then every
+    /// security-relevant field.
+    #[test]
+    fn group_event_canonical_bytes_golden_vector() {
+        let owner = golden_key(0x42);
+        let member = golden_key(0x22).public();
+        let group: TopicId = [7u8; 32].into();
+        let nonce = [0xABu8; 16];
+        let payload = GroupEventPayload::MemberInvited { member };
+        let event =
+            GroupEvent::sign_with_nonce(&owner, group, 0, 1_700_000_000, nonce, payload).unwrap();
+        let envelope = event.envelope();
+
+        let unsigned = unsigned_bytes(
+            envelope.version,
+            &envelope.group_id,
+            &envelope.event_id,
+            &envelope.nonce,
+            envelope.epoch,
+            &envelope.actor,
+            envelope.timestamp,
+            &envelope.payload,
+        )
+        .unwrap();
+        assert_eq!(unsigned[0] as usize, GROUP_EVENT_PROTOCOL.len());
+        assert_eq!(
+            &unsigned[1..1 + GROUP_EVENT_PROTOCOL.len()],
+            GROUP_EVENT_PROTOCOL.as_bytes()
+        );
+        assert_eq!(unsigned[1 + GROUP_EVENT_PROTOCOL.len()], 0x02); // GROUP_EVENT_VERSION
+
+        // The canonical bytes must round-trip to the same signed fields.
+        let decoded: (
+            String,
+            u16,
+            TopicId,
+            ByteArray<EVENT_ID_LEN>,
+            ByteArray<NONCE_LEN>,
+            u64,
+            PublicKey,
+            u64,
+            GroupEventPayload,
+        ) = postcard::from_bytes(&unsigned).expect("decode canonical group event bytes");
+        assert_eq!(decoded.0, GROUP_EVENT_PROTOCOL);
+        assert_eq!(decoded.1, envelope.version as u16);
+        assert_eq!(decoded.2, envelope.group_id);
+        assert_eq!(decoded.3, envelope.event_id);
+        assert_eq!(decoded.4, envelope.nonce);
+        assert_eq!(decoded.5, envelope.epoch);
+        assert_eq!(decoded.6, envelope.actor);
+        assert_eq!(decoded.7, envelope.timestamp);
+        assert_eq!(decoded.8, envelope.payload);
+    }
+
+    /// Cross-version: a pre-AUDIT-27 event signed over the bare tuple (no
+    /// domain tag) still verifies during the migration window.
+    #[test]
+    fn group_event_legacy_framing_still_verifies() {
+        let owner = golden_key(0x42);
+        let member = golden_key(0x22).public();
+        let group: TopicId = [7u8; 32].into();
+        let nonce = [0xABu8; 16];
+        let payload = GroupEventPayload::MemberInvited { member };
+        let timestamp = now_secs();
+        let event =
+            GroupEvent::sign_with_nonce(&owner, group, 0, timestamp, nonce, payload.clone())
+                .unwrap();
+        let mut envelope = event.envelope().clone();
+        // Re-sign with the legacy pre-AUDIT-27 bytes (bare tuple).
+        let legacy = legacy_unsigned_bytes(
+            envelope.version,
+            &envelope.group_id,
+            &envelope.event_id,
+            &envelope.nonce,
+            envelope.epoch,
+            &envelope.actor,
+            envelope.timestamp,
+            &envelope.payload,
+        )
+        .unwrap();
+        envelope.signature = ByteArray::new(owner.sign(&legacy).to_bytes());
+        let state = GroupState::new(group, owner.public());
+        let legacy_event = GroupEvent::from_payload(envelope, &payload);
+        assert!(
+            legacy_event.verify(&state).is_ok(),
+            "legacy-framed group event must verify during migration (BORU-AUDIT-27)"
+        );
+    }
+
+    /// Cross-version: an unknown version value is rejected even when the
+    /// signature itself is valid, because verification never guesses at
+    /// interpretation (BORU-AUDIT-27 step 1: unknown-version rejection).
+    #[test]
+    fn group_event_unknown_version_is_rejected() {
+        let owner = golden_key(0x42);
+        let member = golden_key(0x22).public();
+        let group: TopicId = [7u8; 32].into();
+        let nonce = [0xABu8; 16];
+        let payload = GroupEventPayload::MemberInvited { member };
+        let event =
+            GroupEvent::sign_with_nonce(&owner, group, 0, now_secs(), nonce, payload.clone())
+                .unwrap();
+        let mut envelope = event.envelope().clone();
+        // Bump the version and re-sign with the canonical bytes for that
+        // version: the signature is valid, yet verification must still
+        // reject the object because its interpretation is unknown.
+        envelope.version = GROUP_EVENT_VERSION + 1;
+        let bytes = unsigned_bytes(
+            envelope.version,
+            &envelope.group_id,
+            &envelope.event_id,
+            &envelope.nonce,
+            envelope.epoch,
+            &envelope.actor,
+            envelope.timestamp,
+            &envelope.payload,
+        )
+        .unwrap();
+        envelope.signature = ByteArray::new(owner.sign(&bytes).to_bytes());
+        let state = GroupState::new(group, owner.public());
+        let future_event = GroupEvent::from_payload(envelope, &payload);
+        assert_eq!(
+            future_event.verify(&state),
+            Err(GroupValidationError::UnsupportedVersion(
+                GROUP_EVENT_VERSION + 1
+            )),
+            "unknown group-event version must be rejected (BORU-AUDIT-27)"
         );
     }
 }

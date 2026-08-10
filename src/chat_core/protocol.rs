@@ -291,33 +291,63 @@ pub fn message_hash(message: &Message) -> MessageHash {
     *blake3::hash(&bytes).as_bytes()
 }
 
+/// Canonical protocol tag for signed room advertisements (BORU-AUDIT-27).
+pub const ROOM_ADVERTISEMENT_PROTOCOL: &str = "boru/room-advertisement";
+
+/// Version of the signed room-advertisement payload layout (BORU-AUDIT-27).
+pub const ROOM_ADVERTISEMENT_VERSION: u16 = 1;
+
 /// Sign a [`RoomAdvertisement`] with the room creator's secret key.
 ///
 /// Returns the Ed25519 signature bytes that [`verify_advertisement`] can check.
+/// The signature covers the canonical framing
+/// (`boru/room-advertisement` / 1 / all advertisement fields), so identity,
+/// routing/topic and freshness fields are authenticated.
 pub fn sign_advertisement(ad: &RoomAdvertisement, sk: &SecretKey) -> Vec<u8> {
-    let bytes = postcard::to_stdvec(ad).expect("postcard::to_stdvec is infallible");
-    sk.sign(&bytes).to_bytes().to_vec()
+    let canonical = crate::protocol_signing::canonical_signed_bytes(
+        ROOM_ADVERTISEMENT_PROTOCOL,
+        ROOM_ADVERTISEMENT_VERSION,
+        ad,
+    )
+    .expect("postcard advertisement encoding cannot fail");
+    sk.sign(&canonical).to_bytes().to_vec()
 }
 
 /// Verify an Ed25519 signature over a [`RoomAdvertisement`].
 ///
 /// Returns `true` if the signature is valid for the given author's public key.
+/// Pre-AUDIT-27 signatures over the bare advertisement bytes still verify
+/// during the migration window.
 pub fn verify_advertisement(ad: &RoomAdvertisement, signature: &[u8], author: PublicKey) -> bool {
-    let bytes = match postcard::to_stdvec(ad) {
+    let Ok(canonical) = crate::protocol_signing::canonical_signed_bytes(
+        ROOM_ADVERTISEMENT_PROTOCOL,
+        ROOM_ADVERTISEMENT_VERSION,
+        ad,
+    ) else {
+        return false;
+    };
+    let legacy = match postcard::to_stdvec(ad) {
         Ok(b) => b,
         Err(_) => return false,
     };
-    let sig_bytes: [u8; iroh::Signature::LENGTH] = match signature.try_into() {
-        Ok(a) => a,
-        Err(_) => return false,
-    };
-    author
-        .verify(&bytes, &iroh::Signature::from_bytes(&sig_bytes))
-        .is_ok()
+    crate::protocol_signing::verify_canonical_or_legacy(&author, signature, &canonical, &legacy)
 }
 
 const SIGNATURE_LENGTH: usize = iroh::Signature::LENGTH;
 pub(crate) type Signature = ByteArray<SIGNATURE_LENGTH>;
+
+/// Canonical protocol tag for signed chat messages (BORU-AUDIT-27).
+///
+/// The signature over [`SignedMessage`] covers
+/// `canonical_signed_bytes("boru/chat-message", 1, (from, sent_at,
+/// compression, data))`, so identity, freshness and interpretation fields
+/// are all authenticated.  Pre-AUDIT-27 envelopes (signature over `data`
+/// alone) still verify during the migration window via
+/// [`crate::protocol_signing::verify_canonical_or_legacy`].
+pub const SIGNED_MESSAGE_PROTOCOL: &str = "boru/chat-message";
+
+/// Version of the signed chat-message payload layout (BORU-AUDIT-27).
+pub const SIGNED_MESSAGE_VERSION: u16 = 1;
 
 /// A signed message envelope with sender identity and signature.
 #[derive(Debug, Serialize)]
@@ -400,14 +430,32 @@ impl SignedMessage {
         let signed_message: Self =
             postcard::from_bytes(bytes).std_context("decode signed message")?;
         let key: PublicKey = signed_message.from;
-        key.verify(
-            &signed_message.data,
-            &iroh::Signature::from_bytes(&signed_message.signature),
+        // BORU-AUDIT-27: the canonical framing authenticates identity,
+        // freshness (`sent_at`) and interpretation (`compression`) as well
+        // as the payload.  Pre-AUDIT-27 envelopes signed only over `data`
+        // still verify during the migration window.
+        let canonical = crate::protocol_signing::canonical_signed_bytes(
+            SIGNED_MESSAGE_PROTOCOL,
+            SIGNED_MESSAGE_VERSION,
+            &(
+                signed_message.from,
+                signed_message.sent_at,
+                signed_message.compression,
+                &signed_message.data,
+            ),
         )
-        .std_context("verify signature")?;
-        // The signature covers the `data` bytes as stored on the wire, so we
-        // inflate *after* verifying: tampering with either the compressed
-        // payload or the `compression` byte is caught here.
+        .std_context("canonical signed message bytes")?;
+        if !crate::protocol_signing::verify_canonical_or_legacy(
+            &key,
+            signed_message.signature.as_ref(),
+            &canonical,
+            &signed_message.data,
+        ) {
+            bail_any!("verify signature");
+        }
+        // The canonical framing covers the `compression` byte, so tampering
+        // with either the compressed payload or the `compression` byte is
+        // caught by the signature itself.  We still inflate after verifying.
         let raw = match signed_message.compression {
             0 => signed_message.data.to_vec(),
             1 => crate::wire_compression::decompress(&signed_message.data)?,
@@ -454,12 +502,21 @@ impl SignedMessage {
         } else {
             (raw.into(), 0u8)
         };
-        let signature = secret_key.sign(&data);
         let key: PublicKey = secret_key.public();
         let sent_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
+        // BORU-AUDIT-27: sign the canonical framing — identity, freshness and
+        // interpretation fields are all authenticated.  The signature covers
+        // exactly what verify_and_decode recomputes.
+        let canonical = crate::protocol_signing::canonical_signed_bytes(
+            SIGNED_MESSAGE_PROTOCOL,
+            SIGNED_MESSAGE_VERSION,
+            &(key, sent_at, compression, &data),
+        )
+        .std_context("canonical signed message bytes")?;
+        let signature = secret_key.sign(&canonical);
         let signed_message = Self {
             from: key,
             data,
