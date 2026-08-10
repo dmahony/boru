@@ -1,13 +1,13 @@
-//! Pairing service — connects out-of-band [`PeerInvitation`] to the friend request
+//! Pairing service — connects out-of-band [`PeerInvitation`](crate::peer_invitation::PeerInvitation) to the friend request
 //! infrastructure.
 //!
-//! The main entry point is [`accept_peer_invitation`], which validates the
+//! The main entry point is [`accept_peer_invitation`](crate::pairing_service::accept_peer_invitation), which validates the
 //! invitation, updates the friends store with the peer's addresses, creates a
-//! pending friend request in the store, signs it, persists a [`PendingPairing`]
-//! for restart recovery, and returns a structured [`PairingOutcome`] together
+//! pending friend request in the store, signs it, persists a [`PendingPairing`](crate::pairing_service::PendingPairing)
+//! for restart recovery, and returns a structured [`PairingOutcome`](crate::pairing_service::PairingOutcome) together
 //! with the signed message bytes the caller should send over the whisper channel.
 //!
-//! On restart the caller should call [`resolve_pending_pairings`] to attempt
+//! On restart the caller should call [`resolve_pending_pairings`](crate::pairing_service::resolve_pending_pairings) to attempt
 //! connection to peers whose pairing was accepted but never completed, turning
 //! pending outcomes into `Connected` or keeping them for a future retry.
 //!

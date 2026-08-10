@@ -41,9 +41,9 @@ const SIGNATURE_LEN: usize = Signature::LENGTH;
 /// cross-version signature confusion.
 const MAILBOX_DOMAIN: &str = "boru/mailbox";
 /// Envelope format version 1 (legacy). Decode-only during the migration
-/// window; never emitted by [`seal`] / [`seal_for`].
+/// window; never emitted by `seal` / [`seal_for`].
 pub const ENVELOPE_VERSION_V1: u32 = 1;
-/// Envelope format version 2 (current). The only format [`seal`] emits.
+/// Envelope format version 2 (current). The only format `seal` emits.
 /// The V2 signature authenticates `created_at` (BORU-AUDIT-02).
 pub const ENVELOPE_VERSION_V2: u32 = 2;
 /// Maximum allowed forward clock skew for a freshly validated envelope.
@@ -145,7 +145,7 @@ impl MailboxIdentity {
 /// (BORU-AUDIT-02). V1 remains decodable only for the migration window:
 /// envelopes persisted before the V2 upgrade are still served with their
 /// original semantics until they expire under the mailbox TTL. This layout
-/// is never emitted by [`seal`] / [`seal_for`].
+/// is never emitted by `seal` / [`seal_for`].
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MailboxEnvelopeV1 {
     /// Authenticated sender identity.
@@ -184,7 +184,7 @@ impl MailboxEnvelopeV1 {
 /// Every field used for identity, routing, freshness or interpretation is
 /// authenticated. The signature covers
 /// `(domain, version, from, recipient, ephemeral, nonce, created_at,
-/// ciphertext)` via [`MailboxEnvelopeV2::signing_bytes`], and the same
+/// ciphertext)` via `MailboxEnvelopeV2::signing_bytes`, and the same
 /// context (minus the ciphertext, which does not exist yet at encryption
 /// time) is bound into the AEAD associated data. Mutating `created_at` or
 /// any other field therefore invalidates both the signature and the AEAD
@@ -256,7 +256,7 @@ impl MailboxEnvelopeV2 {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum MailboxEnvelope {
     /// Legacy format. Decode-only during the migration window; never
-    /// emitted by [`seal`] / [`seal_for`].
+    /// emitted by `seal` / [`seal_for`].
     V1(MailboxEnvelopeV1),
     /// Current format — the only format `seal`/`seal_for` produces.
     V2(MailboxEnvelopeV2),
@@ -811,7 +811,7 @@ impl MailboxStore {
     }
     /// Store an outgoing envelope without recipient or authorization checks.
     ///
-    /// Unlike [`enqueue`], this accepts envelopes addressed to *other* peers
+    /// Unlike [`enqueue`](crate::mailbox::MailboxStore::enqueue), this accepts envelopes addressed to *other* peers
     /// (the sender's own outgoing messages).  Signature verification is
     /// skipped because the envelope was just created locally.  Duplicate
     /// message ids are still rejected.
@@ -847,7 +847,7 @@ impl MailboxStore {
     /// Outgoing stores are not bound to the local identity: their `recipient`
     /// field is either unset or describes an incoming mailbox.  The signer of
     /// an outgoing acknowledgement is the remote envelope recipient, so using
-    /// [`acknowledge`] here would verify against the wrong identity.
+    /// [`acknowledge`](crate::mailbox::MailboxStore::acknowledge) here would verify against the wrong identity.
     pub fn acknowledge_outgoing(&mut self, ack: &MailboxAck) -> Result<bool> {
         let Some(envelope) = self.entries.get(&ack.message_id) else {
             return Ok(false);

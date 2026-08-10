@@ -1,13 +1,13 @@
 //! File access (download-authorisation) protocol handler — server side.
 //!
-//! Implements [`ProtocolHandler`] for the `/boru-file-access/1` ALPN.
+//! Implements [`ProtocolHandler`](iroh::protocol::ProtocolHandler) for the `/boru-file-access/1` ALPN.
 //! On each incoming connection:
 //!
-//! 1. Authenticate the requester via [`Connection::remote_id()`].
-//! 2. Deserialise and validate the [`FileAccessWireRequest`].
+//! 1. Authenticate the requester via [`Connection::remote_id()`](iroh::endpoint::Connection::remote_id).
+//! 2. Deserialise and validate the [`FileAccessWireRequest`](crate::file_access_protocol::FileAccessWireRequest).
 //! 3. Perform a **request-time** permission, availability, and integrity
 //!    check against the current database state.
-//! 4. Issue a [`SignedDownloadDescriptor`] (short-lived) or return the
+//! 4. Issue a `SignedDownloadDescriptor` (short-lived) or return the
 //!    appropriate refusal variant.
 //!
 //! The handler never relies on cached catalogue state — every request is
@@ -57,7 +57,7 @@ pub enum NonceCheck {
 /// - Descriptors are **single-use**: a nonce is marked consumed upon
 ///   first presentation to the download protocol.
 /// - Replayed descriptors (same nonce) are rejected with
-///   [`DescriptorVerification::NonceReused`].
+///   [`DescriptorVerification::NonceReused`](crate::file_access_protocol::DescriptorVerification::NonceReused).
 /// - Expired entries are cleaned up lazily on every [`check`](Self::check) /
 ///   [`check_and_mark`](Self::check_and_mark) call, keeping the store
 ///   bounded to at most one TTL window's worth of entries.

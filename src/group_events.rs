@@ -5,7 +5,7 @@
 //!
 //! # Event identity (BORU-AUDIT-15)
 //!
-//! Every event carries a fresh 128-bit cryptographic [`nonce`](GroupEventEnvelope::nonce)
+//! Every event carries a fresh 128-bit cryptographic [`nonce`](crate::group_events::GroupEventEnvelope::nonce)
 //! generated at signing time. The `event_id` is derived from a
 //! domain-separated BLAKE3 hash of the complete canonical signed event
 //! contents (version, actor, group, epoch, timestamp, nonce and payload), so
@@ -16,7 +16,7 @@
 //! mandatory rather than advisory.
 //!
 //! All current event classes use the nonce-based constructor
-//! ([`GroupEvent::sign`]); there is no deterministic-ID event class in the
+//! ([`GroupEvent::sign`](crate::group_events::GroupEvent::sign)); there is no deterministic-ID event class in the
 //! protocol today. If one is ever introduced it must be documented separately
 //! and must not reuse the generic event-ID constructor.
 //!
@@ -26,8 +26,8 @@
 //! ([`crate::group_replay::ReplayStore`]) when one is attached. The in-memory
 //! `seen` map is a capped hot cache layered over that persisted state, never
 //! the sole authority: replay protection survives restart, memory stays
-//! bounded by [`REPLAY_MEMORY_CACHE_MAX`], and markers older than
-//! [`REPLAY_WINDOW_PRIOR_EPOCHS`] prior epochs are pruned on rotation and
+//! bounded by [`REPLAY_MEMORY_CACHE_MAX`](crate::group_events::REPLAY_MEMORY_CACHE_MAX), and markers older than
+//! [`REPLAY_WINDOW_PRIOR_EPOCHS`](crate::group_events::REPLAY_WINDOW_PRIOR_EPOCHS) prior epochs are pruned on rotation and
 //! startup.
 
 use std::collections::{HashMap, HashSet};

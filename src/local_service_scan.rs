@@ -2,7 +2,7 @@
 //!
 //! Enumerates loopback-reachable TCP listeners, verifies them with connect
 //! tests, fingerprints HTTP services, and labels them with a human-readable
-//! name. The GUI calls [`scan_local_services`] and renders the returned
+//! name. The GUI calls [`scan_local_services`](crate::local_service_scan::scan_local_services) and renders the returned
 //! suggestions; the module itself has no iced dependency so a future
 //! non-desktop backend could substitute its own enumeration strategy.
 //!

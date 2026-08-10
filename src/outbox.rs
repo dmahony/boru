@@ -24,13 +24,13 @@
 //! # Expiry (legacy)
 //!
 //! Old entries (default 7 days) are cleaned up automatically on save.
-//! Call [`OutboxStore::expire`] explicitly or rely on the automatic
-//! expiry that runs before every [`save`](OutboxStore::save).
+//! Call [`OutboxStore::expire`](crate::outbox::OutboxStore::expire) explicitly or rely on the automatic
+//! expiry that runs before every [`save`](crate::outbox::OutboxStore::save).
 //!
 //! # Duplicate suppression
 //!
-//! [`push`](OutboxStore::push) checks for an existing entry with the
-//! same [`event_id`](OutboxEntry::event_id) and returns an error if one
+//! [`push`](crate::outbox::OutboxStore::push) checks for an existing entry with the
+//! same [`event_id`](crate::outbox::OutboxEntry::event_id) and returns an error if one
 //! already exists — preventing the same message from being queued twice.
 //!
 //! # Migration

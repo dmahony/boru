@@ -1,10 +1,10 @@
 //! Per-group encryption state and high-level API for managing encrypted groups.
 //!
-//! [`EncryptionState`] holds per-group [`GroupState`] instances keyed by
-//! [`GroupId`] and provides high-level methods for creating encrypted groups,
+//! [`EncryptionState`](crate::group_encryption::encryption_state::EncryptionState) holds per-group [`GroupState`](crate::group_events::GroupState) instances keyed by
+//! [`GroupId`](crate::group_id::GroupId) and provides high-level methods for creating encrypted groups,
 //! sending encrypted messages, and processing incoming encrypted messages.
 //!
-//! This module wires the p2panda-encryption [`MessageGroup`] API into boru's
+//! This module wires the p2panda-encryption [`MessageGroup`](p2panda_encryption::message_scheme::group::MessageGroup) API into boru's
 //! application layer.
 
 use std::collections::HashMap;

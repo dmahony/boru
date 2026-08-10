@@ -1,9 +1,9 @@
 //! Provider-neutral GIF domain model.
 //!
-//! Defines the [`GifProvider`] trait plus the neutral request/response
+//! Defines the [`GifProvider`](crate::gif_provider::GifProvider) trait plus the neutral request/response
 //! types every GIF provider (KLIPY, Tenor, …) speaks.  The rest of
 //! the application depends only on these types — provider-specific wire
-//! models stay inside the adapter module that implements [`GifProvider`].
+//! models stay inside the adapter module that implements [`GifProvider`](crate::gif_provider::GifProvider).
 //!
 //! This module performs no networking and holds no provider credentials.
 //! Concrete providers are responsible for HTTP transport, timeouts,

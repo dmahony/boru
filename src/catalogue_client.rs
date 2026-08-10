@@ -180,8 +180,9 @@ fn validate_pages(
 /// Validate a fully assembled [`SignedFileCatalogue`] against limits,
 /// duplicate checks, field validation, owner matching, and signature verification.
 ///
-/// Emits [`DiagnosticEventKind::CatalogueSignatureRejected`](crate::diagnostics::DiagnosticEventKind::CatalogueSignatureRejected)
-/// on signature or owner mismatch.  Returns
+/// Emits a
+/// [signature rejection](crate::diagnostics::DiagnosticEventKind::CatalogueSignatureRejected)
+/// event on signature or owner mismatch.  Returns
 /// [`RemoteCatalogueFetchError::SignatureInvalid`] for signature/owner
 /// errors and [`RemoteCatalogueFetchError::ProtocolError`] for structural
 /// issues.
@@ -447,7 +448,7 @@ fn record_fetch_result(
 }
 
 /// Store a fetched and validated [`SignedFileCatalogue`] to local storage,
-/// emitting a [`CatalogueRevisionInstalled`] event on success.
+/// emitting a [`CatalogueRevisionInstalled`](crate::diagnostics::DiagnosticEventKind::CatalogueRevisionInstalled) event on success.
 ///
 /// This is the idiomatic way to persist a remote catalogue after a
 /// successful fetch.  The function calls [`Storage::replace_remote_catalogue`]
@@ -481,10 +482,10 @@ pub fn process_and_store_remote_catalogue(
 /// Handle a catalogue notice/advertisement from a remote peer.
 ///
 /// Orchestrates the full lifecycle:
-/// 1. Emits [`CatalogueNoticeReceived`] with the advertised revision.
+/// 1. Emits [`CatalogueNoticeReceived`](crate::diagnostics::DiagnosticEventKind::CatalogueNoticeReceived) with the advertised revision.
 /// 2. Fetches the remote catalogue via [`fetch_remote_catalogue`].
 /// 3. On success, persists the catalogue via [`process_and_store_remote_catalogue`],
-///    which emits [`CatalogueRevisionInstalled`].
+///    which emits [`CatalogueRevisionInstalled`](crate::diagnostics::DiagnosticEventKind::CatalogueRevisionInstalled).
 ///
 /// The peer identity for all events is sourced from `server_pk`.
 ///

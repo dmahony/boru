@@ -1,7 +1,7 @@
 //! Transport-level message deduplication and signed-payload cache.
 //!
-//! [`SEEN_MESSAGES`] suppresses duplicate deliveries from gossip fan-out,
-//! backfill and reconnection paths; [`SIGNED_MESSAGE_CACHE`] retains the raw
+//! `SEEN_MESSAGES` suppresses duplicate deliveries from gossip fan-out,
+//! backfill and reconnection paths; `SIGNED_MESSAGE_CACHE` retains the raw
 //! authenticated wire bytes so the backfill responder can serve exact payloads.
 
 use std::collections::HashMap;

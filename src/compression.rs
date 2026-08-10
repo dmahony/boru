@@ -1,6 +1,6 @@
 //! Pure-Rust image compression utilities using the `image` crate.
 //!
-//! Provides [`compress_image`] — resize and JPEG-encode image bytes with
+//! Provides [`compress_image`](crate::compression::compress_image) — resize and JPEG-encode image bytes with
 //! caller-specified maximum dimension and quality.
 //!
 //! Also exposes internal helpers (`resize_rgb8`, `encode_jpeg_rgb8`) as

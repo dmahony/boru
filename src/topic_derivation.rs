@@ -9,7 +9,7 @@ use crate::proto::state::TopicId;
 
 /// Domain separator for public-room gossip topics.
 ///
-/// Chosen to be distinct from [`DISCOVERY_KEY_DOMAIN_SEPARATOR`] so that the
+/// Chosen to be distinct from [`DISCOVERY_KEY_DOMAIN_SEPARATOR`](crate::public_room::DISCOVERY_KEY_DOMAIN_SEPARATOR) so that the
 /// same inputs (network, room name, version) always produce different topic
 /// and discovery-key outputs — providing **domain separation** between the
 /// gossip mesh and the DHT discovery namespace.
@@ -20,7 +20,7 @@ pub const PUBLIC_ROOM_DOMAIN_SEPARATOR: &[u8] = b"boru-chat public-room v1";
 /// # Inputs
 ///
 /// * `network_byte` — single byte identifying the network (see
-///   [`PublicNetwork::network_byte`]).
+///   [`PublicNetwork::network_byte`](crate::public_room::PublicNetwork::network_byte)).
 /// * `room_name` — UTF-8 room name (e.g. `"public-lobby"`).
 /// * `version` — protocol version byte (currently `1`).
 ///

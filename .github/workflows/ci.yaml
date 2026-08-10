@@ -227,13 +227,27 @@ jobs:
     env:
       RUSTC_WRAPPER: "sccache"
       SCCACHE_GHA_ENABLED: "on"
+      # Fail on any rustdoc warning: broken intra-doc links, unresolved links,
+      # invalid HTML, etc. The crate also denies missing_docs and
+      # rustdoc::broken_intra_doc_links at the crate root (src/lib.rs).
       RUSTDOCFLAGS: -Dwarnings
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@nightly
-      - uses: dtolnay/install@cargo-docs-rs
+      - uses: dtolnay/rust-toolchain@stable
       - name: Install sccache
         uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Build docs (all features, no deps)
+        # --all-features matches [package.metadata.docs.rs] (all-features = true)
+        # and the Docs Preview job (.github/workflows/docs.yaml). The all-features
+        # feature matrix is valid on ubuntu-latest: the platform-dependent
+        # features (gui / video-calls / voice-calls) are Linux-first and the
+        # runner image ships the native libraries they need (X11/Wayland/GL,
+        # GStreamer, ALSA, libclang for nokhwa's bindgen, C++ toolchain for
+        # openh264). --no-deps keeps the check focused on this crate's docs.
+        # sccache only caches dependency compilation, never rustdoc output, so
+        # every run re-documents the crate and cannot be hidden by stale cache.
+        run: cargo doc --workspace --all-features --no-deps
 
 
   clippy_check:

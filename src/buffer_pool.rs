@@ -1,19 +1,25 @@
 //! Zero-allocation byte-buffer pooling.
 //!
-//! A [`BufferPool`] holds a fixed-size collection of pre-allocated byte
-//! buffers.  [`BufferPool::acquire`] hands out one buffer at a time wrapped in
-//! a [`PooledBuffer`]; calling [`PooledBuffer::freeze`] turns it into an
-//! immutable, reference-counted [`PooledBytes`].  When the last [`PooledBytes`]
-//! reference is dropped, the underlying allocation is cleared and returned to
-//! the pool, so the steady state performs no heap allocation for repeated
-//! message construction.
+//! A [`BufferPool`](crate::buffer_pool::BufferPool) holds a fixed-size
+//! collection of pre-allocated byte buffers.
+//! [`BufferPool::acquire`](crate::buffer_pool::BufferPool::acquire) hands out
+//! one buffer at a time wrapped in a
+//! [`PooledBuffer`](crate::buffer_pool::PooledBuffer); calling
+//! [`PooledBuffer::freeze`](crate::buffer_pool::PooledBuffer::freeze) turns it
+//! into an immutable, reference-counted
+//! [`PooledBytes`](crate::buffer_pool::PooledBytes).  When the last
+//! [`PooledBytes`](crate::buffer_pool::PooledBytes) reference is dropped, the
+//! underlying allocation is cleared and returned to the pool, so the steady
+//! state performs no heap allocation for repeated message construction.
 //!
 //! The pool never panics on exhaustion: if no idle buffer is available,
-//! [`BufferPool::acquire`] falls back to a fresh heap allocation, and buffers
-//! returned while the pool is already full (or still shared with cloned
-//! [`Bytes`]) are freed normally.  Returned buffers keep whatever capacity they
-//! grew to while in use, so a buffer that outgrew its nominal [`BufferPool`]
-//! capacity stays large for subsequent reuse.
+//! [`BufferPool::acquire`](crate::buffer_pool::BufferPool::acquire) falls back
+//! to a fresh heap allocation, and buffers returned while the pool is already
+//! full (or still shared with cloned [`Bytes`](bytes::Bytes)) are freed
+//! normally.  Returned buffers keep whatever capacity they grew to while in
+//! use, so a buffer that outgrew its nominal
+//! [`BufferPool`](crate::buffer_pool::BufferPool) capacity stays large for
+//! subsequent reuse.
 
 use bytes::Bytes;
 use std::sync::{Mutex, MutexGuard};

@@ -1,6 +1,6 @@
 //! Dynamic group-membership management and handshake.
 //!
-//! Implements [`AckedGroupMembership<PeerId, OpId>`] by bridging boru's
+//! Implements [`AckedGroupMembership<PeerId, OpId>`](p2panda_encryption::traits::AckedGroupMembership) by bridging boru's
 //! existing owner-centric membership model (from
 //! [`group_events`](crate::group_events) + [`group_epoch`](crate::group_epoch))
 //! to p2panda-encryption's operation-based trait.
@@ -11,14 +11,14 @@
 //! boru's existing owner-centric model:
 //!
 //! - The owner performs add/remove via [`GroupEvent`](crate::group_events::GroupEvent)s.
-//! - Each operation maps to a p2panda [`OpId`].
+//! - Each operation maps to a p2panda [`OpId`](crate::group_encryption::types::OpId).
 //! - The member set is authoritative from boru's group state.
 //! - On member removal, encryption keys are rotated (delegated to
-//!   p2panda-encryption's [`MessageGroup::remove`]).
+//!   p2panda-encryption's [`MessageGroup::remove`](p2panda_encryption::message_scheme::group::MessageGroup::remove)).
 //!
 //! # State
 //!
-//! [`MembershipState`] tracks the current member set, the owner, and a
+//! [`MembershipState`](crate::group_encryption::membership::MembershipState) tracks the current member set, the owner, and a
 //! sequenced operation log.  All operations from the owner are immediately
 //! effective — acknowledgements are tracked for p2panda-encryption
 //! compatibility but do not gate membership visibility.
@@ -45,7 +45,7 @@ use super::types::{OpId, PeerId};
 /// p2panda-encryption 0.7's wire message scheme has **no role field**:
 /// [`p2panda_encryption::message_scheme::group::MessageGroup::send`] only checks
 /// that a ratchet exists, never *who* is allowed to write.  Roles are therefore
-/// enforced at the boru application layer ([`EncryptionState`]), not inside the
+/// enforced at the boru application layer ([`EncryptionState`](crate::group_encryption::encryption_state::EncryptionState)), not inside the
 /// p2panda DGM.  A conforming client refuses to encrypt for a Reader and refuses
 /// to surface plaintext from a non-member/Reader; a malicious client with a
 /// leaked group key can still emit ciphertext, but honest receivers drop it.

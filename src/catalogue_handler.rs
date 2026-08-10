@@ -1,15 +1,15 @@
 //! Catalogue retrieval protocol handler — server side.
 //!
-//! Implements [`ProtocolHandler`] for the `/boru-file-catalog/1` ALPN.
+//! Implements [`ProtocolHandler`](iroh::protocol::ProtocolHandler) for the `/boru-file-catalog/1` ALPN.
 //! On each incoming connection:
 //!
-//! 1. Authenticate the requester via [`Connection::remote_id()`].
-//! 2. Look up the requester in [`FriendsStore`]; blocked peers get
+//! 1. Authenticate the requester via [`Connection::remote_id()`](iroh::endpoint::Connection::remote_id).
+//! 2. Look up the requester in [`FriendsStore`](crate::friends::FriendsStore); blocked peers get
 //!    `PermissionDenied`.
-//! 3. Call [`Storage::catalogue_entries_for_peer()`] to get the filtered,
+//! 3. Call [`Storage::catalogue_entries_for_peer()`](crate::storage::Storage::catalogue_entries_for_peer) to get the filtered,
 //!    authorised view of files and collections.
-//! 4. Build and sign a [`SignedFileCatalogue`] with the local [`SecretKey`].
-//! 5. Return it as [`CatalogResponse::SignedCatalogue`].
+//! 4. Build and sign a [`SignedFileCatalogue`](crate::catalogue_model::SignedFileCatalogue) with the local [`SecretKey`](iroh::SecretKey).
+//! 5. Return it as [`CatalogResponse::SignedCatalogue`](crate::catalogue_protocol::CatalogResponse::SignedCatalogue).
 //!
 //! The handler never reuses a catalogue signed for one requester as
 //! another's — every request builds a fresh signed envelope.

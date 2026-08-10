@@ -5,14 +5,14 @@
 //! - `identity_registry` — maps `PeerId → OneTimeKeyBundle` (identity key + signed
 //!   pre-key + optional one-time pre-key).  Looked up by [`IdentityRegistry`].
 //! - `prekey_registry` — one-time pre-key bundles per peer.  Each row stores a
-//!   single [`OneTimeKeyBundle`]; the `used` flag marks consumed bundles.
+//!   single `OneTimeKeyBundle`; the `used` flag marks consumed bundles.
 //!   Looked up by [`PreKeyRegistry`].
 //!
 //! # State
 //!
-//! [`RegistryState`] wraps a shared SQLite connection (`Arc<Mutex<Connection>>`)
+//! [`RegistryState`](crate::group_encryption::registry::RegistryState) wraps a shared SQLite connection (`Arc<Mutex<Connection>>`)
 //! so that both registry traits work from the same connection handle.  The
-//! [`Registry`] unit struct carries the two trait implementations.
+//! [`Registry`](crate::group_encryption::registry::Registry) unit struct carries the two trait implementations.
 //!
 //! [`IdentityRegistry`]: p2panda_encryption::traits::IdentityRegistry
 //! [`PreKeyRegistry`]: p2panda_encryption::traits::PreKeyRegistry

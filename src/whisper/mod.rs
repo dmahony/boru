@@ -6,15 +6,15 @@
 //!
 //! # Architecture
 //!
-//! * [`WhisperBuilder`] / [`Whisper::spawn`] — create and run the whisper actor.
-//! * [`WhisperHandle`] — cloneable handle for sending DMs and files.
-//! * [`WhisperProtocol`] — registers as a protocol handler on the Router to accept
+//! * [`WhisperBuilder`](crate::whisper::WhisperBuilder) / `Whisper::spawn` — create and run the whisper actor.
+//! * [`WhisperHandle`](crate::whisper::WhisperHandle) — cloneable handle for sending DMs and files.
+//! * [`WhisperProtocol`](crate::whisper::WhisperProtocol) — registers as a protocol handler on the Router to accept
 //!   incoming whisper connections.
-//! * [`WhisperEvent`] — events delivered to the frontend (messages, connect/disconnect).
+//! * [`WhisperEvent`](crate::whisper::WhisperEvent) — events delivered to the frontend (messages, connect/disconnect).
 //!
 //! # ALPN
 //!
-//! The ALPN for whisper connections is [`WHISPER_ALPN`].
+//! The ALPN for whisper connections is [`WHISPER_ALPN`](crate::whisper::WHISPER_ALPN).
 
 pub mod session_manager;
 
@@ -35,7 +35,7 @@ use iroh::{
 use n0_error::Result;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, Mutex};
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::mailbox::{MailboxAck, MailboxEnvelope};
 

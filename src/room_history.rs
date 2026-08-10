@@ -163,7 +163,6 @@ impl RoomHistoryStore {
 
     /// Do not persist room history.  Returns the legacy path for API
     /// compatibility without creating it.
-    #[expect(dead_code)]
     pub fn save(&self) -> Result<PathBuf> {
         let data_dir = &self.data_dir;
         if data_dir.as_os_str().is_empty() {

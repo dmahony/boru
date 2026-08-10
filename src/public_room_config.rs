@@ -3,7 +3,7 @@
 //!
 //! All tunable parameters that control DHT traffic rate, record validation
 //! strictness, peer-count bounds, message size, and backfill limits live
-//! in a single [`PublicRoomConfig`] struct so they can be overridden easily
+//! in a single [`PublicRoomConfig`](crate::public_room_config::PublicRoomConfig) struct so they can be overridden easily
 //! in tests without touching production defaults.
 //!
 //! # Why defaults are conservative
@@ -113,7 +113,7 @@ pub struct PublicRoomConfig {
     // ── Retry / backoff ────────────────────────────────────────────
     /// Initial delay before the first retry on a DHT failure.
     ///
-    /// Doubled on each subsequent failure, capped at [`retry_backoff_max`].
+    /// Doubled on each subsequent failure, capped at `retry_backoff_max`.
     ///
     /// Default: 1 second.
     pub retry_backoff_min: Duration,
@@ -140,7 +140,7 @@ pub struct PublicRoomConfig {
     /// [`Record`]: distributed_topic_tracker::Record
     pub max_record_size: usize,
 
-    /// Maximum number of candidate [`EndpointId`] values to return from
+    /// Maximum number of candidate [`EndpointId`](iroh::EndpointId) values to return from
     /// a single discovery cycle.
     ///
     /// Default: 20.

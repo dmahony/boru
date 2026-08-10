@@ -6,8 +6,8 @@
 //!
 //! # Concurrency
 //!
-//! When [`OutboxDeliveryWorker::with_max_concurrent`] is set to a value > 1,
-//! [`run_once`](OutboxDeliveryWorker::run_once) claims batches of due rows
+//! When [`OutboxDeliveryWorker::with_max_concurrent`](crate::outbox_delivery::OutboxDeliveryWorker::with_max_concurrent) is set to a value > 1,
+//! [`run_once`](crate::outbox_delivery::OutboxDeliveryWorker::run_once) claims batches of due rows
 //! transactionally and processes them concurrently (up to the configured
 //! limit).  Per-peer ordering is preserved: at most one delivery is in flight
 //! for a given recipient at any time.
@@ -30,7 +30,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{mpsc, Semaphore};
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// Run a blocking outbox storage operation on the Tokio blocking pool.
 ///
@@ -114,7 +114,7 @@ impl ReconnectDeliveryTrigger {
     /// This channel is **intentionally lossy** (telemetry/hint): a dropped
     /// notification only delays an immediate retry — the worker also runs a
     /// periodic recovery tick — so no queued message is ever lost.  When the
-    /// queue itself is full the drop is counted in [`RECONNECT_TRIGGER_QUEUE_FULL`]
+    /// queue itself is full the drop is counted in `RECONNECT_TRIGGER_QUEUE_FULL`
     /// and logged, so overload is observable rather than silent.
     pub fn notify(&self, event: PeerReachable) -> bool {
         let now = Instant::now();

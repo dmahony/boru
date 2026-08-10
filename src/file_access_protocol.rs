@@ -15,12 +15,12 @@
 //!
 //! The version field lets us evolve the file-access protocol without
 //! changing the ALPN string.  Unknown versions MUST be rejected with
-//! [`FileAccessErrorCode::UnsupportedVersion`].
+//! [`FileAccessErrorCode::UnsupportedVersion`](crate::file_access_protocol::FileAccessErrorCode::UnsupportedVersion).
 //!
 //! # Descriptor signing (BORU-AUDIT-05)
 //!
-//! A [`SignedDownloadDescriptor`] is authenticated by an Ed25519 signature
-//! over the canonical serialization of a [`DescriptorSignedPayloadV2`]:
+//! A `SignedDownloadDescriptor` is authenticated by an Ed25519 signature
+//! over the canonical serialization of a [`DescriptorSignedPayloadV2`](crate::file_access_protocol::DescriptorSignedPayloadV2):
 //!
 //! ```text
 //! postcard::to_stdvec(DescriptorSignedPayloadV2 {
@@ -34,11 +34,11 @@
 //! The struct field order IS the wire order: postcard serializes struct
 //! fields in declaration order and length-prefixes every variable-length
 //! field, so no two descriptors can encode the same byte string with
-//! different meanings.  [`sign_download_descriptor`] and
-//! [`verify_download_descriptor`] both call
-//! [`DescriptorSignedPayloadV2::canonical_bytes`], so the signed bytes can
+//! different meanings.  [`sign_download_descriptor`](crate::file_access_protocol::sign_download_descriptor) and
+//! [`verify_download_descriptor`](crate::file_access_protocol::verify_download_descriptor) both call
+//! [`DescriptorSignedPayloadV2::canonical_bytes`](crate::file_access_protocol::DescriptorSignedPayloadV2::canonical_bytes), so the signed bytes can
 //! never drift between signing and verification.  Unknown signed-payload
-//! versions are rejected as [`DescriptorVerification::UnsupportedVersion`].
+//! versions are rejected as [`DescriptorVerification::UnsupportedVersion`](crate::file_access_protocol::DescriptorVerification::UnsupportedVersion).
 //! The strongly typed `blob_hash` is the single canonical hash representation
 //! (the hex display string was removed by BORU-AUDIT-06 — logs/UI derive a
 //! display hash from `blob_hash` when needed instead of carrying a second

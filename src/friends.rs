@@ -2,7 +2,7 @@
 //!
 //! This module owns the on-disk `friends.json` file that lives beside the
 //! persistent `secret_key.txt` identity file.  Friend relationships are
-//! persisted as JSON using [`atomic_write_json`] for crash-safe atomic writes.
+//! persisted as JSON using [`atomic_write_json`](crate::chat_core::atomic_write::atomic_write_json) for crash-safe atomic writes.
 
 use std::{
     collections::BTreeMap,

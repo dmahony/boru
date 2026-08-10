@@ -3,25 +3,25 @@
 //!
 //! # Architecture
 //!
-//! [`DownloadManager`] owns the download lifecycle loop.  Each call to
-//! [`tick`](DownloadManager::tick) claims one queued download row from
+//! [`DownloadManager`](crate::download_manager::DownloadManager) owns the download lifecycle loop.  Each call to
+//! [`tick`](crate::download_manager::DownloadManager::tick) claims one queued download row from
 //! the database and advances it into the `resolving_peer` state.  Downstream
 //! protocol handlers (file-access client, blob transfer) drive the row
-//! through the remaining states via [`Storage`] methods.
+//! through the remaining states via [`Storage`](crate::storage::Storage) methods.
 //!
-//! On startup, [`recover_from_restart`](DownloadManager::recover_from_restart)
+//! On startup, [`recover_from_restart`](crate::download_manager::DownloadManager::recover_from_restart)
 //! collects interrupted downloads, recovers them to `queued`, and pushes them
-//! into a [`BoundedStartupScheduler`] which starts up to `max_startup_downloads`
+//! into a [`BoundedStartupScheduler`](crate::bounded_startup_scheduler::BoundedStartupScheduler) which starts up to `max_startup_downloads`
 //! immediately via [`kickstart`] and holds the rest in a pending queue.
 //! Remaining items are started by [`notify_startup_completed`] as active
 //! downloads finish.
 //!
 //! Storage extension methods in this file add temp-path tracking and
-//! permission-rejection bookkeeping to [`Storage`] without modifying
+//! permission-rejection bookkeeping to [`Storage`](crate::storage::Storage) without modifying
 //! `src/storage.rs`.
 //!
-//! [`kickstart`]: BoundedStartupScheduler::kickstart
-//! [`notify_startup_completed`]: DownloadManager::notify_startup_completed
+//! [`kickstart`]: crate::bounded_startup_scheduler::BoundedStartupScheduler::kickstart
+//! [`notify_startup_completed`]: crate::download_manager::DownloadManager::notify_startup_completed
 
 use std::collections::HashMap;
 use std::sync::{atomic::AtomicBool, Arc, Mutex};
@@ -118,7 +118,7 @@ impl DownloadManager {
     /// `max_startup_downloads` immediately.  Remaining items stay in the
     /// scheduler's pending queue.
     ///
-    /// [`kickstart`]: BoundedStartupScheduler::kickstart
+    /// [`kickstart`]: crate::bounded_startup_scheduler::BoundedStartupScheduler::kickstart
     pub async fn recover_from_restart(&self) -> Result<()> {
         let mut interrupted = Vec::new();
         for state in [
@@ -217,7 +217,7 @@ impl DownloadManager {
     /// Start a batch of popped queued downloads, stopping on the first
     /// failure.  Mirrors the original [`kickstart`] loop logic.
     ///
-    /// [`kickstart`]: BoundedStartupScheduler::kickstart
+    /// [`kickstart`]: crate::bounded_startup_scheduler::BoundedStartupScheduler::kickstart
     async fn start_burst_items(items: Vec<(i64, QueuedDownload)>) -> Vec<ActiveDownload> {
         let mut started = Vec::with_capacity(items.len());
         for (_id, queued) in items {

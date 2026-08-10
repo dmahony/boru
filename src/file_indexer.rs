@@ -181,7 +181,7 @@ impl FileIndexer {
 
     /// Compute and cache a file's content hash on a blocking worker thread.
     ///
-    /// This is the async non-blocking equivalent of [`hash_for_transfer`].
+    /// This is the async non-blocking equivalent of [`hash_for_transfer`](crate::file_indexer::FileIndexer::hash_for_transfer).
     ///
     /// 1. Reads the file path under the index read lock, then releases it.
     /// 2. Delegates the actual file I/O + blake3 to a blocking worker
@@ -259,7 +259,7 @@ impl FileIndexer {
     /// *   The batch contains directory-level events (create/remove/rename)
     ///     that could change the tree structure.
     /// *   The number of unique changed paths exceeds
-    ///     [`FULL_RESCAN_PATH_THRESHOLD`] (50).
+    ///     `FULL_RESCAN_PATH_THRESHOLD` (50).
     pub fn watch(&self) -> Result<mpsc::Receiver<FileChangeEvent>> {
         ensure_shared_folder(&self.shared_folder)?;
         let (notify_tx, notify_rx) = mpsc::channel();

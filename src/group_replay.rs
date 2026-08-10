@@ -14,10 +14,10 @@
 //! - Accepted event IDs are recorded in SQLite (`group_event_replay`),
 //!   keyed by `(group_id, event_id)` and indexed by `(group_id, epoch)` so
 //!   pruning is a cheap range delete.
-//! - [`ReplayStore::record`] is a single atomic `INSERT OR IGNORE` — the
+//! - [`ReplayStore::record`](crate::group_replay::ReplayStore::record) is a single atomic `INSERT OR IGNORE` — the
 //!   replay marker lands in the same transaction as the acceptance decision,
 //!   so a concurrent duplicate arrival cannot both be accepted.
-//! - [`ReplayStore::prune_older_than`] deletes expired epochs in bounded
+//! - [`ReplayStore::prune_older_than`](crate::group_replay::ReplayStore::prune_older_than) deletes expired epochs in bounded
 //!   batches (never one unbounded statement).
 //!
 //! The in-memory hot cache in [`GroupState`](crate::group_events::GroupState)
@@ -88,7 +88,7 @@ impl std::error::Error for ReplayStoreError {}
 /// SQLite-backed store of accepted group event IDs.
 ///
 /// Thread-safe and cheap to clone (the connection is shared behind an
-/// `Arc<Mutex<_>>`), so a single store can back many [`GroupState`]s.
+/// `Arc<Mutex<_>>`), so a single store can back many [`GroupState`](crate::group_events::GroupState)s.
 #[derive(Clone, Debug)]
 pub struct ReplayStore {
     conn: Arc<Mutex<Connection>>,

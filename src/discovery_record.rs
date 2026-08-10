@@ -1,13 +1,13 @@
 //! Public discovery record — how a node advertises its EndpointId on the DHT.
 //!
-//! Uses the [`distributed-topic-tracker`] crate's native [`Record`] format.
+//! Uses the `distributed-topic-tracker` crate's native [`Record`] format.
 //! Each record is a signed, timestamped payload whose content is a small
 //! postcard-encoded structure carrying the publisher's 32-byte Ed25519
 //! public key (the iroh [`EndpointId`]).
 //!
 //! # Wire format
 //!
-//! A discovery record is a [`Record`] whose inner [`RecordContent`] deserializes
+//! A discovery record is a [`Record`] whose inner `RecordContent` deserializes
 //! to [`DiscoveryRecordPayload`]:
 //!
 //! | Offset | Size | Field |
@@ -27,7 +27,7 @@
 //! | Ed25519 signature | 64 B |
 //! | **Total** | **~171 B** |
 //!
-//! This is well under the tracker's [`EncryptedRecord::MAX_SIZE`] of 2048
+//! This is well under the tracker's [`EncryptedRecord::MAX_SIZE`](distributed_topic_tracker::EncryptedRecord::MAX_SIZE) of 2048
 //! bytes even after HPKE encryption (~270 B ciphertext), leaving ample room
 //! for future fields.
 //!
@@ -36,13 +36,11 @@
 //! * **Publisher binding.** The [`Record`] embeds the publisher's Ed25519
 //!   verifying key and the record is signed with the corresponding secret key.
 //!   Signature verification proves authorship.
-//! * **Time window.** Each record is bound to a [`unix_minute`] slot, enabling
+//! * **Time window.** Each record is bound to a [`unix_minute`](distributed_topic_tracker::unix_minute) slot, enabling
 //!   the tracker's minute-rotating key schedule and making replay attacks
 //!   self-limiting.
 //! * **Topic binding.** The topic hash is signed into every record, so a
 //!   record valid for one room's discovery key is useless for another.
-//!
-//! [RecordContent]: distributed_topic_tracker::crypto::record::RecordContent
 
 use distributed_topic_tracker::Record;
 use iroh::{EndpointId, SecretKey};
@@ -239,7 +237,7 @@ pub fn create_discovery_record(
 ///   unix minute, or
 /// * Accept the record from a trusted source (e.g. after the tracker crate's
 ///   own decryption-and-verification pipeline in
-///   [`RecordPublisher::get_records`]).
+///   [`RecordPublisher::get_records`](distributed_topic_tracker::RecordPublisher::get_records)).
 ///
 /// # Returns
 ///

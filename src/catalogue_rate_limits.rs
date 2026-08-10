@@ -4,8 +4,8 @@
 //!
 //! 1. **Concurrency limiter** (`CatalogueConcurrencyLimiter`) — caps the number
 //!    of catalogue connections being served simultaneously.  When the limit is
-//!    reached, new connections receive a [`CatalogResponse::Error`] with
-//!    [`CatalogErrorCode::Busy`].
+//!    reached, new connections receive a [`CatalogResponse::Error`](crate::catalogue_protocol::CatalogResponse::Error) with
+//!    [`CatalogErrorCode::Busy`](crate::catalogue_protocol::CatalogErrorCode::Busy).
 //!
 //! 2. **Combined per-peer abuse limiter** (`PeerCatalogueAbuseLimiter`) —
 //!    limits request frequency and response volume, and blocks peers that

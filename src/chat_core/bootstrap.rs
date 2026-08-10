@@ -65,7 +65,7 @@ pub fn seed_memory_lookup(
     }
 }
 
-/// Refresh the stored bootstrap peers in a [`RoomStore`] using the
+/// Refresh the stored bootstrap peers in a [`RoomStore`](crate::room::RoomStore) using the
 /// endpoint's current remote info for a set of known peer IDs.
 ///
 /// Call this **after** joining a room so that future reconnections

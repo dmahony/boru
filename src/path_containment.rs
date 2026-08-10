@@ -1,6 +1,6 @@
 //! Path containment helpers shared by download/export safety checks.
 //!
-//! [`canonicalize_allow_missing`] resolves symlinks in a path even when the
+//! `canonicalize_allow_missing` resolves symlinks in a path even when the
 //! final components do not exist yet — the normal case for an export or
 //! download target, where `Path::canonicalize` would fail.  Containment
 //! checks in [`crate::collection_transfer`] and [`crate::safe_destination`]
@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 ///
 /// This is the **canonical path-containment check** for files that already
 /// exist (or whose ancestors exist): it canonicalises both sides with
-/// [`canonicalize_allow_missing`] and verifies the result starts with the
+/// `canonicalize_allow_missing` and verifies the result starts with the
 /// root.  A pre-existing symlink inside the root that points outside is
 /// resolved and therefore rejected.
 ///
@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 ///
 /// This replaces the legacy `UserProfile::is_path_contained` (BORU-AUDIT-20);
 /// the legacy method used `Path::canonicalize`, which fails on
-/// not-yet-existing targets.  [`canonicalize_allow_missing`] handles the
+/// not-yet-existing targets.  `canonicalize_allow_missing` handles the
 /// export/download target case too, so this is the single containment check
 /// for both existing and to-be-created paths.
 pub fn is_path_contained(path: &Path, root: &Path) -> bool {

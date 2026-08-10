@@ -2,17 +2,17 @@
 //!
 //! Spawns background tasks that periodically re-publish local presence and
 //! discover new peers on the DHT.  Discovered peer IDs are forwarded through
-//! an [`mpsc::Sender`] channel or processed internally via a
-//! [`DynamicPeerJoiner`] for the caller to join.
+//! an `mpsc::Sender` channel or processed internally via a
+//! [`DynamicPeerJoiner`](crate::dynamic_joiner::DynamicPeerJoiner) for the caller to join.
 //!
 //! # Lifecycle
 //!
-//! 1. [`ContinuousTracker::start`] or
-//!    [`ContinuousTracker::start_with_joiner`] — spawns background tasks
+//! 1. `ContinuousTracker::start` or
+//!    `ContinuousTracker::start_with_joiner` — spawns background tasks
 //!    and returns a handle.
-//! 2. The caller reads from the [`mpsc::Receiver`] to get discovered peer
-//!    batches, or the internal [`DynamicPeerJoiner`] handles joining.
-//! 3. [`ContinuousTracker::shutdown`] — signals cancellation and awaits
+//! 2. The caller reads from the `mpsc::Receiver` to get discovered peer
+//!    batches, or the internal [`DynamicPeerJoiner`](crate::dynamic_joiner::DynamicPeerJoiner) handles joining.
+//! 3. `ContinuousTracker::shutdown` — signals cancellation and awaits
 //!    task completion.
 //!
 //! # Design
@@ -20,10 +20,10 @@
 //! - Two independent tokio tasks: one for publication, one for discovery.
 //! - Each tick applies uniform jitter to the configured interval.
 //! - Failures use exponential backoff capped at `max_retry_delay`.
-//! - The shared [`CancellationToken`] is fired on shutdown; both tasks
+//! - The shared [`CancellationToken`](tokio_util::sync::CancellationToken) is fired on shutdown; both tasks
 //!   observe it and exit promptly.
 //! - No blocking locks are held across `.await` — the tracker only calls
-//!   async methods on an `Arc`-wrapped [`PublicRoomTracker`] and the
+//!   async methods on an `Arc`-wrapped [`PublicRoomTracker`](crate::public_room_tracker::PublicRoomTracker) and the
 //!   channel sender.
 
 use std::collections::{HashMap, VecDeque};
@@ -197,7 +197,7 @@ impl Default for PublicationPolicyConfig {
 ///    twice with the same sequence wastes bandwidth and risks CAS-rejection on
 ///    DHT nodes that enforce strict ordering.
 ///
-/// 2. **Refresh heartbeat.**  If [`max_refresh_age`] has elapsed since the
+/// 2. **Refresh heartbeat.**  If [`max_refresh_age`](crate::public_room_continuous::PublicationPolicyConfig::max_refresh_age) has elapsed since the
 ///    last successful publish, the policy allows a re-publish even within the
 ///    same DHT minute — this keeps DHT leases alive on nodes that have already
 ///    accepted our record.
@@ -418,7 +418,7 @@ impl ContinuousTracker {
     /// and per-peer retry with exponential backoff.  The caller does not
     /// need to consume a channel or call `spawn_join_fanout`.
     ///
-    /// The joiner's [`neighbor_events_tx`](DynamicPeerJoiner::neighbor_events_tx)
+    /// The joiner's [`neighbor_events_tx`](crate::dynamic_joiner::DynamicPeerJoiner::neighbor_events_tx)
     /// sender is returned so the caller can forward gossip
     /// [`NeighborEvent`]s to keep the known-set in sync.
     ///

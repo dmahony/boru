@@ -49,7 +49,7 @@ use crate::diagnostics::TransferLifecycleEvent;
 use crate::friends::{FriendRelationship, FriendsStore};
 use crate::mailbox::{seal_for, MailboxAck, MailboxEnvelope, MailboxPublicKey};
 use crate::proto::TopicId;
-use crate::rings::{Ring, RingMember, RingPermission, RingResourcePermission};
+use crate::rings::{Ring, RingPermission, RingResourcePermission};
 use crate::store::{DeliveryStatus, MessageId, OutboxRow, StoredEnvelope};
 
 // ── Current schema version ────────────────────────────────────────────────
@@ -712,7 +712,7 @@ impl Storage {
     /// Open (or create) the database at `data_dir / `[`DB_FILE_NAME`]`.
     ///
     /// Runs schema migrations automatically so the database is always at
-    /// [`CURRENT_SCHEMA_VERSION`] after this call returns.
+    /// `CURRENT_SCHEMA_VERSION` after this call returns.
     /// Runs integrity check and crash-state recovery automatically.
     pub fn open(data_dir: impl AsRef<Path>) -> Result<Self> {
         Self::open_with_catalogue_limits(data_dir, CatalogueLimitsConfig::default())
@@ -2508,7 +2508,7 @@ impl Storage {
 
     /// Record that the transport layer successfully handed bytes to the
     /// remote peer.  Transitions `Sending` → `Sent`.  This is distinct
-    /// from an end-to-end ACK (see [`mark_acked`]).
+    /// from an end-to-end ACK (see [`mark_acked`](crate::storage::Storage::mark_acked)).
     ///
     /// `Sent` rows are still eligible for retry: they become claimable
     /// again once `next_attempt_at_ms` (the retry delay) has passed.
@@ -2794,7 +2794,7 @@ impl Storage {
     /// This is the durable claim primitive for single-owner workers.
     /// The `Sending` status acts as a per-row lock that prevents two workers
     /// from concurrently picking up the same row.  Stale `Sending` rows are
-    /// recovered by [`recover_stale_sending_deliveries`].
+    /// recovered by [`recover_stale_sending_deliveries`](crate::storage::Storage::recover_stale_sending_deliveries).
     pub fn claim_pending_deliveries(&self, limit: u32, now_ms: u64) -> Result<Vec<OutboxRow>> {
         let conn = self.conn.lock().unwrap();
         let tx = conn
@@ -4776,7 +4776,7 @@ impl Storage {
     /// Write multiple progress updates in a single SQLite transaction.
     ///
     /// Each entry is `(download_id, bytes_downloaded, state)`.  Updates
-    /// are applied via the same logic as [`update_download_progress`],
+    /// are applied via the same logic as [`update_download_progress`](crate::storage::Storage::update_download_progress),
     /// but wrapped in a single `BEGIN` / `COMMIT` so that N concurrent
     /// downloaders do not issue N separate transactions.
     ///
@@ -5889,7 +5889,7 @@ impl Storage {
     /// this facade never holds it across an await point, and transactions
     /// must be started and committed entirely inside the closure.
     ///
-    /// Slow operations (>= [`SLOW_STORAGE_OP_MS`]) are logged with a label
+    /// Slow operations (>= `SLOW_STORAGE_OP_MS`) are logged with a label
     /// and elapsed time only; message contents are never logged.
     ///
     /// If the store has been shut down, this fails fast instead of queueing.

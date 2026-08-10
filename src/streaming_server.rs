@@ -14,10 +14,10 @@
 //!   yield to the runtime and run the syscall on the blocking pool.
 //! - File-size polls use [`tokio::fs::metadata`].
 //! - Concurrent expensive streams are bounded by a semaphore
-//!   ([`MAX_CONCURRENT_STREAMS`] permits).  When the limit is reached the
+//!   (`MAX_CONCURRENT_STREAMS` permits).  When the limit is reached the
 //!   server answers an explicit `503 Busy` instead of spawning unbounded
 //!   blocking work.
-//! - Bodies are streamed in bounded [`CHUNK_SIZE`] chunks — the file is never
+//! - Bodies are streamed in bounded `CHUNK_SIZE` chunks — the file is never
 //!   read into memory as a whole.
 //! - Dropping the handle aborts in-flight connection tasks so file handles and
 //!   sockets close promptly.
@@ -93,7 +93,7 @@ impl StreamingServer {
     /// Start a server with an explicit cap on concurrent GET streams.
     ///
     /// Exposed for tests and embedders that need to tighten (or loosen) the
-    /// default [`MAX_CONCURRENT_STREAMS`] bound.  Requests beyond the cap are
+    /// default `MAX_CONCURRENT_STREAMS` bound.  Requests beyond the cap are
     /// answered with an explicit `503 Busy`.
     pub async fn start_with_limit(
         file_path: PathBuf,

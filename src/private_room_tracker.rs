@@ -1,24 +1,24 @@
 //! Private-room DHT discovery tracker.
 //!
-//! [`PrivateRoomTracker`] is a minimal wrapper around a
-//! [`TopicDiscoveryBackend`] that provides publish-once / discover-once
-//! operations for **private** rooms.  It differs from [`PublicRoomTracker`]
+//! [`PrivateRoomTracker`](crate::private_room_tracker::PrivateRoomTracker) is a minimal wrapper around a
+//! [`TopicDiscoveryBackend`](crate::discovery_backend::TopicDiscoveryBackend) that provides publish-once / discover-once
+//! operations for **private** rooms.  It differs from [`PublicRoomTracker`](crate::public_room_tracker::PublicRoomTracker)
 //! in two key ways:
 //!
 //! 1. **Namespace isolation.**  The DHT namespace is derived via
 //!    BLAKE3(topic || secret) instead of from a public room name, so
 //!    only peers who know both the gossip [`TopicId`] and the
-//!    [`DiscoverySecret`] can locate each other on the DHT.
-//! 2. **Key material.**  The [`DiscoverySecret`] itself is used as the
+//!    [`DiscoverySecret`](crate::discovery_secret::DiscoverySecret) can locate each other on the DHT.
+//! 2. **Key material.**  The [`DiscoverySecret`](crate::discovery_secret::DiscoverySecret) itself is used as the
 //!    discovery key for signing and verifying records, replacing the
 //!    public-room's deterministic discovery key.
 //!
 //! # Lifecycle
 //!
-//! 1. [`new`](Self::new) — construct with a backend, topic, and secret.
-//! 2. [`publish_once`](Self::publish_once) — advertise local presence.
-//! 3. [`discover_once`](Self::discover_once) — find valid peers.
-//! 4. [`shutdown`](Self::shutdown) — release backend resources.
+//! 1. [`new`](crate::private_room_tracker::PrivateRoomTracker::new) — construct with a backend, topic, and secret.
+//! 2. [`publish_once`](crate::private_room_tracker::PrivateRoomTracker::publish_once) — advertise local presence.
+//! 3. [`discover_once`](crate::private_room_tracker::PrivateRoomTracker::discover_once) — find valid peers.
+//! 4. [`shutdown`](crate::private_room_tracker::PrivateRoomTracker::shutdown) — release backend resources.
 //!
 //! # Minimal example
 //!
@@ -105,9 +105,9 @@ pub fn private_room_namespace(topic: &TopicId, secret: &DiscoverySecret) -> Name
 /// # Lifecycle
 ///
 /// 1. [`new`](Self::new) — construct.
-/// 2. [`publish_once`](Self::publish_once) — advertise local presence.
+/// 2. [`publish_once`](crate::private_room_tracker::PrivateRoomTracker::publish_once) — advertise local presence.
 /// 3. [`discover_once`](Self::discover_once) — find peers.
-/// 4. [`shutdown`](Self::shutdown) — release backend resources.
+/// 4. [`shutdown`](crate::private_room_tracker::PrivateRoomTracker::shutdown) — release backend resources.
 ///
 /// # Cancellation
 ///

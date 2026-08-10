@@ -3,9 +3,9 @@
 //! Each room has two logical documents, both broadcast over the same gossip topic:
 //!
 //! 1. **Metadata doc** — key-value room properties (name, description, rules).
-//!    Messages carry the [`METADATA_MARKER`] (0xFE) prefix byte.
+//!    Messages carry the `METADATA_MARKER` (0xFE) prefix byte.
 //! 2. **Roster doc** — the set of members currently in the room.
-//!    Messages carry the [`ROSTER_MARKER`] (0xFF) prefix byte.
+//!    Messages carry the `ROSTER_MARKER` (0xFF) prefix byte.
 //!
 //! Both docs use postcard serialization over the gossip mesh.  The room
 //! identifier / namespace is the gossip [`TopicId`].
@@ -13,26 +13,26 @@
 //! # Opening a room
 //!
 //! 1. Subscribe to the gossip topic.
-//! 2. Call [`create_metadata_doc`] to initialise the metadata.
-//! 3. Call [`create_roster_doc`] to initialise the roster and add yourself.
-//! 4. Call [`forward_room_events`] to start processing all three message
+//! 2. Call [`create_metadata_doc`](crate::room_docs::create_metadata_doc) to initialise the metadata.
+//! 3. Call [`create_roster_doc`](crate::room_docs::create_roster_doc) to initialise the roster and add yourself.
+//! 4. Call [`forward_room_events_for_chat`](crate::room_docs::forward_room_events_for_chat) to start processing all three message
 //!    types (metadata, roster, chat) from a single receiver.
 //!
 //! # Joining a room
 //!
 //! 1. Subscribe to the gossip topic (from a ticket).
-//! 2. Call [`create_metadata_doc`] with an empty initial state — the
+//! 2. Call [`create_metadata_doc`](crate::room_docs::create_metadata_doc) with an empty initial state — the
 //!    doc will be populated by remote peers' sync messages.
-//! 3. Call [`create_roster_doc`] with an empty initial state — the
+//! 3. Call [`create_roster_doc`](crate::room_docs::create_roster_doc) with an empty initial state — the
 //!    roster will be populated by remote peers' sync messages.
-//! 4. Add yourself to the roster with [`add_member`].
-//! 5. Call [`forward_room_events`] to start processing all messages.
+//! 4. Add yourself to the roster with [`add_member`](crate::room_docs::add_member).
+//! 5. Call [`forward_room_events_for_chat`](crate::room_docs::forward_room_events_for_chat) to start processing all messages.
 //!
 //! # Wire protocol
 //!
 //! Every doc message over the gossip topic starts with a protocol marker
 //! byte so the receiver can route it to the correct handler without
-//! trying to decode it as a chat [`SignedMessage`].
+//! trying to decode it as a chat [`SignedMessage`](crate::chat_core::SignedMessage).
 //!
 //! | Marker | Message type        |
 //! |--------|---------------------|
@@ -51,13 +51,13 @@
 //!
 //! # API overview
 //!
-//! - [`RoomMetadata`] — the persisted key-value struct.
-//! - [`RoomMetadataUpdate`] — a partial update (merges into the current doc).
-//! - [`RoomMetadataDoc`] — a live handle that drives gossip sync.
-//! - [`create_metadata_doc`] — create (or attach to) a room's metadata doc.
-//! - [`update_metadata`] — broadcast a partial update to all peers.
-//! - [`read_metadata`] — snapshot the current metadata.
-//! - [`metadata_events`] — stream of incoming metadata updates.
+//! - [`RoomMetadata`](crate::room_docs::RoomMetadata) — the persisted key-value struct.
+//! - [`RoomMetadataUpdate`](crate::room_docs::RoomMetadataUpdate) — a partial update (merges into the current doc).
+//! - [`RoomMetadataDoc`](crate::room_docs::RoomMetadataDoc) — a live handle that drives gossip sync.
+//! - [`create_metadata_doc`](crate::room_docs::create_metadata_doc) — create (or attach to) a room's metadata doc.
+//! - [`update_metadata`](crate::room_docs::update_metadata) — broadcast a partial update to all peers.
+//! - [`read_metadata`](crate::room_docs::read_metadata) — snapshot the current metadata.
+//! - [`RoomMetadataDoc::events`](crate::room_docs::RoomMetadataDoc::events) — stream of incoming metadata updates.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -155,11 +155,11 @@ impl RoomMetadata {
 
     /// Validate all fields against length and content constraints.
     ///
-    /// - `name`: must not exceed [`MAX_ROOM_NAME_BYTES`], and must not contain
+    /// - `name`: must not exceed `MAX_ROOM_NAME_BYTES`, and must not contain
     ///   control characters or path-separator characters.
-    /// - `description`: must not exceed [`MAX_ROOM_DESCRIPTION_BYTES`], and
+    /// - `description`: must not exceed `MAX_ROOM_DESCRIPTION_BYTES`, and
     ///   must not contain control characters beyond tab/CR/LF.
-    /// - `rules`: must not exceed [`MAX_ROOM_RULES_BYTES`], and must not
+    /// - `rules`: must not exceed `MAX_ROOM_RULES_BYTES`, and must not
     ///   contain control characters beyond tab/CR/LF.
     pub fn validate(&self) -> Result<()> {
         let valid_display = |value: &str| -> bool {
@@ -447,7 +447,7 @@ impl RoomMetadataDoc {
 /// This subscribes to the gossip topic to receive metadata updates from
 /// remote peers, and spawns a background task that applies them to the
 /// shared state.  The caller should drive the returned
-/// [`GossipTopic`]'s event stream and feed metadata-related events
+/// [`GossipTopic`](crate::api::GossipTopic)'s event stream and feed metadata-related events
 /// back into the doc (see [`process_gossip_event`]).
 ///
 /// The returned doc handle reports events on a channel.  Use
@@ -963,7 +963,7 @@ pub async fn list_members(doc: &RosterDoc) -> HashMap<String, RosterMember> {
 /// Returns `true` if the event was a roster message (consumed here),
 /// `false` if it should be forwarded to the chat frontend.
 ///
-/// The dispatch order in [`forward_room_events`] is:
+/// The dispatch order in [`forward_room_events_for_chat`] is:
 /// 1. Metadata (0xFE) — see [`process_gossip_event`]
 /// 2. Roster (0xFF) — this function
 /// 3. Chat (anything else)
@@ -1019,7 +1019,7 @@ pub async fn process_roster_event(
 /// A bundle of both room documents (metadata + roster).
 ///
 /// Returned when a room is opened or joined, and used by
-/// [`forward_room_events`] for merged event dispatch.
+/// [`forward_room_events_for_chat`] for merged event dispatch.
 #[derive(Debug, Clone)]
 pub struct RoomDocs {
     /// The metadata document handle.
@@ -1039,7 +1039,7 @@ pub struct RoomDocs {
 /// 2. Roster updates (0xFF) — applied to the roster doc
 /// 3. Chat / neighbour events (anything else) — forwarded to `non_room_tx`
 ///
-/// The `non_room_tx` channel receives gossip [`Event`] items that are neither
+/// The `non_room_tx` channel receives gossip [`Event`](crate::api::Event) items that are neither
 /// metadata nor roster updates, i.e. chat messages, NeighborUp, NeighborDown.
 /// The caller can process those with [`crate::chat_core::handle_net_event`] or
 /// similar logic.

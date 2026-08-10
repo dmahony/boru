@@ -3,7 +3,7 @@
 //! File hashing (blake3) is CPU-bound and involves synchronous file I/O.
 //! Running it directly on the async runtime would block the worker threads
 //! for the duration of the read + hash.  This module provides a bounded
-//! [`FileHasher`] that delegates to [`tokio::task::spawn_blocking`] with
+//! [`FileHasher`](crate::file_hasher::FileHasher) that delegates to [`tokio::task::spawn_blocking`] with
 //! configurable concurrency limits.
 //!
 //! # Mtime/Size verification
@@ -16,7 +16,7 @@
 //!
 //! # Semantics
 //!
-//! - [`hash_file`] returns `Ok(Some(hash))` on success.
+//! - [`hash_file`](crate::file_hasher::FileHasher::hash_file) returns `Ok(Some(hash))` on success.
 //! - Returns `Ok(None)` when the file has changed (mismatched mtime or
 //!   size) — the caller should retry or discard.
 //! - Returns `Err` on genuine I/O errors (permission denied, not found,
@@ -94,7 +94,7 @@ impl FileHasher {
         spawn_blocking_hash(path, expected_size, expected_mtime).await
     }
 
-    /// Same as [`hash_file`] but tries once without waiting for a
+    /// Same as [`hash_file`](crate::file_hasher::FileHasher::hash_file) but tries once without waiting for a
     /// concurrency slot.  Returns `None` immediately if busy.
     pub async fn try_hash_file(
         &self,

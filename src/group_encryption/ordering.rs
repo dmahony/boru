@@ -2,7 +2,7 @@
 //!
 //! Bridges boru's causal ordering requirements to the pattern expected by
 //! p2panda-encryption's `ForwardSecureOrdering` trait but uses our local
-//! [`EncryptedGroupEnvelope`] and types to avoid depending on a concrete
+//! [`EncryptedGroupEnvelope`](crate::group_encryption::message::EncryptedGroupEnvelope) and types to avoid depending on a concrete
 //! [`AckedGroupMembership`](p2panda_encryption::traits::AckedGroupMembership)
 //! at this level.
 //!
@@ -16,15 +16,15 @@
 //!
 //! # State
 //!
-//! [`OrderingState`] holds:
+//! [`OrderingState`](crate::group_encryption::ordering::OrderingState) holds:
 //! - The per-group lamport clock (shared across all members).
-//! - A dependency DAG (message → [`OpId`] dependencies).
+//! - A dependency DAG (message → [`OpId`](crate::group_encryption::types::OpId) dependencies).
 //! - All queued messages.
 //! - A welcome-message anchor that marks the "create group" baseline.
 //!
 //! # Trait
 //!
-//! [`ForwardSecureOrdering`] is a local trait (mirroring p2panda-encryption's
+//! [`ForwardSecureOrdering`](crate::group_encryption::ordering::ForwardSecureOrdering) is a local trait (mirroring p2panda-encryption's
 //! trait) that provides the ordering API used by the group encryption layer.
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -136,7 +136,7 @@ impl OrderingState {
         self.clock
     }
 
-    /// Returns `true` if we have been welcomed (via [`set_welcome`]).
+    /// Returns `true` if we have been welcomed (via `set_welcome`).
     pub fn is_welcomed(&self) -> bool {
         self.welcome_message.is_some()
     }

@@ -5,7 +5,7 @@
 //!
 //! Boru's existing out-of-band pairing flow
 //! ([`crate::peer_invitation`] + [`crate::pairing_service`]) exchanges a
-//! [`PeerInvitation`] over a QR code or `boru-chat://pair/...` URI.  SPAKE2
+//! [`PeerInvitation`](crate::peer_invitation::PeerInvitation) over a QR code or `boru-chat://pair/...` URI.  SPAKE2
 //! adds a **short numeric code** path that is useful when both peers are in
 //! the same room: they agree on a 6-digit code and both sides authenticate
 //! each other with the code as the shared password.
@@ -13,20 +13,20 @@
 //! # Protocol
 //!
 //! 1. Both peers agree on a short code (e.g. `123456`) out-of-band.
-//! 2. Each side calls [`Spake2Pairing::begin`] with the same code and the
+//! 2. Each side calls [`Spake2Pairing::begin`](crate::spake2_pairing::Spake2Pairing::begin) with the same code and the
 //!    same identity context.  Each receives an outbound message.
 //! 3. The outbound messages are exchanged (over whisper, clipboard, or any
 //!    transport the caller chooses).
-//! 4. Each side calls [`Spake2Pairing::finish`] with the *other* side's
+//! 4. Each side calls [`Spake2Pairing::finish`](crate::spake2_pairing::Spake2Pairing::finish) with the *other* side's
 //!    outbound message.  Both derive the **same** shared key iff they used
 //!    the same code (SPAKE2 is a PAKE — an attacker who does not know the
 //!    code cannot learn the key).
-//! 5. Each side wraps its [`PeerInvitation`] with a keyed MAC using the
-//!    shared key ([`Spake2SharedKey::authenticate`]) and sends the result.
+//! 5. Each side wraps its [`PeerInvitation`](crate::peer_invitation::PeerInvitation) with a keyed MAC using the
+//!    shared key ([`Spake2SharedKey::authenticate`](crate::spake2_pairing::Spake2SharedKey::authenticate)) and sends the result.
 //! 6. Each side verifies the peer's authenticated invitation
-//!    ([`Spake2SharedKey::verify`]) and feeds it into the existing
-//!    [`accept_peer_invitation`] flow, which creates the friend record and
-//!    persists a [`PendingPairing`] for restart recovery.
+//!    ([`Spake2SharedKey::verify`](crate::spake2_pairing::Spake2SharedKey::verify)) and feeds it into the existing
+//!    [`accept_peer_invitation`](crate::pairing_service::accept_peer_invitation) flow, which creates the friend record and
+//!    persists a [`PendingPairing`](crate::pairing_service::PendingPairing) for restart recovery.
 //!
 //! # Security notes
 //!
@@ -243,7 +243,7 @@ pub struct AuthenticatedInvitation {
 ///
 /// This mirrors [`accept_peer_invitation`]: it validates the invitation,
 /// updates the friends store with the peer's addresses, creates a pending
-/// friend request, signs it, and persists a [`PendingPairing`] for restart
+/// friend request, signs it, and persists a [`PendingPairing`](crate::pairing_service::PendingPairing) for restart
 /// recovery.  The existing URI/QR flow is untouched; this is an additive
 /// entry point for the SPAKE2 path.
 ///

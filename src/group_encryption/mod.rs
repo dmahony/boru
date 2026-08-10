@@ -3,13 +3,13 @@
 //! This module provides the building blocks for encrypting and decrypting
 //! messages within a group of peers using the p2panda encryption framework:
 //!
-//! - [`types`] — type-conversion bridge between iroh and p2panda types,
+//! - [`types`](crate::group_encryption::types) — type-conversion bridge between iroh and p2panda types,
 //!   plus newtype wrappers (`PeerId`, `OpId`).
-//! - [`registry`] — encryption key and session registry for active groups.
-//! - [`manager`] — high-level encrypt/decrypt orchestration.
-//! - [`message`] — wire-format encrypted message types.
-//! - [`ordering`] — causal ordering of encrypted operations (Merkle CRDT).
-//! - [`membership`] — dynamic group-membership management and handshake.
+//! - [`registry`](crate::group_encryption::registry) — encryption key and session registry for active groups.
+//! - [`manager`](crate::group_encryption::manager) — high-level encrypt/decrypt orchestration.
+//! - [`message`](crate::group_encryption::message) — wire-format encrypted message types.
+//! - [`ordering`](crate::group_encryption::ordering) — causal ordering of encrypted operations (Merkle CRDT).
+//! - [`membership`](crate::group_encryption::membership) — dynamic group-membership management and handshake.
 
 pub mod types;
 

@@ -4,30 +4,30 @@
 //!
 //! # Import
 //!
-//! [`import_collection`] walks a directory with `walkdir`, flattens it into
+//! [`import_collection`](crate::collection_transfer::import_collection) walks a directory with `walkdir`, flattens it into
 //! `(relative_name, path)` pairs (validated with
-//! [`canonicalized_path_to_string`] so names never contain path separators or
+//! [`canonicalized_path_to_string`](crate::collection_transfer::canonicalized_path_to_string) so names never contain path separators or
 //! traversal components), imports each file in parallel with
-//! [`ImportMode::TryReference`] (copy-on-write when the store supports it),
-//! keeps the per-file [`TempTag`]s alive while building the
-//! [`Collection`], then stores the collection and drops the tags.  The
+//! [`ImportMode::TryReference`](iroh_blobs::api::proto::ImportMode::TryReference) (copy-on-write when the store supports it),
+//! keeps the per-file [`TempTag`](iroh_blobs::api::TempTag)s alive while building the
+//! [`Collection`](iroh_blobs::format::collection::Collection), then stores the collection and drops the tags.  The
 //! returned tag references the HashSeq root, which is what a
-//! [`BlobTicket`] carries for a folder share.
+//! [`BlobTicket`](iroh_blobs::ticket::BlobTicket) carries for a folder share.
 //!
 //! # Export
 //!
-//! [`export_collection`] mirrors sendme's export loop: for each entry it
+//! [`export_collection`](crate::collection_transfer::export_collection) mirrors sendme's export loop: for each entry it
 //! builds a traversal-safe target under a caller-chosen root with
-//! [`get_export_path`] (which rejects `/`, `\`, `..` and `.` components),
+//! [`get_export_path`](crate::collection_transfer::get_export_path) (which rejects `/`, `\`, `..` and `.` components),
 //! refuses to overwrite an existing target, and copies the blob out with
-//! [`ExportMode::Copy`].
+//! [`ExportMode::Copy`](iroh_blobs::api::proto::ExportMode::Copy).
 //!
 //! # Security
 //!
 //! Collection entry names are peer-controlled.  The single
 //! `validate_path_component` gate used at both import and export time keeps
 //! the wire names confined to safe relative components, and
-//! [`get_export_path`] additionally verifies the joined path stays under the
+//! [`get_export_path`](crate::collection_transfer::get_export_path) additionally verifies the joined path stays under the
 //! export root (belt-and-suspenders, matching the stronger guarantees in
 //! [`crate::safe_destination`]).
 

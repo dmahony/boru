@@ -3,22 +3,22 @@
 //! This module is a thin composition surface over responsibility-scoped
 //! submodules (BORU-AUDIT-23):
 //!
-//! - [`protocol`] — pure wire types (`Message`, `SignedMessage`, `Ticket`,
+//! - [`protocol`](crate::chat_core::protocol) — pure wire types (`Message`, `SignedMessage`, `Ticket`,
 //!   `RoomInvitation`, `NetEvent`) and codec helpers.
-//! - [`composer`], [`entries`], [`status`], [`state`] — UI-free state types
+//! - [`composer`](crate::chat_core::composer), [`entries`](crate::chat_core::entries), [`status`](crate::chat_core::status), [`state`](crate::chat_core::state) — UI-free state types
 //!   (`Composer`, `ChatEntry`, `StatusContext`, `AppState`).
-//! - [`dedup`] — transport deduplication and signed-payload cache.
-//! - [`net_event`] — network event processing (`handle_net_event`,
+//! - [`dedup`](crate::chat_core::dedup) — transport deduplication and signed-payload cache.
+//! - [`net_event`](crate::chat_core::net_event) — network event processing (`handle_net_event`,
 //!   `forward_gossip_events`, public-room safety filter).
-//! - [`downloads`] — blob transfer execution with progress reporting.
-//! - [`bootstrap`], [`util`] — bootstrap peer resolution and small helpers.
+//! - [`downloads`](crate::chat_core::downloads) — blob transfer execution with progress reporting.
+//! - [`bootstrap`](crate::chat_core::bootstrap), [`util`](crate::chat_core::util) — bootstrap peer resolution and small helpers.
 //!
 //! Everything is re-exported at this level so existing import paths
 //! (`iroh_gossip::chat_core::Message`, `chat_core::handle_net_event`, …)
 //! keep working unchanged.  The module has **no** terminal/ratatui/crossterm
 //! dependencies, making it usable from any frontend (TUI, GUI, headless).
 //!
-//! The [`ChatCallbacks`] trait is defined in [`crate::chat_callbacks`].
+//! The [`ChatCallbacks`](crate::chat_callbacks::ChatCallbacks) trait is defined in [`crate::chat_callbacks`].
 
 pub mod atomic_write;
 pub mod bootstrap;
@@ -56,7 +56,7 @@ pub static TRANSFER_TELEMETRY: LazyLock<TransferTelemetry> =
 pub use crate::chat_callbacks::ChatCallbacks;
 pub use crate::chat_callbacks::{TransferId, TransferKind, TransferProgress};
 
-/// Pure protocol/wire types, extracted to [`protocol`](self::protocol) so the
+/// Pure protocol/wire types, extracted to [`protocol`] so the
 /// codec can be tested without network or storage.  Re-exported so existing
 /// import paths (`iroh_gossip::chat_core::Message`) keep working.
 pub use protocol::{
@@ -72,7 +72,7 @@ pub use entries::{ChatEntry, ChatKind};
 pub use state::AppState;
 pub use status::{ConnectionType, MeshHealth, StatusContext};
 
-/// Transport deduplication and signed-payload cache, extracted to [`dedup`](self::dedup).
+/// Transport deduplication and signed-payload cache, extracted to [`dedup`].
 /// The cache functions are part of the public API; the shared statics stay
 /// `pub(crate)` and are re-exported so `chat_core`'s net-event handler and
 /// tests can keep reaching them.
@@ -80,7 +80,7 @@ pub use dedup::{get_signed_message, remember_signed_message, take_signed_message
 pub(crate) use dedup::{prune_seen_messages, DEDUP_SWEEP_THRESHOLD, DIAGNOSTIC_SEEN_MESSAGES, SEEN_MESSAGES};
 
 /// Network event processing and the gossip→[`NetEvent`] bridge, extracted to
-/// [`net_event`](self::net_event).  Re-exported for existing import paths.
+/// [`net_event`].  Re-exported for existing import paths.
 pub use net_event::{
     broadcast_diagnostic_probe, check_peer_connection_type, filter_net_event_with_safety,
     forward_gossip_events, forward_gossip_events_with_safety, handle_net_event,
@@ -88,7 +88,7 @@ pub use net_event::{
     handle_net_event_with_safety_for_topic, now_ms, now_secs, update_connection_counts,
 };
 
-/// Blob transfer execution, extracted to [`downloads`](self::downloads).
+/// Blob transfer execution, extracted to [`downloads`].
 /// Re-exported for existing import paths; the internals stay `pub(crate)` so
 /// `chat_core`'s tests can exercise them directly.
 pub use downloads::{
@@ -96,13 +96,13 @@ pub use downloads::{
     download_candidates,
 };
 
-/// Bootstrap peer resolution, extracted to [`bootstrap`](self::bootstrap).
+/// Bootstrap peer resolution, extracted to [`bootstrap`].
 pub use bootstrap::{
     collect_bootstrap_peers, merge_bootstrap_peer_addrs, refresh_bootstrap_peers,
     seed_memory_lookup,
 };
 
-/// Shared formatting helpers, extracted to [`util`](self::util).
+/// Shared formatting helpers, extracted to [`util`].
 pub use util::fmt_relay_mode;
 
 /// Unit tests for the chat core — kept in a separate file so `chat_core.rs`

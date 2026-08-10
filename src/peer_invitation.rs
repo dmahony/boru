@@ -1,6 +1,6 @@
 //! Versioned, serializable peer invitation for boru-chat pairing.
 //!
-//! This module defines the [`PeerInvitation`] struct — a compact, versioned
+//! This module defines the [`PeerInvitation`](crate::peer_invitation::PeerInvitation) struct — a compact, versioned
 //! payload used to encode a pairing invitation that can be shared out-of-band
 //! (QR code, URL, clipboard text, etc.).
 //!
@@ -13,7 +13,7 @@
 //! The `boru-chat://pair/` prefix identifies the payload as a boru-chat
 //! peer invitation. The remainder is a compact serialization:
 //!
-//! 1. [`postcard`] encode the [`PeerInvitation`] struct.
+//! 1. [`postcard`] encode the [`PeerInvitation`](crate::peer_invitation::PeerInvitation) struct.
 //! 2. URL-safe base64 encode (no padding).
 //!
 //! # Security properties
@@ -132,7 +132,7 @@ impl PeerInvitation {
     ///
     /// Returns an error if:
     /// - The input is not valid base64 (URL-safe, no padding).
-    /// - The decoded bytes exceed [`MAX_PAYLOAD_SIZE`].
+    /// - The decoded bytes exceed `MAX_PAYLOAD_SIZE`.
     /// - The decoded bytes are not a valid [`PeerInvitation`] (wrong version,
     ///   corrupt postcard data, etc.).
     pub fn decode(input: &str) -> Result<Self, DecodeError> {

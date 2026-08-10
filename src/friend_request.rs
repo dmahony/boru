@@ -3,7 +3,7 @@
 //! This module owns the on-disk `friend_requests.json` file that lives beside
 //! the persistent `secret_key.txt` identity file and the `friends.json` friends
 //! list.  Friend request state is persisted as JSON using
-//! [`atomic_write_json`] for crash-safe atomic writes.
+//! [`atomic_write_json`](crate::chat_core::atomic_write::atomic_write_json) for crash-safe atomic writes.
 //!
 //! # Status transitions
 //!

@@ -2,15 +2,15 @@
 //! and processes the response.
 //!
 //! Provides the client side of the `/boru-file-access/1` protocol.
-//! The transfer worker calls [`request_download_permission`] to obtain a fresh
-//! [`SignedDownloadDescriptor`] from a remote peer, then calls
-//! [`handle_permission_response`] to verify the descriptor and persist the
+//! The transfer worker calls `request_download_permission` to obtain a fresh
+//! `SignedDownloadDescriptor` from a remote peer, then calls
+//! `handle_permission_response` to verify the descriptor and persist the
 //! appropriate download-state transition.
 //!
 //! # Flow
 //!
-//! 1. [`request_download_permission`] — connect, send request, receive response.
-//! 2. [`handle_permission_response`] — verify descriptor, apply storage
+//! 1. `request_download_permission` — connect, send request, receive response.
+//! 2. `handle_permission_response` — verify descriptor, apply storage
 //!    transitions (granted → `downloading`, denied → `paused`, etc.).
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

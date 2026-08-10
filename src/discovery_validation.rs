@@ -25,11 +25,11 @@
 //! batch of [`Record`] values, applying:
 //!
 //! * Per-record validation (pipeline above).
-//! * Bounded iteration — at most [`max_records_per_lookup`] records are
+//! * Bounded iteration — at most `max_records_per_lookup` records are
 //!   examined.
 //! * Deduplication — identical [`EndpointId`] values are emitted at most once.
 //! * Self-filtering — the local node's own [`EndpointId`] is excluded.
-//! * Bound on candidates — at most [`max_candidate_peers`] are returned.
+//! * Bound on candidates — at most `max_candidate_peers` are returned.
 //!
 //! # Security
 //!
@@ -171,7 +171,7 @@ impl std::fmt::Display for RejectionReason {
 /// [`DiscoveryRecordValidator::filter_and_build`] call.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ValidationCounters {
-    /// Total records examined (bounded by [`max_records_per_lookup`]).
+    /// Total records examined (bounded by `max_records_per_lookup`).
     pub total: usize,
     /// Records rejected because their serialized size exceeded the limit.
     pub oversized: usize,
@@ -304,7 +304,7 @@ impl DiscoveryRecordValidator {
     /// * `config` — tunable validation parameters.
     /// * `now_minute` — the current Unix minute (seconds / 60), used as the
     ///   reference point for staleness and future-skew checks.  Obtain from
-    ///   [`distributed_topic_tracker::unix_minute(0)`].
+    ///   [`distributed_topic_tracker::unix_minute(0)`](distributed_topic_tracker::unix_minute).
     pub fn new(mut config: ValidationConfig, now_minute: u64) -> Self {
         // Keep the public tuning knobs from disabling the safety bounds.  A
         // caller may tighten these values, but never expand the amount of
@@ -385,11 +385,11 @@ impl DiscoveryRecordValidator {
     /// deduplicated, and bounded candidate peers.
     ///
     /// The pipeline:
-    /// 1. Iterates over at most [`max_records_per_lookup`] records.
+    /// 1. Iterates over at most `max_records_per_lookup` records.
     /// 2. Runs [`validate_single`](Self::validate_single) on each.
     /// 3. Deduplicates by [`EndpointId`].
     /// 4. Filters out the local node's own [`EndpointId`] if provided.
-    /// 5. Bounds the result to [`max_candidate_peers`].
+    /// 5. Bounds the result to `max_candidate_peers`.
     ///
     /// No secret or decrypted payload content is logged.
     pub fn filter_and_build(

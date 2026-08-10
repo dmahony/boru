@@ -9,8 +9,9 @@
 //!
 //! It is deliberately NOT used on the CPAL callback thread: the real-time
 //! callback only copies samples into the bounded capture queue (see
-//! [`super::AudioCaptureProducer`]). This stage is constructed and driven from
-//! the audio worker, where allocating and running the RNNoise model is safe.
+//! [`crate::call::audio::AudioCaptureProducer`]). This stage is constructed
+//! and driven from the audio worker, where allocating and running the RNNoise
+//! model is safe.
 //!
 //! The stage is gated by a runtime toggle and is optional for the first voice
 //! milestone. When disabled it is an exact pass-through, so the baseline
@@ -18,7 +19,7 @@
 
 use nnnoiseless::DenoiseState;
 
-use crate::call::frame::{SAMPLES_PER_FRAME, SAMPLE_RATE};
+use crate::call::frame::SAMPLES_PER_FRAME;
 
 /// Samples consumed per `nnnoiseless` call (10 ms at 48 kHz).
 const NNOISELESS_FRAME_SIZE: usize = 480;

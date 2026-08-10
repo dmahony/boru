@@ -1,6 +1,6 @@
 //! Callbacks trait for the chat frontend — decoupled from the core state machine.
 //!
-//! The [`ChatCallbacks`] trait defines the interface that a frontend state
+//! The [`ChatCallbacks`](crate::chat_callbacks::ChatCallbacks) trait defines the interface that a frontend state
 //! struct must implement to receive typed callbacks for each kind of network
 //! event processed by [`crate::chat_core::handle_net_event`].
 //!
@@ -283,7 +283,7 @@ pub trait ChatCallbacks {
     /// `collection_hash` is the collection root hash, and `collection_entries`
     /// is the number of files in the collection.
     ///
-    /// The default implementation falls back to [`set_pending_file`] so
+    /// The default implementation falls back to [`set_pending_file`](crate::chat_callbacks::ChatCallbacks::set_pending_file) so
     /// frontends that only know single-file transfers still surface a
     /// download card — the ticket is a valid (HashSeq) BlobTicket.
     fn set_pending_folder(
@@ -436,16 +436,16 @@ pub trait ChatCallbacks {
 
     // ── Latency probe callbacks ──────────────────────────────────────────
 
-    /// Called when a [`LatencyPing`] is received from `peer`.
+    /// Called when a [`LatencyPing`](crate::chat_core::Message::LatencyPing) is received from `peer`.
     ///
-    /// The frontend should respond by broadcasting a [`LatencyPong`] with
+    /// The frontend should respond by broadcasting a [`LatencyPong`](crate::chat_core::Message::LatencyPong) with
     /// the same `sent_at_ms` value.  The default implementation is a no-op
     /// (the ping is silently absorbed).
     fn on_latency_ping(&mut self, _peer: PublicKey, _sent_at_ms: u64) {}
 
     /// Record a measured round-trip latency for `peer`.
     ///
-    /// Called when a [`LatencyPong`] arrives and the round-trip time has
+    /// Called when a [`LatencyPong`](crate::chat_core::Message::LatencyPong) arrives and the round-trip time has
     /// been computed.  Frontends store this in their per-peer latency map
     /// for display.  The default implementation is a no-op.
     fn record_latency(&mut self, _peer: PublicKey, _latency: Duration) {}

@@ -1,8 +1,8 @@
 //! Optional network diagnostics built on Boru's tunnel raw-stream primitive.
 //!
-//! [`NetworkDoctor`] deliberately does not create an endpoint or duplicate
-//! connection setup. It uses an already-established Iroh [`Connection`] and
-//! the [`TunnelProtocol`] raw stream queue, so diagnostics exercise the same
+//! [`NetworkDoctor`](crate::network_doctor::NetworkDoctor) deliberately does not create an endpoint or duplicate
+//! connection setup. It uses an already-established Iroh [`Connection`](iroh::endpoint::Connection) and
+//! the [`TunnelProtocol`](crate::tunnel::TunnelProtocol) raw stream queue, so diagnostics exercise the same
 //! transport path as tunnels. Throughput is a separate, explicitly-invoked
 //! bounded operation.
 
@@ -123,7 +123,7 @@ impl NetworkDoctor {
 
     /// Run a user-requested bounded throughput sample.
     ///
-    /// This method is never called by [`check`]. Callers must explicitly opt
+    /// This method is never called by [`check`](crate::network_doctor::NetworkDoctor::check). Callers must explicitly opt
     /// in and the payload is capped to [`MAX_THROUGHPUT_SAMPLE_BYTES`].
     pub async fn throughput_sample(
         connection: &Connection,

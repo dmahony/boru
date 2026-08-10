@@ -9,26 +9,26 @@
 //! # Rendezvous
 //!
 //! Both sides derive the same gossip topic from the code
-//! ([`derive_shortcode_topic`]), so no prior relationship or address exchange
+//! ([`derive_shortcode_topic`](crate::short_code::derive_shortcode_topic)), so no prior relationship or address exchange
 //! is required (mirroring how the public-room directory derives a topic from
 //! the relay URL).  The sender subscribes to the topic and broadcasts a
-//! signed [`ShortCodeAnnouncement`] containing the ticket; the receiver
+//! signed [`ShortCodeAnnouncement`](crate::short_code::ShortCodeAnnouncement) containing the ticket; the receiver
 //! subscribes to the same topic and picks the announcement up.
 //!
 //! # Security properties
 //!
 //! - **Expiry** — each code carries a `created_at` and `expires_at`; a
 //!   resolved code must still be inside its validity window
-//!   ([`ShortCodeError::Expired`]).
-//! - **Replay rejection** — a code is single-use: [`ShortCodeStore::resolve`]
+//!   ([`ShortCodeError::Expired`](crate::short_code::ShortCodeError::Expired)).
+//! - **Replay rejection** — a code is single-use: [`ShortCodeStore::resolve`](crate::short_code::ShortCodeStore::resolve)
 //!   marks the code `used` on first successful resolution and rejects any
-//!   subsequent resolution ([`ShortCodeError::AlreadyUsed`]).
+//!   subsequent resolution ([`ShortCodeError::AlreadyUsed`](crate::short_code::ShortCodeError::AlreadyUsed)).
 //! - **Authenticity** — announcements are signed with the sender's iroh
 //!   secret key; receivers verify before trusting the ticket.
 //! - **Freshness** — every signed announcement carries an authenticated
-//!   `sent_at_unix_secs`; [`SignedShortCodeAnnouncement::verify`] /
-//!   [`SignedShortCodeAnnouncement::verify_at`] reject announcements outside
-//!   the [`ShortCodeFreshnessPolicy`] window as [`ShortCodeError::Stale`], so
+//!   `sent_at_unix_secs`; [`SignedShortCodeAnnouncement::verify`](crate::short_code::SignedShortCodeAnnouncement::verify) /
+//!   [`SignedShortCodeAnnouncement::verify_at`](crate::short_code::SignedShortCodeAnnouncement::verify_at) reject announcements outside
+//!   the [`ShortCodeFreshnessPolicy`](crate::short_code::ShortCodeFreshnessPolicy) window as [`ShortCodeError::Stale`](crate::short_code::ShortCodeError::Stale), so
 //!   a captured announcement cannot be replayed indefinitely.
 //!
 //! Persistence follows the `pairing_service.rs` pattern: a JSON file in the
@@ -37,7 +37,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use n0_error::{bail_any, Result, StdResultExt};
+use n0_error::{Result, StdResultExt};
 use serde::{Deserialize, Serialize};
 
 use crate::chat_core::atomic_write::atomic_write_json;
@@ -125,7 +125,7 @@ pub struct ResolvedShortCode {
     pub size: u64,
 }
 
-/// Generate a random 7-character code from [`CODE_ALPHABET`].
+/// Generate a random 7-character code from `CODE_ALPHABET`.
 ///
 /// Uses rejection sampling over [`getrandom`] bytes for a uniform distribution
 /// over the alphabet (34 symbols).
@@ -185,7 +185,7 @@ pub fn derive_shortcode_topic(code: &str) -> TopicId {
 
 /// Persistent store of short-code grants.
 ///
-/// The store is a single JSON file ([`SHORT_CODES_FILE`]) in the data
+/// The store is a single JSON file (`SHORT_CODES_FILE`) in the data
 /// directory, loaded lazily and written atomically on every mutation — the
 /// same pattern as `pairing_service::PendingPairing`.
 #[derive(Debug, Clone)]

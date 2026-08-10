@@ -16,7 +16,7 @@
 //!
 //! | Store | Persisted? | Purpose |
 //! |-------|-----------|---------|
-//! | [`ConversationStore`] | ✓ | Durable conversation records (this module) |
+//! | [`ConversationStore`](crate::conversations::ConversationStore) | ✓ | Durable conversation records (this module) |
 //! | [`RoomHistoryStore`](crate::room_history::RoomHistoryStore) | ✗ | Transient in-process room list for navigation |
 //! | [`RoomStore`](crate::room::RoomStore) | ✓ | Current active room's topic and bootstrap peers |
 //! | [`FriendsStore`](crate::friends::FriendsStore) | ✓ | Friend/contact list with relationship state |
@@ -85,7 +85,7 @@ pub struct ConversationNetEvent {
 }
 
 impl ConversationNetEvent {
-    /// Wrap a [`NetEvent`] with the topic it arrived on.
+    /// Wrap a [`NetEvent`](crate::chat_core::NetEvent) with the topic it arrived on.
     pub fn new(topic: TopicId, event: crate::chat_core::NetEvent) -> Self {
         Self { topic, event }
     }
@@ -514,7 +514,7 @@ impl ConversationStore {
 
     /// Persist the store atomically to `conversations.json`.
     ///
-    /// Uses [`atomic_write_json`] for crash-safe writes: serialise →
+    /// Uses [`atomic_write_json`](crate::chat_core::atomic_write::atomic_write_json) for crash-safe writes: serialise →
     /// round-trip validation → fsync → atomic rename.
     pub fn save(&self) -> Result<PathBuf> {
         let data_dir = self.data_dir();
@@ -666,7 +666,7 @@ impl ConversationStore {
 /// The resulting [`ConversationNetEvent`]s are pushed to `net_tx` so the
 /// frontend can route them to the correct conversation state.
 ///
-/// Returns a [`JoinHandle`] that can be stored in the conversation's
+/// Returns a [`JoinHandle`](tokio::task::JoinHandle) that can be stored in the conversation's
 /// `forward_handle` field for lifecycle tracking.  Dropping the handle
 /// does **not** abort the task — the task runs until the gossip receiver
 /// closes or the `net_tx` channel is dropped.

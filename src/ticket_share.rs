@@ -1,17 +1,17 @@
 //! BlobTicket wormhole sharing (SENDME-02).
 //!
-//! Share a file outside the friend graph by copying a [`BlobTicket`] string;
+//! Share a file outside the friend graph by copying a [`BlobTicket`](iroh_blobs::ticket::BlobTicket) string;
 //! receive by pasting a ticket.  The ticket grants access to exactly that
 //! blob — no friend relationship or download-authorisation is required.
 //!
 //! This module provides:
 //!
-//! - [`AddrInfoOptions`] + [`apply_options`] — ticket trimming (Id-only vs
+//! - `AddrInfoOptions` + [`apply_options`](crate::ticket_share::apply_options) — ticket trimming (Id-only vs
 //!   RelayAndAddresses), mirroring sendme's `apply_options`
 //!   (`src/main.rs:269-294`).
-//! - [`make_share_ticket`] — build a share-ticket string from parts with the
+//! - [`make_share_ticket`](crate::ticket_share::make_share_ticket) — build a share-ticket string from parts with the
 //!   selected address info.
-//! - [`preflight_ticket`] — connect to the ticket's node and read size
+//! - [`preflight_ticket`](crate::ticket_share::preflight_ticket) — connect to the ticket's node and read size
 //!   information without downloading payload bytes (mirrors sendme's receive
 //!   preflight: connect -> `get_hash_seq_and_sizes` / `get_verified_size`).
 //!

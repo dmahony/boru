@@ -870,7 +870,7 @@ impl MessageStore {
     ///
     /// **Does NOT touch outbox/outgoing messages** — pending outgoing
     /// messages for this conversation are preserved so they can still be
-    /// delivered.  Use [`delete_outgoing_for_conversation`] for the
+    /// delivered.  Use `delete_outgoing_for_conversation` for the
     /// explicit "delete everything" path.
     ///
     /// Returns the number of inbox messages removed.
@@ -1437,7 +1437,7 @@ impl MessageStore {
     /// outbound deliveries for this message.
     ///
     /// This is a **local-only** operation — no protocol message is sent to
-    /// peers.  Use [`insert_tombstone`] for remote-initiated deletions.
+    /// peers.  Use [`insert_tombstone`](crate::store::MessageStore::insert_tombstone) for remote-initiated deletions.
     ///
     /// Returns `true` if the message was found and deleted.
     pub fn delete_message(&self, msg_id: &MessageId) -> Result<bool> {

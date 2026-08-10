@@ -30,10 +30,10 @@
 //!
 //! - **Display text**: message body, sender label, file name, room name,
 //!   description, user bio, friend label, preview snippet — use
-//!   [`sanitize_display_text`].
+//!   [`sanitize_display_text`](crate::abuse_controls::sanitize_display_text).
 //! - **Single-line fields** (labels, names, nicknames): use
-//!   [`sanitize_single_line`] to additionally strip newlines.
-//! - **Log output**: already handled by [`mcp_server::sanitize_for_log`]
+//!   [`sanitize_single_line`](crate::abuse_controls::sanitize_single_line) to additionally strip newlines.
+//! - **Log output**: already handled by `mcp_server::sanitize_for_log`
 //!   in the iced example — this crate-level function is for the display path.
 
 use unicode_normalization::UnicodeNormalization;

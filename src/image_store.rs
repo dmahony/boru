@@ -1,6 +1,6 @@
 //! Secure, local storage for user-uploaded images.
 //!
-//! [`ImageStore`] keeps images below `<data_dir>/files`, with one directory
+//! [`ImageStore`](crate::image_store::ImageStore) keeps images below `<data_dir>/files`, with one directory
 //! per user. User names and uploaded filenames are never used as path
 //! components: user directories are keyed by a hash and image identifiers are
 //! content hashes with a small allow-list of extensions.

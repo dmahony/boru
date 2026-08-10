@@ -721,7 +721,7 @@ impl CallRuntime {
 
 async fn run_actor(
     endpoint: Endpoint,
-    secret_key: SecretKey,
+    _secret_key: SecretKey,
     command_tx: mpsc::Sender<Command>,
     mut command_rx: mpsc::Receiver<Command>,
     event_tx: mpsc::Sender<CallEvent>,

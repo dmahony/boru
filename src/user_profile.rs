@@ -4,8 +4,8 @@
 //! via the unified storage layer.  This JSON file is retained only for
 //! backward-compatible reads during a transition period.
 //!
-//! This module defines [`UserProfile`] (local user identity and preferences)
-//! and [`SharedFile`] (metadata about files the user shares with peers).
+//! This module defines [`UserProfile`](crate::user_profile::UserProfile) (local user identity and preferences)
+//! and [`SharedFile`](crate::user_profile::SharedFile) (metadata about files the user shares with peers).
 //!
 //! The on-disk JSON file `profile.json` lives beside `secret_key.txt` in the
 //! user's data directory alongside `friends.json` and `conversations.json`.
@@ -212,8 +212,8 @@ impl UserProfile {
     /// Validate profile fields, returning an error on constraint violation.
     ///
     /// Checks:
-    /// - `display_name` must be at most [`MAX_DISPLAY_NAME_LENGTH`] characters.
-    /// - `bio` must be at most [`MAX_BIO_LENGTH`] characters.
+    /// - `display_name` must be at most `MAX_DISPLAY_NAME_LENGTH` characters.
+    /// - `bio` must be at most `MAX_BIO_LENGTH` characters.
     pub fn validate(&self) -> Result<()> {
         if self.display_name.chars().count() > MAX_DISPLAY_NAME_LENGTH {
             bail_any!(

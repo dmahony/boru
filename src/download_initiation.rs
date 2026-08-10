@@ -10,8 +10,8 @@
 //! 3. **No conflicting download** — no completed or in-progress download
 //!    already exists for the same content hash and remote peer.
 //!
-//! If all checks pass, [`initiate_download`] creates a new download row via
-//! [`Storage::create_download`] and returns the download ID.
+//! If all checks pass, [`initiate_download`](crate::download_initiation::initiate_download) creates a new download row via
+//! [`Storage::create_download`](crate::storage::Storage::create_download) and returns the download ID.
 
 use n0_error::StdResultExt;
 use tracing::info;

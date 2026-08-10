@@ -44,7 +44,7 @@ const MAX_DEDUP_ATTEMPTS: u32 = 10_000;
 ///   (e.g. `..`) after path-separator removal.
 /// - Returns an error if the resulting path would escape `download_dir`
 ///   (belt-and-suspenders — traversal checks above should prevent this).
-/// - Returns an error if deduplication exhausts [`MAX_DEDUP_ATTEMPTS`]
+/// - Returns an error if deduplication exhausts `MAX_DEDUP_ATTEMPTS`
 ///   (extremely unlikely unless there are >10k files with the same name).
 ///
 /// # Stability
@@ -441,6 +441,7 @@ fn safe_destination_path_no_dedup(
 /// Dropping the reservation without publishing removes the file it created
 /// (and only that file), so a cancelled or failed transfer leaves neither a
 /// partial destination nor a stray temporary file behind.
+#[derive(Debug)]
 pub struct ReservedDestination {
     file: Option<std::fs::File>,
     /// Path the handle refers to.  For `KeepBoth`/`Skip` reservations this
@@ -559,6 +560,7 @@ impl Drop for ReservedDestination {
 }
 
 /// Outcome of [`reserve_download_destination`].
+#[derive(Debug)]
 pub enum Reservation {
     /// The destination is reserved and ready to receive download bytes.
     Use(ReservedDestination),
@@ -596,7 +598,7 @@ pub enum Reservation {
 /// # Errors
 ///
 /// Same error conditions as [`safe_destination_path`], plus exhaustion of
-/// [`MAX_DEDUP_ATTEMPTS`] and any filesystem error that is not
+/// `MAX_DEDUP_ATTEMPTS` and any filesystem error that is not
 /// `AlreadyExists`.
 pub fn reserve_download_destination(
     download_dir: &Path,

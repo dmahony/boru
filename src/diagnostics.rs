@@ -1,12 +1,12 @@
 //! Core diagnostics — bounded event and probe storage for Boru.
 //!
-//! Provides a thread-safe [`Diagnostics`] singleton that records
-//! [`DiagnosticEvent`]s and [`ReceivedProbe`]s with bounded capacity.
+//! Provides a thread-safe [`Diagnostics`](crate::diagnostics::Diagnostics) singleton that records
+//! [`DiagnosticEvent`](crate::diagnostics::DiagnosticEvent)s and [`ReceivedProbe`](crate::diagnostics::ReceivedProbe)s with bounded capacity.
 //! Oldest records are automatically evicted when limits are exceeded.
 //!
 //! # Event types
 //!
-//! See [`DiagnosticEventKind`] for all supported event variants, including
+//! See [`DiagnosticEventKind`](crate::diagnostics::DiagnosticEventKind) for all supported event variants, including
 //! the extended lifecycle stages (discovery, address lookup, connection,
 //! subscription, probes).
 //!
@@ -18,13 +18,13 @@
 //!
 //! | Event | Required fields | Optional fields | Description |
 //! |---|---|---|---|
-//! | [`DiagnosticEventKind::CatalogueNoticeReceived`] | — | `known_revision` | A remote peer advertised a catalogue (e.g. via gossip). Peer identity is carried by the `record_with_peer` context. |
-//! | [`DiagnosticEventKind::CatalogueFetchStarted`] | — | `known_revision` | A fetch connection to a remote peer was initiated. |
-//! | [`DiagnosticEventKind::CatalogueFetchCompleted`] | `revision`, `file_count`, `collection_count` | — | A fetch completed successfully with a validated response. |
-//! | [`DiagnosticEventKind::CatalogueSignatureRejected`] | `error` | — | The fetched catalogue failed signature or owner-id verification. |
-//! | [`DiagnosticEventKind::CatalogueFetchFailed`] | `error` | — | The fetch failed (timeout, connection error, protocol violation). |
-//! | [`DiagnosticEventKind::CatalogueRevisionInstalled`] | `revision`, `file_count`, `collection_count` | — | A validated catalogue revision was persisted to local storage. |
-//! | [`DiagnosticEventKind::CatalogueCachedDataUsed`] | `cached_revision` | — | Local cached data was served instead of a remote fetch (cache hit or known-revision match). |
+//! | [`DiagnosticEventKind::CatalogueNoticeReceived`](crate::diagnostics::DiagnosticEventKind::CatalogueNoticeReceived) | — | `known_revision` | A remote peer advertised a catalogue (e.g. via gossip). Peer identity is carried by the `record_with_peer` context. |
+//! | [`DiagnosticEventKind::CatalogueFetchStarted`](crate::diagnostics::DiagnosticEventKind::CatalogueFetchStarted) | — | `known_revision` | A fetch connection to a remote peer was initiated. |
+//! | [`DiagnosticEventKind::CatalogueFetchCompleted`](crate::diagnostics::DiagnosticEventKind::CatalogueFetchCompleted) | `revision`, `file_count`, `collection_count` | — | A fetch completed successfully with a validated response. |
+//! | [`DiagnosticEventKind::CatalogueSignatureRejected`](crate::diagnostics::DiagnosticEventKind::CatalogueSignatureRejected) | `error` | — | The fetched catalogue failed signature or owner-id verification. |
+//! | [`DiagnosticEventKind::CatalogueFetchFailed`](crate::diagnostics::DiagnosticEventKind::CatalogueFetchFailed) | `error` | — | The fetch failed (timeout, connection error, protocol violation). |
+//! | [`DiagnosticEventKind::CatalogueRevisionInstalled`](crate::diagnostics::DiagnosticEventKind::CatalogueRevisionInstalled) | `revision`, `file_count`, `collection_count` | — | A validated catalogue revision was persisted to local storage. |
+//! | [`DiagnosticEventKind::CatalogueCachedDataUsed`](crate::diagnostics::DiagnosticEventKind::CatalogueCachedDataUsed) | `cached_revision` | — | Local cached data was served instead of a remote fetch (cache hit or known-revision match). |
 //!
 //! None of these events carry secrets, full catalogue contents, or raw
 //! error internals.  All peer identities are provided via the caller's
@@ -32,14 +32,14 @@
 //!
 //! # Peer state
 //!
-//! [`PeerDiagnosticState`] tracks the per-peer diagnostic lifecycle — what
-//! stage each peer has reached.  The [`classify_discovery_test`] function
+//! [`PeerDiagnosticState`](crate::diagnostics::PeerDiagnosticState) tracks the per-peer diagnostic lifecycle — what
+//! stage each peer has reached.  The [`classify_discovery_test`](crate::diagnostics::classify_discovery_test) function
 //! produces a structured failure classification from the collected evidence.
 //!
 //! # Probe types
 //!
-//! [`ReceivedProbe`] tracks probes received from peers with full metadata
-//! (latency, message hash, duplicate count).  [`DiagnosticProbe`] is the
+//! [`ReceivedProbe`](crate::diagnostics::ReceivedProbe) tracks probes received from peers with full metadata
+//! (latency, message hash, duplicate count).  [`DiagnosticProbe`](crate::diagnostics::DiagnosticProbe) is the
 //! wire-format probe sent through the gossip mesh.
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -1659,7 +1659,7 @@ pub enum FailureLayer {
 /// A single entry in the Iced message processing journal.
 ///
 /// Recorded each time the Iced `update()` function processes an
-/// [`AppMessage`] variant (as a string summary).
+/// `AppMessage` variant (as a string summary).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IcedMessageJournalEntry {
     /// Monotonically increasing sequence number.
@@ -2761,7 +2761,7 @@ pub enum GuiWaitCondition {
     /// matching a specific conversation identifier.
     ///
     /// Evaluated against [`IcedStateSnapshot::active_room`].
-    /// This is a more general check than [`RoomSelected`] — it covers both
+    /// This is a more general check than [`RoomSelected`](crate::diagnostics::GuiWaitCondition::RoomSelected) — it covers both
     /// group chat rooms and direct message conversations.
     ConversationSelected {
         /// If `Some(id)`, requires the active conversation to match this
@@ -2798,7 +2798,7 @@ pub enum GuiWaitCondition {
     /// Whether no blocking modal dialog is currently open.
     ///
     /// Evaluated against [`IcedStateSnapshot::dialog_open`].
-    /// The logical inverse of [`DialogOpen`].
+    /// The logical inverse of [`DialogOpen`](crate::diagnostics::GuiWaitCondition::DialogOpen).
     DialogClosed,
     /// Whether the total number of unread messages across all conversations
     /// is at least `min_count`.

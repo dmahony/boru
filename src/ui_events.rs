@@ -10,7 +10,7 @@
 //! the repository to reload the affected projection.
 //!
 //! Events are broadcast through a `tokio::sync::broadcast` channel; the
-//! sender is stored on [`Storage`] so any component with a `&Storage`
+//! sender is stored on [`Storage`](crate::storage::Storage) so any component with a `&Storage`
 //! reference can emit events.
 
 use iroh::PublicKey;

@@ -1,6 +1,6 @@
 //! Per-peer safety enforcement for untrusted public rooms.
 //!
-//! [`PublicRoomSafety`] wraps a [`PublicRoomConfig`] and provides
+//! [`PublicRoomSafety`](crate::public_room_safety::PublicRoomSafety) wraps a [`PublicRoomConfig`](crate::public_room_config::PublicRoomConfig) and provides
 //! per-peer enforcement for message size, nickname length, message
 //! rate, blob announcements, and download queue depth.  All checks
 //! are gated by the presence of a safety instance — private rooms
@@ -8,7 +8,7 @@
 //!
 //! # State tracking
 //!
-//! The struct holds per-peer [`Mutex`]-protected state (rate-limit
+//! The struct holds per-peer [`Mutex`](std::sync::Mutex)-protected state (rate-limit
 //! timestamps, blob-announcement counts, download-queue depths) so
 //! it is safe to share via `&PublicRoomSafety` across tasks.
 

@@ -1,7 +1,7 @@
 //! Named-ring permission groups for file resources (iroh-rings borrow).
 //!
 //! A **ring** is a named set of peers (by [`FriendId`](crate::friends::FriendId)
-//! string form) that share typed permissions — [`RingPermission`] — on file
+//! string form) that share typed permissions — [`RingPermission`](crate::rings::RingPermission) — on file
 //! resources (identified by content hash).  Rings are persisted in SQLite
 //! via [`crate::storage::Storage`] and are enforced **request-time** in the
 //! file-access handler *before* a [`SignedDownloadDescriptor`](crate::file_access_protocol::SignedDownloadDescriptor)
@@ -28,7 +28,7 @@
 //! wire format.  The existing [`FileAccessRequest`](crate::file_access_protocol::FileAccessRequest)
 //! already carries the resource identity (`shared_file_id` /
 //! `expected_content_hash`); the handler maps a download request to
-//! [`RingPermission::Read`] internally.
+//! [`RingPermission::Read`](crate::rings::RingPermission::Read) internally.
 
 use serde::{Deserialize, Serialize};
 

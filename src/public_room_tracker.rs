@@ -1,17 +1,17 @@
 //! Boru-specific public-room topic tracker.
 //!
-//! Wraps a [`TopicDiscoveryBackend`] with boru's public-room identity model
+//! Wraps a [`TopicDiscoveryBackend`](crate::discovery_backend::TopicDiscoveryBackend) with boru's public-room identity model
 //! to provide publish-once and discover-once operations.  Does **not**
 //! integrate with the iroh gossip actor — callers use the returned
-//! [`EndpointId`] values to join the gossip mesh independently.
+//! [`EndpointId`](iroh::EndpointId) values to join the gossip mesh independently.
 //!
 //! # Lifecycle
 //!
-//! 1. [`start`](PublicRoomTracker::start) — construct and initialise.
-//! 2. [`publish_once`](PublicRoomTracker::publish_once) — advertise local
+//! 1. [`start`](crate::public_room_tracker::PublicRoomTracker::start) — construct and initialise.
+//! 2. [`publish_once`](crate::public_room_tracker::PublicRoomTracker::publish_once) — advertise local
 //!    presence.
-//! 3. [`discover_once`](PublicRoomTracker::discover_once) — find valid peers.
-//! 4. [`shutdown`](PublicRoomTracker::shutdown) — release backend resources.
+//! 3. [`discover_once`](crate::public_room_tracker::PublicRoomTracker::discover_once) — find valid peers.
+//! 4. [`shutdown`](crate::public_room_tracker::PublicRoomTracker::shutdown) — release backend resources.
 //!
 //! # Minimal example
 //!
@@ -61,9 +61,9 @@ use n0_error::Result;
 /// # Lifecycle
 ///
 /// 1. [`start`](Self::start) — construct.
-/// 2. [`publish_once`](Self::publish_once) — advertise local presence.
+/// 2. [`publish_once`](crate::public_room_tracker::PublicRoomTracker::publish_once) — advertise local presence.
 /// 3. [`discover_once`](Self::discover_once) — find peers.
-/// 4. [`shutdown`](Self::shutdown) — release backend resources.
+/// 4. [`shutdown`](crate::public_room_tracker::PublicRoomTracker::shutdown) — release backend resources.
 ///
 /// # Cancellation
 ///

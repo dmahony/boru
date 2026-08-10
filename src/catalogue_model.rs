@@ -1,12 +1,12 @@
 //! Remote-safe representation of shared file entries for wire transfer.
 //!
-//! [`RemoteSharedFile`] is the wire-friendly counterpart of
+//! [`RemoteSharedFile`](crate::catalogue_model::RemoteSharedFile) is the wire-friendly counterpart of
 //! [`crate::user_profile::SharedFile`] — it strips local-only fields
 //! (paths, database row IDs, blob tickets, permissions) so that file
 //! metadata can be safely transmitted to remote peers.
 //!
-//! The module also provides [`SignedFileCatalogue`] (a signed collection
-//! of [`RemoteSharedFile`] entries) and [`FileCatalogueCollection`]
+//! The module also provides [`SignedFileCatalogue`](crate::catalogue_model::SignedFileCatalogue) (a signed collection
+//! of [`RemoteSharedFile`](crate::catalogue_model::RemoteSharedFile) entries) and `FileCatalogueCollection`
 //! (logical groupings of shared files).
 
 use std::time::{SystemTime, UNIX_EPOCH};

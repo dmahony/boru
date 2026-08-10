@@ -1,12 +1,12 @@
 //! `/iroh-chat-inbox/1` direct QUIC protocol for offline-message delivery.
 //!
 //! The inbox protocol runs on a dedicated QUIC ALPN, separate from gossip
-//! and whisper.  It carries opaque, already-encrypted [`MailboxEnvelope`]s
-//! and signed [`MailboxAck`]s between peers.
+//! and whisper.  It carries opaque, already-encrypted [`MailboxEnvelope`](crate::mailbox::MailboxEnvelope)s
+//! and signed [`MailboxAck`](crate::mailbox::MailboxAck)s between peers.
 //!
 //! # Security
 //!
-//! * Every `Deliver` and `Ack` is wrapped in a [`SignedInboxMessage`] with
+//! * Every `Deliver` and `Ack` is wrapped in a [`SignedInboxMessage`](crate::inbox::SignedInboxMessage) with
 //!   a sender signature and timestamp for replay protection.
 //! * The handler rejects messages whose sender is not in the configured
 //!   `allowed_senders` set (populated from the contact/friend list).
@@ -15,25 +15,25 @@
 //!
 //! # Lifecycle
 //!
-//! * [`InboxProtocol`] — registered as a protocol handler so remote peers
+//! * [`InboxProtocol`](crate::inbox::InboxProtocol) — registered as a protocol handler so remote peers
 //!   can deliver envelopes to this node.
 //! * Received envelopes are forwarded via an mpsc channel to the frontend,
 //!   which stores them in the local MailboxStore and broadcasts acknowledgements.
 //!
 //! # Event-channel semantics (BORU-AUDIT-08)
 //!
-//! All [`InboxEvent`]s are **correctness-critical**: a silently dropped
+//! All [`InboxEvent`](crate::inbox::InboxEvent)s are **correctness-critical**: a silently dropped
 //! `EnvelopeReceived`, `AckReceived`, `SyncRequested` or
 //! `DeleteTombstoneReceived` would lose protocol state that the frontend
 //! can only recover by a full resync.  Every event therefore goes through
-//! [`emit_inbox_event`], which never ignores a channel failure:
+//! `emit_inbox_event`, which never ignores a channel failure:
 //!
 //! * a **full** channel rejects the request with an explicit Busy error so
 //!   the peer can retry later (`TrySendError::Full`),
 //! * a **closed** channel surfaces as an explicit channel-closed error
 //!   (`TrySendError::Closed`).
 //!
-//! Both increment [`INBOX_EVENT_SEND_FAILURES`] so overload is observable
+//! Both increment [`INBOX_EVENT_SEND_FAILURES`](crate::inbox::INBOX_EVENT_SEND_FAILURES) so overload is observable
 //! and deterministic.  Deliberately lossy channels elsewhere in the app
 //! (discovery/UI telemetry, MCP request channels, debounced reconnect
 //! notifications) keep `try_send` semantics by design and are documented

@@ -437,7 +437,7 @@ pub(crate) async fn write_blob_to_reserved_file(
 /// When `safety` is `None`, this is equivalent to
 /// [`download_blob_with_progress`] (no size enforcement).
 ///
-/// [`max_blob_size_bytes`]: PublicRoomConfig::max_blob_size_bytes
+/// [`max_blob_size_bytes`]: crate::public_room_config::PublicRoomConfig::max_blob_size_bytes
 #[expect(clippy::too_many_arguments)]
 pub async fn download_blob_with_safety(
     blob_store: &iroh_blobs::api::Store,

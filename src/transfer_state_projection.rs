@@ -2,7 +2,7 @@
 //!
 //! The projection is fed by authoritative transfer lifecycle callbacks. It is
 //! deliberately independent of storage and widgets: callers publish events on
-//! [`TransferStateStore`] and an Iced subscription can consume its broadcast
+//! [`TransferStateStore`](crate::transfer_state_projection::TransferStateStore) and an Iced subscription can consume its broadcast
 //! receiver without polling the database or blocking the UI thread.
 
 use std::collections::{HashMap, HashSet, VecDeque};

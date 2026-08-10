@@ -49,7 +49,7 @@ pub mod public_room;
 /// All tuning parameters for DHT discovery timing, record validation
 /// strictness, peer-count bounds, message size, nickname length, rate
 /// limits, blob announcement limits, download limits, and backfill caps
-/// are centralised here.  See [`PublicRoomConfig`] for field-level docs.
+/// are centralised here.  See [`PublicRoomConfig`](crate::public_room_config::PublicRoomConfig) for field-level docs.
 pub mod public_room_config;
 /// Continuous DHT publication and discovery for public rooms.
 ///
@@ -78,12 +78,12 @@ pub mod directory;
 pub mod dynamic_joiner;
 /// Safety and rate-limit enforcement for untrusted public-room message flows.
 ///
-/// Wraps [`PublicRoomConfig`] with per-peer state for message size, nickname
+/// Wraps [`PublicRoomConfig`](crate::public_room_config::PublicRoomConfig) with per-peer state for message size, nickname
 /// length, message rate, blob announcements, and download-queue bounds.
 /// Pass `None` for private rooms to skip every check.
 #[cfg(feature = "net")]
 pub mod public_room_safety;
-/// Boru-specific public-room topic tracker that wraps a [`TopicDiscoveryBackend`]
+/// Boru-specific public-room topic tracker that wraps a [`TopicDiscoveryBackend`](crate::discovery_backend::TopicDiscoveryBackend)
 /// with boru's identity model for publish-once / discover-once operations.
 #[cfg(feature = "net")]
 pub mod public_room_tracker;
@@ -92,11 +92,11 @@ pub mod topic_derivation;
 /// Per-room discovery secrets — cryptographically random 32-byte keys
 /// that isolate private rooms on the DHT.
 ///
-/// Always available (no feature gate) so that [`RoomStore`] can
+/// Always available (no feature gate) so that [`RoomStore`](crate::room::RoomStore) can
 /// (de)serialize secrets without the `net` feature.
 pub mod discovery_secret;
 
-/// Private-room topic tracker — thin wrapper over [`TopicDiscoveryBackend`]
+/// Private-room topic tracker — thin wrapper over [`TopicDiscoveryBackend`](crate::discovery_backend::TopicDiscoveryBackend)
 /// with domain-separated namespace derivation and peer isolation.
 #[cfg(feature = "net")]
 pub mod private_room_tracker;
@@ -140,7 +140,7 @@ pub mod contact;
 
 /// Frontend callback trait — decoupled from the core state machine.
 ///
-/// The [`ChatCallbacks`] trait is the interface that frontend state structs
+/// The [`ChatCallbacks`](crate::chat_callbacks::ChatCallbacks) trait is the interface that frontend state structs
 /// implement to receive typed network-event callbacks.  Extracted into its
 /// own module so frontends (TUI, iced GUI, headless) can use it without
 /// depending on the full `chat_core` implementation.
@@ -341,8 +341,8 @@ pub mod perf;
 /// Core diagnostics — bounded event and probe storage with sequence
 /// numbering and thread-safe query methods.
 ///
-/// Always available (no feature gate).  Use [`Diagnostics`] to record
-/// [`DiagnosticEvent`]s and [`ReceivedProbe`]s.  Oldest entries are
+/// Always available (no feature gate).  Use [`Diagnostics`](crate::diagnostics::Diagnostics) to record
+/// [`DiagnosticEvent`](crate::diagnostics::DiagnosticEvent)s and [`ReceivedProbe`](crate::diagnostics::ReceivedProbe)s.  Oldest entries are
 /// automatically evicted when storage limits are exceeded.
 pub mod diagnostics;
 
@@ -370,16 +370,16 @@ pub mod ui_events;
 
 /// Catalogue retrieval protocol — versioned request/response wire wrappers.
 ///
-/// Always available (no feature gate).  Defines [`CatalogWireRequest`],
-/// [`CatalogWireResponse`], inner [`CatalogRequest`]/[`CatalogResponse`]
-/// enums, and wire-safe [`CatalogErrorCode`].
+/// Always available (no feature gate).  Defines [`CatalogWireRequest`](crate::catalogue_protocol::CatalogWireRequest),
+/// [`CatalogWireResponse`](crate::catalogue_protocol::CatalogWireResponse), inner [`CatalogRequest`](crate::catalogue_protocol::CatalogRequest)/[`CatalogResponse`](crate::catalogue_protocol::CatalogResponse)
+/// enums, and wire-safe [`CatalogErrorCode`](crate::catalogue_protocol::CatalogErrorCode).
 pub mod catalogue_protocol;
 
 /// File access protocol — versioned request/response wire wrappers.
 ///
-/// Always available (no feature gate).  Defines [`FileAccessWireRequest`],
-/// [`FileAccessWireResponse`], inner [`FileAccessRequest`]/[`FileAccessResponse`]
-/// types, and wire-safe [`FileAccessErrorCode`].
+/// Always available (no feature gate).  Defines [`FileAccessWireRequest`](crate::file_access_protocol::FileAccessWireRequest),
+/// [`FileAccessWireResponse`](crate::file_access_protocol::FileAccessWireResponse), inner [`FileAccessRequest`](crate::file_access_protocol::FileAccessRequest)/[`FileAccessResponse`](crate::file_access_protocol::FileAccessResponse)
+/// types, and wire-safe [`FileAccessErrorCode`](crate::file_access_protocol::FileAccessErrorCode).
 pub mod file_access_protocol;
 
 // ── New modules (catalogue + file access) ────────────────────────────────────
@@ -449,10 +449,10 @@ pub mod short_code;
 /// reasonable length.  See the module docs for full details.
 pub mod abuse_controls;
 
-/// Human-friendly deterministic peer names derived from [`PublicKey`].
+/// Human-friendly deterministic peer names derived from [`PublicKey`](iroh::PublicKey).
 ///
-/// Provides [`generate_friendly_name`] for stable adjective‑noun names
-/// (e.g. "Blue Falcon") and [`fmt_truncated`] for short identifiers
+/// Provides [`generate_friendly_name`](crate::peer_names::generate_friendly_name) for stable adjective‑noun names
+/// (e.g. "Blue Falcon") and [`fmt_truncated`](crate::peer_names::fmt_truncated) for short identifiers
 /// ("dfab…961f").  Used by the GUI as the fallback display‑name layer.
 pub mod peer_names;
 
@@ -496,7 +496,7 @@ pub mod group_encryption;
 /// SPAKE2 short-code pairing — a password-authenticated complement to the
 /// QR/URI peer-invitation flow.  Both peers agree on a short numeric code;
 /// the PAKE proves they share it, then each side authenticates its
-/// [`PeerInvitation`] with the derived key and feeds it into
+/// [`PeerInvitation`](crate::peer_invitation::PeerInvitation) with the derived key and feeds it into
 /// [`pairing_service::accept_peer_invitation`].
 #[cfg(feature = "net")]
 pub mod spake2_pairing;
@@ -510,7 +510,7 @@ pub mod spake2_pairing;
 #[cfg(feature = "net")]
 pub mod file_hasher;
 
-/// Provider-neutral GIF domain model — the [`GifProvider`] trait and its
+/// Provider-neutral GIF domain model — the [`GifProvider`](crate::gif_provider::GifProvider) trait and its
 /// neutral request/response types.
 ///
 /// Always available (no feature gate) because it is pure data plus a
@@ -519,7 +519,7 @@ pub mod file_hasher;
 /// [`GifProvider`](gif_provider::GifProvider).
 pub mod gif_provider;
 
-/// KLIPY GIF provider adapter — a concrete [`GifProvider`] implementation
+/// KLIPY GIF provider adapter — a concrete [`GifProvider`](crate::gif_provider::GifProvider) implementation
 /// for the KLIPY HTTP API.
 ///
 /// All KLIPY-specific wire models and request/response types stay inside

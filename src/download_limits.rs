@@ -290,7 +290,7 @@ impl DownloadLimiter {
     /// Acquire the CPU budget for post-transfer hashing, blocking until a
     /// permit is available.
     ///
-    /// Unlike [`try_acquire_hash_verification`] this waits instead of
+    /// Unlike [`try_acquire_hash_verification`](crate::download_limits::DownloadLimiter::try_acquire_hash_verification) this waits instead of
     /// returning [`DownloadLimitError::HashVerificationBusy`].  Use this when
     /// the caller already holds an active download slot (and therefore the
     /// download is guaranteed to proceed eventually).

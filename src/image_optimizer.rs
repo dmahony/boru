@@ -2,16 +2,16 @@
 //!
 //! Provides three public functions:
 //!
-//! * [`optimize_chat_image`] — full resize + quality-retry JPEG compression for
+//! * [`optimize_chat_image`](crate::image_optimizer::optimize_chat_image) — full resize + quality-retry JPEG compression for
 //!   the sender-side wire path.  Validates inputs, strips metadata, composites
 //!   PNG alpha, and rejects images that cannot meet the 2 MiB wire-size cap.
 //!
-//! * [`optimize_chat_image_to_webp`] — similar to [`optimize_chat_image`] but
+//! * [`optimize_chat_image_to_webp`](crate::image_optimizer::optimize_chat_image_to_webp) — similar to [`optimize_chat_image`](crate::image_optimizer::optimize_chat_image) but
 //!   encodes as lossless WebP instead of JPEG.  Also returns the compression
 //!   ratio so the UI can display a size-savings note.
 //!
-//! * [`compress_image`] — lightweight display-thumbnailing helper for
-//!   receiver-side safe rendering.  Delegates to [`optimize_chat_image`] but
+//! * [`compress_image`](crate::compression::compress_image) — lightweight display-thumbnailing helper for
+//!   receiver-side safe rendering.  Delegates to [`optimize_chat_image`](crate::image_optimizer::optimize_chat_image) but
 //!   falls back to the original bytes on any error.
 //!
 //! All functions operate on raw bytes and return raw bytes, so they can be

@@ -1,19 +1,19 @@
 //! Bounded startup burst scheduler for queued download admissions.
 //!
-//! The scheduler bridges the gap between [`DownloadManager`] (which creates
-//! [`QueuedDownload`] admissions) and the actual start of download work
-//! (which requires [`QueuedDownload::start()`] to acquire the global active
+//! The scheduler bridges the gap between [`DownloadManager`](crate::download_manager::DownloadManager) (which creates
+//! [`QueuedDownload`](crate::download_limits::QueuedDownload) admissions) and the actual start of download work
+//! (which requires [`QueuedDownload::start()`](crate::download_limits::QueuedDownload::start) to acquire the global active
 //! semaphore).
 //!
 //! # Behaviour
 //!
-//! 1. **Startup burst** — [`kickstart`](BoundedStartupScheduler::kickstart)
+//! 1. **Startup burst** — [`kickstart`](crate::bounded_startup_scheduler::BoundedStartupScheduler::kickstart)
 //!    starts up to `max_startup_downloads` admissions immediately, respecting
 //!    the `max_concurrent_downloads` cap.  Each admission transitions from
-//!    queued to active by calling [`QueuedDownload::start()`], which acquires
+//!    queued to active by calling [`QueuedDownload::start()`](crate::download_limits::QueuedDownload::start), which acquires
 //!    a global semaphore with exactly `max_concurrent_downloads` permits.
 //! 2. **Ongoing cap** — after the burst, each call to
-//!    [`notify_completed`](BoundedStartupScheduler::notify_completed)
+//!    [`notify_completed`](crate::bounded_startup_scheduler::BoundedStartupScheduler::notify_completed)
 //!    triggers the next pending item to start, keeping the active count
 //!    at or below `max_concurrent_downloads`.
 //! 3. **FIFO ordering** — items are processed in the order they were pushed.

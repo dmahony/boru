@@ -2,14 +2,14 @@
 //!
 //! The directory topic is a deterministic gossip topic derived from the relay
 //! URL.  Peers on the same relay can discover each other's public rooms by
-//! subscribing to this topic and sharing [`RoomAdvertisement`] messages.
+//! subscribing to this topic and sharing [`RoomAdvertisement`](crate::chat_core::RoomAdvertisement) messages.
 //!
 //! # Security
 //!
 //! Advertisements carry a signature from the room creator's node key so
-//! receivers can verify authenticity.  The [`DirectoryStore`] does not verify
+//! receivers can verify authenticity.  The [`DirectoryStore`](crate::directory::DirectoryStore) does not verify
 //! signatures — that is the caller's responsibility.  Stale advertisements
-//! are evicted by the [`evict_stale`](DirectoryStore::evict_stale) method.
+//! are evicted by the [`evict_stale`](crate::directory::DirectoryStore::evict_stale) method.
 
 use std::{
     collections::HashMap,
@@ -63,7 +63,7 @@ pub fn directory_topic(relay_url: &str) -> TopicId {
 /// author can publish at most one advertisement per room.  A later
 /// advertisement from the same author replaces an earlier one (upsert).
 ///
-/// Old entries should be periodically evicted with [`evict_stale`] to keep
+/// Old entries should be periodically evicted with [`evict_stale`](crate::directory::DirectoryStore::evict_stale) to keep
 /// the store size bounded.
 #[derive(Debug)]
 pub struct DirectoryStore {

@@ -1,6 +1,6 @@
 //! Per-room discovery secrets for private-room DHT isolation.
 //!
-//! A [`DiscoverySecret`] is a 32-byte cryptographically random value that
+//! A [`DiscoverySecret`](crate::discovery_secret::DiscoverySecret) is a 32-byte cryptographically random value that
 //! acts as both the DHT namespace key and the signing/verification key for
 //! a private room's discovery records.  Only peers who know the secret can:
 //!
@@ -20,7 +20,7 @@
 //!   so secret material does not linger on the stack or heap after the value
 //!   is destroyed.
 //! * [`Clone`] is intentionally *not* derived — secrets should be explicitly
-//!   borrowed via [`as_bytes`](DiscoverySecret::as_bytes), and duplicated only
+//!   borrowed via [`as_bytes`](crate::discovery_secret::DiscoverySecret::as_bytes), and duplicated only
 //!   with a deliberate [`clone()`](Clone::clone) call. (We provide a manual
 //!   [`Clone`] impl for practical testing use; see the type-level docs for
 //!   guidance.) `Copy` is deliberately absent so the secret can never be
@@ -33,7 +33,7 @@
 //! | Purpose | Derivation | V1 usage |
 //! |---------|-----------|----------|
 //! | DHT namespace | `BLAKE3("private-room v1" \|\| topic \|\| secret)` | [`private_room_namespace()`](crate::private_room_tracker::private_room_namespace) |
-//! | Encryption key | `encryption_keypair(secret_as_topic, BLAKE3(secret), minute)` | [`PrivateRoomTracker::encryption_key()`] |
+//! | Encryption key | `encryption_keypair(secret_as_topic, BLAKE3(secret), minute)` | `PrivateRoomTracker::encryption_key()` |
 //! | Signing/verification topic | Direct use as `topic` parameter | `create_discovery_record()` / `ValidationConfig::new()` |
 //!
 //! **Risk**: If any one primitive is compromised (BLAKE3 preimage, Ed25519 key
@@ -54,9 +54,9 @@
 //! subkey_signing    = BLAKE3("boru-chat private-room v2 signing"    || secret)
 //! ```
 //!
-//! The functions below ([`subkey_namespace`](Self::subkey_namespace),
-//! [`subkey_encryption`](Self::subkey_encryption),
-//! [`subkey_signing`](Self::subkey_signing)) implement these derivations.
+//! The functions below ([`subkey_namespace`](crate::discovery_secret::DiscoverySecret::subkey_namespace),
+//! [`subkey_encryption`](crate::discovery_secret::DiscoverySecret::subkey_encryption),
+//! [`subkey_signing`](crate::discovery_secret::DiscoverySecret::subkey_signing)) implement these derivations.
 //! They are **not** used by the V1 wire format — they exist for assessment,
 //! unit testing, and future V2 migration.
 

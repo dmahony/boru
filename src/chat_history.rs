@@ -558,7 +558,7 @@ impl ChatHistoryStore {
     /// Return up to `count` of the most recent entries for a given topic,
     /// oldest-first.
     ///
-    /// Unlike [`for_topic`], this scans backwards from newest to oldest
+    /// Unlike [`for_topic`](crate::chat_history::ChatHistoryStore::for_topic), this scans backwards from newest to oldest
     /// and stops once `count` matching entries have been found, making it
     /// suitable for backfill queries against large topic histories.
     pub fn get_recent_messages_for_topic(

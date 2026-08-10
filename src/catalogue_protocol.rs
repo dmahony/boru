@@ -7,7 +7,7 @@
 //! - Error codes are stable, human-readable strings (snake_case), never raw Rust
 //!   error internals.
 //! - Unknown error codes received from a remote peer are mapped to
-//!   [`CatalogErrorCode::InternalError`] so deserialization never panics on an
+//!   [`CatalogErrorCode::InternalError`](crate::catalogue_protocol::CatalogErrorCode::InternalError) so deserialization never panics on an
 //!   unrecognised variant.
 
 use serde::{Deserialize, Serialize};
@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Each variant serializes as a snake_case string (e.g. `"permission_denied"`).
 /// Unknown strings received from a remote peer are safely mapped to
-/// [`InternalError`] — the deserializer never panics on an unrecognised value.
+/// [`InternalError`](crate::catalogue_protocol::CatalogErrorCode::InternalError) — the deserializer never panics on an unrecognised value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CatalogErrorCode {
@@ -226,7 +226,7 @@ impl CataloguePage {
     /// In the current implementation, catalogue pages are served over an
     /// authenticated QUIC connection and signed by the owning profile's
     /// secret key at the catalogue level.  Individual page verification is
-    /// deferred to the complete [`SignedFileCatalogue`] verification.
+    /// deferred to the complete [`SignedFileCatalogue`](crate::catalogue_model::SignedFileCatalogue) verification.
     pub fn verify(&self) -> Result<(), &'static str> {
         // Each item's content_hash is verified against the blake3 hash at
         // download time.  Page-level verification is a no-op for now.

@@ -7,7 +7,7 @@
 //! - Reports progress via a callback.
 //! - Supports cancellation via a shared `AtomicBool` flag.
 //! - Enforces a per-transfer timeout and a per-chunk network timeout.
-//! - Persists progress periodically to the database via a [`ProgressUpdateGate`].
+//! - Persists progress periodically to the database via a [`ProgressUpdateGate`](crate::download_limits::ProgressUpdateGate).
 //! - Temporary file is cleaned up on error or cancellation.
 //!
 //! # Flow
@@ -17,7 +17,7 @@
 //! 2. Stream the completed blob from the local store to the temporary file
 //!    using a bounded buffer (128 KiB chunks), computing the BLAKE3 hash
 //!    incrementally.
-//! 3. Verify size + hash match the [`SignedDownloadDescriptor`].
+//! 3. Verify size + hash match the `SignedDownloadDescriptor`.
 //! 4. Record the temp path in the database for crash recovery.
 //! 5. Report progress every chunk.
 

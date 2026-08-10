@@ -7,19 +7,19 @@
 //! request/response round-trip:
 //!
 //! 1. Requester opens a bi-directional QUIC stream to the responder using
-//!    [`BACKFILL_ALPN`].
-//! 2. Requester sends a length-prefixed, postcard-encoded [`BackfillRequest`].
-//! 3. Responder reads the request, queries its [`Storage`], and replies
-//!    with a length-prefixed, postcard-encoded [`BackfillResponse`] containing
+//!    [`BACKFILL_ALPN`](crate::backfill::BACKFILL_ALPN).
+//! 2. Requester sends a length-prefixed, postcard-encoded [`BackfillRequest`](crate::backfill::BackfillRequest).
+//! 3. Responder reads the request, queries its [`Storage`](crate::storage::Storage), and replies
+//!    with a length-prefixed, postcard-encoded [`BackfillResponse`](crate::backfill::BackfillResponse) containing
 //!    the raw signed message bytes.
 //! 4. Requester decodes each message through
-//!    [`SignedMessage::verify_and_decode`] and feeds the result into its
+//!    [`SignedMessage::verify_and_decode`](crate::chat_core::SignedMessage::verify_and_decode) and feeds the result into its
 //!    `NetEvent` channel as if they arrived over gossip.
 //!
 //! # Authorization
 //!
 //! Every remote request must name a concrete topic and pass the
-//! [`BackfillAuthorizer`] gate, which checks the authenticated connection
+//! [`BackfillAuthorizer`](crate::backfill::BackfillAuthorizer) gate, which checks the authenticated connection
 //! peer against the topic's conversation type: active group membership,
 //! the deterministic direct-chat pairing, or the public-room policy.
 //! Unauthorized and unknown topics receive an identical generic denial
@@ -28,7 +28,7 @@
 //! # Rate limiting
 //!
 //! The responding side enforces a per-peer concurrency limit: at most one
-//! backfill request per remote [`PublicKey`] is served at a time.
+//! backfill request per remote [`PublicKey`](iroh::PublicKey) is served at a time.
 //!
 //! # Wire format
 //!

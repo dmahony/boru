@@ -1,9 +1,9 @@
 //! Reusable video metadata and ephemeral inline-player state.
 //!
-//! [`MediaMetadata`] is the small, serializable description that may be
+//! [`MediaMetadata`](crate::video_playback::MediaMetadata) is the small, serializable description that may be
 //! attached to a stored message.  Decoder handles, widget state, local paths,
 //! and playback position deliberately do not belong here: they are process
-//! local and are represented by [`PlayerState`] and [`PlaybackCoordinator`].
+//! local and are represented by [`PlayerState`](crate::video_playback::PlayerState) and [`PlaybackCoordinator`](crate::video_playback::PlaybackCoordinator).
 
 use std::collections::BTreeSet;
 use std::io::Read;

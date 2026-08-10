@@ -227,7 +227,7 @@ impl TopicDiscoveryBackend for InMemoryDiscoveryBackend {
 /// # DHT instance separation
 ///
 /// This backend wraps a distinct `distributed_topic_tracker::Dht` instance
-/// that is **independent** from the [`DhtAddressLookup`] used by iroh's
+/// that is **independent** from the [`DhtAddressLookup`](iroh_mainline_address_lookup::DhtAddressLookup) used by iroh's
 /// address-resolution layer (`iroh-mainline-address-lookup`).  The two
 /// systems serve different purposes:
 ///

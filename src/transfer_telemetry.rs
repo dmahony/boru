@@ -5,9 +5,9 @@
 //!
 //! # Architecture
 //!
-//! [`TransferTelemetry`] is a small wrapper that owns per-transfer sequence
-//! counters and emits structured [`TransferLifecycleEvent`]s into the shared
-//! [`Diagnostics`] store via [`DiagnosticEventKind::TransferLifecycle`].
+//! [`TransferTelemetry`](crate::transfer_telemetry::TransferTelemetry) is a small wrapper that owns per-transfer sequence
+//! counters and emits structured [`TransferLifecycleEvent`](crate::diagnostics::TransferLifecycleEvent)s into the shared
+//! [`Diagnostics`](crate::diagnostics::Diagnostics) store via [`DiagnosticEventKind::TransferLifecycle`](crate::diagnostics::DiagnosticEventKind::TransferLifecycle).
 //!
 //! Each public method accepts the minimal context needed (download id, byte
 //! counts, error categories) and builds the correct envelope.  No filenames,
@@ -17,7 +17,7 @@
 //!
 //! - `event_id` is a locally-generated opaque hex string (truncated SHA-256 of
 //!   `transfer_id || sequence || occurred_at_ms`).
-//! - `transfer_id` follows the existing [`short_transfer_id`] policy: at most
+//! - `transfer_id` follows the existing [`short_transfer_id`](crate::diagnostics::short_transfer_id) policy: at most
 //!   8 ASCII chars plus `…` when shortened.
 //! - No forbidden fields (filename, path, URL, peer, hash, token, etc.) may
 //!   be passed to these methods — the caller is responsible for respecting

@@ -9,7 +9,7 @@
 //!
 //! KLIPY authenticates via the application key placed **in the URL path**
 //! (`api/v1/{app_key}/gifs/search`).  The key is stored in a redacted
-//! [`SecretString`] wrapper; it is never logged, never Debug-printed in
+//! `SecretString` wrapper; it is never logged, never Debug-printed in
 //! full, and never included in chat messages.
 //!
 //! # Rendition selection

@@ -1,6 +1,6 @@
 //! Persistence for per-group encryption state.
 //!
-//! Saves and loads [`GroupEncryptionState`] (a serialised [`GroupState`] from
+//! Saves and loads [`GroupEncryptionState`](crate::group_encryption::encryption_state::GroupEncryptionState) (a serialised [`GroupState`](crate::group_events::GroupState) from
 //! p2panda-encryption) to/from the `group_encryption_state` SQLite table.
 //!
 //! # Table schema (created by migration v13)
@@ -14,24 +14,24 @@
 //! ```
 //!
 //! The `state` column stores a postcard-encoded, **versioned envelope**
-//! ([`StoredGroupStateV1`]) wrapping a [`GroupEncryptionState`] blob.
+//! (`StoredGroupStateV1`) wrapping a [`GroupEncryptionState`](crate::group_encryption::encryption_state::GroupEncryptionState) blob.
 //! `updated_at` is a Unix-epoch milliseconds timestamp set on every write.
 //!
 //! # Fail-closed loading
 //!
-//! [`load_group_state`] distinguishes four conditions:
+//! `load_group_state` distinguishes four conditions:
 //!
-//! - [`GroupStateLoadError::Missing`] — no row exists. This is the **only**
+//! - [`GroupStateLoadError::Missing`](crate::group_encryption::persistence::GroupStateLoadError::Missing) — no row exists. This is the **only**
 //!   condition that permits fresh initialization (a genuinely new group).
-//! - [`GroupStateLoadError::Corrupt`] — a row exists but cannot be decoded or
+//! - [`GroupStateLoadError::Corrupt`](crate::group_encryption::persistence::GroupStateLoadError::Corrupt) — a row exists but cannot be decoded or
 //!   fails invariant validation. The raw record is **never overwritten**
 //!   automatically; it stays in the table until an explicit user-approved
-//!   reset moves it to the quarantine table ([`quarantine_group_state`]).
-//! - [`GroupStateLoadError::UnsupportedVersion`] — the row decodes but uses a
+//!   reset moves it to the quarantine table (`quarantine_group_state`).
+//! - [`GroupStateLoadError::UnsupportedVersion`](crate::group_encryption::persistence::GroupStateLoadError::UnsupportedVersion) — the row decodes but uses a
 //!   format version this build cannot load (including the legacy pre-version
 //!   raw blob, version 0). Route through migration rather than treating it as
 //!   missing or corrupt.
-//! - [`GroupStateLoadError::Io`] — an underlying database failure.
+//! - [`GroupStateLoadError::Io`](crate::group_encryption::persistence::GroupStateLoadError::Io) — an underlying database failure.
 
 use std::collections::HashMap;
 

@@ -5,19 +5,19 @@
 //! join/leave notices, renames, command help, tunnel events, whisper activity,
 //! file-transfer progress, video guidance, errors, warnings, and generic
 //! informational notices. This module is the single data-layer mapping from
-//! those message formats to a typed [`SystemEventKind`].
+//! those message formats to a typed [`SystemEventKind`](crate::system_events::SystemEventKind).
 //!
 //! # Invariants
 //!
 //! * **Nothing is silently discarded.** Every input maps to exactly one
-//!   variant. Unrecognised text falls back to [`SystemEventKind::Information`];
+//!   variant. Unrecognised text falls back to [`SystemEventKind::Information`](crate::system_events::SystemEventKind::Information);
 //!   there is no "ignore" outcome.
 //! * **All original content is preserved.** Classification is a pure read-only
 //!   function over the message text. It never rewrites, filters, or truncates
 //!   the body — callers keep the raw string as the source of truth and use the
 //!   kind only to select rendering or grouping treatment.
 //! * **Extensible.** Adding a new system-message format is a one-arm change in
-//!   [`classify_system_event`] plus one row in the test table. Keep the most
+//!   [`classify_system_event`](crate::system_events::classify_system_event) plus one row in the test table. Keep the most
 //!   specific formats above the generic keyword buckets so positive domain
 //!   signals (e.g. `Download queued …`) win over error/warning keywords.
 //!
@@ -27,22 +27,22 @@
 //!
 //! | Format (template) | Variant | Producer |
 //! |---|---|---|
-//! | `{name} joined the chat`, `🟢 {name} joined`, `🟢 {name} is online`, `Friend {label} is now ONLINE` | [`Join`](SystemEventKind::Join) | `chat_callbacks::on_neighbor_status_change`, Iced `on_neighbor_up`/`record_presence`/friend status |
-//! | `{name} left the chat`, `Friend {label} is now offline` | [`Leave`](SystemEventKind::Leave) | `chat_callbacks::on_neighbor_status_change`, Iced friend status |
-//! | `{key} is now known as {name}` | [`Rename`](SystemEventKind::Rename) | `chat_core` profile-name handling |
-//! | `{name} shared a file` | [`FileShared`](SystemEventKind::FileShared) | `chat_core` `Message::FileShare` |
-//! | `Usage: …`, `Type a message … /help for commands.` | [`CommandHelp`](SystemEventKind::CommandHelp) | Iced slash-command handlers |
-//! | `Tunnel request accepted`, `Tunnel request declined`, `Tunnel closed` | [`Tunnel`](SystemEventKind::Tunnel) | Iced tunnel dialogs |
-//! | `[Whisper] Connected to {label}`, `[Whisper to {label}] …`, `[Mailbox] …`, `[Offline DM sync: …]` | [`Whisper`](SystemEventKind::Whisper) | Iced whisper/inbox events |
-//! | `{label} invited you to …`, `Room invite sent via whisper to …`, `Invite to join this room (boru1): …`, `{label} opened a private chat with you.` | [`Invite`](SystemEventKind::Invite) | Iced room/group invites |
-//! | `Added friend: {label}`, `Updated friend: …`, `Removed friend: …`, `No friends tracked yet.`, `Friends ({n}):` | [`Friend`](SystemEventKind::Friend) | Iced friend management |
-//! | `Profile image updated.`, `Profile image removed.`, `Saving profile image…` | [`Profile`](SystemEventKind::Profile) | Iced profile screens |
-//! | `Mesh degraded: …`, `Mesh offline: …`, `Mesh recovered: …`, `The gossip receiver closed.` | [`Mesh`](SystemEventKind::Mesh) | Iced mesh watchdog, `chat_core` `NetEvent::Closed` |
-//! | `Sharing: {name}`, `Download queued for …`, `*{name}* is complete`, `Shared file added: …`, `Shared file removed.` | [`Transfer`](SystemEventKind::Transfer) | Iced transfer handlers |
-//! | `Download started — click play again …`, `Download in progress — click play again …`, `Stream ready: …` | [`Video`](SystemEventKind::Video) | Iced inline-video handlers |
-//! | `Network error: …`, `Download failed: …`, `Open failed: …`, `Image/File upload failed: …`, `Catalogue fetch failed: …`, `Video verification failed: …`, `Could not delete room history: …`, `Failed to join room: …`, `Mailbox sync failed: …` | [`Error`](SystemEventKind::Error) | core `NetEvent::Error`, Iced failure paths |
-//! | `Cannot react/edit/delete a system message`, `No message at index {n}`, `Unknown peer: …`, `Video is not ready to play yet.`, `Shared file is no longer available.`, `… not yet implemented.`, `Group invite not found or expired.`, `Select at least one friend to invite.`, `Inline video playback unavailable: …`, `Rejected invalid contact control message.` | [`Warning`](SystemEventKind::Warning) | Iced command/validation paths |
-//! | `Chat joined.`, `Conversation cleared.`, `No known peers to inspect.`, `  {peer}: {status}` (friend-list rows), anything unrecognised | [`Information`](SystemEventKind::Information) | fallback — never discarded |
+//! | `{name} joined the chat`, `🟢 {name} joined`, `🟢 {name} is online`, `Friend {label} is now ONLINE` | [`Join`](crate::system_events::SystemEventKind::Join) | `chat_callbacks::on_neighbor_status_change`, Iced `on_neighbor_up`/`record_presence`/friend status |
+//! | `{name} left the chat`, `Friend {label} is now offline` | [`Leave`](crate::system_events::SystemEventKind::Leave) | `chat_callbacks::on_neighbor_status_change`, Iced friend status |
+//! | `{key} is now known as {name}` | [`Rename`](crate::system_events::SystemEventKind::Rename) | `chat_core` profile-name handling |
+//! | `{name} shared a file` | [`FileShared`](crate::system_events::SystemEventKind::FileShared) | `chat_core` `Message::FileShare` |
+//! | `Usage: …`, `Type a message … /help for commands.` | [`CommandHelp`](crate::system_events::SystemEventKind::CommandHelp) | Iced slash-command handlers |
+//! | `Tunnel request accepted`, `Tunnel request declined`, `Tunnel closed` | [`Tunnel`](crate::system_events::SystemEventKind::Tunnel) | Iced tunnel dialogs |
+//! | `[Whisper] Connected to {label}`, `[Whisper to {label}] …`, `[Mailbox] …`, `[Offline DM sync: …]` | [`Whisper`](crate::system_events::SystemEventKind::Whisper) | Iced whisper/inbox events |
+//! | `{label} invited you to …`, `Room invite sent via whisper to …`, `Invite to join this room (boru1): …`, `{label} opened a private chat with you.` | [`Invite`](crate::system_events::SystemEventKind::Invite) | Iced room/group invites |
+//! | `Added friend: {label}`, `Updated friend: …`, `Removed friend: …`, `No friends tracked yet.`, `Friends ({n}):` | [`Friend`](crate::system_events::SystemEventKind::Friend) | Iced friend management |
+//! | `Profile image updated.`, `Profile image removed.`, `Saving profile image…` | [`Profile`](crate::system_events::SystemEventKind::Profile) | Iced profile screens |
+//! | `Mesh degraded: …`, `Mesh offline: …`, `Mesh recovered: …`, `The gossip receiver closed.` | [`Mesh`](crate::system_events::SystemEventKind::Mesh) | Iced mesh watchdog, `chat_core` `NetEvent::Closed` |
+//! | `Sharing: {name}`, `Download queued for …`, `*{name}* is complete`, `Shared file added: …`, `Shared file removed.` | [`Transfer`](crate::system_events::SystemEventKind::Transfer) | Iced transfer handlers |
+//! | `Download started — click play again …`, `Download in progress — click play again …`, `Stream ready: …` | [`Video`](crate::system_events::SystemEventKind::Video) | Iced inline-video handlers |
+//! | `Network error: …`, `Download failed: …`, `Open failed: …`, `Image/File upload failed: …`, `Catalogue fetch failed: …`, `Video verification failed: …`, `Could not delete room history: …`, `Failed to join room: …`, `Mailbox sync failed: …` | [`Error`](crate::system_events::SystemEventKind::Error) | core `NetEvent::Error`, Iced failure paths |
+//! | `Cannot react/edit/delete a system message`, `No message at index {n}`, `Unknown peer: …`, `Video is not ready to play yet.`, `Shared file is no longer available.`, `… not yet implemented.`, `Group invite not found or expired.`, `Select at least one friend to invite.`, `Inline video playback unavailable: …`, `Rejected invalid contact control message.` | [`Warning`](crate::system_events::SystemEventKind::Warning) | Iced command/validation paths |
+//! | `Chat joined.`, `Conversation cleared.`, `No known peers to inspect.`, `  {peer}: {status}` (friend-list rows), anything unrecognised | [`Information`](crate::system_events::SystemEventKind::Information) | fallback — never discarded |
 
 use crate::chat_core::ChatKind;
 

@@ -10,11 +10,11 @@
 //! 1. User‑assigned nickname (friend label)
 //! 2. Remote profile display name (from `ProfileUpdate` gossip)
 //! 3. Advertised device / session name
-//! 4. [`resolve_peer_name`] fallback — last 5 hex characters of the peer ID
+//! 4. [`resolve_peer_name`](crate::peer_names::resolve_peer_name) fallback — last 5 hex characters of the peer ID
 //!    (compact, deterministic)
 //!
 //! The callers (`app.rs::resolve_name` etc.) enforce this priority; this
-//! module also provides [`generate_friendly_name`] as an optional richer
+//! module also provides [`generate_friendly_name`](crate::peer_names::generate_friendly_name) as an optional richer
 //! label for contexts that want a two-word "Adjective Noun" name.
 
 use iroh::PublicKey;

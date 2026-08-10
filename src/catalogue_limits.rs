@@ -2,7 +2,7 @@
 //!
 //! All hard limits enforced by the server (handler) and client are defined
 //! here. Values are chosen to prevent resource exhaustion while supporting
-//! legitimate usage patterns. The [`CatalogueLimitsConfig`] type provides a
+//! legitimate usage patterns. The [`CatalogueLimitsConfig`](crate::catalogue_limits::CatalogueLimitsConfig) type provides a
 //! JSON-loadable, validated configuration for deployments that need to tune
 //! these limits without rebuilding the application.
 
@@ -15,14 +15,14 @@
 //! | Max response payload bytes | 4 MiB | Client (receive) + Handler (send) — reject oversized responses |
 //! | Max files per catalogue | 10,000 | Handler (build) + Client (receive) |
 //! | Max collections per catalogue | 1,000 | Handler (build) + Client (receive) |
-//! | Max file name (display_name) length | 512 bytes | [`RemoteSharedFile::validate`] |
-//! | Max description length | 1,024 UTF-8 bytes; only tab, CR, and LF controls are allowed; Unicode format and line/paragraph-separator characters are rejected | [`RemoteSharedFile::validate`], [`RemoteCollection::validate`] |
-//! | Max mime_type length | 128 bytes | [`RemoteSharedFile::validate`] |
-//! | Max content_hash length | 128 bytes | [`RemoteSharedFile::validate`] |
-//! | Max shared_file_id length | 256 bytes | [`RemoteSharedFile::validate`] |
-//! | Max collections per file | 256 | [`RemoteSharedFile::validate`] |
-//! | Max collection_id length | 256 bytes | [`RemoteCollection::validate`] |
-//! | Max collection name length | 512 bytes | [`RemoteCollection::validate`] |
+//! | Max file name (display_name) length | 512 bytes | [`RemoteSharedFile::validate`](crate::catalogue_model::RemoteSharedFile::validate) |
+//! | Max description length | 1,024 UTF-8 bytes; only tab, CR, and LF controls are allowed; Unicode format and line/paragraph-separator characters are rejected | [`RemoteSharedFile::validate`](crate::catalogue_model::RemoteSharedFile::validate), [`RemoteCollection::validate`](crate::catalogue_model::RemoteCollection::validate) |
+//! | Max mime_type length | 128 bytes | [`RemoteSharedFile::validate`](crate::catalogue_model::RemoteSharedFile::validate) |
+//! | Max content_hash length | 128 bytes | [`RemoteSharedFile::validate`](crate::catalogue_model::RemoteSharedFile::validate) |
+//! | Max shared_file_id length | 256 bytes | [`RemoteSharedFile::validate`](crate::catalogue_model::RemoteSharedFile::validate) |
+//! | Max collections per file | 256 | [`RemoteSharedFile::validate`](crate::catalogue_model::RemoteSharedFile::validate) |
+//! | Max collection_id length | 256 bytes | [`RemoteCollection::validate`](crate::catalogue_model::RemoteCollection::validate) |
+//! | Max collection name length | 512 bytes | [`RemoteCollection::validate`](crate::catalogue_model::RemoteCollection::validate) |
 //! | Max individual file size | 10 TiB | Handler (build) — checked in catalogue construction |
 //! | Max file-details response bytes | 256 KiB | Handler (send) + Client (receive) |
 
@@ -52,7 +52,7 @@ pub const MAX_CATALOGUE_PAGE_BYTES: usize = 1024 * 1024; // 1 MiB
 /// Maximum number of files in a single catalogue response.
 ///
 /// Beyond this count the server truncates or returns
-/// [`CatalogErrorCode::InvalidRequest`].
+/// [`CatalogErrorCode::InvalidRequest`](crate::catalogue_protocol::CatalogErrorCode::InvalidRequest).
 pub const MAX_CATALOGUE_FILES: usize = 10_000;
 
 /// Maximum number of collections in a single catalogue response.
@@ -73,8 +73,8 @@ pub const MAX_INVALID_RESPONSE_ATTEMPTS: usize = 3;
 /// obviously bogus or overflow values.
 pub const MAX_FILE_SIZE_BYTES: u64 = 10 * 1024 * 1024 * 1024 * 1024; // 10 TiB
 
-/// Maximum serialized wire-format [`CatalogResponse::FileDetails`] payload
-/// in bytes.  File details are a single [`RemoteSharedFile`] – 256 KiB is
+/// Maximum serialized wire-format [`CatalogResponse::FileDetails`](crate::catalogue_protocol::CatalogResponse::FileDetails) payload
+/// in bytes.  File details are a single [`RemoteSharedFile`](crate::catalogue_model::RemoteSharedFile) – 256 KiB is
 /// far beyond what a single file entry needs.
 pub const MAX_FILE_DETAILS_PAYLOAD_BYTES: usize = 256 * 1024; // 256 KiB
 

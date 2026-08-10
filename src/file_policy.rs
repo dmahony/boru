@@ -2,7 +2,7 @@
 //!
 //! This module is the **single authoritative implementation** of the
 //! "may this file be shared / announced?" gate. Every intake boundary that
-//! applies a size ceiling or an extension allowlist MUST call [`admission`]
+//! applies a size ceiling or an extension allowlist MUST call [`admission`](crate::file_policy::admission)
 //! instead of re-implementing the rule inline.
 //!
 //! # Why this module exists (BORU-AUDIT-20)
@@ -13,7 +13,7 @@
 //! rule inline with subtly different semantics (case-insensitive matching
 //! there, case-sensitive in the profile method; no leading-dot trimming in
 //! the indexer). Security fixes had to be applied to two places and could
-//! drift. All callers now go through [`admission`], which is
+//! drift. All callers now go through [`admission`](crate::file_policy::admission), which is
 //! case-insensitive and trims leading dots — the union of both behaviours.
 //!
 //! # Policy changes

@@ -1,15 +1,15 @@
 //! Wire-format encrypted message types for group encryption.
 //!
-//! Defines the local [`ForwardSecureGroupMessage`] trait, the
-//! [`EncryptedGroupContent`] enum, and the [`EncryptedGroupEnvelope`] wrapper
+//! Defines the local [`ForwardSecureGroupMessage`](crate::group_encryption::message::ForwardSecureGroupMessage) trait, the
+//! [`EncryptedGroupContent`](crate::group_encryption::message::EncryptedGroupContent) enum, and the [`EncryptedGroupEnvelope`](crate::group_encryption::message::EncryptedGroupEnvelope) wrapper
 //! that is serialized via postcard and included in the gossip-signed
-//! [`crate::Message::EncryptedGroupMessage`] variant.
+//! [`crate::Message::EncryptedGroupMessage`](crate::chat_core::Message::EncryptedGroupMessage) variant.
 //!
 //! # ForwardSecureGroupMessage trait
 //!
 //! This is a local trait (not re-exporting p2panda's trait directly) so that
 //! we can avoid depending on a concrete `AckedGroupMembership` implementation
-//! (the [`membership`](super::membership) module) until it exists.  Direct
+//! (the [`membership`](crate::group_encryption::membership) module) until it exists.  Direct
 //! messages are carried as opaque serialised payloads (`Vec<u8>`); they are
 //! deserialised at the outer processing layer.
 
@@ -55,8 +55,8 @@ pub enum EncryptedGroupContent {
 /// payloads for individual peers.
 ///
 /// The envelope is serialised via postcard and wrapped in a
-/// [`SignedMessage`](crate::SignedMessage) for gossip broadcast, exactly like
-/// every other [`Message`](crate::Message) variant.
+/// [`SignedMessage`](crate::chat_core::SignedMessage) for gossip broadcast, exactly like
+/// every other [`Message`](crate::chat_core::Message) variant.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EncryptedGroupEnvelope {
     /// Unique identifier (hash of the message).
@@ -68,7 +68,7 @@ pub struct EncryptedGroupEnvelope {
     /// Opaque serialised direct-message payloads for key delivery.
     ///
     /// Each element is a postcard-serialised
-    /// [`DirectMessage`](p2panda_encryption::message_scheme::DirectMessage)
+    /// [`p2panda DirectMessage`](p2panda_encryption::message_scheme::DirectMessage)
     /// destined for a specific group member.  The receiving layer
     /// deserialises and dispatches these to the appropriate recipient's
     /// DCGKA processing function.

@@ -95,7 +95,7 @@ pub enum Message {
         #[serde(default, deserialize_with = "deserialize_tolerant_opt_hash")]
         collection_hash: Option<MessageHash>,
         /// Number of entries (files) in the collection.  Only meaningful
-        /// when [`collection_hash`](Self::collection_hash) is present; 0 for
+        /// when `collection_hash` is present; 0 for
         /// single-file shares.
         #[serde(default, deserialize_with = "deserialize_tolerant_u64")]
         collection_entries: u64,
@@ -174,7 +174,7 @@ pub enum Message {
         sent_at_ms: u64,
     },
     /// Latency probe pong — echoes back the `sent_at_ms` from the
-    /// corresponding [`LatencyPing`] so the original sender can compute
+    /// corresponding [`LatencyPing`](crate::chat_core::Message::LatencyPing) so the original sender can compute
     /// round-trip latency.  Never displayed in the chat log.
     LatencyPong {
         /// Unix epoch milliseconds from the original ping.

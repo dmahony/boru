@@ -1,16 +1,16 @@
 //! Bounded dynamic peer joiner for gossip topics.
 //!
-//! [`DynamicPeerJoiner`] reads discovered peer batches from an `mpsc` channel
-//! and joins them via [`GossipSender::join_peers`] with:
+//! [`DynamicPeerJoiner`](crate::dynamic_joiner::DynamicPeerJoiner) reads discovered peer batches from an `mpsc` channel
+//! and joins them via [`GossipSender::join_peers`](crate::api::GossipSender::join_peers) with:
 //!
 //! * **Deduplication** — skip already-known or already-joining peers.
-//! * **Self-ignore** — skip the local [`EndpointId`].
-//! * **Bounded concurrency** — at most [`DynamicPeerJoinerConfig::max_concurrent_joins`]
+//! * **Self-ignore** — skip the local [`EndpointId`](iroh::EndpointId).
+//! * **Bounded concurrency** — at most [`DynamicPeerJoinerConfig::max_concurrent_joins`](crate::dynamic_joiner::DynamicPeerJoinerConfig::max_concurrent_joins)
 //!   in-flight join attempts at once.
 //! * **Per-peer retry with backoff** — on failure, wait then retry up to
-//!   [`DynamicPeerJoinerConfig::max_retries_per_peer`] times with exponential
+//!   [`DynamicPeerJoinerConfig::max_retries_per_peer`](crate::dynamic_joiner::DynamicPeerJoinerConfig::max_retries_per_peer) times with exponential
 //!   backoff + jitter.
-//! * **Later retries** — when a [`NeighborEvent::Down`] is received, the peer
+//! * **Later retries** — when a [`NeighborEvent::Down`](crate::dynamic_joiner::NeighborEvent::Down) is received, the peer
 //!   is removed from the known set so a future discovery batch can try again.
 //! * **Bounded per-peer tasks** — at most one in-flight join attempt per peer
 //!   at any time; retries are sequential, not concurrent.
@@ -19,13 +19,13 @@
 //!
 //! # Lifecycle
 //!
-//! 1. [`DynamicPeerJoiner::start`] — spawns a background tokio task.
-//! 2. Feed peer batches into the [`discovery_tx`](DynamicPeerJoiner::discovery_tx)
+//! 1. [`DynamicPeerJoiner::start`](crate::dynamic_joiner::DynamicPeerJoiner::start) — spawns a background tokio task.
+//! 2. Feed peer batches into the [`discovery_tx`](crate::dynamic_joiner::DynamicPeerJoiner::discovery_tx)
 //!    sender (e.g. from a DHT discovery loop).
-//! 3. Feed [`NeighborEvent`]s into the
-//!    [`neighbor_events_tx`](DynamicPeerJoiner::neighbor_events_tx) sender
+//! 3. Feed [`NeighborEvent`](crate::dynamic_joiner::NeighborEvent)s into the
+//!    [`neighbor_events_tx`](crate::dynamic_joiner::DynamicPeerJoiner::neighbor_events_tx) sender
 //!    (from the gossip event stream).
-//! 4. [`DynamicPeerJoiner::shutdown`] — signals cancellation and awaits the
+//! 4. [`DynamicPeerJoiner::shutdown`](crate::dynamic_joiner::DynamicPeerJoiner::shutdown) — signals cancellation and awaits the
 //!    background task.
 
 use std::{
@@ -49,7 +49,7 @@ use crate::api::GossipSender;
 
 /// Events that inform the joiner about neighbor connectivity changes.
 ///
-/// Feed these via the [`neighbor_events_tx`](DynamicPeerJoiner::neighbor_events_tx)
+/// Feed these via the [`neighbor_events_tx`](crate::dynamic_joiner::DynamicPeerJoiner::neighbor_events_tx)
 /// sender so the joiner can update its known‑peer set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NeighborEvent {

@@ -1,6 +1,7 @@
 //! Device-boundary PCM normalization for voice calls.
 //!
-//! The call pipeline carries mono `f32` samples at [`INTERNAL_SAMPLE_RATE`].
+//! The call pipeline carries mono `f32` samples at
+//! [`INTERNAL_SAMPLE_RATE`](crate::call::format::INTERNAL_SAMPLE_RATE).
 //! Device formats and rates are converted only at the edge of the pipeline.
 
 use rubato::audioadapter_buffers::owned::InterleavedOwned;

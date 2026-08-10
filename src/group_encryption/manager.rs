@@ -3,16 +3,16 @@
 //!
 //! # Architecture
 //!
-//! [`KmgState`] holds the local peer's x25519 identity key and all pre-key
-//! state (long-term pre-keys + one-time secrets).  [`Manager`] is a unit
+//! [`KmgState`](crate::group_encryption::manager::KmgState) holds the local peer's x25519 identity key and all pre-key
+//! state (long-term pre-keys + one-time secrets).  [`Manager`](crate::group_encryption::manager::Manager) is a unit
 //! struct that carries the [`IdentityManager`] and [`PreKeyManager`] trait
 //! implementations.
 //!
 //! The identity x25519 key is generated at startup (via
-//! [`Manager::init_with_rng`]) and should be persisted alongside the iroh
+//! [`Manager::init_with_rng`](crate::group_encryption::manager::Manager::init_with_rng)) and should be persisted alongside the iroh
 //! ed25519 secret key via serde.  New long-term pre-keys are generated with
-//! [`PreKeyManager::rotate_prekey`]; one-time bundles are created with
-//! [`PreKeyManager::generate_onetime_bundle`] and can be published via the
+//! [`PreKeyManager::rotate_prekey`](p2panda_encryption::traits::PreKeyManager::rotate_prekey); one-time bundles are created with
+//! [`PreKeyManager::generate_onetime_bundle`](p2panda_encryption::traits::PreKeyManager::generate_onetime_bundle) and can be published via the
 //! [`PreKeyRegistry`] for other peers to consume.
 //!
 //! [`IdentityManager`]: p2panda_encryption::traits::IdentityManager

@@ -33,7 +33,7 @@ use crate::proto::state::TopicId;
 
 /// Domain separator for the public-room discovery key.
 ///
-/// Deliberately different from [`PUBLIC_ROOM_DOMAIN_SEPARATOR`] so that the
+/// Deliberately different from [`PUBLIC_ROOM_DOMAIN_SEPARATOR`](crate::topic_derivation::PUBLIC_ROOM_DOMAIN_SEPARATOR) so that the
 /// same (network, room name, version) triple always produces different topic
 /// and discovery-key outputs.
 pub const DISCOVERY_KEY_DOMAIN_SEPARATOR: &[u8] = b"boru-chat discovery-key v1";
