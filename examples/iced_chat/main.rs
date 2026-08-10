@@ -1061,10 +1061,14 @@ fn main() -> Result<()> {
             .accept(BORU_TUNNEL_ALPN, tunnel_handler)
             .accept(boru_core::call::manager::CALL_ALPN, call_handler);
         #[cfg(feature = "screen-sharing")]
-        let router_builder = router_builder.accept(
-            SCREEN_SHARE_ALPN,
-            ScreenShareProtocol::new(tokio::sync::mpsc::channel(32).0),
-        );
+        let screen_share = {
+            let (events_tx, events_rx) = tokio::sync::mpsc::channel(32);
+            let (media_tx, media_rx) = tokio::sync::mpsc::channel(64);
+            let protocol = ScreenShareProtocol::with_channels(events_tx.clone(), media_tx);
+            (protocol, events_rx, media_rx, events_tx)
+        };
+        #[cfg(feature = "screen-sharing")]
+        let router_builder = router_builder.accept(SCREEN_SHARE_ALPN, screen_share.0.clone());
         let router = router_builder.spawn();
         splash_send("Protocol router ready");
 
@@ -1623,6 +1627,18 @@ fn main() -> Result<()> {
             // doesn't flood the watch channel and MCP consumers.
             app.gui_snapshot_throttle_ms = 125;
             app.directory_store = shared_directory_store;
+            #[cfg(feature = "screen-sharing")]
+            {
+                // Wire the screen-share protocol channels and handle into the
+                // app: events for invitations, media for the decode worker,
+                // and the protocol handle to respond on inbound connections.
+                app.screen_share_protocol = Some(screen_share.0.clone());
+                app.screen_share_events_rx =
+                    Some(Arc::new(tokio::sync::Mutex::new(screen_share.1)));
+                app.screen_share_media_rx =
+                    Some(Arc::new(tokio::sync::Mutex::new(screen_share.2)));
+                app.screen_share_events_tx = Some(screen_share.3);
+            }
             app
         },
         initial_topic,
@@ -1732,6 +1748,10 @@ fn main() -> Result<()> {
                 state.gui_action_rx.clone(),
                 Arc::clone(&state.transfer_update_rx),
                 Arc::clone(&state.call_events_rx),
+                #[cfg(feature = "screen-sharing")]
+                state.screen_share_events_rx.clone(),
+                #[cfg(feature = "screen-sharing")]
+                state.screen_share_frame_watch.clone(),
             ),
             app::keyboard_shortcuts_subscription(),
         ]);

@@ -351,7 +351,7 @@ impl IcedChat {
     pub(crate) fn view_screen_share_panel(&self) -> iced::Element<'_, AppMessage> {
         use iced::widget::{button, column, container, row, text};
         use iced::Length;
-        let body = if let Some(inviter) = &self.screen_share_invite {
+        let body = if let Some((inviter, _)) = &self.screen_share_invite {
             column![
                 text(format!("{inviter} wants to share their screen")),
                 row![
@@ -359,15 +359,28 @@ impl IcedChat {
                     button(text("Decline")).on_press(AppMessage::DeclineScreenShare),
                 ].spacing(SPACE_8),
             ].spacing(SPACE_6)
-        } else if self.screen_share_active {
+        } else if self.screen_share_host_state != ScreenShareHostState::Idle {
+            let state = match self.screen_share_host_state {
+                ScreenShareHostState::Inviting => "Waiting for the viewer to accept…",
+                ScreenShareHostState::Streaming => "Screen sharing active",
+                ScreenShareHostState::Idle => unreachable!(),
+            };
             column![
-                text("Screen sharing active"),
+                text(state),
                 button(text("Stop Sharing")).on_press(AppMessage::StopScreenShare),
             ].spacing(SPACE_6)
         } else if self.screen_share_viewing {
+            let video: iced::Element<'_, AppMessage> = if let Some(handle) = &self.screen_share_frame_handle {
+                iced::widget::Image::new(handle.clone())
+                    .width(Length::Fill)
+                    .height(Length::Fixed(if self.screen_share_fullscreen { 480.0 } else { 240.0 }))
+                    .content_fit(iced::ContentFit::Contain)
+                    .into()
+            } else {
+                text("Waiting for the next decoded frame…").into()
+            };
             column![
-                text("Screen share"),
-                text("Waiting for the next decoded frame…"),
+                video,
                 row![
                     button(text(if self.screen_share_fullscreen { "Inline" } else { "Fullscreen" }))
                         .on_press(AppMessage::ToggleScreenShareFullscreen),
@@ -1253,11 +1266,13 @@ impl IcedChat {
 
         #[cfg(feature = "screen-sharing")]
         let screen_share: iced::Element<'_, AppMessage> = peer
-            .filter(|_| !is_group && !is_blocked && !self.screen_share_active)
-            .map(|_| tool_btn(
+            .filter(|_| {
+                !is_group && !is_blocked && self.screen_share_host_state == ScreenShareHostState::Idle
+            })
+            .map(|key| tool_btn(
                 Icon::VideoCamera.build().size(IconSize::Sm).build().into(),
                 "Share screen",
-                Some(AppMessage::StartScreenShare),
+                Some(AppMessage::StartScreenShare(key)),
             ))
             .unwrap_or_else(|| iced::widget::Space::new().width(Length::Fixed(0.0)).into());
 

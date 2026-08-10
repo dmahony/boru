@@ -51,6 +51,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -85,6 +86,12 @@ use boru_core::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
 use boru_core::call::manager::{CallEvent, CallHandle};
 use boru_core::call::history::{event_text as call_history_text, CallHistoryOutcome};
 use boru_core::call::{CallId, CallKind};
+#[cfg(feature = "screen-sharing")]
+use boru_core::screen_share::{
+    run_host_session, CapturedFrame, ControlMessage, InboundMedia, OpenH264Decoder, PixelFormat,
+    ScreenShareProtocol, ScreenShareSessionId, SessionEvent, ViewerPipeline,
+    DEFAULT_QUEUE_CAPACITY, SCREEN_SHARE_PROTOCOL_VERSION,
+};
 #[cfg(feature = "video-calls")]
 use boru_core::call::video::VideoFrame;
 #[cfg(feature = "video-calls")]
@@ -3517,6 +3524,18 @@ struct IncomingCall {
     kind: CallKind,
 }
 
+#[cfg(feature = "screen-sharing")]
+/// Host-side lifecycle of a locally initiated screen-share session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScreenShareHostState {
+    /// No local sharing session.
+    Idle,
+    /// Hello sent; waiting for the viewer's explicit Accept/Reject.
+    Inviting,
+    /// Viewer accepted; capture and streaming are active.
+    Streaming,
+}
+
 pub struct IcedChat {
     // ── Navigation ──
     pub screen: Screen,
@@ -3949,15 +3968,48 @@ pub struct IcedChat {
     /// when the user explicitly accepts.
     incoming_call: Option<IncomingCall>,
     #[cfg(feature = "screen-sharing")]
-    /// Host-side persistent indicator and deterministic UI session state.
-    screen_share_active: bool,
+    /// Receiver for inbound screen-share session events (set by main.rs).
+    pub screen_share_events_rx: Option<Arc<Mutex<Receiver<SessionEvent>>>>,
     #[cfg(feature = "screen-sharing")]
-    /// Incoming invitation text; no media is accepted until the user acts.
-    screen_share_invite: Option<String>,
+    /// Receiver for inbound screen-share media units (set by main.rs).
+    pub screen_share_media_rx: Option<Arc<Mutex<Receiver<InboundMedia>>>>,
     #[cfg(feature = "screen-sharing")]
+    /// Sender the host session task uses to emit session events (set by main.rs).
+    pub screen_share_events_tx: Option<tokio::sync::mpsc::Sender<SessionEvent>>,
+    #[cfg(feature = "screen-sharing")]
+    /// Protocol handle used to respond to invitations on the inbound connection.
+    pub screen_share_protocol: Option<ScreenShareProtocol>,
+    #[cfg(feature = "screen-sharing")]
+    /// Watch receiver delivering the latest decoded frame to the viewer panel.
+    pub screen_share_frame_watch: Option<Arc<Mutex<watch::Receiver<Option<CapturedFrame>>>>>,
+    #[cfg(feature = "screen-sharing")]
+    /// Host-side sharing state; drives the persistent indicator.
+    screen_share_host_state: ScreenShareHostState,
+    #[cfg(feature = "screen-sharing")]
+    /// Stop flag for the running host session task.
+    screen_share_host_stop: Option<Arc<AtomicBool>>,
+    #[cfg(feature = "screen-sharing")]
+    /// Pending invitation (inviter label + session id); no media is accepted
+    /// until the user explicitly accepts.
+    screen_share_invite: Option<(String, ScreenShareSessionId)>,
+    #[cfg(feature = "screen-sharing")]
+    /// Viewer is actively rendering an accepted session.
     screen_share_viewing: bool,
     #[cfg(feature = "screen-sharing")]
+    /// Session currently being viewed.
+    screen_share_view_session: Option<ScreenShareSessionId>,
+    #[cfg(feature = "screen-sharing")]
+    /// Stop flag for the viewer decode worker.
+    screen_share_decode_stop: Option<Arc<AtomicBool>>,
+    #[cfg(feature = "screen-sharing")]
+    /// Viewer presentation mode.
     screen_share_fullscreen: bool,
+    #[cfg(feature = "screen-sharing")]
+    /// Timestamp of the frame currently held in `screen_share_frame_handle`.
+    screen_share_last_frame_ts: Option<u64>,
+    #[cfg(feature = "screen-sharing")]
+    /// Rendered handle of the latest decoded frame (RGBA).
+    screen_share_frame_handle: Option<iced::widget::image::Handle>,
     /// Receiver for incoming inbox events.
     pub inbox_events_rx: Arc<Mutex<Receiver<InboxEvent>>>,
     /// Receiver for incoming whisper events.
@@ -5111,8 +5163,8 @@ pub enum AppMessage {
     StartVoiceCall(PublicKey),
     StartVideoCall(PublicKey),
     #[cfg(feature = "screen-sharing")]
-    /// Start sharing the current screen with the active direct conversation.
-    StartScreenShare,
+    /// Start sharing with the given direct-chat peer (invitation + stream).
+    StartScreenShare(PublicKey),
     #[cfg(feature = "screen-sharing")]
     /// Stop the local screen-share session immediately.
     StopScreenShare,
@@ -5125,6 +5177,15 @@ pub enum AppMessage {
     #[cfg(feature = "screen-sharing")]
     /// Toggle the native viewer between inline and fullscreen presentation.
     ToggleScreenShareFullscreen,
+    #[cfg(feature = "screen-sharing")]
+    /// Forward one session event from the screen-share protocol subscription.
+    ScreenShareEventReceived(SessionEvent),
+    #[cfg(feature = "screen-sharing")]
+    /// Forward the latest decoded frame from the viewer decode worker.
+    ScreenShareFrameReceived(Option<CapturedFrame>),
+    #[cfg(feature = "screen-sharing")]
+    /// A screen-share control send finished (Accept/Reject/EndSession).
+    ScreenShareCommandFinished(Result<(), String>),
     /// Forward one event from the call actor subscription.
     CallEventReceived(CallEvent),
     /// Update notification suppression state from the native window focus event.
@@ -7517,13 +7578,33 @@ impl IcedChat {
             call_declined: false,
             incoming_call: None,
             #[cfg(feature = "screen-sharing")]
-            screen_share_active: false,
+            screen_share_events_rx: None,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_media_rx: None,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_events_tx: None,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_protocol: None,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_frame_watch: None,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_host_state: ScreenShareHostState::Idle,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_host_stop: None,
             #[cfg(feature = "screen-sharing")]
             screen_share_invite: None,
             #[cfg(feature = "screen-sharing")]
             screen_share_viewing: false,
             #[cfg(feature = "screen-sharing")]
+            screen_share_view_session: None,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_decode_stop: None,
+            #[cfg(feature = "screen-sharing")]
             screen_share_fullscreen: false,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_last_frame_ts: None,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_frame_handle: None,
             inbox_events_rx,
             whisper_events_rx,
             profile_image_handle,
@@ -9280,7 +9361,7 @@ impl IcedChat {
             AppMessage::StartVoiceCall(_) => "StartVoiceCall",
             AppMessage::StartVideoCall(_) => "StartVideoCall",
             #[cfg(feature = "screen-sharing")]
-            AppMessage::StartScreenShare => "StartScreenShare",
+            AppMessage::StartScreenShare(_) => "StartScreenShare",
             #[cfg(feature = "screen-sharing")]
             AppMessage::StopScreenShare => "StopScreenShare",
             #[cfg(feature = "screen-sharing")]
@@ -9289,6 +9370,12 @@ impl IcedChat {
             AppMessage::DeclineScreenShare => "DeclineScreenShare",
             #[cfg(feature = "screen-sharing")]
             AppMessage::ToggleScreenShareFullscreen => "ToggleScreenShareFullscreen",
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareEventReceived(_) => "ScreenShareEventReceived",
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareFrameReceived(_) => "ScreenShareFrameReceived",
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareCommandFinished(_) => "ScreenShareCommandFinished",
             AppMessage::CallEventReceived(_) => "CallEventReceived",
             AppMessage::WindowFocusChanged(_) => "WindowFocusChanged",
             AppMessage::AcceptIncomingCall(_) => "AcceptIncomingCall",
@@ -12721,32 +12808,99 @@ impl IcedChat {
             | AppMessage::CallUiTick
             | AppMessage::CallCommandFinished(_) => self.update_calls(message),
             #[cfg(feature = "screen-sharing")]
-            AppMessage::StartScreenShare => {
-                self.screen_share_active = true;
-                self.screen_share_viewing = false;
-                iced::Task::none()
-            }
+            AppMessage::StartScreenShare(peer) => self.start_screen_share(peer),
             #[cfg(feature = "screen-sharing")]
             AppMessage::StopScreenShare => {
-                self.screen_share_active = false;
-                self.screen_share_viewing = false;
-                self.screen_share_fullscreen = false;
+                // Stop the host task (it sends EndSession on its connection)
+                // and the decode worker, then reset every viewer/host flag.
+                if let Some(stop) = &self.screen_share_host_stop {
+                    stop.store(true, Ordering::Relaxed);
+                }
+                if let Some(stop) = &self.screen_share_decode_stop {
+                    stop.store(true, Ordering::Relaxed);
+                }
+                if let (Some(protocol), Some(session_id)) =
+                    (&self.screen_share_protocol, self.screen_share_view_session)
+                {
+                    let protocol = protocol.clone();
+                    let _ = self.runtime_handle.spawn(async move {
+                        let _ = protocol
+                            .send_control(
+                                session_id,
+                                ControlMessage::EndSession {
+                                    version: SCREEN_SHARE_PROTOCOL_VERSION,
+                                    session_id,
+                                },
+                            )
+                            .await;
+                    });
+                }
+                self.reset_screen_share_state();
                 iced::Task::none()
             }
             #[cfg(feature = "screen-sharing")]
-            AppMessage::AcceptScreenShare => {
-                self.screen_share_invite = None;
-                self.screen_share_viewing = true;
-                iced::Task::none()
-            }
+            AppMessage::AcceptScreenShare => self.accept_screen_share(),
             #[cfg(feature = "screen-sharing")]
             AppMessage::DeclineScreenShare => {
-                self.screen_share_invite = None;
+                if let Some((_, session_id)) = self.screen_share_invite.take() {
+                    if let Some(protocol) = &self.screen_share_protocol {
+                        let protocol = protocol.clone();
+                        return iced::Task::perform(
+                            async move {
+                                protocol
+                                    .send_control(
+                                        session_id,
+                                        ControlMessage::Reject {
+                                            version: SCREEN_SHARE_PROTOCOL_VERSION,
+                                            session_id,
+                                            reason: "declined".to_string(),
+                                        },
+                                    )
+                                    .await
+                                    .map_err(|e| e.to_string())
+                            },
+                            |result| AppMessage::ScreenShareCommandFinished(result),
+                        );
+                    }
+                }
                 iced::Task::none()
             }
             #[cfg(feature = "screen-sharing")]
             AppMessage::ToggleScreenShareFullscreen => {
                 self.screen_share_fullscreen = !self.screen_share_fullscreen;
+                iced::Task::none()
+            }
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareEventReceived(event) => {
+                self.apply_screen_share_event(event);
+                iced::Task::none()
+            }
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareFrameReceived(frame) => {
+                if let Some(frame) = frame {
+                    // Only rebuild the rendered handle when a genuinely new
+                    // frame arrives; the worker publishes newest-frame-wins.
+                    if self.screen_share_last_frame_ts != Some(frame.timestamp_us) {
+                        if frame.pixel_format == PixelFormat::Rgba8 {
+                            self.screen_share_frame_handle = Some(
+                                iced::widget::image::Handle::from_rgba(
+                                    frame.width,
+                                    frame.height,
+                                    frame.pixels,
+                                ),
+                            );
+                        }
+                        self.screen_share_last_frame_ts = Some(frame.timestamp_us);
+                    }
+                }
+                iced::Task::none()
+            }
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareCommandFinished(result) => {
+                if let Err(error) = result {
+                    tracing::warn!(error, "screen-share control send failed");
+                    self.toast_message = Some(error);
+                }
                 iced::Task::none()
             }
             AppMessage::WindowFocusChanged(focused) => {
@@ -17279,6 +17433,104 @@ fn map_gui_action(action: GuiActionRequest) -> AppMessage {
     AppMessage::GuiTestActionReceived(action)
 }
 
+#[cfg(feature = "screen-sharing")]
+/// Drain inbound media for one viewer session into the bounded decode
+/// pipeline, publishing the newest decoded frame to `watch_tx`. Runs on the
+/// tokio runtime (never the UI thread); exits when the session ends, the
+/// channel closes, or `stop` is set.
+async fn decode_worker(
+    media_rx: Arc<Mutex<Receiver<InboundMedia>>>,
+    session_id: ScreenShareSessionId,
+    mut pipeline: ViewerPipeline<OpenH264Decoder>,
+    watch_tx: tokio::sync::watch::Sender<Option<CapturedFrame>>,
+    stop: Arc<AtomicBool>,
+) {
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        let unit = tokio::select! {
+            unit = media_rx.lock().await.recv() => match unit {
+                Some(unit) => unit,
+                None => break,
+            },
+            _ = tokio::time::sleep(Duration::from_millis(50)) => continue,
+        };
+        if unit.session_id != session_id {
+            continue;
+        }
+        if pipeline.enqueue(unit.header, unit.payload).is_err() {
+            // Session ended or authorization revoked — stop decoding.
+            break;
+        }
+        pipeline.process();
+        if let Some(frame) = pipeline.take_frame() {
+            let _ = watch_tx.send(Some(frame));
+        }
+    }
+}
+
+#[cfg(feature = "screen-sharing")]
+struct ScreenShareEventsRxHandle(Arc<Mutex<Receiver<SessionEvent>>>);
+
+#[cfg(feature = "screen-sharing")]
+impl std::hash::Hash for ScreenShareEventsRxHandle {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (Arc::as_ptr(&self.0) as usize).hash(state);
+    }
+}
+
+#[cfg(feature = "screen-sharing")]
+fn screen_share_events_subscription(
+    rx: Option<Arc<Mutex<Receiver<SessionEvent>>>>,
+) -> iced::Subscription<AppMessage> {
+    let rx = rx.unwrap_or_else(|| {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        drop(tx);
+        Arc::new(tokio::sync::Mutex::new(rx))
+    });
+    iced::Subscription::run_with(ScreenShareEventsRxHandle(rx), |handle| {
+        let rx = Arc::clone(&handle.0);
+        Box::pin(n0_future::stream::unfold(rx, |rx| async move {
+            let event = rx.lock().await.recv().await?;
+            Some((AppMessage::ScreenShareEventReceived(event), rx))
+        }))
+    })
+}
+
+#[cfg(feature = "screen-sharing")]
+struct ScreenShareFrameWatchHandle(Arc<Mutex<tokio::sync::watch::Receiver<Option<CapturedFrame>>>>);
+
+#[cfg(feature = "screen-sharing")]
+impl std::hash::Hash for ScreenShareFrameWatchHandle {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (Arc::as_ptr(&self.0) as usize).hash(state);
+    }
+}
+
+#[cfg(feature = "screen-sharing")]
+fn screen_share_frame_subscription(
+    watch: Option<Arc<Mutex<tokio::sync::watch::Receiver<Option<CapturedFrame>>>>>,
+) -> iced::Subscription<AppMessage> {
+    let watch = watch.unwrap_or_else(|| {
+        let (tx, rx) = tokio::sync::watch::channel(None);
+        drop(tx);
+        Arc::new(tokio::sync::Mutex::new(rx))
+    });
+    iced::Subscription::run_with(ScreenShareFrameWatchHandle(watch), |handle| {
+        let rx = Arc::clone(&handle.0);
+        Box::pin(n0_future::stream::unfold(rx, |rx| async move {
+            let mut guard = rx.lock().await;
+            if guard.changed().await.is_err() {
+                return None;
+            }
+            let frame = guard.borrow_and_update().clone();
+            drop(guard);
+            Some((AppMessage::ScreenShareFrameReceived(frame), rx))
+        }))
+    })
+}
+
 fn subscription_stream(
     rx: &RxHandle,
     friend_rx: &FriendRxHandle,
@@ -17431,6 +17683,164 @@ fn subscription_stream(
 }
 
 impl IcedChat {
+    #[cfg(feature = "screen-sharing")]
+    /// Start a local sharing session with `peer`: spawn the host driver task
+    /// (dial → Hello → negotiate → capture/encode/send) and show the
+    /// persistent indicator while it runs.
+    fn start_screen_share(&mut self, peer: PublicKey) -> iced::Task<AppMessage> {
+        if self.screen_share_host_state != ScreenShareHostState::Idle {
+            return iced::Task::none();
+        }
+        let Some(events_tx) = self.screen_share_events_tx.clone() else {
+            return iced::Task::none();
+        };
+        self.screen_share_host_state = ScreenShareHostState::Inviting;
+        let stop = Arc::new(AtomicBool::new(false));
+        self.screen_share_host_stop = Some(stop.clone());
+        let endpoint = self.endpoint.clone();
+        let local_public = self.local_public;
+        // conversation_id is informational in the protocol and not used for
+        // media routing; M7 shows the invitation in the active conversation.
+        let conversation_id = 0u64;
+        self.runtime_handle.spawn(async move {
+            run_host_session(endpoint, peer, local_public, conversation_id, events_tx, stop)
+                .await;
+        });
+        iced::Task::none()
+    }
+
+    #[cfg(feature = "screen-sharing")]
+    /// Accept the pending invitation: respond Accept on the inbound QUIC
+    /// connection and spawn the viewer decode worker for the session.
+    fn accept_screen_share(&mut self) -> iced::Task<AppMessage> {
+        let Some((_, session_id)) = self.screen_share_invite.take() else {
+            return iced::Task::none();
+        };
+        self.screen_share_viewing = true;
+        self.screen_share_view_session = Some(session_id);
+        // Respond Accept on the same connection the invitation arrived on.
+        let mut send_task = iced::Task::none();
+        if let Some(protocol) = &self.screen_share_protocol {
+            let protocol = protocol.clone();
+            send_task = iced::Task::perform(
+                async move {
+                    protocol
+                        .send_control(
+                            session_id,
+                            ControlMessage::Accept {
+                                version: SCREEN_SHARE_PROTOCOL_VERSION,
+                                session_id,
+                            },
+                        )
+                        .await
+                        .map_err(|e| e.to_string())
+                },
+                |result| AppMessage::ScreenShareCommandFinished(result),
+            );
+        }
+        // Spawn the decode worker: drains inbound media for this session,
+        // feeds the bounded ViewerPipeline off the UI thread, and publishes
+        // the newest decoded frame to the watch channel the subscription reads.
+        let Some(media_rx) = self.screen_share_media_rx.clone() else {
+            self.screen_share_viewing = false;
+            self.screen_share_view_session = None;
+            return send_task;
+        };
+        let decoder = match OpenH264Decoder::default_profile() {
+            Ok(decoder) => decoder,
+            Err(_) => {
+                self.screen_share_viewing = false;
+                self.screen_share_view_session = None;
+                return send_task;
+            }
+        };
+        let pipeline = match ViewerPipeline::new(
+            decoder,
+            *session_id.as_bytes(),
+            DEFAULT_QUEUE_CAPACITY,
+        ) {
+            Ok(pipeline) => pipeline,
+            Err(_) => {
+                self.screen_share_viewing = false;
+                self.screen_share_view_session = None;
+                return send_task;
+            }
+        };
+        let decode_stop = Arc::new(AtomicBool::new(false));
+        self.screen_share_decode_stop = Some(decode_stop.clone());
+        let (watch_tx, watch_rx) = tokio::sync::watch::channel(None);
+        self.screen_share_frame_watch = Some(Arc::new(tokio::sync::Mutex::new(watch_rx)));
+        let runtime_handle = self.runtime_handle.clone();
+        runtime_handle.spawn(async move {
+            decode_worker(media_rx, session_id, pipeline, watch_tx, decode_stop).await;
+        });
+        send_task
+    }
+
+    #[cfg(feature = "screen-sharing")]
+    /// Apply one protocol session event to the deterministic UI session state.
+    fn apply_screen_share_event(&mut self, event: SessionEvent) {
+        match event {
+            SessionEvent::Invitation {
+                session_id,
+                host_id,
+                ..
+            } => {
+                if !self.screen_share_viewing
+                    && self.screen_share_host_state == ScreenShareHostState::Idle
+                    && self.screen_share_invite.is_none()
+                {
+                    self.screen_share_invite =
+                        Some((host_id.fmt_short().to_string(), session_id));
+                }
+            }
+            SessionEvent::Accepted { .. } => {
+                if self.screen_share_host_state != ScreenShareHostState::Idle {
+                    // Capture is active now — the persistent indicator stays on.
+                    self.screen_share_host_state = ScreenShareHostState::Streaming;
+                }
+            }
+            SessionEvent::Rejected { .. } => {
+                if self.screen_share_host_state != ScreenShareHostState::Idle {
+                    self.screen_share_host_state = ScreenShareHostState::Idle;
+                    self.screen_share_host_stop = None;
+                }
+            }
+            SessionEvent::Ended { session_id } => {
+                if self.screen_share_view_session == Some(session_id) {
+                    self.screen_share_viewing = false;
+                    self.screen_share_view_session = None;
+                    self.screen_share_last_frame_ts = None;
+                    self.screen_share_frame_handle = None;
+                    if let Some(stop) = &self.screen_share_decode_stop {
+                        stop.store(true, Ordering::Relaxed);
+                    }
+                    self.screen_share_decode_stop = None;
+                }
+                if self.screen_share_host_state != ScreenShareHostState::Idle {
+                    self.screen_share_host_state = ScreenShareHostState::Idle;
+                    self.screen_share_host_stop = None;
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "screen-sharing")]
+    /// Reset every viewer/host screen-share flag. Must mirror everything the
+    /// start path sets so no boolean leak leaves the UI stuck.
+    fn reset_screen_share_state(&mut self) {
+        self.screen_share_host_state = ScreenShareHostState::Idle;
+        self.screen_share_host_stop = None;
+        self.screen_share_invite = None;
+        self.screen_share_viewing = false;
+        self.screen_share_view_session = None;
+        self.screen_share_decode_stop = None;
+        self.screen_share_fullscreen = false;
+        self.screen_share_last_frame_ts = None;
+        self.screen_share_frame_handle = None;
+        self.screen_share_frame_watch = None;
+    }
+
     pub fn subscription(
         rx: Arc<Mutex<Receiver<ConversationNetEvent>>>,
         friend_rx: Arc<Mutex<Receiver<FriendEvent>>>,
@@ -17440,6 +17850,10 @@ impl IcedChat {
         gui_action_rx: Option<Arc<Mutex<tokio::sync::mpsc::Receiver<GuiActionRequest>>>>,
         transfer_rx: Arc<Mutex<TransferUpdateReceiver>>,
         call_events_rx: Arc<Mutex<Receiver<CallEvent>>>,
+        #[cfg(feature = "screen-sharing")]
+        screen_share_events_rx: Option<Arc<Mutex<Receiver<SessionEvent>>>>,
+        #[cfg(feature = "screen-sharing")]
+        screen_share_frame_watch: Option<Arc<Mutex<tokio::sync::watch::Receiver<Option<CapturedFrame>>>>>,
     ) -> iced::Subscription<AppMessage> {
         let mut subs: Vec<iced::Subscription<AppMessage>> = vec![
             iced::time::every(std::time::Duration::from_secs(1))
@@ -17528,6 +17942,10 @@ impl IcedChat {
             },
         ));
         subs.push(call_subscription(call_events_rx));
+        #[cfg(feature = "screen-sharing")]
+        subs.push(screen_share_events_subscription(screen_share_events_rx));
+        #[cfg(feature = "screen-sharing")]
+        subs.push(screen_share_frame_subscription(screen_share_frame_watch));
         iced::Subscription::batch(subs)
     }
 

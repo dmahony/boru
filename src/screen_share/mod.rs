@@ -6,6 +6,7 @@
 
 pub mod capture;
 pub mod codec;
+pub mod host;
 pub mod permissions;
 pub mod platform;
 pub mod protocol;
@@ -14,12 +15,15 @@ pub mod session;
 pub mod transport;
 pub mod viewer;
 
-pub use capture::{CapturedFrame, FrameSink, PixelFormat, ScreenCapture};
+pub use capture::{CapturedFrame, FrameSink, PixelFormat, ScreenCapture, TestPatternCapture};
 pub use codec::{
     CodecConfig, CodecKind, CodecMetadata, EncodedFrame, OpenH264Decoder, OpenH264Encoder,
-    ScreenShareCodec, VideoDecoder, VideoEncoder,
+    ScreenShareCodec, VideoDecoder, VideoEncoder, DEFAULT_QUEUE_CAPACITY,
 };
-pub use protocol::{ControlMessage, Hello, Permission, ScreenShareProtocol, SCREEN_SHARE_ALPN};
+pub use host::{run_host_session, DEMO_FPS, DEMO_HEIGHT, DEMO_WIDTH};
+pub use protocol::{
+    ControlMessage, Hello, InboundMedia, Permission, ScreenShareProtocol, SCREEN_SHARE_ALPN,
+};
 pub use remote_input::{InputEvent, RemoteInput};
 pub use session::{
     ScreenShareSession, ScreenShareSessionId, SessionEvent, SessionManager, SessionState,

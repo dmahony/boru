@@ -16,6 +16,8 @@ impl ScreenShareSessionId {
     pub fn generate() -> Self { let mut bytes = [0; 16]; getrandom::fill(&mut bytes).expect("OS CSPRNG unavailable"); Self(bytes) }
     /// Construct the all-zero identifier, useful only as a test sentinel.
     pub const fn zero() -> Self { Self([0; 16]) }
+    /// Construct an identifier from raw wire bytes.
+    pub const fn from_bytes(bytes: [u8; 16]) -> Self { Self(bytes) }
     /// Return the wire representation.
     pub const fn as_bytes(&self) -> &[u8; 16] { &self.0 }
 }
