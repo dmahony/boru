@@ -249,7 +249,7 @@ impl IcedChat {
 
         let mut sections = Column::new()
             .padding(iced::Padding {
-                top: SPACE_8,
+                top: SPACE_4,
                 right: 0.0,
                 bottom: 0.0,
                 left: 0.0,
@@ -366,8 +366,9 @@ impl IcedChat {
 
         // ═══════════════════════════════════════════════════════════════
         // 5. BOTTOM UTILITY ROW — new chat, search, mesh, notifications
-        // POLISH-05: inactive toolbar icons are dimmed (text_muted) so the
-        // selected Home icon stays visually stronger.
+        // POLISH-05 / BORU-HOME-09: inactive toolbar icons are dimmed
+        // (text_muted) so the selected Home icon stays visually stronger.
+        // Section header chrome recedes behind chat/friend content.
         // ═══════════════════════════════════════════════════════════════
         let utility_row = Row::new()
             .push(ghost_icon_button(

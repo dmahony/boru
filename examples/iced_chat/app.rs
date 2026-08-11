@@ -6620,10 +6620,10 @@ fn sidebar_name_text<'a>(
 /// Renders the local-user profile block in the sidebar: avatar (profile image
 /// or generated initials circle), display name, online/away/offline status, and a settings gear button.
 ///
-/// SIDEBAR-03: the top-left profile header avatar renders at 2× the list-row
-/// avatar size (AVATAR_SM stays for sidebar list rows; this block is the only
-/// site that uses the doubled token).
-const PROFILE_HEADER_AVATAR_SIZE: f32 = AVATAR_SM * 2.0;
+/// SIDEBAR-03 / BORU-HOME-09: the top-left profile header avatar renders at
+/// PROFILE_HEADER_AVATAR_SIZE (~48 px) — larger than list-row avatars
+/// (AVATAR_SM = 36 px) but compact enough to not dominate the sidebar.
+const PROFILE_HEADER_AVATAR_SIZE: f32 = 48.0;
 
 fn view_local_profile_block(
     local_label: String,
@@ -6717,7 +6717,7 @@ fn view_local_profile_block(
     Row::new()
         .push(avatar)
         .push(name_col)
-        .spacing(SPACE_8)
+        .spacing(SPACE_6)
         .align_y(Alignment::Center)
         .width(Length::Fill)
         .into()
@@ -21730,25 +21730,24 @@ mod tests {
     }
 
     #[test]
-    fn sidebar03_profile_header_avatar_is_doubled() {
-        // SIDEBAR-03: the top-left profile header avatar must render at 2× the
-        // list-row avatar size. The header block (both the profile-image path
-        // and the generated initials circle) must use the doubled token with a
-        // matching radius, while sidebar list-row avatars keep AVATAR_SM.
+    fn sidebar03_profile_header_avatar_is_compact() {
+        // SIDEBAR-03 / BORU-HOME-09: the top-left profile header avatar renders
+        // at PROFILE_HEADER_AVATAR_SIZE (48 px) — larger than list-row avatars
+        // (AVATAR_SM = 36 px) but compact enough to not dominate the sidebar.
         let src = include_str!("app.rs");
         let sidebar_src = include_str!("app/sidebar.rs");
         assert!(
-            src.contains("const PROFILE_HEADER_AVATAR_SIZE: f32 = AVATAR_SM * 2.0;"),
-            "profile header avatar token must be defined as exactly 2× AVATAR_SM"
+            src.contains("const PROFILE_HEADER_AVATAR_SIZE: f32 = 48.0;"),
+            "profile header avatar token must be 48 px"
         );
         let profile = method_source(src, "fn view_local_profile_block(", "fn profile_identity_card(");
         assert!(
             profile.contains("Length::Fixed(PROFILE_HEADER_AVATAR_SIZE)"),
-            "profile-image avatar must use the doubled PROFILE_HEADER_AVATAR_SIZE"
+            "profile-image avatar must use PROFILE_HEADER_AVATAR_SIZE"
         );
         assert!(
             profile.contains("radius: (PROFILE_HEADER_AVATAR_SIZE / 2.0).into()"),
-            "initials-circle radius must be half of the doubled avatar size"
+            "initials-circle radius must be half of the avatar size"
         );
         assert!(
             !profile.contains("Length::Fixed(AVATAR_SM)"),
@@ -21889,11 +21888,12 @@ mod tests {
     fn sidebar_section_labels_use_fonts06_size() {
         // FONTS-06: all-caps sidebar section labels (CHATS / GROUPS / …)
         // keep the ButtonLabel family/weight (IBM Plex Sans SemiBold) but
-        // render at the 11–12 px band via SIDEBAR_SECTION_LABEL_SIZE.
+        // render at the 10–12 px band via SIDEBAR_SECTION_LABEL_SIZE.
+        // BORU-HOME-09: reduced from 12 px to 11 px.
         let src = include_str!("ui_components.rs");
         assert!(
-            src.contains("const SIDEBAR_SECTION_LABEL_SIZE: f32 = 12.0;"),
-            "sidebar section label size const must exist (FONTS-06 11–12 px)"
+            src.contains("const SIDEBAR_SECTION_LABEL_SIZE: f32 = 11.0;"),
+            "sidebar section label size const must be 11 px (BORU-HOME-09)"
         );
         let header = method_source(
             src,
@@ -21906,7 +21906,7 @@ mod tests {
         );
         assert!(
             header.contains(".size(SIDEBAR_SECTION_LABEL_SIZE)"),
-            "sidebar section label must use the FONTS-06 11–12 px size"
+            "sidebar section label must use the FONTS-06 11 px size"
         );
     }
 

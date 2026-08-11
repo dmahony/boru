@@ -1355,11 +1355,13 @@ pub fn card_header<'a>(
 ///
 /// All-caps sidebar section labels (CHATS / GROUPS / FRIENDS / DISCOVER /
 /// PUBLIC ROOMS / REQUESTS) keep the `ButtonLabel` role's family and weight
-/// (IBM Plex Sans SemiBold) but render at the tighter FONTS-06 11–12 px band
+/// (IBM Plex Sans SemiBold) but render at the tighter FONTS-06 10–12 px band
 /// instead of the 14 px button default. iced 0.14's text widgets expose no
 /// letter-spacing API, so the spec's "modest letter spacing" is approximated
 /// by the SemiBold weight at this small size (no API to set it explicitly).
-const SIDEBAR_SECTION_LABEL_SIZE: f32 = 12.0;
+/// BORU-HOME-09: reduced from 12 px to 11 px so section chrome recedes behind
+/// chat/friend content.
+const SIDEBAR_SECTION_LABEL_SIZE: f32 = 11.0;
 
 /// A collapsible sidebar section header with an optional count badge and a
 /// trailing add action.
@@ -1464,9 +1466,9 @@ impl<'a> SidebarSectionHeader<'a> {
 
         let mut label_button = button(toggle_row)
             .width(Length::Fill)
-            // POLISH-05: reduced vertical padding from SPACE_6 to SPACE_4
-            // — saves ~4 px per section header, tightening sidebar rhythm.
-            .padding([design_tokens::SPACE_4, design_tokens::SPACE_12])
+            // POLISH-05 / BORU-HOME-09: tightened padding — SPACE_4 vertical,
+            // SPACE_8 horizontal saves ~4 px per edge, reducing header visual weight.
+            .padding([design_tokens::SPACE_4, design_tokens::SPACE_8])
             .style(move |t, status| {
                 let bg = match status {
                     button::Status::Hovered => {
