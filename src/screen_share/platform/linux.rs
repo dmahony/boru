@@ -1083,15 +1083,15 @@ fn convert_zpixmap_rgba(
             data.len()
         )));
     }
+    if red_mask == 0 || green_mask == 0 || blue_mask == 0 {
+        return Err(ScreenShareError::new("X11 visual channel masks are empty"));
+    }
     let red_shift = red_mask.trailing_zeros();
     let green_shift = green_mask.trailing_zeros();
     let blue_shift = blue_mask.trailing_zeros();
     let red_max = red_mask >> red_shift;
     let green_max = green_mask >> green_shift;
     let blue_max = blue_mask >> blue_shift;
-    if red_max == 0 || green_max == 0 || blue_max == 0 {
-        return Err(ScreenShareError::new("X11 visual channel masks are empty"));
-    }
     let mut out = Vec::with_capacity(width * height * 4);
     for chunk in data.chunks_exact(bpp).take(width * height) {
         let pixel = if lsb_first {
@@ -1269,14 +1269,15 @@ mod tests {
 
     #[test]
     fn zpixmap_respects_nonstandard_channel_masks() {
-        // 5-6-5 style masks (e.g. Xvfb depth-16 converted to 32-bit padding):
-        // R=0xF800, G=0x07E0, B=0x001F. LSBFirst bytes for RGB(0x1F,0x3F,0x1F).
-        let data = [0x1F, 0x3F, 0x1F, 0x00];
+        // 5-6-5 masks (R=0xF800, G=0x07E0, B=0x001F). A pixel with
+        // R=0x1F,G=0x3F,B=0x1F packs as 0xF800|0x07E0|0x001F = 0xFFFF;
+        // LSBFirst bytes are [0xFF, 0x0F, 0x00, 0x00].
+        let data = [0xFF, 0x0F, 0x00, 0x00];
         let out = convert_zpixmap_rgba(
             &data, 1, 1, 24, true, 0x0000_F800, 0x0000_07E0, 0x0000_001F,
         )
         .unwrap();
-        // R: 0x1F/0x1F*255 = 255; G: 0x3F/0x3F*255 = 255; B: 255.
+        // R: 31/31*255 = 255; G: 63/63*255 = 255; B: 255.
         assert_eq!(out, vec![255, 255, 255, 255]);
     }
 
