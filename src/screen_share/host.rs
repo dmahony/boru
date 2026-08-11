@@ -14,11 +14,12 @@ use tokio::sync::mpsc;
 use super::{
     codec::{CodecConfig, OpenH264Encoder, VideoEncoder},
     permissions::Capability,
+    platform::{capture_dimensions, create_capture_source, CAPTURE_FPS},
     protocol::{self, ControlMessage, SCREEN_SHARE_PROTOCOL_VERSION},
     remote_input::{self, create_platform_backend, InputEvent, NormalizedPointer},
     session::{ScreenShareSessionId, SessionEvent, SessionManager, SessionState},
     transport::{read_unit, QuicScreenTransport, ReadUnit},
-    ScreenCapture, ScreenShareError, TestPatternCapture, SCREEN_SHARE_ALPN,
+    ScreenShareError, SCREEN_SHARE_ALPN,
 };
 use iroh::endpoint::Endpoint;
 use iroh::PublicKey;
@@ -56,7 +57,13 @@ pub async fn run_host_session(
     let session_id = ScreenShareSessionId::generate();
     let mut manager = SessionManager::default();
     manager.start_invitation(session_id, local_public, conversation_id);
-    let Some(hello) = manager.hello(session_id, vec!["h264".to_string()], DEMO_WIDTH as u16, DEMO_HEIGHT as u16, DEMO_FPS as u16) else { return };
+    // Select the capture source up front so the Hello advertises the ACTIVE
+    // geometry: a real portal/PipeWire capture when available, otherwise the
+    // synthetic test pattern (demo/CI path).
+    let mut capture = create_capture_source(false).await;
+    let (capture_width, capture_height) = capture_dimensions(&capture);
+    let capture_fps = CAPTURE_FPS;
+    let Some(hello) = manager.hello(session_id, vec!["h264".to_string()], capture_width.min(u16::MAX as u32) as u16, capture_height.min(u16::MAX as u32) as u16, capture_fps as u16) else { return };
     let addr = endpoint
         .remote_info(peer)
         .await
@@ -126,12 +133,17 @@ pub async fn run_host_session(
     }
     if manager.state(session_id) != Some(SessionState::Streaming) { return; }
     // Streaming: capture → encode → send, apply consent-gated input, honour
-    // host commands and stop.
-    let config = CodecConfig { width: DEMO_WIDTH, height: DEMO_HEIGHT, target_fps: DEMO_FPS, ..CodecConfig::default() };
-    let Ok(mut capture) = TestPatternCapture::new(DEMO_WIDTH, DEMO_HEIGHT) else { return };
+    // host commands and stop. The codec is configured from the ACTIVE
+    // capture's geometry (the encoder requires even dimensions; real portal
+    // sources are typically even, but round down defensively).
+    let (capture_width, capture_height) = capture_dimensions(&capture);
+    let encode_width = capture_width & !1;
+    let encode_height = capture_height & !1;
+    if encode_width == 0 || encode_height == 0 { return; }
+    let mut config = CodecConfig { width: encode_width, height: encode_height, target_fps: capture_fps, ..CodecConfig::default() };
     let Ok(mut encoder) = OpenH264Encoder::new(config) else { return };
-    let mut backend = create_platform_backend((DEMO_WIDTH, DEMO_HEIGHT)).await;
-    let mut interval = tokio::time::interval(Duration::from_micros(1_000_000 / DEMO_FPS as u64));
+    let mut backend = create_platform_backend((capture_width, capture_height)).await;
+    let mut interval = tokio::time::interval(Duration::from_micros(1_000_000 / capture_fps as u64));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         if stop.load(Ordering::Relaxed) {
@@ -151,7 +163,7 @@ pub async fn run_host_session(
                             if !authorized { continue; }
                             match capability {
                                 Capability::ControlPointer => {
-                                    if let Some((px, py)) = remote_input::normalize_to_capture(NormalizedPointer { x, y }, (DEMO_WIDTH, DEMO_HEIGHT)) {
+                                    if let Some((px, py)) = remote_input::normalize_to_capture(NormalizedPointer { x, y }, (capture_width, capture_height)) {
                                         let _ = backend.apply(InputEvent { code, capability, token: None, x: px as f32, y: py as f32, pressed }).await;
                                     }
                                 }
@@ -188,10 +200,23 @@ pub async fn run_host_session(
             },
             _ = interval.tick() => {
                 match capture.capture() {
-                    Ok(Some(frame)) => match encoder.encode(&frame) {
-                        Ok(encoded) => { if transport.send_frame(&encoded).await.is_err() { return; } }
-                        Err(_) => {}
-                    },
+                    Ok(Some(frame)) => {
+                        // Real portal captures negotiate their geometry after
+                        // streaming starts; reconfigure the encoder when the
+                        // frame size differs from the initial config.
+                        if frame.width != config.width || frame.height != config.height {
+                            if frame.width == 0 || frame.height == 0 || frame.width % 2 != 0 || frame.height % 2 != 0 {
+                                return;
+                            }
+                            let new_config = CodecConfig { width: frame.width, height: frame.height, ..config };
+                            if encoder.reconfigure(new_config).is_err() { return; }
+                            config = new_config;
+                        }
+                        match encoder.encode(&frame) {
+                            Ok(encoded) => { if transport.send_frame(&encoded).await.is_err() { return; } }
+                            Err(_) => {}
+                        }
+                    }
                     Ok(None) => {}
                     Err(_) => return,
                 }

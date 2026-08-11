@@ -24,6 +24,9 @@ pub use codec::{
     ScreenShareCodec, VideoDecoder, VideoEncoder, DEFAULT_QUEUE_CAPACITY,
 };
 pub use host::{run_host_session, HostCommand, DEMO_FPS, DEMO_HEIGHT, DEMO_WIDTH};
+pub use platform::{
+    capture_dimensions, create_capture_source, ActiveCapture, CAPTURE_FPS,
+};
 pub use protocol::{
     ControlMessage, Hello, InboundMedia, Permission, ScreenShareProtocol, SCREEN_SHARE_ALPN,
     SCREEN_SHARE_PROTOCOL_VERSION, MAX_INPUT_CODE,
