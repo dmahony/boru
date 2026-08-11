@@ -1646,8 +1646,8 @@ fn typography_gallery() -> Element<'static, AppMessage> {
             TypeRole::BrandWordmark => "BORU",
         };
         let family_weight = match role {
-            TypeRole::DisplayHeading => "Roboto Condensed Bold 700",
-            TypeRole::PageTitle => "Roboto Condensed Bold 700",
+            TypeRole::DisplayHeading => "Inter Tight Bold 700",
+            TypeRole::PageTitle => "Inter Tight Bold 700",
             TypeRole::SectionTitle => "Public Sans SemiBold 600",
             TypeRole::CardTitle => "Public Sans SemiBold 600",
             TypeRole::Body => "Public Sans Regular 400",

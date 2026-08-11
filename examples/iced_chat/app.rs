@@ -20939,8 +20939,8 @@ mod tests {
             "type_role_text_lh must apply a relative line height"
         );
         assert!(
-            !home.contains("roboto_condensed("),
-            "home screen must not hardcode Roboto Condensed locally; it may only arrive via TypeRole::DisplayHeading"
+            !home.contains("inter_tight("),
+            "home screen must not hardcode Inter Tight locally; it may only arrive via TypeRole::DisplayHeading"
         );
     }
 
@@ -29652,7 +29652,7 @@ fn vr_create_tunnel_picker_port_validation() {
                 include_bytes!("fonts/Raleway-ExtraBold.ttf"),
                 include_bytes!("fonts/JetBrainsMono-Regular.ttf"),
                 include_bytes!("fonts/JetBrainsMono-Medium.ttf"),
-                include_bytes!("fonts/RobotoCondensed-Bold.ttf"),
+                include_bytes!("fonts/InterTight-Bold.ttf"),
                 include_bytes!("fonts/PublicSans-Regular.ttf"),
                 include_bytes!("fonts/PublicSans-Medium.ttf"),
                 include_bytes!("fonts/PublicSans-SemiBold.ttf"),

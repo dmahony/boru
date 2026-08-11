@@ -8,7 +8,7 @@
 //!
 //! | Family          | Weights loaded               | Scope                          | Fallback chain (FONTS-14)          |
 //! |-----------------|------------------------------|--------------------------------|------------------------------------|
-//! | Roboto Condensed | 700 (Bold)                  | Major display/page headings (DisplayHeading, PageTitle) | Arial Narrow → generic sans-serif |
+//! | Inter Tight     | 700 (Bold)                  | Major display/page headings (DisplayHeading, PageTitle) | Arial Narrow → generic sans-serif |
 //! | Public Sans     | 400 (Regular) · 500 (Medium) · 600 (SemiBold) | Primary app UI: sections, cards, body, buttons, metadata | Arial → system sans-serif |
 //! | Figtree         | 400 · 500 · 600               | Chat messages, sender, metadata, composer | Arial → system sans-serif |
 //! | JetBrains Mono  | 400 · 500                     | Technical/code values           | Consolas → monospace               |
@@ -23,11 +23,11 @@
 //!
 //! ## Licence
 //!
-//! Figtree, Raleway, JetBrains Mono, Roboto Condensed, and Public
+//! Figtree, Raleway, JetBrains Mono, Inter Tight, and Public
 //! Sans are licensed under the SIL Open Font License 1.1. See
 //! fonts/OFL.txt and the per-family OFL records (fonts/Figtree-OFL.txt,
 //! fonts/JetBrainsMono-OFL.txt, fonts/Raleway-OFL.txt,
-//! fonts/RobotoCondensed-OFL.txt, fonts/PublicSans-OFL.txt) plus
+//! fonts/InterTight-OFL.txt, fonts/PublicSans-OFL.txt) plus
 //! fonts/THIRD_PARTY_NOTICES.md for exact sources and versions.
 
 use iced::font::{self, Family, Weight};
@@ -62,8 +62,8 @@ const JETBRAINS_MONO_REGULAR_BYTES: &[u8] = include_bytes!("fonts/JetBrainsMono-
 /// JetBrains Mono Medium (500) — emphasised technical values.
 const JETBRAINS_MONO_MEDIUM_BYTES: &[u8] = include_bytes!("fonts/JetBrainsMono-Medium.ttf");
 
-/// Roboto Condensed Bold (700) — major display/page headings.
-const ROBOTO_CONDENSED_BOLD_BYTES: &[u8] = include_bytes!("fonts/RobotoCondensed-Bold.ttf");
+/// Inter Tight Bold (700) — major display/page headings.
+const INTER_TIGHT_BOLD_BYTES: &[u8] = include_bytes!("fonts/InterTight-Bold.ttf");
 
 /// Public Sans Regular (400) — general app UI body text.
 const PUBLIC_SANS_REGULAR_BYTES: &[u8] = include_bytes!("fonts/PublicSans-Regular.ttf");
@@ -85,14 +85,14 @@ pub const RALEWAY: &str = "Raleway";
 /// Internal family name for JetBrains Mono.
 pub const JETBRAINS_MONO: &str = "JetBrains Mono";
 
-/// Internal family name for Roboto Condensed (display headings).
-pub const ROBOTO_CONDENSED: &str = "Roboto Condensed";
+/// Internal family name for Inter Tight (display headings).
+pub const INTER_TIGHT: &str = "Inter Tight";
 
 /// Internal family name for Public Sans (general app UI).
 pub const PUBLIC_SANS: &str = "Public Sans";
 
 /// Platform fallback family for display/page-heading roles (FONTS Task 14:
-/// Roboto Condensed → Arial Narrow → generic sans-serif).
+/// Inter Tight → Arial Narrow → generic sans-serif).
 pub const ARIAL_NARROW: &str = "Arial Narrow";
 
 // ── Font constructors ────────────────────────────────────────────────
@@ -127,13 +127,12 @@ pub fn jetbrains_mono(weight: Weight) -> Font {
     }
 }
 
-/// Return a `Font` for Roboto Condensed at the given weight.
+/// Return a `Font` for Inter Tight at the given weight.
 ///
-/// Registered weight: 700 (Bold). The bundled static instance is generated
-/// from the official variable font with wght pinned at 700.
-pub fn roboto_condensed(weight: Weight) -> Font {
+/// Registered weight: 700 (Bold).
+pub fn inter_tight(weight: Weight) -> Font {
     Font {
-        family: Family::Name(ROBOTO_CONDENSED),
+        family: Family::Name(INTER_TIGHT),
         weight,
         stretch: iced::font::Stretch::Normal,
         style: iced::font::Style::Normal,
@@ -211,8 +210,8 @@ pub use sizes::*;
 //
 // Sizes follow the Boru plan's approved mapping (UI-HOME-12/13) and the
 // FONTS Task 16 baseline (all values are within the approved ranges):
-//   display_heading  Roboto Condensed Bold 32     page greeting / hero
-//   page_title       Roboto Condensed Bold 28     application page title
+//   display_heading  Inter Tight Bold 32     page greeting / hero
+//   page_title       Inter Tight Bold 28     application page title
 //   section_title    Public Sans SemiBold 20      section heading (creation-dialog titles use PageTitle family @ DIALOG_TITLE — FONTS-11)
 //   card_title       Public Sans SemiBold 18      dashboard card title
 //   body             Public Sans Regular 15       body copy and descriptions
@@ -230,13 +229,13 @@ pub use sizes::*;
 /// Canonical semantic typography roles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypeRole {
-    /// Hero / page greeting — Roboto Condensed Bold 32.
+    /// Hero / page greeting — Inter Tight Bold 32.
     DisplayHeading,
-    /// Application page title — Roboto Condensed Bold 28.
+    /// Application page title — Inter Tight Bold 28.
     PageTitle,
     /// Section heading — Public Sans SemiBold 20.
     /// (Creation-dialog titles use the PageTitle family at the DIALOG_TITLE
-    /// scale — Roboto Condensed Bold 26 px, FONTS-11.)
+    /// scale — Inter Tight Bold 26 px, FONTS-11.)
     SectionTitle,
     /// Card title — Public Sans SemiBold 18.
     CardTitle,
@@ -268,7 +267,7 @@ impl TypeRole {
     /// Primary font family name for this role.
     pub fn family_name(self) -> &'static str {
         match self {
-            Self::DisplayHeading | Self::PageTitle => ROBOTO_CONDENSED,
+            Self::DisplayHeading | Self::PageTitle => INTER_TIGHT,
             Self::SectionTitle
             | Self::CardTitle
             | Self::Body
@@ -323,7 +322,7 @@ impl TypeRole {
     /// Return an `iced::Font` for this role.
     pub fn font(self) -> Font {
         match self.family_name() {
-            ROBOTO_CONDENSED => roboto_condensed(self.weight()),
+            INTER_TIGHT => inter_tight(self.weight()),
             PUBLIC_SANS => public_sans(self.weight()),
             FIGTREE => figtree(self.weight()),
             JETBRAINS_MONO => jetbrains_mono(self.weight()),
@@ -449,7 +448,7 @@ pub fn type_role_text_lh<'a>(
 /// loading result can be ignored (errors are non-fatal — the system falls
 /// back to the default sans-serif font).
 ///
-/// Loads Roboto Condensed (display/page headings), Public Sans (primary
+/// Loads Inter Tight (display/page headings), Public Sans (primary
 /// UI), Figtree (chat), Raleway ExtraBold (wordmark), and JetBrains Mono
 /// (technical values).
 pub fn load_fonts() -> iced::Task<crate::app::AppMessage> {
@@ -467,8 +466,8 @@ pub fn load_fonts() -> iced::Task<crate::app::AppMessage> {
         // JetBrains Mono — 400 · 500 (technical values).
         font::load(JETBRAINS_MONO_REGULAR_BYTES).map(|_| crate::app::AppMessage::Noop),
         font::load(JETBRAINS_MONO_MEDIUM_BYTES).map(|_| crate::app::AppMessage::Noop),
-        // Roboto Condensed — 700 (display headings).
-        font::load(ROBOTO_CONDENSED_BOLD_BYTES).map(|_| crate::app::AppMessage::Noop),
+        // Inter Tight — 700 (display headings).
+        font::load(INTER_TIGHT_BOLD_BYTES).map(|_| crate::app::AppMessage::Noop),
         // Public Sans — 400 · 500 · 600 (general app UI).
         font::load(PUBLIC_SANS_REGULAR_BYTES).map(|_| crate::app::AppMessage::Noop),
         font::load(PUBLIC_SANS_MEDIUM_BYTES).map(|_| crate::app::AppMessage::Noop),
@@ -496,8 +495,8 @@ mod tests {
         // JetBrains Mono statics
         assert!(!JETBRAINS_MONO_REGULAR_BYTES.is_empty());
         assert!(!JETBRAINS_MONO_MEDIUM_BYTES.is_empty());
-        // Roboto Condensed static
-        assert!(!ROBOTO_CONDENSED_BOLD_BYTES.is_empty());
+        // Inter Tight static
+        assert!(!INTER_TIGHT_BOLD_BYTES.is_empty());
         // Public Sans statics
         assert!(!PUBLIC_SANS_REGULAR_BYTES.is_empty());
         assert!(!PUBLIC_SANS_MEDIUM_BYTES.is_empty());
@@ -509,7 +508,7 @@ mod tests {
         // The FONTS-04 token families, each at the exact weights the roles
         // request.
         let expectations: &[(&str, Weight)] = &[
-            (ROBOTO_CONDENSED, Weight::Bold), // 700
+            (INTER_TIGHT, Weight::Bold),    // 700
             (PUBLIC_SANS, Weight::Normal),    // 400
             (PUBLIC_SANS, Weight::Medium),    // 500
             (PUBLIC_SANS, Weight::Semibold),  // 600
@@ -527,7 +526,7 @@ mod tests {
             (RALEWAY, Weight::ExtraBold),
             (JETBRAINS_MONO, Weight::Normal),
             (JETBRAINS_MONO, Weight::Medium),
-            (ROBOTO_CONDENSED, Weight::Bold),
+            (INTER_TIGHT, Weight::Bold),
             (PUBLIC_SANS, Weight::Normal),
             (PUBLIC_SANS, Weight::Medium),
             (PUBLIC_SANS, Weight::Semibold),
@@ -542,12 +541,12 @@ mod tests {
 
     #[test]
     fn type_role_uses_approved_families() {
-        // FONTS-04 approved mapping: Roboto Condensed for display/page
+        // FONTS-04 approved mapping: Inter Tight for display/page
         // headings, Public Sans for general UI, Figtree for chat,
         // JetBrains Mono for technical values, Raleway for the wordmark.
-        assert_eq!(TypeRole::DisplayHeading.family_name(), ROBOTO_CONDENSED);
+        assert_eq!(TypeRole::DisplayHeading.family_name(), INTER_TIGHT);
         assert_eq!(TypeRole::DisplayHeading.weight(), Weight::Bold);
-        assert_eq!(TypeRole::PageTitle.family_name(), ROBOTO_CONDENSED);
+        assert_eq!(TypeRole::PageTitle.family_name(), INTER_TIGHT);
         assert_eq!(TypeRole::PageTitle.weight(), Weight::Bold);
         assert_eq!(TypeRole::SectionTitle.family_name(), PUBLIC_SANS);
         assert_eq!(TypeRole::SectionTitle.weight(), Weight::Semibold);
@@ -573,9 +572,9 @@ mod tests {
             let family = role.family_name();
             let weight = role.weight();
             match family {
-                ROBOTO_CONDENSED => assert!(
+                INTER_TIGHT => assert!(
                     weight == Weight::Bold,
-                    "Roboto Condensed role {role:?} requests unsupported weight {weight:?}"
+                    "Inter Tight role {role:?} requests unsupported weight {weight:?}"
                 ),
                 PUBLIC_SANS => assert!(
                     matches!(weight, Weight::Normal | Weight::Medium | Weight::Semibold),
@@ -776,7 +775,7 @@ mod tests {
 
     #[test]
     fn dialog_size_tokens_fit_task11_bands() {
-        // FONTS Task 11: dialog title Roboto Condensed Bold 24–28 px,
+        // FONTS Task 11: dialog title Inter Tight Bold 24–28 px,
         // subtitle Public Sans Regular 14–15 px. The DIALOG_TITLE /
         // DIALOG_SUBTITLE scale tokens must sit inside those approved bands.
         assert!(
@@ -787,10 +786,10 @@ mod tests {
             (14.0..=15.0).contains(&DIALOG_SUBTITLE),
             "DIALOG_SUBTITLE {DIALOG_SUBTITLE} must be within 14–15 px"
         );
-        // The dialog title must resolve to the Roboto Condensed Bold
+        // The dialog title must resolve to the Inter Tight Bold
         // family — the same family the PageTitle role uses — so callers can
         // apply `TypeRole::PageTitle.font()` with the DIALOG_TITLE size.
-        assert_eq!(TypeRole::PageTitle.family_name(), ROBOTO_CONDENSED);
+        assert_eq!(TypeRole::PageTitle.family_name(), INTER_TIGHT);
         assert_eq!(TypeRole::PageTitle.weight(), Weight::Bold);
     }
 
@@ -801,8 +800,8 @@ mod tests {
         for role in TypeRole::ALL {
             let font = role.font();
             match role.family_name() {
-                ROBOTO_CONDENSED => {
-                    assert_eq!(font.family, iced::font::Family::Name(ROBOTO_CONDENSED));
+                INTER_TIGHT => {
+                    assert_eq!(font.family, iced::font::Family::Name(INTER_TIGHT));
                 }
                 PUBLIC_SANS => {
                     assert_eq!(font.family, iced::font::Family::Name(PUBLIC_SANS));
