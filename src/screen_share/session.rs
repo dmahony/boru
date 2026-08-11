@@ -198,8 +198,12 @@ impl ScreenShareSession { pub fn new() -> Self { Self { id: ScreenShareSessionId
 /// bounded channel is full (a dropped Invitation/Accepted is a silent
 /// negotiation failure otherwise).
 fn emit_event(events: &tokio::sync::mpsc::Sender<SessionEvent>, event: SessionEvent) {
-    if let Err(tokio::sync::mpsc::error::SendError(ev)) = events.try_send(event) {
-        tracing::warn!(?ev, "screen-share: session event dropped (receiver full)");
+    if let Err(
+        tokio::sync::mpsc::error::TrySendError::Full(ev)
+        | tokio::sync::mpsc::error::TrySendError::Closed(ev),
+    ) = events.try_send(event)
+    {
+        tracing::warn!(?ev, "screen-share: session event dropped (receiver full or closed)");
     }
 }
 
