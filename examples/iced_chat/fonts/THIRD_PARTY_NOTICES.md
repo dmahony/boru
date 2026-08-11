@@ -15,7 +15,7 @@ License texts:
 | Archivo SemiCondensed | `Archivo-OFL.txt` | 4388  |
 | IBM Plex Sans | `IBMPlexSans-OFL.txt` | 4456  |
 | Public Sans    | `PublicSans-OFL.txt`    | 4389  |
-| Roboto Condensed | `RobotoCondensed-OFL.txt` | 4351  |
+| Inter Tight | `InterTight-OFL.txt` | 4380  |
 | Combined      | `OFL.txt`               | 4985  (multi-family notice kept for legacy) |
 
 ---
@@ -104,16 +104,14 @@ License texts:
   Static instances have clean family/subfamily naming so iced/fontdb resolves
   "Public Sans" + exact weight.
 
-## Roboto Condensed — OFL-1.1
+## Inter Tight — OFL-1.1
 
-- Version: **2.003**
-- Copyright: Copyright 2011 Google Inc. All Rights Reserved.
-- Source: Google Fonts — `https://github.com/google/fonts` (`ofl/robotocondensed/RobotoCondensed[wght].ttf`),
-  variable font (wght 100–900). Static instance generated with fontTools
-  `varLib.instancer` from the official variable font above — permitted under OFL-1.1.
-- Bundled weight (static): `RobotoCondensed-Bold.ttf` (700)
-- License: `RobotoCondensed-OFL.txt`
-- Note: Replaces Archivo SemiCondensed as the display/page heading font in FONT-SWAP-01.
+- Version: **4.1** (bundled as Bold 700 static instance)
+- Copyright: Copyright (c) 2016 The Inter Project Authors (https://github.com/rsms/inter)
+- Source: Google Fonts — `https://fonts.google.com/specimen/Inter+Tight`
+- Bundled weight (static): `InterTight-Bold.ttf` (700)
+- License: `InterTight-OFL.txt`
+- Note: Replaces Roboto Condensed as the display/page heading font in FONT-SWAP-02.
   Only Bold (700) is bundled — it is the sole weight the DisplayHeading and PageTitle
   roles request.
 

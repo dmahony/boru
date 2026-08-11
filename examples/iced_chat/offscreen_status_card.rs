@@ -162,7 +162,7 @@ mod tests {
         // left. This walks the real layout tree of the Ready card and
         // asserts those shared alignment lines from the layout engine
         // (ground truth, not pixel estimates).
-        load_font(include_bytes!("fonts/RobotoCondensed-Bold.ttf"));
+        load_font(include_bytes!("fonts/InterTight-Bold.ttf"));
         load_font(include_bytes!("fonts/PublicSans-Regular.ttf"));
         load_font(include_bytes!("fonts/PublicSans-Medium.ttf"));
         load_font(include_bytes!("fonts/PublicSans-SemiBold.ttf"));
@@ -279,7 +279,7 @@ mod tests {
     fn capture_status_card_states() {
         // Fonts used by the status card: Archivo SemiCondensed Bold
         // (DisplayHeading) + IBM Plex Sans Regular/Medium/SemiBold.
-        load_font(include_bytes!("fonts/RobotoCondensed-Bold.ttf"));
+        load_font(include_bytes!("fonts/InterTight-Bold.ttf"));
         load_font(include_bytes!("fonts/PublicSans-Regular.ttf"));
         load_font(include_bytes!("fonts/PublicSans-Medium.ttf"));
         load_font(include_bytes!("fonts/PublicSans-SemiBold.ttf"));
@@ -329,7 +329,7 @@ mod tests {
         // ~24px from the total height (~11% reduction).
         // Medium tier allows growth up to 220 for wrapped text; the card
         // grows only when its content requires it (requirement 3).
-        load_font(include_bytes!("fonts/RobotoCondensed-Bold.ttf"));
+        load_font(include_bytes!("fonts/InterTight-Bold.ttf"));
         load_font(include_bytes!("fonts/PublicSans-Regular.ttf"));
         load_font(include_bytes!("fonts/PublicSans-Medium.ttf"));
         load_font(include_bytes!("fonts/PublicSans-SemiBold.ttf"));
@@ -578,7 +578,7 @@ mod tests {
         // than the whole left column) and with the rail CLOSED (empty),
         // and assert the hero card's laid-out height is identical in both
         // — and equal to the standalone content-determined height.
-        load_font(include_bytes!("fonts/RobotoCondensed-Bold.ttf"));
+        load_font(include_bytes!("fonts/InterTight-Bold.ttf"));
         load_font(include_bytes!("fonts/PublicSans-Regular.ttf"));
         load_font(include_bytes!("fonts/PublicSans-Medium.ttf"));
         load_font(include_bytes!("fonts/PublicSans-SemiBold.ttf"));

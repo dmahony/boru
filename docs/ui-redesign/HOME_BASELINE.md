@@ -65,7 +65,7 @@
   - `dep.time_of_day_greeting` → "Good morning/afternoon/evening" (computed by `Self::time_of_day_greeting()` in app.rs)
   - `dep.mesh_health` + `dep.has_peer_connections` + `dep.sender_ready` → connection variant
 - **Sub-components:**
-  - **Greeting** (`DisplayHeading`): "Good {time}, {name}" — Roboto Condensed Bold 32px
+  - **Greeting** (`DisplayHeading`): "Good {time}, {name}" — Inter Tight Bold 32px
   - **Welcome subtitle**: "Welcome to Boru" — Public Sans Regular at `HOME_SUBTITLE` (16px)
   - **Status pill**: icon + label (Starting/Connecting/Connected/Degraded/Offline), colored border
   - **Download Manager button**: outline button opening `DownloadManager`
@@ -234,8 +234,8 @@ All three cards are lazy-rendered with independent `PartialEq` dependencies.
 
 | Role | Family | Weight | Size | Use |
 |------|--------|--------|------|-----|
-| `DisplayHeading` | Roboto Condensed | Bold 700 | 32px | Page greeting |
-| `PageTitle` | Roboto Condensed | Bold 700 | 28px | App page title |
+| `DisplayHeading` | Inter Tight | Bold 700 | 32px | Page greeting |
+| `PageTitle` | Inter Tight | Bold 700 | 28px | App page title |
 | `SectionTitle` | Public Sans | SemiBold 600 | 20px | Section heading |
 | `CardTitle` | Public Sans | SemiBold 600 | 18px | Dashboard card title |
 | `Body` | Public Sans | Regular 400 | 15px | Body copy |

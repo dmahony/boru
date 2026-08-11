@@ -16,7 +16,7 @@ This document specifies every visual token, component, and behaviour in the Boru
 
 | Family | Weights loaded | Scope |
 |---|---|---|
-| **Roboto Condensed** | 700 (Bold) | Major display/page headings |
+| **Inter Tight** | 700 (Bold) | Major display/page headings |
 | **Public Sans** | 400 (Regular), 500 (Medium), 600 (SemiBold) | Primary app UI — nav, forms, buttons, supporting text |
 | **Figtree** | 400 (Regular), 500 (Medium), 600 (SemiBold) | Chat messages, sender names, message metadata, composer |
 | **Raleway** | 800 (ExtraBold) | BORU wordmark / branding only |
@@ -30,8 +30,8 @@ Fonts are bundled at compile time via `include_bytes!` in `fonts.rs` and loaded 
 
 | Role | Family | Weight | px |
 |---|---|---|---|
-| `display_heading` | Roboto Condensed | Bold (700) | 32 |
-| `page_title` | Roboto Condensed | Bold (700) | 28 |
+| `display_heading` | Inter Tight | Bold (700) | 32 |
+| `page_title` | Inter Tight | Bold (700) | 28 |
 | `section_title` | Public Sans | SemiBold (600) | 20 |
 | `card_title` | Public Sans | SemiBold (600) | 18 |
 | `body` | Public Sans | Regular (400) | 15 |
@@ -1107,7 +1107,7 @@ One `Icon` enum maps every semantic action to a Lucide SVG asset; `IconSize` nam
 
 ### 19.4 `fonts.rs` — typography
 
-`TypeRole` enum provides semantic roles (DisplayHeading, PageTitle, SectionTitle, ChatMessage, …) with correct family/weight/size; `load_fonts()` registers Roboto Condensed, Public Sans, Figtree, Raleway, and JetBrains Mono at startup.
+`TypeRole` enum provides semantic roles (DisplayHeading, PageTitle, SectionTitle, ChatMessage, …) with correct family/weight/size; `load_fonts()` registers Inter Tight, Public Sans, Figtree, Raleway, and JetBrains Mono at startup.
 
 ### 19.5 Responsive breakpoints
 
