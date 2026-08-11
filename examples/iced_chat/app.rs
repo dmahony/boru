@@ -17713,6 +17713,12 @@ impl std::hash::Hash for ScreenShareEventsRxHandle {
 fn screen_share_events_subscription(
     rx: Option<Arc<Mutex<Receiver<SessionEvent>>>>,
 ) -> iced::Subscription<AppMessage> {
+    // When screen sharing is unavailable, the fallback receiver is
+    // intentionally closed. Its one-shot stream may end while the recipe is
+    // still registered; that is benign because the recipe hash changes when
+    // a real session receiver is installed, causing iced to spawn a fresh
+    // stream. The application-lifetime call/network receivers must not use
+    // this fallback pattern.
     let rx = rx.unwrap_or_else(|| {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         drop(tx);
@@ -17741,6 +17747,9 @@ impl std::hash::Hash for ScreenShareFrameWatchHandle {
 fn screen_share_frame_subscription(
     watch: Option<Arc<Mutex<tokio::sync::watch::Receiver<Option<CapturedFrame>>>>>,
 ) -> iced::Subscription<AppMessage> {
+    // This closed fallback is likewise a one-shot "not available" stream.
+    // A real watch receiver has a different Arc identity and therefore a
+    // different subscription recipe when screen sharing starts.
     let watch = watch.unwrap_or_else(|| {
         let (tx, rx) = tokio::sync::watch::channel(None);
         drop(tx);
