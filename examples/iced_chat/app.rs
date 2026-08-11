@@ -17865,10 +17865,33 @@ impl IcedChat {
         // conversation_id is informational in the protocol and not used for
         // media routing; M7 shows the invitation in the active conversation.
         let conversation_id = 0u64;
-        self.runtime_handle.spawn(async move {
-            run_host_session(endpoint, peer, local_public, conversation_id, events_tx, stop, cmd_rx)
-                .await;
-        });
+        // run_host_session's streaming loop performs synchronous capture
+        // (X11 GetImage) and encode (openh264) — up to ~500ms of blocking per
+        // frame with no yield. On the shared multi-thread runtime that blocks
+        // one worker and starves the QUIC connection driver task if it parks
+        // on the same worker (observed: media stream data buffered forever,
+        // cwnd frozen at the initial window, udp_tx frozen; the viewer never
+        // receives frames and idle-times-out). Run the whole host session on
+        // a dedicated thread with its own current-thread runtime so the app
+        // runtime and its connection drivers are never blocked.
+        std::thread::Builder::new()
+            .name("boru-screen-share-host".to_string())
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("failed to create screen-share host runtime");
+                rt.block_on(run_host_session(
+                    endpoint,
+                    peer,
+                    local_public,
+                    conversation_id,
+                    events_tx,
+                    stop,
+                    cmd_rx,
+                ));
+            })
+            .expect("failed to spawn screen-share host thread");
         iced::Task::none()
     }
 
