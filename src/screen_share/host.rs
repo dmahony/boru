@@ -121,7 +121,19 @@ async fn run_host_session_inner(
     let conn_paths: Vec<String> = connection
         .paths()
         .iter()
-        .map(|path| format!("{}/selected={}", path.remote_addr(), path.is_selected()))
+        .map(|path| {
+            let s = path.stats();
+            format!(
+                "{}/selected={}/cwnd={}/cong_events={}/stream_tx={}/udp_tx={}/lost={}",
+                path.remote_addr(),
+                path.is_selected(),
+                s.cwnd,
+                s.congestion_events,
+                s.frame_tx.stream,
+                s.udp_tx.bytes,
+                s.lost_packets,
+            )
+        })
         .collect();
     tracing::info!(remote_addrs = ?remote_addrs, paths = ?conn_paths, "screen-share: host connected to viewer (single-path transport)");
     let transport = match QuicScreenTransport::new(connection.clone(), *session_id.as_bytes()) {
@@ -268,14 +280,28 @@ async fn run_host_session_inner(
                         }
                         match encoder.encode(&frame) {
                             Ok(encoded) => {
-                                if encoded.sequence == 0 {
-                                    tracing::info!(bytes = encoded.bytes.len(), "screen-share: host encoded first frame");
-                                    let first_paths: Vec<String> = connection
+                                if encoded.sequence == 0 || encoded.sequence % 25 == 0 {
+                                    let stats_paths: Vec<String> = connection
                                         .paths()
                                         .iter()
-                                        .map(|path| format!("{}/selected={}", path.remote_addr(), path.is_selected()))
+                                        .map(|path| {
+                                            let s = path.stats();
+                                            format!(
+                                                "{}/selected={}/cwnd={}/cong_events={}/stream_tx={}/udp_tx={}/lost={}",
+                                                path.remote_addr(),
+                                                path.is_selected(),
+                                                s.cwnd,
+                                                s.congestion_events,
+                                                s.frame_tx.stream,
+                                                s.udp_tx.bytes,
+                                                s.lost_packets,
+                                            )
+                                        })
                                         .collect();
-                                    tracing::info!(paths = ?first_paths, "screen-share: host streaming paths at frame 0");
+                                    if encoded.sequence == 0 {
+                                        tracing::info!(bytes = encoded.bytes.len(), "screen-share: host encoded first frame");
+                                    }
+                                    tracing::info!(sequence = encoded.sequence, paths = ?stats_paths, "screen-share: host streaming path stats");
                                 }
                                 let send_started = std::time::Instant::now();
                                 let sent = transport.send_frame(&encoded).await;
