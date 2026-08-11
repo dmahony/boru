@@ -240,11 +240,21 @@ impl iroh::protocol::ProtocolHandler for ScreenShareProtocol {
             let message = match super::transport::read_unit(recv).await {
                 Ok(ReadUnit::Control(message)) => message,
                 Ok(ReadUnit::Media(header, payload)) => {
-                    let _ = self.media_tx.try_send(InboundMedia {
-                        session_id: ScreenShareSessionId::from_bytes(header.session_id),
-                        header,
-                        payload,
-                    });
+                    if header.sequence == 0 || header.sequence % 150 == 0 {
+                        tracing::info!(session = ?header.session_id, sequence = header.sequence, bytes = payload.len(), "screen-share: viewer received media");
+                    }
+                    let sequence = header.sequence;
+                    let dropped = self
+                        .media_tx
+                        .try_send(InboundMedia {
+                            session_id: ScreenShareSessionId::from_bytes(header.session_id),
+                            header,
+                            payload,
+                        })
+                        .is_err();
+                    if dropped {
+                        tracing::warn!(sequence, "screen-share: viewer media dropped (channel full)");
+                    }
                     continue;
                 }
                 Err(_error) => { let _ = send.reset(0u32.into()); continue; }

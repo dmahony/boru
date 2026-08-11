@@ -107,6 +107,7 @@ async fn run_host_session_inner(
             return;
         }
     };
+    tracing::info!(remote = ?connection.remote_address(), "screen-share: host connected to viewer");
     let transport = match QuicScreenTransport::new(connection.clone(), *session_id.as_bytes()) {
         Ok(transport) => transport,
         Err(error) => {
@@ -252,11 +253,18 @@ async fn run_host_session_inner(
                         match encoder.encode(&frame) {
                             Ok(encoded) => {
                                 if encoded.sequence == 0 {
-                                    tracing::info!("screen-share: host sent first frame");
-                                } else if encoded.sequence % 150 == 0 {
-                                    tracing::info!(sequence = encoded.sequence, "screen-share: host streaming");
+                                    tracing::info!(bytes = encoded.bytes.len(), "screen-share: host encoded first frame");
                                 }
-                                if transport.send_frame(&encoded).await.is_err() { return; }
+                                let send_started = std::time::Instant::now();
+                                let sent = transport.send_frame(&encoded).await;
+                                let send_elapsed = send_started.elapsed();
+                                if encoded.sequence == 0 || encoded.sequence % 150 == 0 {
+                                    tracing::info!(sequence = encoded.sequence, bytes = encoded.bytes.len(), elapsed_ms = send_elapsed.as_millis() as u64, "screen-share: host frame sent");
+                                }
+                                if send_elapsed > Duration::from_secs(2) {
+                                    tracing::warn!(sequence = encoded.sequence, elapsed_ms = send_elapsed.as_millis() as u64, "screen-share: send_frame took abnormally long");
+                                }
+                                if sent.is_err() { return; }
                             }
                             Err(error) => {
                                 tracing::warn!(error = %error, "screen-share: host encode failed");
