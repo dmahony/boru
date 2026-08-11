@@ -1000,7 +1000,7 @@ dependencies = [
 
 [[package]]
 name = "boru-core"
-version = "0.186.0"
+version = "0.193.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1039,6 +1039,7 @@ dependencies = [
  "iroh-metrics",
  "irpc",
  "libc",
+ "libloading",
  "mimalloc",
  "n0-error",
  "n0-future",
@@ -1084,6 +1085,7 @@ dependencies = [
  "url",
  "walkdir",
  "windows-sys 0.59.0",
+ "x11rb",
  "x25519-dalek",
  "zbus",
  "zeroize",

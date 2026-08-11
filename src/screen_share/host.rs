@@ -61,6 +61,7 @@ pub async fn run_host_session(
     // geometry: a real portal/PipeWire capture when available, otherwise the
     // synthetic test pattern (demo/CI path).
     let mut capture = create_capture_source(false).await;
+    tracing::info!(backend = capture.backend_name(), "screen-share capture backend selected");
     let (capture_width, capture_height) = capture_dimensions(&capture);
     let capture_fps = CAPTURE_FPS;
     let Some(hello) = manager.hello(session_id, vec!["h264".to_string()], capture_width.min(u16::MAX as u32) as u16, capture_height.min(u16::MAX as u32) as u16, capture_fps as u16) else { return };

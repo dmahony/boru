@@ -28,6 +28,8 @@ use crate::screen_share::{
     capture::FrameSink, CapturedFrame, PixelFormat, ScreenCapture, ScreenShareError,
     TestPatternCapture,
 };
+use x11rb::connection::Connection as _;
+use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat, ImageOrder};
 
 /// State of the XDG ScreenCast portal session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -942,12 +944,165 @@ fn extract_stream_node_id(body: &zbus::zvariant::Value) -> Option<u32> {
     None
 }
 
+// ── Direct X11 capture backend ─────────────────────────────────────────────
+
+/// Direct X11 capture: grabs the root window via `GetImage` and converts the
+/// ZPixmap buffer to RGBA8. This is the no-portal fallback — it makes real
+/// desktop sharing work on any X11 display without xdg-desktop-portal or
+/// PipeWire. Pixels are interpreted through the root visual's channel masks,
+/// so both LSBFirst (BGRX, typical x86) and MSBFirst (XRGB) servers convert
+/// correctly. An XShm fast path can replace the per-frame GetImage copy later
+/// without changing this interface.
+pub struct X11Capture {
+    conn: x11rb::rust_connection::RustConnection,
+    root: u32,
+    width: u32,
+    height: u32,
+    depth: u8,
+    lsb_first: bool,
+    red_mask: u32,
+    green_mask: u32,
+    blue_mask: u32,
+    timestamp_us: u64,
+}
+
+impl X11Capture {
+    /// Connect to `$DISPLAY` and describe the root window. Fails closed when
+    /// no display is reachable or the root visual is not 24/32-bit.
+    pub fn connect() -> Result<Self, ScreenShareError> {
+        let (conn, screen_num) = x11rb::connect(None)
+            .map_err(|e| ScreenShareError::new(format!("X11 connect failed: {e}")))?;
+        let setup = conn.setup();
+        let screen = &setup.roots[screen_num];
+        let root = screen.root;
+        let depth = screen.root_depth;
+        if !matches!(depth, 24 | 32) {
+            return Err(ScreenShareError::new(format!(
+                "unsupported X11 root depth {depth} (need a 24 or 32-bit visual)"
+            )));
+        }
+        let visual = screen
+            .allowed_depths
+            .iter()
+            .flat_map(|d| d.visuals.iter())
+            .find(|v| v.visual_id == screen.root_visual)
+            .ok_or_else(|| ScreenShareError::new("X11 root visual not found"))?;
+        let lsb_first = setup.image_byte_order == ImageOrder::LSB_FIRST;
+        Ok(Self {
+            conn,
+            root,
+            width: screen.width_in_pixels as u32,
+            height: screen.height_in_pixels as u32,
+            depth,
+            lsb_first,
+            red_mask: visual.red_mask,
+            green_mask: visual.green_mask,
+            blue_mask: visual.blue_mask,
+            timestamp_us: 0,
+        })
+    }
+}
+
+impl ScreenCapture for X11Capture {
+    fn capture(&mut self) -> Result<Option<CapturedFrame>, ScreenShareError> {
+        // Refresh geometry every frame (the screen can resize); the capture
+        // buffer is rebuilt only when the size actually changed.
+        let geometry = self
+            .conn
+            .get_geometry(self.root)
+            .map_err(|e| ScreenShareError::new(format!("X11 get_geometry failed: {e}")))?
+            .reply()
+            .map_err(|e| ScreenShareError::new(format!("X11 get_geometry reply failed: {e}")))?;
+        let width = geometry.width as u32;
+        let height = geometry.height as u32;
+        if width == 0 || height == 0 {
+            return Ok(None);
+        }
+        self.width = width;
+        self.height = height;
+        let reply = self
+            .conn
+            .get_image(ImageFormat::Z_PIXMAP, self.root, 0, 0, width as u16, height as u16, u32::MAX)
+            .map_err(|e| ScreenShareError::new(format!("X11 GetImage failed: {e}")))?
+            .reply()
+            .map_err(|e| ScreenShareError::new(format!("X11 GetImage reply failed: {e}")))?;
+        let pixels = convert_zpixmap_rgba(
+            &reply.data,
+            width as usize,
+            height as usize,
+            self.depth,
+            self.lsb_first,
+            self.red_mask,
+            self.green_mask,
+            self.blue_mask,
+        )?;
+        let timestamp_us = self.timestamp_us;
+        self.timestamp_us = self.timestamp_us.saturating_add(33_333);
+        CapturedFrame::cpu(timestamp_us, width, height, PixelFormat::Rgba8, pixels).map(Some)
+    }
+}
+
+/// Convert an X11 ZPixmap `GetImage` buffer into RGBA8 using the root
+/// visual's channel masks. Depth 24/32 visuals pack every pixel into 32 bits
+/// (the high byte is padding for depth 24); the pixel value is reassembled in
+/// the server's image byte order before the masks are applied, which makes the
+/// conversion correct for both LSBFirst (BGRX on x86) and MSBFirst (XRGB)
+/// servers.
+fn convert_zpixmap_rgba(
+    data: &[u8],
+    width: usize,
+    height: usize,
+    depth: u8,
+    lsb_first: bool,
+    red_mask: u32,
+    green_mask: u32,
+    blue_mask: u32,
+) -> Result<Vec<u8>, ScreenShareError> {
+    let bpp = if matches!(depth, 24 | 32) { 4 } else { 0 };
+    if bpp == 0 {
+        return Err(ScreenShareError::new(format!(
+            "unsupported ZPixmap depth {depth}"
+        )));
+    }
+    let expected = width * height * bpp;
+    if data.len() < expected {
+        return Err(ScreenShareError::new(format!(
+            "X11 image buffer too small: {} bytes for {width}x{height}@{depth}",
+            data.len()
+        )));
+    }
+    let red_shift = red_mask.trailing_zeros();
+    let green_shift = green_mask.trailing_zeros();
+    let blue_shift = blue_mask.trailing_zeros();
+    let red_max = red_mask >> red_shift;
+    let green_max = green_mask >> green_shift;
+    let blue_max = blue_mask >> blue_shift;
+    if red_max == 0 || green_max == 0 || blue_max == 0 {
+        return Err(ScreenShareError::new("X11 visual channel masks are empty"));
+    }
+    let mut out = Vec::with_capacity(width * height * 4);
+    for chunk in data.chunks_exact(bpp).take(width * height) {
+        let pixel = if lsb_first {
+            u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+        } else {
+            u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+        };
+        let r = (((pixel & red_mask) >> red_shift) as u32 * 255) / red_max;
+        let g = (((pixel & green_mask) >> green_shift) as u32 * 255) / green_max;
+        let b = (((pixel & blue_mask) >> blue_shift) as u32 * 255) / blue_max;
+        out.extend_from_slice(&[r as u8, g as u8, b as u8, 255]);
+    }
+    Ok(out)
+}
+
 // ── Selection factory ────────────────────────────────────────────────────────
 
 /// The capture source chosen by [`create_capture_source`].
 pub enum ActiveCapture {
     /// A real portal/PipeWire capture with its negotiated geometry.
     Portal(LinuxPortalCapture),
+    /// A direct X11 GetImage capture of the root window.
+    X11(X11Capture),
     /// Synthetic fallback (demo/CI path) with the given geometry.
     TestPattern(TestPatternCapture, (u32, u32)),
 }
@@ -957,6 +1112,7 @@ impl ActiveCapture {
     pub fn capture(&mut self) -> Result<Option<CapturedFrame>, ScreenShareError> {
         match self {
             ActiveCapture::Portal(capture) => capture.capture(),
+            ActiveCapture::X11(capture) => capture.capture(),
             ActiveCapture::TestPattern(capture, _) => capture.capture(),
         }
     }
@@ -967,6 +1123,7 @@ impl ActiveCapture {
             ActiveCapture::Portal(capture) => {
                 capture.negotiated_size().unwrap_or((DEMO_WIDTH, DEMO_HEIGHT))
             }
+            ActiveCapture::X11(capture) => (capture.width, capture.height),
             ActiveCapture::TestPattern(_, size) => *size,
         }
     }
@@ -975,20 +1132,33 @@ impl ActiveCapture {
     pub fn is_test_pattern(&self) -> bool {
         matches!(self, ActiveCapture::TestPattern(..))
     }
+
+    /// Human-readable backend name for startup diagnostics.
+    pub fn backend_name(&self) -> &'static str {
+        match self {
+            ActiveCapture::Portal(_) => "portal",
+            ActiveCapture::X11(_) => "x11",
+            ActiveCapture::TestPattern(..) => "test-pattern",
+        }
+    }
 }
 
 const DEMO_WIDTH: u32 = 640;
 const DEMO_HEIGHT: u32 = 360;
 const DEMO_FPS: u32 = 15;
 
-/// Try the real platform capture first, falling back to the test pattern.
-/// `force_fallback` is a test hook; production callers pass `false`.
+/// Try the real platform capture first, then the direct X11 backend, falling
+/// back to the synthetic test pattern. `force_fallback` is a test hook;
+/// production callers pass `false`.
 pub async fn create_capture_source(force_fallback: bool) -> ActiveCapture {
     #[cfg(target_os = "linux")]
     {
         if !force_fallback {
             if let Ok(capture) = LinuxPortalCapture::connect().await {
                 return ActiveCapture::Portal(capture);
+            }
+            if let Ok(capture) = X11Capture::connect() {
+                return ActiveCapture::X11(capture);
             }
         }
     }
@@ -1060,5 +1230,56 @@ mod tests {
     #[test]
     fn parse_rejects_non_object_pod() {
         assert!(parse_format_pod(std::ptr::null()).is_none());
+    }
+
+    #[test]
+    fn zpixmap_lsb_first_bgrx_converts_to_rgba() {
+        // Depth 24, LSBFirst (x86): pixel bytes are B,G,R,X. Two pixels:
+        // (0x30,0x20,0x10) → RGB(0x10,0x20,0x30) and (0xAA,0xBB,0xCC) → RGB(0xCC,0xBB,0xAA).
+        let data = [0x30, 0x20, 0x10, 0x00, 0xAA, 0xBB, 0xCC, 0x00];
+        let out = convert_zpixmap_rgba(
+            &data, 2, 1, 24, true, 0x00FF_0000, 0x0000_FF00, 0x0000_00FF,
+        )
+        .unwrap();
+        assert_eq!(out, vec![0x10, 0x20, 0x30, 255, 0xCC, 0xBB, 0xAA, 255]);
+    }
+
+    #[test]
+    fn zpixmap_msb_first_xrgb_converts_to_rgba() {
+        // Depth 24, MSBFirst (big-endian): pixel bytes are X,R,G,B.
+        let data = [0x00, 0x10, 0x20, 0x30];
+        let out = convert_zpixmap_rgba(
+            &data, 1, 1, 24, false, 0x00FF_0000, 0x0000_FF00, 0x0000_00FF,
+        )
+        .unwrap();
+        assert_eq!(out, vec![0x10, 0x20, 0x30, 255]);
+    }
+
+    #[test]
+    fn zpixmap_respects_nonstandard_channel_masks() {
+        // 5-6-5 style masks (e.g. Xvfb depth-16 converted to 32-bit padding):
+        // R=0xF800, G=0x07E0, B=0x001F. LSBFirst bytes for RGB(0x1F,0x3F,0x1F).
+        let data = [0x1F, 0x3F, 0x1F, 0x00];
+        let out = convert_zpixmap_rgba(
+            &data, 1, 1, 24, true, 0x0000_F800, 0x0000_07E0, 0x0000_001F,
+        )
+        .unwrap();
+        // R: 0x1F/0x1F*255 = 255; G: 0x3F/0x3F*255 = 255; B: 255.
+        assert_eq!(out, vec![255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn zpixmap_rejects_unsupported_depth_and_short_buffer() {
+        assert!(
+            convert_zpixmap_rgba(&[0; 8], 2, 1, 16, true, 0x00FF_0000, 0x0000_FF00, 0x0000_00FF)
+                .is_err()
+        );
+        assert!(
+            convert_zpixmap_rgba(&[0; 4], 2, 1, 24, true, 0x00FF_0000, 0x0000_FF00, 0x0000_00FF)
+                .is_err()
+        );
+        assert!(
+            convert_zpixmap_rgba(&[0; 8], 2, 1, 24, true, 0, 0, 0x0000_00FF).is_err()
+        );
     }
 }
