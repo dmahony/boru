@@ -2,14 +2,13 @@
 #
 # Run with:  cargo chat open
 #            cargo chat join <ticket>
-#            cargo iced-chat open
-#            cargo iced-chat join <ticket>
+#            cargo boru open
+#            cargo boru join <ticket>
 #
 
 [alias]
 chat = "run --features examples --example chat --"
 # The GUI example target is named `boru` (see Cargo.toml [[example]]).
-iced-chat = "run --features gui --example boru --"
 boru = "run --features gui --example boru --"
 
 # ── Edition note ─────────────────────────────────────────────────────────
