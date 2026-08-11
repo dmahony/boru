@@ -100,8 +100,12 @@ async fn run_host_session_inner(
         .await
         .map(|info| iroh::EndpointAddr::from_parts(info.id(), info.into_addrs().map(|a| a.into_addr())))
         .unwrap_or_else(|| iroh::EndpointAddr::new(peer));
-    // BISECT-A: default transport config (plain connect) to isolate whether
-    // the single_path() config breaks the handshake.
+    // Use the default transport config: the earlier single_path() experiment
+    // (multipath disabled) broke the QUIC handshake entirely — the offer
+    // never arrived on the viewer. The media black hole it was meant to fix
+    // turned out to be runtime starvation of the connection driver (see
+    // start_screen_share in the app), fixed by running the host session on
+    // a dedicated thread + runtime.
     let connection = match endpoint.connect(addr, SCREEN_SHARE_ALPN).await {
         Ok(connection) => connection,
         Err(error) => {
@@ -136,7 +140,7 @@ async fn run_host_session_inner(
             )
         })
         .collect();
-    tracing::info!(remote_addrs = ?remote_addrs, paths = ?conn_paths, "screen-share: host connected to viewer (single-path transport)");
+    tracing::info!(remote_addrs = ?remote_addrs, paths = ?conn_paths, "screen-share: host connected to viewer");
     let transport = match QuicScreenTransport::new(connection.clone(), *session_id.as_bytes()) {
         Ok(transport) => transport,
         Err(error) => {
