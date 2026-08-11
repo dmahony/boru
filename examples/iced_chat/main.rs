@@ -94,7 +94,6 @@ use boru_core::whisper::{WhisperBuilder, WHISPER_ALPN};
 use boru_core::screen_share::{ScreenShareProtocol, SCREEN_SHARE_ALPN};
 use iroh_mainline_address_lookup::DhtAddressLookup;
 
-use boru_core::public_room_continuous::{ContinuousTracker, ContinuousTrackerConfig};
 #[cfg(feature = "gui")]
 use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
 use n0_error::{bail_any, Result, StdResultExt};
@@ -580,11 +579,11 @@ fn main() -> Result<()> {
             }
             Some(Command::Logs) => None,
             None => {
-                // Open the public lobby room so the user can start typing
-                // immediately. The lobby gossip subscribe is also done here
-                // inside runtime.block_on.
-                let lobby_topic = app::IcedChat::default_lobby_topic();
-                Some((lobby_topic, Vec::new()))
+                // No explicit room: start on the Home/ChatList screen. Boru
+                // no longer auto-opens the internal lobby as a conversation
+                // (BORU-DISC-12); peer discovery is served by the internal
+                // discovery topic via DiscoveryService, not by a lobby chat.
+                None
             }
         }
     });
@@ -753,7 +752,6 @@ fn main() -> Result<()> {
         inbox_events_rx,
         discovered_peers_rx,
         directory_room_rx,
-        continuous_tracker,
         // The discovery service handle is deliberately NOT stored on
         // IcedChat (no conversation/UI state for the internal discovery
         // topic); holding it here for the rest of main() keeps its
@@ -1080,10 +1078,10 @@ fn main() -> Result<()> {
         let router = router_builder.spawn();
         splash_send("Protocol router ready");
 
-        // Subscribe to the lobby topic so the gossip mesh is ready for
-        // LAN-discovered peers. This must happen inside runtime.block_on
-        // because gossip.subscribe() can hang in the iced event loop.
-        // Also create the discovered-peers channel for UI display.
+        // Create the discovered-peers channel for UI display. Peer discovery
+        // is served by the internal discovery topic (DiscoveryService) and
+        // mDNS; Boru no longer auto-subscribes to the public lobby at startup
+        // (BORU-DISC-12).
         let (discovered_peers_tx, discovered_peers_rx_tmp) =
             tokio::sync::mpsc::channel::<DiscoveredPeersUpdate>(64);
         // Create the directory room channel for UI display.
@@ -1092,10 +1090,12 @@ fn main() -> Result<()> {
 
         // ── Shared member-discovery DHT client ───────────────────────────
         // One `distributed_topic_tracker::Dht` handle is created (when DHT is
-        // enabled) and shared between the public-lobby `MainlineDhtBackend`
-        // and existing private-room discovery.  This is intentionally separate
-        // from Iroh's `DhtAddressLookup` (address resolution) — see
-        // `docs/discovery-architecture.md` §2.
+        // enabled) for user-facing room discovery: private-room trackers and
+        // user-created public-room trackers inside `IcedChat`.  The lobby is
+        // no longer auto-joined at startup (BORU-DISC-12), so there is no
+        // startup public-lobby tracker consuming this handle.  This is
+        // intentionally separate from Iroh's `DhtAddressLookup` (address
+        // resolution) — see `docs/discovery-architecture.md` §2.
         let room_discovery_dht = (!args.no_dht).then(|| {
             let dht = distributed_topic_tracker::Dht::new(
                 &distributed_topic_tracker::DhtConfig::default(),
@@ -1104,200 +1104,20 @@ fn main() -> Result<()> {
             dht
         });
         if args.no_dht {
-            info!("public-lobby DHT discovery disabled by --no-dht");
-        }
-
-        // The public-lobby continuous tracker is kept alive for the lifetime
-        // of `IcedChat` to prevent its background publish/discover/join tasks
-        // from being dropped immediately after startup.
-        let mut continuous_tracker: Option<ContinuousTracker> = None;
-
-        let lobby_topic = app::IcedChat::default_lobby_topic();
-        splash_send("Joining lobby...");
-        if let Ok(sub) = gossip.subscribe(lobby_topic, Vec::new()).await {
-            let (sender, mut receiver) = sub.split();
-
-            // ── Start the public-room DHT tracker (Steps 4) ─────────────
-            // `ContinuousTracker::start_with_joiner` needs the lobby
-            // `GossipSender`, so this must run after the subscription
-            // succeeds.  A DHT failure is non-fatal — the app continues
-            // with mDNS, relay, tickets and known addresses.
-            let mut lobby_neighbor_events_tx: Option<
-                irpc::channel::mpsc::Sender<
-                    boru_core::dynamic_joiner::NeighborEvent,
-                >,
-            > = None;
-
-            if let Some(ref dht) = room_discovery_dht {
-                let backend = boru_core::discovery_backend::MainlineDhtBackend::new(dht.clone());
-
-                match boru_core::public_room_tracker::PublicRoomTracker::start(
-                    Box::new(backend),
-                    boru_core::public_room::PublicNetwork::Mainnet,
-                    endpoint.id(),
-                    secret_key.clone(),
-                )
-                .await
-                {
-                    Ok(tracker) => {
-                        debug_assert_eq!(tracker.identity().topic, lobby_topic);
-
-                        let (tracker_handle, neighbor_events_tx) =
-                            ContinuousTracker::start_with_joiner(
-                                tracker,
-                                ContinuousTrackerConfig::default(),
-                                sender.clone(),
-                            );
-
-                        continuous_tracker = Some(tracker_handle);
-                        lobby_neighbor_events_tx = Some(neighbor_events_tx);
-
-                        info!(
-                            room = %continuous_tracker
-                                .as_ref()
-                                .map(|t| t.identity_short_id())
-                                .unwrap_or_default(),
-                            "public-lobby continuous DHT tracker started"
-                        );
-                    }
-                    Err(error) => {
-                        warn!(
-                            error = %error,
-                            "public-lobby DHT tracker failed to start; \
-                             continuing without DHT member discovery"
-                        );
-                    }
-                }
-            }
-
-            // Drain the lobby receiver to prevent backpressure, forwarding
-            // gossip neighbour lifecycle events to the dynamic joiner so a
-            // `NeighborDown` lets it remove the peer from its known set and
-            // retry it after a later DHT discovery.
-            //
-            // NeighborUp events are also forwarded to the UI's discovered-peers
-            // channel so that DHT-discovered peers (joined via the
-            // DynamicPeerJoiner) appear in the sidebar Discover section —
-            // not only mDNS-discovered peers.
-            let neighbor_events_tx = lobby_neighbor_events_tx;
-            let ui_discovered_tx = discovered_peers_tx.clone();
-            tokio::spawn(async move {
-                use n0_future::StreamExt;
-                use boru_core::api::Event;
-                use boru_core::dynamic_joiner::NeighborEvent;
-
-                while let Some(event) = receiver.next().await {
-                    let Ok(gossip_event) = event else {
-                        continue;
-                    };
-                    match &gossip_event {
-                        Event::NeighborUp(peer) => {
-                            if let Some(tx) = neighbor_events_tx.as_ref() {
-                                let _ = tx
-                                    .try_send(NeighborEvent::Up(*peer))
-                                    .await;
-                            }
-                            let _ = ui_discovered_tx.try_send(
-                                DiscoveredPeersUpdate {
-                                    added: vec![*peer],
-                                    removed: Vec::new(),
-                                },
-                            );
-                        }
-                        Event::NeighborDown(peer) => {
-                            if let Some(tx) = neighbor_events_tx.as_ref() {
-                                let _ = tx
-                                    .try_send(NeighborEvent::Down(*peer))
-                                    .await;
-                            }
-                            let _ = ui_discovered_tx.try_send(
-                                DiscoveredPeersUpdate {
-                                    added: Vec::new(),
-                                    removed: vec![*peer],
-                                },
-                            );
-                        }
-                        _ => {}
-                    }
-                }
-            });
-
-            // mDNS-based LAN peer discovery: when a peer appears on the LAN,
-            // join them to the lobby gossip mesh directly, and forward the
-            // peer ID to the UI for sidebar display.
-            {
-                let memory_lookup_for_events = memory_lookup.clone();
-                let tx = discovered_peers_tx.clone();
-                let my_id = endpoint.id();
-                tokio::spawn(async move {
-                    use n0_future::StreamExt;
-                    let mut joined_peers = std::collections::HashSet::new();
-                    let mut events = mdns_events;
-                    while let Some(event) = events.next().await {
-                        match event {
-                            DiscoveryEvent::Discovered { endpoint_info, .. } => {
-                                let peer = endpoint_info.endpoint_id;
-                                if peer == my_id {
-                                    debug!(peer = %peer, "mDNS discovered our own endpoint, skipping");
-                                    continue;
-                                }
-                                // Keep the concrete addresses in the endpoint's
-                                // shared lookup cache. mDNS can resolve the
-                                // endpoint itself, but the explicit memory entry
-                                // also makes subsequent dials deterministic.
-                                memory_lookup_for_events.set_endpoint_info(endpoint_info);
-                                if !joined_peers.insert(peer) {
-                                    continue;
-                                }
-                                // Spawn join_peers in a separate task so the
-                                // mDNS event loop isn't blocked. join_peers
-                                // triggers the gossip actor to dial the peer
-                                // and establish a properly wired connection.
-                                let s = sender.clone();
-                                tokio::spawn(async move {
-                                    if let Err(e) = s.join_peers(vec![peer]).await {
-                                        warn!(peer = %peer, error = %e, "join_peers failed");
-                                    } else {
-                                        info!(peer = %peer, "join_peers succeeded");
-                                    }
-                                });
-                                let _ = tx.try_send(DiscoveredPeersUpdate {
-                                    added: vec![peer],
-                                    removed: Vec::new(),
-                                });
-                            }
-                            DiscoveryEvent::Expired { endpoint_id } => {
-                                memory_lookup_for_events.remove_endpoint_info(endpoint_id);
-                                if joined_peers.remove(&endpoint_id) {
-                                    info!(peer = %endpoint_id, "mDNS peer advertisement expired");
-                                    let _ = tx.try_send(DiscoveredPeersUpdate {
-                                        added: Vec::new(),
-                                        removed: vec![endpoint_id],
-                                    });
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                });
-            }
-            info!("subscribed to lobby topic");
-            splash_send("Lobby joined — discovering peers");
-        } else {
-            warn!("lobby subscription failed; public-lobby DHT tracker not started");
+            info!("room-discovery DHT disabled by --no-dht");
         }
 
         // ── Internal discovery topic subscription ────────────────────────
         // Every Boru node joins the versioned internal discovery gossip
         // topic (BORU_DISCOVERY_TOPIC_V1, BORU-DISC-05) at startup as
         // networking infrastructure: peer discovery / presence /
-        // connectivity bootstrap. This is a SEPARATE subscription from the
-        // lobby — the two coexist during this phase (lobby removal is
-        // BORU-DISC-12). The discovery topic must never become a
-        // conversation: no IcedChat field, no conversations entry, no
-        // sidebar row, no rendering. The handle is returned to main() and
-        // held there for the app lifetime (like continuous_tracker) so its
-        // background drain task is not dropped.
+        // connectivity bootstrap. The old auto-joined lobby subscription
+        // (BORU-DISC-12) is gone — the discovery topic is the mesh. The
+        // discovery topic must never become a conversation: no IcedChat
+        // field, no conversations entry, no sidebar row, no rendering. The
+        // handle is returned to main() and held there for the app lifetime
+        // so its background drain task is not dropped.
+        splash_send("Joining discovery mesh...");
         let discovery_service = match boru_core::discovery_service::DiscoveryService::join(
             &gossip,
             boru_core::discovery_topic::discovery_topic(
@@ -1320,6 +1140,102 @@ fn main() -> Result<()> {
                 None
             }
         };
+
+        // mDNS-based LAN peer discovery: when a peer appears on the LAN,
+        // join it into the internal discovery gossip mesh (the mesh role the
+        // lobby previously played, BORU-DISC-12), and forward the peer ID to
+        // the UI for sidebar display. The discovery-service joiner is used so
+        // the mesh edge forms on the discovery topic, never a conversation.
+        {
+            let memory_lookup_for_events = memory_lookup.clone();
+            let tx = discovered_peers_tx.clone();
+            let my_id = endpoint.id();
+            let discovery_joiner = discovery_service.as_ref().map(|service| service.joiner());
+            tokio::spawn(async move {
+                use n0_future::StreamExt;
+                let mut joined_peers = std::collections::HashSet::new();
+                let mut events = mdns_events;
+                while let Some(event) = events.next().await {
+                    match event {
+                        DiscoveryEvent::Discovered { endpoint_info, .. } => {
+                            let peer = endpoint_info.endpoint_id;
+                            if peer == my_id {
+                                debug!(peer = %peer, "mDNS discovered our own endpoint, skipping");
+                                continue;
+                            }
+                            // Keep the concrete addresses in the endpoint's
+                            // shared lookup cache. mDNS can resolve the
+                            // endpoint itself, but the explicit memory entry
+                            // also makes subsequent dials deterministic.
+                            memory_lookup_for_events.set_endpoint_info(endpoint_info);
+                            if !joined_peers.insert(peer) {
+                                continue;
+                            }
+                            // Spawn join_peers in a separate task so the
+                            // mDNS event loop isn't blocked. join_peers
+                            // triggers the gossip actor to dial the peer
+                            // and establish a properly wired connection.
+                            if let Some(joiner) = &discovery_joiner {
+                                let joiner = joiner.clone();
+                                tokio::spawn(async move {
+                                    if let Err(e) = joiner.join_peers(vec![peer]).await {
+                                        warn!(peer = %peer, error = %e, "join_peers failed");
+                                    } else {
+                                        info!(peer = %peer, "join_peers succeeded");
+                                    }
+                                });
+                            }
+                            let _ = tx.try_send(DiscoveredPeersUpdate {
+                                added: vec![peer],
+                                removed: Vec::new(),
+                            });
+                        }
+                        DiscoveryEvent::Expired { endpoint_id } => {
+                            memory_lookup_for_events.remove_endpoint_info(endpoint_id);
+                            if joined_peers.remove(&endpoint_id) {
+                                info!(peer = %endpoint_id, "mDNS peer advertisement expired");
+                                let _ = tx.try_send(DiscoveredPeersUpdate {
+                                    added: Vec::new(),
+                                    removed: vec![endpoint_id],
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            });
+        }
+
+        // Feed peers seen on the internal discovery topic into the Discover
+        // sidebar. The DHT/lobby neighbour feed the old startup lobby drain
+        // provided is now served by the discovery service (BORU-DISC-12).
+        if let Some(service) = &discovery_service {
+            let tx = discovered_peers_tx.clone();
+            let mut peer_updates = service.peer_updates();
+            tokio::spawn(async move {
+                loop {
+                    match peer_updates.recv().await {
+                        Ok(update) => {
+                            let node_id = match update {
+                                boru_core::discovery_service::PeerUpdate::Seen { node_id, .. } => {
+                                    node_id
+                                }
+                                boru_core::discovery_service::PeerUpdate::Advertised {
+                                    advertised,
+                                    ..
+                                } => advertised,
+                            };
+                            let _ = tx.try_send(DiscoveredPeersUpdate {
+                                added: vec![node_id],
+                                removed: Vec::new(),
+                            });
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+        }
 
         // ── Directory topic subscription ──────────────────────────────────
         // Subscribe to the directory gossip topic for public-room discovery.
@@ -1492,7 +1408,6 @@ fn main() -> Result<()> {
             inbox_events_rx,
             discovered_peers_rx,
             directory_room_rx,
-            continuous_tracker,
             discovery_service,
             room_discovery_dht,
             tunnel_service,
@@ -1650,7 +1565,7 @@ fn main() -> Result<()> {
                 chat_history,
                 backfill_handle,
                 initial_topic.is_some() && args.command.is_none(),
-                continuous_tracker,
+                None, // continuous_tracker: the startup public-lobby tracker is gone (BORU-DISC-12)
                 Arc::clone(&discovered_peers_rx),
                 directory_room_rx,
                 dht_for_private,

@@ -555,6 +555,25 @@ impl ReceiveCore {
 // DiscoveryService
 // ---------------------------------------------------------------------------
 
+/// A cloneable handle to join peers into the discovery gossip mesh.
+///
+/// Background discovery sources that outlive the service handle (e.g. the
+/// mDNS event loop in `main.rs`) use this to form a mesh edge on the
+/// discovery topic. Joining a peer only updates networking connectivity —
+/// it never creates a friendship, a group, or a conversation, and no chat
+/// payload is routed through the discovery topic (BORU-DISC-11/12).
+#[derive(Clone, Debug)]
+pub struct DiscoveryJoiner {
+    sender: GossipSender,
+}
+
+impl DiscoveryJoiner {
+    /// Join one or more peers into the discovery gossip mesh.
+    pub async fn join_peers(&self, peers: Vec<PublicKey>) -> Result<(), ApiError> {
+        self.sender.join_peers(peers).await
+    }
+}
+
 /// The internal discovery subsystem.
 ///
 /// Owns the discovery gossip topic subscription (join), message publishing,
@@ -766,6 +785,20 @@ impl DiscoveryService {
     pub fn peer_count(&self) -> usize {
         let registry = self.core.registry.lock().expect("peer registry lock poisoned");
         registry.len()
+    }
+
+    /// Return a cloneable joiner handle bound to the discovery gossip
+    /// sender.
+    ///
+    /// Long-lived background discovery sources (e.g. the mDNS event loop in
+    /// `main.rs`) hold this to join peers into the discovery mesh without
+    /// needing the whole service handle. Joining only forms a gossip mesh
+    /// edge — it never creates a friend/group/conversation and never routes
+    /// chat payloads (BORU-DISC-12).
+    pub fn joiner(&self) -> DiscoveryJoiner {
+        DiscoveryJoiner {
+            sender: self.announce.sender.clone(),
+        }
     }
 
     /// Shut down the service: cancel the drain and connectivity tasks and

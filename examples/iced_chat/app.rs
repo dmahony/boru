@@ -12160,31 +12160,6 @@ impl IcedChat {
                     }
                 }
 
-                // Retroactively join any pending discovered peers now that the lobby sender is available
-                let lobby_topic = Self::default_lobby_topic();
-                if topic == lobby_topic {
-                    let pending: Vec<PublicKey> = self
-                        .discovered_peers
-                        .iter()
-                        .filter(|&&pk| pk != self.local_public)
-                        .copied()
-                        .collect();
-                    if !pending.is_empty() {
-                        let s = sender.clone();
-                        info!(
-                            count = pending.len(),
-                            "joining pending discovered peers to lobby mesh"
-                        );
-                        tokio::spawn(async move {
-                            for peer in pending {
-                                if let Err(e) = s.join_peers(vec![peer]).await {
-                                    warn!(peer = %peer, error = %e, "retroactive join_peers failed");
-                                }
-                            }
-                        });
-                    }
-                }
-
                 self.forward_handle = self.forward_handle_slot.lock().unwrap().take();
 
                 // Store continuous tracker if one was provided (private room with DHT).
@@ -12519,25 +12494,6 @@ impl IcedChat {
                     } else {
                         self.pending_open_conversation_action = Some((action_id, expected_peer));
                     }
-                }
-
-                // Keep the lobby in conversations so its GossipSender survives
-                // room switches. This lets mDNS-discovered peers be joined to
-                // the lobby mesh regardless of which room is currently active.
-                let lobby_topic = Self::default_lobby_topic();
-                if topic == lobby_topic {
-                    let mut lobby_conv = self
-                        .conversations
-                        .remove(&topic)
-                        .unwrap_or_else(|| ConversationLive::new(topic));
-                    lobby_conv.sender = Some(sender.clone());
-                    lobby_conv.forward_handle_slot = Arc::clone(&self.forward_handle_slot);
-                    lobby_conv.ticket_str = ticket.clone();
-                    self.conversations.insert(topic, lobby_conv);
-                    info!(
-                        topic = %lobby_topic,
-                        "inserted lobby into conversations",
-                    );
                 }
 
                 if self.return_to_chat_list_after_open {
@@ -14058,11 +14014,13 @@ impl IcedChat {
                     }
                 };
 
-                // The stable lobby is intentionally bootstrap-free: the
-                // diagnostic MCP action must be able to create/join it even
-                // when no room history exists yet.
-                let known_room = topic == Self::default_lobby_topic()
-                    || (self.sender.is_some() && topic == self.topic)
+                // A room must already be known (active, in the conversation
+                // map, or in room history) before the diagnostic MCP action
+                // can open it. The internal discovery topic is never a
+                // user-facing room, and the old auto-joined lobby no longer
+                // exists at startup (BORU-DISC-12), so there is no
+                // bootstrap-free lobby special case here.
+                let known_room = (self.sender.is_some() && topic == self.topic)
                     || self.conversations.contains_key(&topic)
                     || self
                         .room_history
