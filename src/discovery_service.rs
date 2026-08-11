@@ -37,6 +37,28 @@
 //! 5. [`announce_hello`](DiscoveryService::announce_hello) /
 //!    [`announce_presence`](DiscoveryService::announce_presence) — throttled
 //!    presence announcements (guarded by [`AnnounceThrottle`]).
+//! 6. **Connectivity wiring (Phase 4, BORU-DISC-11)** — every newly
+//!    discovered peer (Hello / Presence / PeerAdvertisement) is dialed into
+//!    the discovery gossip mesh via [`GossipSender::join_peers`], the same
+//!    mechanism the mDNS and DHT discovery paths use today. This improves
+//!    connectivity ONLY: it never creates a friendship, a group membership,
+//!    or a conversation, and no chat payload is ever routed through the
+//!    discovery topic.
+//!
+//! # Connectivity wiring (BORU-DISC-11)
+//!
+//! Discovery is networking infrastructure: when the service learns about a
+//! valid peer it updates the networking peer/address book through the
+//! existing trusted node identity mechanism ([`GossipSender::join_peers`],
+//! exactly what `main.rs`'s mDNS handler and [`DynamicPeerJoiner`] do for
+//! mDNS/DHT results). The wiring task subscribes to the [`peer_updates`]
+//! broadcast and dials each newly seen/advertised peer once (deduplicated by
+//! endpoint id). Friendship state stays in Boru's friend/request model,
+//! group membership determines which group topics are joined, and public
+//! room membership remains explicit — discovery never grants any of them.
+//!
+//! [`DynamicPeerJoiner`]: crate::dynamic_joiner::DynamicPeerJoiner
+//! [`peer_updates`]: DiscoveryService::peer_updates
 //!
 //! # Peer registry
 //!
@@ -69,7 +91,7 @@
 //!   registry (mirroring `chat_core`'s `local_public()` self filter).
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -562,10 +584,13 @@ pub struct DiscoveryService {
     announce: AnnounceHandle,
     /// Receive-path core (registry + update channel + dispatch logic).
     core: ReceiveCore,
-    /// Cancellation token shared with the drain task.
+    /// Cancellation token shared with the drain and connectivity tasks.
     cancel: CancellationToken,
     /// Join handle of the background drain task.
     task: JoinHandle<()>,
+    /// Join handle of the connectivity wiring task (BORU-DISC-11): dials
+    /// newly discovered peers into the discovery gossip mesh.
+    connectivity_task: JoinHandle<()>,
 }
 
 impl DiscoveryService {
@@ -639,6 +664,17 @@ impl DiscoveryService {
         let task_announce = announce.clone();
         let task_cancel = cancel.clone();
         let task = tokio::spawn(drain_loop(receiver, task_core, task_announce, task_cancel));
+        // BORU-DISC-11: connectivity wiring — dial newly discovered peers
+        // into the discovery gossip mesh via join_peers (the same mechanism
+        // the mDNS/DHT paths use). This improves connectivity ONLY; it never
+        // grants friendship/group membership or routes chat payloads.
+        let connectivity_cancel = cancel.clone();
+        let connectivity_task = tokio::spawn(connectivity_loop(
+            announce.sender.clone(),
+            core.peer_updates_tx.subscribe(),
+            local_node,
+            connectivity_cancel,
+        ));
         info!(topic = %topic, "discovery service joined");
         Self {
             topic,
@@ -646,6 +682,7 @@ impl DiscoveryService {
             core,
             cancel,
             task,
+            connectivity_task,
         }
     }
 
@@ -731,10 +768,12 @@ impl DiscoveryService {
         registry.len()
     }
 
-    /// Shut down the service: cancel the drain task and await it.
+    /// Shut down the service: cancel the drain and connectivity tasks and
+    /// await them.
     pub async fn shutdown(self) {
         self.cancel.cancel();
         let _ = self.task.await;
+        let _ = self.connectivity_task.await;
         info!(topic = %self.topic, "discovery service shut down");
     }
 }
@@ -824,6 +863,93 @@ async fn drain_loop(
     }
 
     info!(event_count, "discovery service drain loop exited");
+}
+
+// ---------------------------------------------------------------------------
+// Connectivity wiring (BORU-DISC-11)
+// ---------------------------------------------------------------------------
+
+/// Background task that turns discovery peer updates into connectivity
+/// actions: every newly discovered peer is dialed into the discovery gossip
+/// mesh via [`GossipSender::join_peers`].
+///
+/// This is the Phase-4 "use discovery only to improve connectivity" wiring:
+/// the same mechanism the mDNS handler in `main.rs` and
+/// [`DynamicPeerJoiner`](crate::dynamic_joiner::DynamicPeerJoiner) use for
+/// mDNS/DHT results. Dialing a peer improves the mesh/address book but never
+/// grants friendship, group membership, or a conversation — no
+/// [`FriendsStore`](crate::friends::FriendsStore), no
+/// [`ConversationStore`](crate::conversations::ConversationStore), and no
+/// chat payload ever crosses the discovery topic.
+///
+/// Deduplication: each peer is dialed at most once per service lifetime
+/// (tracked by endpoint id). A `PeerUpdate::Seen` refresh or repeat
+/// advertisement does not re-dial. The local node is never dialed.
+async fn connectivity_loop(
+    sender: GossipSender,
+    mut updates: broadcast::Receiver<PeerUpdate>,
+    local_node: PublicKey,
+    cancel: CancellationToken,
+) {
+    let mut dialed: HashSet<iroh_base::EndpointId> = HashSet::new();
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                debug!("discovery connectivity loop cancelled");
+                break;
+            }
+            update = updates.recv() => {
+                match update {
+                    Ok(PeerUpdate::Seen { node_id, .. }) => {
+                        maybe_dial(&sender, &mut dialed, local_node, node_id).await;
+                    }
+                    Ok(PeerUpdate::Advertised { advertised, .. }) => {
+                        maybe_dial(&sender, &mut dialed, local_node, advertised).await;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        debug!("discovery connectivity loop lagged");
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+    }
+    debug!("discovery connectivity loop exited");
+}
+
+/// Dial `peer` into the discovery gossip mesh once (deduplicated).
+///
+/// Connectivity only: `join_peers` makes the gossip actor establish a mesh
+/// edge / resolve the peer's address book entry through the existing
+/// mechanisms — it never creates friends, groups, or conversations.
+async fn maybe_dial(
+    sender: &GossipSender,
+    dialed: &mut HashSet<iroh_base::EndpointId>,
+    local_node: PublicKey,
+    peer: PublicKey,
+) {
+    if peer == local_node {
+        trace!(peer = %peer.fmt_short(), "discovery: not dialing self");
+        return;
+    }
+    let endpoint: iroh_base::EndpointId = peer.into();
+    if !dialed.insert(endpoint) {
+        trace!(peer = %peer.fmt_short(), "discovery: peer already dialed");
+        return;
+    }
+    match sender.join_peers(vec![endpoint]).await {
+        Ok(()) => {
+            info!(peer = %peer.fmt_short(), "discovery: dialed discovered peer for connectivity");
+        }
+        Err(error) => {
+            warn!(
+                peer = %peer.fmt_short(),
+                error = %error,
+                "discovery: join_peers failed",
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1276,5 +1402,196 @@ mod tests {
         };
         let decoded: DiscoveryMessage = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(decoded, DiscoveryMessage::hello(local));
+    }
+
+    // ── connectivity wiring (BORU-DISC-11) ─────────────────────────────
+
+    /// Build a running service over offline channels, keeping the command
+    /// receiver live so tests can observe what the service sends to the
+    /// gossip actor (connectivity side effects).
+    fn test_service_with_cmd(
+        local_node: PublicKey,
+    ) -> (
+        DiscoveryService,
+        irpc_mpsc::Receiver<Command>,
+        irpc_mpsc::Sender<Event>,
+    ) {
+        let (cmd_tx, cmd_rx) = irpc_mpsc::channel::<Command>(64);
+        let (ev_tx, ev_rx) = irpc_mpsc::channel::<Event>(64);
+        let sender = GossipSender::new(cmd_tx);
+        let receiver = GossipReceiver::new(ev_rx);
+        let service = DiscoveryService::from_subscription(test_topic(), sender, receiver, local_node);
+        (service, cmd_rx, ev_tx)
+    }
+
+    /// Deliver a discovery payload through the drain loop as a received
+    /// gossip event, the way the mesh would.
+    async fn deliver(ev_tx: &irpc_mpsc::Sender<Event>, peer: PublicKey, bytes: Vec<u8>) {
+        ev_tx
+            .send(Event::Received(GossipMessage {
+                content: Bytes::from(bytes),
+                scope: DeliveryScope::Neighbors,
+                delivered_from: peer,
+            }))
+            .await
+            .expect("send discovery event");
+    }
+
+    /// Await the next command from the gossip actor (5s timeout).
+    async fn next_command(cmd_rx: &mut irpc_mpsc::Receiver<Command>) -> Command {
+        tokio::time::timeout(Duration::from_secs(5), cmd_rx.recv())
+            .await
+            .expect("timed out waiting for gossip command")
+            .expect("channel receive failed")
+            .expect("channel closed before command")
+    }
+
+    /// A valid Hello from a newly discovered peer produces exactly ONE
+    /// connectivity command (`Command::JoinPeers`) and nothing else — no
+    /// chat broadcast, no friendship/group/conversation mutation. This is
+    /// the Phase-4 "discovery updates connectivity only" invariant.
+    #[tokio::test]
+    async fn discovery_updates_connectivity_only() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let (service, mut cmd_rx, ev_tx) = test_service_with_cmd(local);
+
+        let bytes = postcard::to_stdvec(&DiscoveryMessage::hello(peer)).unwrap();
+        deliver(&ev_tx, peer, bytes).await;
+
+        // The ONLY command sent to the gossip actor is the connectivity dial.
+        let command = next_command(&mut cmd_rx).await;
+        let Command::JoinPeers(peers) = command else {
+            panic!("expected only JoinPeers connectivity command, got {command:?}");
+        };
+        let expected: iroh_base::EndpointId = peer.into();
+        assert_eq!(peers, vec![expected]);
+
+        // No further commands: discovery never broadcasts chat payloads nor
+        // mutates friend/group/conversation state through the gossip actor.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), cmd_rx.recv())
+                .await
+                .is_err(),
+            "discovery must not produce any further gossip commands"
+        );
+
+        // Presence is tracked in the discovery registry only, with no
+        // friendship or conversation metadata.
+        assert_eq!(service.peer_count(), 1);
+        let known = service.known_peers();
+        assert_eq!(known[0].0, peer);
+        assert_eq!(known[0].1.source, PeerSource::Hello);
+    }
+
+    /// A `PeerAdvertisement` dials BOTH the advertising sender (seen) and the
+    /// advertised peer — both are connectivity candidates. Still no chat
+    /// broadcast and no friend/group/conversation side effects.
+    #[tokio::test]
+    async fn discovery_advertisement_dials_sender_and_advertised() {
+        let local = test_key(0xAA);
+        let sender_pk = test_key(0xDD);
+        let advertised = test_key(0xEE);
+        let (service, mut cmd_rx, ev_tx) = test_service_with_cmd(local);
+
+        let bytes =
+            postcard::to_stdvec(&DiscoveryMessage::peer_advertisement(sender_pk, advertised))
+                .unwrap();
+        deliver(&ev_tx, sender_pk, bytes).await;
+
+        // Two dials: the sender (via Seen) then the advertised peer.
+        let command = next_command(&mut cmd_rx).await;
+        let Command::JoinPeers(peers) = command else {
+            panic!("expected JoinPeers command, got {command:?}");
+        };
+        let sender_endpoint: iroh_base::EndpointId = sender_pk.into();
+        let advertised_endpoint: iroh_base::EndpointId = advertised.into();
+        assert_eq!(peers, vec![sender_endpoint]);
+
+        let command = next_command(&mut cmd_rx).await;
+        let Command::JoinPeers(peers) = command else {
+            panic!("expected JoinPeers command, got {command:?}");
+        };
+        assert_eq!(peers, vec![advertised_endpoint]);
+
+        // Only the sender is registered (presence); the advertised peer is a
+        // dial candidate, not a registered peer.
+        assert_eq!(service.peer_count(), 1);
+        assert_eq!(service.known_peers()[0].0, sender_pk);
+
+        // Nothing further (no chat payload broadcast).
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), cmd_rx.recv())
+                .await
+                .is_err(),
+            "discovery advertisement must not produce further gossip commands"
+        );
+    }
+
+    /// Repeats (Presence refresh, duplicate advertisement) do NOT re-dial an
+    /// already-dialed peer — the connectivity loop deduplicates by endpoint.
+    #[tokio::test]
+    async fn connectivity_loop_deduplicates_peer_dials() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let (_service, mut cmd_rx, ev_tx) = test_service_with_cmd(local);
+
+        // First Hello dials the peer.
+        let bytes = postcard::to_stdvec(&DiscoveryMessage::hello(peer)).unwrap();
+        deliver(&ev_tx, peer, bytes).await;
+        let command = next_command(&mut cmd_rx).await;
+        assert!(
+            matches!(command, Command::JoinPeers(_)),
+            "expected JoinPeers command, got {command:?}"
+        );
+
+        // A Presence refresh for the same peer must not re-dial.
+        let bytes = postcard::to_stdvec(&DiscoveryMessage::presence(peer)).unwrap();
+        deliver(&ev_tx, peer, bytes).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), cmd_rx.recv())
+                .await
+                .is_err(),
+            "presence refresh must not re-dial an already-dialed peer"
+        );
+    }
+
+    /// A self-originated discovery message never produces a connectivity
+    /// dial (the receive path already filters self messages; the wiring adds
+    /// a second guard).
+    #[tokio::test]
+    async fn connectivity_loop_never_dials_self() {
+        let local = test_key(0xAA);
+        let (_service, mut cmd_rx, ev_tx) = test_service_with_cmd(local);
+
+        let bytes = postcard::to_stdvec(&DiscoveryMessage::hello(local)).unwrap();
+        deliver(&ev_tx, local, bytes).await;
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), cmd_rx.recv())
+                .await
+                .is_err(),
+            "self discovery message must not produce a connectivity dial"
+        );
+        assert_eq!(_service.peer_count(), 0);
+    }
+
+    /// A malformed / non-discovery payload produces no registry update and
+    /// no connectivity command (drop at the receive gate).
+    #[tokio::test]
+    async fn undecodable_payload_produces_no_connectivity() {
+        let local = test_key(0xAA);
+        let (_service, mut cmd_rx, ev_tx) = test_service_with_cmd(local);
+
+        let peer = test_key(0x42);
+        deliver(&ev_tx, peer, b"this is not a discovery message".to_vec()).await;
+
+        assert_eq!(_service.peer_count(), 0);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), cmd_rx.recv())
+                .await
+                .is_err(),
+            "undecodable payload must not produce any gossip command"
+        );
     }
 }
