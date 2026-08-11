@@ -29,6 +29,14 @@ boru = "run --features gui --example boru --"
 # If you really need standalone clippy on a single file, pass --edition:
 #   clippy-driver --edition 2021 src/foo.rs
 
+# ── mold linker (x86_64 GNU/Linux) ────────────────────────────────────
+# Use the mold linker for faster native debug/dev links.  Requires mold
+# to be installed (`apt install mold` on Debian/Ubuntu); the distro
+# package provides /usr/bin/ld.mold so gcc's -fuse-ld=mold resolves.
+# Other targets keep their own linker settings (see below).
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
 # ── Cross-compilation ──────────────────────────────────────────────────
 # aarch64-unknown-linux-gnu (dragon — Radxa Dragon Q6A, Ubuntu arm64)
 [target.aarch64-unknown-linux-gnu]
