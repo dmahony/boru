@@ -52,11 +52,41 @@ pub async fn run_host_session(
     conversation_id: u64,
     events: mpsc::Sender<SessionEvent>,
     stop: Arc<AtomicBool>,
-    mut commands: mpsc::Receiver<HostCommand>,
+    commands: mpsc::Receiver<HostCommand>,
 ) {
     let session_id = ScreenShareSessionId::generate();
     let mut manager = SessionManager::default();
     manager.start_invitation(session_id, local_public, peer, conversation_id);
+    run_host_session_inner(
+        endpoint,
+        peer,
+        session_id,
+        &mut manager,
+        &events,
+        &stop,
+        commands,
+    )
+    .await;
+    // Every silent exit path (transport error, capture failure, peer drop)
+    // otherwise leaves the host UI stuck on the "Screen sharing active"
+    // indicator and blocks starting the next share. Emit Ended so the app
+    // resets host state; it is a no-op when an EndSession/Reject already
+    // ended the session.
+    if !matches!(manager.state(session_id), Some(SessionState::Ended) | None) {
+        let _ = events.send(SessionEvent::Ended { session_id }).await;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_host_session_inner(
+    endpoint: Endpoint,
+    peer: PublicKey,
+    session_id: ScreenShareSessionId,
+    manager: &mut SessionManager,
+    events: &mpsc::Sender<SessionEvent>,
+    stop: &Arc<AtomicBool>,
+    mut commands: mpsc::Receiver<HostCommand>,
+) {
     // Select the capture source up front so the Hello advertises the ACTIVE
     // geometry: a real portal/PipeWire capture when available, otherwise the
     // synthetic test pattern (demo/CI path).
@@ -95,7 +125,7 @@ pub async fn run_host_session(
             r = connection.accept_bi() => match r {
                 Ok((mut send, recv)) => match read_unit(recv).await {
                     Ok(ReadUnit::Control(message)) => {
-                        let response = manager.apply_remote(peer, message, &events);
+                        let response = manager.apply_remote(peer, message, events);
                         if let Some(response) = response {
                             let _ = write_control_response(&mut send, &response).await;
                         }
@@ -108,13 +138,13 @@ pub async fn run_host_session(
             },
             cmd = commands.recv() => match cmd {
                 Some(HostCommand::GrantControl(capabilities)) => {
-                    if let Some(message) = manager.grant_control(session_id, capabilities, &events) {
+                    if let Some(message) = manager.grant_control(session_id, capabilities, events) {
                         let _ = transport.send_control(&message).await;
                     }
                     false
                 }
                 Some(HostCommand::RevokeControl) => {
-                    if let Some(message) = manager.revoke_control(session_id, &events) {
+                    if let Some(message) = manager.revoke_control(session_id, events) {
                         let _ = transport.send_control(&message).await;
                     }
                     false
@@ -177,7 +207,7 @@ pub async fn run_host_session(
                             }
                         }
                         Ok(ReadUnit::Control(message)) => {
-                            let response = manager.apply_remote(peer, message, &events);
+                            let response = manager.apply_remote(peer, message, events);
                             if let Some(response) = response { let _ = write_control_response(&mut send, &response).await; }
                             if manager.state(session_id) == Some(SessionState::Ended) { return; }
                         }
@@ -189,13 +219,13 @@ pub async fn run_host_session(
             }
             cmd = commands.recv() => match cmd {
                 Some(HostCommand::GrantControl(capabilities)) => {
-                    if let Some(message) = manager.grant_control(session_id, capabilities, &events) {
+                    if let Some(message) = manager.grant_control(session_id, capabilities, events) {
                         let _ = transport.send_control(&message).await;
                     }
                 }
                 Some(HostCommand::RevokeControl) => {
                     backend.shutdown().await;
-                    if let Some(message) = manager.revoke_control(session_id, &events) {
+                    if let Some(message) = manager.revoke_control(session_id, events) {
                         let _ = transport.send_control(&message).await;
                     }
                 }

@@ -130,9 +130,17 @@ fn make_encoder(config: CodecConfig) -> Result<openh264::encoder::Encoder, Scree
     let settings = EncoderConfig::new().bitrate(BitRate::from_bps(config.target_bitrate_bps))
         .max_frame_rate(openh264::encoder::FrameRate::from_hz(config.target_fps as f32))
         .rate_control_mode(RateControlMode::Bitrate).usage_type(UsageType::CameraVideoRealTime)
-        .complexity(Complexity::Low).skip_frames(true).scene_change_detect(false)
+        .complexity(Complexity::Low).skip_frames(false).scene_change_detect(false)
         .background_detection(false).long_term_reference(false)
         .intra_frame_period(IntraFramePeriod::from_num_frames(config.keyframe_interval as u32));
+    // NOTE: skip_frames MUST stay false. With skipping enabled, a static
+    // screen (nobody interacting with the host) makes the encoder emit no
+    // decodable data after the first keyframe — the viewer then freezes on
+    // that first frame ("it shows a screen I was on previously"). Every
+    // captured frame must yield a P-frame, even when the content is
+    // unchanged; the periodic intra_frame_period keyframe keeps the stream
+    // self-recovering. Interactive video is better served by always-encoded
+    // frames than by bitrate-optimized silence.
     openh264::encoder::Encoder::with_api_config(openh264::OpenH264API::from_source(), settings).map_err(fail)
 }
 
@@ -215,5 +223,29 @@ mod tests {
         encoder.reconfigure(config(24, 16)).unwrap(); assert_eq!(encoder.metadata().generation, 1);
         let frame = encoder.encode(&pattern(24, 16, 2)).unwrap(); assert!(frame.keyframe);
         let mut decoder = OpenH264Decoder::new(config(24, 16)).unwrap(); decoder.reset().unwrap(); assert!(decoder.decode(&frame).unwrap().is_some());
+    }
+    #[test]
+    fn static_screen_still_produces_decodable_frames_every_tick() {
+        // Regression: skip_frames(true) made the encoder emit NO decodable
+        // data for a static screen after the first keyframe — the viewer
+        // froze on the first frame ("it shows a screen I was on
+        // previously"). With skipping disabled every captured frame must
+        // yield a non-empty P-frame that decodes.
+        let cfg = config(64, 48);
+        let mut encoder = OpenH264Encoder::new(cfg).unwrap();
+        let mut decoder = OpenH264Decoder::new(cfg).unwrap();
+        // Identical pixels on every tick = static screen.
+        let static_frame = pattern(64, 48, 0);
+        let first = encoder.encode(&static_frame).unwrap();
+        assert!(first.keyframe && !first.bytes.is_empty());
+        let mut decoded = 0;
+        for tick in 1..=5 {
+            let encoded = encoder.encode(&static_frame).unwrap();
+            assert!(!encoded.bytes.is_empty(), "static frame {tick} must not be skipped");
+            if decoder.decode(&encoded).unwrap().is_some() {
+                decoded += 1;
+            }
+        }
+        assert_eq!(decoded, 5, "every static frame must decode");
     }
 }
