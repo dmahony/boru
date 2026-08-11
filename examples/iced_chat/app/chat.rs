@@ -1362,7 +1362,7 @@ impl IcedChat {
                 !is_group && !is_blocked && self.screen_share_host_state == ScreenShareHostState::Idle
             })
             .map(|key| tool_btn(
-                Icon::VideoCamera.build().size(IconSize::Sm).build().into(),
+                Icon::Monitor.build().size(IconSize::Sm).build().into(),
                 "Share screen",
                 Some(AppMessage::StartScreenShare(key)),
             ))

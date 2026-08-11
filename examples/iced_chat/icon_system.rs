@@ -64,6 +64,7 @@ const SVG_FOLDER: &[u8] = include_bytes!("../../assets/icons/lucide/folder.svg")
 const SVG_FILM: &[u8] = include_bytes!("../../assets/icons/lucide/film.svg");
 const SVG_PHONE: &[u8] = include_bytes!("../../assets/icons/lucide/phone.svg");
 const SVG_VIDEO_CAMERA: &[u8] = include_bytes!("../../assets/icons/lucide/video-camera.svg");
+const SVG_MONITOR: &[u8] = include_bytes!("../../assets/icons/lucide/monitor.svg");
 // Re-export the app-level constants for the Lucide icons that were already
 // embedded there.  We keep them in app.rs so app-level code that already
 // references ICON_CHAT etc. doesn't break, but the Icon enum uses them
@@ -117,6 +118,9 @@ pub enum Icon {
     Video,
     /// Start a video call with a direct friend.
     VideoCamera,
+    /// Share a screen with a direct peer (monitor/screen glyph, distinct
+    /// from the video-camera used for video calls).
+    Monitor,
     Play,
     Pause,
     Volume1,
@@ -188,6 +192,7 @@ impl Icon {
             Icon::Image => SVG_IMAGE,
             Icon::Video => SVG_FILM,
             Icon::VideoCamera => SVG_VIDEO_CAMERA,
+            Icon::Monitor => SVG_MONITOR,
             Icon::Play => SVG_PLAY,
             Icon::Pause => SVG_PAUSE,
             Icon::Volume1 => SVG_VOLUME_1,
@@ -465,6 +470,8 @@ mod tests {
             Icon::Paperclip,
             Icon::Image,
             Icon::Video,
+            Icon::VideoCamera,
+            Icon::Monitor,
             Icon::Play,
             Icon::Online,
             Icon::Offline,
