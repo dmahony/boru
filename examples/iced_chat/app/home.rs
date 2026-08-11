@@ -792,7 +792,7 @@ impl IcedChat {
             HomeConnectionVariant::Connecting => {
                 "Connecting \u{2014} waiting for peers\u{2026}".to_string()
             }
-            HomeConnectionVariant::Ready => "Boru is connected and ready.".to_string(),
+            HomeConnectionVariant::Ready => "Boru is connected".to_string(),
             HomeConnectionVariant::Degraded => {
                 let reason = match &mesh_health {
                     MeshHealth::Degraded(r) => r.clone(),

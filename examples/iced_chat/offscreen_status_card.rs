@@ -335,16 +335,18 @@ mod tests {
         load_font(include_bytes!("fonts/PublicSans-SemiBold.ttf"));
 
         // Wide desktop (1600 window → ~1215 content) — full three-region row.
+        // BORU-HOME-03: card compacted to ~150-170px (mesh 170→135, padding 12→8,
+        // gaps tightened).
         let full = measure_card_height(&dep(HomeConnectionVariant::Ready, 1215.0), 1215.0);
         assert!(
-            (180.0..=210.0).contains(&full),
-            "Ready Full card height {full:.1}px must land in the tightened 180-210px band"
+            (150.0..=175.0).contains(&full),
+            "Ready Full card height {full:.1}px must land in the 150-175px band"
         );
         // Minimum supported window (1024 → ~679 content) — medium row.
         let medium = measure_card_height(&dep(HomeConnectionVariant::Ready, 679.0), 679.0);
         assert!(
-            (160.0..=220.0).contains(&medium),
-            "Ready Medium card height {medium:.1}px must stay compact (single-line heading; wrapped-growth allowed to 220)"
+            (140.0..=200.0).contains(&medium),
+            "Ready Medium card height {medium:.1}px must stay compact (single-line heading; wrapped-growth allowed)"
         );
     }
 

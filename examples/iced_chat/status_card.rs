@@ -49,7 +49,7 @@ pub(crate) const STATUS_CARD_PULSE_PHASES: u32 = 6;
 /// so the card never clips content; the mesh (170 px Full / 136 px
 /// Medium) and a wrapped two-line heading usually exceed this floor
 /// anyway.
-pub(crate) const STATUS_CARD_MIN_CONTENT_HEIGHT: f32 = 150.0;
+pub(crate) const STATUS_CARD_MIN_CONTENT_HEIGHT: f32 = 110.0;
 
 /// Content width at which the card switches from the full three-region
 /// row layout (MODE A) to the reduced compact horizontal layout
@@ -156,7 +156,7 @@ pub(crate) fn view_status_card(
 
     let heading = status_heading(dep, heading_size);
     let divider = status_divider(accent);
-    let supporting = fonts::type_role_text_lh(TypeRole::Body, "Private communication, peer to peer.", 1.5)
+    let supporting = fonts::type_role_text_lh(TypeRole::Body, "Peer to peer.", 1.4)
         .size(support_size)
         .color(design_tokens::STATUS_SECONDARY_TEXT);
 
@@ -213,14 +213,14 @@ pub(crate) fn view_status_card(
                 Tier::Full => (
                     STATUS_ICON_TEXT_GAP_FULL,
                     STATUS_TEXT_GRAPH_GAP_FULL,
+                    6.0,
                     10.0,
-                    18.0,
                 ),
                 _ => (
                     STATUS_ICON_TEXT_GAP_MEDIUM,
                     STATUS_TEXT_GRAPH_GAP_MEDIUM,
+                    6.0,
                     10.0,
-                    16.0,
                 ),
             };
             let header_row = Row::new()
@@ -318,7 +318,7 @@ pub(crate) fn view_status_card(
     // card's height always equal to its own content, never a taller
     // sibling, the right rail, or the outer Fill chain.
     container(body)
-        .padding([design_tokens::SPACE_12, STATUS_CARD_PADDING_X])
+        .padding([design_tokens::SPACE_8, STATUS_CARD_PADDING_X])
         .width(Length::Fill)
         .height(Length::Shrink)
         .style(move |_t| {
@@ -479,7 +479,7 @@ fn status_heading(dep: &StatusCardDependency, size: f32) -> iced::Element<'stati
             Span::<()>::new("Boru\u{00A0}")
                 .font(TypeRole::DisplayHeading.font())
                 .color(design_tokens::STATUS_CONNECTED),
-            Span::<()>::new("is connected and ready.")
+            Span::<()>::new("is connected")
                 .font(TypeRole::DisplayHeading.font())
                 .color(design_tokens::STATUS_PRIMARY_TEXT),
         ])
@@ -554,7 +554,7 @@ pub(crate) fn security_pill() -> iced::Element<'static, AppMessage> {
             // fit-content — hug the icon + gap + text.
             .width(Length::Shrink),
     )
-    .padding([design_tokens::SPACE_8, design_tokens::SPACE_12])
+    .padding([design_tokens::SPACE_6, design_tokens::SPACE_10])
     .width(Length::Shrink)
     .style(move |_t| container::Style {
         background: Some(Background::Color(with_alpha(
@@ -603,9 +603,9 @@ fn actions_row(show_retry: bool, show_details: bool) -> iced::Element<'static, A
 /// this nominal size is never laid out at those widths.
 fn network_size(tier: Tier) -> (f32, f32) {
     match tier {
-        Tier::Full => (STATUS_CARD_MESH_MAX_WIDTH, 170.0),
-        Tier::Medium => (STATUS_CARD_MESH_MAX_WIDTH, 136.0),
-        Tier::Narrow => (190.0, 130.0),
+        Tier::Full => (STATUS_CARD_MESH_MAX_WIDTH, 135.0),
+        Tier::Medium => (STATUS_CARD_MESH_MAX_WIDTH, 108.0),
+        Tier::Narrow => (190.0, 100.0),
     }
 }
 
