@@ -227,6 +227,86 @@ pub(crate) fn truncate_with_ellipsis(text: &str, max_chars: usize) -> String {
     out
 }
 
+/// Truncate an activity description for compact card rendering.
+///
+/// Short descriptions (≤ `max_chars`) are kept intact. Longer ones are
+/// truncated with an ellipsis. When the text contains a filename-like
+/// pattern (a dot followed by 2–5 alphanumeric characters at a word
+/// boundary), the ellipsis is placed before the extension so the caller
+/// can still see what kind of file is involved (e.g.
+/// `"Alice finished downloading very-long-file-name-report-final.pdf from you"`
+/// becomes `"Alice finished downl…report-final.pdf from you"`).
+///
+/// The default `max_chars` of 75 keeps rows at roughly two lines at the
+/// card's typical width with the `Body` font role (15 px Public Sans).
+pub(crate) fn truncate_activity_description(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let total = chars.len();
+
+    // Find the LAST filename-like extension pattern in the text: a dot
+    // followed by 2–5 alphanumeric characters followed by a word boundary
+    // (end of string, space, quote, or punctuation).  This catches
+    // descriptions like "… downloaded report.pdf from you" where the
+    // extension is mid-sentence, not at the very end.
+    let mut ext_at: Option<usize> = None;
+    let mut ext_end: usize = total;
+
+    // Walk backward to find `.ext` at word boundaries.
+    let mut i = total;
+    while i >= 3 {
+        i -= 1;
+        // Look for a dot at position i, followed by 2-5 alphanumeric chars,
+        // followed by a word boundary.
+        if chars[i] != '.' {
+            continue;
+        }
+        let suffix_start = i + 1;
+        let mut suffix_end = suffix_start;
+        while suffix_end < total && chars[suffix_end].is_alphanumeric() {
+            suffix_end += 1;
+        }
+        let suffix_len = suffix_end - suffix_start;
+        if !(2..=5).contains(&suffix_len) {
+            continue;
+        }
+        // Check word boundary after the extension: end of string, space,
+        // quote, or other non-alphanumeric.
+        let boundary_ok = suffix_end == total
+            || chars[suffix_end] == ' '
+            || chars[suffix_end] == '"'
+            || chars[suffix_end] == '\''
+            || chars[suffix_end] == '.'
+            || chars[suffix_end] == ','
+            || chars[suffix_end] == ')'
+            || chars[suffix_end] == ']';
+        if boundary_ok {
+            ext_at = Some(i);
+            ext_end = suffix_end;
+            break; // last (rightmost) extension wins
+        }
+    }
+
+    if let Some(ext_at) = ext_at {
+        // Keep everything from the extension onward, fill the front
+        // with enough chars to reach max_chars.
+        let back_len = total - ext_at;
+        let front_chars = max_chars.saturating_sub(back_len).saturating_sub(1); // 1 for ellipsis
+        if front_chars > 0 {
+            let front: String = chars[..front_chars].iter().collect();
+            let back: String = chars[ext_at..].iter().collect();
+            format!("{front}…{back}")
+        } else {
+            // Extension + suffix alone exceeds max_chars — fall back.
+            truncate_with_ellipsis(text, max_chars)
+        }
+    } else {
+        truncate_with_ellipsis(text, max_chars)
+    }
+}
+
 /// Format an optional last-seen timestamp, returning an empty label when absent.
 #[expect(dead_code)]
 pub(crate) fn format_last_seen(last_seen_ms: Option<u64>) -> String {
@@ -410,6 +490,77 @@ mod tests {
         let out = truncate_with_ellipsis("abcdefghij", 7);
         assert_eq!(out, "abcdef…");
         assert_eq!(out.chars().count(), 7);
+    }
+
+    #[test]
+    fn truncate_activity_preserves_short_text() {
+        assert_eq!(
+            truncate_activity_description("Alice came online", 75),
+            "Alice came online"
+        );
+        assert_eq!(truncate_activity_description("", 75), "");
+    }
+
+    #[test]
+    fn truncate_activity_caps_long_text_with_ellipsis() {
+        let long = "A".repeat(100);
+        let out = truncate_activity_description(&long, 20);
+        assert!(out.chars().count() <= 20);
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn truncate_activity_preserves_file_extension() {
+        let desc = "Alice started downloading very-long-file-name-report-final.pdf from you";
+        let out = truncate_activity_description(desc, 50);
+        assert!(out.chars().count() <= 50);
+        assert!(out.contains('…'), "must contain ellipsis");
+        assert!(
+            out.contains(".pdf from you"),
+            "must preserve extension mid-sentence: got '{out}'"
+        );
+    }
+
+    #[test]
+    fn truncate_activity_preserves_file_extension_at_end() {
+        // Extension at the end of string, over the limit: preserved.
+        let desc =
+            "A very long message about downloading the final version of the quarterly report.pdf";
+        assert!(desc.chars().count() > 50);
+        let out = truncate_activity_description(desc, 50);
+        assert!(out.chars().count() <= 50);
+        assert!(out.contains('…'), "must contain ellipsis");
+        assert!(out.ends_with(".pdf"), "extension at end preserved: got '{out}'");
+    }
+
+    #[test]
+    fn truncate_activity_falls_back_when_extension_too_long() {
+        // Extension alone exceeds max_chars — falls back to simple truncation.
+        let desc = "file.verylongextension";
+        let out = truncate_activity_description(desc, 8);
+        assert!(out.chars().count() <= 8);
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn truncate_activity_no_false_positive_on_dots() {
+        // Dots in the middle of text, not at end, should not trigger extension logic.
+        let desc = "User shared a message... waiting for response from the peer";
+        let out = truncate_activity_description(desc, 30);
+        assert!(out.chars().count() <= 30);
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn truncate_activity_handles_unicode_and_mid_sentence_extension() {
+        // Extension detection works with Unicode characters before and after the dot.
+        let desc = "héllo wörld — downloaded archive.zip from peer";
+        let out = truncate_activity_description(desc, 40);
+        assert!(out.chars().count() <= 40);
+        assert!(
+            out.contains(".zip"),
+            "should preserve .zip extension: got '{out}'"
+        );
     }
 
     #[test]

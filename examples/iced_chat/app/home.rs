@@ -505,9 +505,15 @@ impl IcedChat {
                 // the lazy content builder's `Element<'static, _>` return.
                 let kind = event.kind;
                 // Min-height floor keeps the dense 32 px single-line rhythm;
-                // a wrapped description grows the row instead of being
-                // clipped (UI-HOME-10: no fixed row height, no clip, no
-                // 40-char truncation).
+                // long descriptions are truncated to ~75 chars (roughly two
+                // lines at typical card width) with file-extension preservation
+                // so filenames stay identifiable. Wrapped overflow is still
+                // allowed for slightly-longer-but-still-reasonable text.
+                let description =
+                    crate::presentation::truncate_activity_description(
+                        &event.description,
+                        75,
+                    );
                 container(
                 row![
                     Space::new()
@@ -525,7 +531,7 @@ impl IcedChat {
                     container(
                         crate::fonts::type_role_text(
                             crate::fonts::TypeRole::Body,
-                            event.description.clone(),
+                            description,
                         )
                         .color(text_system(&theme))
                         .width(Length::Fill)
@@ -903,7 +909,7 @@ impl IcedChat {
         //
         // CONN-02: the card's responsive tier must respond to the card's
         // REAL container width, not the window-derived dashboard width.
-        // With the right rail open the card occupies FillPortion(2) of
+        // With the right rail open the card occupies FillPortion(9) of
         // (content_width − 24); with the rail stacked it spans the full
         // content width. iced has no container queries, so the width is
         // derived here from the same layout rules the grid below builds
@@ -1416,13 +1422,13 @@ impl IcedChat {
             Row::new()
                 .push(
                     container(left_col)
-                        .width(Length::FillPortion(2))
+                        .width(Length::FillPortion(9))
                         .height(Length::Shrink),
                 )
                 .push(Space::new().width(Length::Fixed(SPACE_24)))
                 .push(
                     container(right_col)
-                        .width(Length::FillPortion(1))
+                        .width(Length::FillPortion(5))
                         .height(Length::Shrink),
                 )
                 .spacing(0)
