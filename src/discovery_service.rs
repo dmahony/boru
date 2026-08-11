@@ -34,12 +34,39 @@
 //! 4. [`peer_updates`](DiscoveryService::peer_updates) — a live stream of
 //!    [`PeerUpdate`]s for callers, backed by the authoritative
 //!    [`PeerRegistry`].
+//! 5. [`announce_hello`](DiscoveryService::announce_hello) /
+//!    [`announce_presence`](DiscoveryService::announce_presence) — throttled
+//!    presence announcements (guarded by [`AnnounceThrottle`]).
 //!
 //! # Peer registry
 //!
 //! The registry maps `node_id` → last-seen / source-topic metadata. It is
 //! the dedup anchor later discovery tasks (e.g. BORU-DISC-17) build on: a
 //! node already registered is not re-announced as new.
+//!
+//! # Announcement policy (BORU-DISC-09)
+//!
+//! The service announces its presence with a minimal `Hello` (protocol
+//! version + node id, 34 bytes on the wire):
+//!
+//! * **On join** — [`join`](DiscoveryService::join) publishes one `Hello`
+//!   immediately after the subscription succeeds, so existing nodes on the
+//!   discovery topic learn about the new node without any chat message
+//!   being created.
+//! * **On neighbour-up** — the drain loop re-announces a `Hello` when a new
+//!   gossip neighbour joins the mesh (reconnect / late-joiner path), so a
+//!   neighbour that connected after our join hello still hears us.
+//! * **Throttle** — every announcement passes through a minimum-interval
+//!   throttle ([`AnnounceThrottle`], default
+//!   [`DEFAULT_ANNOUNCE_MIN_INTERVAL`] = 30 s). The first announcement
+//!   always passes; later announcements within the interval are suppressed
+//!   ([`AnnounceOutcome::Throttled`]). This prevents aggressive broadcast
+//!   loops under neighbour churn while still guaranteeing one hello per
+//!   join.
+//! * **Self-filter** — the receive path ignores messages whose node id
+//!   equals the local identity ([`IncomingOutcome::SelfMessage`]), so the
+//!   gossip mesh's echo of our own hello never registers us in the peer
+//!   registry (mirroring `chat_core`'s `local_public()` self filter).
 
 use std::{
     collections::HashMap,
@@ -64,6 +91,12 @@ use crate::proto::TopicId;
 
 /// Capacity of the peer-update broadcast channel.
 const PEER_UPDATES_CAPACITY: usize = 256;
+
+/// Default minimum interval between discovery announcements (Hello /
+/// Presence). Announcements are throttled to at most one per interval so a
+/// join hello plus neighbour-up re-announcements cannot become an aggressive
+/// broadcast loop on the discovery topic.
+pub const DEFAULT_ANNOUNCE_MIN_INTERVAL: Duration = Duration::from_secs(30);
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -233,6 +266,96 @@ impl PeerRegistry {
     }
 }
 
+/// Outcome of a throttled discovery announcement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnnounceOutcome {
+    /// The announcement was broadcast to the discovery topic.
+    Announced,
+    /// The announcement was suppressed by the throttle (too soon since the
+    /// last one); nothing was broadcast.
+    Throttled,
+}
+
+/// Minimum-interval throttle for discovery announcements.
+///
+/// At most one announcement is broadcast per [`min_interval`](Self::min_interval)
+/// (default [`DEFAULT_ANNOUNCE_MIN_INTERVAL`]). The very first announcement
+/// always passes; later attempts within the interval are suppressed. This
+/// prevents aggressive broadcast loops (join + neighbour-up + presence must
+/// not spam the discovery topic) while still guaranteeing one hello per
+/// join.
+///
+/// The throttle is cheaply shareable (`Arc`): the service handle and the
+/// drain loop use the same instance, so join-time and neighbour-up
+/// announcements share one policy.
+#[derive(Debug)]
+pub struct AnnounceThrottle {
+    state: Mutex<AnnounceThrottleState>,
+}
+
+#[derive(Debug)]
+struct AnnounceThrottleState {
+    /// Minimum spacing between allowed announcements.
+    min_interval: Duration,
+    /// When the last announcement was broadcast (`None` = never yet).
+    last_announce: Option<Instant>,
+}
+
+impl AnnounceThrottle {
+    /// A throttle using the default interval
+    /// ([`DEFAULT_ANNOUNCE_MIN_INTERVAL`]).
+    pub fn new() -> Self {
+        Self::with_min_interval(DEFAULT_ANNOUNCE_MIN_INTERVAL)
+    }
+
+    /// A throttle with a custom minimum interval (tests use short intervals
+    /// to exercise the throttle without sleeping).
+    pub fn with_min_interval(min_interval: Duration) -> Self {
+        Self {
+            state: Mutex::new(AnnounceThrottleState {
+                min_interval,
+                last_announce: None,
+            }),
+        }
+    }
+
+    /// The configured minimum interval between announcements.
+    pub fn min_interval(&self) -> Duration {
+        self.state.lock().expect("announce throttle lock poisoned").min_interval
+    }
+
+    /// Update the minimum interval between announcements.
+    ///
+    /// Safe to call while the throttle is shared (the service handle and the
+    /// drain loop use the same instance).
+    pub fn set_min_interval(&self, min_interval: Duration) {
+        self.state.lock().expect("announce throttle lock poisoned").min_interval = min_interval;
+    }
+
+    /// Whether an announcement is allowed right now.
+    ///
+    /// When allowed, records the announcement time; the caller must only
+    /// broadcast if this returns `true`.
+    pub fn try_announce(&self) -> bool {
+        let mut state = self.state.lock().expect("announce throttle lock poisoned");
+        let now = Instant::now();
+        let allowed = match state.last_announce {
+            Some(prev) => now.duration_since(prev) >= state.min_interval,
+            None => true,
+        };
+        if allowed {
+            state.last_announce = Some(now);
+        }
+        allowed
+    }
+}
+
+impl Default for AnnounceThrottle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Errors returned by [`DiscoveryService`] operations.
 #[stack_error(derive, add_meta, from_sources)]
 #[non_exhaustive]
@@ -251,6 +374,65 @@ pub enum DiscoveryServiceError {
         #[error(std_err)]
         source: postcard::Error,
     },
+}
+
+// ---------------------------------------------------------------------------
+// Announcement handle (sender + throttle + local identity)
+// ---------------------------------------------------------------------------
+
+/// Shared announcement state: the gossip sender, the local node identity,
+/// and the announcement throttle.
+///
+/// Cloned into the drain loop so neighbour-up events can re-announce
+/// presence. All clones share one [`AnnounceThrottle`] via `Arc`, so
+/// join-time and neighbour-up announcements observe the same minimum-interval
+/// policy.
+#[derive(Clone, Debug)]
+struct AnnounceHandle {
+    sender: GossipSender,
+    local_node: PublicKey,
+    throttle: Arc<AnnounceThrottle>,
+}
+
+impl AnnounceHandle {
+    fn new(sender: GossipSender, local_node: PublicKey) -> Self {
+        Self {
+            sender,
+            local_node,
+            throttle: Arc::new(AnnounceThrottle::new()),
+        }
+    }
+
+    /// Raw, unthrottled publish (used by [`DiscoveryService::publish`]).
+    async fn publish(&self, message: DiscoveryMessage) -> Result<(), DiscoveryServiceError> {
+        let bytes = postcard::to_stdvec(&message)
+            .map_err(|source| e!(DiscoveryServiceError::Serialize { source }))?;
+        self.sender
+            .broadcast(Bytes::from(bytes))
+            .await
+            .map_err(|source| e!(DiscoveryServiceError::Api { source }))?;
+        Ok(())
+    }
+
+    /// Throttled announce of an arbitrary discovery message.
+    async fn announce(&self, message: DiscoveryMessage) -> Result<AnnounceOutcome, DiscoveryServiceError> {
+        if !self.throttle.try_announce() {
+            debug!(message = ?message, "discovery: announcement throttled");
+            return Ok(AnnounceOutcome::Throttled);
+        }
+        self.publish(message).await?;
+        Ok(AnnounceOutcome::Announced)
+    }
+
+    /// Announce this node with a `Hello`.
+    async fn announce_hello(&self) -> Result<AnnounceOutcome, DiscoveryServiceError> {
+        self.announce(DiscoveryMessage::hello(self.local_node)).await
+    }
+
+    /// Announce this node with a `Presence` heartbeat.
+    async fn announce_presence(&self) -> Result<AnnounceOutcome, DiscoveryServiceError> {
+        self.announce(DiscoveryMessage::presence(self.local_node)).await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -375,9 +557,9 @@ impl ReceiveCore {
 pub struct DiscoveryService {
     /// Topic this service joined.
     topic: TopicId,
-    /// Sender half of the gossip subscription — kept alive by the service so
-    /// the discovery topic stays joined.
-    sender: GossipSender,
+    /// Announcement handle: gossip sender + throttle + local identity. The
+    /// sender half keeps the discovery topic joined for the service lifetime.
+    announce: AnnounceHandle,
     /// Receive-path core (registry + update channel + dispatch logic).
     core: ReceiveCore,
     /// Cancellation token shared with the drain task.
@@ -393,6 +575,13 @@ impl DiscoveryService {
     /// splits the subscription and spawns the receive drain. Equivalent to
     /// calling [`from_subscription`](Self::from_subscription) on the result
     /// of `gossip.subscribe(topic, bootstrap)`.
+    ///
+    /// Immediately after the subscription succeeds, a throttled `Hello` is
+    /// published so existing nodes on the discovery topic learn about this
+    /// node (the join-time announcement; see the module-level
+    /// [announcement policy](self#announcement-policy-boru-disc-09)). A
+    /// failed announcement is non-fatal: the receive path still works and
+    /// the drain loop re-announces on neighbour-up.
     pub async fn join(
         gossip: &crate::net::Gossip,
         topic: TopicId,
@@ -401,7 +590,23 @@ impl DiscoveryService {
     ) -> Result<Self, ApiError> {
         let subscription = gossip.subscribe(topic, bootstrap).await?;
         let (sender, receiver) = subscription.split();
-        Ok(Self::from_subscription(topic, sender, receiver, local_node))
+        let service = Self::from_subscription(topic, sender, receiver, local_node);
+        match service.announce_hello().await {
+            Ok(AnnounceOutcome::Announced) => {
+                info!(topic = %topic, "discovery hello announced on join");
+            }
+            Ok(AnnounceOutcome::Throttled) => {
+                debug!(topic = %topic, "discovery hello suppressed on join");
+            }
+            Err(error) => {
+                warn!(
+                    topic = %topic,
+                    error = %error,
+                    "discovery hello on join failed; continuing without it",
+                );
+            }
+        }
+        Ok(service)
     }
 
     /// Build a running service from an already-created subscription.
@@ -410,6 +615,10 @@ impl DiscoveryService {
     /// background drain task, and returns the service handle. This is the
     /// offline-friendly constructor used by tests and by callers that already
     /// hold a subscription.
+    ///
+    /// Does **not** announce presence automatically — call
+    /// [`announce_hello`](Self::announce_hello) explicitly if the join hello
+    /// is wanted (the async [`join`](Self::join) path does this itself).
     pub fn from_subscription(
         topic: TopicId,
         sender: GossipSender,
@@ -424,14 +633,16 @@ impl DiscoveryService {
             registry,
             peer_updates_tx,
         };
+        let announce = AnnounceHandle::new(sender, local_node);
         let cancel = CancellationToken::new();
         let task_core = core.clone();
+        let task_announce = announce.clone();
         let task_cancel = cancel.clone();
-        let task = tokio::spawn(drain_loop(receiver, task_core, task_cancel));
+        let task = tokio::spawn(drain_loop(receiver, task_core, task_announce, task_cancel));
         info!(topic = %topic, "discovery service joined");
         Self {
             topic,
-            sender,
+            announce,
             core,
             cancel,
             task,
@@ -446,14 +657,43 @@ impl DiscoveryService {
     /// Publish a discovery message to the discovery topic.
     ///
     /// Serialises with postcard and broadcasts through the gossip sender.
+    /// This is the raw, **unthrottled** path — prefer
+    /// [`announce_hello`](Self::announce_hello) /
+    /// [`announce_presence`](Self::announce_presence) for presence
+    /// announcements so the minimum-interval throttle applies.
     pub async fn publish(&self, message: DiscoveryMessage) -> Result<(), DiscoveryServiceError> {
-        let bytes = postcard::to_stdvec(&message)
-            .map_err(|source| e!(DiscoveryServiceError::Serialize { source }))?;
-        self.sender
-            .broadcast(Bytes::from(bytes))
-            .await
-            .map_err(|source| e!(DiscoveryServiceError::Api { source }))?;
-        Ok(())
+        self.announce.publish(message).await
+    }
+
+    /// Announce this node's presence with a `Hello` on the discovery topic.
+    ///
+    /// The broadcast is throttled: at most one announcement per
+    /// [`DEFAULT_ANNOUNCE_MIN_INTERVAL`], so repeated calls (join,
+    /// neighbour-up, periodic presence) cannot produce a broadcast loop. The
+    /// first announcement always passes.
+    pub async fn announce_hello(&self) -> Result<AnnounceOutcome, DiscoveryServiceError> {
+        self.announce.announce_hello().await
+    }
+
+    /// Announce a periodic `Presence` heartbeat, throttled like
+    /// [`announce_hello`](Self::announce_hello).
+    pub async fn announce_presence(&self) -> Result<AnnounceOutcome, DiscoveryServiceError> {
+        self.announce.announce_presence().await
+    }
+
+    /// Override the minimum interval between announcements.
+    ///
+    /// Defaults to [`DEFAULT_ANNOUNCE_MIN_INTERVAL`]. Tests use short
+    /// intervals to exercise the throttle without sleeping. Applies to the
+    /// shared throttle used by both the service handle and the drain loop.
+    pub fn with_announce_min_interval(self, min_interval: Duration) -> Self {
+        self.announce.throttle.set_min_interval(min_interval);
+        self
+    }
+
+    /// The minimum interval between announcements (the throttle policy).
+    pub fn announce_min_interval(&self) -> Duration {
+        self.announce.throttle.min_interval()
     }
 
     /// Handle one received discovery-topic payload.
@@ -508,6 +748,7 @@ impl DiscoveryService {
 async fn drain_loop(
     mut receiver: GossipReceiver,
     core: ReceiveCore,
+    announce: AnnounceHandle,
     cancel: CancellationToken,
 ) {
     info!("discovery service drain loop started");
@@ -529,6 +770,32 @@ async fn drain_loop(
                     }
                     Some(Ok(Event::NeighborUp(peer))) => {
                         trace!(peer = %peer.fmt_short(), "discovery: neighbor up");
+                        // A new gossip neighbour joined the mesh — re-announce
+                        // our presence so it can discover this node even if
+                        // the join-time hello was broadcast before the
+                        // neighbour connected (reconnect / late-joiner path).
+                        // The minimum-interval throttle prevents neighbour
+                        // churn from becoming a broadcast loop. Fire and
+                        // forget: never block the receive drain on a publish.
+                        let announce = announce.clone();
+                        tokio::spawn(async move {
+                            match announce.announce_hello().await {
+                                Ok(AnnounceOutcome::Announced) => {
+                                    info!(
+                                        peer = %peer.fmt_short(),
+                                        "discovery: re-announced hello after neighbor up",
+                                    );
+                                }
+                                Ok(AnnounceOutcome::Throttled) => {}
+                                Err(error) => {
+                                    warn!(
+                                        peer = %peer.fmt_short(),
+                                        error = %error,
+                                        "discovery: neighbor-up hello failed",
+                                    );
+                                }
+                            }
+                        });
                     }
                     Some(Ok(Event::NeighborDown(peer))) => {
                         trace!(peer = %peer.fmt_short(), "discovery: neighbor down");
@@ -811,6 +1078,136 @@ mod tests {
         assert_eq!(decoded, DiscoveryMessage::hello(peer));
     }
 
+    // ── announce (throttled presence) ─────────────────────────────────
+
+    #[tokio::test]
+    async fn announce_hello_publishes_hello_and_own_echo_is_ignored() {
+        let local = test_key(0xAA);
+        let (cmd_tx, mut cmd_rx) = irpc_mpsc::channel::<Command>(64);
+        let (_ev_tx, ev_rx) = irpc_mpsc::channel::<Event>(64);
+        let sender = GossipSender::new(cmd_tx);
+        let receiver = GossipReceiver::new(ev_rx);
+        let service = DiscoveryService::from_subscription(test_topic(), sender, receiver, local);
+
+        let outcome = service.announce_hello().await.unwrap();
+        assert_eq!(outcome, AnnounceOutcome::Announced);
+
+        // The hello was broadcast as a DiscoveryMessage carrying this node.
+        let command = tokio::time::timeout(Duration::from_secs(5), cmd_rx.recv())
+            .await
+            .expect("timed out waiting for hello broadcast")
+            .expect("channel receive failed")
+            .expect("channel closed before broadcast");
+        let Command::Broadcast(bytes) = command else {
+            panic!("expected Broadcast command, got {command:?}");
+        };
+        let decoded: DiscoveryMessage = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded, DiscoveryMessage::hello(local));
+        assert_eq!(decoded.node_id(), local);
+
+        // The gossip mesh echoes our own broadcast back; the receive path
+        // must ignore it so we never register ourselves.
+        let outcome = service.handle_incoming(&bytes, local);
+        assert_eq!(outcome, IncomingOutcome::SelfMessage);
+        assert_eq!(service.peer_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn announce_presence_publishes_presence() {
+        let local = test_key(0xAA);
+        let (cmd_tx, mut cmd_rx) = irpc_mpsc::channel::<Command>(64);
+        let (_ev_tx, ev_rx) = irpc_mpsc::channel::<Event>(64);
+        let sender = GossipSender::new(cmd_tx);
+        let receiver = GossipReceiver::new(ev_rx);
+        let service = DiscoveryService::from_subscription(test_topic(), sender, receiver, local);
+
+        let outcome = service.announce_presence().await.unwrap();
+        assert_eq!(outcome, AnnounceOutcome::Announced);
+
+        let command = tokio::time::timeout(Duration::from_secs(5), cmd_rx.recv())
+            .await
+            .expect("timed out waiting for presence broadcast")
+            .expect("channel receive failed")
+            .expect("channel closed before broadcast");
+        let Command::Broadcast(bytes) = command else {
+            panic!("expected Broadcast command, got {command:?}");
+        };
+        let decoded: DiscoveryMessage = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded, DiscoveryMessage::presence(local));
+    }
+
+    #[tokio::test]
+    async fn announce_throttle_suppresses_rapid_repeat() {
+        let local = test_key(0xAA);
+        let (cmd_tx, mut cmd_rx) = irpc_mpsc::channel::<Command>(64);
+        let (_ev_tx, ev_rx) = irpc_mpsc::channel::<Event>(64);
+        let sender = GossipSender::new(cmd_tx);
+        let receiver = GossipReceiver::new(ev_rx);
+        let service = DiscoveryService::from_subscription(test_topic(), sender, receiver, local)
+            .with_announce_min_interval(Duration::from_millis(60));
+
+        // First announcement passes the throttle.
+        assert_eq!(
+            service.announce_hello().await.unwrap(),
+            AnnounceOutcome::Announced
+        );
+        // An immediate repeat is suppressed — no second broadcast.
+        assert_eq!(
+            service.announce_hello().await.unwrap(),
+            AnnounceOutcome::Throttled
+        );
+
+        // Exactly one Broadcast command was produced.
+        let command = tokio::time::timeout(Duration::from_secs(5), cmd_rx.recv())
+            .await
+            .expect("timed out waiting for hello broadcast")
+            .expect("channel receive failed")
+            .expect("channel closed before broadcast");
+        let Command::Broadcast(bytes) = command else {
+            panic!("expected Broadcast command, got {command:?}");
+        };
+        let decoded: DiscoveryMessage = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded, DiscoveryMessage::hello(local));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(40), cmd_rx.recv())
+                .await
+                .is_err(),
+            "throttled announcement must not broadcast"
+        );
+
+        // After the interval elapses, the next announcement passes again.
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert_eq!(
+            service.announce_hello().await.unwrap(),
+            AnnounceOutcome::Announced
+        );
+        let command = tokio::time::timeout(Duration::from_secs(5), cmd_rx.recv())
+            .await
+            .expect("timed out waiting for second hello")
+            .expect("channel receive failed")
+            .expect("channel closed before broadcast");
+        let Command::Broadcast(_) = command else {
+            panic!("expected Broadcast command, got {command:?}");
+        };
+    }
+
+    #[test]
+    fn announce_throttle_first_passes_then_suppresses_then_recovers() {
+        let throttle = AnnounceThrottle::with_min_interval(Duration::from_millis(50));
+        assert!(throttle.try_announce());
+        assert!(!throttle.try_announce());
+        std::thread::sleep(Duration::from_millis(70));
+        assert!(throttle.try_announce());
+    }
+
+    #[test]
+    fn announce_throttle_default_interval_is_documented() {
+        assert_eq!(
+            AnnounceThrottle::new().min_interval(),
+            DEFAULT_ANNOUNCE_MIN_INTERVAL
+        );
+    }
+
     // ── drain loop (offline over a channel) ───────────────────────────
 
     #[tokio::test]
@@ -847,5 +1244,37 @@ mod tests {
             }
         );
         assert_eq!(service.peer_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn drain_loop_reannounces_hello_on_neighbor_up() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let (cmd_tx, mut cmd_rx) = irpc_mpsc::channel::<Command>(64);
+        let (ev_tx, ev_rx) = irpc_mpsc::channel::<Event>(64);
+        let sender = GossipSender::new(cmd_tx);
+        let receiver = GossipReceiver::new(ev_rx);
+        // The service handle stays alive for the whole test (the drain task
+        // owns clones of the receiver/announce state, so this also documents
+        // that the loop runs independently of the handle).
+        let _service = DiscoveryService::from_subscription(test_topic(), sender, receiver, local)
+            .with_announce_min_interval(Duration::from_millis(60));
+
+        // A new gossip neighbour joins the mesh (reconnect / late-joiner
+        // path) — the drain loop re-announces our hello so the neighbour can
+        // discover us even if our join-time hello predates the connection.
+        let peer_endpoint: iroh_base::EndpointId = peer.into();
+        ev_tx.send(Event::NeighborUp(peer_endpoint)).await.unwrap();
+
+        let command = tokio::time::timeout(Duration::from_secs(5), cmd_rx.recv())
+            .await
+            .expect("timed out waiting for neighbor-up hello")
+            .expect("channel receive failed")
+            .expect("channel closed before broadcast");
+        let Command::Broadcast(bytes) = command else {
+            panic!("expected Broadcast command, got {command:?}");
+        };
+        let decoded: DiscoveryMessage = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded, DiscoveryMessage::hello(local));
     }
 }
