@@ -124,9 +124,10 @@ async fn run_host_session_inner(
         .map(|path| {
             let s = path.stats();
             format!(
-                "{}/selected={}/cwnd={}/cong_events={}/stream_tx={}/udp_tx={}/lost={}",
+                "{}/selected={}/status={}/cwnd={}/cong_events={}/stream_tx={}/udp_tx={}/lost={}",
                 path.remote_addr(),
                 path.is_selected(),
+                path.status(),
                 s.cwnd,
                 s.congestion_events,
                 s.frame_tx.stream,

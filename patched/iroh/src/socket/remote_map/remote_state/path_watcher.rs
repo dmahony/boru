@@ -494,6 +494,22 @@ impl<'conn> Path<'conn> {
     pub fn rtt(&self) -> Duration {
         self.stats().rtt
     }
+
+    /// Reports the live path status from noq: `Available` / `Backup`, or
+    /// `closed` / `gone` if the path was closed or no longer exists.
+    ///
+    /// Boru screen-share diagnostic: a path that is `closed` cannot carry
+    /// application data (the noq scheduler only sends on validated,
+    /// non-abandoned paths), which shows up as stream data buffered forever.
+    pub fn status(&self) -> String {
+        match self.conn.path(self.id()) {
+            Some(path) => match path.status() {
+                Ok(status) => format!("{status:?}"),
+                Err(_) => "closed".to_string(),
+            },
+            None => "gone".to_string(),
+        }
+    }
 }
 
 /// A stream of [`PathList`] snapshots for a connection.
