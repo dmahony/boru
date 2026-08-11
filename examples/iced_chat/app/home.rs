@@ -781,120 +781,59 @@ impl IcedChat {
             home_connection_variant(&mesh_health, has_peer_connections, relay_reachable);
 
         // ── Hero variant visuals (truthful, from the pure mapping above) ──
-        let (hero_icon, hero_color, headline): (&[u8], fn(&iced::Theme) -> iced::Color, String) =
-            match variant {
-                HomeConnectionVariant::Starting => {
-                    const RECONNECT_DOTS: [&str; 4] =
-                        ["\u{280B}", "\u{2819}", "\u{2839}", "\u{2838}"];
-                    let dot = RECONNECT_DOTS
-                        [(dep.main_screen_reconnect_frame as usize) % RECONNECT_DOTS.len()];
-                    (ICON_RETRY, color_warning, format!("Starting Boru {dot}"))
-                }
-                HomeConnectionVariant::Connecting => (
-                    ICON_RETRY,
-                    color_warning,
-                    "Connecting \u{2014} waiting for peers\u{2026}".to_string(),
-                ),
-                HomeConnectionVariant::Ready => (
-                    ICON_CHECK,
-                    accent_green,
-                    "Boru is connected and ready.".to_string(),
-                ),
-                HomeConnectionVariant::Degraded => {
-                    let reason = match &mesh_health {
-                        MeshHealth::Degraded(r) => r.clone(),
-                        _ => String::new(),
-                    };
-                    (
-                        ICON_MESH,
-                        color_warning,
-                        format!("Mesh degraded \u{2014} {reason}"),
-                    )
-                }
-                HomeConnectionVariant::Offline => {
-                    let reason = match &mesh_health {
-                        MeshHealth::Offline(r) => r.clone(),
-                        _ => String::new(),
-                    };
-                    (
-                        ICON_OFFLINE,
-                        color_error,
-                        format!("Boru is offline \u{2014} {reason}"),
-                    )
-                }
-            };
+        let headline: String = match variant {
+            HomeConnectionVariant::Starting => {
+                const RECONNECT_DOTS: [&str; 4] =
+                    ["\u{280B}", "\u{2819}", "\u{2839}", "\u{2838}"];
+                let dot = RECONNECT_DOTS
+                    [(dep.main_screen_reconnect_frame as usize) % RECONNECT_DOTS.len()];
+                format!("Starting Boru {dot}")
+            }
+            HomeConnectionVariant::Connecting => {
+                "Connecting \u{2014} waiting for peers\u{2026}".to_string()
+            }
+            HomeConnectionVariant::Ready => "Boru is connected and ready.".to_string(),
+            HomeConnectionVariant::Degraded => {
+                let reason = match &mesh_health {
+                    MeshHealth::Degraded(r) => r.clone(),
+                    _ => String::new(),
+                };
+                format!("Mesh degraded \u{2014} {reason}")
+            }
+            HomeConnectionVariant::Offline => {
+                let reason = match &mesh_health {
+                    MeshHealth::Offline(r) => r.clone(),
+                    _ => String::new(),
+                };
+                format!("Boru is offline \u{2014} {reason}")
+            }
+        };
         let show_retry = matches!(variant, HomeConnectionVariant::Offline);
         let show_details = matches!(
             variant,
             HomeConnectionVariant::Offline | HomeConnectionVariant::Degraded
         );
-        // Compact status pill label for the page header (Figure 3).
-        let pill_label = match variant {
-            HomeConnectionVariant::Starting => "Starting",
-            HomeConnectionVariant::Connecting => "Connecting",
-            HomeConnectionVariant::Ready => "Connected",
-            HomeConnectionVariant::Degraded => "Degraded",
-            HomeConnectionVariant::Offline => "Offline",
-        };
 
         // ── Greeting (page header) ──
         // UI-HOME-12: display_heading — Archivo SemiCondensed Bold 32 px,
         // 1.2 line height (via TypeRole::DisplayHeading).
-        let display_name = if dep.local_label.is_empty() {
-            "there"
-        } else {
-            &dep.local_label
-        };
         let greeting = crate::fonts::type_role_text_lh(
             crate::fonts::TypeRole::DisplayHeading,
-            format!("Good {}, {display_name}", dep.time_of_day_greeting),
+            format!("Good {}", dep.time_of_day_greeting),
             1.2,
         )
         .color(crate::design_tokens::text_primary(&theme))
         .width(Length::Fill)
-        // A long display name (e.g. a bare peer key) must wrap inside the
-        // header instead of overflowing it (UI-HOME-10).
         .wrapping(iced::widget::text::Wrapping::WordOrGlyph);
         // Subtitle — IBM Plex Sans Regular at the UI-HOME-02 size token
         // (16 px; the canonical `body` role is 15 px, plan band 15–17 px).
         let welcome_line = crate::fonts::type_role_text(
             crate::fonts::TypeRole::Body,
-            "Welcome to Boru",
+            "Your Boru node is online and ready.",
         )
         .size(crate::fonts::HOME_SUBTITLE)
         .color(text_secondary(&theme))
         .width(Length::Fill);
-
-        // ── Status pill (page header right, compact) ──
-        // POLISH-05: reduced vertical padding from SPACE_12 to SPACE_10
-        // (~36 px tall, in the UI-HOME-02 36–40 px band but now visually
-        // closer to the Download Manager button at right).
-        let status_pill = container(
-            row![
-                icon_svg(hero_icon, TYPO_SM).style(move |t, _| iced::widget::svg::Style {
-                    color: Some(hero_color(t)),
-                }),
-                Space::new().width(Length::Fixed(SPACE_8)),
-                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, pill_label)
-                    .color(hero_color(&theme)),
-            ]
-            .spacing(0)
-            .align_y(Alignment::Center),
-        )
-        .padding([SPACE_10, SPACE_12])
-        .style(move |t| {
-            let mut bg = bg_surface(t);
-            bg.a *= home_menu_opacity;
-            iced::widget::container::Style {
-                background: Some(iced::Background::Color(bg)),
-                border: iced::Border {
-                    color: hero_color(t),
-                    width: 1.0,
-                    radius: SPACE_16.into(),
-                },
-                ..Default::default()
-            }
-        });
 
         // ── Large connection status card (new dark panel) ──
         // Rendered by the dedicated `status_card` module: dark green
@@ -1333,10 +1272,10 @@ impl IcedChat {
             .spacing(0)
             .width(Length::Fill);
 
-        // ── Page header: greeting + welcome + status pill (Figure 3) ──
-        // UI-HOME-15: on narrow content the pill stacks under the greeting
-        // (left-aligned) instead of squeezing it; on wider content it keeps
-        // the approved top-right position.
+        // ── Page header: greeting + welcome + Download Manager ──
+        // UI-HOME-15: on narrow content the Download Manager stacks under
+        // the greeting (left-aligned); on wider content it keeps the
+        // approved top-right position.
         let page_header: iced::Element<'static, AppMessage> = if compact_header {
             Column::new()
                 .push(
@@ -1350,15 +1289,7 @@ impl IcedChat {
                         .width(Length::Fill),
                 )
                 .push(Space::new().height(Length::Fixed(SPACE_12)))
-                .push(
-                    Row::new()
-                        .push(status_pill)
-                        .push(Space::new().width(Length::Fixed(SPACE_8)))
-                        .push(download_manager_btn)
-                        .spacing(0)
-                        .align_y(Alignment::Center)
-                        .width(Length::Fill),
-                )
+                .push(download_manager_btn)
                 .spacing(0)
                 .width(Length::Fill)
                 .into()
@@ -1372,8 +1303,6 @@ impl IcedChat {
                     .push(welcome_line)
                     .spacing(0)
                     .width(Length::Fill),
-                status_pill,
-                Space::new().width(Length::Fixed(SPACE_8)),
                 download_manager_btn,
             ]
             .spacing(SPACE_8)
