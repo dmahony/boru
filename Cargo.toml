@@ -128,6 +128,21 @@ zbus = { version = "5", default-features = false, features = ["tokio"], optional
 libloading = { version = "0.8", optional = true }
 # windows-sys: SendInput user-session input injection (Windows backend).
 windows-sys = { version = "0.59", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_Foundation"], optional = true }
+# WinRT Graphics Capture for the Windows screen-sharing source. This is kept
+# separate from windows-sys because the capture API is a WinRT object graph.
+windows = { version = "0.58", default-features = false, features = [
+    "Graphics_Capture",
+    "Graphics_DirectX_Direct3D11",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Direct3D11",
+    "Win32_System_WinRT_Graphics_Capture",
+    "Win32_UI_WindowsAndMessaging",
+], optional = true }
 # x11rb: direct X11 capture (GetImage) fallback for the Linux ScreenCast
 # backend — used when xdg-desktop-portal/PipeWire are unavailable, so real
 # desktop sharing works on any X11 display.
@@ -264,7 +279,7 @@ video-playback = ["gui", "dep:iced_video_player"]
 terminal = ["gui", "dep:iced_term"]
 # Screen sharing is deliberately opt-in while the subsystem is integrated.
 # Reuse the OpenH264 dependency already used by video-calls.
-screen-sharing = ["net", "dep:openh264", "dep:zbus", "dep:libloading", "dep:windows-sys", "dep:x11rb"]
+screen-sharing = ["net", "dep:openh264", "dep:zbus", "dep:libloading", "dep:windows-sys", "dep:windows", "dep:x11rb"]
 # Developer-only fast screen-sharing prototype; reuses the existing tunnel.
 experimental-vnc = ["gui"]
 
