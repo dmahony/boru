@@ -754,6 +754,11 @@ fn main() -> Result<()> {
         discovered_peers_rx,
         directory_room_rx,
         continuous_tracker,
+        // The discovery service handle is deliberately NOT stored on
+        // IcedChat (no conversation/UI state for the internal discovery
+        // topic); holding it here for the rest of main() keeps its
+        // background drain task alive for the entire GUI lifetime.
+        _discovery_service,
         dht_for_private,
         tunnel_service,
     ) = runtime.block_on(async {
@@ -1282,6 +1287,40 @@ fn main() -> Result<()> {
             warn!("lobby subscription failed; public-lobby DHT tracker not started");
         }
 
+        // ── Internal discovery topic subscription ────────────────────────
+        // Every Boru node joins the versioned internal discovery gossip
+        // topic (BORU_DISCOVERY_TOPIC_V1, BORU-DISC-05) at startup as
+        // networking infrastructure: peer discovery / presence /
+        // connectivity bootstrap. This is a SEPARATE subscription from the
+        // lobby — the two coexist during this phase (lobby removal is
+        // BORU-DISC-12). The discovery topic must never become a
+        // conversation: no IcedChat field, no conversations entry, no
+        // sidebar row, no rendering. The handle is returned to main() and
+        // held there for the app lifetime (like continuous_tracker) so its
+        // background drain task is not dropped.
+        let discovery_service = match boru_core::discovery_service::DiscoveryService::join(
+            &gossip,
+            boru_core::discovery_topic::discovery_topic(
+                boru_core::public_room::PublicNetwork::Mainnet,
+            ),
+            Vec::new(),
+            local_public,
+        )
+        .await
+        {
+            Ok(service) => {
+                info!(topic = %service.topic(), "joined internal discovery topic");
+                Some(service)
+            }
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "failed to join internal discovery topic; continuing without discovery service"
+                );
+                None
+            }
+        };
+
         // ── Directory topic subscription ──────────────────────────────────
         // Subscribe to the directory gossip topic for public-room discovery.
         // The directory topic is derived from the relay URL so all peers on
@@ -1454,6 +1493,7 @@ fn main() -> Result<()> {
             discovered_peers_rx,
             directory_room_rx,
             continuous_tracker,
+            discovery_service,
             room_discovery_dht,
             tunnel_service,
         ))
