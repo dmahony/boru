@@ -135,10 +135,16 @@ impl StreamingServer {
         // Drop impl handles cleanup
     }
 
-    /// The HTTP URL for GStreamer playbin.
+    /// The HTTP URL for GStreamer playbin (and external OS players).
     pub fn url(&self) -> String {
-        format!("http://127.0.0.1:{}/video", self.port)
+        stream_url(self.port)
     }
+}
+
+/// Pure URL builder for the local streaming server. External players
+/// (VLC/browser) consume the exact same URL the inline player uses.
+pub fn stream_url(port: u16) -> String {
+    format!("http://127.0.0.1:{port}/video")
 }
 
 /// Polling interval when the file hasn't reached the expected size yet.
@@ -597,6 +603,14 @@ async fn write_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stream_url_is_loopback_video_endpoint() {
+        assert_eq!(stream_url(8765), "http://127.0.0.1:8765/video");
+        assert_eq!(stream_url(0), "http://127.0.0.1:0/video");
+        assert!(stream_url(49152).starts_with("http://127.0.0.1:"));
+        assert!(stream_url(49152).ends_with("/video"));
+    }
 
     #[test]
     fn parse_range_header_accepts_valid_single_ranges() {

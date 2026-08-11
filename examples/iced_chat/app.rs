@@ -145,7 +145,6 @@ use boru_core::video_playback::{
     PlaybackCoordinator, VideoInstanceKey, VideoJitterBuffer,
 };
 use boru_core::video_poster;
-#[cfg(feature = "video-playback")]
 use boru_core::streaming_server::StreamingServer;
 #[cfg(feature = "video-playback")]
 use boru_core::video_runtime::VideoRuntimeCapability;
@@ -3702,6 +3701,12 @@ pub struct IcedChat {
     inline_video_resume: Option<(VideoInstanceKey, Duration)>,
     #[cfg(feature = "video-playback")]
     video_runtime: VideoRuntimeCapability,
+    /// Live external-player HTTP stream (non-`video-playback` builds, e.g.
+    /// Windows). Keeps the [`StreamingServer`] alive while the OS default
+    /// player (VLC/browser) consumes the URL; replaced on the next stream and
+    /// dropped on room leave. Feature-gated builds park the server in
+    /// `InlineVideoSession.streaming_server` instead.
+    external_stream_server: Arc<StdMutex<Option<StreamingServer>>>,
     /// TransferId → entry index cache for O(1) progress update lookups.
     /// Populated lazily in handle_download_progress; cleared on room switch.
     transfer_id_to_index: HashMap<TransferId, usize>,
@@ -7472,6 +7477,7 @@ impl IcedChat {
                 }
                 capability
             },
+            external_stream_server: Arc::new(StdMutex::new(None)),
             transfer_id_to_index: HashMap::new(),
             names: HashMap::new(),
             topic: initial_topic,
@@ -9944,8 +9950,12 @@ impl IcedChat {
         .to_string()
     }
 
-    /// Start downloading a video for external playback (no streaming server).
-    /// Returns a task that waits for the download to finish, then opens the file.
+    /// Start progressive external playback for an undownloaded video when the
+    /// `video-playback` feature is disabled (Windows builds). The blob
+    /// download runs in the background while a local HTTP streaming server
+    /// serves the growing store file, and the URL is handed to the OS default
+    /// player (VLC/browser). Returns a task that starts both; `None` when the
+    /// video cannot be streamed (unknown size / missing identity).
     fn stream_for_external_play(
         &self,
         _entry_index: usize,
@@ -9954,6 +9964,7 @@ impl IcedChat {
         let total_size = match &download.state {
             DownloadState::Ready { total } => total.unwrap_or(0),
             DownloadState::Active { total, .. } => total.unwrap_or(0),
+            DownloadState::Paused { total, .. } => total.unwrap_or(0),
             DownloadState::Completed { total_size, .. } => total_size.unwrap_or(0),
             _ => 0,
         };
@@ -9970,8 +9981,15 @@ impl IcedChat {
                 download.name.clone(),
             )));
         }
+        let Some(content_hash) = download.expected_content_hash.clone() else {
+            return None;
+        };
+
+        // Download task: identical to the classic download-then-open path, so
+        // the card still reaches Completed (and the file can be opened later)
+        // even while the stream is being consumed.
         let name = download.name.clone();
-        let expected_hash = download.expected_content_hash.clone();
+        let expected_hash = content_hash.clone();
         let data_dir = self.data_dir.clone();
         let blob_store = self.blob_store.clone();
         let endpoint = self.endpoint.clone();
@@ -9980,7 +9998,19 @@ impl IcedChat {
         let kind = download.kind;
         let ticket = download.ticket.clone();
 
-        Some(iced::Task::perform(
+        // Stream-task inputs are captured before `name`/`data_dir` move into
+        // the download task below.
+        let store_data_path = data_dir
+            .join("blobs")
+            .join("data")
+            .join(format!("{content_hash}.data"));
+        let content_type = Self::content_type_for_filename(&name);
+        let server_slot = self.external_stream_server.clone();
+        if let Ok(mut guard) = server_slot.lock() {
+            guard.take(); // stop any previous external stream
+        }
+
+        let download_task = iced::Task::perform(
             async move {
                 let dl_dir = data_dir.join("downloads");
                 let _ = tokio::fs::create_dir_all(&dl_dir).await;
@@ -10014,7 +10044,7 @@ impl IcedChat {
                     name.clone(),
                     kind,
                     &mut destination,
-                    expected_hash.as_deref(),
+                    Some(expected_hash.as_str()),
                     move |ev| {
                         if let Ok(mut q) = progress_queue.lock() {
                             q.push_back(ev);
@@ -10034,7 +10064,40 @@ impl IcedChat {
                 Ok((name, save_path)) => AppMessage::DownloadDone(name, save_path),
                 Err(e) => AppMessage::ErrorMsg(e),
             },
-        ))
+        );
+
+        // Stream task: serve the growing FsStore data file over HTTP and hand
+        // the URL to the OS default player. The server handle is parked in
+        // `external_stream_server` so it outlives this task (the OS player
+        // connects after the URL is shown); the next stream or a room leave
+        // drops it, which stops the server and closes its file handles.
+        let stream_task = iced::Task::perform(
+            async move {
+                let server = StreamingServer::start(store_data_path, total_size, content_type)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let url = server.url();
+                if let Ok(mut guard) = server_slot.lock() {
+                    *guard = Some(server);
+                }
+                Ok::<_, String>(url)
+            },
+            |result| match result {
+                Ok(url) => AppMessage::StreamUrl(url),
+                Err(e) => AppMessage::ErrorMsg(format!("Could not start video stream: {e}")),
+            },
+        );
+
+        Some(iced::Task::batch([download_task, stream_task]))
+    }
+
+    /// User-facing hint shown when an external-player stream is ready. The URL
+    /// is intentionally included so the user can paste it into any player even
+    /// if the default open fails.
+    fn external_stream_hint(url: &str) -> String {
+        format!(
+            "Stream ready: {url}\nOpening in your default video player — or paste this URL into VLC or a browser."
+        )
     }
 
     #[cfg(feature = "video-playback")]
@@ -10055,6 +10118,11 @@ impl IcedChat {
         let topic = self.topic;
         #[cfg(feature = "video-playback")]
         self.stop_inline_video();
+        // Stop any external-player HTTP stream (non-video-playback builds):
+        // the server holds a file handle on the store data path.
+        if let Ok(mut guard) = self.external_stream_server.lock() {
+            guard.take();
+        }
         let mut conversation = self
             .conversations
             .remove(&topic)
@@ -18643,6 +18711,13 @@ mod tests {
     // ── GIF picker pure logic (KLIPY-05) ───────────────────────────────
     // Network-free helpers: rendition selection for the send path and the
     // provider-error message mapper.  No provider, no app instance.
+
+    #[test]
+    fn external_stream_hint_embeds_url_and_keeps_manual_option() {
+        let hint = super::external_stream_hint("http://127.0.0.1:54321/video");
+        assert!(hint.contains("http://127.0.0.1:54321/video"), "hint must carry the URL");
+        assert!(hint.contains("VLC") || hint.contains("browser"), "hint must mention manual paste options");
+    }
 
     fn media_source(url: &str, format: GifMediaFormat) -> GifMediaSource {
         GifMediaSource {

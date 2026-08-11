@@ -69,14 +69,19 @@ closure are checked in as `scripts/gstreamer-windows-plugins.txt` and
 `scripts/gstreamer-windows-runtime.txt`; regenerate with
 `scripts/gst_windows_manifest.py` when the pinned runtime version changes.
 
-The Windows release build still uses `--features gui` (no `video-playback`).
-gstreamer-sys links GStreamer through import libraries, so enabling the
-feature would make `boru.exe` fail to start whenever the runtime DLLs are
-not in the Windows loader search path — contradicting the clean-start
-guarantee above.  The bundled runtime is therefore ready for the next build
-that moves inline playback to dynamic loading or delay-load imports; until
-then it is shipped so the package is self-contained and the layout is
-stable.
+The Windows release build uses `--features gui` (no `video-playback`) by
+design (WIN-FEAT-01, direction b). gstreamer-sys links GStreamer through
+import libraries, so enabling the feature would make `boru.exe` fail to
+start whenever the runtime DLLs are not in the Windows loader search path —
+contradicting the clean-start guarantee above. Instead, non-`video-playback`
+builds (Windows) serve undownloaded videos over the built-in local HTTP
+streaming server (`src/streaming_server.rs`) and open the URL in the OS
+default player (VLC/browser); fully downloaded videos keep the Download and
+Open actions, and `src/video_runtime.rs` capability detection is untouched.
+The bundled runtime is still shipped so the package stays self-contained,
+`gst-inspect-1.0.exe` detection keeps working, and the layout is stable for
+a future native-CI build that moves inline playback to dynamic loading or
+delay-load imports (direction a).
 
 ## Licensing and notices
 

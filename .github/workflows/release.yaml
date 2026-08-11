@@ -20,14 +20,21 @@ jobs:
             os: ubuntu-latest
             artifact: boru-linux-x86_64
             binary: boru
+            # Linux ships inline GStreamer playback.
+            features: gui,video-playback
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             artifact: boru-windows-x86_64
             binary: boru.exe
+            # Windows stays without GStreamer linking (WIN-FEAT-01 direction
+            # b): undownloaded videos stream over local HTTP to the OS default
+            # player. See the Build step comment.
+            features: gui
           - target: aarch64-apple-darwin
             os: macos-latest
             artifact: boru-macos-aarch64
             binary: boru
+            features: gui
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -36,7 +43,8 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libx11-dev libasound2-dev
+          sudo apt-get install -y libgtk-3-dev libx11-dev libasound2-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -48,14 +56,17 @@ jobs:
 
       - name: Build (release)
         run: |
-          # Windows ships the reviewed GStreamer runtime beside the exe (see
-          # scripts/package_windows.sh).  The app itself stays on --features
-          # gui so it starts cleanly without GStreamer: gstreamer-sys links
-          # import libraries, so enabling video-playback would make boru.exe
-          # fail to start when the runtime DLLs are missing.  The bundled
-          # runtime is ready for the next build that moves to dynamic
-          # loading / delay-load imports (docs/video-runtime-packaging.md).
-          cargo build --release --target ${{ matrix.target }} --features gui --example boru
+          # Per-target features: Linux ships inline GStreamer playback
+          # (video-playback).  Windows deliberately stays on --features gui
+          # (WIN-FEAT-01, direction b): gstreamer-sys links import libraries,
+          # so enabling video-playback would make boru.exe fail to start when
+          # the runtime DLLs are missing.  Instead, undownloaded videos are
+          # served over a local HTTP streaming server and opened in the OS
+          # default player (VLC/browser); the reviewed GStreamer runtime is
+          # still bundled beside the exe for gst-inspect capability detection
+          # and a future dynamic-loading / delay-load build
+          # (docs/video-runtime-packaging.md).
+          cargo build --release --target ${{ matrix.target }} --features ${{ matrix.features }} --example boru
 
       - name: Fetch GStreamer MSVC runtime (Windows)
         if: runner.os == 'Windows'

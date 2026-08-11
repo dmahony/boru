@@ -6675,10 +6675,19 @@ impl IcedChat {
                 iced::Task::none()
             }
             AppMessage::StreamUrl(url) => {
-                self.push_system(format!(
-                    "Stream ready: {url}\nPaste this URL into VLC or your browser to watch."
-                ));
-                iced::Task::none()
+                self.push_system(Self::external_stream_hint(&url));
+                // Open the stream in the OS default player (VLC/browser).
+                // Non-fatal: the hint above carries the URL so the user can
+                // paste it manually if no default handler is registered.
+                let url2 = url.clone();
+                iced::Task::perform(
+                    async move {
+                        if let Err(e) = open::that(&url2) {
+                            tracing::warn!(url = %url2, error = %e, "failed to open external stream URL");
+                        }
+                    },
+                    |_| AppMessage::Noop,
+                )
             }
             #[cfg(feature = "video-playback")]
             AppMessage::CloseInlineVideo => {
