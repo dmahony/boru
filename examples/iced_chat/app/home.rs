@@ -1515,12 +1515,17 @@ impl IcedChat {
         // content region; vertical page scrolling stays on gutter_scrollable.
         // The max-width only binds on very wide windows (e.g. 1920), where it
         // keeps the grid from stretching edge-to-edge.
+        // UI-HOME-11: the dashboard content container uses Shrink height so
+        // the cards + footer take only their natural height instead of
+        // stretching to fill the viewport — no giant empty white space on
+        // tall/maximized windows. The outer canvas keeps Fill height for
+        // scrollable bounds + horizontal centering.
         let canvas = container(
             container(col)
                 .padding(iced::Padding::from([SPACE_28, h_padding]).bottom(SPACE_32))
                 .width(Length::Fill)
                 .max_width(crate::design_tokens::DASHBOARD_MAX_WIDTH)
-                .height(Length::Fill),
+                .height(Length::Shrink),
         )
         .width(Length::Fill)
         .align_x(Alignment::Center)
