@@ -112,7 +112,7 @@ async fn run_host_session_inner(
         .await
         .map(|info| {
             info.addrs()
-                .map(|addr| format!("{:?}/{:?}", addr.addr(), addr.usage))
+                .map(|addr| format!("{:?}/{:?}", addr.addr(), addr.usage()))
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
