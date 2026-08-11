@@ -22,6 +22,12 @@ license = "MIT/Apache-2.0"
 authors = ["n0 team"]
 repository = "https://github.com/dmahony/boru"
 resolver = "2"
+# examples/ is auto-discovered by default, which would re-expose
+# examples/iced_chat/main.rs as a stray `iced_chat` example after the legacy
+# [[example]] boru was removed (BORU-CARGO-05). The boru bin is the single
+# authoritative startup path, so auto-discovery is disabled and every genuine
+# example is declared explicitly below.
+autoexamples = false
 # Plain `cargo run` must launch the Boru desktop app (the [[bin]] boru target).
 # `sim` (src/bin/sim.rs) is a separate simulator bin and stays reachable via
 # `cargo run --bin sim --features simulator`. (BORU-CARGO-03)
@@ -332,18 +338,13 @@ required-features = ["examples"]
 
 # Standard binary target for the Boru desktop app: plain `cargo run` launches it.
 # Reuses the exact same entry point as the legacy example (same main.rs code
-# path) — no startup logic duplicated. The [[example]] boru below is retained
-# until BORU-CARGO-05 removes it after equivalence is proven.
-# (BORU-CARGO-03)
+# path) — no startup logic duplicated. The old [[example]] boru was removed in
+# BORU-CARGO-05; the bin is the single authoritative startup path.
+# (BORU-CARGO-03/05)
 [[bin]]
 name = "boru"
 path = "examples/iced_chat/main.rs"
 required-features = ["gui"]
-
-[[example]]
-name = "boru"
-required-features = ["gui"]
-path = "examples/iced_chat/main.rs"
 
 [[example]]
 name = "video_backend_probe"
@@ -351,6 +352,17 @@ required-features = ["video-playback"]
 
 [[example]]
 name = "doctor"
+required-features = ["net"]
+
+# Auto-discovery is disabled (autoexamples = false, BORU-CARGO-05), so the two
+# previously auto-discovered demo harnesses are declared explicitly to keep
+# them listed as genuine examples.
+[[example]]
+name = "dht_harness"
+required-features = ["net"]
+
+[[example]]
+name = "test_addr"
 required-features = ["net"]
 
 [[example]]
