@@ -679,6 +679,31 @@ pub fn spawn_conversation_forwarder(
     net_tx: tokio::sync::mpsc::Sender<ConversationNetEvent>,
     safety: Option<std::sync::Arc<crate::public_room_safety::PublicRoomSafety>>,
 ) -> n0_future::task::JoinHandle<()> {
+    // ── BORU-DISC-10 routing guard ─────────────────────────────────────
+    // The FIRST classification in the gossip receive path: a discovery-topic
+    // receiver must NEVER be handed to the conversation forwarder. Discovery
+    // payloads are owned by DiscoveryService (see src/discovery_service.rs)
+    // and must never deserialize into chat state or reach ChatCallbacks /
+    // persistence / UI. If a discovery-topic receiver reaches this boundary
+    // (defense in depth against a mis-wired subscription), drain and drop it
+    // instead of forwarding any event as a conversation event.
+    if crate::discovery_topic::topic_kind(topic)
+        == crate::discovery_topic::TopicKind::Discovery
+    {
+        tracing::warn!(
+            topic = %topic.fmt_short(),
+            "refusing to forward discovery-topic events as conversation events"
+        );
+        return n0_future::task::spawn(async move {
+            use n0_future::StreamExt;
+            let mut receiver = receiver;
+            while receiver.next().await.is_some() {
+                // Intentionally dropped: discovery payloads never become
+                // conversation events.
+            }
+        });
+    }
+
     n0_future::task::spawn(async move {
         let (inner_tx, mut inner_rx) = tokio::sync::mpsc::channel(256);
         // Spawn the room-doc-aware forwarder to push raw NetEvents to inner_tx
@@ -1107,5 +1132,186 @@ mod tests {
         store.upsert(make_entry(topic, "grace", "Grace (updated)"));
         assert_eq!(store.len(), 1);
         assert_eq!(store.find(&topic).unwrap().name, "Grace (updated)");
+    }
+
+    // ── BORU-DISC-10: topic-kind routing guard ─────────────────────────
+
+    /// Deterministic test identity: a `SecretKey` seeded from a single byte
+    /// produces a valid Ed25519 public key.
+    fn test_key(byte: u8) -> iroh_base::PublicKey {
+        let mut seed = [0u8; 32];
+        seed[0] = byte;
+        let sk = iroh_base::SecretKey::from_bytes(&seed);
+        sk.public()
+    }
+
+    /// Build an offline (never-fed) gossip sender/receiver pair plus the
+    /// event sender half, mirroring the discovery_service tests.
+    fn offline_gossip() -> (
+        crate::api::GossipSender,
+        crate::api::GossipReceiver,
+        irpc::channel::mpsc::Sender<crate::api::Event>,
+    ) {
+        use irpc::channel::mpsc as irpc_mpsc;
+        let (cmd_tx, _cmd_rx) = irpc_mpsc::channel::<crate::api::Command>(64);
+        let (ev_tx, ev_rx) = irpc_mpsc::channel::<crate::api::Event>(64);
+        let sender = crate::api::GossipSender::new(cmd_tx);
+        let receiver = crate::api::GossipReceiver::new(ev_rx);
+        (sender, receiver, ev_tx)
+    }
+
+    /// Sign a chat `Message` into a wire payload, as a real peer would.
+    fn signed_chat_payload(sender: iroh_base::PublicKey, text: &str) -> bytes::Bytes {
+        let mut seed = [0u8; 32];
+        seed[..32].copy_from_slice(sender.as_bytes());
+        let sk = iroh_base::SecretKey::from_bytes(&seed);
+        crate::chat_core::SignedMessage::sign_and_encode(
+            &sk,
+            &crate::chat_core::Message::Message {
+                text: text.to_string(),
+            },
+        )
+        .expect("sign chat payload")
+    }
+
+    /// A payload broadcast on the internal DISCOVERY topic must NEVER reach
+    /// conversation handling: `spawn_conversation_forwarder` classifies the
+    /// topic first and drains the receiver instead of producing any
+    /// [`ConversationNetEvent`].
+    #[tokio::test]
+    async fn discovery_topic_forwarder_never_reaches_conversation_handling() {
+        let topic = crate::discovery_topic::discovery_topic(
+            crate::public_room::PublicNetwork::Test,
+        );
+        assert_eq!(
+            crate::discovery_topic::topic_kind(topic),
+            crate::discovery_topic::TopicKind::Discovery
+        );
+
+        let (sender, receiver, ev_tx) = offline_gossip();
+        let metadata_doc = crate::room_docs::create_metadata_doc(
+            topic,
+            &sender,
+            crate::room_docs::RoomMetadata::empty(),
+        )
+        .await
+        .expect("metadata doc");
+        let roster_doc = crate::room_docs::create_roster_doc(
+            topic,
+            &sender,
+            "local".to_string(),
+            "Local".to_string(),
+        )
+        .await
+        .expect("roster doc");
+
+        let (net_tx, mut net_rx) = tokio::sync::mpsc::channel::<ConversationNetEvent>(16);
+        let _handle = spawn_conversation_forwarder(
+            topic,
+            metadata_doc,
+            roster_doc,
+            receiver,
+            net_tx,
+            None,
+        );
+
+        // Feed a VALID chat payload on the discovery topic. If the guard
+        // were missing, this would deserialize and reach ChatCallbacks.
+        let peer = test_key(0xAB);
+        let payload = signed_chat_payload(peer, "hello from discovery");
+        ev_tx
+            .send(crate::api::Event::Received(crate::api::Message {
+                content: payload,
+                scope: crate::proto::DeliveryScope::Neighbors,
+                delivered_from: peer,
+            }))
+            .await
+            .expect("send discovery event");
+
+        // Neighbor lifecycle events are also discovery-owned; they must not
+        // become conversation events either.
+        let peer_endpoint: iroh_base::EndpointId = test_key(0xAC).into();
+        ev_tx
+            .send(crate::api::Event::NeighborUp(peer_endpoint))
+            .await
+            .expect("send neighbor-up");
+
+        // Nothing may arrive on the conversation channel. The guard drains
+        // the discovery receiver and never touches net_tx, so the channel
+        // either closes with nothing sent (Ok(None)) or times out (Err) —
+        // both prove the payload never reached conversation handling. The
+        // only failure is Ok(Some(_)): a ConversationNetEvent was produced.
+        let arrived = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            net_rx.recv(),
+        )
+        .await;
+        assert!(
+            !matches!(arrived, Ok(Some(_))),
+            "discovery-topic payload reached conversation handling: {arrived:?}"
+        );
+    }
+
+    /// Positive control: a normal CONVERSATION topic still flows through the
+    /// same forwarder unchanged — the guard only blocks Discovery topics.
+    #[tokio::test]
+    async fn conversation_topic_forwarder_still_forwards_chat() {
+        let topic = TopicId::from_bytes([0x77; 32]);
+        assert_eq!(
+            crate::discovery_topic::topic_kind(topic),
+            crate::discovery_topic::TopicKind::Conversation
+        );
+
+        let (sender, receiver, ev_tx) = offline_gossip();
+        let metadata_doc = crate::room_docs::create_metadata_doc(
+            topic,
+            &sender,
+            crate::room_docs::RoomMetadata::empty(),
+        )
+        .await
+        .expect("metadata doc");
+        let roster_doc = crate::room_docs::create_roster_doc(
+            topic,
+            &sender,
+            "local".to_string(),
+            "Local".to_string(),
+        )
+        .await
+        .expect("roster doc");
+
+        let (net_tx, mut net_rx) = tokio::sync::mpsc::channel::<ConversationNetEvent>(16);
+        let _handle = spawn_conversation_forwarder(
+            topic,
+            metadata_doc,
+            roster_doc,
+            receiver,
+            net_tx,
+            None,
+        );
+
+        let peer = test_key(0xCD);
+        let payload = signed_chat_payload(peer, "hello conversation");
+        ev_tx
+            .send(crate::api::Event::Received(crate::api::Message {
+                content: payload,
+                scope: crate::proto::DeliveryScope::Neighbors,
+                delivered_from: peer,
+            }))
+            .await
+            .expect("send conversation event");
+
+        let conv_event = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            net_rx.recv(),
+        )
+        .await
+        .expect("timed out waiting for conversation event")
+        .expect("channel closed before event");
+        assert_eq!(conv_event.topic, topic);
+        assert!(
+            matches!(conv_event.event, crate::chat_core::NetEvent::Message { .. }),
+            "expected a Message NetEvent, got {:?}",
+            conv_event.event
+        );
     }
 }

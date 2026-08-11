@@ -83,6 +83,61 @@ pub fn discovery_topic_with_version(network: PublicNetwork, version: u8) -> Topi
     TopicId::from_bytes(*hasher.finalize().as_bytes())
 }
 
+// ---------------------------------------------------------------------------
+// Topic-kind classification (BORU-DISC-10 routing guard)
+// ---------------------------------------------------------------------------
+
+/// Classification of a gossip topic in the receive path.
+///
+/// This is the FIRST classification applied to an inbound gossip event: the
+/// app must know whether an event came from the internal discovery topic or
+/// from a conversation topic BEFORE deserializing it into high-level chat
+/// state (the Phase-4 routing guard from the discovery refactor).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TopicKind {
+    /// The internal discovery gossip topic — networking infrastructure only.
+    ///
+    /// Payloads on this topic are handled exclusively by
+    /// [`DiscoveryService`](crate::discovery_service::DiscoveryService);
+    /// they must never reach chat persistence, rendering, or unread state.
+    Discovery,
+    /// Any conversation topic: direct, group, or public room (including the
+    /// canonical lobby during the transition).
+    Conversation,
+}
+
+/// Classify a gossip [`TopicId`] as Discovery or Conversation.
+///
+/// The classifier recognises the versioned internal discovery topic
+/// ([`discovery_topic`]) on every network. Everything else — direct topics,
+/// group topics, public-room topics, and the canonical lobby — is a
+/// Conversation. The classifier deliberately does **not** treat the stale
+/// MCP lobby literal (`mcp_server.rs` `b"iroh-gossip-chat/default-lobby/v1"`)
+/// as canonical: that hash is not the discovery topic and must never be
+/// routed as discovery infrastructure.
+pub fn topic_kind(topic: TopicId) -> TopicKind {
+    if is_discovery_topic(topic) {
+        TopicKind::Discovery
+    } else {
+        TopicKind::Conversation
+    }
+}
+
+/// Whether `topic` is the internal discovery gossip topic for any network.
+///
+/// Equivalent to `topic_kind(topic) == TopicKind::Discovery`; provided as a
+/// convenience for guard sites that only need the boolean.
+pub fn is_discovery_topic(topic: TopicId) -> bool {
+    topic == BORU_DISCOVERY_TOPIC_V1
+        || [
+            PublicNetwork::Mainnet,
+            PublicNetwork::Development,
+            PublicNetwork::Test,
+        ]
+        .iter()
+        .any(|network| discovery_topic(*network) == topic)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,5 +315,69 @@ mod tests {
             dir_topic,
             "discovery topic must differ from the directory topic"
         );
+    }
+
+    // ── Topic-kind classification (BORU-DISC-10 routing guard) ────────
+
+    /// The discovery topic for every network classifies as Discovery.
+    #[test]
+    fn topic_kind_classifies_discovery_topics() {
+        for network in [
+            PublicNetwork::Mainnet,
+            PublicNetwork::Development,
+            PublicNetwork::Test,
+        ] {
+            let topic = discovery_topic(network);
+            assert_eq!(topic_kind(topic), TopicKind::Discovery, "{network:?}");
+            assert!(is_discovery_topic(topic), "{network:?}");
+        }
+    }
+
+    /// The hard-coded `BORU_DISCOVERY_TOPIC_V1` const classifies as
+    /// Discovery (it equals the mainnet derivation).
+    #[test]
+    fn topic_kind_classifies_boru_discovery_topic_v1() {
+        assert_eq!(topic_kind(BORU_DISCOVERY_TOPIC_V1), TopicKind::Discovery);
+        assert!(is_discovery_topic(BORU_DISCOVERY_TOPIC_V1));
+    }
+
+    /// Arbitrary conversation topics (direct/group/public rooms) classify
+    /// as Conversation, never Discovery.
+    #[test]
+    fn topic_kind_classifies_conversation_topics() {
+        for seed in 0u8..=8 {
+            let topic = TopicId::from_bytes([seed; 32]);
+            assert_eq!(topic_kind(topic), TopicKind::Conversation, "{seed}");
+            assert!(!is_discovery_topic(topic), "{seed}");
+        }
+    }
+
+    /// The canonical public-lobby topic is a Conversation during the
+    /// transition — it is not the discovery topic.
+    #[test]
+    fn topic_kind_lobby_is_conversation() {
+        for network in [
+            PublicNetwork::Mainnet,
+            PublicNetwork::Development,
+            PublicNetwork::Test,
+        ] {
+            let lobby = crate::topic_derivation::public_room_topic(
+                network.network_byte(),
+                "public-lobby",
+                1,
+            );
+            assert_eq!(topic_kind(lobby), TopicKind::Conversation, "{network:?}");
+            assert!(!is_discovery_topic(lobby), "{network:?}");
+        }
+    }
+
+    /// Direct (deterministic pairwise) topics classify as Conversation.
+    #[test]
+    fn topic_kind_direct_topic_is_conversation() {
+        let a = iroh_base::SecretKey::generate().public();
+        let b = iroh_base::SecretKey::generate().public();
+        let topic = crate::contact::direct_topic(&a, &b);
+        assert_eq!(topic_kind(topic), TopicKind::Conversation);
+        assert!(!is_discovery_topic(topic));
     }
 }

@@ -4787,6 +4787,23 @@ impl IcedChat {
 
             AppMessage::NetEvent(conv_event) => {
                 let _timer = PerfTracker::timer("net_event", format!("topic={}", conv_event.topic));
+                // ── BORU-DISC-10 defensive routing guard ────────────────
+                // The internal discovery topic is owned by DiscoveryService
+                // (joined at startup in main.rs). Discovery payloads must
+                // NEVER reach conversation handling: no touch_and_bump, no
+                // ConversationLive creation, no preview/unread, no
+                // persistence, no rendering. This is the GUI-bridge
+                // backstop; the primary guard lives at the forwarder-spawn
+                // boundary (spawn_conversation_forwarder).
+                if boru_core::discovery_topic::topic_kind(conv_event.topic)
+                    == boru_core::discovery_topic::TopicKind::Discovery
+                {
+                    tracing::warn!(
+                        topic = %conv_event.topic,
+                        "dropping discovery-topic NetEvent before conversation handling"
+                    );
+                    return iced::Task::none();
+                }
                 let topic = conv_event.topic;
                 let event = conv_event.event;
                 // Only bump conversation to the top of the sidebar when there
