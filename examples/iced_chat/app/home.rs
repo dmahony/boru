@@ -909,7 +909,7 @@ impl IcedChat {
         //
         // CONN-02: the card's responsive tier must respond to the card's
         // REAL container width, not the window-derived dashboard width.
-        // With the right rail open the card occupies FillPortion(5) of
+        // With the right rail open the card occupies FillPortion(9) of
         // (content_width − 24); with the rail stacked it spans the full
         // content width. iced has no container queries, so the width is
         // derived here from the same layout rules the grid below builds
@@ -1422,13 +1422,13 @@ impl IcedChat {
             Row::new()
                 .push(
                     container(left_col)
-                        .width(Length::FillPortion(5))
+                        .width(Length::FillPortion(9))
                         .height(Length::Shrink),
                 )
                 .push(Space::new().width(Length::Fixed(SPACE_24)))
                 .push(
                     container(right_col)
-                        .width(Length::FillPortion(3))
+                        .width(Length::FillPortion(5))
                         .height(Length::Shrink),
                 )
                 .spacing(0)
