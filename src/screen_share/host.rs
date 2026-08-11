@@ -100,8 +100,30 @@ async fn run_host_session_inner(
         .await
         .map(|info| iroh::EndpointAddr::from_parts(info.id(), info.into_addrs().map(|a| a.into_addr())))
         .unwrap_or_else(|| iroh::EndpointAddr::new(peer));
-    let connection = match endpoint.connect(addr, SCREEN_SHARE_ALPN).await {
-        Ok(connection) => connection,
+    // Screen-share media streams cannot tolerate noq's post-handshake
+    // multipath/NAT-traversal path transitions (observed: negotiation and
+    // control flow fine, then STREAM data is accepted by the QUIC send
+    // buffer but never transmitted). Pin this connection to the single path
+    // that established it via the vendored `single_path()` transport config
+    // (patched/iroh/iroh/src/endpoint/quic.rs).
+    let transport_config = iroh::endpoint::QuicTransportConfig::builder()
+        .single_path()
+        .build();
+    let connection = match endpoint
+        .connect_with_opts(
+            addr,
+            SCREEN_SHARE_ALPN,
+            iroh::endpoint::ConnectOptions::new().with_transport_config(transport_config),
+        )
+        .await
+    {
+        Ok(connecting) => match connecting.await {
+            Ok(connection) => connection,
+            Err(error) => {
+                let _ = events.send(SessionEvent::Rejected { session_id, reason: error.to_string() }).await;
+                return;
+            }
+        },
         Err(error) => {
             let _ = events.send(SessionEvent::Rejected { session_id, reason: error.to_string() }).await;
             return;
@@ -116,7 +138,12 @@ async fn run_host_session_inner(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    tracing::info!(remote_addrs = ?remote_addrs, "screen-share: host connected to viewer");
+    let conn_paths: Vec<String> = connection
+        .paths()
+        .iter()
+        .map(|path| format!("{}/selected={}", path.remote_addr(), path.is_selected()))
+        .collect();
+    tracing::info!(remote_addrs = ?remote_addrs, paths = ?conn_paths, "screen-share: host connected to viewer (single-path transport)");
     let transport = match QuicScreenTransport::new(connection.clone(), *session_id.as_bytes()) {
         Ok(transport) => transport,
         Err(error) => {
@@ -263,6 +290,12 @@ async fn run_host_session_inner(
                             Ok(encoded) => {
                                 if encoded.sequence == 0 {
                                     tracing::info!(bytes = encoded.bytes.len(), "screen-share: host encoded first frame");
+                                    let first_paths: Vec<String> = connection
+                                        .paths()
+                                        .iter()
+                                        .map(|path| format!("{}/selected={}", path.remote_addr(), path.is_selected()))
+                                        .collect();
+                                    tracing::info!(paths = ?first_paths, "screen-share: host streaming paths at frame 0");
                                 }
                                 let send_started = std::time::Instant::now();
                                 let sent = transport.send_frame(&encoded).await;

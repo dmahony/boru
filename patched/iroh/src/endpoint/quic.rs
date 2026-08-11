@@ -546,6 +546,35 @@ impl QuicTransportConfigBuilder {
         self
     }
 
+    /// Boru workaround: force the connection to remain on the single path
+    /// used to establish it — no multipath, no NAT-traversal hole-punching,
+    /// no server-side handshake migration.
+    ///
+    /// Screen-share media streams cannot tolerate the post-handshake
+    /// path-transition state a multipath connection can get stuck in
+    /// (observed: negotiation and control flow fine, then STREAM data is
+    /// accepted by the QUIC send buffer but never transmitted). A stable
+    /// single path (direct LAN or relay) is preferable to a theoretically
+    /// better route that wedges the transport. The public setters refuse
+    /// these low values (they enforce recommended minima), so this bypasses
+    /// them and sets the underlying noq config directly.
+    ///
+    /// NB: `max_concurrent_multipath_paths` must be `0` (= disabled,
+    /// `NonZeroU32::new(0)` -> `None` so the peer's `initial_max_path_id`
+    /// is ignored and multipath is NOT negotiated). A value of `1` would
+    /// ENABLE multipath with a single path, which wedges the handshake
+    /// (observed 2026-08-11: connect never completes, viewer never gets the
+    /// router.accept, host Rejected with "timed out" after ~30s).
+    pub fn single_path(mut self) -> Self {
+        // Disable the Multipath Extension entirely: only the initial path may exist.
+        self.0.max_concurrent_multipath_paths(0);
+        // Do not negotiate additional n0 NAT-traversal paths.
+        self.0.max_remote_nat_traversal_addresses(0);
+        // Do not permit server address migration during the handshake (RFC 9000 default).
+        self.0.server_handshake_migration(false);
+        self
+    }
+
     /// Configures qlog capturing by setting a [`QlogFactory`].
     ///
     /// This assigns a [`QlogFactory`] that produces qlog capture configurations for
