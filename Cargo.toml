@@ -22,6 +22,10 @@ license = "MIT/Apache-2.0"
 authors = ["n0 team"]
 repository = "https://github.com/dmahony/boru"
 resolver = "2"
+# Plain `cargo run` must launch the Boru desktop app (the [[bin]] boru target).
+# `sim` (src/bin/sim.rs) is a separate simulator bin and stays reachable via
+# `cargo run --bin sim --features simulator`. (BORU-CARGO-03)
+default-run = "boru"
 
 # Sadly this also needs to be updated in .github/workflows/ci.yml
 rust-version = "1.91"
@@ -242,7 +246,10 @@ harness = false
 required-features = ["net"]
 
 [features]
-default = ["net", "metrics"]
+# gui is in default so that plain `cargo run` (no --example/--features flags)
+# builds and launches the Boru desktop app via the [[bin]] boru target.
+# (BORU-CARGO-03)
+default = ["net", "metrics", "gui"]
 net = [
     "dep:irpc",
     "dep:iroh",
@@ -275,7 +282,7 @@ simulator = [
 ]
 metrics = ["iroh-metrics/metrics"]
 examples = ["net"]
-gui = ["net", "dep:iced", "dep:iced_aw", "dep:iced_moving_picture", "dep:tokio", "dep:rfd", "dep:tracing-subscriber", "dep:tracing-appender", "dep:mimalloc", "dep:rayon", "dep:profiling", "dep:rustc-hash", "dep:regex", "dep:open", "dep:url", "dep:reqwest", "dep:netstat2", "dep:sysinfo"]
+gui = ["net", "dep:iced", "dep:iced_aw", "dep:iced_moving_picture", "dep:tokio", "dep:rfd", "dep:tracing-subscriber", "dep:tracing-appender", "dep:mimalloc", "dep:rayon", "dep:profiling", "dep:rustc-hash", "dep:regex", "dep:open", "dep:url", "dep:reqwest", "dep:netstat2", "dep:sysinfo", "dep:clap"]
 video-playback = ["gui", "dep:iced_video_player"]
 terminal = ["gui", "dep:iced_term"]
 # Screen sharing is deliberately opt-in while the subsystem is integrated.
@@ -322,6 +329,16 @@ required-features = ["simulator"]
 [[example]]
 name = "setup"
 required-features = ["examples"]
+
+# Standard binary target for the Boru desktop app: plain `cargo run` launches it.
+# Reuses the exact same entry point as the legacy example (same main.rs code
+# path) — no startup logic duplicated. The [[example]] boru below is retained
+# until BORU-CARGO-05 removes it after equivalence is proven.
+# (BORU-CARGO-03)
+[[bin]]
+name = "boru"
+path = "examples/iced_chat/main.rs"
+required-features = ["gui"]
 
 [[example]]
 name = "boru"
