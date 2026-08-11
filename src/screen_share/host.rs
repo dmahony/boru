@@ -175,7 +175,10 @@ async fn run_host_session_inner(
     if encode_width == 0 || encode_height == 0 { return; }
     let mut config = CodecConfig { width: encode_width, height: encode_height, target_fps: capture_fps, ..CodecConfig::default() };
     let Ok(mut encoder) = OpenH264Encoder::new(config) else { return };
+    tracing::info!("screen-share: host initializing remote-input backend");
+    let backend_started = std::time::Instant::now();
     let mut backend = create_platform_backend((capture_width, capture_height)).await;
+    tracing::info!(elapsed_ms = backend_started.elapsed().as_millis() as u64, "screen-share: host remote-input backend ready");
     let mut interval = tokio::time::interval(Duration::from_micros(1_000_000 / capture_fps as u64));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -247,8 +250,17 @@ async fn run_host_session_inner(
                             config = new_config;
                         }
                         match encoder.encode(&frame) {
-                            Ok(encoded) => { if transport.send_frame(&encoded).await.is_err() { return; } }
-                            Err(_) => {}
+                            Ok(encoded) => {
+                                if encoded.sequence == 0 {
+                                    tracing::info!("screen-share: host sent first frame");
+                                } else if encoded.sequence % 150 == 0 {
+                                    tracing::info!(sequence = encoded.sequence, "screen-share: host streaming");
+                                }
+                                if transport.send_frame(&encoded).await.is_err() { return; }
+                            }
+                            Err(error) => {
+                                tracing::warn!(error = %error, "screen-share: host encode failed");
+                            }
                         }
                     }
                     Ok(None) => {}
