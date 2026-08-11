@@ -235,17 +235,23 @@ mod tests {
         let mut encoder = OpenH264Encoder::new(cfg).unwrap();
         let mut decoder = OpenH264Decoder::new(cfg).unwrap();
         // Identical pixels on every tick = static screen (timestamps still
-        // advance, exactly like the X11 capture source does).
+        // advance by one frame period, exactly like the X11 capture source).
         let first = encoder.encode(&pattern(64, 48, 0)).unwrap();
         assert!(first.keyframe && !first.bytes.is_empty());
-        let mut decoded = 0;
+        assert!(
+            decoder.decode(&first).unwrap().is_some(),
+            "keyframe must decode"
+        );
+        let mut decoded = 1;
         for tick in 1..=5 {
-            let encoded = encoder.encode(&pattern(64, 48, tick)).unwrap();
+            let encoded = encoder
+                .encode(&pattern(64, 48, tick * 33_333))
+                .unwrap_or_else(|e| panic!("tick {tick}: {e}"));
             assert!(!encoded.bytes.is_empty(), "static frame {tick} must not be skipped");
             if decoder.decode(&encoded).unwrap().is_some() {
                 decoded += 1;
             }
         }
-        assert_eq!(decoded, 5, "every static frame must decode");
+        assert_eq!(decoded, 6, "every static frame must decode");
     }
 }
