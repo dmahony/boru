@@ -4,9 +4,9 @@
 //! deliberately only dispatch existing application messages; the normal
 //! update path owns the dialogs and file-picker flow.
 //!
-//! Visual notes (Figure 3 target):
-//! - Icons match the mockup semantics: chat bubble (public room), two people
-//!   (group chat), person + plus (add friend), upload arrow (share files).
+//! Visual notes (BORU-HOME-07 target):
+//! - Icons match their actions: person (start chat), two people
+//!   (create group), chat bubble (create public room), terminal (create tunnel).
 //! - Labels use the card-title role at the FONTS-07 quick-action size (IBM
 //!   Plex Sans SemiBold 17); descriptions stay muted supporting text at the
 //!   FONTS-07 size (IBM Plex Sans Regular 14) and the plan's 1.45 line
@@ -55,28 +55,28 @@ pub(crate) struct QuickAction {
 
 const ACTIONS: &[QuickAction] = &[
     QuickAction {
+        icon: Icon::Friend,
+        label: "Start Chat",
+        description: "Find or start a direct conversation.",
+        message: AppMessage::OpenFriendRequests,
+    },
+    QuickAction {
+        icon: Icon::Users,
+        label: "Create Group",
+        description: "Start a private group conversation.",
+        message: AppMessage::ShowCreateGroupDialog,
+    },
+    QuickAction {
         icon: Icon::Chat,
         label: "Create Public Room",
         description: "Open a public room for anyone to join.",
         message: AppMessage::CreateNewRoom,
     },
     QuickAction {
-        icon: Icon::Users,
-        label: "Create Group Chat",
-        description: "Start a private group conversation.",
-        message: AppMessage::ShowCreateGroupDialog,
-    },
-    QuickAction {
-        icon: Icon::UserPlus,
-        label: "Add Friend",
-        description: "Connect with a friend by public key.",
-        message: AppMessage::OpenFriendRequests,
-    },
-    QuickAction {
-        icon: Icon::Upload,
-        label: "Share Files",
-        description: "Choose a file to share in a chat.",
-        message: AppMessage::AttachPressed,
+        icon: Icon::Terminal,
+        label: "Create Tunnel",
+        description: "Create a tunnel to share connectivity.",
+        message: AppMessage::ShowCreateTunnelDialog,
     },
 ];
 
@@ -320,21 +320,21 @@ mod tests {
                 .map(|action| action.label)
                 .collect::<Vec<_>>(),
             vec![
+                "Start Chat",
+                "Create Group",
                 "Create Public Room",
-                "Create Group Chat",
-                "Add Friend",
-                "Share Files",
+                "Create Tunnel",
             ]
         );
     }
 
     #[test]
     fn action_icons_match_figure3_semantics() {
-        // Figure 3: chat bubble, two people, person + plus, upload arrow.
-        assert_eq!(ACTIONS[0].icon, crate::icon_system::Icon::Chat);
+        // BORU-HOME-07: person, two people, chat bubble, terminal.
+        assert_eq!(ACTIONS[0].icon, crate::icon_system::Icon::Friend);
         assert_eq!(ACTIONS[1].icon, crate::icon_system::Icon::Users);
-        assert_eq!(ACTIONS[2].icon, crate::icon_system::Icon::UserPlus);
-        assert_eq!(ACTIONS[3].icon, crate::icon_system::Icon::Upload);
+        assert_eq!(ACTIONS[2].icon, crate::icon_system::Icon::Chat);
+        assert_eq!(ACTIONS[3].icon, crate::icon_system::Icon::Terminal);
     }
 
     #[test]
@@ -346,10 +346,10 @@ mod tests {
                 .map(|action| action.description)
                 .collect::<Vec<_>>(),
             vec![
-                "Open a public room for anyone to join.",
+                "Find or start a direct conversation.",
                 "Start a private group conversation.",
-                "Connect with a friend by public key.",
-                "Choose a file to share in a chat.",
+                "Open a public room for anyone to join.",
+                "Create a tunnel to share connectivity.",
             ]
         );
     }
@@ -357,13 +357,16 @@ mod tests {
     #[test]
     fn action_messages_dispatch_to_expected_flows() {
         use crate::app::AppMessage;
-        assert!(matches!(ACTIONS[0].message, AppMessage::CreateNewRoom));
+        assert!(matches!(ACTIONS[0].message, AppMessage::OpenFriendRequests));
         assert!(matches!(
             ACTIONS[1].message,
             AppMessage::ShowCreateGroupDialog
         ));
-        assert!(matches!(ACTIONS[2].message, AppMessage::OpenFriendRequests));
-        assert!(matches!(ACTIONS[3].message, AppMessage::AttachPressed));
+        assert!(matches!(ACTIONS[2].message, AppMessage::CreateNewRoom));
+        assert!(matches!(
+            ACTIONS[3].message,
+            AppMessage::ShowCreateTunnelDialog
+        ));
     }
 
     #[test]
