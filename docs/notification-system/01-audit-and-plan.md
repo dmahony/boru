@@ -142,7 +142,7 @@ The subscription stream uses `iced::Subscription::run_with` with an async unfold
 
 The core library targets all platforms supported by Rust + iroh.
 
-The GUI (`iced_chat` example) targets:
+The GUI (`boru` binary) targets:
 - **Linux** — X11 + Wayland (via `iced` features)
 - **macOS** — (via `iced`, but not tested/configured)
 - **Windows** — (via `iced`, but not tested/configured)

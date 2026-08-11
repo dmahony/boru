@@ -11,7 +11,7 @@ Baseline: `cargo build --bin boru --features gui,video-playback,terminal` — se
 
 | Concern | Location |
 |---|---|
-| Boru example entry | `examples/iced_chat/main.rs`; registered in `Cargo.toml:227-235` (`[[example]] name = "boru", required-features = ["gui"]`; `gui` feature at `Cargo.toml:208`, `video-playback = ["gui", "dep:iced_video_player"]` at `:209`, `terminal = ["gui", "dep:iced_term"]` at `:210`) |
+| Boru binary entry | `examples/iced_chat/main.rs`; registered in `Cargo.toml:344-347` (`[[bin]] name = "boru", required-features = ["gui"]`; `gui` feature at `Cargo.toml:291`, `video-playback = ["gui", "dep:iced_video_player"]` at `:292`, `terminal = ["gui", "dep:iced_term"]` at `:293`) |
 | App state + messages + chat rendering | `examples/iced_chat/app.rs` (43,565 lines) |
 | Download/video card renderer (stateless) | `examples/iced_chat/download_progress_view.rs` (980 lines) |
 | Design system | `examples/iced_chat/design_tokens.rs`, `fonts.rs`, `card_shell.rs`, `icon_system.rs`, `ui_components.rs` |

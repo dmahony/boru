@@ -5,7 +5,7 @@ settings files. This document covers all available options.
 
 ## CLI Flags
 
-### iced_chat (GUI)
+### boru (GUI)
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|

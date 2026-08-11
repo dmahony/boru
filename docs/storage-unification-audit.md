@@ -89,7 +89,7 @@ Added `source_path` to `file_objects`.
 
 ## 3. Data Flow: Read/Write Locations
 
-### Startup sequence (iced_chat example)
+### Startup sequence (boru GUI)
 1. Load `settings.json` → iced `AppSettings` (defaults if missing)
 2. Load `friends.json` → `FriendsStore`
 3. Load `friend_requests.json` → `FriendRequestStore`
