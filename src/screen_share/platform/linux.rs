@@ -972,32 +972,44 @@ impl X11Capture {
     pub fn connect() -> Result<Self, ScreenShareError> {
         let (conn, screen_num) = x11rb::connect(None)
             .map_err(|e| ScreenShareError::new(format!("X11 connect failed: {e}")))?;
-        let setup = conn.setup();
-        let screen = &setup.roots[screen_num];
-        let root = screen.root;
-        let depth = screen.root_depth;
-        if !matches!(depth, 24 | 32) {
-            return Err(ScreenShareError::new(format!(
-                "unsupported X11 root depth {depth} (need a 24 or 32-bit visual)"
-            )));
-        }
-        let visual = screen
-            .allowed_depths
-            .iter()
-            .flat_map(|d| d.visuals.iter())
-            .find(|v| v.visual_id == screen.root_visual)
-            .ok_or_else(|| ScreenShareError::new("X11 root visual not found"))?;
-        let lsb_first = setup.image_byte_order == ImageOrder::LSB_FIRST;
+        // Copy everything out of the borrowed setup/screen/visual data before
+        // moving `conn` into the struct (the setup borrows the connection).
+        let (root, width, height, depth, lsb_first, red_mask, green_mask, blue_mask) = {
+            let setup = conn.setup();
+            let screen = &setup.roots[screen_num];
+            let depth = screen.root_depth;
+            if !matches!(depth, 24 | 32) {
+                return Err(ScreenShareError::new(format!(
+                    "unsupported X11 root depth {depth} (need a 24 or 32-bit visual)"
+                )));
+            }
+            let visual = screen
+                .allowed_depths
+                .iter()
+                .flat_map(|d| d.visuals.iter())
+                .find(|v| v.visual_id == screen.root_visual)
+                .ok_or_else(|| ScreenShareError::new("X11 root visual not found"))?;
+            (
+                screen.root,
+                screen.width_in_pixels as u32,
+                screen.height_in_pixels as u32,
+                depth,
+                setup.image_byte_order == ImageOrder::LSB_FIRST,
+                visual.red_mask,
+                visual.green_mask,
+                visual.blue_mask,
+            )
+        };
         Ok(Self {
             conn,
             root,
-            width: screen.width_in_pixels as u32,
-            height: screen.height_in_pixels as u32,
+            width,
+            height,
             depth,
             lsb_first,
-            red_mask: visual.red_mask,
-            green_mask: visual.green_mask,
-            blue_mask: visual.blue_mask,
+            red_mask,
+            green_mask,
+            blue_mask,
             timestamp_us: 0,
         })
     }
