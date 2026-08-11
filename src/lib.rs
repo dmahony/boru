@@ -120,6 +120,20 @@ pub mod discovery_topic;
 /// separation-from-chat tests that need the chat type are gated on `net`.
 pub mod discovery_message;
 
+/// Internal discovery subsystem — the service API for the hidden discovery
+/// gossip topic.
+///
+/// Owns the discovery join, publish, receive-path dispatch, and the
+/// in-process peer registry behind a dedicated service that never creates or
+/// touches conversation state
+/// ([`ConversationEntry`](crate::conversations::ConversationEntry) /
+/// [`ConversationStore`](crate::conversations::ConversationStore)) and never
+/// touches chat persistence or rendering. Receive-path logic is testable
+/// without any network (feed postcard bytes into
+/// [`DiscoveryService::handle_incoming`](crate::discovery_service::DiscoveryService::handle_incoming)).
+#[cfg(feature = "net")]
+pub mod discovery_service;
+
 /// Per-room discovery secrets — cryptographically random 32-byte keys
 /// that isolate private rooms on the DHT.
 ///
