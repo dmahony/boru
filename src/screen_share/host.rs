@@ -107,7 +107,16 @@ async fn run_host_session_inner(
             return;
         }
     };
-    tracing::info!(remote = ?connection.remote_address(), "screen-share: host connected to viewer");
+    let remote_addrs = endpoint
+        .remote_info(peer)
+        .await
+        .map(|info| {
+            info.addrs()
+                .map(|addr| format!("{:?}/{:?}", addr.addr(), addr.usage))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    tracing::info!(remote_addrs = ?remote_addrs, "screen-share: host connected to viewer");
     let transport = match QuicScreenTransport::new(connection.clone(), *session_id.as_bytes()) {
         Ok(transport) => transport,
         Err(error) => {
