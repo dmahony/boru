@@ -17987,7 +17987,7 @@ impl IcedChat {
             let protocol = protocol.clone();
             send_task = iced::Task::perform(
                 async move {
-                    protocol
+                    let result = protocol
                         .send_control(
                             session_id,
                             ControlMessage::Accept {
@@ -17996,7 +17996,9 @@ impl IcedChat {
                             },
                         )
                         .await
-                        .map_err(|e| e.to_string())
+                        .map_err(|e| e.to_string());
+                    tracing::info!(error = ?result.as_ref().err(), "screen-share: viewer Accept send result");
+                    result
                 },
                 |result| AppMessage::ScreenShareCommandFinished(result),
             );
@@ -18043,6 +18045,7 @@ impl IcedChat {
     #[cfg(feature = "screen-sharing")]
     /// Apply one protocol session event to the deterministic UI session state.
     fn apply_screen_share_event(&mut self, event: SessionEvent) {
+        tracing::info!(?event, "screen-share: session event received");
         match event {
             SessionEvent::Invitation {
                 session_id,

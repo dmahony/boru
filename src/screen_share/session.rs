@@ -111,10 +111,12 @@ impl SessionManager {
     pub fn apply_remote(&mut self, peer_id: iroh::PublicKey, message: ControlMessage, events: &tokio::sync::mpsc::Sender<SessionEvent>) -> Option<ControlMessage> {
         match message {
             ControlMessage::Hello(hello) => {
+                tracing::info!(session = ?hello.session_id, "screen-share: Hello received");
                 if hello.session_id == ScreenShareSessionId::zero() || self.sessions.len() >= MAX_ACTIVE_SESSIONS {
                     return Some(ControlMessage::Reject { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: hello.session_id, reason: "session is not available".into() });
                 }
                 if hello.host_id != peer_id {
+                    tracing::warn!(session = ?hello.session_id, "screen-share: Hello host_id does not match connected peer, rejecting");
                     return Some(ControlMessage::Reject {
                         version: SCREEN_SHARE_PROTOCOL_VERSION,
                         session_id: hello.session_id,
@@ -127,7 +129,7 @@ impl SessionManager {
                 }
                 self.sessions.insert(hello.session_id, Record { state: SessionState::Connecting, host_id: hello.host_id, peer_id: Some(peer_id), conversation_id: hello.conversation_id });
                 self.permissions.insert(hello.session_id, SessionPermissions::view_only(hello.session_id, peer_id));
-                let _ = events.try_send(SessionEvent::Invitation { session_id: hello.session_id, host_id: hello.host_id, conversation_id: hello.conversation_id, hello });
+                emit_event(events, SessionEvent::Invitation { session_id: hello.session_id, host_id: hello.host_id, conversation_id: hello.conversation_id, hello });
                 None
             }
             ControlMessage::Accept { session_id, .. } => {
@@ -138,7 +140,18 @@ impl SessionManager {
                 // when the Hello was applied). Checking host_id here would
                 // make the host's own session unreachable — the check can
                 // never pass because host_id is the host's own key.
-                if let Some(record) = self.sessions.get_mut(&session_id) { if record.peer_id == Some(peer_id) && matches!(record.state, SessionState::AwaitingAcceptance | SessionState::Connecting) { record.state = SessionState::Streaming; self.permissions.insert(session_id, SessionPermissions::view_only(session_id, peer_id)); let _ = events.try_send(SessionEvent::Accepted { session_id, peer_id }); } }
+                if let Some(record) = self.sessions.get_mut(&session_id) {
+                    if record.peer_id == Some(peer_id)
+                        && matches!(record.state, SessionState::AwaitingAcceptance | SessionState::Connecting)
+                    {
+                        record.state = SessionState::Streaming;
+                        self.permissions.insert(session_id, SessionPermissions::view_only(session_id, peer_id));
+                        tracing::info!(session = ?session_id, "screen-share: session entered Streaming");
+                        emit_event(events, SessionEvent::Accepted { session_id, peer_id });
+                    } else {
+                        tracing::warn!(session = ?session_id, "screen-share: Accept ignored (peer or state mismatch)");
+                    }
+                }
                 None
             }
             ControlMessage::RequestControl { session_id, capabilities, .. } => {
@@ -180,6 +193,15 @@ impl SessionManager {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScreenShareSession { id: ScreenShareSessionId, conversation_id: u64 }
 impl ScreenShareSession { pub fn new() -> Self { Self { id: ScreenShareSessionId::generate(), conversation_id: 0 } } pub fn for_conversation(conversation_id: u64) -> Self { Self { id: ScreenShareSessionId::generate(), conversation_id } } pub const fn id(&self) -> ScreenShareSessionId { self.id } pub const fn conversation_id(&self) -> u64 { self.conversation_id } }
+
+/// Push a session event to the app-facing channel, logging a warning if the
+/// bounded channel is full (a dropped Invitation/Accepted is a silent
+/// negotiation failure otherwise).
+fn emit_event(events: &tokio::sync::mpsc::Sender<SessionEvent>, event: SessionEvent) {
+    if let Err(tokio::sync::mpsc::error::SendError(ev)) = events.try_send(event) {
+        tracing::warn!(?ev, "screen-share: session event dropped (receiver full)");
+    }
+}
 
 #[cfg(test)]
 mod tests {

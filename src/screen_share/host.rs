@@ -125,9 +125,11 @@ pub async fn run_host_session(
         };
         if accepted { break; }
         if !matches!(manager.state(session_id), Some(SessionState::AwaitingAcceptance) | Some(SessionState::Connecting) | Some(SessionState::Streaming)) {
+            tracing::warn!(session = ?session_id, state = ?manager.state(session_id), "screen-share: host negotiation exited without streaming");
             return;
         }
     }
+    tracing::info!(session = ?session_id, "screen-share: host entering streaming");
     if stop.load(Ordering::Relaxed) {
         let _ = transport.send_control(&ControlMessage::EndSession { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id }).await;
         return;
@@ -207,6 +209,7 @@ pub async fn run_host_session(
                         // frame size differs from the initial config.
                         if frame.width != config.width || frame.height != config.height {
                             if frame.width == 0 || frame.height == 0 || frame.width % 2 != 0 || frame.height % 2 != 0 {
+                                tracing::warn!(width = frame.width, height = frame.height, "screen-share: capture produced invalid geometry, ending session");
                                 return;
                             }
                             let new_config = CodecConfig { width: frame.width, height: frame.height, ..config };
@@ -219,7 +222,10 @@ pub async fn run_host_session(
                         }
                     }
                     Ok(None) => {}
-                    Err(_) => return,
+                    Err(error) => {
+                        tracing::warn!(error = %error, "screen-share: capture failed, ending session");
+                        return;
+                    }
                 }
             }
         }
