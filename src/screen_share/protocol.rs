@@ -304,7 +304,7 @@ mod tests {
         assert!(encode(&bad_x).is_err());
     }
     #[test] fn malformed_and_unsupported_are_rejected() { assert!(decode(&[0xff]).is_err()); let mut message = hello(); message.version = 2; assert!(matches!(encode(&ControlMessage::Hello(message)), Err(ProtocolError::UnsupportedVersion { .. }))); }
-    #[test] fn accept_is_explicit() { let mut manager = SessionManager::default(); let id = ScreenShareSessionId::from_bytes([2; 16]); manager.start_invitation(id, hello().host_id, 7); assert_eq!(manager.state(id), Some(SessionState::AwaitingAcceptance)); }
+    #[test] fn accept_is_explicit() { let mut manager = SessionManager::default(); let id = ScreenShareSessionId::from_bytes([2; 16]); let host = hello().host_id; let viewer = iroh::SecretKey::generate().public(); manager.start_invitation(id, host, viewer, 7); assert_eq!(manager.state(id), Some(SessionState::AwaitingAcceptance)); }
 
     /// Full QUIC round trip: host dials the viewer, Hello → Invitation,
     /// viewer responds Accept on the inbound connection, host streams a

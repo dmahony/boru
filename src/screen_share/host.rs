@@ -56,7 +56,7 @@ pub async fn run_host_session(
 ) {
     let session_id = ScreenShareSessionId::generate();
     let mut manager = SessionManager::default();
-    manager.start_invitation(session_id, local_public, conversation_id);
+    manager.start_invitation(session_id, local_public, peer, conversation_id);
     // Select the capture source up front so the Hello advertises the ACTIVE
     // geometry: a real portal/PipeWire capture when available, otherwise the
     // synthetic test pattern (demo/CI path).

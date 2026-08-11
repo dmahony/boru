@@ -56,9 +56,11 @@ pub const MAX_ACTIVE_SESSIONS: usize = 8;
 
 impl SessionManager {
     /// Start a local invitation. The caller must send the corresponding Hello.
-    pub fn start_invitation(&mut self, id: ScreenShareSessionId, host_id: iroh::PublicKey, conversation_id: u64) {
+    /// `peer` is the invitee (the node the Hello will be dialed to); it is
+    /// recorded so the eventual remote Accept can be attributed to the invitee.
+    pub fn start_invitation(&mut self, id: ScreenShareSessionId, host_id: iroh::PublicKey, peer: iroh::PublicKey, conversation_id: u64) {
         if id == ScreenShareSessionId::zero() || self.sessions.len() >= MAX_ACTIVE_SESSIONS { return; }
-        self.sessions.insert(id, Record { state: SessionState::AwaitingAcceptance, host_id, peer_id: None, conversation_id });
+        self.sessions.insert(id, Record { state: SessionState::AwaitingAcceptance, host_id, peer_id: Some(peer), conversation_id });
     }
     /// Return a session state, if the session is known.
     pub fn state(&self, id: ScreenShareSessionId) -> Option<SessionState> { self.sessions.get(&id).map(|record| record.state) }
@@ -129,7 +131,14 @@ impl SessionManager {
                 None
             }
             ControlMessage::Accept { session_id, .. } => {
-                if let Some(record) = self.sessions.get_mut(&session_id) { if record.host_id == peer_id && matches!(record.state, SessionState::AwaitingAcceptance | SessionState::Connecting) { record.state = SessionState::Streaming; self.permissions.insert(session_id, SessionPermissions::view_only(session_id, peer_id)); let _ = events.try_send(SessionEvent::Accepted { session_id, peer_id }); } }
+                // The Accept always comes from the INVITEE (the peer the host
+                // dialed), never from the host itself. Validate against the
+                // recorded invitee: on the host record.peer_id holds the
+                // viewer; on the viewer record.peer_id holds the host (set
+                // when the Hello was applied). Checking host_id here would
+                // make the host's own session unreachable — the check can
+                // never pass because host_id is the host's own key.
+                if let Some(record) = self.sessions.get_mut(&session_id) { if record.peer_id == Some(peer_id) && matches!(record.state, SessionState::AwaitingAcceptance | SessionState::Connecting) { record.state = SessionState::Streaming; self.permissions.insert(session_id, SessionPermissions::view_only(session_id, peer_id)); let _ = events.try_send(SessionEvent::Accepted { session_id, peer_id }); } }
                 None
             }
             ControlMessage::RequestControl { session_id, capabilities, .. } => {
@@ -176,5 +185,78 @@ impl ScreenShareSession { pub fn new() -> Self { Self { id: ScreenShareSessionId
 mod tests {
     use super::*;
     #[test] fn accept_requires_pending_invitation() { let key = iroh::SecretKey::generate().public(); let mut manager = SessionManager::default(); let id = ScreenShareSessionId::generate(); assert!(manager.accept_invitation(id, key).is_none()); }
-    #[test] fn end_is_idempotent() { let key = iroh::SecretKey::generate().public(); let id = ScreenShareSessionId::generate(); let mut manager = SessionManager::default(); manager.start_invitation(id, key, 1); assert!(manager.end(id).is_some()); assert!(manager.end(id).is_none()); assert_eq!(manager.state(id), Some(SessionState::Ended)); }
+    #[test] fn end_is_idempotent() { let key = iroh::SecretKey::generate().public(); let peer = iroh::SecretKey::generate().public(); let id = ScreenShareSessionId::generate(); let mut manager = SessionManager::default(); manager.start_invitation(id, key, peer, 1); assert!(manager.end(id).is_some()); assert!(manager.end(id).is_none()); assert_eq!(manager.state(id), Some(SessionState::Ended)); }
+    /// Regression: the HOST's manager records the invitee and must transition
+    /// to Streaming when the INVITEE's Accept arrives. (The old check compared
+    /// against record.host_id — the host's own key — so the Accept was
+    /// silently ignored and the host never streamed: "waiting for viewer to
+    /// accept" forever, viewer sees nothing.)
+    #[test]
+    fn remote_accept_from_invitee_transitions_host_to_streaming() {
+        let host = iroh::SecretKey::generate().public();
+        let viewer = iroh::SecretKey::generate().public();
+        let mut manager = SessionManager::default();
+        let id = ScreenShareSessionId::generate();
+        manager.start_invitation(id, host, viewer, 7);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let response = manager.apply_remote(
+            viewer,
+            ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id },
+            &tx,
+        );
+        assert!(response.is_none());
+        assert_eq!(manager.state(id), Some(SessionState::Streaming));
+        match rx.try_recv() {
+            Ok(SessionEvent::Accepted { session_id, peer_id }) => {
+                assert_eq!(session_id, id);
+                assert_eq!(peer_id, viewer);
+            }
+            other => panic!("expected Accepted event, got {other:?}"),
+        }
+    }
+    /// Mirror case: the viewer's manager (record built from the remote Hello)
+    /// also accepts via the invitee check.
+    #[test]
+    fn remote_accept_from_invitee_transitions_viewer_to_streaming() {
+        let host = iroh::SecretKey::generate().public();
+        let mut manager = SessionManager::default();
+        let id = ScreenShareSessionId::generate();
+        let hello = crate::screen_share::protocol::Hello {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: id,
+            host_id: host,
+            conversation_id: 7,
+            codecs: vec!["h264".into()],
+            width: 640,
+            height: 360,
+            frame_rate: 15,
+            permission: Permission::ViewOnly,
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        manager.apply_remote(host, ControlMessage::Hello(hello), &tx);
+        assert_eq!(manager.state(id), Some(SessionState::Connecting));
+        manager.apply_remote(
+            host,
+            ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id },
+            &tx,
+        );
+        assert_eq!(manager.state(id), Some(SessionState::Streaming));
+    }
+    /// A stranger's Accept must never transition the session.
+    #[test]
+    fn remote_accept_from_wrong_peer_is_ignored() {
+        let host = iroh::SecretKey::generate().public();
+        let viewer = iroh::SecretKey::generate().public();
+        let stranger = iroh::SecretKey::generate().public();
+        let mut manager = SessionManager::default();
+        let id = ScreenShareSessionId::generate();
+        manager.start_invitation(id, host, viewer, 7);
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        manager.apply_remote(
+            stranger,
+            ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id },
+            &tx,
+        );
+        assert_eq!(manager.state(id), Some(SessionState::AwaitingAcceptance));
+    }
 }
