@@ -1,0 +1,46 @@
+BORU-HOME-12 regression QA OCR verification
+===========================================
+  OK   home: greeting                   -> Good evening
+  OK   home: connection hero            -> Your Boru node is online and ready
+  OK   home: Mesh Health                -> Mesh Health
+  OK   home: quick actions present      -> Start Chat
+  OK   home: Download Manager           -> Download Manager
+  OK   home: People & Activity          -> People & Activity
+  OK   home: Tunnels zero state         -> No active tunnels
+  action_start_chat            screen: FriendRequests
+  action_create_group          screen: ChatList
+  action_create_public_room    screen: ChatList
+  action_create_tunnel         screen: ChatList
+  OK   Start Chat -> Friends screen     -> Friend Requests
+  OK   Create Group -> dialog           -> Create Group Chat
+  OK   Create Public Room -> dialog     -> Create Public Room
+  OK   Create Tunnel -> dialog          -> Create Tunnel
+  OK   Download Manager access          -> Files I'm Sharing
+  OK   one online: Ada row              -> Ada
+  OK   two online: Bob row              -> Bob
+  OK   nav friends screen               -> Friend Requests
+  OK   nav settings screen              -> Settings
+
+[live updates]
+  OK   activity "came online" appended after flip
+  OK   activity "went offline" appended after flip
+
+[long-label geometry] t_a38b6ffa_qa_long_label_1280x800.png
+                               left=211 right=233
+BORU                           left=25 right=80
+>                              left=14 right=20
+CHATS                          left=31 right=67
+>                              left=14 right=20
+GROUPS                         left=31 right=76
+FRIENDS                        left=31 right=77
+3                              left=83 right=89
+Add                            left=25 right=51
+friend                         left=57 right=96
+by                             left=102 right=117
+key..                          left=123 right=148
+Avery                          left=53 right=92
+Longname                       left=98 right=170
+rows=166 words_past_right_edge=0
+
+[health] app alive at end of run
+[health] no panic in app log

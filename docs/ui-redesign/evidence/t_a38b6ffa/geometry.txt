@@ -1,0 +1,128 @@
+BORU-HOME-12 geometry (OCR word boxes; x-right must stay < window width)
+========================================================================
+
+[1600] t_a38b6ffa_home_1600x900.png
+token                  left    top     width  right
+BORU                   25      26      55     80
+>                      14      138     6      20
+CHATS                  31      137     36     67
+>                      14      174     6      20
+GROUPS                 31      173     45     76
+>                      14      210     6      20
+FRIENDS                31      209     46     77
+v                      12      243     10     22
+2                      91      240     6      97
+434610da               53      275     69     122
+bdceb475               53      321     70     123
+>                      14      362     6      20
+PUBLIC                 31      361     38     69
+ROOMS                  77      361     36     113
+rows=147 words_past_right_edge=0
+
+[1280] t_a38b6ffa_home_1280x800.png
+token                  left    top     width  right
+BORU                   25      26      55     80
+>                      14      138     6      20
+CHATS                  31      137     36     67
+>                      14      174     6      20
+GROUPS                 31      173     45     76
+>                      14      210     6      20
+FRIENDS                31      209     46     77
+v                      12      243     10     22
+2                      91      240     6      97
+434610da               53      275     69     122
+Chat                   143     275     30     173
+bdceb475               53      321     70     123
+Chat                   143     321     30     173
+>                      14      362     6      20
+rows=147 words_past_right_edge=0
+
+[1280] t_a38b6ffa_home_1280x800_scrolled.png
+token                  left    top     width  right
+BORU                   25      26      55     80
+>                      14      138     6      20
+CHATS                  31      137     36     67
+>                      14      174     6      20
+GROUPS                 31      173     45     76
+>                      14      210     6      20
+FRIENDS                31      209     46     77
+v                      12      243     10     22
+2                      91      240     6      97
+434610da               53      275     69     122
+Chat                   143     275     30     173
+bdceb475               53      321     70     123
+Chat                   143     321     30     173
+>                      14      362     6      20
+rows=145 words_past_right_edge=0
+
+[1024] t_a38b6ffa_home_1024x720.png
+token                  left    top     width  right
+BORU                   25      26      55     80
+8                      238     25      16     254
+>                      14      138     6      20
+cHaTs                  31      137     36     67
++                      264     137     12     276
+>                      14      174     6      20
+>                      14      210     6      20
+FRIENDS                31      209     46     77
+v                      12      243     10     22
+2                      91      240     6      97
+434610:                53      275     55     108
+Chat                   127     275     30     157
+—                      170     267     10     180
+Browse                 187     267     39     226
+rows=95 words_past_right_edge=0
+
+[1024] t_a38b6ffa_home_1024x720_scrolled.png
+token                  left    top     width  right
+BORU                   25      26      55     80
+8                      238     25      16     254
+Online                 78      93      36     114
+>                      14      138     6      20
+CHATS                  31      137     37     68
+>                      14      174     6      20
+GROUPS                 31      173     45     76
+>                      14      210     6      20
+FRIENDS                31      209     47     78
+v                      12      243     10     22
+2                      91      240     6      97
+@                      8       263     22     30
+Chat                   127     275     30     157
+Files                  237     267     32     269
+rows=91 words_past_right_edge=0
+
+[800] t_a38b6ffa_home_800x600.png
+token                  left    top     width  right
+BORU                   25      26      55     80
+8                      238     25      16     254
+>                      14      138     6      20
+CHATS                  31      137     36     67
+>                      14      174     6      20
+GROUPS                 31      173     45     76
+>                      14      210     6      20
+FRIENDS                31      209     46     77
+v                      12      243     10     22
+2                      91      240     6      97
+>                      14      362     6      20
+PUBLIC                 31      361     38     69
+ROOMS                  73      361     40     113
+>                      14      393     6      20
+rows=60 words_past_right_edge=0
+
+[800] t_a38b6ffa_home_800x600_scrolled.png
+token                  left    top     width  right
+BORU                   25      26      55     80
+8                      238     25      16     254
+Online                 78      93      36     114
+>                      14      138     6      20
+CHATS                  30      137     38     68
++                      263     136     13     276
+>                      14      174     6      20
+>                      14      210     6      20
+FRIENDS                31      209     47     78
+v                      12      243     10     22
+biscover               31      240     66     97
+2                      93      228     9      102
+@                      8       263     22     30
+Chat                   127     274     30     157
+rows=74 words_past_right_edge=0
