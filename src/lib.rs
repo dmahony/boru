@@ -107,6 +107,19 @@ pub mod topic_derivation;
 /// [`public_room`](crate::public_room).
 pub mod discovery_topic;
 
+/// Discovery protocol message types — Hello / Presence / PeerAdvertisement.
+///
+/// The payloads exchanged on the internal discovery topic
+/// ([`discovery_topic`](crate::discovery_topic)). A dedicated enum distinct
+/// from the chat [`Message`](crate::chat_core::Message) type, so discovery
+/// traffic can never be confused with chat payloads and chat payloads are
+/// never routed through the discovery topic.
+///
+/// Always available (no feature gate) so the wire format, roundtrips, and
+/// version gate mirror [`discovery_topic`](crate::discovery_topic); the
+/// separation-from-chat tests that need the chat type are gated on `net`.
+pub mod discovery_message;
+
 /// Per-room discovery secrets — cryptographically random 32-byte keys
 /// that isolate private rooms on the DHT.
 ///
