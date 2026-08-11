@@ -1,4 +1,5 @@
 //! Platform-specific screen-sharing backend modules.
+#![allow(missing_docs)]
 
 #[cfg(target_os = "windows")]
 use crate::screen_share::capture::ScreenCapture;
@@ -30,7 +31,10 @@ pub enum ActiveCapture {
 
 #[cfg(target_os = "windows")]
 impl ActiveCapture {
-    pub fn capture(&mut self) -> Result<Option<crate::screen_share::CapturedFrame>, crate::screen_share::ScreenShareError> {
+    pub fn capture(
+        &mut self,
+    ) -> Result<Option<crate::screen_share::CapturedFrame>, crate::screen_share::ScreenShareError>
+    {
         match self {
             Self::Graphics(capture, _) => capture.capture(),
             Self::TestPattern(capture, _) => capture.capture(),
@@ -41,7 +45,9 @@ impl ActiveCapture {
             Self::Graphics(_, dimensions) | Self::TestPattern(_, dimensions) => *dimensions,
         }
     }
-    pub fn is_test_pattern(&self) -> bool { matches!(self, Self::TestPattern(..)) }
+    pub fn is_test_pattern(&self) -> bool {
+        matches!(self, Self::TestPattern(..))
+    }
     pub fn backend_name(&self) -> &'static str {
         match self {
             Self::Graphics(..) => "windows-graphics-capture",
@@ -52,14 +58,25 @@ impl ActiveCapture {
 
 #[cfg(target_os = "macos")]
 impl ActiveCapture {
-    pub fn capture(&mut self) -> Result<Option<crate::screen_share::CapturedFrame>, crate::screen_share::ScreenShareError> {
-        match self { Self::TestPattern(capture, _) => capture.capture() }
+    pub fn capture(
+        &mut self,
+    ) -> Result<Option<crate::screen_share::CapturedFrame>, crate::screen_share::ScreenShareError>
+    {
+        match self {
+            Self::TestPattern(capture, _) => capture.capture(),
+        }
     }
     pub fn dimensions(&self) -> (u32, u32) {
-        match self { Self::TestPattern(_, dimensions) => *dimensions }
+        match self {
+            Self::TestPattern(_, dimensions) => *dimensions,
+        }
     }
-    pub fn is_test_pattern(&self) -> bool { matches!(self, Self::TestPattern(..)) }
-    pub fn backend_name(&self) -> &'static str { "macos-test-pattern" }
+    pub fn is_test_pattern(&self) -> bool {
+        matches!(self, Self::TestPattern(..))
+    }
+    pub fn backend_name(&self) -> &'static str {
+        "macos-test-pattern"
+    }
 }
 
 #[cfg(not(target_os = "linux"))]

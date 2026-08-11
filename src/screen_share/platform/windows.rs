@@ -16,18 +16,25 @@ use windows::Graphics::Capture::{
 use windows::Graphics::DirectX::{Direct3D11::IDirect3DDevice, DirectXPixelFormat};
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0};
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, D3D11_CREATE_DEVICE_BGRA_SUPPORT, ID3D11Device, ID3D11DeviceContext,
-    D3D11_SDK_VERSION,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_CPU_ACCESS_READ,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION,
+    D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
 };
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTOPRIMARY};
-use windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
 use windows::Win32::System::WinRT::Direct3D11::CreateDirect3D11DeviceFromDXGIDevice;
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
+use windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
 
 /// Lifecycle of a Windows Graphics Capture session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GraphicsCaptureState { Idle, Selecting, Streaming, Ending, Ended }
+pub enum GraphicsCaptureState {
+    Idle,
+    Selecting,
+    Streaming,
+    Ending,
+    Ended,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GraphicsCaptureEvent {
@@ -48,6 +55,8 @@ pub struct GraphicsCapture {
     session: Option<GraphicsCaptureSession>,
     device: Option<ID3D11Device>,
     context: Option<ID3D11DeviceContext>,
+    staging: Option<ID3D11Texture2D>,
+    staging_dimensions: Option<(u32, u32)>,
 }
 
 impl std::fmt::Debug for GraphicsCapture {
@@ -70,6 +79,8 @@ impl GraphicsCapture {
             session: None,
             device: None,
             context: None,
+            staging: None,
+            staging_dimensions: None,
         })
     }
 
@@ -116,7 +127,9 @@ impl GraphicsCapture {
             .Size()
             .map_err(|e| ScreenShareError::new(format!("capture item size: {e}")))?;
         if size.Width <= 0 || size.Height <= 0 {
-            return Err(ScreenShareError::new("primary monitor has no captureable area"));
+            return Err(ScreenShareError::new(
+                "primary monitor has no captureable area",
+            ));
         }
         let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
             &winrt_device,
@@ -137,13 +150,17 @@ impl GraphicsCapture {
         capture.session = Some(session);
         capture.device = Some(device);
         capture.context = Some(context);
-        capture.events.push_back(GraphicsCaptureEvent::SourceSelected);
+        capture
+            .events
+            .push_back(GraphicsCaptureEvent::SourceSelected);
         Ok(capture)
     }
 
     pub fn begin_selection(&mut self) -> Result<(), ScreenShareError> {
         if self.state != GraphicsCaptureState::Idle {
-            return Err(ScreenShareError::new("graphics capture session is already active"));
+            return Err(ScreenShareError::new(
+                "graphics capture session is already active",
+            ));
         }
         self.state = GraphicsCaptureState::Selecting;
         self.events.push_back(GraphicsCaptureEvent::PickerOpened);
@@ -151,7 +168,9 @@ impl GraphicsCapture {
     }
     pub fn source_selected(&mut self) -> Result<(), ScreenShareError> {
         if self.state != GraphicsCaptureState::Selecting {
-            return Err(ScreenShareError::new("graphics source was not being selected"));
+            return Err(ScreenShareError::new(
+                "graphics source was not being selected",
+            ));
         }
         self.state = GraphicsCaptureState::Streaming;
         self.events.push_back(GraphicsCaptureEvent::SourceSelected);
@@ -159,38 +178,114 @@ impl GraphicsCapture {
     }
     pub fn push_surface(&mut self, frame: CapturedFrame) -> Result<(), ScreenShareError> {
         if self.state != GraphicsCaptureState::Streaming {
-            return Err(ScreenShareError::new("graphics frame received outside streaming state"));
+            return Err(ScreenShareError::new(
+                "graphics frame received outside streaming state",
+            ));
         }
         self.sink.push(frame);
         Ok(())
     }
-    pub fn source_minimized(&mut self) { self.events.push_back(GraphicsCaptureEvent::SourceMinimized); }
+    pub fn source_minimized(&mut self) {
+        self.events.push_back(GraphicsCaptureEvent::SourceMinimized);
+    }
     pub fn close(&mut self) {
-        if let Some(pool) = self.pool.take() { let _ = pool.Close(); }
+        if let Some(pool) = self.pool.take() {
+            let _ = pool.Close();
+        }
         self.session.take();
         self.state = GraphicsCaptureState::Ended;
         self.events.push_back(GraphicsCaptureEvent::Ended);
     }
-    pub fn next_event(&mut self) -> Option<GraphicsCaptureEvent> { self.events.pop_front() }
-    pub fn counters(&self) -> (u64, u64, u64) { self.sink.counters() }
-    pub fn dimensions(&self) -> (u32, u32) { self.format.unwrap_or((640, 360)) }
-    pub fn state(&self) -> GraphicsCaptureState { self.state }
+    pub fn next_event(&mut self) -> Option<GraphicsCaptureEvent> {
+        self.events.pop_front()
+    }
+    pub fn counters(&self) -> (u64, u64, u64) {
+        self.sink.counters()
+    }
+    pub fn dimensions(&self) -> (u32, u32) {
+        self.format.unwrap_or((640, 360))
+    }
+    pub fn state(&self) -> GraphicsCaptureState {
+        self.state
+    }
 }
 
 impl ScreenCapture for GraphicsCapture {
     fn capture(&mut self) -> Result<Option<CapturedFrame>, ScreenShareError> {
-        if self.state != GraphicsCaptureState::Streaming { return Ok(None); }
+        if self.state != GraphicsCaptureState::Streaming {
+            return Ok(None);
+        }
         if let Some(pool) = &self.pool {
             if let Ok(frame) = pool.TryGetNextFrame() {
-                let size = frame.ContentSize().map_err(|e| ScreenShareError::new(format!("frame size: {e}")))?;
-                let timestamp = frame.SystemRelativeTime().map(|t| t.Duration as u64).unwrap_or(0);
-                // The GPU surface is intentionally retained through the common
-                // frame representation. A D3D11-aware encoder can consume this
-                // handle without a readback; CPU encoders can use the stored
-                // device/context to stage it before encoding.
-                let surface = frame.Surface().map_err(|e| ScreenShareError::new(format!("frame surface: {e}")))?;
-                let handle = surface.as_raw() as usize as u64;
-                return Ok(Some(CapturedFrame::gpu(timestamp, size.Width as u32, size.Height as u32, handle)));
+                let size = frame
+                    .ContentSize()
+                    .map_err(|e| ScreenShareError::new(format!("frame size: {e}")))?;
+                let timestamp = frame
+                    .SystemRelativeTime()
+                    .map(|t| t.Duration as u64 / 10)
+                    .unwrap_or(0);
+                let surface = frame
+                    .Surface()
+                    .map_err(|e| ScreenShareError::new(format!("frame surface: {e}")))?;
+                let texture: ID3D11Texture2D = surface
+                    .cast()
+                    .map_err(|e| ScreenShareError::new(format!("capture surface cast: {e}")))?;
+                let width = size.Width as u32;
+                let height = size.Height as u32;
+                let device = self
+                    .device
+                    .as_ref()
+                    .ok_or_else(|| ScreenShareError::new("capture device was released"))?;
+                let context = self
+                    .context
+                    .as_ref()
+                    .ok_or_else(|| ScreenShareError::new("capture context was released"))?;
+                if self.staging_dimensions != Some((width, height)) {
+                    let mut desc = D3D11_TEXTURE2D_DESC::default();
+                    unsafe {
+                        texture.GetDesc(&mut desc);
+                    }
+                    desc.Width = width;
+                    desc.Height = height;
+                    desc.Usage = D3D11_USAGE_STAGING;
+                    desc.BindFlags = 0;
+                    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+                    desc.MiscFlags = 0;
+                    let mut staging = None;
+                    unsafe { device.CreateTexture2D(&desc, None, Some(&mut staging)) }
+                        .map_err(|e| ScreenShareError::new(format!("staging texture: {e}")))?;
+                    self.staging = staging;
+                    self.staging_dimensions = Some((width, height));
+                }
+                let staging = self
+                    .staging
+                    .as_ref()
+                    .ok_or_else(|| ScreenShareError::new("staging texture was not created"))?;
+                unsafe {
+                    context.CopyResource(staging, &texture);
+                }
+                let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+                unsafe { context.Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)) }
+                    .map_err(|e| ScreenShareError::new(format!("map capture frame: {e}")))?;
+                let row_bytes = width as usize * 4;
+                let mut pixels = vec![0u8; row_bytes * height as usize];
+                unsafe {
+                    for row in 0..height as usize {
+                        let source =
+                            (mapped.pData as *const u8).add(row * mapped.RowPitch as usize);
+                        let target = pixels.as_mut_ptr().add(row * row_bytes);
+                        std::ptr::copy_nonoverlapping(source, target, row_bytes);
+                    }
+                    context.Unmap(staging, 0);
+                }
+                return CapturedFrame::cpu(
+                    timestamp,
+                    width,
+                    height,
+                    crate::screen_share::PixelFormat::Bgra8,
+                    pixels,
+                )
+                .map(Some);
             }
         }
         Ok(self.sink.pop_latest())
