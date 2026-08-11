@@ -97,6 +97,16 @@ pub mod public_room_safety;
 pub mod public_room_tracker;
 pub mod topic_derivation;
 
+/// Versioned internal discovery topic identifier — the single gossip topic
+/// every Boru node joins at startup as networking infrastructure (peer
+/// discovery / presence / connectivity bootstrap). Not a conversation: it is
+/// never rendered, persisted, or routed through chat payload paths.
+///
+/// Always available (no feature gate) so the derivation and its known-answer
+/// vectors mirror [`topic_derivation`](crate::topic_derivation) and
+/// [`public_room`](crate::public_room).
+pub mod discovery_topic;
+
 /// Per-room discovery secrets — cryptographically random 32-byte keys
 /// that isolate private rooms on the DHT.
 ///
