@@ -63,8 +63,7 @@ pub(crate) struct ChatListDependency {
     /// `Instant`, which is not Hash); the per-second `ActivityTick` already
     /// rebuilds this screen via the rail-card `tick`, so ages stay fresh.
     pub(crate) mesh_events: Vec<MeshEventRow>,
-    pub(crate) online: OnlinePeersCardData,
-    pub(crate) activity: RecentActivityCardData,
+    pub(crate) people_activity: PeopleActivityCardData,
     pub(crate) tunnels: TunnelsCardData,
     /// f32 bit pattern of the home menu item background opacity — included
     /// so the lazy home screen re-renders when the setting changes.
@@ -116,6 +115,23 @@ pub(crate) struct OnlinePeerRow {
     pub(crate) presence: PeerPresence,
     pub(crate) avatar: SidebarAvatarHandle,
 }
+
+/// Combined dependency for the People & Activity card: online peers +
+/// recent activity in one coherent right-rail card (BORU-HOME-05).
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub(crate) struct PeopleActivityCardData {
+    pub(crate) online: OnlinePeersCardData,
+    pub(crate) activity: RecentActivityCardData,
+}
+
+/// Max visible peer rows in the People & Activity combined card (BORU-HOME-05).
+/// The combined card shows at most 3 peers; extra peers are accessible via
+/// the "View all" header action.
+const PEOPLE_PEERS_MAX: usize = 3;
+
+/// Max visible activity rows in the People & Activity combined card (BORU-HOME-05).
+/// Rendered inline beneath the peers section with a restrained divider.
+const PEOPLE_ACTIVITY_MAX: usize = 4;
 
 /// Minimum Online Peers body height (px). A single 60 px peer row is
 /// floored to this so the card keeps a sensible ~220–280 px footprint
@@ -273,6 +289,16 @@ impl IcedChat {
             rows,
             compact_header: self.home_compact_headers(),
             home_menu_item_opacity_bits: self.home_menu_item_opacity.to_bits(),
+        }
+    }
+
+    /// Combined selector for the People & Activity card (BORU-HOME-05).
+    /// Merges online peers + recent activity into one data dependency so the
+    /// merged right-rail card can be cached by `iced::widget::lazy`.
+    pub(crate) fn people_activity_card_data(&self) -> PeopleActivityCardData {
+        PeopleActivityCardData {
+            online: self.online_peers_card_data(),
+            activity: self.recent_activity_card_data(),
         }
     }
 
@@ -570,6 +596,262 @@ impl IcedChat {
             .build(&theme)
     }
 
+    /// Build the combined People & Activity card (BORU-HOME-05).
+    /// Merges online peers + recent activity into one coherent right-rail card.
+    /// The peers section shows up to [`PEOPLE_PEERS_MAX`] online friends with
+    /// avatar + name + presence; a restrained divider separates it from the
+    /// recent activity feed (up to [`PEOPLE_ACTIVITY_MAX`] rows).
+    pub(crate) fn view_people_activity_card(
+        dep: &PeopleActivityCardData,
+    ) -> iced::Element<'static, AppMessage> {
+        use iced::widget::{button, container, Column, Row, Space};
+        use iced::{Alignment, Length};
+
+        let theme = Self::theme_from_dark(dep.online.dark_mode);
+        const ACTIVITY_ROW_HEIGHT: f32 = 32.0;
+
+        // ── Peers section ──
+        let peers_body: iced::Element<'static, AppMessage> = if dep.online.rows.is_empty() {
+            container(
+                Row::new()
+                    .push(icon_svg(ICON_FRIEND, TYPO_SM).style(move |t, _| {
+                        iced::widget::svg::Style {
+                            color: Some(text_muted(t)),
+                        }
+                    }))
+                    .push(Space::new().width(Length::Fixed(SPACE_8)))
+                    .push(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::SupportingText,
+                            ONLINE_PEERS_EMPTY_MESSAGE,
+                        )
+                        .color(text_muted(&theme))
+                        .width(Length::Fill)
+                        .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+                    )
+                    .spacing(0)
+                    .align_y(Alignment::Center)
+                    .width(Length::Fill),
+            )
+            .width(Length::Fill)
+            .height(Length::Fixed(PEERS_BODY_MIN))
+            .align_y(Alignment::Center)
+            .into()
+        } else {
+            let peer_rows: Vec<iced::Element<'static, AppMessage>> = dep
+                .online
+                .rows
+                .iter()
+                .take(PEOPLE_PEERS_MAX)
+                .map(|row| {
+                    let mut avatar = Avatar::new(row.name.clone())
+                        .size(crate::design_tokens::AVATAR_SM)
+                        .dark_mode(dep.online.dark_mode)
+                        .online_dot(true)
+                        .fallback_icon(Icon::Friend);
+                    if let Some(handle) = row.avatar.handle.clone() {
+                        avatar = avatar.image(handle);
+                    }
+                    let presence_color = row.presence.color(&theme);
+                    let text_col = Column::new()
+                        .push(
+                            crate::fonts::type_role_text(
+                                crate::fonts::TypeRole::Body,
+                                row.name.clone(),
+                            )
+                            .color(text_system(&theme))
+                            .width(Length::Fill)
+                            .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+                        )
+                        .push(
+                            crate::fonts::type_role_text(
+                                crate::fonts::TypeRole::SupportingText,
+                                row.presence.label(),
+                            )
+                            .color(presence_color),
+                        )
+                        .spacing(crate::design_tokens::SPACE_2)
+                        .align_x(Alignment::Start)
+                        .width(Length::Fill);
+                    let row_el = Row::new()
+                        .push(
+                            Space::new()
+                                .width(Length::Fixed(0.0))
+                                .height(Length::Fixed(crate::card_shell::PEER_ROW_HEIGHT)),
+                        )
+                        .push(avatar.build())
+                        .push(Space::new().width(Length::Fixed(SPACE_8)))
+                        .push(text_col)
+                        .spacing(0)
+                        .align_y(Alignment::Center);
+                    button(row_el)
+                        .on_press(AppMessage::OpenConversation(row.pk))
+                        .width(Length::Fill)
+                        .padding([0.0, SPACE_8])
+                        .style(|t, status| {
+                            iced::widget::button::Style {
+                                background: matches!(
+                                    status,
+                                    iced::widget::button::Status::Hovered
+                                )
+                                .then(|| {
+                                    iced::Background::Color(crate::design_tokens::surface_hover(t))
+                                }),
+                                border: iced::Border {
+                                    radius: crate::design_tokens::RADIUS_SM.into(),
+                                    ..Default::default()
+                                },
+                                text_color: iced::Color::TRANSPARENT,
+                                ..Default::default()
+                            }
+                        })
+                        .into()
+                })
+                .collect();
+            let row_count = dep.online.rows.len().min(PEOPLE_PEERS_MAX);
+            let body_height = if row_count == 0 {
+                PEERS_BODY_MIN
+            } else {
+                let content = row_count as f32 * crate::card_shell::PEER_ROW_HEIGHT
+                    + (row_count as f32 - 1.0) * SPACE_2;
+                content.max(PEERS_BODY_MIN)
+            };
+            Column::with_children(peer_rows)
+                .spacing(SPACE_2)
+                .width(Length::Fill)
+                .height(Length::Fixed(body_height))
+                .into()
+        };
+
+        // ── Divider ──
+        let divider = container(Space::new().width(Length::Fill).height(Length::Fixed(1.0)))
+            .style(move |t: &iced::Theme| {
+                container::Style {
+                    background: Some(iced::Background::Color(
+                        crate::design_tokens::border_muted(t),
+                    )),
+                    ..container::Style::default()
+                }
+            })
+            .width(Length::Fill);
+
+        // ── Activity section ──
+        let activity_body: iced::Element<'static, AppMessage> = if dep.activity.rows.is_empty() {
+            container(
+                Row::new()
+                    .push(icon_svg(ICON_ACTIVITY, TYPO_SM).style(move |t, _| {
+                        iced::widget::svg::Style {
+                            color: Some(text_muted(t)),
+                        }
+                    }))
+                    .push(Space::new().width(Length::Fixed(SPACE_8)))
+                    .push(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::SupportingText,
+                            RECENT_ACTIVITY_EMPTY_MESSAGE,
+                        )
+                        .color(text_muted(&theme))
+                        .width(Length::Fill)
+                        .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+                    )
+                    .spacing(0)
+                    .align_y(Alignment::Center)
+                    .width(Length::Fill),
+            )
+            .width(Length::Fill)
+            .height(Length::Fixed(40.0))
+            .align_y(Alignment::Center)
+            .into()
+        } else {
+            let activity_rows: Vec<iced::Element<'static, AppMessage>> = dep
+                .activity
+                .rows
+                .iter()
+                .take(PEOPLE_ACTIVITY_MAX)
+                .map(|event| {
+                    let ago = crate::presentation::relative_time_from_system(event.timestamp);
+                    let activity_icon = match event.kind {
+                        ActivityKind::Online => ICON_ONLINE,
+                        ActivityKind::Offline => ICON_OFFLINE,
+                        ActivityKind::FileShared => ICON_FILES,
+                        ActivityKind::Message => ICON_CHAT,
+                        ActivityKind::Generic => ICON_ACTIVITY,
+                    };
+                    let kind = event.kind;
+                    let description =
+                        crate::presentation::truncate_activity_description(&event.description, 75);
+                    container(
+                        Row::new()
+                            .push(
+                                Space::new()
+                                    .width(Length::Fixed(0.0))
+                                    .height(Length::Fixed(ACTIVITY_ROW_HEIGHT)),
+                            )
+                            .push(icon_svg(activity_icon, TYPO_SM).style(move |t, _| {
+                                iced::widget::svg::Style {
+                                    color: Some(if kind == ActivityKind::Online {
+                                        accent_green(t)
+                                    } else {
+                                        text_muted(t)
+                                    }),
+                                }
+                            }))
+                            .push(Space::new().width(Length::Fixed(SPACE_6)))
+                            .push(
+                                container(
+                                    crate::fonts::type_role_text(
+                                        crate::fonts::TypeRole::Body,
+                                        description,
+                                    )
+                                    .color(text_system(&theme))
+                                    .width(Length::Fill)
+                                    .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+                                )
+                                .width(Length::Fill),
+                            )
+                            .push(
+                                crate::fonts::type_role_text(
+                                    crate::fonts::TypeRole::Metadata,
+                                    ago,
+                                )
+                                .color(text_muted(&theme)),
+                            )
+                            .spacing(0)
+                            .align_y(Alignment::Center),
+                    )
+                    .width(Length::Fill)
+                    .padding([0.0, SPACE_8])
+                    .align_y(Alignment::Center)
+                    .into()
+                })
+                .collect();
+            Column::with_children(activity_rows)
+                .spacing(SPACE_2)
+                .width(Length::Fill)
+                .into()
+        };
+
+        // ── Assemble body ──
+        let body = Column::new()
+            .push(peers_body)
+            .push(Space::new().height(Length::Fixed(SPACE_8)))
+            .push(divider)
+            .push(Space::new().height(Length::Fixed(SPACE_8)))
+            .push(activity_body)
+            .spacing(0)
+            .width(Length::Fill);
+
+        CardShell::new("People & Activity", vec![])
+            .title_case(false)
+            .on_view_all(AppMessage::OpenFriendRequests)
+            .count(dep.online.rows.len())
+            .count_total(dep.online.total_friends)
+            .compact_header(dep.online.compact_header)
+            .body(body.into())
+            .background_opacity(f32::from_bits(dep.online.home_menu_item_opacity_bits))
+            .build(&theme)
+    }
+
     /// Build the Tunnels card subtree (memoized via lazy).
     pub(crate) fn view_tunnels_card(dep: &TunnelsCardData) -> iced::Element<'static, AppMessage> {
         use iced::widget::{button, container, row, Column, Space};
@@ -742,8 +1024,7 @@ impl IcedChat {
             neighbors_len: self.neighbors.len() as u32,
             connected_age_secs,
             mesh_events,
-            online: self.online_peers_card_data(),
-            activity: self.recent_activity_card_data(),
+            people_activity: self.people_activity_card_data(),
             tunnels: self.tunnels_card_data(),
             home_menu_item_opacity_bits: self.home_menu_item_opacity.to_bits(),
             hero_pulse_frame: (self.activity_tick % crate::status_card::STATUS_CARD_PULSE_PHASES as u64)
@@ -1055,30 +1336,19 @@ impl IcedChat {
         // initials fallback when downloaded). Full rationale in
         // docs/ui-redesign/evidence/ui-skeletons/README.md.
 
-        // ── Right column: Online Peers / Recent Activity / Tunnels ──
-        // Each card is built by a fine-grained selector (see the selector
-        // methods above) and wrapped in `iced::widget::lazy`. The lazy widget
-        // compares the fresh selector value — a PartialEq snapshot of exactly
-        // that card's state slice — with the previous frame and reuses the
-        // already-built subtree when nothing in the slice changed. A peer
-        // presence change therefore rebuilds only the Online Peers card, an
-        // activity push only Recent Activity, and a tunnel status change only
-        // Tunnels. The per-second ActivityTick bumps `activity_tick`, which
-        // the Recent Activity and Tunnels dependencies include (fresh relative
-        // timestamps / truthful expiry flips) but the Online Peers dependency
-        // deliberately excludes — the peers card never rebuilds on an idle
-        // tick.
-        let online_card =
-            iced::widget::lazy(dep.online.clone(), Self::view_online_peers_card);
-        let activity_card =
-            iced::widget::lazy(dep.activity.clone(), Self::view_recent_activity_card);
+        // ── Right column: People & Activity / Tunnels ──
+        // BORU-HOME-05: Online Peers + Recent Activity merged into one
+        // coherent "People & Activity" card with a restrained divider between
+        // the peers section and the activity feed. The combined dependency
+        // changes when either slice changes, so the merged card rebuilds
+        // correctly via `iced::widget::lazy`.
+        let people_activity_card =
+            iced::widget::lazy(dep.people_activity.clone(), Self::view_people_activity_card);
         let tunnels_card = iced::widget::lazy(dep.tunnels.clone(), Self::view_tunnels_card);
 
         // Right rail: 20 px vertical card gaps (UI-HOME-02: 20–24 px).
         let right_col = Column::new()
-            .push(online_card)
-            .push(Space::new().height(Length::Fixed(SPACE_20)))
-            .push(activity_card)
+            .push(people_activity_card)
             .push(Space::new().height(Length::Fixed(SPACE_20)))
             .push(tunnels_card)
             .spacing(0)
