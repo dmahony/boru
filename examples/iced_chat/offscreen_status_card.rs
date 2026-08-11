@@ -426,8 +426,8 @@ mod tests {
     //
     // The dashboard grid replicates app.rs's wide-mode structure exactly:
     // left column (hero card + mesh card + quick actions) in a
-    // FillPortion(9) wrapper, a 24 px gutter, and the right rail in a
-    // FillPortion(5) wrapper, all inside a Row with `align_y(Start)` —
+    // FillPortion(2) wrapper, a 24 px gutter, and the right rail in a
+    // FillPortion(1) wrapper, all inside a Row with `align_y(Start)` —
     // then the outer Fill-height canvas chain and the gutter scrollable.
     // The hero card must keep its content-determined height whether the
     // rail is tall (open) or empty (closed): the wrappers are explicit
@@ -496,13 +496,13 @@ mod tests {
         let main_content: iced::Element<'static, AppMessage> = Row::new()
             .push(
                 container(left_col)
-                    .width(Length::FillPortion(9))
+                    .width(Length::FillPortion(2))
                     .height(Length::Shrink),
             )
             .push(Space::new().width(Length::Fixed(crate::design_tokens::SPACE_24)))
             .push(
                 container(right_col)
-                    .width(Length::FillPortion(5))
+                    .width(Length::FillPortion(1))
                     .height(Length::Shrink),
             )
             .spacing(0)
