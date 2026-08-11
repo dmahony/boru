@@ -100,30 +100,10 @@ async fn run_host_session_inner(
         .await
         .map(|info| iroh::EndpointAddr::from_parts(info.id(), info.into_addrs().map(|a| a.into_addr())))
         .unwrap_or_else(|| iroh::EndpointAddr::new(peer));
-    // Screen-share media streams cannot tolerate noq's post-handshake
-    // multipath/NAT-traversal path transitions (observed: negotiation and
-    // control flow fine, then STREAM data is accepted by the QUIC send
-    // buffer but never transmitted). Pin this connection to the single path
-    // that established it via the vendored `single_path()` transport config
-    // (patched/iroh/iroh/src/endpoint/quic.rs).
-    let transport_config = iroh::endpoint::QuicTransportConfig::builder()
-        .single_path()
-        .build();
-    let connection = match endpoint
-        .connect_with_opts(
-            addr,
-            SCREEN_SHARE_ALPN,
-            iroh::endpoint::ConnectOptions::new().with_transport_config(transport_config),
-        )
-        .await
-    {
-        Ok(connecting) => match connecting.await {
-            Ok(connection) => connection,
-            Err(error) => {
-                let _ = events.send(SessionEvent::Rejected { session_id, reason: error.to_string() }).await;
-                return;
-            }
-        },
+    // BISECT-A: default transport config (plain connect) to isolate whether
+    // the single_path() config breaks the handshake.
+    let connection = match endpoint.connect(addr, SCREEN_SHARE_ALPN).await {
+        Ok(connection) => connection,
         Err(error) => {
             let _ = events.send(SessionEvent::Rejected { session_id, reason: error.to_string() }).await;
             return;
