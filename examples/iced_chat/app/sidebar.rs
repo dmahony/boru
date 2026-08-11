@@ -179,6 +179,7 @@ impl IcedChat {
                 Some(AppMessage::OpenTerminal),
                 false,
                 false,
+                false,
             ));
             brand_row = brand_row.push(Space::new().width(Length::Fixed(SPACE_4)));
         }
@@ -189,6 +190,7 @@ impl IcedChat {
                 IconSize::Md,
                 Some("Settings"),
                 Some(AppMessage::OpenSettings),
+                false,
                 false,
                 false,
             ))
@@ -364,6 +366,8 @@ impl IcedChat {
 
         // ═══════════════════════════════════════════════════════════════
         // 5. BOTTOM UTILITY ROW — new chat, search, mesh, notifications
+        // POLISH-05: inactive toolbar icons are dimmed (text_muted) so the
+        // selected Home icon stays visually stronger.
         // ═══════════════════════════════════════════════════════════════
         let utility_row = Row::new()
             .push(ghost_icon_button(
@@ -371,6 +375,7 @@ impl IcedChat {
                 IconSize::Md,
                 Some("Home"),
                 Some(AppMessage::GoToChatList),
+                false,
                 false,
                 false,
             ))
@@ -382,6 +387,7 @@ impl IcedChat {
                 Some(AppMessage::CreateNewRoom),
                 false,
                 false,
+                true,
             ))
             .push(Space::new().width(Length::Fixed(SPACE_4)))
             .push(ghost_icon_button(
@@ -391,6 +397,7 @@ impl IcedChat {
                 Some(AppMessage::Noop),
                 false,
                 false,
+                true,
             ))
             .push(Space::new().width(Length::Fill))
             .push(ghost_icon_button(
@@ -400,6 +407,7 @@ impl IcedChat {
                 Some(AppMessage::OpenFileSharing),
                 false,
                 false,
+                true,
             ))
             .push(Space::new().width(Length::Fixed(SPACE_4)))
             .push(ghost_icon_button(
@@ -409,6 +417,7 @@ impl IcedChat {
                 Some(AppMessage::OpenConnectionDetails),
                 false,
                 false,
+                true,
             ))
             .push(Space::new().width(Length::Fixed(SPACE_4)))
             .push(ghost_icon_button(
@@ -418,6 +427,7 @@ impl IcedChat {
                 Some(AppMessage::OpenSettings),
                 false,
                 false,
+                true,
             ))
             .align_y(Alignment::Center);
 
