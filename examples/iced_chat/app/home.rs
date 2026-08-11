@@ -1076,7 +1076,7 @@ impl IcedChat {
                 .align_x(Alignment::Center)
                 .width(Length::Fill);
             container(tile)
-                .padding([SPACE_6, SPACE_4])
+                .padding([SPACE_2, SPACE_4])
                 .width(Length::Fill)
                 .style(move |t| container::Style {
                     background: Some(iced::Background::Color(
@@ -1225,13 +1225,15 @@ impl IcedChat {
 
         let mesh_body = Column::new()
             .push(mesh_status_row)
-            // UI-HOME-09: structural body gaps on the shared scale (SPACE_12
-            // between blocks; was SPACE_10, off the scale).
-            .push(Space::new().height(Length::Fixed(SPACE_12)))
+            // POLISH-04: wider gaps (SPACE_16) between the primary status row
+            // and the stat tiles, and between the lobby row and the recent-events
+            // divider — the \"Connected\" label reads as the strongest element and
+            // the three stat tiles land in a visually subordinate block.
+            .push(Space::new().height(Length::Fixed(SPACE_16)))
             .push(mesh_stats_row)
             .push(Space::new().height(Length::Fixed(SPACE_8)))
             .push(mesh_lobby_row)
-            .push(Space::new().height(Length::Fixed(SPACE_12)))
+            .push(Space::new().height(Length::Fixed(SPACE_16)))
             .push(crate::ui_components::divider())
             .push(Space::new().height(Length::Fixed(SPACE_8)))
             .push(events_header)
