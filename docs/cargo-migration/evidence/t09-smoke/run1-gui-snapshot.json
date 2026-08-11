@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":1,"result":{"active_room":null,"active_rooms":[[224,87,231,237,92,32,69,186,211,156,244,214,151,113,225,87,59,144,169,30,82,60,85,163,138,77,9,205,37,172,163,168]],"active_screen":"ChatList","dashboard":null,"diagnostics_event_count":7,"diagnostics_latest_sequence":6,"gui_test_actions_enabled":true,"journal_entry_count":2,"journal_latest_sequence":1}}

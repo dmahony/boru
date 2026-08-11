@@ -1,0 +1,18 @@
+{
+  "ok": true,
+  "reason": "within_tolerance",
+  "actual_size": [
+    1280,
+    800
+  ],
+  "baseline_size": [
+    1280,
+    800
+  ],
+  "mismatched_pixels": 11642,
+  "total_pixels": 1024000,
+  "mismatch_fraction": 0.011369140625,
+  "max_channel_delta": 228,
+  "tolerance": 12,
+  "max_mismatch": 0.05
+}

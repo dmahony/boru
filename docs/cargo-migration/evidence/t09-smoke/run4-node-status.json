@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":1,"result":{"active_room_count":1,"active_rooms":["e26679b7d2e03bb27f53018b661667cf3f63dc53d71ee3c435d46e2cfd576f5a"],"latest_event_sequence":6,"node_id":"b04a2ef7dc5d33a49aba0d2bf34968319b9608fa754ca69f3ea8f79fca94b0c6","node_id_short":"b04a2ef7dc","relay_url":null,"version":"v0.200.1"}}
