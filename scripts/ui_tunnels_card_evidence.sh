@@ -17,7 +17,7 @@ set -euo pipefail
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 OUTPUT_DIR="$ROOT_DIR/docs/ui-redesign/evidence/ui-tunnels-card"
-BINARY="$ROOT_DIR/target/debug/examples/boru"
+BINARY="$ROOT_DIR/target/debug/boru"
 TASK_ID="t_5f03f97d"
 
 mkdir -p "$OUTPUT_DIR"

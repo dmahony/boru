@@ -11,7 +11,7 @@
 
 ## SUMMARY
 
-Boru is a Rust/Iced desktop example binary named `boru`, bootstrapped from
+Boru is a Rust/Iced desktop GUI binary named `boru`, bootstrapped from
 `examples/iced_chat/main.rs`. `IcedChat` in `examples/iced_chat/app.rs` owns
 application state, the `Screen` route enum, the `AppMessage` event vocabulary,
 update reducer, subscriptions, and top-level view composition. Home is
@@ -143,12 +143,12 @@ product code.
 - `cargo fmt --all -- --check` → exit 0 from the tool, but reported formatting
   differences in the pre-existing modified `examples/iced_chat/app.rs`; no
   files were rewritten.
-- `cargo check --features gui --example boru` → PASS, exit 0; 3 library
+- `cargo check --features gui --bin boru` → PASS, exit 0; 3 library
   warnings and 112 GUI-example warnings (unused/dead code, unfulfilled
   expectations, deprecated legacy history save, and private-interface warnings).
-- `cargo build --features gui --example boru` → PASS, exit 0; same warning
+- `cargo build --features gui --bin boru` → PASS, exit 0; same warning
   baseline class as check.
-- `cargo clippy --features gui --example boru --all-targets -- -A clippy::all`
+- `cargo clippy --features gui --bin boru --all-targets -- -A clippy::all`
   → FAIL, exit 101 in pre-existing test compilation:
   `tests/test_friend_ticket_persistence.rs:64` implements `set_pending_file`
   with `Option<Vec<u8>>`, while the current trait requires `Option<[u8; 32]>`.
@@ -159,7 +159,7 @@ product code.
   and name-fallback tests, `room_cleanup::delete_room_history_cascades_across_stores`,
   and `storage::test_partial_migration_resumes_on_reopen`. This is an unhealthy
   baseline; it must not be reported as a passing full suite.
-- `timeout 15s xvfb-run -a target/debug/examples/boru --data-dir /tmp/boru-fs00-data --no-dht --no-relay`
+- `timeout 15s xvfb-run -a target/debug/boru --data-dir /tmp/boru-fs00-data --no-dht --no-relay`
   → exit 124 because the application remained alive for the timeout; this is a
   successful GUI event-loop smoke test. Only a non-fatal llvmpipe/libEGL DRI3
   warning was emitted.
@@ -167,7 +167,7 @@ product code.
 ## RUNTIME / MCP EVIDENCE
 
 A fresh temporary data directory was used. The command
-`xvfb-run -a target/debug/examples/boru --data-dir /tmp/boru-fs00-mcp
+`xvfb-run -a target/debug/boru --data-dir /tmp/boru-fs00-mcp
 --no-dht --no-relay --mcp --enable-gui-test-actions --mcp-bind
 127.0.0.1:18765` stayed alive under Xvfb. JSON-RPC calls over loopback returned:
 

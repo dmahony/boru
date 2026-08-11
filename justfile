@@ -7,23 +7,23 @@ default:
 
 # ── Build ────────────────────────────────────────────────────────────────
 
-# Build the GUI example (debug)
+# Build the Boru GUI binary (debug)
 build-gui:
-    cargo build --features gui --example boru
+    cargo build --features gui --bin boru
 
-# Build the GUI example (release)
+# Build the Boru GUI binary (release)
 build-gui-release:
-    cargo build --features gui --example boru --release
+    cargo build --features gui --bin boru --release
 
-# Check the GUI example compiles (faster than a full build)
+# Check the Boru GUI binary compiles (faster than a full build)
 check-gui:
-    cargo check --features gui --example boru
+    cargo check --features gui --bin boru
 
 # ── Run ──────────────────────────────────────────────────────────────────
 
-# Run the boru GUI example with perf instrumentation
+# Run the Boru GUI binary with perf instrumentation
 run-gui:
-    BORU_PERF=1 cargo run --features gui --example boru
+    BORU_PERF=1 cargo run --features gui
 
 # ── Profiling: Tracy ────────────────────────────────────────────────────
 
@@ -31,11 +31,11 @@ run-gui:
 # Requires the Tracy profiler GUI (https://github.com/wolfpld/tracy) running
 # on the same machine or reachable via the TRACY_PORT env var (default: 8086).
 perf-tracy:
-    BORU_PERF=1 cargo run --features gui --example boru -- --perf
+    BORU_PERF=1 cargo run --features gui -- --perf
 
 # Same as above but captures a fixed-duration run and prints the perf report
 perf-tracy-quick:
-    BORU_PERF=1 cargo run --features gui --example boru -- --perf &
+    BORU_PERF=1 cargo run --features gui -- --perf &
     TRACY_PID=$$!
     sleep 15
     kill $$TRACY_PID 2>/dev/null || true
@@ -55,7 +55,7 @@ perf-flamegraph-out out:
 
 # Clippy lint for the GUI feature
 lint-gui:
-    cargo clippy --features gui --example boru
+    cargo clippy --features gui --bin boru
 
 # Run GUI tests
 test-gui:

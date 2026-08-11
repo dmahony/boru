@@ -67,8 +67,8 @@ creep.
 
 ## 4. Verification
 
-- Build: `cargo build --example boru --features gui` → OK (exit 0, 43.6 s).
-- Tests: `cargo test --example boru --features gui` → **853 passed, 0 failed**
+- Build: `cargo build --bin boru --features gui` → OK (exit 0, 43.6 s).
+- Tests: `cargo test --bin boru --features gui` → **853 passed, 0 failed**
   (62.9 s). Includes 4 new UI-HOME-14 regression guards:
   - `sidebar_navigation_uses_type_role_roles` — sidebar rows/buttons/previews
     resolve through `TypeRole::Body/SupportingText/Metadata/ButtonLabel`.
@@ -78,7 +78,7 @@ creep.
     Group Chat / Tunnel build on `BoruDialog` + `FormSection` (no local fonts).
   - `shared_chrome_no_raw_typo_text` — local profile block + profile identity card
     no longer declare raw `TYPO_` text sizes.
-- Smoke test: launched `target/debug/examples/boru` under Xvfb (1280×800) with
+- Smoke test: launched `target/debug/boru` under Xvfb (1280×800) with
   `--no-dht --no-relay`; app stayed alive the full 30 s window, rendered the
   window (verified via `import` capture, 1280×800 PNG), no panics; only expected
   libEGL software-rendering warnings. Clean exit via timeout.

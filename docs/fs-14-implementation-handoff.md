@@ -122,7 +122,7 @@ COMMANDS RUN (exact + result)
     → 10 passed; 0 failed  (8 module tests + 2 harness tests)
 - cargo test --lib transfer_state_projection
     → 6 passed; 0 failed (is_terminal addition is additive)
-- cargo check --example boru --features gui
+- cargo check --bin boru --features gui
     → still fails, but ONLY on sibling-owned errors (FS-11 blocked:
       OutboundState, transfer_store, outbound_*, MAX_OUTBOUND_HISTORY,
       PeerDownload, outbound_row, sort_outbound_rows; FS-16 clobbered:
@@ -150,7 +150,7 @@ downloading_view_model.rs has 8 unit tests covering:
 
 RUNTIME / MCP EVIDENCE
 ----------------------
-None possible this run: the example binary cannot be built while sibling
+None possible this run: the binary cannot be built while sibling
 workers (FS-11 blocked, FS-09/13/15/17 running) hold the shared tree in a
 non-compiling state. This mirrors FS-12's accepted status ("example blocked by
 concurrent-worker code outside FS-12 scope") and FS-16's accepted status.

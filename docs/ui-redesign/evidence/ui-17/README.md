@@ -95,7 +95,7 @@ with ImageMagick `import` on the Xvfb displays.
 
 - **Isolated verification (HEAD + UI-17 hunks only):** the 7 ToggleHelp hunks
   were extracted and applied to a clean worktree at HEAD (52a312d7) and the
-  targeted unit test passes; `cargo check --features gui --example boru`
+  targeted unit test passes; `cargo check --features gui --bin boru`
   passes there (no sibling WIP). Logs: `ui17-verify-test.log`,
   `ui17-verify-check.log`.
 - **Shared tree:** at the time of this run the shared working tree did **not**

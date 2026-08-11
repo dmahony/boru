@@ -7,8 +7,8 @@ the gate's own re-verification outputs.
 
 ## Files
 
-- `gate_build_test.log` — fresh `cargo build --example boru --features gui`
-  (BUILD_EXIT=0) + `cargo test --example boru --features gui`
+- `gate_build_test.log` — fresh `cargo build --bin boru --features gui`
+  (BUILD_EXIT=0) + `cargo test --bin boru --features gui`
   (896 passed / 0 failed, 66.5s) at the exact HEAD being gated.
 - `verify_mockup_composite.txt` — side-by-side composite check: 2200x808
   composite, halves split at midpoint, mean abs RGB diff 13.42 (UI-HOME-18

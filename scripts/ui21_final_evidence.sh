@@ -13,10 +13,10 @@
 # All states come from deterministic QA fixtures (scripts/figure4_fixture.py,
 # scripts/ui14_states_evidence.sh spec, scripts/ui16_fixture.py) written into
 # isolated temp data dirs — never production data. The binary is the running
-# application; point BORU_BIN at a freshly built target/debug/examples/boru.
+# application; point BORU_BIN at a freshly built target/debug/boru.
 set -euo pipefail
 ROOT=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-BIN=${BORU_BIN:-$ROOT/target/debug/examples/boru}
+BIN=${BORU_BIN:-$ROOT/target/debug/boru}
 FIXTURE=$ROOT/scripts/figure4_fixture.py
 UI16_FIXTURE=$ROOT/scripts/ui16_fixture.py
 MCP=$ROOT/scripts/ui_mcp.py

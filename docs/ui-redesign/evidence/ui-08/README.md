@@ -27,7 +27,7 @@ The node motif is an embedded static SVG (`assets/icons/network-motif.svg`), ren
 
 ## Verification
 
-- `cargo check --features gui --example boru` passed.
-- `cargo test --features gui --example boru` passed (558 tests).
+- `cargo check --features gui --bin boru` passed.
+- `cargo test --features gui --bin boru` passed (558 tests).
 - `cargo fmt --check` passed.
 - `git diff --check` passed.

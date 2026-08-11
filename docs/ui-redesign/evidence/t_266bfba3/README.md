@@ -27,8 +27,8 @@ plus scrolled captures where content sits below the fold.
 - `accessibility_checklist.md` — full a11y checklist (focus, keyboard
   order, contrast, target sizes, labels, typography/glyphs) with evidence
   and follow-up tickets
-- `build.log` — cargo build --example boru --features gui (BUILD_EXIT=0)
-- `gui_test.log` — cargo test --example boru --features gui (896/896 pass)
+- `build.log` — cargo build --bin boru --features gui (BUILD_EXIT=0)
+- `gui_test.log` — cargo test --bin boru --features gui (896/896 pass)
 - `lib_test.log` — cargo test --lib (1824 pass / 20 pre-existing fail on
   origin/main, zero src/ diff; see UI-HOME-18-report.md §7)
 

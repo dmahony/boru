@@ -45,7 +45,7 @@ passes the stricter normal-text requirement.
 
 The regression test `design_tokens::tests::contrast_ratios_pass_wcag_aa`
 pins `primary_on_white ≥ 4.5:1` — verified passing this run
-(`cargo test --example boru --features gui design_tokens`: 24/24 passed).
+(`cargo test --bin boru --features gui design_tokens`: 24/24 passed).
 
 ## 3. Changes made
 

@@ -82,13 +82,13 @@ buffer length). Neither card grows the dashboard.
 
 - `cargo fmt --all -- --check` passed (one pre-existing one-line closure
   formatting drift in the chat view, committed by UI-12, was formatted).
-- `cargo check --features gui --example boru` passed.
-- `cargo test --features gui --example boru` passed: 596 tests, 0 failed.
+- `cargo check --features gui --bin boru` passed.
+- `cargo test --features gui --bin boru` passed: 596 tests, 0 failed.
 - `git diff --check` passed.
 
 ## How to re-run
 
 ```bash
-cargo build --features gui --example boru
+cargo build --features gui --bin boru
 bash scripts/ui10_rail_evidence.sh
 ```

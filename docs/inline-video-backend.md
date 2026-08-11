@@ -84,5 +84,5 @@ The build host was missing GStreamer headers/tools initially. Installing the
 packages above provided GStreamer 1.24.2 development/runtime components and
 FFmpeg/libav decoders. `cargo check --example video_backend_probe
 --features video-playback` passes, as does the existing `video_playback` unit
-test group (3 tests). The normal Boru GUI example also continues to compile
-with `cargo check --example boru --features gui` (existing warnings only).
+test group (3 tests). The normal Boru GUI binary also continues to compile
+with `cargo check --bin boru --features gui` (existing warnings only).

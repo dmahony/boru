@@ -86,8 +86,8 @@ WIRING TO APPLY (in the serialization pass)
 
 VERIFICATION STEPS (run after wiring is committed)
 --------------------------------------------------
-1. cargo check --features gui --example boru        # expect 0 errors
-2. cargo test --features gui --example boru -- sharing_summary   # 6/6 pass
+1. cargo check --features gui --bin boru        # expect 0 errors
+2. cargo test --features gui --bin boru -- sharing_summary   # 6/6 pass
 3. cargo test --lib --features gui -- storage::tests::list_downloads \
      storage::tests::list_shared_peer_ids \
      storage::tests::summary_projection_counts_survive_restart     # 3/3 pass

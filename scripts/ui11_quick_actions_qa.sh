@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-BIN=$ROOT/target/debug/examples/boru
+BIN=$ROOT/target/debug/boru
 OUT=$ROOT/docs/ui-redesign/evidence/ui-11
 mkdir -p "$OUT"
 data=$(mktemp -d /tmp/boru-qa.XXXXXX)

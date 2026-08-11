@@ -95,12 +95,12 @@ No font files are exposed through task reports or artifacts.
 
 ## 6. Verification
 
-- Build: `cargo build --example boru --features gui` → OK (assets bundled via
-  `include_bytes!`; binary at `target/debug/examples/boru`). New fonts load at startup via
+- Build: `cargo build --bin boru --features gui` → OK (assets bundled via
+  `include_bytes!`; binary at `target/debug/boru`). New fonts load at startup via
   `load_fonts()` chained in `main.rs:1602`; iced re-measures/re-renders when font loading
   completes, so layout invalidates correctly (fonts load before the first meaningful frame;
   non-fatal fallback on error).
-- Tests: `cargo test --example boru --features gui` → all pass (13 fonts tests including
+- Tests: `cargo test --bin boru --features gui` → all pass (13 fonts tests including
   required-weight coverage, role-family/weight mapping, fallback policy, plan-role list).
 - Evidence screenshot: `docs/ui-redesign/evidence/t_318cd671/t_318cd671_typography_preview.png`
   (1500×3000, Xvfb + Ctrl+Shift+G gallery, scrolled to the Typography section; OCR-verified:

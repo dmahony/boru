@@ -44,8 +44,8 @@ sources; the ring buffer evicts the oldest event beyond 50.
 
 ## Verification
 
-- `cargo check --features gui --example boru` passed.
-- `cargo test --features gui --example boru` passed: 584 tests.
+- `cargo check --features gui --bin boru` passed.
+- `cargo test --features gui --bin boru` passed: 584 tests.
 - `presentation::tests` (23) and `card_shell::tests` (10) all pass.
 - `git diff --check` passed.
 - Note: `cargo fmt --all -- --check` currently reports one diff at

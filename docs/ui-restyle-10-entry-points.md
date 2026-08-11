@@ -19,7 +19,7 @@ UI-RESTYLE-04/05/06), and that no stale entry point opens the old dark modal.
 2. Audited every site that dispatches the creation-flow messages.
 3. Verified the top-level overlay cascade still routes to the restyled view
    functions.
-4. `cargo check --workspace --all-targets` PASS; `cargo test --example boru
+4. `cargo check --workspace --all-targets` PASS; `cargo test --bin boru
    --features gui` → 810 passed / 0 failed.
 
 ## Entry points → new dialogs (all verified)

@@ -51,8 +51,8 @@ which is not available in an isolated capture run.
 
 ## Verification
 
-- `cargo check --features gui --example boru` — PASS.
-- `cargo test --features gui --example boru` — 578 passed, 0 failed.
+- `cargo check --features gui --bin boru` — PASS.
+- `cargo test --features gui --bin boru` — 578 passed, 0 failed.
 - `cargo fmt --all -- --check` — the Tunnels card region is clean. Two fmt
   diffs remain in `app.rs` lines ~22029/22052 (Online Peers card) — that
   region is owned by concurrent sibling task t_d4ca2ca4 and was left

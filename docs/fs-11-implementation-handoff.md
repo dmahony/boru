@@ -451,8 +451,8 @@ and check item_id / peer_id.as_deref().
 ====================================================================
 VERIFICATION (after re-applying, when tree compiles)
 ====================================================================
-1. cargo check --example boru --features gui        # expect 0 errors
-2. cargo test --example boru outbound_panel --features gui    # 2 FS-11 tests
+1. cargo check --bin boru --features gui        # expect 0 errors
+2. cargo test --bin boru outbound_panel --features gui    # 2 FS-11 tests
 3. cargo test --features net transfer_state_projection::tests --lib   # 6+ tests
 4. Manual: two/three-peer download, watch panel appear/complete/archive;
    disconnect peer -> Disconnected rows; reconnect -> retry row.

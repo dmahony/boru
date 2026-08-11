@@ -51,7 +51,7 @@ commits in order: `146c366b` → `ce58d080` → `646c4a60` → `f5fa6392` →
   `BORU_DIALOG_WIDTH_STANDARD` (still used by the dialog body) and drops
   `peer_list` in favour of `SelectablePeerList` + `SelectablePeerRow`.
 - The other four commits applied cleanly (docs only, no overlap with main).
-- Post-merge compile: `cargo check --example boru --features gui` → Finished
+- Post-merge compile: `cargo check --bin boru --features gui` → Finished
   dev profile, 0 errors (217 pre-existing warnings, unchanged). 5m24s.
 
 ## Rationale — why merge (option a)

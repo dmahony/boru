@@ -40,13 +40,13 @@ authority to connect everyone.
 
 ```sh
 # GUI
-cargo run --example boru --features gui -- --name <nickname>
+cargo run -- --name <nickname>
 
 # With a custom data directory
-BORU_DATA_DIR=~/.boru cargo run --example boru --features gui -- --name <nickname>
+BORU_DATA_DIR=~/.boru cargo run -- --name <nickname>
 
 # All CLI options
-cargo run --example boru --features gui -- --help
+cargo run -- --help
 ```
 
 See [`docs/`](docs/) for architecture, storage, discovery, security model, and

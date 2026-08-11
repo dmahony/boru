@@ -45,7 +45,7 @@ enhancement requiring an explicit backend/window integration design.
 The required debsrv check passed after the parent merge:
 
 ```text
-rb check --example boru --features gui,video-playback,terminal
+rb check --bin boru --features gui,video-playback,terminal
 Finished `dev` profile [unoptimized + debuginfo] target(s) in 27.46s
 ```
 

@@ -9,7 +9,7 @@ Canonical deliverables:
   (114 icons across 5 sizes = 570 SVGs; the single source of truth for what is bundled)
 
 The script is deliberately NOT wired into the application build. Normal builds
-(`cargo build` / `cargo build --example boru ...`) never re-run vendoring; icon
+(`cargo build` / `cargo build --bin boru ...`) never re-run vendoring; icon
 upgrades are a deliberate, reviewable step (`python3 scripts/vendor_papirus_icons.py
 --source <checkout> --import-date YYYY-MM-DD`, then commit the regenerated bundle).
 

@@ -117,6 +117,6 @@ inline copy ever disagrees, that test fails.
    `src/download_initiation.rs`.
 
 After any change, run the conformance matrix:
-`rb test --example boru --features gui,video-playback,terminal -- policy_conformance`
+`rb test --bin boru --features gui,video-playback,terminal -- policy_conformance`
 (or `rb test --lib -- file_policy` / `path_containment` / `file_indexer`
 for the unit suites).

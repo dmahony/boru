@@ -158,9 +158,9 @@ terminal fix 9cb90217 that CONN-04 rebased through).
 
 ## 8. Tests added/updated and commands run
 
-- **rb check** (debsrv, never local): `rb check --example boru --features gui,video-playback,terminal`
+- **rb check** (debsrv, never local): `rb check --bin boru --features gui,video-playback,terminal`
   → exit 0 from the final tree (origin/main content, d793ee0f).
-- **rb test** (targeted, once): `rb test --example boru --features gui,video-playback,terminal -- status_card`
+- **rb test** (targeted, once): `rb test --bin boru --features gui,video-playback,terminal -- status_card`
   → **20 passed / 0 failed** (5.07s), including: layout_tiers_are_ordered_and_consistent,
   card_tier_uses_card_width_not_window_width, status_card_width_tracks_the_real_container_not_the_window,
   text_column_keeps_minimum_width_in_horizontal_tiers, mesh_yields_before_text_when_space_is_tight,

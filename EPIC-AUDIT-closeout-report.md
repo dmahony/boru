@@ -91,7 +91,7 @@ matrix used as the reference (`ci.yaml` / `tests.yaml`).
 ### 3.1 Regressions found and fixed by this close-out
 
 The final validation sequence exposed regressions that the per-card `rb check`
-runs had missed (cards only verified `--example boru`, not `--workspace
+runs had missed (cards only verified `--bin boru`, not `--workspace
 --all-targets` / `--tests`):
 
 | File | Problem | Fix |

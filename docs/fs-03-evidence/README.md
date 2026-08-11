@@ -37,7 +37,7 @@
   collapsed state, and conversation-store count)
 - `gui_navigation_actions_reach_completed_via_normal_update_path` (extended
   with the OpenFileSharing case)
-- `cargo check --features gui --example boru` → exit 0
+- `cargo check --features gui --bin boru` → exit 0
 - `cargo test --lib diagnostics::tests` → 234 passed
 
 ## RUNTIME / MCP EVIDENCE

@@ -21,7 +21,7 @@ set -euo pipefail
 
 MODE="${1:-all}"
 ROOT=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-BIN=$ROOT/target/debug/examples/boru
+BIN=$ROOT/target/debug/boru
 TASK_ID="t_faa541a0"
 OUT="$ROOT/docs/ui-redesign/evidence/$TASK_ID"
 MCP=$ROOT/scripts/ui_mcp.py

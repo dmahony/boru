@@ -180,7 +180,7 @@ dedupes existing files, falls back to the content-hash stem.
 - `cargo test --lib -- file_access_handler catalogue_handler`
   → 72 passed / 0 failed (expiry regressions + existing suites).
 - `cargo test --lib` (full suite) → see COMMIT section for the final result.
-- `cargo check --example boru --features gui` → PASS after fixing two
+- `cargo check --bin boru --features gui` → PASS after fixing two
   pre-existing FS-19 sibling compile errors (`dashboard_connectivity_notice`
   missing lifetime; `ConnectivityNotice` phantom lifetime + capturing
   `color_fn` closure). Those files were committed by the FS-19/UI-19

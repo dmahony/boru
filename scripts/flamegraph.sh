@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ── CPU flamegraph for Boru GUI example ──────────────────────────
+# ── CPU flamegraph for the Boru GUI binary ────────────────────────
 # Requires: cargo-flamegraph (`cargo install flamegraph`), perf on Linux
 #
 # Usage:
@@ -40,6 +40,6 @@ fi
 
 exec cargo flamegraph \
     --features "$FEATURES" \
-    --example "$EXAMPLE" \
+    --bin "$EXAMPLE" \
     --output "$OUTPUT" \
     "${ARGS[@]}"

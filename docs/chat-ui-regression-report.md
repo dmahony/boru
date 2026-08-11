@@ -72,8 +72,8 @@ The following features were verified by reviewing the diff and build:
 | Command | Result | Details |
 |---------|--------|---------|
 | `cargo fmt --check` | PASS | All files formatted |
-| `cargo check --example boru --features gui` | PASS | 96 warnings (all pre-existing) |
-| `cargo clippy --example boru --features gui` | PASS | 128 warnings (all pre-existing) |
+| `cargo check --bin boru --features gui` | PASS | 96 warnings (all pre-existing) |
+| `cargo clippy --bin boru --features gui` | PASS | 128 warnings (all pre-existing) |
 | `cargo test --lib` | 1609 PASS, 9 FAIL, 2 HUNG | All failures/hangs pre-existing in core library |
 
 ## Accidental Changes Check

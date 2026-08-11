@@ -1,9 +1,9 @@
 //! Iced desktop frontend for Boru.
 //!
 //! Usage:
-//!   cargo run --features gui --example boru       # show chat list
-//!   cargo run --features gui --example boru open   # open new room
-//!   cargo run --features gui --example boru join <ticket>  # join room
+//!   cargo run            # show chat list
+//!   cargo run -- open    # open new room
+//!   cargo run -- join <ticket>  # join room
 
 mod activity_log_view_model;
 mod app;

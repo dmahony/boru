@@ -55,8 +55,8 @@ Actions preserved (same `AppMessage` dispatch as before):
 ## 4. Verification
 
 ### Build + tests
-- `cargo build --example boru --features gui` → exit 0.
-- `cargo test --example boru --features gui` → **866 passed / 0 failed**
+- `cargo build --bin boru --features gui` → exit 0.
+- `cargo test --bin boru --features gui` → **866 passed / 0 failed**
   (baseline 864; +2 new quick-action tests: exact description copy and
   action-message dispatch; existing content-driven / breakpoint tests updated
   to the new design).

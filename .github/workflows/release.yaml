@@ -68,7 +68,7 @@ jobs:
           # and opened in the OS default player (VLC/browser). The reviewed
           # GStreamer runtime remains bundled for capability detection and a
           # future dynamic-loading / delay-load build.
-          cargo build --release --target ${{ matrix.target }} --features ${{ matrix.features }} --example boru
+          cargo build --release --target ${{ matrix.target }} --features ${{ matrix.features }} --bin boru
 
       - name: Fetch GStreamer MSVC runtime (Windows)
         if: runner.os == 'Windows'
@@ -95,7 +95,7 @@ jobs:
             # runtime DLLs.  Icons are bundled by the script so the
             # exe-relative loader always resolves them (PAPIRUS-17).
             bash scripts/package_windows.sh \
-              --exe "target/${{ matrix.target }}/release/examples/${{ matrix.binary }}" \
+              --exe "target/${{ matrix.target }}/release/${{ matrix.binary }}" \
               --gst-root "$GSTREAMER_MSVC_ROOT" \
               --target "${{ matrix.target }}" \
               --out dist
@@ -106,7 +106,7 @@ jobs:
               mv "$f" "$base"
             done
           else
-            cp "target/${{ matrix.target }}/release/examples/${{ matrix.binary }}" dist/
+            cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" dist/
             mkdir -p dist/assets/third_party
             cp -r assets/third_party/papirus dist/assets/third_party/papirus
             cd dist

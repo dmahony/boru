@@ -166,12 +166,12 @@ DESIGN/ARCHITECTURE DECISIONS
 
 COMMANDS RUN (exact + result)
 -----------------------------
-- cargo check --example boru --features gui
+- cargo check --bin boru --features gui
   → exit 0, no errors (208 pre-existing warnings, unchanged)
-- cargo test --example boru --features gui dashboard_filters
+- cargo test --bin boru --features gui dashboard_filters
   → test result: ok. 16 passed; 0 failed (normalization, matching, sort
     tie-breaks, ref-sort parity, long/Unicode names, empty query)
-- cargo test --example boru --features gui
+- cargo test --bin boru --features gui
   → test result: ok. 764 passed; 0 failed (full example suite green)
 
 TESTS

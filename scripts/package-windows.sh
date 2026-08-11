@@ -89,11 +89,11 @@ fi
 # Redirect (no pipe) so cargo's exit status is preserved — a pipeline would
 # mask a failure and leave a stale exe (see the skill's pipe-mask pitfall).
 mkdir -p "$ROOT/target"
-cargo build $PROFILE_FLAG --target "$TARGET" --features "$FEATURES" --example "$EXAMPLE" \
+cargo build $PROFILE_FLAG --target "$TARGET" --features "$FEATURES" --bin "$EXAMPLE" \
     > "$ROOT/target/windows-build.log" 2>&1
 echo "cargo build exit=$?"
 
-EXE="$ROOT/target/$TARGET/$PROFILE_DIR/examples/$EXAMPLE.exe"
+EXE="$ROOT/target/$TARGET/$PROFILE_DIR/$EXAMPLE.exe"
 if [ ! -f "$EXE" ]; then
     echo "ERROR: build produced no exe at $EXE" >&2
     tail -40 "$ROOT/target/windows-build.log" >&2

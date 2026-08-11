@@ -242,10 +242,10 @@ Settings are not yet stored in SQLite, so there is no migration path.
 
 ```sh
 # Run with RUST_LOG for detailed output
-RUST_LOG=boru_core=debug cargo run --example boru --features gui -- --name <nickname>
+RUST_LOG=boru_core=debug cargo run -- --name <nickname>
 
 # Capture all logs including storage and delivery
-RUST_LOG=boru_core=trace cargo run --example boru --features gui -- --name <nickname>
+RUST_LOG=boru_core=trace cargo run -- --name <nickname>
 ```
 
 ### Checking database state

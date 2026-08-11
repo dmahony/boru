@@ -60,7 +60,7 @@ the card body is never empty due to a pending fetch.
 - Source-level audit of `main.rs` (friend load before Iced window,
   `splash.py` lifecycle) and `app.rs` (presence seeding, activity ring
   buffer, tunnel service read) — see table above.
-- `cargo check --features gui --example boru` — PASS.
+- `cargo check --features gui --bin boru` — PASS.
 - `cargo fmt --all -- --check` — PASS.
 - `git diff --check` — PASS.
 - No behavior change: comment-only diff. No skeleton code added, so no new

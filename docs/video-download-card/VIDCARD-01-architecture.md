@@ -3,7 +3,7 @@
 Task: `t_58b2cda9` — Inspect the existing Boru video download card.
 Source spec: `Boru_video_download_card_redesign.txt` Task 1 (attachment of `t_6e936d77`).
 Scope: analysis only. No production code was modified by this task.
-Baseline: `cargo build --example boru --features gui,video-playback,terminal` — see "Baseline evidence" at the end.
+Baseline: `cargo build --bin boru --features gui,video-playback,terminal` — see "Baseline evidence" at the end.
 
 ---
 
@@ -209,4 +209,4 @@ Applied only for `kind == TransferKind::Video` (`:475`): poster image with `cont
 ## 11. Baseline evidence
 - Repo: `origin` → `dmahony/boru.git`, branch `wt/t_58b2cda9` (worktree `~/.worktrees/t_58b2cda9`).
 - Analysis commit: `<commit to be recorded after landing>` — this note only; no production code changed.
-- Build (acceptance criterion): `cargo build --example boru --features gui,video-playback,terminal` — result recorded in the task handoff (exit code + duration).
+- Build (acceptance criterion): `cargo build --bin boru --features gui,video-playback,terminal` — result recorded in the task handoff (exit code + duration).

@@ -20,9 +20,9 @@ evidence.
 
 ## Verification setup
 
-- `cargo build --example boru --features gui` — **OK (exit 0; only the 207
+- `cargo build --bin boru --features gui` — **OK (exit 0; only the 207
   pre-existing warnings, untouched)**.
-- `cargo test --example boru --features gui` — **896 passed / 0 failed**.
+- `cargo test --bin boru --features gui` — **896 passed / 0 failed**.
 - Evidence harness: `scripts/ui_home17_verification_evidence.sh` +
   `scripts/ui17_click_calibrate.py` (Xvfb, MCP, GUI test actions, tesseract
   TSV click calibration — same technique as UI-HOME-06/07/08).

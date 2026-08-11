@@ -97,7 +97,7 @@ spec = load_spec()                              # parsed spec dict
 ## GUI smoke test (how the timeline was verified)
 
 The fixture was verified end-to-end by launching the real GUI headless
-(`target/debug/examples/boru`) under Xvfb against an injected data dir,
+(`target/debug/boru`) under Xvfb against an injected data dir,
 opening the Direct conversation through the MCP test-action path
 (`boru_gui_open_conversation` + `boru_gui_set_peer_presence`), capturing a
 1280x800 screenshot, and OCR-verifying the rendered timeline:

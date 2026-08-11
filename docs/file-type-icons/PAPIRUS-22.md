@@ -63,9 +63,9 @@ the icon+filename line.  Identical results in dark theme.
 
 Other checks:
 
-- `cargo test --example boru --features gui,video-playback,terminal`:
+- `cargo test --bin boru --features gui,video-playback,terminal`:
   **1077 passed, 0 failed** (incl. 14 `shared_by_me_table` tests).
-- `rb check --example boru --features gui,video-playback,terminal`: exit 0
+- `rb check --bin boru --features gui,video-playback,terminal`: exit 0
   (216 pre-existing warnings, unchanged).
 - No icon behaviour changed: same central `FileTypeIcon` component, same
   resolver, same sizes; Papirus icons verified in the captures (PDF red,

@@ -54,7 +54,7 @@ The shared media boundary uses:
 Verification command:
 
 ```text
-rb check --example boru --features gui,video-playback,terminal
+rb check --bin boru --features gui,video-playback,terminal
 ```
 
 Result: passed. Existing compiler warnings remain unrelated to this player

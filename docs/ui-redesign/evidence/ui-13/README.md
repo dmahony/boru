@@ -36,8 +36,8 @@ their attachment card (both use the original body text).
 
 ## Verification
 
-- `cargo build --features gui --example boru` — PASS
-- `cargo test --features gui --example boru` — 615 passed / 0 failed
+- `cargo build --features gui --bin boru` — PASS
+- `cargo test --features gui --bin boru` — 615 passed / 0 failed
 - `git diff --check` — clean
 - Timeline region geometry (`ui-timeline-region/verification.json`) — PASS
   (header 60px, composer pinned, scrollbar present, bottom-aligned content)

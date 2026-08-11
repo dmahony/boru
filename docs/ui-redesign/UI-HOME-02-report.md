@@ -57,9 +57,9 @@ No card internals were redesigned; all live state and actions preserved.
 
 ## Tests
 
-- `cargo build --example boru --features gui` — OK (8 m 35 s; only pre-existing warnings, 218,
+- `cargo build --bin boru --features gui` — OK (8 m 35 s; only pre-existing warnings, 218,
   none introduced by this change).
-- `cargo test --example boru --features gui` — **835 passed, 0 failed** (55 s). Includes
+- `cargo test --bin boru --features gui` — **835 passed, 0 failed** (55 s). Includes
   `design_tokens::tests` (18 tests, incl. the new `DASHBOARD_MAX_WIDTH` 1440-1520 band assertion).
 
 ## Evidence (screenshots)

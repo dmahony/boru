@@ -236,12 +236,12 @@ changed.
 
 ## TESTS
 
-- **Build:** `cargo build --example boru --features gui` → exit 0 at close-out
+- **Build:** `cargo build --bin boru --features gui` → exit 0 at close-out
   HEAD (207 pre-existing warnings, unchanged — approved difference #5).
 - **Unit:** Font registration suite 14/14 (part of the GUI example suite);
   `cargo test --lib` → 1824 pass / 20 pre-existing failures, proven unrelated
   (empty `src/` diff vs origin/main; triage ticket t_869b59bf).
-- **UI:** `cargo test --example boru --features gui` → **896/896 pass,
+- **UI:** `cargo test --bin boru --features gui` → **896/896 pass,
   0 failed, 0 ignored** (87.7 s at close-out HEAD 7bc0b5c5; gate reported
   896/896 at 9d34a33c). Per-card counts grew monotonically from 835
   (UI-HOME-02) to 896 (UI-HOME-16..18), consistent with no test loss.

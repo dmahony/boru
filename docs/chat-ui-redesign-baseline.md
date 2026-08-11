@@ -330,9 +330,9 @@ No global search exists. Shared files are accessed through peer profiles:
 ### Build
 
 ```
-Command: cargo check --example boru --features gui
+Command: cargo check --bin boru --features gui
 Result:  SUCCESS (0.53s, cached dev profile)
-Linter:  cargo clippy --example boru --features gui — SUCCESS
+Linter:  cargo clippy --bin boru --features gui — SUCCESS
 Format:  cargo fmt --check — SUCCESS (all files formatted)
 Warnings at check: 96 (all pre-existing; see categories below)
 Warnings at clippy: 128 (all pre-existing; clippy adds style nits on top of compiler warnings)

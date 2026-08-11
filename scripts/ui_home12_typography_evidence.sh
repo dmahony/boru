@@ -22,7 +22,7 @@ case "$PHASE" in
 esac
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-BIN=$ROOT/target/debug/examples/boru
+BIN=$ROOT/target/debug/boru
 TASK_ID="t_4c86d88c"
 OUT="$ROOT/docs/ui-redesign/evidence/$TASK_ID"
 mkdir -p "$OUT"

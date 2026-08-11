@@ -64,9 +64,9 @@ touched — the rail cards keep reading live state exactly as before.
 
 ## Verification
 
-- `cargo build --example boru --features gui` — PASS (exit 0; 207
+- `cargo build --bin boru --features gui` — PASS (exit 0; 207
   pre-existing warnings, untouched).
-- `cargo test --example boru --features gui` — **867 passed, 0 failed**
+- `cargo test --bin boru --features gui` — **867 passed, 0 failed**
   (864 pre-existing + 3 new).
 - `cargo fmt` — the rustfmt-normalized diff vs. the base commit contains
   only this card's semantic changes; the standing global fmt drift in

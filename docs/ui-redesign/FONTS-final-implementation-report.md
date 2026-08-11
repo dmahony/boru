@@ -159,7 +159,7 @@ AC6 TechnicalValue → JETBRAINS_MONO (fonts.rs:287) + 27 jetbrains references; 
 SourceSans3-*/Manrope*/Inter* files; AC11 FONTS-15 pixel-width audit + fixes; AC12 FONTS-05/08/10/11
 role usage above; AC13 FONTS-13 debug+release builds, fonts embedded in binaries
 (UTF-16BE TTF name-table strings present in both binaries), release.yaml builds
-`cargo build --release --features gui --example boru` with no strip step; AC14 FONTS-17
+`cargo build --release --features gui --bin boru` with no strip step; AC14 FONTS-17
 screenshots.
 
 ## 11. No business-logic / protocol changes
@@ -172,9 +172,9 @@ networking, protocol, file-transfer, crypto, or storage code was modified by any
 
 ## 12. Build/test verification (debsrv, never local cargo)
 
-- `RB_SLOTS=8 rb check --example boru --features gui,video-playback,terminal` → **exit 0**
+- `RB_SLOTS=8 rb check --bin boru --features gui,video-playback,terminal` → **exit 0**
   (217 pre-existing warnings, no new errors; warm build 4.1s)
-- `rb test --example boru --features gui,video-playback,terminal -- fonts` → **17 passed, 0 failed**
+- `rb test --bin boru --features gui,video-playback,terminal -- fonts` → **17 passed, 0 failed**
   (font bytes, approved families, weights real, sizes Task-16 baseline, wordmark Raleway,
   technical JetBrains, dialog tokens, home/creation-dialog guards, sidebar labels)
 - `... -- offscreen_capture` → **10 passed, 0 failed** (FONTS-17 harness renders real app screens)

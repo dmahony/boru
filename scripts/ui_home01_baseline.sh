@@ -7,7 +7,7 @@ set -euo pipefail
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 OUTPUT_DIR="$ROOT_DIR/docs/ui-redesign/evidence/t_a0b1f82f"
-BINARY="$ROOT_DIR/target/debug/examples/boru"
+BINARY="$ROOT_DIR/target/debug/boru"
 MCP_CLIENT="$ROOT_DIR/scripts/ui_mcp.py"
 TASK_ID="t_a0b1f82f"
 
@@ -23,7 +23,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -x "$BINARY" ]] || {
-    printf 'GUI binary not found: %s\nBuild with: rb build --example boru --features gui,video-playback,terminal\n' "$BINARY" >&2
+    printf 'GUI binary not found: %s\nBuild with: rb build --features gui,video-playback,terminal\n' "$BINARY" >&2
     exit 1
 }
 [[ -x "$MCP_CLIENT" ]] || { printf 'MCP helper is not executable: %s\n' "$MCP_CLIENT" >&2; exit 1; }

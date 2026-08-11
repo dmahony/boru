@@ -23,7 +23,7 @@ The GUI example suite is therefore the authoritative regression surface for
 this work.
 
 ```
-cargo test --example boru --features gui
+cargo test --bin boru --features gui
 → test result: ok. 822 passed; 0 failed; 0 ignored (57.08s)
 ```
 

@@ -172,7 +172,7 @@ registered in the app-level room-status map. `boru_get_room_status` only
 knows about rooms joined through `OpenRoom`. To verify lobby connectivity,
 check the app log instead:
 ```
-grep "subscribed to lobby topic" <data_dir>/logs/iced_chat.log
+grep "subscribed to lobby topic" <data_dir>/logs/boru.log
 ```
 
 ### 2. `boru_get_discovery_events` returns 0 events despite active mDNS
@@ -181,7 +181,7 @@ mDNS discovery events (peer seen, advertisement expired) are NOT recorded
 in this buffer. Only gossip-level protocol events appear. Empty events does
 NOT mean mDNS is broken. Verify mDNS separately:
 ```
-grep -c "join_peers succeeded" <data_dir>/logs/iced_chat.log
+grep -c "join_peers succeeded" <data_dir>/logs/boru.log
 ```
 
 ### 3. `boru_get_failure_analysis` reports all-clear despite broken gossip
@@ -290,5 +290,5 @@ mcp__boru_b__boru_send_probe(room_id="<topic-hex>")
 | Is the lobby subscribed? | — | `grep "subscribed to lobby"` |
 | Is mDNS working? | — | `grep "join_peers succeeded"` |
 | Did a message get delivered? | — | VNC or debug logging |
-| What crashed? | — | `grep "ERROR\|panic" iced_chat.log` |
+| What crashed? | — | `grep "ERROR\|panic" boru.log` |
 | Is the GUI frozen? | `boru_get_iced_state` (needs flag) | `cat /proc/<pid>/wchan` |

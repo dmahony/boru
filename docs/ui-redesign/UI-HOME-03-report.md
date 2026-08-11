@@ -82,8 +82,8 @@ padding.
 
 ## 5. Tests
 
-- `cargo build --example boru --features gui` — OK (exit 0).
-- `cargo test --example boru --features gui` — **864 passed / 0 failed**
+- `cargo build --bin boru --features gui` — OK (exit 0).
+- `cargo test --bin boru --features gui` — **864 passed / 0 failed**
   (prior: 853; +11 net new).
 - New `design_tokens` tests (3): `RADIUS_CARD` in 14–18 band, `card_style`
   uses the token (border/radius/shadow assertions), status soft colours are

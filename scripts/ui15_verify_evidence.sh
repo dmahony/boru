@@ -3,7 +3,7 @@
 # Captures home screen at four required viewports for independent verification.
 set -euo pipefail
 ROOT=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-BIN=$ROOT/target/debug/examples/boru
+BIN=$ROOT/target/debug/boru
 OUT=$ROOT/docs/ui-redesign/evidence/ui-15
 mkdir -p "$OUT"
 

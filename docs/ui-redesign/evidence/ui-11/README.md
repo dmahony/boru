@@ -78,8 +78,8 @@ files: click handled; process remained alive
 ## Verification
 
 - `cargo fmt --check` — pass
-- `cargo check --features gui --example boru` — pass
-- `cargo build --features gui --example boru` — pass
-- `cargo test --features gui --example boru` — 598 passed, 0 failed
+- `cargo check --features gui --bin boru` — pass
+- `cargo build --features gui --bin boru` — pass
+- `cargo test --features gui --bin boru` — 598 passed, 0 failed
 - `git diff --check` — pass
 - Visual captures exercised at 1024x720, 1280x800, 1440x900, and 1920x1080.

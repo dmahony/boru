@@ -73,8 +73,8 @@ subscription (app.rs:18560-18562), and watchdog transitions
 
 ## 4. Tests
 
-- `cargo build --example boru --features gui` — OK (exit 0).
-- `cargo test --example boru --features gui` — **869 passed / 0 failed**
+- `cargo build --bin boru --features gui` — OK (exit 0).
+- `cargo test --bin boru --features gui` — **869 passed / 0 failed**
   (prior: 864; +5 net new).
 - New tests:
   - `card_shell_stores_header_icon`, `card_shell_build_with_header_icon_does_not_panic`

@@ -4,7 +4,7 @@ Feeds implementation task **t_9e9a0fcd** ("Implement scroll behavior preservatio
 jump-to-latest integration") for parent **t_6f308ca5** (UI-13 scroll preservation).
 
 Investigated: 2026-08-03, against the working tree on `main` (commit 1241e0e2 + uncommitted
-UI changes). Verified `cargo check --examples` passes and `cargo test --example boru --features gui`
+UI changes). Verified `cargo check --examples` passes and `cargo test --bin boru --features gui`
 baseline is green (597 tests, 4 layout-cache tests pass).
 
 ---
@@ -71,7 +71,7 @@ The probe scripts (`scripts/scroll_roundtrip_probe.sh`, `scripts/scroll_probe.sh
 after opening a conversation seeded with 60 history messages, OCR shows the **top** of the
 timeline ("Today", "Chat joined.", system chips) instead of the newest messages. Those runs
 used a binary built **before** the uncommitted snap-consumption change
-(`target/debug/examples/boru` was rebuilt 20:45, after the `app.rs` edit at 20:37), so the
+(`target/debug/boru` was rebuilt 20:45, after the `app.rs` edit at 20:37), so the
 current tree has **not** been probe-verified yet.
 
 Likely failure chain to verify during implementation:
@@ -225,7 +225,7 @@ deliberately NOT changed.
 ### 9.3 Verification
 
 - `cargo check --examples` OK.
-- `cargo test --example boru --features gui`: **608 passed / 0 failed** (was 597 baseline;
+- `cargo test --bin boru --features gui`: **608 passed / 0 failed** (was 597 baseline;
   7 new scroll state-machine tests added in `app::tests`):
   - `chat_scroll_empty_timeline_preserves_bottom_sentinel` — the sentinel fix.
   - `chat_scroll_at_bottom_keeps_following_latest_and_mirrors_offset`
@@ -354,8 +354,8 @@ to the newest entry.
 
 ### 10.5 Verification summary
 
-- `cargo check --example boru --features gui` OK.
-- `cargo test --example boru --features gui`: **615 passed / 0 failed** (was 610;
+- `cargo check --bin boru --features gui` OK.
+- `cargo test --bin boru --features gui`: **615 passed / 0 failed** (was 610;
   +5 new tests). All 9 parent scroll tests still pass — no regressions.
 - `cargo test --lib -- try_backfill_skips_when_history_at_or_above_threshold`: PASS
   (0.03s). The full lib suite was not re-run end-to-end: it is long-running
@@ -403,7 +403,7 @@ later `Scrolled` to cancel).
 
 ### 11.3 Verification
 
-- `cargo test --example boru --features gui`: **897 passed / 0 failed** (all 12
+- `cargo test --bin boru --features gui`: **897 passed / 0 failed** (all 12
   scroll state-machine tests green, including the 2 new/updated ones).
 
 

@@ -25,12 +25,12 @@ tiers (MODE A ≥760 / MODE B 560-759 / MODE C <560; mesh hidden <520).
 ## rb commands run (all on debsrv, never local)
 
 ```
-rb test --example boru --features gui,video-playback,terminal -- capture_status_card --nocapture
+rb test --bin boru --features gui,video-playback,terminal -- capture_status_card --nocapture
 # -> 1 passed (12 captures) in 4.81s; RB_EXIT=0
 rsync -az debsrv:~/boru-build/work-1/captures/ ./captures/
 ```
 
-Final canonical-repo check: `rb check --example boru --features gui,video-playback,terminal` (see
+Final canonical-repo check: `rb check --bin boru --features gui,video-playback,terminal` (see
 verification below).
 
 ## Per-width checklist matrix

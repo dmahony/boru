@@ -142,7 +142,7 @@ Until that migration exists, callers must treat tunnel definitions and capabilit
 
 ## Optional CLI/debug interface (Phase 21)
 
-The current Boru command surface is the GUI example (`cargo run --features gui --example boru`), whose Clap commands select or join chat rooms before the long-lived GUI/network runtime is started. It does not provide a standalone process or a reusable command context for tunnel operations: tunnel definitions and capabilities are owned by the in-process `TunnelService`, and tunnel protocol handling is registered on the shared endpoint/router created by the GUI startup path.
+The current Boru command surface is the GUI binary (`cargo run`), whose Clap commands select or join chat rooms before the long-lived GUI/network runtime is started. It does not provide a standalone process or a reusable command context for tunnel operations: tunnel definitions and capabilities are owned by the in-process `TunnelService`, and tunnel protocol handling is registered on the shared endpoint/router created by the GUI startup path.
 
 Therefore Phase 21 does not add a separate `boru tunnel share <friend> <port>` or `boru tunnel connect <tunnel>` command. Adding those commands now would either create a second endpoint/identity and duplicate runtime setup, or require a new control API and lifecycle boundary for attaching short-lived CLI invocations to the running GUI. Neither is a small, natural extension of the existing architecture, and no new CLI framework is justified solely for this feature.
 

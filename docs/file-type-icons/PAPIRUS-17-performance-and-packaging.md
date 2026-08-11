@@ -58,10 +58,10 @@ PAPIRUS-17 lands four changes:
 ## Verification evidence
 
 ```
-$ rb check --example boru --features gui,video-playback,terminal   # worktree
+$ rb check --bin boru --features gui,video-playback,terminal   # worktree
    Finished `dev` profile in 8.01s (exit 0; 216 pre-existing warnings, unchanged)
 
-$ rb test --example boru --features gui,video-playback,terminal -- file_type_resolver file_type_icon
+$ rb test --bin boru --features gui,video-playback,terminal -- file_type_resolver file_type_icon
    test result: ok. 90 passed; 0 failed; 970 filtered out
 
 $ find assets/third_party/papirus -type l | wc -l

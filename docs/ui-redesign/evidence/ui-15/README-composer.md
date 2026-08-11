@@ -58,8 +58,8 @@ persistence, permission and authorization semantics are untouched.
 
 ## Verification
 
-- Build: `cargo build --features gui --example boru` — PASS.
-- Tests: `cargo test --features gui --example boru` — **655 passed, 0 failed**.
+- Build: `cargo build --features gui --bin boru` — PASS.
+- Tests: `cargo test --features gui --bin boru` — **655 passed, 0 failed**.
   UI-15-specific (all pass):
   - `send_pressed_skips_while_ime_composing`
   - `composer_sending_flag_roundtrips`
@@ -87,7 +87,7 @@ persistence, permission and authorization semantics are untouched.
   states at the compact viewport.
 
 Re-run: `bash scripts/ui15_composer_evidence.sh` (requires Xvfb, xdotool,
-ImageMagick; builds/uses `target/debug/examples/boru`). Set `BORU_WIDTH` /
+ImageMagick; builds/uses `target/debug/boru`). Set `BORU_WIDTH` /
 `BORU_HEIGHT` to capture other viewports.
 
 ## Remaining risks / notes

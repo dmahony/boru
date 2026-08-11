@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-BIN=$ROOT/target/debug/examples/boru
+BIN=$ROOT/target/debug/boru
 for action in public group friend files; do
   display=$((250 + ${#action}))
   data=$(mktemp -d /tmp/boru-ui11-action.XXXXXX)

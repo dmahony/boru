@@ -2,7 +2,7 @@
 # Manual two-instance ready test: verify instances discover/connect, then capture.
 set -euo pipefail
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-BINARY="$ROOT_DIR/target/debug/examples/boru"
+BINARY="$ROOT_DIR/target/debug/boru"
 OUTPUT_DIR="$ROOT_DIR/docs/ui-redesign/evidence/ui-08"
 TOPIC="2222222222222222222222222222222222222222222222222222222222222222"
 mkdir -p "$OUTPUT_DIR"

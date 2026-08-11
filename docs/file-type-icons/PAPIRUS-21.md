@@ -80,9 +80,9 @@ all other existing tests are untouched.
 
 | Run | Result |
 |---|---|
-| `rb test --example boru --features gui,video-playback,terminal -- file_type_resolver` | 65 passed, 0 failed (incl. all 7 new + all PAPIRUS-19 `task19_*`) |
-| `rb test --example boru --features gui,video-playback,terminal -- file_type_icon` | 39 passed, 0 failed |
-| `rb check --example boru --features gui,video-playback,terminal` | exit 0 (216 pre-existing warnings, same as PAPIRUS-20 baseline) |
+| `rb test --bin boru --features gui,video-playback,terminal -- file_type_resolver` | 65 passed, 0 failed (incl. all 7 new + all PAPIRUS-19 `task19_*`) |
+| `rb test --bin boru --features gui,video-playback,terminal -- file_type_icon` | 39 passed, 0 failed |
+| `rb check --bin boru --features gui,video-playback,terminal` | exit 0 (216 pre-existing warnings, same as PAPIRUS-20 baseline) |
 
 ## 4. Visual verification (headless Xvfb + MCP, PAPIRUS-20 harness pattern)
 

@@ -44,7 +44,7 @@ Toolchain recorded in `baseline-build.log`:
 Build command:
 
 ```text
-cargo check --features gui --example boru
+cargo check --features gui --bin boru
 ```
 
 Result: exit 0, finished successfully. It emitted 67 warnings for the GUI example and 3 warnings for the library (unused imports/variables, unfulfilled expectations, deprecated legacy history save, dead code, and private-interface warnings). These warnings are baseline noise, not introduced by this audit.
@@ -52,7 +52,7 @@ Result: exit 0, finished successfully. It emitted 67 warnings for the GUI exampl
 Binary build command:
 
 ```text
-cargo build --features gui --example boru
+cargo build --features gui --bin boru
 ```
 
 Result: exit 0.
@@ -60,7 +60,7 @@ Result: exit 0.
 Headless launch smoke test:
 
 ```text
-xvfb-run -a target/debug/examples/boru --data-dir <temporary-directory> --no-dht --no-relay
+xvfb-run -a target/debug/boru --data-dir <temporary-directory> --no-dht --no-relay
 ```
 
 The process stayed alive for the 15-second timeout (exit 124 from `timeout`), which demonstrates that the application reached and maintained its GUI event loop. Xvfb/llvmpipe emitted a non-fatal `libEGL` DRI3 warning. A screenshot was captured at 1280x800 after 8 seconds; see `baseline-home-1280x800.png`.
@@ -68,9 +68,9 @@ The process stayed alive for the 15-second timeout (exit 124 from `timeout`), wh
 Normal CLI usage documented by `examples/iced_chat/main.rs`:
 
 ```text
-cargo run --features gui --example boru
-cargo run --features gui --example boru open
-cargo run --features gui --example boru join <ticket>
+cargo run --features gui --bin boru
+cargo run --features gui --bin boru open
+cargo run --features gui --bin boru join <ticket>
 ```
 
 The package manifest names the actual example binary `boru` at `examples/iced_chat/main.rs` (`[[example]]`, required feature `gui`). The application supports `--data-dir`, `--no-dht`, `--no-relay`, `--mcp`, `--bind-port`, `--name`, `open`, `join`, and `logs`. `DISPLAY` or `WAYLAND_DISPLAY` is required; `main.rs` explicitly recommends `xvfb-run` for headless smoke tests.
@@ -80,7 +80,7 @@ The package manifest names the actual example binary `boru` at `examples/iced_ch
 `baseline-test-list.log` records the complete test inventory:
 
 - `cargo test --lib -- --list`: 1,789 library tests listed.
-- `cargo test --features gui --example boru -- --list`: 514 GUI/example tests listed.
+- `cargo test --features gui --bin boru -- --list`: 514 GUI/example tests listed.
 - Combined inventory output contains 2,303 test entries.
 
 Command attempted:
@@ -261,7 +261,7 @@ Do not rename or remove the following shared contracts during UI work:
 
 ## ACCEPTANCE CRITERIA
 
-- [x] Current application build succeeds (`cargo check --features gui --example boru` and `cargo build --features gui --example boru`).
+- [x] Current application build succeeds (`cargo check --features gui --bin boru` and `cargo build --features gui --bin boru`).
 - [x] Current application launches and remains alive under Xvfb with isolated temporary data (`baseline-launch.log`).
 - [x] Home and Chat source regions are mapped to exact functions/line ranges.
 - [x] Visible Home sections and live data sources are mapped.

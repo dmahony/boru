@@ -231,7 +231,7 @@ The existing test-only offscreen harness
 tiny-skia headless renderer (no GPU/display/network). Run:
 
 ```text
-rb test --example boru --features gui,video-playback,terminal -- capture_status_card --nocapture
+rb test --bin boru --features gui,video-playback,terminal -- capture_status_card --nocapture
 rsync -az debsrv:~/boru-build/work-<slot>/captures/ ./captures/
 ```
 

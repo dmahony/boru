@@ -79,8 +79,8 @@ the existing icon (`✓`/`✓✓`/`✗`/…), so state is never colour-only.
 
 ## Verification (section 6 report)
 
-- **Build:** `cargo build --features gui --example boru` — PASS
-- **Tests:** `cargo test --features gui --example boru` — 652 passed / 0
+- **Build:** `cargo build --features gui --bin boru` — PASS
+- **Tests:** `cargo test --features gui --bin boru` — 652 passed / 0
   failed. New tests: `chat_bubble_max_width_caps_at_560_or_68_percent`
   (presentation), `bubble_bg_uses_spec_surfaces`,
   `bubble_border_follows_spec_rules` (design_tokens),

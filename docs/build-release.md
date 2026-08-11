@@ -14,20 +14,20 @@
 # Build the library (debug profile; fastest iteration and full debug info)
 cargo build
 
-# Build the GUI example (debug profile)
-cargo build --features gui --example boru
+# Build the Boru GUI binary (debug profile)
+cargo build --features gui --bin boru
 
 # Check compilation (faster than a full build)
-cargo check --features gui --example boru
+cargo check --features gui --bin boru
 
 # Build a production GUI binary (optimized, LTO, one codegen unit, stripped)
-cargo build --release --features gui --example boru
+cargo build --release --features gui --bin boru
 
 # Build a profiling binary (same release optimizations, with DWARF symbols)
-cargo build --profile profiling --features gui --example boru
+cargo build --profile profiling --features gui --bin boru
 
 # Run the profiling binary under a profiler, for example:
-# samply record target/profiling/examples/boru
+# samply record target/profiling/boru
 # (Use the corresponding target/profiling path for other binaries.)
 ```
 
@@ -50,7 +50,7 @@ issue.
 
 | Feature | Dependencies | Description |
 |---------|--------------|-------------|
-| `default` = `["net", "metrics"]` | | |
+| `default` = `["net", "metrics", "gui"]` | | |
 | `net` | iroh, irpc, iroh-blobs, serde_json, tokio, ... | Full networking stack |
 | `metrics` | iroh-metrics/metrics | Metrics instrumentation |
 | `gui` | iced, rfd, mimalloc, rayon, profiling, rustc-hash | Iced GUI frontend (includes `net`) |
@@ -85,7 +85,7 @@ pkg-config --exists opus && echo opus-OK   # optional: vendored autotools fallba
 
 ```sh
 # boru GUI
-cargo run --features gui --example boru -- --name alice
+cargo run -- --name alice
 
 # doctor diagnostic tool
 cargo run --features net --example doctor
@@ -137,7 +137,7 @@ Inspect the resolved profile settings before a release or profiling run:
 
 ```sh
 cargo metadata --no-deps --format-version 1 > /tmp/boru-metadata.json
-cargo build --profile profiling --features gui --example boru
+cargo build --profile profiling --features gui --bin boru
 ```
 
 The release and profiling builds use the same dependency graph and optimized

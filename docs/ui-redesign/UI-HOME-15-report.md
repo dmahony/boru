@@ -89,9 +89,9 @@ At the four evidence windows the content widths are ~1231 / ~919 / ~679 /
 
 ## Verification
 
-- `cargo build --example boru --features gui` — OK (exit 0; only
+- `cargo build --bin boru --features gui` — OK (exit 0; only
   pre-existing warnings).
-- `cargo test --example boru --features gui` — **891 passed / 0 failed**
+- `cargo test --bin boru --features gui` — **891 passed / 0 failed**
   (prior 884; +7 new: 3 design-token tests, 1 card-shell test, 3 app.rs
   regression guards).
 - Screenshot pixel geometry:

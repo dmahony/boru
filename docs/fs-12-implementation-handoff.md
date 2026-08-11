@@ -83,7 +83,7 @@ DESIGN / ARCHITECTURE DECISIONS
 
 COMMANDS RUN (exact + result)
 -----------------------------
-- cargo check --example boru --features gui
+- cargo check --bin boru --features gui
     → still fails, but ONLY on sibling-owned errors:
       * FS-11 (BLOCKED card): OutboundState, TransferRecord, TransferStateStore,
         ProjectionUpdate, transfer_store, outbound_*, MAX_OUTBOUND_HISTORY,
@@ -119,7 +119,7 @@ recent_activity_view_model.rs has 12 unit tests covering:
 
 RUNTIME / MCP EVIDENCE
 ----------------------
-None possible this run: the example binary cannot be built while sibling
+None possible this run: the binary cannot be built while sibling
 workers (FS-11 blocked, FS-13/14/15/17 running) hold the shared tree in a
 non-compiling state. This mirrors FS-16's accepted status ("Example blocked by
 concurrent-worker code outside FS-16 scope"). FS-23 is the integration card

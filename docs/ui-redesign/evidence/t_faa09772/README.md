@@ -17,5 +17,5 @@ Overflow / clipping / scroll audit evidence.
 | `home_scroll_top_900x650.png` | top of the page at a short window: greeting + hero |
 | `home_scroll_bottom_900x650.png` | after wheel-scroll: RECENT ACTIVITY + Online Peers rows visible — the page scrolls vertically and content below the fold is reachable; rightmost word x≈846 < 900 |
 
-Harness prerequisites: built GUI binary (`target/debug/examples/boru`),
+Harness prerequisites: built GUI binary (`target/debug/boru`),
 Xvfb, xdotool, ImageMagick `import`, tesseract.

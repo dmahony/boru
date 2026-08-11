@@ -46,5 +46,5 @@ key is captured when focus is elsewhere.
 The required verification command is:
 
 ```text
-rb check --example boru --features gui,video-playback,terminal
+rb check --bin boru --features gui,video-playback,terminal
 ```

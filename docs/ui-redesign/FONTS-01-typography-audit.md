@@ -404,5 +404,5 @@ $ grep -rn "googleapis\|fonts\.google\|font\.load(.*http" -r .
 0     # no remote font loading
 ```
 
-Verified build (debsrv): `rb check --example boru --features gui,video-playback,terminal`
+Verified build (debsrv): `rb check --bin boru --features gui,video-playback,terminal`
 — see task completion metadata for result.

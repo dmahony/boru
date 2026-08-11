@@ -95,10 +95,10 @@ No production file-transfer payloads or message types were modified.
 
 ## Verification
 
-- `rb check --example boru --features gui,video-playback,terminal` exit 0
+- `rb check --bin boru --features gui,video-playback,terminal` exit 0
   (worktree + canonical repo post-merge).
 - Targeted test run (single invocation, filtered — never the full suite):
-  `rb test --example boru --features gui,video-playback,terminal -- file_type_resolver file_category file_type_icon download_progress_view`
+  `rb test --bin boru --features gui,video-playback,terminal -- file_type_resolver file_category file_type_icon download_progress_view`
   → all resolver, fallback, and shared-component UI integration tests pass.
   (Note: cargo 1.97 does not split a single filter argument on commas, so the
   mandated `-- file_type_resolver,file_category` was run as the equivalent

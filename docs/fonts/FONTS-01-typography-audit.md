@@ -606,5 +606,5 @@ files route everything through `type_role_text`.)
 
 - Whole-repo greps above (search_files / ripgrep) — complete inventory.
 - No production files modified during this audit (git status clean apart from this note).
-- Build gate to run (per card): `rb check --example boru --features gui,video-playback,terminal`
+- Build gate to run (per card): `rb check --bin boru --features gui,video-playback,terminal`
   on debsrv (remote). Since no production code changed, the audit note is additive.

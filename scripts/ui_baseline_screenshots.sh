@@ -3,7 +3,7 @@
 #
 # Usage:
 #   scripts/ui_baseline_screenshots.sh
-#   scripts/ui_baseline_screenshots.sh --binary target/debug/examples/boru
+#   scripts/ui_baseline_screenshots.sh --binary target/debug/boru
 #
 # The output names are intentionally immutable evidence names. Remove an old
 # evidence directory explicitly before recapturing; this script refuses to
@@ -12,7 +12,7 @@ set -euo pipefail
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 OUTPUT_DIR="$ROOT_DIR/docs/ui-redesign/evidence/baseline"
-BINARY="$ROOT_DIR/target/debug/examples/boru"
+BINARY="$ROOT_DIR/target/debug/boru"
 MCP_CLIENT="$ROOT_DIR/scripts/ui_mcp.py"
 TASK_ID="t_9ec8d24f"
 
@@ -28,7 +28,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -x "$BINARY" ]] || {
-    printf 'GUI binary not found: %s\nBuild with: cargo build --features gui --example boru\n' "$BINARY" >&2
+    printf 'GUI binary not found: %s\nBuild with: cargo build --features gui --bin boru\n' "$BINARY" >&2
     exit 1
 }
 [[ -x "$MCP_CLIENT" ]] || { printf 'MCP helper is not executable: %s\n' "$MCP_CLIENT" >&2; exit 1; }

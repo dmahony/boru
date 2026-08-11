@@ -8,7 +8,7 @@ Shared DEBSRV access details:
 - Host: 172.16.0.59
 - SSH user: dan
 - Wrapper: `~/bin/rb`
-- Build command: `rb check --example boru --features gui,video-playback,terminal`
+- Build command: `rb check --bin boru --features gui,video-playback,terminal`
 
 Workspace shell setup:
 - Source `workspace.env` from the workspace root.
@@ -34,7 +34,7 @@ Workspace shell setup:
 ```bash
 cd /home/dan/iroh-gossip-chat/.worktrees/t_5ce7f106
 source workspace.env
-rb check --example boru --features gui,video-playback,terminal
+rb check --bin boru --features gui,video-playback,terminal
 ```
 
 ## Notes

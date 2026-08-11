@@ -1144,7 +1144,7 @@ Deterministic screenshots are produced from the running GUI under Xvfb using the
 
 ```sh
 # Build once
-cargo build --features gui --example boru
+cargo build --features gui --bin boru
 
 # Baseline (UI-01): home + chat at 1280x800, 1024x720, 1440x900
 scripts/ui_baseline_screenshots.sh

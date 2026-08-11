@@ -3,7 +3,7 @@
 # Usage: fs23_launch.sh start|stop|status
 set -uo pipefail
 ROOT=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-BIN=${BORU_BIN:-$ROOT/target/debug/examples/boru}
+BIN=${BORU_BIN:-$ROOT/target/debug/boru}
 BASE=/tmp/fs23-clean
 DISPLAY_NUM=310
 MCP_SENDER=19101

@@ -47,10 +47,10 @@ proven quick_action_card button path. 608/608 tests pass, cargo check clean.
 
 ## COMMANDS RUN
 
-- Build: cargo build --features gui --example boru (pre-existing binary from 20:53)
-- Tests: cargo test --features gui --example boru
+- Build: cargo build --features gui --bin boru (pre-existing binary from 20:53)
+- Tests: cargo test --features gui --bin boru
 - Formatting/lint: cargo fmt --check (pre-existing unstaged diffs in app.rs tests)
-- Check: cargo check --features gui --example boru
+- Check: cargo check --features gui --bin boru
 - Screenshot command: bash scripts/ui15_verify_evidence.sh
 - MCP test: python3 raw TCP JSON-RPC against 127.0.0.1:8770
 

@@ -114,7 +114,7 @@ The File Sharing dashboard visual QA (FS-24) and its user/architecture docs:
 ## 5. How to regenerate
 
 ```sh
-cargo build --features gui --example boru
+cargo build --features gui --bin boru
 
 # Baseline screenshots (UI-01 harness)
 scripts/ui_baseline_screenshots.sh

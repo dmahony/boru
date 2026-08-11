@@ -8,7 +8,7 @@
 set -euo pipefail
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-BINARY=${BORU_BINARY:-$ROOT_DIR/target/debug/examples/boru}
+BINARY=${BORU_BINARY:-$ROOT_DIR/target/debug/boru}
 MCP_CLIENT=$ROOT_DIR/scripts/ui_mcp.py
 FIXTURE=$ROOT_DIR/scripts/figure4_fixture.py
 COMPARE=$ROOT_DIR/scripts/compare_screenshot.py
@@ -27,7 +27,7 @@ else
 fi
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
-[[ -x "$BINARY" ]] || fail "GUI binary not found: $BINARY (build with: cargo build --features gui --example boru)"
+[[ -x "$BINARY" ]] || fail "GUI binary not found: $BINARY (build with: cargo build --features gui --bin boru)"
 [[ -x "$MCP_CLIENT" ]] || fail "MCP client is not executable: $MCP_CLIENT"
 command -v Xvfb >/dev/null || fail "Xvfb is required for headless CI capture"
 command -v xdotool >/dev/null || fail "xdotool is required for headless CI capture"

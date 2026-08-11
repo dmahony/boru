@@ -88,8 +88,8 @@ horizontal scrollbar appears (the page scrollable is vertical-only).
 
 ## Tests
 
-- `cargo build --example boru --features gui` — OK (exit 0; 207 pre-existing warnings unchanged).
-- `cargo test --example boru --features gui` — **884 passed / 0 failed** (prior 880; +4 new regression guards).
+- `cargo build --bin boru --features gui` — OK (exit 0; 207 pre-existing warnings unchanged).
+- `cargo test --bin boru --features gui` — **884 passed / 0 failed** (prior 880; +4 new regression guards).
 - New tests (source-inclusion guards matching the existing UI-HOME-09/12 pattern):
   - `home_rail_rows_are_content_driven_not_fixed_height` — forbids fixed 60/32/48 px row heights in the three rail cards; requires the zero-width min-height spacer for each.
   - `home_rail_descriptions_wrap_naturally_not_truncated_or_clipped` — forbids `truncate_with_ellipsis`, `Wrapping::None` and `.clip(true)` in Recent Activity / Mesh events; requires `Wrapping::WordOrGlyph`.

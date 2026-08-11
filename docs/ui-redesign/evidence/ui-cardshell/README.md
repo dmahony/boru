@@ -51,8 +51,8 @@ header but previously unreachable.
 
 ## Verification
 
-- `cargo check --features gui --example boru` — PASS.
-- `cargo test --features gui --example boru` — 577 passed, 0 failed (10 new
+- `cargo check --features gui --bin boru` — PASS.
+- `cargo test --features gui --bin boru` — 577 passed, 0 failed (10 new
   card shell unit tests: row-height token = 48 px, default bounded max height,
   count/view-all/empty-message/children storage, empty + populated build
   smoke tests, default row spacing).

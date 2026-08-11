@@ -6,7 +6,7 @@ set -euo pipefail
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 OUTPUT_DIR="$ROOT_DIR/docs/ui-redesign/evidence/fs-24"
-BINARY="$ROOT_DIR/target/debug/examples/boru"
+BINARY="$ROOT_DIR/target/debug/boru"
 TASK_ID="t_f4f6f34d"
 MCP_PORT=18765
 

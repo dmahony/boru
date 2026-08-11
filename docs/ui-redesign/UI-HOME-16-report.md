@@ -92,9 +92,9 @@ the existing dependency-isolation tests).
 
 ## Verification
 
-- `cargo build --example boru --features gui` — OK (exit 0; only the 207
+- `cargo build --bin boru --features gui` — OK (exit 0; only the 207
   pre-existing warnings, untouched).
-- `cargo test --example boru --features gui` — **896 passed / 0 failed**
+- `cargo test --bin boru --features gui` — **896 passed / 0 failed**
   (prior 891; +5 net new: 3 card-shell + 2 app.rs; the UI-HOME-08 copy test
   was renamed to the UI-HOME-16 spec test).
 - Screenshot evidence (OCR-verified):

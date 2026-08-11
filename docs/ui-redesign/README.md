@@ -2,10 +2,10 @@
 
 ## Baseline capture
 
-Build the GUI example, then run one command from the repository root:
+Build the GUI binary, then run one command from the repository root:
 
 ```sh
-cargo build --features gui --example boru
+cargo build --features gui --bin boru
 scripts/ui_baseline_screenshots.sh
 ```
 
@@ -25,7 +25,7 @@ For this baseline the task ID is `t_9ec8d24f`, and `state` is `baseline`.
 
 ## How the harness works
 
-- Starts `target/debug/examples/boru` with `open`, so a fresh temporary data directory creates a deterministic local room for the Chat screen.
+- Starts `target/debug/boru` with `open`, so a fresh temporary data directory creates a deterministic local room for the Chat screen.
 - Uses `--name "UI Baseline"`, `--no-dht`, and `--no-relay`; no network identifiers or private keys are committed.
 - Enables the existing loopback-only GUI test MCP (`127.0.0.1`) solely to navigate from Chat to Home.
 - Starts a disposable Xvfb screen at the requested size and captures the Boru window with ImageMagick `import`.

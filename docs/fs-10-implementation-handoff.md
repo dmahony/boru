@@ -88,10 +88,10 @@ DESIGN / ARCHITECTURE DECISIONS
 
 COMMANDS RUN (exact + result)
 -----------------------------
-- cargo build --example boru --features gui            → OK (Finished dev profile)
-- cargo test --example boru --features gui shared_by_me → 14 passed; 0 failed
-- cargo test --example boru --features gui             → 732 passed; 0 failed
-- timeout 12 xvfb-run -a ./target/debug/examples/boru --data-dir /tmp/fs10-smoke
+- cargo build --bin boru --features gui            → OK (Finished dev profile)
+- cargo test --bin boru --features gui shared_by_me → 14 passed; 0 failed
+- cargo test --bin boru --features gui             → 732 passed; 0 failed
+- timeout 12 xvfb-run -a ./target/debug/boru --data-dir /tmp/fs10-smoke
   --no-dht --no-relay                                  → EXIT 124 (ran until
   timeout; no panic/error in log; only benign libEGL DRI3 warnings under
   headless Xvfb)

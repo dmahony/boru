@@ -44,8 +44,8 @@ real network events use).
 
 ## Verification
 
-- `cargo build --example boru --features gui` — PASS.
-- `cargo test --example boru --features gui` — 867 passed, 0 failed
+- `cargo build --bin boru --features gui` — PASS.
+- `cargo test --bin boru --features gui` — 867 passed, 0 failed
   (3 new tests: peer-row-height band, body-height min/cap math, live
   presence in rows; existing empty/populated/dependency-isolation tests
   unchanged and green).
@@ -56,6 +56,6 @@ real network events use).
 ## How to re-run
 
 ```bash
-cargo build --example boru --features gui
+cargo build --bin boru --features gui
 bash scripts/ui_home07_online_peers_evidence.sh
 ```

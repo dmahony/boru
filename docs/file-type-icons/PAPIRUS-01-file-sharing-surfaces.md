@@ -3,7 +3,7 @@
 Task: `t_50f26f47` — Audit every Boru surface that displays a file or folder.
 Source spec: `Boru_Papirus_icons.txt` Task 1 (attachment of `t_9d01cfec`).
 Scope: analysis only. No production code was modified by this task.
-Baseline: `cargo build --example boru --features gui,video-playback,terminal` — see "Baseline evidence" at the end.
+Baseline: `cargo build --bin boru --features gui,video-playback,terminal` — see "Baseline evidence" at the end.
 
 ---
 
@@ -243,4 +243,4 @@ PAPIRUS Task 4 semantic sizes map onto today's tokens as: compact ≈ Xs/Sm (16-
 
 - Repo: `origin` → `dmahony/boru.git`, branch `wt/t_50f26f47` (worktree `/home/dan/iroh-gossip-chat/.worktrees/t_50f26f47`).
 - Analysis commit: `<recorded after landing>` — this note only; no production code changed.
-- Build (acceptance criterion): `cargo build --example boru --features gui,video-playback,terminal` — result recorded in the task handoff (exit code + duration).
+- Build (acceptance criterion): `cargo build --bin boru --features gui,video-playback,terminal` — result recorded in the task handoff (exit code + duration).

@@ -8,7 +8,7 @@ Task: t_9827c02b — UI-RESTYLE-11: Functional verification of all 3 flows
 
 The three dialogs are iced (GUI) views; a full interactive desktop session is not
 available in the worker environment, so verification uses the project's existing
-test harness: `cargo test --example boru --features gui`. The harness constructs a
+test harness: `cargo test --bin boru --features gui`. The harness constructs a
 real `IcedChat` app instance (via the pre-existing `build_join_request_test_app`
 helper in `examples/iced_chat/app.rs`, which binds a real iroh endpoint on
 127.0.0.1:0) and drives it with the **same `AppMessage` variants the GUI emits** for
@@ -85,7 +85,7 @@ All 16 bullets exercised. **16/16 PASS, 0 FAIL, 0 regressions.**
 ## Regression check
 
 Full example test suite: **816/816 passed, 0 failed** (810 pre-existing + 6 vr_*
-verification tests) via `cargo test --example boru --features gui` on this branch.
+verification tests) via `cargo test --bin boru --features gui` on this branch.
 
 The compile emitted only pre-existing warnings (unused imports/fields, unfulfilled
 `#[expect(dead_code)]` lints, deprecated `ChatHistoryStore::save`); no new warnings

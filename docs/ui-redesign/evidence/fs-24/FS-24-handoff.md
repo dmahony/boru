@@ -39,15 +39,15 @@ regression.
 
 ```bash
 # Build verification
-cargo check --example boru --features gui
+cargo check --bin boru --features gui
 # → 0 errors, 211 pre-existing warnings (unchanged)
 
 # Token tests
-cargo test --example boru --features gui -- design_tokens -- --nocapture
+cargo test --bin boru --features gui -- design_tokens -- --nocapture
 # → 18 passed
 
 # Component tests
-cargo test --example boru --features gui -- sharing_summary shared_by_me_table -- --nocapture
+cargo test --bin boru --features gui -- sharing_summary shared_by_me_table -- --nocapture
 # → 21 passed
 
 # Screenshot capture

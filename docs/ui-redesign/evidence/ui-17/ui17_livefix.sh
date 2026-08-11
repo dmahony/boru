@@ -4,7 +4,7 @@
 # checks: (1) action status reaches Completed, (2) dialog_open snapshot flips,
 # (3) iced journal records GuiTestActionReceived, (4) screenshot shows overlay.
 set -uo pipefail
-BIN=/tmp/ui17-verify/target/debug/examples/boru
+BIN=/tmp/ui17-verify/target/debug/boru
 MCP=/home/dan/iroh-gossip-chat/scripts/ui_mcp.py
 OUT=/tmp/ui17-livefix
 mkdir -p "$OUT"

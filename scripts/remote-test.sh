@@ -9,7 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 MANIFEST="${BORU_TEST_MANIFEST:-$PROJECT_DIR/config/test-machines.toml}"
 SUPERVISOR="$PROJECT_DIR/scripts/boru-test-instance.sh"
-LOCAL_BINARY="${BORU_TEST_BINARY:-$PROJECT_DIR/target/debug/examples/boru}"
+LOCAL_BINARY="${BORU_TEST_BINARY:-$PROJECT_DIR/target/debug/boru}"
 REMOTE_BINARY_NAME="boru-x86_64-linux"
 SSH_OPTIONS=()
 
@@ -127,8 +127,8 @@ check_machine() {
 
 build_binary() {
     require_command cargo
-    echo "→ cargo build --example boru --features gui" >&2
-    (cd "$PROJECT_DIR" && cargo build --example boru --features gui)
+    echo "→ cargo build --bin boru --features gui" >&2
+    (cd "$PROJECT_DIR" && cargo build --bin boru --features gui)
     require_file "$LOCAL_BINARY"
 }
 

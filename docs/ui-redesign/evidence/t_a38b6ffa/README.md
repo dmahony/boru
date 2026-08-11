@@ -8,7 +8,7 @@ Release build on debsrv via `rb`, from the canonical repo state (post
 BORU-HOME-01..11, HEAD `fdcf5708`):
 
 ```text
-rb build --release --example boru --features gui,video-playback,terminal
+rb build --release --bin boru --features gui,video-playback,terminal
 Finished `release` profile [optimized] target(s) in 13m 37s
 exit code: 0
 ```
@@ -16,12 +16,12 @@ exit code: 0
 Final compile gate (also on debsrv):
 
 ```text
-rb check --example boru --features gui,video-playback,terminal
+rb check --bin boru --features gui,video-playback,terminal
 Finished `dev` profile [unoptimized + debuginfo] target(s) in 17.47s
 exit code: 0   (only the pre-existing unfulfilled #[expect(dead_code)] warnings)
 ```
 
-The release binary was rsynced back to `target/release/examples/boru`
+The release binary was rsynced back to `target/release/boru`
 (53,427,128 bytes, mtime after HEAD) and every capture below ran against it
 under Xvfb with a fresh temporary data dir, `--no-dht --no-relay`, MCP +
 GUI test actions, and the loopback MCP test interface.

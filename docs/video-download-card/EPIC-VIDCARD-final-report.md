@@ -226,7 +226,7 @@ user-cancelled card back to Ready (fixed via terminal-state guard). Item-level e
   (`git merge-base --is-ancestor` clean for every commit); `HEAD == origin/main == 99ac0a04`
   (VIDCARD-17 commit, latest). Nothing lost.
 - Worktree `wt/t_78f5b5d2` HEAD == canonical `/home/dan/iroh-gossip-chat` HEAD.
-- Compilation verified on debsrv: `rb check --example boru --features gui,video-playback,terminal`
+- Compilation verified on debsrv: `rb check --bin boru --features gui,video-playback,terminal`
   from `/home/dan/iroh-gossip-chat` → exit 0, "Finished dev profile in 7.84s".
 - Test evidence at final commits: video_file_card 47/47 (VIDCARD-19), download_restartable +
   download_lifecycle tests (VIDCARD-20), 73 targeted accessibility tests (VIDCARD-17), full

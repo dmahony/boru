@@ -9,7 +9,7 @@
 set -euo pipefail
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-BINARY=${BORU_BINARY:-$ROOT_DIR/target/debug/examples/boru}
+BINARY=${BORU_BINARY:-$ROOT_DIR/target/debug/boru}
 MCP_CLIENT=$ROOT_DIR/scripts/ui_mcp.py
 FIXTURE=$ROOT_DIR/scripts/figure4_fixture.py
 SPEC=${BORU_SPEC:-$ROOT_DIR/docs/ui-redesign/evidence/ui-14/ui14-states-spec.json}
@@ -19,7 +19,7 @@ HEIGHT=${BORU_HEIGHT:-800}
 SLOW_PORT=18731
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
-[[ -x "$BINARY" ]] || fail "GUI binary not found: $BINARY (build with: cargo build --features gui --example boru)"
+[[ -x "$BINARY" ]] || fail "GUI binary not found: $BINARY (build with: cargo build --features gui --bin boru)"
 [[ -x "$MCP_CLIENT" ]] || fail "MCP client is not executable: $MCP_CLIENT"
 [[ -f "$SPEC" ]] || fail "states spec not found: $SPEC"
 command -v Xvfb >/dev/null || fail "Xvfb is required for headless capture"

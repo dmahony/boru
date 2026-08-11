@@ -3,8 +3,8 @@
 //! with two different keys (as two separate instances would have with separate data dirs).
 //!
 //! This matches what happens when:
-//!   Instance A: cargo run --features gui --example boru open
-//!   Instance B: cargo run --features gui --example boru join <ticket>
+//!   Instance A: cargo run --features gui -- open
+//!   Instance B: cargo run --features gui -- join <ticket>
 
 use std::collections::HashMap;
 use std::sync::Arc;

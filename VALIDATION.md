@@ -120,7 +120,7 @@ confirm audibility without relying on the sender's local monitor.
 ## Exact Linux execution procedure
 
 1. Build the Linux GUI binary with all call/video features using the repository's remote build
-   wrapper: `rb build --example boru --features gui,video-playback,terminal`.
+   wrapper: `rb build --bin boru --features gui,video-playback,terminal`.
 2. Deploy the matching binary and `scripts/boru-test-instance.sh` to each selected Linux host.
    For dragon, use an `aarch64-unknown-linux-gnu` build and launch on its xrdp display (`:10`),
    as described in the iroh-gossip-chat deployment reference.

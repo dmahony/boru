@@ -59,7 +59,7 @@ stop_instance() {
         [[ "$stale_pid" == "$$" ]] && continue
         kill -TERM "$stale_pid" 2>/dev/null || true
     done
-    # Also kill any bare 'iced_chat' debug binary or other-named variants
+    # Also kill any bare 'boru' debug binary or other-named variants
     for stale_pid in $(pgrep -u "$(id -u)" -x 'boru' 2>/dev/null || true); do
         [[ "$stale_pid" == "$$" ]] && continue
         kill -TERM "$stale_pid" 2>/dev/null || true

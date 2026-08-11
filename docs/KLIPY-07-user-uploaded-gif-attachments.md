@@ -143,9 +143,9 @@ This path is identical for MP4 and for any other file — no animation-specific 
 
 ### 4.3 Build/test
 
-- `rb check --example boru --features gui,video-playback,terminal` (remote debsrv build).
+- `rb check --bin boru --features gui,video-playback,terminal` (remote debsrv build).
 - Targeted `rb test --test test_user_uploaded_gif -- gif` (integration).
-- Targeted `rb test --example boru --features gui,video-playback,terminal -- decode_gif_frames` (renderer unit tests).
+- Targeted `rb test --bin boru --features gui,video-playback,terminal -- decode_gif_frames` (renderer unit tests).
 
 ---
 

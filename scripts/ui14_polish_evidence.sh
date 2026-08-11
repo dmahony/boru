@@ -4,7 +4,7 @@
 # comparison with the Figure 3 target crop.
 set -euo pipefail
 ROOT=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-BIN=$ROOT/target/debug/examples/boru
+BIN=$ROOT/target/debug/boru
 OUT=$ROOT/docs/ui-redesign/evidence/ui-14
 mkdir -p "$OUT"
 

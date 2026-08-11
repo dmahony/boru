@@ -3,7 +3,7 @@
 # set_peer_presence AFTER a delay, reporting the MCP action result.
 set -uo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-BIN=$ROOT/target/debug/examples/boru
+BIN=$ROOT/target/debug/boru
 FIXTURE=$ROOT/scripts/figure4_fixture.py
 MCP=$ROOT/scripts/ui_mcp.py
 REMOTE_PK=28d7ee8656$(printf 'ab%.0s' {1..27})

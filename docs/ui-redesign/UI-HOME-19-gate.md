@@ -44,8 +44,8 @@ Fresh run at gate time on the exact HEAD being gated (origin/main 9d34a33c):
 
 | Run | Result | Detail |
 |---|---|---|
-| `cargo build --example boru --features gui` | ✅ exit 0 | 207 pre-existing warnings (unchanged, documented) |
-| `cargo test --example boru --features gui` | ✅ 896/896 pass | 66.5 s, 0 failed, 0 ignored |
+| `cargo build --bin boru --features gui` | ✅ exit 0 | 207 pre-existing warnings (unchanged, documented) |
+| `cargo test --bin boru --features gui` | ✅ 896/896 pass | 66.5 s, 0 failed, 0 ignored |
 | Fonts regression tests | ✅ 14/14 | included in the 896 (UI-HOME-11 suite) |
 | `cargo test --lib` | ⚠️ 1824 pass / 20 fail | **pre-existing, unrelated**: `git diff origin/main HEAD src/` is EMPTY — all UI-HOME work is examples/iced_chat-only; groups: DCGKA integration flake (5), stale sent_at:1000 (5), friendly-name flake (7), store/fs path (3). Remediation for the timestamp group (t_99573d95 / t_42beb205) is archived/done; triage ticket t_869b59bf filed for the rest |
 

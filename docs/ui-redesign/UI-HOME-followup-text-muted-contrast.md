@@ -41,7 +41,7 @@ actual token:
 All six light surfaces pass WCAG AA normal-text 4.5:1. The regression test
 `design_tokens::tests::contrast_ratios_pass_wcag_aa` pins muted ≥ 4.5:1 on
 white, canvas, sidebar, primary-soft bubble and selected surface — verified
-passing this run (`cargo test --example boru --features gui design_tokens`:
+passing this run (`cargo test --bin boru --features gui design_tokens`:
 24/24 passed).
 
 ## 3. Changes made

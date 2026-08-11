@@ -26,7 +26,7 @@ Deterministic checks:
 
 ```text
 cargo test --lib video_runtime
-cargo test --example boru --features video-playback inline_playback
+cargo test --bin boru --features video-playback inline_playback
 cargo check --example video_backend_probe --features video-playback
 ```
 

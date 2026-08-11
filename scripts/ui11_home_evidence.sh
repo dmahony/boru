@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-BIN=$ROOT/target/debug/examples/boru
+BIN=$ROOT/target/debug/boru
 OUT=$ROOT/docs/ui-redesign/evidence/ui-11
 mkdir -p "$OUT"
 for spec in '1280 800' '1024 720' '1440 900' '1920 1080'; do

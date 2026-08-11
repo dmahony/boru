@@ -74,8 +74,8 @@ replay, deterministic) and a live two-instance MCP run for the initial capture.
 
 ## 4. Verification
 
-- Build: `cargo build --example boru --features gui` → OK (exit 0).
-- Tests: `cargo test --example boru --features gui` → 844 passed, 0 failed.
+- Build: `cargo build --bin boru --features gui` → OK (exit 0).
+- Tests: `cargo test --bin boru --features gui` → 844 passed, 0 failed.
   This includes the 3 new UI-HOME-13 regression tests:
   - `chat_timeline_uses_type_role_figtree_roles` — view_chat_log must use
     `TypeRole::ChatMessage/Sender/Metadata` + `LineHeight::Relative(1.45)` and must

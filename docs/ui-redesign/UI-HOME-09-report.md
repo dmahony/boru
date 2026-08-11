@@ -113,8 +113,8 @@ columns sit at the same y (109/119), so edges align across columns.
 
 ## Tests
 
-- `cargo build --example boru --features gui` — OK (exit 0; 207 pre-existing warnings unchanged).
-- `cargo test --example boru --features gui` — **880 passed / 0 failed** (prior 876; +4 net: 2 new + existing suite re-run green).
+- `cargo build --bin boru --features gui` — OK (exit 0; 207 pre-existing warnings unchanged).
+- `cargo test --bin boru --features gui` — **880 passed / 0 failed** (prior 876; +4 net: 2 new + existing suite re-run green).
 - New tests:
   - `card_shell_spacing_uses_the_shared_scale` — pins title→subtitle `SPACE_4`, header→content `SPACE_16`, body→footer `SPACE_8`, badge padding via `SPACE_2` token, and forbids off-scale `SPACE_6` structural gaps / raw `2.0` padding.
   - `home_screen_spacing_uses_the_shared_scale` — pins page-header→dashboard `SPACE_28`, greeting→welcome `SPACE_4`, hero badge `AVATAR_MD` + `IconSize::Lg`, pill `SPACE_12` padding, and forbids raw `48.0`/`22.0`/`SPACE_10` remnants.

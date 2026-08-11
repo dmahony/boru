@@ -98,7 +98,7 @@ type uses the same icon everywhere" — for every extension outside the 8-entry 
   an explicit limitation (`SharedFolderPicked` surfaces a message; `directory_icon_element`
   is `#[allow(dead_code)]`, used only by unit tests). The Papirus folder icon exists in the
   bundle and is unit-tested (PAPIRUS-12), but there is no shared-folder row to photograph.
-- **Build gate:** `rb check --example boru --features gui,video-playback,terminal` on debsrv
+- **Build gate:** `rb check --bin boru --features gui,video-playback,terminal` on debsrv
   exits 0 (216 pre-existing warnings). ✅
 
 ## 5. Residual / follow-up

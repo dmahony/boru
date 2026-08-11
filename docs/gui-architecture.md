@@ -1,6 +1,6 @@
-# GUI Architecture — iced_chat
+# GUI Architecture — boru
 
-The iced_chat GUI is a [Iced](https://iced.rs/) (v0.14) desktop application providing
+The Boru GUI is a [Iced](https://iced.rs/) (v0.14) desktop application providing
 a conversation-first chat interface — like Telegram or Signal — with support for
 rooms, direct messaging, file sharing, and peer discovery.
 
@@ -67,7 +67,7 @@ A JSON-RPC 2.0 server over TCP (loopback by default) providing:
 ### Log Viewer (`log_viewer.rs`)
 
 A standalone Iced application for viewing the persistent log file. Launched with
-`iced_chat logs`.
+`boru logs`.
 
 ### Performance Tracker (`perf_tracker.rs`)
 

@@ -29682,7 +29682,7 @@ fn vr_create_tunnel_picker_port_validation() {
     // Renders REAL app screens offscreen with the tiny-skia half of iced's
     // fallback renderer (no Xvfb, no window, no network/peers) and saves PNGs
     // to ./captures/ (or $CAPTURE_DIR). Used by the FONTS-17 visual QA card.
-    // Run: rb test --example boru --features gui,video-playback,terminal -- offscreen_capture --nocapture
+    // Run: rb test --bin boru --features gui,video-playback,terminal -- offscreen_capture --nocapture
     /// A video state transition changes card height, but it is not a new
     /// timeline entry.  Regression coverage for CHAT-SCROLL-03: the download
     /// start path must rebuild the affected row without re-arming a pending

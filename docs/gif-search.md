@@ -75,7 +75,7 @@ file entry and no CLI flag; `KlipyConfig::from_env()` is the single seam.
 
 ```sh
 export KLIPY_API_KEY="your_klipy_api_key_here"
-cargo run --example boru --features gui,video-playback,terminal -- --name alice
+cargo run --features gui,video-playback,terminal -- --name alice
 ```
 
 An example environment file with a placeholder ships at

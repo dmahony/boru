@@ -23,7 +23,7 @@ The connecting and degraded screenshots were captured by the existing Xvfb/xdoto
 
 ## Verification
 
-- `cargo check --features gui --example boru` passed.
-- `cargo test --features gui --example boru` passed: 558 tests.
+- `cargo check --features gui --bin boru` passed.
+- `cargo test --features gui --bin boru` passed: 558 tests.
 - `cargo fmt --check` passed.
 - `git diff --check` passed.

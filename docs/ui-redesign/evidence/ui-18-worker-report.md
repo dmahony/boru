@@ -72,11 +72,11 @@ stacked).
 
 ## COMMANDS RUN
 
-- Build: `cargo build --features gui --example boru` — exit 0 (isolated
+- Build: `cargo build --features gui --bin boru` — exit 0 (isolated
   worktree at HEAD `daa44f2b` + the app.rs fix; the kanban shared tree did not
   compile because sibling FS workers were mid-edit — documented in Remaining
   risks).
-- Tests: `cargo test --features gui --example boru` — 664 passed, 0 failed
+- Tests: `cargo test --features gui --bin boru` — 664 passed, 0 failed
   (log: ui18-tests.log, summarized in this evidence set).
 - Formatting/lint: `cargo fmt --check` not run on the shared tree (siblings
   mid-edit); the 3 hunks are rustfmt-clean and follow the existing file style.

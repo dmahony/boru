@@ -13,7 +13,7 @@
 //!
 //! Run with:
 //! ```text
-//! rb test --example boru --features gui,video-playback,terminal -- capture_status_card --nocapture
+//! rb test --bin boru --features gui,video-playback,terminal -- capture_status_card --nocapture
 //! rsync -az debsrv:~/boru-build/work-<slot>/captures/ ./captures/
 //! ```
 

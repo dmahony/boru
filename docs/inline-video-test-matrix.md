@@ -66,7 +66,7 @@ cargo test media_classification video_playback
 Run the GUI error-mapping tests and compile the video path with:
 
 ```sh
-cargo test --example boru --features video-playback inline_playback
+cargo test --bin boru --features video-playback inline_playback
 cargo check --example video_backend_probe --features video-playback
 ```
 

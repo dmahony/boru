@@ -129,9 +129,9 @@ synthetic bolding occurs.
 
 | Suite | Command | Result |
 |---|---|---|
-| Build | `cargo build --example boru --features gui` | **PASS** exit 0 (207 pre-existing warnings) |
-| GUI + UI + integration (ex. boru) | `cargo test --example boru --features gui` | **PASS 896/896** (60.5s) |
-| Fonts | `cargo test --example boru --features gui fonts::` | **PASS 14/14** |
+| Build | `cargo build --bin boru --features gui` | **PASS** exit 0 (207 pre-existing warnings) |
+| GUI + UI + integration (ex. boru) | `cargo test --bin boru --features gui` | **PASS 896/896** (60.5s) |
+| Fonts | `cargo test --bin boru --features gui fonts::` | **PASS 14/14** |
 | Lib unit tests | `cargo test --lib` | **1824 pass / 20 fail / 2 ignored** — see below |
 
 ### Pre-existing lib failures (NOT caused by UI-HOME)

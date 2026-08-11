@@ -13,7 +13,7 @@
 set -euo pipefail
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-BIN=$ROOT/target/debug/examples/boru
+BIN=$ROOT/target/debug/boru
 TASK_ID="t_2e1588be"
 OUT="$ROOT/docs/ui-redesign/evidence/$TASK_ID"
 mkdir -p "$OUT"

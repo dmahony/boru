@@ -8,8 +8,9 @@
 
 [alias]
 chat = "run --features examples --example chat --"
-# The GUI example target is named `boru` (see Cargo.toml [[example]]).
-boru = "run --features gui --example boru --"
+# The GUI app is the `boru` [[bin]] target (see Cargo.toml); `cargo run`
+# launches it directly (default-run = "boru").
+boru = "run --features gui --"
 
 # ── Edition note ─────────────────────────────────────────────────────────
 #

@@ -40,7 +40,7 @@ Example: Alice exposes `127.0.0.1:3000` to Bob; Bob connects through Boru and ge
 1. `cargo fmt .`
 2. Run the relevant existing tests.
 3. `cargo check` for Boru Core.
-4. `cargo check --features gui --example boru`.
+4. `cargo check --features gui --bin boru`.
 5. Fix regressions before proceeding.
 6. Commit changes logically (the board's `default_workdir` is the repo).
 

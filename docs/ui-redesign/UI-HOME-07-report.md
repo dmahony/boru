@@ -62,8 +62,8 @@ reactivity tests still pass).
 
 ## 3. Tests
 
-- `cargo build --example boru --features gui` — OK (exit 0).
-- `cargo test --example boru --features gui` — **867 passed / 0 failed**
+- `cargo build --bin boru --features gui` — OK (exit 0).
+- `cargo test --bin boru --features gui` — **867 passed / 0 failed**
   (prior: 864; +3 net new).
 - New tests:
   - `card_shell::tests::peer_row_height_token_in_58_68_band` — 60 px token

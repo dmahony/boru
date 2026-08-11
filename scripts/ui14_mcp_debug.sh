@@ -2,7 +2,7 @@
 # Debug MCP navigation live: launch app under Xvfb, call navigate + snapshot, print raw responses.
 set -u
 ROOT=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-BIN="$ROOT/target/debug/examples/boru"
+BIN="$ROOT/target/debug/boru"
 MCP="$ROOT/scripts/ui_mcp.py"
 D=""
 for c in $(seq 300 359); do

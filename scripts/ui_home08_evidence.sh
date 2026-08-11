@@ -26,7 +26,7 @@ set -euo pipefail
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 OUTPUT_DIR="$ROOT_DIR/docs/ui-redesign/evidence/t_a2c055ce"
-BINARY="$ROOT_DIR/target/debug/examples/boru"
+BINARY="$ROOT_DIR/target/debug/boru"
 MCP_CLIENT="$ROOT_DIR/scripts/ui_mcp.py"
 SEED_SCRIPT="$ROOT_DIR/scripts/seed_boru_data.py"
 TASK_ID="t_a2c055ce"

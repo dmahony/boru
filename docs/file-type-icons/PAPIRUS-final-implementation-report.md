@@ -14,9 +14,9 @@ Spec: `Boru_Papirus_icons.txt` (attachment of `t_9d01cfec`).
 | All code on origin/main | **Verified** — `git fetch origin`; all 21 PAPIRUS commits (PAPIRUS-01…20, incl. two PAPIRUS-10 commits) are ancestors of `origin/main`; `HEAD == origin/main == bbe63d6b`. |
 | Licensing gate (PAPIRUS-02) | **RESOLVED and recorded** — see §3. |
 | No protocol / payload / encryption / network changes | **Verified** — zero `src/` files touched by any PAPIRUS commit; only `examples/iced_chat/` UI, `assets/`, `scripts/`, `docs/`, `THIRD_PARTY_NOTICES/`, and packaging-only `release.yaml` changed (§6). |
-| Build gate (debsrv) | `rb check --example boru --features gui,video-playback,terminal` → **exit 0** (216 pre-existing warnings). |
+| Build gate (debsrv) | `rb check --bin boru --features gui,video-playback,terminal` → **exit 0** (216 pre-existing warnings). |
 | Library tests (debsrv) | `rb test --lib` → **1854 passed; 0 failed; 2 ignored**. |
-| Targeted PAPIRUS tests (debsrv) | `rb test --example boru --features gui,video-playback,terminal -- file_type_resolver file_type_icon file_category download_progress_view` → **115 passed; 0 failed** (955 filtered). |
+| Targeted PAPIRUS tests (debsrv) | `rb test --bin boru --features gui,video-playback,terminal -- file_type_resolver file_type_icon file_category download_progress_view` → **115 passed; 0 failed** (955 filtered). |
 | Evidence committed | `docs/file-type-icons/` — PAPIRUS-01/02/03/17/18/19 reports + PAPIRUS-20 visual QA report + 12 screenshots; `THIRD_PARTY_NOTICES/papirus/README.md`; `scripts/vendor_papirus_icons.py`; `assets/third_party/papirus/` (LICENSE, NOTICE.md, UPSTREAM.md, manifest.json, selected-icons.json, 570 SVGs). |
 
 ## 2. Required agent report items
@@ -84,7 +84,7 @@ Mapped to Papirus assets via `file_type_resolver.rs` MIME/extension tables (exac
 115 targeted tests pass (0 failed) on debsrv: 14-scenario spec matrix (MIME-only, extension-only, agreement, conflict, uppercase, compound, missing extension, hidden file, folder, unknown, malformed MIME, path-like malicious, Unicode, very long filename), 18 required examples, fallback chain (exact→category, category→unknown, missing-bundle-file→embedded generic — no broken-image symbol), same-file-same-icon across all surfaces (incl. `report.pdf` + `budget.xlsx`), folder-vs-file name collision, cache normalisation/bound, canonical alias dedup, asset-root resolution, light/dark tile readability. PAPIRUS-09 matrix (task9_*) also green.
 
 ### Packaging test results
-- `rb check --example boru --features gui,video-playback,terminal` → exit 0 (216 pre-existing warnings)
+- `rb check --bin boru --features gui,video-playback,terminal` → exit 0 (216 pre-existing warnings)
 - `rb test --lib` → 1854 passed / 0 failed
 - Bundle has **0 symlinks** → Windows zip / Linux / macOS tar.gz packaging cannot break on relative links
 - `release.yaml` packages `assets/third_party/papirus` next to the binary for all three platforms
@@ -132,9 +132,9 @@ Mapped to Papirus assets via `file_type_resolver.rs` MIME/extension tables (exac
 ## 6. Verification evidence (freshly run for this close-out)
 ```
 $ git fetch origin && git merge-base --is-ancestor <commit> origin/main  # all 21 PAPIRUS commits OK
-$ rb check --example boru --features gui,video-playback,terminal   # exit 0 (216 pre-existing warnings)
+$ rb check --bin boru --features gui,video-playback,terminal   # exit 0 (216 pre-existing warnings)
 $ rb test --lib                                                    # 1854 passed; 0 failed; 2 ignored
-$ rb test --example boru --features gui,video-playback,terminal -- file_type_resolver file_type_icon file_category download_progress_view   # 115 passed; 0 failed
+$ rb test --bin boru --features gui,video-playback,terminal -- file_type_resolver file_type_icon file_category download_progress_view   # 115 passed; 0 failed
 $ find assets/third_party/papirus -type l | wc -l                  # 0
 $ find assets/third_party/papirus -name '*.svg' | wc -l            # 570
 ```

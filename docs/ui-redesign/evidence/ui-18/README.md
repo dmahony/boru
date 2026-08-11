@@ -77,7 +77,7 @@ responsive after the sweep (app did not crash or freeze during resizing).
 
 ## How it was run
 
-- Build: `cargo build --features gui --example boru` (isolated worktree at
+- Build: `cargo build --features gui --bin boru` (isolated worktree at
   HEAD `daa44f2b`; the shared kanban tree did not compile because sibling FS
   workers were mid-edit — documented in the worker report).
 - Fixtures: `figure4_fixture.py inject` (Figure 4 timeline + friends +
@@ -146,7 +146,7 @@ Implemented by the design system and verified at every required size:
 - [x] Continuous drag-resize performed on home (sweep frames 1–9) and chat
       (matrix at all four sizes + live-resize path used by UI-16 evidence).
 - [x] Platform-specific rendering checks: full `cargo test --features gui
-      --example boru` suite (see worker report) — the GUI example is not
+      --bin boru` suite (see worker report) — the GUI example is not
       exercised in CI (Linux X11/Wayland runtime), so the local Xvfb captures
       are the platform rendering evidence.
 

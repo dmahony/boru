@@ -209,4 +209,4 @@ User-selected animation files share the **generic attachment pipeline** — they
 
 - Analysis performed in worktree `wt/t_902c3eab` at `dcf7430b` (TUN-UI: cap Create Tunnel share dialog body so footer stays visible).
 - No production code modified (`git status` clean except this note).
-- Build check: `rb check --example boru --features gui,video-playback,terminal` run against the canonical repo (see task record for result).
+- Build check: `rb check --bin boru --features gui,video-playback,terminal` run against the canonical repo (see task record for result).

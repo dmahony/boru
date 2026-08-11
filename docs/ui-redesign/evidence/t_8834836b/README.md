@@ -31,9 +31,9 @@ remaining views that still called `source_sans` directly.
 
 ## Verification (fresh, at HEAD 851198ad)
 
-- `cargo build --example boru --features gui` → **BUILD_EXIT=0** (Finished dev
+- `cargo build --bin boru --features gui` → **BUILD_EXIT=0** (Finished dev
   profile; only pre-existing warnings remain, none in the two migrated files).
-- `cargo test --example boru --features gui` → **896 passed / 0 failed /
+- `cargo test --bin boru --features gui` → **896 passed / 0 failed /
   0 ignored** (64.67s) — identical to the UI-HOME-19 gate baseline.
 
 ## Files

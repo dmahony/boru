@@ -2,7 +2,7 @@
 # UI-17 help overlay VISUAL verification: open a seeded direct conversation,
 # then toggle_help via MCP, then screenshot the chat panel overlay.
 set -uo pipefail
-BIN=/tmp/ui17-verify/target/debug/examples/boru
+BIN=/tmp/ui17-verify/target/debug/boru
 MCP=/home/dan/iroh-gossip-chat/scripts/ui_mcp.py
 OUT=/tmp/ui17-livefix
 PK_B=7d59c5623dd40a74aa4d5a32ac645d3b3f95daeae4c22be25476dd6a486f7382

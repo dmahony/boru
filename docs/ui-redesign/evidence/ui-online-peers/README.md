@@ -38,8 +38,8 @@ state only — no sample data in the render path.
 
 ## Verification
 
-- `cargo check --features gui --example boru` — PASS.
-- `cargo test --features gui --example boru` — 589 passed, 0 failed (3 new
+- `cargo check --features gui --bin boru` — PASS.
+- `cargo test --features gui --bin boru` — 589 passed, 0 failed (3 new
   card-shell `count_total` unit tests + 2 new home-view smoke tests: empty and
   >5-peer populated Online Peers card builds).
 - `cargo fmt --all -- --check` — PASS.
@@ -51,6 +51,6 @@ state only — no sample data in the render path.
 ## How to re-run
 
 ```bash
-cargo build --features gui --example boru
+cargo build --features gui --bin boru
 bash scripts/ui_online_peers_evidence.sh
 ```

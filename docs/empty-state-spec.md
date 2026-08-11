@@ -200,5 +200,5 @@ Before shipping, confirm:
 - [ ] No section uses a card/illustration wrapper around the empty-state text
 - [ ] If an action was added to a sidebar empty state, it uses the ghost button style and `TYPO_XS`
 - [ ] All six strings match the approved copy in §2 exactly
-- [ ] `cargo build --features gui --example boru` compiles (empty states do not introduce errors)
+- [ ] `cargo build --features gui --bin boru` compiles (empty states do not introduce errors)
 - [ ] `git diff --check` passes (no trailing whitespace or merge conflicts)

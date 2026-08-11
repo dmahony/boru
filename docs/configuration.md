@@ -218,7 +218,7 @@ Stored beside `secret_key.txt` in the data directory.
 ├── message_store.db           # Legacy SQLite store (migration source, read-only)
 │
 ├── logs/                      # Persistent trace logs
-│   └── iced_chat.log
+│   └── boru.log
 │
 ├── gossip-debug.log           # Gossip debug trace (BORU_DEBUG=1)
 │

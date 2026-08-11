@@ -103,11 +103,11 @@ proves exactly one card re-renders:
 Run:
 
 ```
-cargo test --features gui --example boru -- card_data
-cargo test --features gui --example boru -- activity_tick_refreshes lazy_card_dependencies
+cargo test --features gui --bin boru -- card_data
+cargo test --features gui --bin boru -- activity_tick_refreshes lazy_card_dependencies
 ```
 
-Full suite: `cargo test --features gui --example boru` → 596 passed, 0 failed.
+Full suite: `cargo test --features gui --bin boru` → 596 passed, 0 failed.
 
 ## 5. Results vs acceptance criteria
 

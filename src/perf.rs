@@ -10,7 +10,7 @@
 //! at process exit via `BORU_PERF_PRINT=1` (default: on).
 //!
 //! ```sh
-//! BORU_PERF=1 cargo run --example boru
+//! BORU_PERF=1 cargo run
 //! ```
 //!
 //! # Slow-operation threshold

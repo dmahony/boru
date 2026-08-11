@@ -12,7 +12,7 @@ assigned to the `orchestrator` profile with separate git worktree workspaces
 (so multiple cards run concurrently without stomping the shared canonical
 tree), force-load the `iroh-gossip-chat-workflows` skill (which mandates
 debsrv/`rb` remote builds), and every implementation card body carries the
-canonical `rb check --example boru --features gui,video-playback,terminal`
+canonical `rb check --bin boru --features gui,video-playback,terminal`
 build instruction so compilation happens on debsrv (172.16.0.59), never the
 local 6-core i5.
 

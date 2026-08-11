@@ -91,9 +91,9 @@ visually at 1600/1280/1024 (see evidence below).
 
 ## 4. Verification
 
-- Build: `cargo build --example boru --features gui` → OK (exit 0; 217
+- Build: `cargo build --bin boru --features gui` → OK (exit 0; 217
   pre-existing warnings only).
-- Tests: `cargo test --example boru --features gui` → 849 passed, 0 failed
+- Tests: `cargo test --bin boru --features gui` → 849 passed, 0 failed
   (844 prior + 5 new UI-HOME-12 tests):
   - `fonts::tests::type_role_text_lh_builds_text_widget` (helper smoke test —
     carried from the pre-block run; +23 lines in `fonts.rs`)

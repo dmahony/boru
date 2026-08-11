@@ -110,7 +110,7 @@ loopback MCP servers. Profiles are seeded deterministically
 
 ```sh
 # From the repo root, after a debug build:
-cargo build --features gui --example boru
+cargo build --features gui --bin boru
 bash scripts/fs23_launch.sh start   # launches both peers
 bash scripts/fs23_launch.sh status  # check MCP liveness
 bash scripts/fs23_launch.sh stop    # tear down Xvfb, portal, peers

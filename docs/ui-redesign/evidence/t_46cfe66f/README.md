@@ -7,7 +7,7 @@ Task: `t_a8f11aa3`
 Verified the GUI release target on debsrv through `rb`:
 
 ```text
-rb build --release --example boru --features gui,video-playback,terminal
+rb build --release --bin boru --features gui,video-playback,terminal
 Finished `release` profile [optimized] target(s) in 13m 52s
 exit code: 0
 ```

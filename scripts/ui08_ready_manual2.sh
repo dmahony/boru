@@ -2,7 +2,7 @@
 # Capture the ready state reliably: two instances, full-display capture.
 set -euo pipefail
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-BINARY="$ROOT_DIR/target/debug/examples/boru"
+BINARY="$ROOT_DIR/target/debug/boru"
 OUTPUT_DIR="$ROOT_DIR/docs/ui-redesign/evidence/ui-08"
 TOPIC="3333333333333333333333333333333333333333333333333333333333333333"
 mkdir -p "$OUTPUT_DIR"

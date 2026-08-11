@@ -77,9 +77,9 @@ app's serde variant names, and all Figure-4 bubbles replay correctly.
 
 ## COMMANDS RUN
 
-- Build: `cargo build --features gui --example boru` (binary at
-  target/debug/examples/boru, built 02:51).
-- Tests: `cargo test --features gui --example boru` → 663 passed, 0 failed.
+- Build: `cargo build --features gui --bin boru` (binary at
+  target/debug/boru, built 02:51).
+- Tests: `cargo test --features gui --bin boru` → 663 passed, 0 failed.
 - Formatting/lint: `cargo fmt --check` (see note below).
 - Screenshot command: `bash scripts/ui16_evidence.sh`.
 - Verification: `python3 scripts/ui16_verify.py docs/ui-redesign/evidence/ui-16`

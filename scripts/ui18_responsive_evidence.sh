@@ -17,7 +17,7 @@
 # production data.
 set -euo pipefail
 ROOT=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-BIN=${BORU_BIN:-$ROOT/target/debug/examples/boru}
+BIN=${BORU_BIN:-$ROOT/target/debug/boru}
 FIXTURE=$ROOT/scripts/figure4_fixture.py
 UI18_FIXTURE=$ROOT/scripts/ui18_fixture.py
 MCP=$ROOT/scripts/ui_mcp.py

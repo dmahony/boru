@@ -84,7 +84,7 @@ enums, `update(&mut FeatureState, FeatureMessage, &mut Context)` style) are
 composition-layer goal (this card's "Done when") is met and a second pass
 over state ownership carries UX/regression risk without a behavior change.
 
-Verification on the final HEAD: `rb check --example boru --features
+Verification on the final HEAD: `rb check --bin boru --features
 gui,video-playback,terminal` passes (0 errors); full example suite
 1213/1215 pass (the 2 failures — `inactive_room_gossip_events_do_not_
 increment_unread` and `outgoing_call_ringing_state_from_event_and_decline_
@@ -93,7 +93,7 @@ these moves).
 
 ## Overview
 
-`app.rs` is the root Iced application module for the `boru` example binary. It
+`app.rs` is the root Iced application module for the `boru` GUI binary. It
 contains the root `IcedChat` state struct, the 364-variant `AppMessage` enum,
 the ~370-arm `update()` match, the `view()` tree, the subscription batch, the
 `ChatCallbacks` implementation, and ~11,000 lines of unit tests.
@@ -251,5 +251,5 @@ High-value existing tests grouped by feature:
 - No duplicate state cache: dependency structs are the single snapshot source
   for lazy screens; do not add a second cache.
 - Keep message variants and state ownership unchanged during the first pass.
-- Compile gate: `rb check --example boru --features gui,video-playback,terminal`.
+- Compile gate: `rb check --bin boru --features gui,video-playback,terminal`.
 - Tests gate: existing ~280 tests in `mod tests` must stay green.

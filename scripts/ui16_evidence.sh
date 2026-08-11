@@ -9,7 +9,7 @@
 # temp data dirs — never production data.
 set -euo pipefail
 ROOT=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-BIN=$ROOT/target/debug/examples/boru
+BIN=$ROOT/target/debug/boru
 FIXTURE=$ROOT/scripts/figure4_fixture.py
 UI16_FIXTURE=$ROOT/scripts/ui16_fixture.py
 MCP=$ROOT/scripts/ui_mcp.py

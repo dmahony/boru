@@ -6,7 +6,7 @@
 #
 # Usage:
 #   scripts/ui06_sidebar_screenshots.sh
-#   scripts/ui06_sidebar_screenshots.sh --binary target/debug/examples/boru
+#   scripts/ui06_sidebar_screenshots.sh --binary target/debug/boru
 #
 # Output goes to docs/ui-redesign/evidence/ui-06/ with immutable names:
 #   t_4d13a7ac_<state>_<width>x<height>_<screen>.png
@@ -14,7 +14,7 @@ set -euo pipefail
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 OUTPUT_DIR="$ROOT_DIR/docs/ui-redesign/evidence/ui-06-v4"
-BINARY="$ROOT_DIR/target/debug/examples/boru"
+BINARY="$ROOT_DIR/target/debug/boru"
 MCP_CLIENT="$ROOT_DIR/scripts/ui_mcp.py"
 SEED_SCRIPT="${SEED_SCRIPT:-$ROOT_DIR/scripts/seed_boru_data.py}"
 TASK_ID="t_4d13a7ac"

@@ -64,7 +64,7 @@ cargo clippy --all-features
 → <result>
 
 # Multi-peer smoke test
-cargo build --features gui --example boru   (clean worktree)
+cargo build --features gui --bin boru   (clean worktree)
 bash scripts/fs23_launch.sh start
 bash scripts/fs23_launch.sh status
 bash scripts/fs23_launch.sh stop
