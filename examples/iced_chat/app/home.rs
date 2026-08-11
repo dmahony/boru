@@ -948,7 +948,7 @@ impl IcedChat {
             "View all"
         };
 
-        crate::card_shell::CardShell::new("Tunnels", tunnel_rows)
+        let mut shell = crate::card_shell::CardShell::new("Tunnels", tunnel_rows)
             .count(dep.rows.len())
             .header_action(header_action_label, AppMessage::ShowCreateTunnelDialog)
             .empty_icon(
@@ -960,9 +960,20 @@ impl IcedChat {
             )
             .empty_message(TUNNELS_EMPTY_MESSAGE)
             .compact_header(dep.compact_header)
-            .max_height(120.0)
-            .background_opacity(f32::from_bits(dep.home_menu_item_opacity_bits))
-            .build(&theme)
+            .background_opacity(f32::from_bits(dep.home_menu_item_opacity_bits));
+
+        // BORU-HOME-06: when tunnels exist, size the list body to fit all
+        // rows naturally instead of capping at a fixed 120 px (which
+        // clipped after ~2 rows). When the list is empty the CardShell
+        // empty-state path renders compactly without a fixed list height.
+        if !dep.rows.is_empty() {
+            let row_count = dep.rows.len() as f32;
+            let natural_height = row_count * crate::card_shell::CARD_ROW_HEIGHT
+                + (row_count - 1.0) * crate::design_tokens::SPACE_2;
+            shell = shell.max_height(natural_height);
+        }
+
+        shell.build(&theme)
     }
 
     /// Header-action label for the Tunnels card: "Create tunnel" when the
