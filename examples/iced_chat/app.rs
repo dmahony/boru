@@ -18723,7 +18723,7 @@ mod tests {
 
     #[test]
     fn external_stream_hint_embeds_url_and_keeps_manual_option() {
-        let hint = super::external_stream_hint("http://127.0.0.1:54321/video");
+        let hint = IcedChat::external_stream_hint("http://127.0.0.1:54321/video");
         assert!(hint.contains("http://127.0.0.1:54321/video"), "hint must carry the URL");
         assert!(hint.contains("VLC") || hint.contains("browser"), "hint must mention manual paste options");
     }
