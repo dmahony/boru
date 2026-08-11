@@ -204,6 +204,7 @@ fn button_gallery() -> Element<'static, AppMessage> {
                         None,
                         false,
                         false,
+                        false,
                     ),
                 ))
                 .push(
@@ -220,6 +221,7 @@ fn button_gallery() -> Element<'static, AppMessage> {
                         None,
                         false,
                         true,
+                        false,
                     ),
                 ))
                 .push(
@@ -229,7 +231,7 @@ fn button_gallery() -> Element<'static, AppMessage> {
                 )
                 .push(button_pair(
                     "Ghost disabled",
-                    ghost_icon_button(Icon::Chat, IconSize::Md, None, None, true, false),
+                    ghost_icon_button(Icon::Chat, IconSize::Md, None, None, true, false, false),
                 ))
                 .spacing(0)
                 .align_y(Alignment::Center),
@@ -812,6 +814,7 @@ fn header_gallery() -> Element<'static, AppMessage> {
         Some(AppMessage::Noop),
         false,
         false,
+        false,
     );
 
     Column::new()
@@ -843,6 +846,7 @@ fn header_gallery() -> Element<'static, AppMessage> {
                 IconSize::Sm,
                 None,
                 Some(AppMessage::Noop),
+                false,
                 false,
                 false,
             )),

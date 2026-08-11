@@ -557,13 +557,22 @@ pub fn ghost_icon_button<'a>(
     on_press: Option<AppMessage>,
     disabled: bool,
     destructive: bool,
+    dimmed: bool,
 ) -> Element<'a, AppMessage> {
-    let svg_el = icon
-        .build()
-        .size(size)
-        .destructive(destructive)
-        .interactive(!disabled)
-        .build();
+    let svg_el = if dimmed {
+        icon.build()
+            .size(size)
+            .destructive(false)
+            .interactive(!disabled)
+            .color_fn(design_tokens::text_muted)
+            .build()
+    } else {
+        icon.build()
+            .size(size)
+            .destructive(destructive)
+            .interactive(!disabled)
+            .build()
+    };
 
     let btn = button(svg_el)
         .padding(design_tokens::SPACE_8)
@@ -1455,7 +1464,9 @@ impl<'a> SidebarSectionHeader<'a> {
 
         let mut label_button = button(toggle_row)
             .width(Length::Fill)
-            .padding([design_tokens::SPACE_6, design_tokens::SPACE_12])
+            // POLISH-05: reduced vertical padding from SPACE_6 to SPACE_4
+            // — saves ~4 px per section header, tightening sidebar rhythm.
+            .padding([design_tokens::SPACE_4, design_tokens::SPACE_12])
             .style(move |t, status| {
                 let bg = match status {
                     button::Status::Hovered => {

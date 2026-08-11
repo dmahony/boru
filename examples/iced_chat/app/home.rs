@@ -860,11 +860,9 @@ impl IcedChat {
         .width(Length::Fill);
 
         // ── Status pill (page header right, compact) ──
-        // ~36 px tall (10 px vertical padding + 16 px content) per the
-        // UI-HOME-02 mockup range (36–40 px).
-        // UI-HOME-09: pill vertical padding on the shared scale (SPACE_12 →
-        // ~40 px tall, still within the UI-HOME-02 36–40 px band; was
-        // SPACE_10, off the scale).
+        // POLISH-05: reduced vertical padding from SPACE_12 to SPACE_10
+        // (~36 px tall, in the UI-HOME-02 36–40 px band but now visually
+        // closer to the Download Manager button at right).
         let status_pill = container(
             row![
                 icon_svg(hero_icon, TYPO_SM).style(move |t, _| iced::widget::svg::Style {
@@ -877,7 +875,7 @@ impl IcedChat {
             .spacing(0)
             .align_y(Alignment::Center),
         )
-        .padding([SPACE_12, SPACE_12])
+        .padding([SPACE_10, SPACE_12])
         .style(move |t| {
             let mut bg = bg_surface(t);
             bg.a *= home_menu_opacity;
@@ -1458,11 +1456,12 @@ impl IcedChat {
             SPACE_28
         };
 
-        // UI-HOME-09: page header → dashboard gap on the shared scale.
-        // Plan band 28–32 px; SPACE_28 (was SPACE_20, below the band).
+        // POLISH-05: page header → dashboard gap bumped from SPACE_28 to
+        // ~40 px — roughly 12 px more breathing room between the
+        // \"Welcome to Boru\" subtitle and the card grid.
         let col = Column::new()
             .push(page_header)
-            .push(Space::new().height(Length::Fixed(SPACE_28)))
+            .push(Space::new().height(Length::Fixed(SPACE_28 + SPACE_12)))
             .push(main_content)
             .push(Space::new().height(Length::Fixed(SPACE_16)))
             .push(footer)
