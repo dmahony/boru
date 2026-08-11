@@ -412,14 +412,21 @@ impl IcedChat {
                     .width(Length::Fill)
                     .padding([0.0, SPACE_8])
                     .style(|t, status| iced::widget::button::Style {
-                        // Hover surface for the interactive row. Note: iced
-                        // 0.14 `button::Status` has no `Focused` variant
-                        // (Active/Hovered/Pressed/Disabled only) and buttons
-                        // are not keyboard-focusable in this version, so
-                        // hover is the interaction affordance here.
-                        background: matches!(status, iced::widget::button::Status::Hovered).then(
-                            || iced::Background::Color(crate::design_tokens::surface_hover(t)),
-                        ),
+                        // Three-tier interaction ramp (BORU-HOME-10):
+                        // default (transparent) → hover → pressed.
+                        // Note: iced 0.14 `button::Status` has no `Focused`
+                        // variant and buttons are not keyboard-focusable
+                        // in this version, so hover/pressed are the
+                        // primary pointer affordances.
+                        background: match status {
+                            iced::widget::button::Status::Pressed => {
+                                Some(iced::Background::Color(crate::design_tokens::surface_pressed(t)))
+                            }
+                            iced::widget::button::Status::Hovered => {
+                                Some(iced::Background::Color(crate::design_tokens::surface_hover(t)))
+                            }
+                            _ => None,
+                        },
                         border: iced::Border {
                             radius: crate::design_tokens::RADIUS_SM.into(),
                             ..Default::default()
@@ -690,13 +697,19 @@ impl IcedChat {
                         .padding([0.0, SPACE_8])
                         .style(|t, status| {
                             iced::widget::button::Style {
-                                background: matches!(
-                                    status,
-                                    iced::widget::button::Status::Hovered
-                                )
-                                .then(|| {
-                                    iced::Background::Color(crate::design_tokens::surface_hover(t))
-                                }),
+                                background: match status {
+                                    iced::widget::button::Status::Pressed => {
+                                        Some(iced::Background::Color(
+                                            crate::design_tokens::surface_pressed(t),
+                                        ))
+                                    }
+                                    iced::widget::button::Status::Hovered => {
+                                        Some(iced::Background::Color(
+                                            crate::design_tokens::surface_hover(t),
+                                        ))
+                                    }
+                                    _ => None,
+                                },
                                 border: iced::Border {
                                     radius: crate::design_tokens::RADIUS_SM.into(),
                                     ..Default::default()

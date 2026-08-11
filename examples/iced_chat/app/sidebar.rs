@@ -1136,7 +1136,7 @@ impl IcedChat {
                 }
             } else if matches!(status, iced::widget::button::Status::Hovered) {
                 iced::widget::button::Style {
-                    background: Some(Background::Color(Color::from_rgba(0.8, 0.2, 0.2, 0.15))),
+                    background: Some(Background::Color(crate::design_tokens::destructive_soft(t))),
                     text_color: color_error(t),
                     border: Border {
                         radius: SPACE_4.into(),
@@ -1227,6 +1227,8 @@ impl IcedChat {
                 let is_selected = selected_for_btn.get() == Some(topic);
                 let bg = if is_selected {
                     Some(Background::Color(crate::design_tokens::surface_selected(t)))
+                } else if matches!(status, iced::widget::button::Status::Pressed) {
+                    Some(Background::Color(crate::design_tokens::surface_pressed(t)))
                 } else if matches!(status, iced::widget::button::Status::Hovered) {
                     Some(Background::Color(crate::design_tokens::surface_hover(t)))
                 } else {
@@ -1813,8 +1815,15 @@ impl IcedChat {
                 .width(Length::Fill)
                 .padding(0)
                 .style(move |t, status| iced::widget::button::Style {
-                    background: matches!(status, iced::widget::button::Status::Hovered)
-                        .then(|| iced::Background::Color(crate::design_tokens::surface_hover(t))),
+                    background: match status {
+                        iced::widget::button::Status::Pressed => {
+                            Some(iced::Background::Color(crate::design_tokens::surface_pressed(t)))
+                        }
+                        iced::widget::button::Status::Hovered => {
+                            Some(iced::Background::Color(crate::design_tokens::surface_hover(t)))
+                        }
+                        _ => None,
+                    },
                     border: iced::Border {
                         radius: crate::design_tokens::RADIUS_MD.into(),
                         ..Default::default()

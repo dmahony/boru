@@ -200,13 +200,7 @@ fn quick_action_card_style(
     let accent = design_tokens::primary(theme);
     let background = match status {
         button::Status::Hovered => hover,
-        button::Status::Pressed => {
-            let mut c = hover;
-            c.r *= 0.92;
-            c.g *= 0.92;
-            c.b *= 0.92;
-            c
-        }
+        button::Status::Pressed => design_tokens::surface_pressed(theme),
         _ => surface,
     };
     let border_color = match status {

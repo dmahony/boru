@@ -34,10 +34,23 @@ const SIDEBAR: Color = Color::from_rgb(
     0xFC as f32 / 255.0,
 );
 const SURFACE: Color = Color::WHITE;
+/// Selected surface — highlighted row/selection background.
+/// BORU-HOME-10: shifted from pale green (#EDF7F1) to a neutral cool-gray
+/// tint (#ECEFED) so selection state doesn't compete with primary green's
+/// semantic role for action/state accents. Still carries a faint green
+/// undertone (< 0.003 chroma) so it belongs to the palette.
 const SURFACE_SELECTED: Color = Color::from_rgb(
+    0xEC as f32 / 255.0,
+    0xEF as f32 / 255.0,
     0xED as f32 / 255.0,
-    0xF7 as f32 / 255.0,
-    0xF1 as f32 / 255.0,
+);
+
+/// Surface pressed state. BORU-HOME-10: slightly darker than hover for a
+/// clear three-tier interaction ramp (default → hover → pressed).
+const SURFACE_PRESSED: Color = Color::from_rgb(
+    0xE4 as f32 / 255.0,
+    0xE8 as f32 / 255.0,
+    0xE5 as f32 / 255.0,
 );
 const BORDER_COLOR: Color = Color::from_rgb(
     0xE8 as f32 / 255.0,
@@ -383,12 +396,24 @@ pub fn surface(theme: &Theme) -> Color {
     }
 }
 
-/// Selected surface — highlighted row/selection background. Spec: #EDF7F1.
+/// Selected surface — highlighted row/selection background. BORU-HOME-10:
+/// shifted to a neutral cool-gray tint so selection state doesn't compete with
+/// primary green's semantic role for action/state accents.
 pub fn surface_selected(theme: &Theme) -> Color {
     if dark(theme) {
         Color::from_rgb(0.16, 0.23, 0.34)
     } else {
         SURFACE_SELECTED
+    }
+}
+
+/// Surface pressed state. BORU-HOME-10: darker than hover, completing the
+/// three-tier interaction ramp (default → surface_hover → surface_pressed).
+pub fn surface_pressed(theme: &Theme) -> Color {
+    if dark(theme) {
+        Color::from_rgb(0.18, 0.18, 0.26)
+    } else {
+        SURFACE_PRESSED
     }
 }
 
@@ -790,7 +815,7 @@ pub fn icon_button(theme: &Theme, status: button::Status) -> button::Style {
     button::Style {
         background: match status {
             button::Status::Hovered => Some(Background::Color(surface_hover(theme))),
-            button::Status::Pressed => Some(Background::Color(surface_selected(theme))),
+            button::Status::Pressed => Some(Background::Color(surface_pressed(theme))),
             _ => None,
         },
         text_color: color,
