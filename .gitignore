@@ -27,3 +27,6 @@ fuzz/target/
 fuzz/Cargo.lock
 fuzz/corpus/
 fuzz/artifacts/
+
+# local runtime data (gossip-debug.log etc.)
+.local/
