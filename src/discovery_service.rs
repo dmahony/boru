@@ -133,6 +133,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 
 use crate::api::{ApiError, Event, GossipReceiver, GossipSender, Message as GossipMessage};
+use crate::control_plane::advertisement::{
+    AdvertisementAuth, PublicRoomAdvertisement as AdvertisementPayload,
+};
 use crate::control_plane::capabilities::{
     compatible_version, default_local_capabilities, CapabilitySet,
 };
@@ -304,7 +307,8 @@ pub enum ControlEvent {
 /// typed, bounded advertisement payload (BORU-DIR-02 metadata model:
 /// room_id, room_name, short_description, room_protocol_version,
 /// owner_peer_id, visibility, TTL, and optional tags / activity /
-/// member-count / avatar / feature flags).
+/// member-count / avatar / feature flags) and the publisher-authentication
+/// verdict (BORU-DIR-03).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoomAdvertisementEvent {
     /// The node that published the advertisement (envelope sender).
@@ -313,6 +317,13 @@ pub struct RoomAdvertisementEvent {
     pub sequence: u64,
     /// Unix epoch seconds when the advertisement was created.
     pub timestamp_secs: u64,
+    /// Publisher-authentication verdict (BORU-DIR-03): the advertisement is
+    /// attributed to `sender_node_id` only when this is
+    /// [`AdvertisementAuth::Verified`]. A [`AdvertisementAuth::MissingSignature`]
+    /// advertisement is clearly untrusted (never canonical); an
+    /// [`AdvertisementAuth::InvalidSignature`] advertisement never reaches
+    /// this event — it is discarded at the receive gate.
+    pub auth: AdvertisementAuth,
     /// The typed advertisement payload (BORU-DIR-02 metadata model).
     pub advert: crate::control_plane::advertisement::PublicRoomAdvertisement,
 }
@@ -364,6 +375,12 @@ pub enum IncomingOutcome {
     /// A control-plane frame was dropped because it violates the
     /// minimal-advertisement whitelist / bounds (BORU-CP-03).
     AdvertViolation(AdvertViolation),
+    /// A PUBLIC_ROOM_ADVERTISEMENT frame was dropped because its publisher
+    /// signature did not verify against the envelope's claimed sender
+    /// (BORU-DIR-03, PDF Task 1.3): the payload was forged or tampered
+    /// with. Discarded — never enters the directory view, never affects
+    /// gossip or chat processing.
+    AdvertisementAuthRejected,
 }
 
 /// Outcome of [`PeerRegistry::upsert`].
@@ -790,6 +807,11 @@ struct ControlAnnounceHandle {
     /// Phase 6). The join-time HELLO + CAPABILITIES + EXTENSIONS burst
     /// fires back-to-back; sharing either throttle would starve one.
     extensions_throttle: Arc<AnnounceThrottle>,
+    /// Separate throttle for PUBLIC_ROOM_ADVERTISEMENT announcements
+    /// (BORU-DIR-03). Room advertisements are lower-frequency and must not
+    /// be starved by (or starve) the presence/capabilities/extension
+    /// cadence; Phase 3 (publish/refresh) will tune the interval per room.
+    advert_throttle: Arc<AnnounceThrottle>,
     /// The last EXTENSIONS payload actually broadcast. Used to make
     /// `announce_extensions(force = false)` a no-op for an unchanged payload
     /// (idempotence — no duplicate advertisements).
@@ -815,6 +837,9 @@ impl ControlAnnounceHandle {
             )),
             last_announced_caps: Arc::new(Mutex::new(None)),
             extensions_throttle: Arc::new(AnnounceThrottle::with_min_interval(
+                DEFAULT_CONTROL_ANNOUNCE_MIN_INTERVAL,
+            )),
+            advert_throttle: Arc::new(AnnounceThrottle::with_min_interval(
                 DEFAULT_CONTROL_ANNOUNCE_MIN_INTERVAL,
             )),
             last_announced_extensions: Arc::new(Mutex::new(None)),
@@ -994,6 +1019,43 @@ impl ControlAnnounceHandle {
             .last_announced_extensions
             .lock()
             .expect("last announced extensions lock poisoned") = Some(payload.clone());
+        Ok(AnnounceOutcome::Announced)
+    }
+
+    /// Announce a PUBLIC_ROOM_ADVERTISEMENT control-plane envelope carrying
+    /// `advert` (BORU-DIR-03, PDF Phase 1 Task 1.3).
+    ///
+    /// The caller is responsible for building the advertisement and signing
+    /// it with its node key ([`PublicRoomAdvertisement::sign`]) — the
+    /// service does not hold a secret key. An unsigned advertisement is
+    /// still broadcast (receivers mark it clearly untrusted, never
+    /// canonical); a signed one lets receivers attribute the payload to
+    /// this node.
+    ///
+    /// The room-advertisement throttle bounds the rate independently of the
+    /// presence/capabilities/extension cadence, and the sequence is
+    /// allocated only when a broadcast actually happens. The broadcast is a
+    /// control-plane envelope — never a chat message, never a join.
+    async fn announce_room_advertisement(
+        &self,
+        advert: AdvertisementPayload,
+    ) -> Result<AnnounceOutcome, DiscoveryServiceError> {
+        if !self.advert_throttle.try_announce() {
+            debug!("discovery: room-advertisement announcement throttled");
+            return Ok(AnnounceOutcome::Throttled);
+        }
+        let sequence = self.next_sequence();
+        let bytes = ControlEnvelope::public_room_advertisement(
+            self.local_node,
+            sequence,
+            unix_now_secs(),
+            advert,
+        )
+        .encode();
+        self.sender
+            .broadcast(Bytes::from(bytes))
+            .await
+            .map_err(|source| e!(DiscoveryServiceError::Api { source }))?;
         Ok(AnnounceOutcome::Announced)
     }
 }
@@ -1302,23 +1364,54 @@ impl ReceiveCore {
                 // conversation, or chat handling. Malformed/oversized
                 // advertisements are already rejected by decode + guard
                 // above, so reaching this point means the advertisement is
-                // well-formed, bounded, and attributed to its real sender.
+                // well-formed, bounded, and attributed to its real sender
+                // (the transport attribution gate bound the envelope's
+                // `sender_node_id` to the authenticated gossip delivery
+                // source).
+                // BORU-DIR-03 (PDF Task 1.3): the advertisement must ALSO
+                // carry a valid publisher signature before it may enter the
+                // trusted directory view. Verification is against the
+                // envelope's `sender_node_id` — the claimed publisher.
+                // * Invalid signature → forged/tampered payload: DISCARD.
+                // * Missing signature → clearly untrusted: emitted with
+                //   [`AdvertisementAuth::MissingSignature`] so the directory
+                //   can list it as unverified but never as canonical.
+                // * Verified → emitted with [`AdvertisementAuth::Verified`];
+                //   whether the publisher is the room authority (canonical
+                //   metadata) is decided by
+                //   [`PublicRoomAdvertisement::is_authoritative_publisher`].
                 if let ControlPayload::PublicRoomAdvertisement(advert) = &envelope.payload {
-                    info!(
-                        sender = %envelope.sender_node_id.fmt_short(),
-                        sequence = envelope.sequence,
-                        advert_version = advert.advert_version,
-                        "discovery: public-room advertisement received",
-                    );
-                    let _ = self.control_events_tx.send(ControlEvent::RoomAdvertisement(
-                        RoomAdvertisementEvent {
-                            sender_node_id: envelope.sender_node_id,
-                            sequence: envelope.sequence,
-                            timestamp_secs: envelope.timestamp_secs,
-                            advert: advert.clone(),
-                        },
-                    ));
-                    return IncomingOutcome::ControlMessage;
+                    let auth = advert.verify_signed(&envelope.sender_node_id);
+                    match auth {
+                        AdvertisementAuth::InvalidSignature => {
+                            self.counters.record_malformed_discovery_packet();
+                            warn!(
+                                sender = %envelope.sender_node_id.fmt_short(),
+                                sequence = envelope.sequence,
+                                "discovery: room advertisement signature verification failed; dropped",
+                            );
+                            return IncomingOutcome::AdvertisementAuthRejected;
+                        }
+                        AdvertisementAuth::Verified { .. } | AdvertisementAuth::MissingSignature => {
+                            info!(
+                                sender = %envelope.sender_node_id.fmt_short(),
+                                sequence = envelope.sequence,
+                                advert_version = advert.advert_version,
+                                auth = ?auth,
+                                "discovery: public-room advertisement received",
+                            );
+                            let _ = self.control_events_tx.send(ControlEvent::RoomAdvertisement(
+                                RoomAdvertisementEvent {
+                                    sender_node_id: envelope.sender_node_id,
+                                    sequence: envelope.sequence,
+                                    timestamp_secs: envelope.timestamp_secs,
+                                    auth,
+                                    advert: advert.clone(),
+                                },
+                            ));
+                            return IncomingOutcome::ControlMessage;
+                        }
+                    }
                 }
 
                 let _ = self
@@ -1989,6 +2082,26 @@ impl DiscoveryService {
         self.control_announce
             .announce_extensions(&payload, false)
             .await
+    }
+
+    /// Broadcast a PUBLIC_ROOM_ADVERTISEMENT control-plane envelope carrying
+    /// `advert` (BORU-DIR-03, PDF Phase 1 Task 1.3).
+    ///
+    /// The caller builds the advertisement and signs it with its node key
+    /// ([`PublicRoomAdvertisement::sign`](crate::control_plane::advertisement::PublicRoomAdvertisement::sign))
+    /// so receivers can attribute the payload to this node — the service
+    /// itself never holds a secret key. An unsigned advertisement is still
+    /// broadcast but receivers treat it as clearly untrusted (never
+    /// canonical).
+    ///
+    /// The room-advertisement throttle bounds the rate; the broadcast is a
+    /// control-plane envelope, never a chat message, and never a room join
+    /// (PDF Core rule: advertisements only advertise existence).
+    pub async fn announce_room_advertisement(
+        &self,
+        advert: crate::control_plane::advertisement::PublicRoomAdvertisement,
+    ) -> Result<AnnounceOutcome, DiscoveryServiceError> {
+        self.control_announce.announce_room_advertisement(advert).await
     }
 
     /// The latest Phase 6 extensions advertisement cached for `peer`
@@ -3498,10 +3611,15 @@ mod tests {
     /// Deterministic test identity: a `SecretKey` seeded from a single byte
     /// produces a valid Ed25519 public key.
     fn test_key(byte: u8) -> PublicKey {
+        test_secret_key(byte).public()
+    }
+
+    /// Deterministic test secret key seeded from a single byte (matches
+    /// [`test_key`]).
+    fn test_secret_key(byte: u8) -> iroh_base::SecretKey {
         let mut seed = [0u8; 32];
         seed[0] = byte;
-        let sk = iroh_base::SecretKey::from_bytes(&seed);
-        sk.public()
+        iroh_base::SecretKey::from_bytes(&seed)
     }
 
     fn test_topic() -> TopicId {
@@ -5328,19 +5446,31 @@ mod tests {
     // ── BORU-DIR-01: PUBLIC_ROOM_ADVERTISEMENT decode path ─────────────
 
     /// A valid, bounded, discoverable room advertisement for tests.
+    ///
+    /// Unsigned by default — the receive path therefore surfaces it with
+    /// [`AdvertisementAuth::MissingSignature`] (clearly untrusted). Tests
+    /// that need a trusted advertisement call [`test_advert_signed`].
     fn test_advert() -> crate::control_plane::advertisement::PublicRoomAdvertisement {
         crate::control_plane::advertisement::PublicRoomAdvertisement::minimal(
             crate::proto::state::TopicId::from_bytes([0x41; 32]),
             "Test Room".into(),
-            {
-                let mut seed = [0u8; 32];
-                seed[0] = 0x42;
-                iroh_base::SecretKey::from_bytes(&seed)
-                    .public()
-                    .as_bytes()
-                    .to_owned()
-            },
+            test_key(0x42).as_bytes().to_owned(),
         )
+    }
+
+    /// A valid advertisement signed by the publisher whose key equals its
+    /// `owner_peer_id` (the room authority). Verifies as
+    /// [`AdvertisementAuth::Verified`] for that publisher.
+    fn test_advert_signed(
+        publisher_byte: u8,
+    ) -> crate::control_plane::advertisement::PublicRoomAdvertisement {
+        let mut advert = crate::control_plane::advertisement::PublicRoomAdvertisement::minimal(
+            crate::proto::state::TopicId::from_bytes([0x41; 32]),
+            "Test Room".into(),
+            test_key(publisher_byte).as_bytes().to_owned(),
+        );
+        advert.sign(&test_secret_key(publisher_byte));
+        advert
     }
 
     /// A valid PUBLIC_ROOM_ADVERTISEMENT envelope is decoded **only inside
@@ -5372,6 +5502,13 @@ mod tests {
                 assert_eq!(ad.sequence, 7);
                 assert_eq!(ad.timestamp_secs, 1_700_000_000);
                 assert_eq!(ad.advert.advert_version, 1);
+                // Unsigned test advertisement → clearly untrusted, but
+                // still emitted (BORU-DIR-03).
+                assert_eq!(
+                    ad.auth,
+                    AdvertisementAuth::MissingSignature,
+                    "an unsigned advertisement is clearly untrusted"
+                );
             }
             other => panic!("expected RoomAdvertisement, got {other:?}"),
         }
@@ -5471,6 +5608,261 @@ mod tests {
             other => panic!("expected RoomAdvertisement, got {other:?}"),
         }
         assert_eq!(service.peer_count(), 0);
+    }
+
+    // ── BORU-DIR-03: publisher signature verification ─────────────────
+
+    /// A signed room advertisement from the claimed publisher is emitted
+    /// with [`AdvertisementAuth::Verified`] — the advertisement can be
+    /// attributed to its publisher before it enters the trusted directory
+    /// view. When the publisher is the room authority (owner_peer_id), the
+    /// advertisement is canonical-eligible.
+    #[tokio::test]
+    async fn handle_incoming_signed_room_advertisement_verified() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let service = test_service(local);
+        let mut events = service.control_events();
+
+        let mut advert = crate::control_plane::advertisement::PublicRoomAdvertisement::minimal(
+            crate::proto::state::TopicId::from_bytes([0x41; 32]),
+            "Test Room".into(),
+            peer.as_bytes().to_owned(),
+        );
+        advert.sign(&test_secret_key(0xBB));
+
+        let bytes =
+            ControlEnvelope::public_room_advertisement(peer, 11, 1_700_000_000, advert).encode();
+        let outcome = service.handle_incoming(&bytes, peer);
+        assert_eq!(outcome, IncomingOutcome::ControlMessage);
+
+        let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("timed out waiting for room advertisement event")
+            .expect("control event channel closed");
+        match event {
+            ControlEvent::RoomAdvertisement(ad) => {
+                assert_eq!(
+                    ad.auth,
+                    AdvertisementAuth::Verified { publisher: peer },
+                    "a valid publisher signature attributes the advertisement"
+                );
+                assert!(
+                    ad.advert.is_authoritative_publisher(&peer),
+                    "an owner-signed advertisement is canonical-eligible"
+                );
+            }
+            other => panic!("expected RoomAdvertisement, got {other:?}"),
+        }
+    }
+
+    /// A tampered advertisement (payload mutated after signing) is
+    /// DISCARDED at the receive gate: [`IncomingOutcome::AdvertisementAuthRejected`],
+    /// no event, no panic, no registry change.
+    #[tokio::test]
+    async fn handle_incoming_tampered_room_advertisement_rejected() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let service = test_service(local);
+        let mut events = service.control_events();
+
+        let mut advert = crate::control_plane::advertisement::PublicRoomAdvertisement::minimal(
+            crate::proto::state::TopicId::from_bytes([0x41; 32]),
+            "Test Room".into(),
+            peer.as_bytes().to_owned(),
+        );
+        advert.sign(&test_secret_key(0xBB));
+        // Tamper with the payload WITHOUT re-signing: the signature is now
+        // stale, so verification must fail.
+        advert.room_name = "Tampered Room".into();
+
+        let bytes =
+            ControlEnvelope::public_room_advertisement(peer, 12, 1_700_000_000, advert).encode();
+        let outcome = service.handle_incoming(&bytes, peer);
+        assert_eq!(
+            outcome,
+            IncomingOutcome::AdvertisementAuthRejected,
+            "a tampered advertisement must be discarded"
+        );
+        assert_eq!(service.peer_count(), 0);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), events.recv())
+                .await
+                .is_err(),
+            "tampered advertisement must not emit an event"
+        );
+    }
+
+    /// An advertisement signed by a DIFFERENT key than the claimed
+    /// publisher (the envelope sender) is a forgery: verification fails and
+    /// the advertisement is discarded.
+    #[tokio::test]
+    async fn handle_incoming_wrong_publisher_room_advertisement_rejected() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB); // envelope sender = claimed publisher
+        let service = test_service(local);
+        let mut events = service.control_events();
+
+        let mut advert = crate::control_plane::advertisement::PublicRoomAdvertisement::minimal(
+            crate::proto::state::TopicId::from_bytes([0x41; 32]),
+            "Test Room".into(),
+            peer.as_bytes().to_owned(),
+        );
+        // The attacker signs, but the envelope claims publisher == peer.
+        advert.sign(&test_secret_key(0xCC));
+
+        let bytes =
+            ControlEnvelope::public_room_advertisement(peer, 13, 1_700_000_000, advert).encode();
+        let outcome = service.handle_incoming(&bytes, peer);
+        assert_eq!(
+            outcome,
+            IncomingOutcome::AdvertisementAuthRejected,
+            "a wrong-publisher signature must be discarded"
+        );
+        assert_eq!(service.peer_count(), 0);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), events.recv())
+                .await
+                .is_err(),
+            "forged advertisement must not emit an event"
+        );
+    }
+
+    /// An unsigned advertisement is emitted in a CLEARLY UNTRUSTED state
+    /// ([`AdvertisementAuth::MissingSignature`]) — it may be listed as
+    /// unverified but can never be canonical metadata.
+    #[tokio::test]
+    async fn handle_incoming_unsigned_room_advertisement_is_untrusted() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let service = test_service(local);
+        let mut events = service.control_events();
+
+        // test_advert() is unsigned and claims owner == test_key(0x42).
+        let bytes =
+            ControlEnvelope::public_room_advertisement(peer, 14, 1_700_000_000, test_advert())
+                .encode();
+        let outcome = service.handle_incoming(&bytes, peer);
+        assert_eq!(outcome, IncomingOutcome::ControlMessage);
+
+        let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("timed out waiting for room advertisement event")
+            .expect("control event channel closed");
+        match event {
+            ControlEvent::RoomAdvertisement(ad) => {
+                assert_eq!(ad.auth, AdvertisementAuth::MissingSignature);
+                // owner_peer_id alone is descriptive: even though the
+                // payload names an owner, the missing signature means the
+                // publisher is NOT cryptographically proven to be the owner.
+                assert!(
+                    !ad.auth.is_verified(),
+                    "an unsigned advertisement is never trusted"
+                );
+            }
+            other => panic!("expected RoomAdvertisement, got {other:?}"),
+        }
+    }
+
+    /// Failed advertisement verification does NOT crash or affect gossip
+    /// processing: after a forged advertisement is rejected, a subsequent
+    /// control-plane message still decodes and emits normally.
+    #[tokio::test]
+    async fn handle_incoming_advertisement_rejection_does_not_affect_gossip() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let service = test_service(local);
+        let mut events = service.control_events();
+
+        // 1. Forged advertisement → rejected, no panic.
+        let mut advert = crate::control_plane::advertisement::PublicRoomAdvertisement::minimal(
+            crate::proto::state::TopicId::from_bytes([0x41; 32]),
+            "Test Room".into(),
+            peer.as_bytes().to_owned(),
+        );
+        advert.sign(&test_secret_key(0xCC)); // wrong publisher
+        let bad = ControlEnvelope::public_room_advertisement(peer, 15, 1_700_000_000, advert)
+            .encode();
+        assert_eq!(
+            service.handle_incoming(&bad, peer),
+            IncomingOutcome::AdvertisementAuthRejected
+        );
+
+        // 2. A normal control-plane message (HELLO) from the same peer is
+        // still processed — rejection of the bad advertisement did not
+        // corrupt the receive path.
+        let hello = ControlEnvelope::hello(peer, 16, 1_700_000_000, 1).encode();
+        assert_eq!(
+            service.handle_incoming(&hello, peer),
+            IncomingOutcome::ControlMessage
+        );
+        let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("timed out waiting for control event")
+            .expect("control event channel closed");
+        assert!(
+            matches!(event, ControlEvent::Received(env) if env.message_type == ControlMessageType::Hello),
+            "normal control processing must continue after an advertisement rejection"
+        );
+    }
+
+    /// `announce_room_advertisement` broadcasts a PUBLIC_ROOM_ADVERTISEMENT
+    /// control-plane envelope carrying the signed advertisement — never a
+    /// chat message, never a legacy discovery message.
+    #[tokio::test]
+    async fn announce_room_advertisement_broadcasts_signed_envelope() {
+        let local = test_key(0xAA);
+        let (cmd_tx, mut cmd_rx) = irpc_mpsc::channel::<Command>(64);
+        let (_ev_tx, ev_rx) = irpc_mpsc::channel::<Event>(64);
+        let sender = GossipSender::new(cmd_tx);
+        let receiver = GossipReceiver::new(ev_rx);
+        let service = DiscoveryService::from_subscription(test_topic(), sender, receiver, local);
+
+        // Owner == publisher == local node.
+        let advert = test_advert_signed(0xAA);
+        assert_eq!(
+            service
+                .announce_room_advertisement(advert.clone())
+                .await
+                .unwrap(),
+            AnnounceOutcome::Announced
+        );
+
+        let command = tokio::time::timeout(Duration::from_secs(5), cmd_rx.recv())
+            .await
+            .expect("timed out waiting for room advertisement broadcast")
+            .expect("channel receive failed")
+            .expect("channel closed before broadcast");
+        let Command::Broadcast(bytes) = command else {
+            panic!("expected Broadcast command, got {command:?}");
+        };
+        assert!(bytes.starts_with(&CONTROL_PLANE_MAGIC));
+        assert!(
+            postcard::from_bytes::<DiscoveryMessage>(&bytes).is_err(),
+            "a room advertisement must never decode as a legacy DiscoveryMessage"
+        );
+        match ControlEnvelope::decode(&bytes).expect("control envelope decodes") {
+            ControlPlaneDecode::Message(env) => {
+                assert_eq!(env.sender_node_id, local);
+                assert_eq!(
+                    env.message_type,
+                    ControlMessageType::PublicRoomAdvertisement
+                );
+                let ControlPayload::PublicRoomAdvertisement(payload) = &env.payload else {
+                    panic!("expected PublicRoomAdvertisement payload, got {:?}", env.payload);
+                };
+                assert!(
+                    payload.signature.is_some(),
+                    "the announced advertisement must be signed"
+                );
+                assert_eq!(
+                    payload.verify_signed(&local),
+                    AdvertisementAuth::Verified { publisher: local },
+                    "receivers can attribute the announced advertisement to this node"
+                );
+            }
+            other => panic!("expected decoded envelope, got {other:?}"),
+        }
     }
 
     /// `send_control` serialises a control-plane envelope (magic `BC`) and

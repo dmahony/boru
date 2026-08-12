@@ -38,14 +38,47 @@
 //! treat an unknown future `advert_version` as metadata to cache — never as
 //! an authorisation signal (PDF Task 1.3 step 4).
 //!
+//! # Authentication (BORU-DIR-03)
+//!
+//! Advertisements are signed by the **publisher** — the node that sends the
+//! PUBLIC_ROOM_ADVERTISEMENT control message, whose identity is the
+//! envelope's `sender_node_id`. [`PublicRoomAdvertisement::sign`] stamps the
+//! payload with an Ed25519 signature over the canonical framing of every
+//! security-relevant field (see [`signing_bytes`](PublicRoomAdvertisement::signing_bytes)),
+//! using the same [`crate::protocol_signing`] primitives as the rest of
+//! Boru's authenticated protocol objects.
+//!
+//! Receivers call [`verify_signed`](PublicRoomAdvertisement::verify_signed)
+//! against the **claimed publisher** (the envelope `sender_node_id`) before
+//! the advertisement may enter the trusted directory view:
+//!
+//! * [`AdvertisementAuth::Verified`] — signature valid; the advertisement
+//!   is attributed to that publisher.
+//! * [`AdvertisementAuth::MissingSignature`] — no signature; the
+//!   advertisement is **clearly untrusted** (it may be listed as
+//!   unverified, never as canonical).
+//! * [`AdvertisementAuth::InvalidSignature`] — signature present but
+//!   invalid; the advertisement is forged/tampered and must be discarded.
+//!
+//! [`owner_peer_id`](PublicRoomAdvertisement::owner_peer_id) remains
+//! **descriptive metadata**: a valid signature proves who *published* the
+//! advertisement, not who *owns* the room. Room ownership is
+//! cryptographically proven only when the verified publisher is the room
+//! authority — see [`is_authoritative_publisher`](PublicRoomAdvertisement::is_authoritative_publisher)
+//! and the design note `docs/public-room-directory/advertisement-authentication.md`.
+//!
 //! # Wire compatibility
 //!
 //! The payload is postcard-encoded as part of [`ControlPayload`](crate::control_plane::message::ControlPayload).
 //! New fields are appended at the END of the struct so older clients decode
 //! the known prefix and ignore the trailing bytes (the envelope decoder uses
-//! `postcard::take_from_bytes` and discards trailing payload bytes).
+//! `postcard::take_from_bytes` and discards trailing payload bytes). The
+//! `signature` field is the last field and is `#[serde(default)]`, so older
+//! clients ignore it and newer clients treat its absence as
+//! [`AdvertisementAuth::MissingSignature`].
 
 use crate::proto::state::TopicId;
+use iroh_base::{PublicKey, SecretKey};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -56,6 +89,71 @@ use serde::{Deserialize, Serialize};
 /// the metadata model changes incompatibly; receivers treat unknown versions
 /// as metadata to cache, never as an authorisation signal.
 pub const ADVERTISEMENT_PAYLOAD_VERSION: u8 = 1;
+
+/// Domain-separation tag for the advertisement publisher signature
+/// (BORU-DIR-03). A signature over this tag can never verify as a signature
+/// over any other Boru protocol object family (mailbox acks, tunnel
+/// capabilities, download descriptors, ...), even if the signed fields
+/// happened to line up byte-for-byte.
+///
+/// The signed-bytes layout follows [`crate::protocol_signing::canonical_signed_bytes`]:
+/// `postcard((protocol, version, (publisher, advert_version, room_id,
+/// room_name, short_description, room_protocol_version, owner_peer_id,
+/// visibility, expires_after_secs, tags, last_active_hint_secs,
+/// approximate_member_count, room_avatar_hash, feature_flags)))`.
+pub const ADVERTISEMENT_SIGNING_PROTOCOL: &str = "boru/public-room-advertisement/v1";
+
+// ---------------------------------------------------------------------------
+// Publisher authentication (BORU-DIR-03)
+// ---------------------------------------------------------------------------
+
+/// Outcome of verifying a room advertisement's publisher signature.
+///
+/// Produced by [`PublicRoomAdvertisement::verify_signed`] against the
+/// **claimed publisher** — the control-plane envelope's `sender_node_id`,
+/// which the transport attribution gate (BORU-CP-03) has already bound to
+/// the authenticated gossip delivery source.
+///
+/// # Trust model
+///
+/// * [`Verified`](Self::Verified) — the payload can be attributed to the
+///   claimed publisher; it may enter the trusted directory view.
+/// * [`MissingSignature`](Self::MissingSignature) — the publisher did not
+///   sign the payload; the advertisement is **clearly untrusted** and must
+///   never be treated as canonical metadata (PDF Task 1.3: "Failed
+///   verification results in discard or clearly untrusted state").
+/// * [`InvalidSignature`](Self::InvalidSignature) — a signature is present
+///   but does not verify for the claimed publisher; the payload was
+///   tampered with or forged, and must be **discarded**.
+///
+/// Authentication only attributes the advertisement to a publisher. It
+/// never grants moderation or join privileges (PDF Task 1.3 step 4): even a
+/// [`Verified`](Self::Verified) advertisement is metadata, and room-level
+/// authorization (join/permission/moderation) stays with the normal
+/// room logic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdvertisementAuth {
+    /// The signature is present and valid for `publisher` — the
+    /// advertisement is attributed to that node.
+    Verified {
+        /// The verified publisher (matches the envelope `sender_node_id`).
+        publisher: PublicKey,
+    },
+    /// No signature present. The advertisement cannot be attributed to a
+    /// publisher at the payload level: clearly untrusted, never canonical.
+    MissingSignature,
+    /// A signature is present but does not verify for the claimed
+    /// publisher — forged or tampered advertisement. Discard.
+    InvalidSignature,
+}
+
+impl AdvertisementAuth {
+    /// Whether this auth state is trusted enough to enter the trusted
+    /// directory view (only a valid publisher signature is trusted).
+    pub fn is_verified(&self) -> bool {
+        matches!(self, Self::Verified { .. })
+    }
+}
 
 /// Default maximum length (Unicode characters) of a room name.
 pub const DEFAULT_MAX_ROOM_NAME_LEN: usize = 64;
@@ -298,11 +396,17 @@ pub enum AdvertisementViolation {
 ///   hash, never bytes; fetchable via Boru's existing blob-transfer path).
 /// * `feature_flags` — compatible feature flag ids (bounded, metadata
 ///   charset).
+/// * `signature` — publisher Ed25519 signature (BORU-DIR-03): proves the
+///   payload was produced by the publisher whose key is the control-plane
+///   envelope's `sender_node_id`. Optional only for forward/backward wire
+///   compatibility; a missing signature means the advertisement is
+///   **untrusted**, never canonical.
 ///
 /// Explicitly **not** present (privacy guardrails): member lists, member
 /// identities, chat history, chat previews, filenames, invite secrets,
-/// moderation state, private keys, attachment content, and
-/// `signature_or_auth_proof` (that is BORU-DIR-03, out of scope here).
+/// moderation state, private keys, attachment content, and any free-form
+/// authentication blob (the signature is a fixed 64-byte Ed25519 value,
+/// nothing else).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublicRoomAdvertisement {
     /// Advertisement payload version ([`ADVERTISEMENT_PAYLOAD_VERSION`]).
@@ -329,9 +433,12 @@ pub struct PublicRoomAdvertisement {
     pub room_protocol_version: u8,
     /// Creator/owner peer id — raw iroh Ed25519 public key bytes.
     ///
-    /// Descriptive metadata only until BORU-DIR-03 signs advertisements; the
-    /// directory must not grant moderation or join privileges based solely
-    /// on this field (PDF Task 1.3 step 3).
+    /// **Descriptive metadata** (BORU-DIR-03): it names the room's
+    /// designated room authority, but the directory must not grant
+    /// moderation or join privileges based solely on this field (PDF Task
+    /// 1.3 step 3). Room ownership is cryptographically proven only when an
+    /// advertisement verifies as signed by this key — see
+    /// [`is_authoritative_publisher`](Self::is_authoritative_publisher).
     pub owner_peer_id: [u8; 32],
     /// Room visibility. Must be [`RoomVisibility::PublicDiscoverable`] for a
     /// valid advertisement (private/unlisted rooms are never advertised).
@@ -365,6 +472,24 @@ pub struct PublicRoomAdvertisement {
     /// `[A-Za-z0-9._-]`. Empty = no extra feature flags.
     #[serde(default)]
     pub feature_flags: Vec<String>,
+    /// Publisher Ed25519 signature (BORU-DIR-03, PDF Task 1.3 step 1).
+    ///
+    /// Set by [`sign`](Self::sign) with the publisher's node secret key and
+    /// verified by [`verify_signed`](Self::verify_signed) against the
+    /// claimed publisher (the control-plane envelope's `sender_node_id`).
+    /// Covers every other field of this advertisement through the canonical
+    /// [`signing_bytes`](Self::signing_bytes) framing, so any tampering
+    /// invalidates verification.
+    ///
+    /// `None` (the wire default for older clients) means the advertisement
+    /// is **untrusted** — never canonical metadata.
+    ///
+    /// Stored as `Vec<u8>` (always exactly [`SIGNATURE_LEN`](crate::protocol_signing::SIGNATURE_LEN)
+    /// = 64 bytes when present) because postcard's serde support in this
+    /// codebase does not deserialize `[u8; 64]`; verification validates the
+    /// length and fails closed on anything else.
+    #[serde(default)]
+    pub signature: Option<Vec<u8>>,
 }
 
 impl PublicRoomAdvertisement {
@@ -389,7 +514,110 @@ impl PublicRoomAdvertisement {
             approximate_member_count: None,
             room_avatar_hash: None,
             feature_flags: Vec::new(),
+            signature: None,
         }
+    }
+
+    /// The canonical bytes a publisher signs and a receiver recomputes for
+    /// verification (BORU-DIR-03).
+    ///
+    /// Follows the crate-wide [`crate::protocol_signing`] framing:
+    /// `postcard((protocol, version, fields))`. The signed fields are every
+    /// security-relevant advertisement field **except** `signature`, plus
+    /// the publisher's own public key — embedding the publisher makes the
+    /// signature self-describing: it can only ever verify for the key that
+    /// produced it, so a cached advertisement cannot be silently
+    /// re-attributed to a different node.
+    ///
+    /// Serialisation is deterministic and infallible for in-memory values.
+    pub fn signing_bytes(&self, publisher: &PublicKey) -> Vec<u8> {
+        crate::protocol_signing::canonical_signed_bytes(
+            ADVERTISEMENT_SIGNING_PROTOCOL,
+            self.advert_version as u16,
+            &(
+                *publisher.as_bytes(),
+                self.room_id,
+                &self.room_name,
+                &self.short_description,
+                self.room_protocol_version,
+                self.owner_peer_id,
+                self.visibility,
+                self.expires_after_secs,
+                &self.tags,
+                self.last_active_hint_secs,
+                self.approximate_member_count,
+                self.room_avatar_hash,
+                &self.feature_flags,
+            ),
+        )
+        .expect("advertisement canonical signing bytes cannot fail")
+    }
+
+    /// Sign this advertisement with the **publisher's** node key
+    /// (BORU-DIR-03, PDF Task 1.3 step 1).
+    ///
+    /// The publisher is the node that will send the advertisement — the
+    /// control-plane envelope's `sender_node_id`. For a room's canonical
+    /// metadata the publisher should be the room owner (`owner_peer_id`);
+    /// see [`is_authoritative_publisher`](Self::is_authoritative_publisher).
+    ///
+    /// After signing, the receiver can attribute the payload to
+    /// `publisher.public()` via [`verify_signed`](Self::verify_signed).
+    /// This is the publisher's own node key — never an advertisement field,
+    /// never a room secret.
+    pub fn sign(&mut self, publisher: &SecretKey) {
+        let public = publisher.public();
+        let bytes = self.signing_bytes(&public);
+        self.signature = Some(publisher.sign(&bytes).to_bytes().to_vec());
+    }
+
+    /// Verify this advertisement against the **claimed publisher** — the
+    /// control-plane envelope's `sender_node_id` (BORU-DIR-03, PDF Task 1.3
+    /// step 2).
+    ///
+    /// Returns [`AdvertisementAuth::Verified`] only when a signature is
+    /// present and valid for `claimed_publisher`. A missing signature is
+    /// [`AdvertisementAuth::MissingSignature`] (clearly untrusted, never
+    /// canonical); a present-but-invalid signature is
+    /// [`AdvertisementAuth::InvalidSignature`] (forged/tampered — discard).
+    /// Never panics: a malformed signature (wrong length) simply fails
+    /// verification.
+    pub fn verify_signed(&self, claimed_publisher: &PublicKey) -> AdvertisementAuth {
+        let Some(signature) = &self.signature else {
+            return AdvertisementAuth::MissingSignature;
+        };
+        let bytes = self.signing_bytes(claimed_publisher);
+        if crate::protocol_signing::verify(claimed_publisher, signature, &bytes) {
+            AdvertisementAuth::Verified {
+                publisher: *claimed_publisher,
+            }
+        } else {
+            AdvertisementAuth::InvalidSignature
+        }
+    }
+
+    /// Whether `publisher` is the **designated room authority** for this
+    /// room — i.e. the publisher's key equals `owner_peer_id`.
+    ///
+    /// This is the authority rule that prevents a random peer from silently
+    /// overwriting another room's canonical metadata (PDF Task 1.3 step 5,
+    /// acceptance criterion):
+    ///
+    /// * Only an advertisement that verifies as signed by the room authority
+    ///   ([`AdvertisementAuth::Verified`] AND
+    ///   [`is_authoritative_publisher`](Self::is_authoritative_publisher))
+    ///   may establish or update a room's **canonical** directory metadata.
+    /// * An advertisement verified as signed by any other member is an
+    ///   **independent endorsement** of the room's existence. It may appear
+    ///   in the directory as a member-endorsed listing but can never replace
+    ///   the authority's canonical metadata.
+    ///
+    /// Note that this alone proves nothing unless the signature already
+    /// verified: `owner_peer_id` is descriptive metadata, and the publisher
+    /// must hold the matching private key (proven by the signature) for the
+    /// authority claim to hold cryptographically.
+    pub fn is_authoritative_publisher(&self, publisher: &PublicKey) -> bool {
+        publisher.as_bytes() == &self.owner_peer_id
     }
 
     /// Validate this advertisement against `bounds`.
@@ -570,7 +798,15 @@ mod tests {
             approximate_member_count: Some(42),
             room_avatar_hash: Some([0xAB; 32]),
             feature_flags: vec!["files-v2".into(), "voice-v1".into()],
+            signature: None,
         }
+    }
+
+    /// A secret key deterministically derived from `byte` (matches `key`).
+    fn secret_key(byte: u8) -> SecretKey {
+        let mut seed = [0u8; 32];
+        seed[0] = byte;
+        SecretKey::from_bytes(&seed)
     }
 
     // ── Round-trip ─────────────────────────────────────────────────────
@@ -856,6 +1092,7 @@ mod tests {
             "approximate_member_count",
             "room_avatar_hash",
             "feature_flags",
+            "signature",
         ] {
             assert!(debug.contains(field), "missing field {field} in {debug}");
         }
@@ -894,5 +1131,252 @@ mod tests {
             "minimal advertisement should be tiny, got {} bytes",
             encoded.len()
         );
+    }
+
+    // ── BORU-DIR-03: publisher authentication ─────────────────────────
+
+    /// A publisher-signed advertisement verifies as
+    /// [`AdvertisementAuth::Verified`] for that publisher.
+    #[test]
+    fn signed_advertisement_verifies_for_publisher() {
+        let publisher = secret_key(0x22); // matches full_advert()'s owner
+        let mut advert = full_advert();
+        assert_eq!(
+            advert.verify_signed(&publisher.public()),
+            AdvertisementAuth::MissingSignature
+        );
+        advert.sign(&publisher);
+        assert!(advert.signature.is_some());
+        assert_eq!(
+            advert.verify_signed(&publisher.public()),
+            AdvertisementAuth::Verified {
+                publisher: publisher.public()
+            }
+        );
+        assert!(advert.verify_signed(&publisher.public()).is_verified());
+    }
+
+    /// Tampering with any signed field invalidates the signature:
+    /// [`AdvertisementAuth::InvalidSignature`], never a panic.
+    #[test]
+    fn tampered_advertisement_rejected() {
+        let publisher = secret_key(0x22);
+        let mut advert = full_advert();
+        advert.sign(&publisher);
+
+        // Tamper with each kind of field: scalar, string, option, vec.
+        let mut tampered = advert.clone();
+        tampered.room_name = "Evil Name".into();
+        assert_eq!(
+            tampered.verify_signed(&publisher.public()),
+            AdvertisementAuth::InvalidSignature
+        );
+
+        let mut tampered = advert.clone();
+        tampered.expires_after_secs += 1;
+        assert_eq!(
+            tampered.verify_signed(&publisher.public()),
+            AdvertisementAuth::InvalidSignature
+        );
+
+        let mut tampered = advert.clone();
+        tampered.approximate_member_count = Some(9_999_999);
+        assert_eq!(
+            tampered.verify_signed(&publisher.public()),
+            AdvertisementAuth::InvalidSignature
+        );
+
+        let mut tampered = advert.clone();
+        tampered.tags.push("spam".into());
+        assert_eq!(
+            tampered.verify_signed(&publisher.public()),
+            AdvertisementAuth::InvalidSignature
+        );
+
+        // The original still verifies (signature covered only the original).
+        assert_eq!(
+            advert.verify_signed(&publisher.public()),
+            AdvertisementAuth::Verified {
+                publisher: publisher.public()
+            }
+        );
+    }
+
+    /// A signature by one key never verifies for a different claimed
+    /// publisher — the wrong-publisher forgery is rejected.
+    #[test]
+    fn wrong_publisher_signature_rejected() {
+        let publisher = secret_key(0x22);
+        let attacker = secret_key(0x99);
+        let mut advert = full_advert();
+        advert.sign(&publisher);
+        assert_eq!(
+            advert.verify_signed(&attacker.public()),
+            AdvertisementAuth::InvalidSignature,
+            "signature by the real publisher must not verify for the attacker"
+        );
+        // The attacker cannot produce a valid signature for their own claim
+        // either, because the embedded publisher in the signed bytes would
+        // differ and the canonical bytes would not match.
+        let mut forged = full_advert();
+        forged.sign(&attacker);
+        assert_eq!(
+            forged.verify_signed(&publisher.public()),
+            AdvertisementAuth::InvalidSignature
+        );
+    }
+
+    /// An unsigned advertisement is clearly untrusted
+    /// ([`AdvertisementAuth::MissingSignature`]) — never canonical.
+    #[test]
+    fn unsigned_advertisement_is_untrusted() {
+        let publisher = secret_key(0x22);
+        let advert = full_advert(); // signature: None
+        assert_eq!(
+            advert.verify_signed(&publisher.public()),
+            AdvertisementAuth::MissingSignature
+        );
+        assert!(!advert.verify_signed(&publisher.public()).is_verified());
+    }
+
+    /// A corrupted signature byte (present but wrong) fails verification
+    /// without panicking — malformed signatures are not a crash path.
+    #[test]
+    fn corrupted_signature_fails_closed() {
+        let publisher = secret_key(0x22);
+        let mut advert = full_advert();
+        advert.sign(&publisher);
+        let mut bytes = advert.signature.unwrap();
+        bytes[0] ^= 0xFF;
+        advert.signature = Some(bytes);
+        assert_eq!(
+            advert.verify_signed(&publisher.public()),
+            AdvertisementAuth::InvalidSignature
+        );
+    }
+
+    /// The signature survives a postcard round trip (wire transport).
+    #[test]
+    fn signature_survives_postcard_roundtrip() {
+        let publisher = secret_key(0x22);
+        let mut advert = full_advert();
+        advert.sign(&publisher);
+        let bytes = postcard::to_stdvec(&advert).unwrap();
+        let decoded: PublicRoomAdvertisement = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.signature, advert.signature);
+        assert_eq!(
+            decoded.verify_signed(&publisher.public()),
+            AdvertisementAuth::Verified {
+                publisher: publisher.public()
+            }
+        );
+    }
+
+    /// The room authority is the publisher whose key equals `owner_peer_id`.
+    /// Only an owner-signed advertisement is canonical-eligible; a verified
+    /// non-owner advertisement is an independent endorsement that can never
+    /// replace canonical metadata (PDF Task 1.3 step 5).
+    #[test]
+    fn owner_is_designated_room_authority() {
+        let owner = secret_key(0x22); // full_advert() owner_peer_id = key(0x22)
+        let member = secret_key(0x77);
+
+        // Owner-signed: authoritative + verified.
+        let mut owner_advert = full_advert();
+        owner_advert.sign(&owner);
+        assert!(owner_advert.is_authoritative_publisher(&owner.public()));
+        assert!(owner_advert.verify_signed(&owner.public()).is_verified());
+
+        // Member-signed: verified endorsement, but NOT authoritative.
+        let mut member_advert = full_advert();
+        member_advert.sign(&member);
+        assert!(member_advert.verify_signed(&member.public()).is_verified());
+        assert!(
+            !member_advert.is_authoritative_publisher(&member.public()),
+            "a verified non-owner publisher is not the room authority"
+        );
+
+        // An unsigned advertisement claiming the owner id is NOT proof of
+        // ownership: ownership requires the owner's signature.
+        let unsigned = full_advert();
+        assert!(unsigned.is_authoritative_publisher(&owner.public()));
+        assert_eq!(
+            unsigned.verify_signed(&owner.public()),
+            AdvertisementAuth::MissingSignature,
+            "owner_peer_id alone (no signature) must not prove ownership"
+        );
+    }
+
+    /// A spoofed advertisement cannot be treated as canonical metadata:
+    /// either the signature does not verify (invalid) or the verified
+    /// publisher is not the room authority (endorsement, not canonical).
+    /// This is the deterministic conflict rule the directory store applies
+    /// per room (PDF Phase 4 Task 4.2): canonical entries are only ever
+    /// replaced by verified owner-signed advertisements.
+    #[test]
+    fn spoofed_advertisement_cannot_overwrite_canonical() {
+        let owner = secret_key(0x22);
+        let attacker = secret_key(0x99);
+
+        // Canonical advertisement: owner-signed, verified, authoritative.
+        let mut canonical = full_advert();
+        canonical.sign(&owner);
+        assert!(canonical.verify_signed(&owner.public()).is_verified());
+        assert!(canonical.is_authoritative_publisher(&owner.public()));
+
+        // Attack 1: attacker reuses the owner's identity in owner_peer_id
+        // but signs with their own key. Verification against the attacker
+        // passes, but the attacker is NOT the room authority, so their
+        // advertisement is at most an endorsement — it cannot replace the
+        // canonical metadata.
+        let mut spoofed = full_advert();
+        spoofed.room_name = "Spoofed Name".into();
+        spoofed.sign(&attacker);
+        assert!(spoofed.verify_signed(&attacker.public()).is_verified());
+        assert!(
+            !spoofed.is_authoritative_publisher(&attacker.public()),
+            "spoofed publisher must not be the room authority"
+        );
+
+        // Attack 2: attacker forges a signature claimed to be the owner's.
+        // The signature does not verify against the owner key.
+        let mut forged = full_advert();
+        forged.room_name = "Forged Name".into();
+        forged.sign(&attacker);
+        assert_eq!(
+            forged.verify_signed(&owner.public()),
+            AdvertisementAuth::InvalidSignature,
+            "a signature by the attacker must not verify as the owner's"
+        );
+
+        // Attack 3: attacker copies the owner's valid signature onto a
+        // tampered payload. The canonical bytes differ, so verification
+        // fails.
+        let mut replayed = full_advert();
+        replayed.sign(&owner);
+        let stolen_sig = replayed.signature;
+        let mut tampered = full_advert();
+        tampered.room_name = "Stolen Signature".into();
+        tampered.signature = stolen_sig;
+        assert_eq!(
+            tampered.verify_signed(&owner.public()),
+            AdvertisementAuth::InvalidSignature,
+            "a signature over a different payload must not verify"
+        );
+
+        // The deterministic rule: only a Verified + authoritative
+        // advertisement may replace the canonical one. All three attacks
+        // fail at least one side of that rule.
+        fn may_replace_canonical(
+            incoming: &PublicRoomAdvertisement,
+            claimed_publisher: &PublicKey,
+        ) -> bool {
+            incoming.verify_signed(claimed_publisher).is_verified()
+                && incoming.is_authoritative_publisher(claimed_publisher)
+        }
+        assert!(may_replace_canonical(&canonical, &owner.public()));
+        assert!(!may_replace_canonical(&spoofed, &attacker.public()));
+        assert!(!may_replace_canonical(&forged, &owner.public()));
+        assert!(!may_replace_canonical(&tampered, &owner.public()));
     }
 }
