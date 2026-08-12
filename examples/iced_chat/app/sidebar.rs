@@ -869,7 +869,7 @@ impl IcedChat {
                 Row::new()
                     .push(
                         Avatar::new(name.clone())
-                            .size(crate::design_tokens::AVATAR_SM)
+                            .size(crate::design_tokens::AVATAR_CHAT_LIST)
                             .dark_mode(dark_mode)
                             .build(),
                     )
@@ -1001,7 +1001,7 @@ impl IcedChat {
         let avatar_element: iced::Element<'static, AppMessage> = {
             let sidebar_avatar = avatar; // SidebarAvatarHandle
             let mut avatar = Avatar::new(name.clone())
-                .size(crate::design_tokens::AVATAR_SM)
+                .size(crate::design_tokens::AVATAR_CHAT_LIST)
                 .dark_mode(dark_mode);
             if !is_group {
                 if let Some(handle) = sidebar_avatar.handle.clone() {
@@ -1345,7 +1345,7 @@ impl IcedChat {
         for peer in &dep.peers {
             // Avatar with online dot.
             let mut avatar = Avatar::new(peer.display_name.clone())
-                .size(crate::design_tokens::AVATAR_SM)
+                .size(crate::design_tokens::AVATAR_CHAT_LIST)
                 .dark_mode(dep.dark_mode)
                 .online_dot(peer.online);
             if let Some(handle) = peer.avatar.handle.clone() {
@@ -1743,7 +1743,7 @@ impl IcedChat {
 
             // Avatar with online status dot.
             let mut avatar = Avatar::new(friend.label.clone())
-                .size(crate::design_tokens::AVATAR_SM)
+                .size(crate::design_tokens::AVATAR_CHAT_LIST)
                 .dark_mode(dep.dark_mode)
                 .online_dot(online);
             if let Some(handle) = friend.avatar.handle.clone() {
