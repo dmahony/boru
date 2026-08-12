@@ -141,6 +141,49 @@ Exchanging capabilities through discovery (sending them in HELLO, caching
 per-peer state, expiry) is control-plane task 4.2 and is implemented
 separately; gating feature initiation on negotiated support is task 4.3.
 
+## 7a. Exchanging capabilities through discovery (task 4.2)
+
+The discovery service (`DiscoveryService` in `src/discovery_service.rs`)
+publishes, caches, expires, and negotiates capability sets. Behavior:
+
+- **Send on startup.** `join()`/`start()` broadcasts a control-plane HELLO
+  followed by one CAPABILITIES envelope (magic `BC`, message type
+  `CAPABILITIES`) carrying the local set — computed by
+  `default_local_capabilities()` from the well-known registry. Capabilities
+  have their own announce throttle so the back-to-back HELLO +
+  CAPABILITIES burst passes.
+- **Send on material change.** `update_local_capabilities(set)` replaces
+  the advertised set and broadcasts it when it differs from the last
+  announced one; an identical set is a no-op (`AnnounceOutcome::Unchanged`,
+  idempotence). This is the hook the app calls when a feature flag /
+  setting disables or enables a feature. Capability changes never require
+  sending a chat message — the exchange is control-plane metadata only.
+- **Periodic refresh.** The presence-refresh loop re-broadcasts the local
+  set every `DEFAULT_CAPABILITIES_REFRESH_EVERY` (3) presence ticks
+  (~6 minutes at the default cadence) so peers that joined after the
+  startup announcement still learn the set.
+- **Cache per peer.** Receivers store the latest valid advertisement in
+  `PeerControlState.capabilities` (the `PeerControlStateStore`, part of the
+  BORU-CP-03 privacy guard). Only advertisements that pass the
+  minimal-content policy (≤ `MAX_CAPABILITIES` ids, bounded lengths,
+  charset) are cached — "latest valid" is enforced by the policy gate.
+  `peer_capabilities(node_id)` returns the typed `CapabilitySet`.
+- **Expire with presence.** Capability data dies with presence: once the
+  peer's TTL expires, the expiry sweep removes the entry (capabilities
+  included), and `peer_capabilities` fails closed for stale peers (it only
+  reads active-presence entries). Stale capability data is never treated
+  as current indefinitely.
+- **Know-before-attempt.** `peer_supports(node_id, feature)` returns the
+  highest version both sides support (local ∩ remote via
+  `compatible_version`), or `None` when the peer is unknown/stale or shares
+  no version — fail closed. This is the query task 4.3 uses to gate feature
+  initiation.
+- **Never authorisation.** Capability advertisements are metadata. Nothing
+  in the capability path creates a friend, group member, tunnel client, or
+  file recipient; friendship/permissions are still enforced when a feature
+  is invoked (see `presence_never_grants_authorisation` in
+  `src/control_plane/privacy.rs`).
+
 ## 8. Adding a new capability
 
 1. Pick a stable lowercase feature name (never a crate or library name).

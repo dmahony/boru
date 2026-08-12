@@ -440,6 +440,30 @@ pub fn known_descriptor(id: &str) -> Option<&'static CapabilityDescriptor> {
     KNOWN_CAPABILITIES.iter().find(|d| d.id == id)
 }
 
+/// The default local capability advertisement (BORU-CP-11, PDF Task 4.2).
+///
+/// Every well-known capability that is **implemented in this build** —
+/// semantics [`CapabilitySemantics::Implemented`] or
+/// [`CapabilitySemantics::EnabledLocally`] — is advertised. This is the
+/// honest claim a fresh client makes on startup: the build contains the
+/// feature and its protocol version. The app may shrink (or extend) the
+/// set via the discovery service's capability-update API when a feature is
+/// disabled by settings or feature flags ("locally enabled capabilities
+/// materially change"), and the new set is re-advertised on the control
+/// plane without any chat message.
+///
+/// Note this function never reads the app protocol version
+/// ([`BORU_APP_PROTOCOL_VERSION`](crate::control_plane::message::BORU_APP_PROTOCOL_VERSION))
+/// — feature availability is never inferred from app version strings
+/// (PDF Task 4.1 acceptance criterion).
+pub fn default_local_capabilities() -> CapabilitySet {
+    let mut set = CapabilitySet::new();
+    for descriptor in KNOWN_CAPABILITIES {
+        set.insert_id(descriptor.id);
+    }
+    set
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -678,5 +702,44 @@ mod tests {
         assert!(set.is_empty());
         assert_eq!(set.to_wire(), Vec::<String>::new());
         assert_eq!(compatible_version(&set, &set, features::FILES), None);
+    }
+
+    /// The default local advertisement contains every well-known id,
+    /// parses cleanly, and round-trips losslessly on the wire.
+    #[test]
+    fn test_default_local_capabilities_include_well_known_ids() {
+        let local = default_local_capabilities();
+        assert_eq!(local.len(), KNOWN_CAPABILITIES.len());
+        for descriptor in KNOWN_CAPABILITIES {
+            let parsed = CapabilityId::parse(descriptor.id).expect("registry id must parse");
+            assert!(
+                local.has_feature(&parsed.feature),
+                "default local set must advertise {:?}",
+                descriptor.id
+            );
+        }
+        // The wire round-trip preserves the set (lossless) and the set is
+        // bounded below the privacy layer's per-advertisement cap.
+        let wire = local.to_wire();
+        let round = CapabilitySet::from_wire(wire.clone());
+        assert_eq!(round, local);
+        assert!(wire.len() <= crate::control_plane::privacy::MAX_CAPABILITIES);
+    }
+
+    /// The default local set never consults the app protocol version —
+    /// availability comes from the registry, not the version constant.
+    #[test]
+    fn test_default_local_capabilities_do_not_read_app_version() {
+        let local = default_local_capabilities();
+        // Feature availability is present regardless of what the app
+        // protocol version constant says; the function has no version input.
+        assert!(local.has_feature(features::FILES));
+        assert!(local.has_feature(features::TUNNELS));
+        // And removing an id shrinks the advertisement (the "materially
+        // changed" path) without affecting the registry itself.
+        let shrunk =
+            CapabilitySet::from_wire(local.to_wire().into_iter().filter(|id| id != ids::FILES_V2));
+        assert!(!shrunk.has_feature(features::FILES));
+        assert!(shrunk.has_feature(features::TUNNELS));
     }
 }

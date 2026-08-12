@@ -136,7 +136,12 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 
 use crate::api::{ApiError, Event, GossipReceiver, GossipSender, Message as GossipMessage};
-use crate::control_plane::connectivity::{ConnectivityEvent, PeerConnectivityState, PeerConnectivityStore};
+use crate::control_plane::capabilities::{
+    compatible_version, default_local_capabilities, CapabilitySet,
+};
+use crate::control_plane::connectivity::{
+    ConnectivityEvent, PeerConnectivityState, PeerConnectivityStore,
+};
 use crate::control_plane::message::{
     ControlEnvelope, ControlPlaneDecode, CONTROL_PLANE_MAGIC, BORU_APP_PROTOCOL_VERSION,
 };
@@ -176,6 +181,15 @@ pub const DEFAULT_PRESENCE_REFRESH_INTERVAL: Duration = Duration::from_secs(120)
 /// per-cycle delay desynchronises nodes so they do not announce in
 /// synchronised bursts (PDF Task 2.1 step 3).
 pub const DEFAULT_PRESENCE_REFRESH_JITTER: Duration = Duration::from_secs(60);
+
+/// Announce CAPABILITIES every N-th presence-refresh tick (BORU-CP-11 /
+/// PDF Task 4.2 step 2). Presence refreshes every
+/// [`DEFAULT_PRESENCE_REFRESH_INTERVAL`], so this re-broadcasts the local
+/// capability set roughly every 6 minutes at the default cadence — enough
+/// for a peer that joined after our startup announcement to still learn the
+/// current set, while remaining low-frequency (bounded resources). `0`
+/// disables periodic capability refreshes entirely.
+pub const DEFAULT_CAPABILITIES_REFRESH_EVERY: u32 = 3;
 
 /// How often the reconnection loop (BORU-CP-07) wakes to drain due
 /// reconnect attempts and apply backoff. Queued attempts are picked up
@@ -496,6 +510,11 @@ pub enum AnnounceOutcome {
     /// The announcement was suppressed by the throttle (too soon since the
     /// last one); nothing was broadcast.
     Throttled,
+    /// The announcement was a no-op: the payload (e.g. the local capability
+    /// set) is byte-identical to the last announced one, so nothing was
+    /// broadcast (BORU-CP-11 idempotence — no duplicate advertisements for
+    /// an unchanged capability set).
+    Unchanged,
 }
 
 /// Minimum-interval throttle for discovery announcements.
@@ -691,20 +710,38 @@ impl AnnounceHandle {
     }
 }
 
-/// Shared control-plane announcement state (BORU-CP-04): the gossip sender,
-/// the local node identity, a per-sender monotonic sequence counter
-/// (BORU-CP-01 dedup key), and a throttle for control-plane announcements.
+/// Shared control-plane announcement state (BORU-CP-04 / BORU-CP-11): the
+/// gossip sender, the local node identity, a per-sender monotonic sequence
+/// counter (BORU-CP-01 dedup key), and throttles for control-plane
+/// announcements.
 ///
 /// Separate from the legacy [`AnnounceHandle`]: control-plane HELLO /
-/// PRESENCE envelopes (magic `BC`) are a different wire format with their
-/// own sequence namespace, and their refresh cadence must not be starved
-/// by legacy neighbour-up hellos (or vice versa).
+/// PRESENCE / CAPABILITIES envelopes (magic `BC`) are a different wire
+/// format with their own sequence namespace, and their refresh cadence must
+/// not be starved by legacy neighbour-up hellos (or vice versa).
+///
+/// Shares one per-sender sequence counter across all control-plane message
+/// types so receivers' `(sender_node_id, sequence)` dedup stays monotonic
+/// per sender. The legacy announce throttle and the control throttle are
+/// separate instances so the legacy neighbour-up hellos cannot starve the
+/// control-plane presence refresh (or vice versa). CAPABILITIES gets its
+/// own throttle too: the join-time control HELLO fires immediately before
+/// the join-time capabilities announcement, and a shared throttle would
+/// suppress the second.
 #[derive(Clone, Debug)]
 struct ControlAnnounceHandle {
     sender: GossipSender,
     local_node: PublicKey,
     sequence: Arc<AtomicU64>,
     throttle: Arc<AnnounceThrottle>,
+    /// Separate throttle for CAPABILITIES announcements (BORU-CP-11). The
+    /// join-time HELLO and the join-time capabilities announcement fire
+    /// back-to-back; sharing the control throttle would starve one of them.
+    caps_throttle: Arc<AnnounceThrottle>,
+    /// The last capability set actually broadcast, as its wire id list.
+    /// Used to make `announce_capabilities(force = false)` a no-op for an
+    /// unchanged set (idempotence — no duplicate advertisements).
+    last_announced_caps: Arc<Mutex<Option<Vec<String>>>>,
 }
 
 impl ControlAnnounceHandle {
@@ -721,6 +758,10 @@ impl ControlAnnounceHandle {
             throttle: Arc::new(AnnounceThrottle::with_min_interval(
                 DEFAULT_CONTROL_ANNOUNCE_MIN_INTERVAL,
             )),
+            caps_throttle: Arc::new(AnnounceThrottle::with_min_interval(
+                DEFAULT_CONTROL_ANNOUNCE_MIN_INTERVAL,
+            )),
+            last_announced_caps: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -728,6 +769,12 @@ impl ControlAnnounceHandle {
     /// starts at 0). Receivers dedup by `(sender_node_id, sequence)`.
     fn next_sequence(&self) -> u64 {
         self.sequence.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Update the minimum interval for CAPABILITIES announcements
+    /// (BORU-CP-11). Tests use short intervals.
+    fn set_caps_min_interval(&self, min_interval: Duration) {
+        self.caps_throttle.set_min_interval(min_interval);
     }
 
     /// Throttled announce of an arbitrary control-plane envelope.
@@ -780,6 +827,56 @@ impl ControlAnnounceHandle {
             )
         })
         .await
+    }
+
+    /// Announce a control-plane CAPABILITIES envelope carrying `caps`
+    /// (BORU-CP-11 / PDF Task 4.2 steps 1–2).
+    ///
+    /// * `force = false` is the explicit startup / material-change path: an
+    ///   unchanged set (byte-identical to the last broadcast) is a no-op
+    ///   returning [`AnnounceOutcome::Unchanged`] — no duplicate
+    ///   advertisement for a capability set that has not materially changed.
+    /// * `force = true` is the periodic-refresh path: the set is
+    ///   re-broadcast even when unchanged so peers that joined after the
+    ///   previous announcement still learn the current set (the gossip
+    ///   actor dedups byte-identical payloads for neighbours that already
+    ///   have them).
+    ///
+    /// Either way the CAPABILITIES throttle bounds the rate, the sequence
+    /// is allocated only when a broadcast actually happens, and the
+    /// broadcast is a control-plane envelope — never a chat message.
+    async fn announce_capabilities(
+        &self,
+        caps: &CapabilitySet,
+        force: bool,
+    ) -> Result<AnnounceOutcome, DiscoveryServiceError> {
+        let wire = caps.to_wire();
+        if !force {
+            let last = self
+                .last_announced_caps
+                .lock()
+                .expect("last announced caps lock poisoned");
+            if last.as_deref() == Some(wire.as_slice()) {
+                return Ok(AnnounceOutcome::Unchanged);
+            }
+        }
+        if !self.caps_throttle.try_announce() {
+            debug!("discovery: capabilities announcement throttled");
+            return Ok(AnnounceOutcome::Throttled);
+        }
+        let sequence = self.next_sequence();
+        let bytes =
+            ControlEnvelope::capabilities(self.local_node, sequence, unix_now_secs(), wire.clone())
+                .encode();
+        self.sender
+            .broadcast(Bytes::from(bytes))
+            .await
+            .map_err(|source| e!(DiscoveryServiceError::Api { source }))?;
+        *self
+            .last_announced_caps
+            .lock()
+            .expect("last announced caps lock poisoned") = Some(wire);
+        Ok(AnnounceOutcome::Announced)
     }
 }
 
@@ -1198,6 +1295,12 @@ pub struct DiscoveryService {
     /// jitter) so the builder can tune it after construction and the
     /// refresh loop observes it.
     refresh_config: Arc<Mutex<PresenceRefreshConfig>>,
+    /// The local capability set this node advertises (BORU-CP-11 / PDF Task
+    /// 4.2). Defaults to [`default_local_capabilities`]; the app replaces it
+    /// via [`update_local_capabilities`](Self::update_local_capabilities)
+    /// when locally enabled capabilities materially change. Shared with the
+    /// periodic refresh loop so it always re-announces the current set.
+    local_caps: Arc<Mutex<CapabilitySet>>,
 }
 
 impl DiscoveryService {
@@ -1235,6 +1338,7 @@ impl DiscoveryService {
             Ok(AnnounceOutcome::Throttled) => {
                 debug!(topic = %topic, "discovery hello suppressed on join");
             }
+            Ok(AnnounceOutcome::Unchanged) => {}
             Err(error) => {
                 warn!(
                     topic = %topic,
@@ -1253,11 +1357,34 @@ impl DiscoveryService {
             Ok(AnnounceOutcome::Throttled) => {
                 debug!(topic = %topic, "discovery control hello suppressed on join");
             }
+            Ok(AnnounceOutcome::Unchanged) => {}
             Err(error) => {
                 warn!(
                     topic = %topic,
                     error = %error,
                     "discovery control hello on join failed; continuing without it",
+                );
+            }
+        }
+        // BORU-CP-11: one CAPABILITIES announcement right after the
+        // control HELLO (PDF Task 4.2 step 1: send capabilities on
+        // startup). It has its own throttle, so the back-to-back HELLO +
+        // CAPABILITIES burst passes. The periodic refresh loop keeps
+        // re-announcing the set while running, so peers that join later
+        // still learn it.
+        match service.announce_capabilities().await {
+            Ok(AnnounceOutcome::Announced) => {
+                info!(topic = %topic, "discovery capabilities announced on join");
+            }
+            Ok(AnnounceOutcome::Throttled) => {
+                debug!(topic = %topic, "discovery capabilities suppressed on join");
+            }
+            Ok(AnnounceOutcome::Unchanged) => {}
+            Err(error) => {
+                warn!(
+                    topic = %topic,
+                    error = %error,
+                    "discovery capabilities on join failed; continuing without it",
                 );
             }
         }
@@ -1399,10 +1526,17 @@ impl DiscoveryService {
         let refresh_config = Arc::new(Mutex::new(PresenceRefreshConfig {
             interval: DEFAULT_PRESENCE_REFRESH_INTERVAL,
             jitter: DEFAULT_PRESENCE_REFRESH_JITTER,
+            caps_every: DEFAULT_CAPABILITIES_REFRESH_EVERY,
         }));
+        // BORU-CP-11: the local capability set this node advertises, shared
+        // with the refresh loop so periodic capability refreshes always
+        // carry the current set (and the app can replace it on material
+        // change via [`DiscoveryService::update_local_capabilities`]).
+        let local_caps = Arc::new(Mutex::new(default_local_capabilities()));
         let refresh_cancel = cancel.clone();
         let refresh_task = tokio::spawn(presence_refresh_loop(
             control_announce.clone(),
+            local_caps.clone(),
             refresh_config.clone(),
             refresh_cancel,
         ));
@@ -1434,6 +1568,7 @@ impl DiscoveryService {
             reconnect_task,
             expiry_config,
             refresh_config,
+            local_caps,
         }
     }
 
@@ -1491,6 +1626,113 @@ impl DiscoveryService {
     /// [`announce_control_hello`](Self::announce_control_hello).
     pub async fn announce_control_presence(&self) -> Result<AnnounceOutcome, DiscoveryServiceError> {
         self.control_announce.announce_presence().await
+    }
+
+    // ── Capability negotiation (BORU-CP-11 / PDF Task 4.2) ────────────────
+
+    /// The local capability set this node currently advertises.
+    ///
+    /// Defaults to [`default_local_capabilities`] (every well-known
+    /// capability implemented in this build). The app replaces it via
+    /// [`update_local_capabilities`](Self::update_local_capabilities) when
+    /// locally enabled capabilities materially change.
+    pub fn local_capabilities(&self) -> CapabilitySet {
+        self.local_caps
+            .lock()
+            .expect("local caps lock poisoned")
+            .clone()
+    }
+
+    /// Replace the local capability set and announce it when it materially
+    /// changed (BORU-CP-11 / PDF Task 4.2 step 2).
+    ///
+    /// The new set is stored; if it differs from the last announced set a
+    /// CAPABILITIES envelope is broadcast on the discovery topic — a
+    /// control-plane message, never a chat message. If the set is
+    /// byte-identical to the last announced one, nothing is broadcast
+    /// ([`AnnounceOutcome::Unchanged`]) — an idempotent no-op.
+    pub async fn update_local_capabilities(
+        &self,
+        caps: CapabilitySet,
+    ) -> Result<AnnounceOutcome, DiscoveryServiceError> {
+        {
+            let mut local = self.local_caps.lock().expect("local caps lock poisoned");
+            *local = caps;
+        }
+        self.announce_capabilities().await
+    }
+
+    /// Broadcast the current local capability set (startup + material-change
+    /// path, BORU-CP-11 / PDF Task 4.2 step 1).
+    ///
+    /// Returns [`AnnounceOutcome::Unchanged`] when the set is byte-identical
+    /// to the last announced one (no duplicate advertisement for an
+    /// unchanged set). The periodic refresh loop re-announces the set on its
+    /// own cadence so peers that joined after the previous announcement
+    /// still learn it.
+    pub async fn announce_capabilities(&self) -> Result<AnnounceOutcome, DiscoveryServiceError> {
+        let caps = self.local_capabilities();
+        self.control_announce
+            .announce_capabilities(&caps, false)
+            .await
+    }
+
+    /// The latest valid capability set cached for `peer` (BORU-CP-11 / PDF
+    /// Task 4.2 steps 3–4).
+    ///
+    /// Returns `None` when the peer is unknown, when its presence has gone
+    /// stale (beyond its TTL — stale capability data is never treated as
+    /// current), or when the peer never advertised capabilities. The set is
+    /// metadata only: it grants no authorisation — friendship/permissions
+    /// are still enforced when a feature is invoked.
+    pub fn peer_capabilities(&self, node_id: &PublicKey) -> Option<CapabilitySet> {
+        let guard = self
+            .core
+            .guard
+            .lock()
+            .expect("control-plane guard lock poisoned");
+        let state = guard.presence().get_active(node_id, Instant::now())?;
+        Some(state.capability_set())
+    }
+
+    /// The highest feature version both sides support for `feature`, or
+    /// `None` when the peer is unknown/stale or shares no version (fail
+    /// closed — BORU-CP-11 / PDF Task 4.2 acceptance: Alice can know whether
+    /// Bob supports a feature before presenting/attempting it).
+    ///
+    /// This is the negotiated view: it intersects the *remote* peer's cached
+    /// advertisement with the *local* capability set
+    /// ([`compatible_version`]), so a remote-only capability never looks
+    /// negotiable. `None` means "do not present/attempt this feature".
+    pub fn peer_supports(&self, node_id: &PublicKey, feature: &str) -> Option<u16> {
+        let remote = self.peer_capabilities(node_id)?;
+        let local = self.local_capabilities();
+        compatible_version(&local, &remote, feature)
+    }
+
+    /// Override the minimum interval between **CAPABILITIES** control-plane
+    /// announcements (BORU-CP-11).
+    ///
+    /// Defaults to [`DEFAULT_CONTROL_ANNOUNCE_MIN_INTERVAL`]. CAPABILITIES
+    /// has its own throttle so the join-time HELLO + capabilities burst and
+    /// the periodic presence refresh never starve each other. Tests use
+    /// short intervals to exercise the throttle without sleeping.
+    pub fn with_capabilities_announce_min_interval(self, min_interval: Duration) -> Self {
+        self.control_announce.set_caps_min_interval(min_interval);
+        self
+    }
+
+    /// Override how often the periodic refresh loop re-announces
+    /// CAPABILITIES (BORU-CP-11).
+    ///
+    /// Defaults to [`DEFAULT_CAPABILITIES_REFRESH_EVERY`] (every 3rd
+    /// presence-refresh tick). `0` disables periodic capability refreshes.
+    pub fn with_capabilities_refresh_every(self, every: u32) -> Self {
+        self.refresh_config
+            .lock()
+            .expect("refresh config lock poisoned")
+            .caps_every = every;
+        self
     }
 
     /// Override the minimum interval between **control-plane**
@@ -1965,6 +2207,7 @@ async fn drain_loop(
                                     );
                                 }
                                 Ok(AnnounceOutcome::Throttled) => {}
+                                Ok(AnnounceOutcome::Unchanged) => {}
                                 Err(error) => {
                                     warn!(
                                         peer = %peer.fmt_short(),
@@ -2467,16 +2710,31 @@ struct PresenceRefreshConfig {
     interval: Duration,
     /// Jitter added to each sleep: `sleep(interval + random(0..=jitter))`.
     jitter: Duration,
+    /// Announce CAPABILITIES every N-th refresh tick (`0` = never).
+    /// Defaults to [`DEFAULT_CAPABILITIES_REFRESH_EVERY`]; each
+    /// capabilities announcement uses its own throttle so the periodic
+    /// presence and capability refreshes never starve each other.
+    caps_every: u32,
 }
 
 /// Background task that keeps this node's control-plane presence alive
-/// (BORU-CP-04, PDF Task 2.1 step 3).
+/// (BORU-CP-04, PDF Task 2.1 step 3) and periodically re-advertises the
+/// local capability set (BORU-CP-11, PDF Task 4.2 step 2).
 ///
 /// Every `interval + random(0..=jitter)` it broadcasts one control-plane
 /// PRESENCE envelope (magic `BC`), so peers refresh this node's entry in
 /// their [`PeerControlStateStore`](crate::control_plane::privacy::PeerControlStateStore).
 /// The join-time HELLO covers the immediate announcement; this loop is the
 /// low-frequency refresh "while running".
+///
+/// Every `caps_every`-th tick it additionally re-broadcasts the current
+/// local capability set ([`CapabilitySet`]) — even when unchanged — so a
+/// peer that joined after our startup announcement still learns the set
+/// within a bounded time (the gossip actor dedups byte-identical payloads
+/// for neighbours that already have them). The capabilities announcement
+/// uses its own throttle, so the periodic presence and capability refreshes
+/// never starve each other; an unchanged explicit announcement between
+/// ticks is still a no-op ([`AnnounceOutcome::Unchanged`]).
 ///
 /// The per-cycle jitter desynchronises nodes so a fleet of clients does not
 /// announce in synchronised bursts. The interval is deliberately well under
@@ -2485,18 +2743,20 @@ struct PresenceRefreshConfig {
 /// throttle, so an explicit announce right before a tick suppresses that
 /// tick (idempotence — no duplicate bursts).
 ///
-/// The configured interval/jitter are re-read every cycle so builder tuning
-/// (e.g. short intervals in tests) takes effect immediately. Logs state
-/// transitions only, never message contents.
+/// The configured interval/jitter/cadence are re-read every cycle so builder
+/// tuning (e.g. short intervals in tests) takes effect immediately. Logs
+/// state transitions only, never message contents.
 async fn presence_refresh_loop(
     control_announce: ControlAnnounceHandle,
+    local_caps: Arc<Mutex<CapabilitySet>>,
     config: Arc<Mutex<PresenceRefreshConfig>>,
     cancel: CancellationToken,
 ) {
+    let mut tick: u64 = 0;
     loop {
-        let (interval, jitter) = {
+        let (interval, jitter, caps_every) = {
             let cfg = config.lock().expect("refresh config lock poisoned");
-            (cfg.interval, cfg.jitter)
+            (cfg.interval, cfg.jitter, cfg.caps_every)
         };
         let delay = interval + random_jitter(jitter);
         tokio::select! {
@@ -2506,6 +2766,7 @@ async fn presence_refresh_loop(
                 break;
             }
             _ = tokio::time::sleep(delay) => {
+                tick = tick.wrapping_add(1);
                 match control_announce.announce_presence().await {
                     Ok(AnnounceOutcome::Announced) => {
                         info!(
@@ -2517,11 +2778,35 @@ async fn presence_refresh_loop(
                     Ok(AnnounceOutcome::Throttled) => {
                         trace!("control: presence refresh suppressed by throttle");
                     }
+                    Ok(AnnounceOutcome::Unchanged) => {}
                     Err(error) => {
                         warn!(
                             error = %error,
                             "control: presence refresh failed; continuing",
                         );
+                    }
+                }
+                // BORU-CP-11: periodic capability refresh (force=true so an
+                // unchanged set still reaches peers that joined late).
+                if caps_every > 0 && tick % caps_every as u64 == 0 {
+                    let caps = local_caps.lock().expect("local caps lock poisoned").clone();
+                    match control_announce.announce_capabilities(&caps, true).await {
+                        Ok(AnnounceOutcome::Announced) => {
+                            info!(
+                                caps_count = caps.len(),
+                                "control: capabilities refresh announced",
+                            );
+                        }
+                        Ok(AnnounceOutcome::Throttled) => {
+                            trace!("control: capabilities refresh suppressed by throttle");
+                        }
+                        Ok(AnnounceOutcome::Unchanged) => {}
+                        Err(error) => {
+                            warn!(
+                                error = %error,
+                                "control: capabilities refresh failed; continuing",
+                            );
+                        }
                     }
                 }
             }
@@ -2551,6 +2836,7 @@ mod tests {
     use crate::api::Command;
     use crate::proto::DeliveryScope;
     use irpc::channel::mpsc as irpc_mpsc;
+    use std::collections::BTreeSet;
 
     /// Deterministic test identity: a `SecretKey` seeded from a single byte
     /// produces a valid Ed25519 public key.
@@ -4358,6 +4644,249 @@ mod tests {
             ControlPlaneDecode::Message(decoded) => assert_eq!(decoded, envelope),
             other => panic!("expected decoded envelope, got {other:?}"),
         }
+    }
+
+    // ── Capability negotiation (BORU-CP-11 / PDF Task 4.2) ───────────────
+
+    /// Encode a `Capabilities` control-plane envelope for `sender`.
+    fn control_caps(sender: PublicKey, sequence: u64, caps: Vec<String>) -> Vec<u8> {
+        ControlEnvelope::capabilities(sender, sequence, 1_700_000_000, caps).encode()
+    }
+
+    /// `announce_capabilities` broadcasts a CAPABILITIES control-plane
+    /// envelope carrying the current local capability set — a control-plane
+    /// message, never a chat message.
+    #[tokio::test]
+    async fn announce_capabilities_broadcasts_capabilities_envelope() {
+        let local = test_key(0xAA);
+        let (cmd_tx, mut cmd_rx) = irpc_mpsc::channel::<Command>(64);
+        let (_ev_tx, ev_rx) = irpc_mpsc::channel::<Event>(64);
+        let sender = GossipSender::new(cmd_tx);
+        let receiver = GossipReceiver::new(ev_rx);
+        let service = DiscoveryService::from_subscription(test_topic(), sender, receiver, local);
+
+        assert_eq!(
+            service.announce_capabilities().await.unwrap(),
+            AnnounceOutcome::Announced
+        );
+
+        let command = tokio::time::timeout(Duration::from_secs(5), cmd_rx.recv())
+            .await
+            .expect("timed out waiting for capabilities broadcast")
+            .expect("channel receive failed")
+            .expect("channel closed before broadcast");
+        let Command::Broadcast(bytes) = command else {
+            panic!("expected Broadcast command, got {command:?}");
+        };
+        // Control-plane envelope, never a chat message or legacy discovery
+        // message (capability changes do not require sending a chat message).
+        assert!(bytes.starts_with(&CONTROL_PLANE_MAGIC));
+        assert!(
+            postcard::from_bytes::<DiscoveryMessage>(&bytes).is_err(),
+            "a capabilities envelope must never decode as a legacy DiscoveryMessage"
+        );
+        match ControlEnvelope::decode(&bytes).expect("control envelope decodes") {
+            ControlPlaneDecode::Message(env) => {
+                assert_eq!(env.sender_node_id, local);
+                assert_eq!(
+                    env.message_type,
+                    crate::control_plane::message::ControlMessageType::Capabilities
+                );
+                let crate::control_plane::message::ControlPayload::Capabilities(payload) =
+                    &env.payload
+                else {
+                    panic!("expected Capabilities payload, got {:?}", env.payload);
+                };
+                // The wire ids equal the default local set's wire form.
+                let local_set = service.local_capabilities();
+                assert_eq!(payload.capabilities, local_set.to_wire());
+                assert!(payload.capabilities.contains(&"files-v2".to_string()));
+            }
+            other => panic!("expected decoded envelope, got {other:?}"),
+        }
+    }
+
+    /// Re-announcing the SAME local capability set is an idempotent no-op:
+    /// [`AnnounceOutcome::Unchanged`] and no second broadcast (BORU-CP-11
+    /// idempotence — no duplicate advertisements for an unchanged set).
+    #[tokio::test]
+    async fn announce_capabilities_dedups_unchanged_set() {
+        let local = test_key(0xAA);
+        let (cmd_tx, mut cmd_rx) = irpc_mpsc::channel::<Command>(64);
+        let (_ev_tx, ev_rx) = irpc_mpsc::channel::<Event>(64);
+        let sender = GossipSender::new(cmd_tx);
+        let receiver = GossipReceiver::new(ev_rx);
+        let service = DiscoveryService::from_subscription(test_topic(), sender, receiver, local)
+            .with_capabilities_announce_min_interval(Duration::ZERO);
+
+        assert_eq!(
+            service.announce_capabilities().await.unwrap(),
+            AnnounceOutcome::Announced
+        );
+        let first = tokio::time::timeout(Duration::from_secs(5), cmd_rx.recv())
+            .await
+            .expect("timed out waiting for first capabilities broadcast")
+            .expect("channel receive failed")
+            .expect("channel closed before broadcast");
+        assert!(matches!(first, Command::Broadcast(_)));
+
+        // Same set again — no duplicate broadcast.
+        assert_eq!(
+            service.announce_capabilities().await.unwrap(),
+            AnnounceOutcome::Unchanged
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), cmd_rx.recv())
+                .await
+                .is_err(),
+            "unchanged capability set must not be re-broadcast"
+        );
+    }
+
+    /// Replacing the local capability set broadcasts the NEW set (the
+    /// "locally enabled capabilities materially change" path) without any
+    /// chat message; `local_capabilities()` reflects the change.
+    #[tokio::test]
+    async fn update_local_capabilities_announces_material_change() {
+        let local = test_key(0xAA);
+        let (cmd_tx, mut cmd_rx) = irpc_mpsc::channel::<Command>(64);
+        let (_ev_tx, ev_rx) = irpc_mpsc::channel::<Event>(64);
+        let sender = GossipSender::new(cmd_tx);
+        let receiver = GossipReceiver::new(ev_rx);
+        let service = DiscoveryService::from_subscription(test_topic(), sender, receiver, local)
+            .with_capabilities_announce_min_interval(Duration::ZERO);
+
+        // Shrink the local set to files-v2 only (e.g. a feature was
+        // disabled) and announce it.
+        let shrunk = CapabilitySet::from_wire(vec!["files-v2".to_string()]);
+        assert_eq!(
+            service
+                .update_local_capabilities(shrunk.clone())
+                .await
+                .unwrap(),
+            AnnounceOutcome::Announced
+        );
+        assert_eq!(service.local_capabilities(), shrunk);
+
+        let command = tokio::time::timeout(Duration::from_secs(5), cmd_rx.recv())
+            .await
+            .expect("timed out waiting for updated capabilities broadcast")
+            .expect("channel receive failed")
+            .expect("channel closed before broadcast");
+        let Command::Broadcast(bytes) = command else {
+            panic!("expected Broadcast command, got {command:?}");
+        };
+        assert!(bytes.starts_with(&CONTROL_PLANE_MAGIC));
+        match ControlEnvelope::decode(&bytes).expect("control envelope decodes") {
+            ControlPlaneDecode::Message(env) => {
+                let crate::control_plane::message::ControlPayload::Capabilities(payload) =
+                    &env.payload
+                else {
+                    panic!("expected Capabilities payload, got {:?}", env.payload);
+                };
+                assert_eq!(payload.capabilities, vec!["files-v2".to_string()]);
+            }
+            other => panic!("expected decoded envelope, got {other:?}"),
+        }
+
+        // Re-updating to the SAME set is a no-op.
+        assert_eq!(
+            service.update_local_capabilities(shrunk).await.unwrap(),
+            AnnounceOutcome::Unchanged
+        );
+    }
+
+    /// Alice can know whether Bob supports a feature before presenting or
+    /// attempting it: a peer's CAPABILITIES advertisement is cached per
+    /// peer, exposed as a typed set, and negotiated with the local set via
+    /// `peer_supports` (fail closed = None).
+    #[tokio::test]
+    async fn peer_capabilities_and_peer_supports_query() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let service = test_service(local);
+
+        // Unknown peer: no capability data at all.
+        assert_eq!(service.peer_capabilities(&peer), None);
+        assert_eq!(service.peer_supports(&peer, "files"), None);
+
+        // Bob advertises files-v2 + a future feature.
+        let bob_caps = vec!["files-v2".to_string(), "hologram-v3".to_string()];
+        let outcome = service.handle_incoming(&control_caps(peer, 1, bob_caps.clone()), peer);
+        assert_eq!(outcome, IncomingOutcome::ControlMessage);
+
+        // Alice now knows Bob's capabilities — including unknown futures
+        // (forward compatibility: unknown ids preserved, never fatal).
+        let cached = service
+            .peer_capabilities(&peer)
+            .expect("caps must be cached");
+        assert!(cached.has_feature("files"));
+        assert_eq!(cached.versions_of("files"), Some(&BTreeSet::from([2u16])));
+        assert!(cached.to_wire().iter().any(|id| id == "hologram-v3"));
+
+        // Negotiation: Bob supports files-v2 and the local client also
+        // advertises files-v2 -> compatible version 2. A feature only Bob
+        // (or only Alice) has is NOT negotiable.
+        assert_eq!(service.peer_supports(&peer, "files"), Some(2));
+        assert_eq!(service.peer_supports(&peer, "hologram"), None);
+        assert_eq!(service.peer_supports(&peer, "voice"), None);
+    }
+
+    /// Stale capability data is not treated as current indefinitely: once
+    /// the peer's presence expires past its TTL, `peer_capabilities`
+    /// returns None (the capability cache dies with presence).
+    #[tokio::test]
+    async fn capabilities_expire_with_presence_ttl() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let service = test_service(local)
+            .with_presence_ttl(Duration::from_millis(60))
+            .with_presence_sweep_interval(Duration::from_millis(20));
+
+        let outcome =
+            service.handle_incoming(&control_caps(peer, 1, vec!["files-v2".to_string()]), peer);
+        assert_eq!(outcome, IncomingOutcome::ControlMessage);
+        assert!(
+            service.peer_capabilities(&peer).is_some(),
+            "capabilities must be current while presence is active"
+        );
+
+        // Wait well past the TTL (60ms) with several sweep ticks (20ms).
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        assert_eq!(
+            service.peer_capabilities(&peer),
+            None,
+            "stale capability data must not be treated as current"
+        );
+        assert_eq!(service.peer_supports(&peer, "files"), None);
+    }
+
+    /// A CAPABILITIES advertisement is metadata only: it never registers
+    /// the peer in the legacy registry and never grants authorisation (the
+    /// peer is not a friend/group member/file recipient by virtue of
+    /// advertising capabilities).
+    #[tokio::test]
+    async fn capabilities_advertisement_never_authorises() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let service = test_service(local);
+
+        let outcome = service.handle_incoming(
+            &control_caps(peer, 1, vec!["files-v2".into(), "tunnels-v1".into()]),
+            peer,
+        );
+        assert_eq!(outcome, IncomingOutcome::ControlMessage);
+
+        // Control-plane traffic does not touch the peer registry.
+        assert_eq!(
+            service.peer_count(),
+            0,
+            "capabilities must not register peers"
+        );
+        // The capability cache is a hint store with no authorisation
+        // surface: nothing here creates a friendship or a transfer.
+        assert!(service.peer_capabilities(&peer).is_some());
     }
 
     /// The drain loop routes a received control-plane envelope to

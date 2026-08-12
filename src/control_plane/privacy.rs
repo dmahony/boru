@@ -59,6 +59,7 @@ use std::time::{Duration, Instant};
 
 use iroh_base::PublicKey;
 
+use super::capabilities::CapabilitySet;
 use super::message::{ControlEnvelope, ControlPayload};
 
 // ---------------------------------------------------------------------------
@@ -437,6 +438,17 @@ impl PeerControlState {
             PresenceState::Active
         }
     }
+
+    /// The latest valid capability set advertised by this peer, as a typed
+    /// [`CapabilitySet`] (BORU-CP-11 / PDF Task 4.2 step 3).
+    ///
+    /// Lossless: ids this client does not understand are preserved in the
+    /// set's raw bucket, so an advertisement is cached exactly as received.
+    /// The raw wire list ([`PeerControlState::capabilities`]) is the cache
+    /// of record; this is the typed view over it.
+    pub fn capability_set(&self) -> CapabilitySet {
+        CapabilitySet::from_wire(self.capabilities.iter().cloned())
+    }
 }
 
 /// Outcome of [`PeerControlStateStore::record`].
@@ -588,9 +600,51 @@ impl PeerControlStateStore {
         expired
     }
 
-    /// Look up the control state for `node_id`, if present and not stale.
+    /// The latest valid capability set cached for `node_id`, if the peer is
+    /// known and actually advertised capabilities (`None` for a peer that
+    /// never sent a CAPABILITIES envelope — unknown, not "empty").
+    pub fn capability_set_of(&self, node_id: &PublicKey) -> Option<CapabilitySet> {
+        let state = self.peers.get(node_id)?;
+        if state.capabilities.is_empty() {
+            return None;
+        }
+        Some(state.capability_set())
+    }
+
+    /// Look up the control state for `node_id`, if present.
     pub fn get(&self, node_id: &PublicKey) -> Option<&PeerControlState> {
         self.peers.get(node_id)
+    }
+
+    /// Look up the control state for `node_id` only while its presence is
+    /// ACTIVE at `now` (BORU-CP-11 / PDF Task 4.2 step 4).
+    ///
+    /// Returns `None` for unknown peers AND for peers whose presence has
+    /// gone stale (beyond their TTL) — so a caller that asks "what does
+    /// this peer currently support?" can never treat stale capability data
+    /// as current. Capability data dies with presence: when the entry is
+    /// removed by [`expire_stale`](Self::expire_stale), the cached
+    /// capabilities go with it.
+    pub fn get_active(&self, node_id: &PublicKey, now: Instant) -> Option<&PeerControlState> {
+        let entry = self.peers.get(node_id)?;
+        if entry.is_stale(now) {
+            return None;
+        }
+        Some(entry)
+    }
+
+    /// Look up the control state for `node_id` even when its presence has
+    /// gone stale at `now` (the complement of [`get_active`](Self::get_active)).
+    ///
+    /// Stale entries still exist in the store until the expiry sweep removes
+    /// them; this accessor lets diagnostics/observability read the *last
+    /// known* state while making the staleness explicit to the caller.
+    pub fn get_stale(&self, node_id: &PublicKey, now: Instant) -> Option<&PeerControlState> {
+        let entry = self.peers.get(node_id)?;
+        if entry.is_stale(now) {
+            return Some(entry);
+        }
+        None
     }
 
     /// Whether `node_id` currently has an entry.
@@ -813,6 +867,7 @@ impl ControlPlaneGuard {
 mod tests {
     use super::*;
     use crate::control_plane::message::{ControlEnvelope, CONTROL_PLANE_PROTOCOL_VERSION};
+    use std::collections::BTreeSet;
 
     fn key(byte: u8) -> PublicKey {
         let mut seed = [0u8; 32];
@@ -1066,6 +1121,79 @@ mod tests {
         let state = store.get(&peer).unwrap();
         assert_eq!(state.app_protocol_version, Some(1));
         assert_eq!(state.capabilities.len(), 2);
+    }
+
+    /// The typed capability view is lossless: unknown future ids are
+    /// preserved, and the wire form round-trips.
+    #[test]
+    fn presence_store_capability_set_typed_query_preserves_unknowns() {
+        let mut store = PeerControlStateStore::with_limits(16, Duration::from_secs(300));
+        let peer = key(0x0A);
+        let t0 = Instant::now();
+        store.record(
+            &capabilities(
+                peer,
+                1,
+                vec![
+                    "files-v2".into(),
+                    "hologram-v3".into(),
+                    "files-v2.1-beta".into(),
+                ],
+            ),
+            t0,
+        );
+
+        let set = store.capability_set_of(&peer).expect("caps must be cached");
+        assert!(set.has_feature("files"));
+        assert_eq!(set.versions_of("files"), Some(&BTreeSet::from([2u16])));
+        // Unknown ids survive the typed view.
+        let wire = set.to_wire();
+        assert!(wire.iter().any(|id| id == "hologram-v3"));
+        assert!(wire.iter().any(|id| id == "files-v2.1-beta"));
+        assert_eq!(CapabilitySet::from_wire(wire), set);
+
+        // A peer that never advertised capabilities has none cached.
+        let silent = key(0x0B);
+        store.record(&hello(silent, 1), t0);
+        assert_eq!(store.capability_set_of(&silent), None);
+    }
+
+    /// Stale capability data is not treated as current: get_active returns
+    /// None once presence is beyond its TTL, get_stale exposes the last
+    /// known state explicitly, and expire_stale removes the capabilities
+    /// together with the presence entry.
+    #[test]
+    fn presence_store_stale_capabilities_not_current() {
+        let mut store = PeerControlStateStore::with_limits(16, Duration::from_secs(5));
+        let peer = key(0x0A);
+        let t0 = Instant::now();
+        store.record(&capabilities(peer, 1, vec!["files-v2".into()]), t0);
+
+        // Within TTL: active and current.
+        assert!(store
+            .get_active(&peer, t0 + Duration::from_secs(4))
+            .is_some());
+        assert!(store
+            .get_stale(&peer, t0 + Duration::from_secs(4))
+            .is_none());
+        assert!(store.capability_set_of(&peer).is_some());
+
+        // Beyond TTL: NOT current (active lookup fails closed).
+        let stale_now = t0 + Duration::from_secs(6);
+        assert!(
+            store.get_active(&peer, stale_now).is_none(),
+            "stale capability data must not be treated as current"
+        );
+        // The last-known state is still readable as stale.
+        assert!(store.get_stale(&peer, stale_now).is_some());
+        // But the typed cache accessor still returns the raw data — the
+        // caller decides staleness via get_active/get_stale.
+        assert!(store.capability_set_of(&peer).is_some());
+
+        // Expiry removes the capabilities WITH the presence entry.
+        let expired = store.expire_stale(stale_now);
+        assert_eq!(expired, vec![peer]);
+        assert_eq!(store.capability_set_of(&peer), None);
     }
 
     #[test]
