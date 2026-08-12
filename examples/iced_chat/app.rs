@@ -103,6 +103,9 @@ use boru_core::conversations::{
 };
 use boru_core::discovery_backend::MainlineDhtBackend;
 use boru_core::discovery_secret::DiscoverySecret;
+use boru_core::control_plane::connectivity::{
+    PeerConnectivityState, PeerConnectivityStore,
+};
 use boru_core::download_limits::DownloadLimitsConfig;
 use boru_core::download_manager::DownloadManager;
 use boru_core::file_indexer::FileIndexer;
@@ -316,6 +319,10 @@ pub struct AppSettings {
     /// Optional user-selected accent color as RGB bytes (None = theme default).
     /// Wired through the iced_aw ColorPicker in Settings → APPEARANCE.
     pub accent_color: Option<[u8; 3]>,
+    /// Whether the optional BORU-CP-06 presence indicator is shown in the
+    /// UI. Disabling it only hides the presentation — it never affects
+    /// discovery or reconnection (PDF 2.3 guardrail).
+    pub show_presence_indicator: bool,
 }
 
 impl Default for AppSettings {
@@ -329,6 +336,7 @@ impl Default for AppSettings {
             home_background_image: None,
             home_menu_item_opacity: HOME_MENU_ITEM_OPACITY_DEFAULT,
             accent_color: None,
+            show_presence_indicator: true,
         }
     }
 }
@@ -1516,6 +1524,10 @@ enum PeerPresence {
     /// The peer is known but we have not yet established a live connection
     /// (e.g. the room subscription is still in flight).
     Connecting,
+    /// Seen recently on discovery but not (yet) connected for direct
+    /// messaging. Derived from the BORU-CP-05 state machine's
+    /// `Discovered` state (PDF 2.3 "Recently seen").
+    RecentlySeen,
     /// We cannot determine the peer's state (no identity, no presence data).
     Unknown,
 }
@@ -1527,6 +1539,7 @@ impl PeerPresence {
             PeerPresence::Away => "Away",
             PeerPresence::Offline => "Offline",
             PeerPresence::Connecting => "Connecting…",
+            PeerPresence::RecentlySeen => "Recently seen",
             PeerPresence::Unknown => "Unknown",
         }
     }
@@ -1534,7 +1547,9 @@ impl PeerPresence {
     fn color(&self, theme: &iced::Theme) -> Color {
         match self {
             PeerPresence::Online => accent_green(theme),
-            PeerPresence::Away | PeerPresence::Connecting => color_warning(theme),
+            PeerPresence::Away | PeerPresence::Connecting | PeerPresence::RecentlySeen => {
+                color_warning(theme)
+            }
             PeerPresence::Offline | PeerPresence::Unknown => text_muted(theme),
         }
     }
@@ -1543,8 +1558,30 @@ impl PeerPresence {
         match self {
             PeerPresence::Online | PeerPresence::Away => ICON_ONLINE,
             PeerPresence::Connecting => ICON_RETRY,
+            PeerPresence::RecentlySeen => ICON_OFFLINE,
             PeerPresence::Offline | PeerPresence::Unknown => ICON_OFFLINE,
         }
+    }
+}
+
+/// Map the BORU-CP-05 backend connectivity state machine onto the four
+/// PDF 2.3 presence labels (Online / Recently seen / Connecting /
+/// Offline). Pure so it can be unit-tested in isolation.
+///
+/// - `Reachable` / `DirectTopicReady` → Online (`is_online()`)
+/// - `Discovered` → Recently seen (seen on discovery, not ready for direct)
+/// - `Connecting` → Connecting
+/// - `Degraded` / `OfflineStale` / `Unknown` → Offline (never 'online')
+fn peer_presence_from_connectivity(state: PeerConnectivityState) -> PeerPresence {
+    match state {
+        PeerConnectivityState::Reachable | PeerConnectivityState::DirectTopicReady => {
+            PeerPresence::Online
+        }
+        PeerConnectivityState::Discovered => PeerPresence::RecentlySeen,
+        PeerConnectivityState::Connecting => PeerPresence::Connecting,
+        PeerConnectivityState::Degraded
+        | PeerConnectivityState::OfflineStale
+        | PeerConnectivityState::Unknown => PeerPresence::Offline,
     }
 }
 
@@ -3837,6 +3874,16 @@ pub struct IcedChat {
     sound_enabled: bool,
     /// Whether room invitations may include direct endpoint addresses.
     share_direct_addresses: bool,
+    /// Whether the optional BORU-CP-06 presence indicator is rendered.
+    /// Presentation-only — disabling it never affects discovery or
+    /// reconnection (PDF 2.3).
+    show_presence_indicator: bool,
+    /// Read handle to the BORU-CP-05 backend connectivity state machine.
+    /// Set from `main.rs` after construction (the discovery service handle
+    /// itself is deliberately not stored on the UI). When `None` (e.g. in
+    /// unit tests) the UI falls back to the legacy timestamp-based
+    /// presence model.
+    pub connectivity_store: Option<Arc<StdMutex<PeerConnectivityStore>>>,
     /// Font size for chat message body text (pixels).
     chat_text_size: f32,
     /// Whether the "clear history" confirmation is shown.
@@ -5836,6 +5883,9 @@ pub enum AppMessage {
     OpenFriendChat(PublicKey),
     /// Toggle notification sounds on/off.
     ToggleSound(bool),
+    /// Toggle the optional BORU-CP-06 UI presence indicator on/off.
+    /// Presentation-only: never affects discovery or reconnection.
+    TogglePresenceIndicator(bool),
     /// Toggle whether room invitations include direct endpoint addresses.
     ToggleInviteAddressSharing(bool),
     /// Set the chat message body text size in pixels.
@@ -7570,6 +7620,8 @@ impl IcedChat {
             dark_mode: app_settings.dark_mode,
             sound_enabled: app_settings.sound_enabled,
             share_direct_addresses: app_settings.share_direct_addresses,
+            show_presence_indicator: app_settings.show_presence_indicator,
+            connectivity_store: None,
             chat_text_size: app_settings.chat_text_size,
             room_delete_confirm_topic: None,
             notice,
@@ -7965,6 +8017,7 @@ impl IcedChat {
             home_background_image: self.home_background_path.clone(),
             home_menu_item_opacity: self.home_menu_item_opacity,
             accent_color: self.accent_color,
+            show_presence_indicator: self.show_presence_indicator,
         };
         settings.save(&self.data_dir);
     }
@@ -7981,6 +8034,7 @@ impl IcedChat {
         home_background_image: Option<String>,
         home_menu_item_opacity: f32,
         accent_color: Option<[u8; 3]>,
+        show_presence_indicator: bool,
     ) -> iced::Task<AppMessage> {
         let settings = AppSettings {
             dark_mode,
@@ -7991,6 +8045,7 @@ impl IcedChat {
             home_background_image,
             home_menu_item_opacity,
             accent_color,
+            show_presence_indicator,
         };
         let data_dir = data_dir.to_path_buf();
         iced::Task::perform(
@@ -8077,6 +8132,7 @@ impl IcedChat {
             home_background_image: self.home_background_path.clone(),
             home_menu_item_opacity: self.home_menu_item_opacity,
             accent_color: self.accent_color,
+            show_presence_indicator: self.show_presence_indicator,
         };
         settings.save(&self.data_dir);
     }
@@ -9718,6 +9774,7 @@ impl IcedChat {
             AppMessage::ConfirmReceiveTicket => "ConfirmReceiveTicket",
             AppMessage::OpenFriendChat(_) => "OpenFriendChat",
             AppMessage::ToggleSound(_) => "ToggleSound",
+            AppMessage::TogglePresenceIndicator(_) => "TogglePresenceIndicator",
             AppMessage::ToggleInviteAddressSharing(_) => "ToggleInviteAddressSharing",
             AppMessage::SetChatTextSize(_) => "SetChatTextSize",
             AppMessage::PickProfileImage => "PickProfileImage",
@@ -15309,6 +15366,7 @@ impl IcedChat {
 
             // ── Settings profile/home (state layer) ────────────────
             AppMessage::ToggleSound(_)
+            | AppMessage::TogglePresenceIndicator(_)
             | AppMessage::ToggleInviteAddressSharing(_)
             | AppMessage::PickProfileImage
             | AppMessage::ProfileImagePicked(_)
@@ -16897,6 +16955,28 @@ impl IcedChat {
                 }
             }
         }
+    }
+
+    /// UI presence for a peer (BORU-CP-06, PDF 2.3).
+    ///
+    /// When the optional presence indicator is enabled AND the backend
+    /// connectivity store handle is available, the badge is derived from
+    /// the BORU-CP-05 state machine (`Reachable`/`DirectTopicReady` →
+    /// Online, `Discovered` → Recently seen, `Connecting` → Connecting,
+    /// everything else → Offline). Otherwise it falls back to the legacy
+    /// timestamp-based model — disabling the indicator never affects
+    /// discovery or reconnection.
+    fn ui_presence(&self, peer: &PublicKey) -> PeerPresence {
+        if self.show_presence_indicator {
+            if let Some(store) = &self.connectivity_store {
+                let state = {
+                    let guard = store.lock().expect("connectivity store lock poisoned");
+                    guard.state(peer)
+                };
+                return peer_presence_from_connectivity(state);
+            }
+        }
+        self.peer_presence(peer)
     }
 
     /// Downgrade stale peers to Away. Called on each ConnMonitorTick:
@@ -20085,6 +20165,7 @@ mod tests {
             home_background_image: None,
             home_menu_item_opacity: HOME_MENU_ITEM_OPACITY_DEFAULT,
             accent_color: None,
+            show_presence_indicator: true,
         };
         let toggled = AppSettings {
             dark_mode: true,
@@ -20095,6 +20176,7 @@ mod tests {
             home_background_image: None,
             home_menu_item_opacity: HOME_MENU_ITEM_OPACITY_DEFAULT,
             accent_color: None,
+            show_presence_indicator: true,
         };
         toggled.save(&data_dir);
         let loaded = AppSettings::load(&data_dir);
@@ -20128,6 +20210,7 @@ mod tests {
             home_background_image: None,
             home_menu_item_opacity: 0.55,
             accent_color: None,
+            show_presence_indicator: true,
         };
         settings.save(&data_dir);
         let loaded = AppSettings::load(&data_dir);
@@ -27503,6 +27586,7 @@ mod tests {
             PeerPresence::Away,
             PeerPresence::Offline,
             PeerPresence::Connecting,
+            PeerPresence::RecentlySeen,
             PeerPresence::Unknown,
         ];
         let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
@@ -27514,6 +27598,83 @@ mod tests {
                 "{state:?} has duplicate label \"{label}\""
             );
         }
+    }
+
+    /// The BORU-CP-05 state machine maps onto the four PDF 2.3 presence
+    /// labels exactly: Reachable/DirectTopicReady → Online, Discovered →
+    /// Recently seen, Connecting → Connecting, Degraded/OfflineStale/
+    /// Unknown → Offline. The UI badge is a projection of the backend
+    /// state machine, never an independent guess.
+    #[test]
+    fn peer_presence_from_connectivity_matches_state_machine() {
+        use boru_core::control_plane::connectivity::PeerConnectivityState as S;
+        assert_eq!(peer_presence_from_connectivity(S::Reachable), PeerPresence::Online);
+        assert_eq!(
+            peer_presence_from_connectivity(S::DirectTopicReady),
+            PeerPresence::Online
+        );
+        assert_eq!(
+            peer_presence_from_connectivity(S::Discovered),
+            PeerPresence::RecentlySeen
+        );
+        assert_eq!(
+            peer_presence_from_connectivity(S::Connecting),
+            PeerPresence::Connecting
+        );
+        assert_eq!(
+            peer_presence_from_connectivity(S::Degraded),
+            PeerPresence::Offline
+        );
+        assert_eq!(
+            peer_presence_from_connectivity(S::OfflineStale),
+            PeerPresence::Offline
+        );
+        assert_eq!(
+            peer_presence_from_connectivity(S::Unknown),
+            PeerPresence::Offline
+        );
+        // The mapping agrees with the state machine's derived accessor:
+        // a peer the machine says is not online must never render Online.
+        for state in [
+            S::Unknown,
+            S::Discovered,
+            S::Connecting,
+            S::Degraded,
+            S::OfflineStale,
+        ] {
+            assert!(!state.is_online());
+            assert_ne!(peer_presence_from_connectivity(state), PeerPresence::Online);
+        }
+        for state in [S::Reachable, S::DirectTopicReady] {
+            assert!(state.is_online());
+            assert_eq!(peer_presence_from_connectivity(state), PeerPresence::Online);
+        }
+    }
+
+    /// ui_presence() falls back to the legacy timestamp model when the
+    /// indicator is disabled — removing the badge never affects discovery
+    /// or reconnection (PDF 2.3 guardrail).
+    #[test]
+    fn ui_presence_falls_back_when_indicator_disabled() {
+        let (mut runtime, mut app) = build_prewarm_test_app();
+        let peer = iroh::SecretKey::generate().public();
+        // Simulate a backend state machine entry (reachable → Online).
+        let store = Arc::new(StdMutex::new(PeerConnectivityStore::default()));
+        store
+            .lock()
+            .unwrap()
+            .apply(peer, boru_core::control_plane::connectivity::ConnectivityEvent::EndpointConnected, std::time::Instant::now());
+        app.connectivity_store = Some(Arc::clone(&store));
+        app.show_presence_indicator = true;
+        assert_eq!(app.ui_presence(&peer), PeerPresence::Online);
+        // Disabling the indicator hides the badge (falls back to legacy
+        // model, which does not know this peer → Offline).
+        app.show_presence_indicator = false;
+        assert_eq!(app.ui_presence(&peer), PeerPresence::Offline);
+        // The backend store is untouched by the UI toggle.
+        assert!(store.lock().unwrap().state(&peer).is_online());
+        drop(app);
+        runtime.block_on(async {});
     }
 
     /// Each state maps to a distinct icon (Online/Away → filled circle,

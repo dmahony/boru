@@ -1618,6 +1618,14 @@ fn main() -> Result<()> {
             // doesn't flood the watch channel and MCP consumers.
             app.gui_snapshot_throttle_ms = 125;
             app.directory_store = shared_directory_store;
+            // BORU-CP-06: give the UI a read handle to the backend
+            // connectivity state machine (the discovery service handle
+            // itself stays off the UI). The optional presence indicator
+            // reads per-peer state from here; disabling it only hides the
+            // badge, never discovery or reconnection.
+            app.connectivity_store = _discovery_service
+                .as_ref()
+                .map(|svc| svc.connectivity_store());
             #[cfg(feature = "screen-sharing")]
             {
                 // Wire the screen-share protocol channels and handle into the

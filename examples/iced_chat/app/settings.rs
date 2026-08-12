@@ -131,6 +131,8 @@ pub(crate) struct SettingsCachedKey {
     accent_color: Option<[u8; 3]>,
     /// Whether the iced_aw ColorPicker overlay is open.
     show_accent_picker: bool,
+    /// Whether the optional BORU-CP-06 presence indicator is shown.
+    show_presence_indicator: bool,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -170,6 +172,7 @@ impl IcedChat {
             home_menu_item_opacity_bits: self.home_menu_item_opacity.to_bits(),
             accent_color: self.accent_color,
             show_accent_picker: self.show_accent_picker,
+            show_presence_indicator: self.show_presence_indicator,
         }
     }
 
@@ -973,6 +976,49 @@ impl IcedChat {
 
         let notifications_card = section_card("NOTIFICATIONS", vec![notifications_row.into()]);
 
+        // ── Presence section (BORU-CP-06, PDF 2.3) ──
+        // Optional UI presence indicator derived from the backend
+        // connectivity state machine. Disabling it only hides the badge —
+        // it never affects discovery or reconnection.
+        let presence_label = if key.show_presence_indicator {
+            "On"
+        } else {
+            "Off"
+        };
+        let presence_row = Row::new()
+            .push(
+                Column::new()
+                    .push(crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::Body,
+                        "Presence indicator",
+                    ))
+                    .push(
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::SupportingText,
+                            "Show Online / Recently seen / Connecting / Offline status \
+                             next to contacts. Derived from the connectivity state \
+                             machine; hiding it never affects discovery or reconnection.",
+                        )
+                        .style(text_muted_style),
+                    )
+                    .spacing(SPACE_2)
+                    .width(Length::Fill)
+                    .align_x(Alignment::Start),
+            )
+            .push(
+                button(crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::ButtonLabel,
+                    presence_label,
+                ))
+                .on_press(AppMessage::TogglePresenceIndicator(!key.show_presence_indicator))
+                .style(BUTTON_OUTLINE)
+                .padding([SPACE_6, SPACE_12]),
+            )
+            .spacing(SPACE_12)
+            .align_y(Alignment::Center);
+
+        let presence_card = section_card("PRESENCE", vec![presence_row.into()]);
+
         // ── Network section ──
         let connection_details_focus_anchor = iced::widget::text_input("", "")
             .id(CONNECTION_DETAILS_TRIGGER_INPUT)
@@ -1203,6 +1249,8 @@ impl IcedChat {
             .push(Space::new().height(Length::Fixed(SPACE_12)))
             .push(notifications_card)
             .push(Space::new().height(Length::Fixed(SPACE_12)))
+            .push(presence_card)
+            .push(Space::new().height(Length::Fixed(SPACE_12)))
             .push(network_card)
             .push(Space::new().height(Length::Fixed(SPACE_12)))
             .push(relay_card)
@@ -1272,6 +1320,7 @@ impl IcedChat {
                     home_background_image: self.home_background_path.clone(),
                     home_menu_item_opacity: self.home_menu_item_opacity,
                     accent_color: self.accent_color,
+                    show_presence_indicator: self.show_presence_indicator,
                 };
                 let data_dir = self.data_dir.clone();
                 let _progress_queue = self.download_progress_queue.clone();
@@ -1308,6 +1357,7 @@ impl IcedChat {
                     home_background_image: self.home_background_path.clone(),
                     home_menu_item_opacity: self.home_menu_item_opacity,
                     accent_color: self.accent_color,
+                    show_presence_indicator: self.show_presence_indicator,
                 };
                 let data_dir = self.data_dir.clone();
                 iced::Task::perform(
@@ -1338,6 +1388,7 @@ impl IcedChat {
                     home_background_image: self.home_background_path.clone(),
                     home_menu_item_opacity: self.home_menu_item_opacity,
                     accent_color: self.accent_color,
+                    show_presence_indicator: self.show_presence_indicator,
                 };
                 let data_dir = self.data_dir.clone();
                 iced::Task::perform(
@@ -1360,6 +1411,7 @@ impl IcedChat {
                     home_background_image: self.home_background_path.clone(),
                     home_menu_item_opacity: self.home_menu_item_opacity,
                     accent_color: self.accent_color,
+                    show_presence_indicator: self.show_presence_indicator,
                 };
                 let data_dir = self.data_dir.clone();
                 let _progress_queue = self.download_progress_queue.clone();
@@ -1382,6 +1434,37 @@ impl IcedChat {
                     home_background_image: self.home_background_path.clone(),
                     home_menu_item_opacity: self.home_menu_item_opacity,
                     accent_color: self.accent_color,
+                    show_presence_indicator: self.show_presence_indicator,
+                };
+                let data_dir = self.data_dir.clone();
+                let _progress_queue = self.download_progress_queue.clone();
+                iced::Task::perform(
+                    tokio::task::spawn_blocking(move || {
+                        settings.save(&data_dir);
+                    }),
+                    |_| AppMessage::Noop,
+                )
+            }
+
+            AppMessage::TogglePresenceIndicator(enabled) => {
+                self.show_presence_indicator = enabled;
+                // The presence badge is pure presentation — toggling it
+                // never touches discovery or reconnection. Bump the
+                // sidebar revisions so friend rows re-render with/without
+                // the state-machine-derived badge.
+                self.mark_friends_sidebar_dirty();
+                self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
+                self.invalidate_prewarm(&[Screen::Settings]);
+                let settings = AppSettings {
+                    dark_mode: self.dark_mode,
+                    sound_enabled: self.sound_enabled,
+                    share_direct_addresses: self.share_direct_addresses,
+                    chat_text_size: self.chat_text_size,
+                    display_name: Some(self.local_label.clone()),
+                    home_background_image: self.home_background_path.clone(),
+                    home_menu_item_opacity: self.home_menu_item_opacity,
+                    accent_color: self.accent_color,
+                    show_presence_indicator: self.show_presence_indicator,
                 };
                 let data_dir = self.data_dir.clone();
                 let _progress_queue = self.download_progress_queue.clone();
@@ -1404,6 +1487,7 @@ impl IcedChat {
                     home_background_image: self.home_background_path.clone(),
                     home_menu_item_opacity: self.home_menu_item_opacity,
                     accent_color: self.accent_color,
+                    show_presence_indicator: self.show_presence_indicator,
                 };
                 let data_dir = self.data_dir.clone();
                 iced::Task::perform(
@@ -1529,6 +1613,7 @@ impl IcedChat {
                             home_background_image: Some(path.clone()),
                             home_menu_item_opacity: self.home_menu_item_opacity,
                             accent_color: self.accent_color,
+                            show_presence_indicator: self.show_presence_indicator,
                         };
                         iced::Task::perform(
                             async move {
@@ -1588,6 +1673,7 @@ impl IcedChat {
                     None,
                     self.home_menu_item_opacity,
                     self.accent_color,
+                    self.show_presence_indicator,
                 )
             }
 
@@ -1604,6 +1690,7 @@ impl IcedChat {
                     home_background_image: self.home_background_path.clone(),
                     home_menu_item_opacity: self.home_menu_item_opacity,
                     accent_color: self.accent_color,
+                    show_presence_indicator: self.show_presence_indicator,
                 };
                 let data_dir = self.data_dir.clone();
                 iced::Task::perform(

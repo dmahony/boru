@@ -1027,7 +1027,7 @@ impl IcedChat {
         let presence = if self.room_loading || self.sender.is_none() {
             PeerPresence::Connecting
         } else {
-            peer.map(|key| self.peer_presence(&key))
+            peer.map(|key| self.ui_presence(&key))
                 .unwrap_or(PeerPresence::Unknown)
         };
 
@@ -1445,7 +1445,7 @@ impl IcedChat {
             })
             .unwrap_or(false);
         let presence = peer
-            .map(|key| self.peer_presence(&key))
+            .map(|key| self.ui_presence(&key))
             .unwrap_or(PeerPresence::Unknown);
         let (route_label, connected, peer_label) =
             chat_footer_status(is_group, &self.neighbors, peer, presence);
@@ -2179,7 +2179,7 @@ impl IcedChat {
             .as_ref()
             .and_then(|entry| entry.peer_id.parse::<PublicKey>().ok());
         let presence = peer
-            .map(|key| self.peer_presence(&key))
+            .map(|key| self.ui_presence(&key))
             .unwrap_or(PeerPresence::Offline);
         let is_online = presence != PeerPresence::Offline;
         let display_name = conversation

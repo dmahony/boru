@@ -1593,6 +1593,20 @@ impl DiscoveryService {
             .collect()
     }
 
+    /// Read handle to the shared BORU-CP-05 connectivity state machine
+    /// store.
+    ///
+    /// The GUI (BORU-CP-06) holds this to render the optional presence
+    /// indicator from the backend state machine without holding the whole
+    /// discovery service. The handle is read-only from the UI's
+    /// perspective — state transitions are fed only by the discovery
+    /// service and the data-plane report API; the UI never writes.
+    pub fn connectivity_store(
+        &self,
+    ) -> Arc<Mutex<crate::control_plane::connectivity::PeerConnectivityStore>> {
+        Arc::clone(&self.core.connectivity)
+    }
+
     /// Report a data-plane networking event into the connectivity state
     /// machine (BORU-CP-05).
     ///

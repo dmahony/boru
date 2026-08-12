@@ -100,12 +100,19 @@ does not re-enter `Connecting`).
 | Presence TTL expiry | `presence_expiry_loop` → `Timeout` |
 | Direct-topic join success/failure, DM receive, path change | data plane calls `DiscoveryService::report_connectivity_event` / `report_connectivity_failure` (direction: data-plane → control-plane state; the discovery service never calls chat code) |
 
-Read API for diagnostics and the future UI indicator (BORU-CP-06):
+Read API for diagnostics and the UI indicator (BORU-CP-06, implemented):
 
 - `connectivity_state(peer)` — current state (`Unknown` if untracked)
 - `connectivity_trail(peer)` — deterministic transition trail (oldest first)
 - `connectivity_peers()` — full snapshot (state, path, direct-topic state,
   last errors, trail)
+- `connectivity_store()` — `Arc<Mutex<PeerConnectivityStore>>` read handle
+  for the GUI. The iced chat (BORU-CP-06) holds this and projects each
+  peer's state onto the four presence labels (Online / Recently seen /
+  Connecting / Offline) via `peer_presence_from_connectivity` in
+  `examples/iced_chat/app.rs`. The indicator is optional (Settings →
+  PRESENCE); disabling it only hides the badge — the store keeps
+  updating and discovery/reconnection are unaffected.
 
 ## Data model
 

@@ -1646,7 +1646,7 @@ impl IcedChat {
                             .get(&peer)
                             .and_then(|avatar| avatar.as_ref()),
                     ),
-                    presence: self.peer_presence(&peer),
+                    presence: self.ui_presence(&peer),
                     profile_version: self
                         .friend_profile_versions
                         .get(&peer)
