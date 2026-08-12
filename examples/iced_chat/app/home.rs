@@ -365,7 +365,7 @@ impl IcedChat {
             .iter()
             .map(|row| {
                 let mut avatar = Avatar::new(row.name.clone())
-                    .size(crate::design_tokens::AVATAR_SM)
+                    .size(crate::design_tokens::AVATAR_CHAT_LIST)
                     .dark_mode(dep.dark_mode)
                     .online_dot(true)
                     .fallback_icon(Icon::Friend);
@@ -652,7 +652,7 @@ impl IcedChat {
                 .take(PEOPLE_PEERS_MAX)
                 .map(|row| {
                     let mut avatar = Avatar::new(row.name.clone())
-                        .size(crate::design_tokens::AVATAR_SM)
+                        .size(crate::design_tokens::AVATAR_CHAT_LIST)
                         .dark_mode(dep.online.dark_mode)
                         .online_dot(true)
                         .fallback_icon(Icon::Friend);
