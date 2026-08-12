@@ -1287,12 +1287,17 @@ fn main() -> Result<()> {
                                     // attempt per peer) and skips online
                                     // peers, so presence refreshes never
                                     // spam the scheduler.
+                                    // BORU-CP-08: only message-capable
+                                    // friends trigger reconnection — a
+                                    // blocked relationship is never
+                                    // resurrected (no authorisation by
+                                    // presence).
                                     if let Some(handle) = &reconnect_handle_for_task {
                                         if friends_for_reconnect
                                             .get(&boru_core::friends::FriendId::from_public_key(
                                                 node_id,
                                             ))
-                                            .is_some()
+                                            .is_some_and(|record| record.relationship.can_message())
                                         {
                                             handle.queue_reconnect(node_id);
                                         }

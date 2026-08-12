@@ -23760,6 +23760,8 @@ mod tests {
 
         let (dummy_discovered_tx, dummy_discovered_rx) =
             tokio::sync::mpsc::channel::<DiscoveredPeersUpdate>(1);
+        let (_, dummy_reconnect_rx) = tokio::sync::mpsc::channel::<PublicKey>(1);
+        let dummy_reconnect_rx = Arc::new(Mutex::new(dummy_reconnect_rx));
         let (_, dummy_directory_rx) = tokio::sync::mpsc::channel::<DirectoryRoomUpdate>(1);
         let dummy_directory_rx = Arc::new(Mutex::new(dummy_directory_rx));
         let (_, dummy_call_rx) = tokio::sync::mpsc::channel::<CallEvent>(1);
@@ -23796,6 +23798,8 @@ mod tests {
             backfill_handle,
             false,
             Arc::new(Mutex::new(dummy_discovered_rx)),
+            dummy_reconnect_rx,
+            None, // reconnect_handle (not exercised in unit tests)
             dummy_directory_rx,
             None, // dht (private-room discovery disabled by default in tests)
             false,
@@ -23956,6 +23960,8 @@ mod tests {
 
         let (dummy_discovered_tx, dummy_discovered_rx) =
             tokio::sync::mpsc::channel::<DiscoveredPeersUpdate>(1);
+        let (_, dummy_reconnect_rx) = tokio::sync::mpsc::channel::<PublicKey>(1);
+        let dummy_reconnect_rx = Arc::new(Mutex::new(dummy_reconnect_rx));
         let (_, dummy_directory_rx) = tokio::sync::mpsc::channel::<DirectoryRoomUpdate>(1);
         let dummy_directory_rx = Arc::new(Mutex::new(dummy_directory_rx));
         let (_, dummy_call_rx) = tokio::sync::mpsc::channel::<CallEvent>(1);
@@ -23992,6 +23998,8 @@ mod tests {
             backfill_handle,
             false,
             Arc::new(Mutex::new(dummy_discovered_rx)),
+            dummy_reconnect_rx,
+            None, // reconnect_handle (not exercised in unit tests)
             dummy_directory_rx,
             None, // dht (private-room discovery disabled by default in tests)
             false,
@@ -29368,6 +29376,138 @@ mod tests {
         assert_eq!(
             conv.scroll_offset, 0.0,
             "no sentinel when there is no history"
+        );
+    }
+
+    // ── BORU-CP-08: reconcile existing conversations after reconnect ────
+
+    /// A current friend with an active designated direct conversation gets
+    /// that topic restored after a reconnect (existing direct chats recover
+    /// after peer restart).
+    #[test]
+    fn reconnect_required_topics_restores_friend_direct_topic() {
+        let (_runtime, mut app, _local, peer) = build_join_request_test_app();
+        let topic = direct_topic(&app.local_public, &peer);
+        let fid = boru_core::friends::FriendId::from_public_key(peer);
+        let record = app.friends.ensure_friend(fid);
+        record.relationship = boru_core::friends::FriendRelationship::Friends;
+        record.set_direct_conversation(
+            topic,
+            boru_core::friends::DirectConversationState::Active,
+        );
+
+        let topics = app.reconnect_required_topics(peer);
+
+        assert_eq!(topics, vec![topic], "friend direct topic restored");
+        // Reconnection must not duplicate or create conversation records.
+        assert_eq!(
+            app.conversation_store.iter().count(),
+            0,
+            "reconcile must not create new conversation records"
+        );
+    }
+
+    /// A friend with no direct-conversation metadata still restores the
+    /// deterministic direct topic (the stable friend topic the app
+    /// auto-subscribes at startup).
+    #[test]
+    fn reconnect_required_topics_restores_deterministic_topic_for_friend() {
+        let (_runtime, mut app, _local, peer) = build_join_request_test_app();
+        let fid = boru_core::friends::FriendId::from_public_key(peer);
+        let record = app.friends.ensure_friend(fid);
+        record.relationship = boru_core::friends::FriendRelationship::Friends;
+
+        let topics = app.reconnect_required_topics(peer);
+
+        assert_eq!(
+            topics,
+            vec![direct_topic(&app.local_public, &peer)],
+            "deterministic direct topic restored for a friend"
+        );
+    }
+
+    /// A blocked friend is never resurrected, even when a stale direct
+    /// record exists (deleted/blocked relationships are not resurrected).
+    #[test]
+    fn reconnect_required_topics_skips_blocked_friend() {
+        let (_runtime, mut app, _local, peer) = build_join_request_test_app();
+        let fid = boru_core::friends::FriendId::from_public_key(peer);
+        let record = app.friends.ensure_friend(fid);
+        record.relationship = boru_core::friends::FriendRelationship::Blocked;
+        // Even a stale active conversation record must not resurrect.
+        app.conversation_store.upsert(boru_core::conversations::ConversationEntry::new(
+            direct_topic(&app.local_public, &peer),
+            peer.to_string(),
+            "Blocked peer",
+        ));
+
+        let topics = app.reconnect_required_topics(peer);
+
+        assert!(topics.is_empty(), "blocked relationship not resurrected");
+    }
+
+    /// An archived (deleted) designated direct conversation is not
+    /// resurrected.
+    #[test]
+    fn reconnect_required_topics_skips_archived_direct_conversation() {
+        let (_runtime, mut app, _local, peer) = build_join_request_test_app();
+        let topic = direct_topic(&app.local_public, &peer);
+        let fid = boru_core::friends::FriendId::from_public_key(peer);
+        let record = app.friends.ensure_friend(fid);
+        record.relationship = boru_core::friends::FriendRelationship::Friends;
+        record.set_direct_conversation(
+            topic,
+            boru_core::friends::DirectConversationState::Archived,
+        );
+
+        let topics = app.reconnect_required_topics(peer);
+
+        assert!(
+            topics.is_empty(),
+            "archived (deleted) direct conversation not resurrected"
+        );
+    }
+
+    /// A peer that is not a friend has no entitlement from discovery alone
+    /// (no authorisation by presence) — unless an existing direct
+    /// conversation record already exists.
+    #[test]
+    fn reconnect_required_topics_restores_existing_store_record_without_friendship() {
+        let (_runtime, mut app, _local, peer) = build_join_request_test_app();
+        let topic = TopicId::from_bytes([0x42u8; 32]);
+        app.conversation_store.upsert(boru_core::conversations::ConversationEntry::new(
+            topic,
+            peer.to_string(),
+            "Existing direct chat",
+        ));
+
+        let topics = app.reconnect_required_topics(peer);
+
+        assert_eq!(
+            topics,
+            vec![topic],
+            "existing direct conversation record restored"
+        );
+    }
+
+    /// Group/public conversation records are never auto-joined from
+    /// discovery.
+    #[test]
+    fn reconnect_required_topics_never_auto_joins_groups() {
+        let (_runtime, mut app, _local, peer) = build_join_request_test_app();
+        let group_topic = TopicId::from_bytes([0x43u8; 32]);
+        let mut group = boru_core::conversations::ConversationEntry::new_group(
+            group_topic,
+            "Some Group",
+        );
+        group.peer_id = peer.to_string();
+        app.conversation_store.upsert(group);
+
+        let topics = app.reconnect_required_topics(peer);
+
+        assert!(
+            topics.is_empty(),
+            "group topics are never auto-joined from discovery"
         );
     }
 

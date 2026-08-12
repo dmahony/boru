@@ -851,3 +851,107 @@ async fn restart_b_while_a_open_triggers_automatic_reconnect() -> Result<()> {
     spy_task_a.abort();
     Ok(())
 }
+
+// =========================================================================
+// BORU-CP-08 (PDF Task 3.2): reconcile existing conversations after reconnect
+// =========================================================================
+
+/// After a peer becomes reachable again, the app restores ONLY the
+/// communication state it is already entitled to. This test drives the
+/// pure reconcile decision with the same inputs the app uses (a friend
+/// record with a designated direct conversation, a conversation store with
+/// an existing direct record, and a store with a group record) and proves:
+///
+/// * the existing direct topic is restored (existing direct chats recover
+///   after peer restart);
+/// * a group/public record is never auto-joined from discovery;
+/// * a blocked relationship is never resurrected, even with stale records;
+/// * reconnection does not create or duplicate local conversation records
+///   (the decision is read-only over the stores).
+#[tokio::test]
+async fn reconcile_control_plane_restores_only_existing_direct_topics() -> Result<()> {
+    use boru_core::contact::direct_topic;
+    use boru_core::control_plane::reconcile::required_reconnect_topics;
+    use boru_core::conversations::{ConversationEntry, ConversationKind};
+    use boru_core::friends::{
+        DirectConversationState, FriendId, FriendRelationship,
+    };
+
+    let dir = TempDir::new()?;
+    let data_dir = dir.path().to_path_buf();
+    let local = SecretKey::from_bytes(&seed(0xD1)).public();
+    let peer = SecretKey::from_bytes(&seed(0xD2)).public();
+    let direct = direct_topic(&local, &peer);
+
+    // ── Local metadata: a current friend with an Active designated
+    //    direct conversation, an existing direct store record, and a group
+    //    record the peer is (incorrectly) associated with ────────────────
+    let mut friends = boru_core::friends::FriendsStore::empty_at(&data_dir);
+    {
+        let record = friends.ensure_friend(FriendId::from_public_key(peer));
+        record.relationship = FriendRelationship::Friends;
+        record.set_direct_conversation(direct, DirectConversationState::Active);
+    }
+    let mut conversations = ConversationStore::default();
+    conversations.upsert(ConversationEntry::new(
+        direct,
+        peer.to_string(),
+        "Existing direct chat",
+    ));
+    let mut group = ConversationEntry::new_group(
+        TopicId::from_bytes([0xD3u8; 32]),
+        "Some Group",
+    );
+    group.peer_id = peer.to_string();
+    conversations.upsert(group);
+
+    let store_entries: Vec<ConversationEntry> = conversations.iter().cloned().collect();
+
+    // 1. Existing direct topic is restored; groups are never auto-joined.
+    let topics =
+        required_reconnect_topics(&local, &peer, friends.get(&FriendId::from_public_key(peer)), &store_entries);
+    assert!(
+        topics.contains(&direct),
+        "existing direct topic must be restored after reconnect"
+    );
+    assert!(
+        !topics
+            .iter()
+            .any(|t| conversations.find(t).is_some_and(|e| e.kind == ConversationKind::Group)),
+        "group/public topics are never auto-joined from discovery"
+    );
+
+    // 2. Reconnection does not duplicate local conversation records: the
+    //    decision is read-only and the topic set is deduplicated.
+    assert_eq!(topics.iter().filter(|t| **t == direct).count(), 1);
+    assert_eq!(conversations.iter().count(), 2, "store untouched");
+
+    // 3. Blocked relationship is never resurrected, even with stale
+    //    records present.
+    {
+        let record = friends.ensure_friend(FriendId::from_public_key(peer));
+        record.relationship = FriendRelationship::Blocked;
+    }
+    let blocked_topics = required_reconnect_topics(
+        &local,
+        &peer,
+        friends.get(&FriendId::from_public_key(peer)),
+        &store_entries,
+    );
+    assert!(
+        blocked_topics.is_empty(),
+        "blocked relationship must not be resurrected"
+    );
+
+    // 4. A peer with no friend record has no entitlement from presence
+    //    alone (no authorisation by presence).
+    let stranger = SecretKey::from_bytes(&seed(0xD4)).public();
+    let stranger_topics =
+        required_reconnect_topics(&local, &stranger, None, &store_entries);
+    assert!(
+        stranger_topics.is_empty(),
+        "a stranger must not be restored purely from discovery"
+    );
+
+    Ok(())
+}

@@ -1731,25 +1731,43 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
-            // ── BORU-CP-07: backend reconnection success ──────────────────
+            // ── BORU-CP-07/08: backend reconnection success ──────────────
             AppMessage::ReconnectPeerReady(peer) => {
                 // The backend re-established endpoint connectivity to a
-                // friend (a reconnect attempt succeeded). Ensure the
-                // deterministic direct topic is joined/subscribed — the
-                // data-plane action the discovery service never performs
-                // itself (deterministic topic ownership). No authorisation
-                // by presence: only current friends are reconnected.
-                let fid = FriendId::from_public_key(peer);
-                if self.friends.get(&fid).is_none() {
-                    trace!(peer = %peer.fmt_short(), "reconnect: peer is not a friend; skipping direct-topic join");
+                // peer (a reconnect attempt succeeded). BORU-CP-08: restore
+                // ONLY the communication state the local user is already
+                // entitled to. The required direct topics come from the
+                // pure reconcile decision (friend record + conversation
+                // store metadata): existing direct conversations are
+                // rejoined/resubscribed, while deleted/blocked
+                // relationships are never resurrected and group/public
+                // topics are never auto-joined from discovery. The
+                // data-plane action (subscription) is performed here, never
+                // by the discovery service (deterministic topic ownership).
+                let topics = self.reconnect_required_topics(peer);
+                if topics.is_empty() {
+                    trace!(
+                        peer = %peer.fmt_short(),
+                        "reconnect: no entitled direct topics to restore"
+                    );
                     return iced::Task::none();
                 }
-                info!(peer = %peer.fmt_short(), "reconnect: ensuring direct topic for friend");
+                info!(
+                    peer = %peer.fmt_short(),
+                    topics = topics.len(),
+                    "reconnect: restoring entitled direct topics"
+                );
                 // 1. Re-join the peer into live conversation senders so the
-                //    direct-topic mesh edge re-forms immediately (the same
+                //    direct-topic mesh edges re-form immediately (the same
                 //    retroactive-join pattern as NewDiscoveredPeers) instead
-                //    of waiting for the gossip dial cooldown.
-                for (_, conv) in &self.conversations {
+                //    of waiting for the gossip dial cooldown. Only senders
+                //    for the required direct topics are touched — the peer
+                //    is never joined into groups/public chats it is not
+                //    entitled to (no authorisation by presence).
+                for (conv_topic, conv) in &self.conversations {
+                    if !topics.contains(conv_topic) {
+                        continue;
+                    }
                     if let Some(ref sender) = conv.sender {
                         let s = sender.clone();
                         let peers = vec![peer];
@@ -1761,16 +1779,23 @@ impl IcedChat {
                         });
                     }
                 }
-                // 2. Ensure the deterministic direct topic is subscribed.
+                // 2. Ensure each required direct topic is subscribed.
                 //    BackgroundSubscribe is idempotent: it skips when the
                 //    topic already has a live sender or a subscription is in
                 //    flight, so several reconnect signals can never create
                 //    duplicate subscriptions.
-                let topic = direct_topic(&self.local_public, &peer);
-                iced::Task::done(AppMessage::BackgroundSubscribe(
-                    topic,
-                    self.discovered_peers.clone(),
-                ))
+                let bootstrap = self.discovered_peers.clone();
+                iced::Task::batch(
+                    topics
+                        .into_iter()
+                        .map(|topic| {
+                            iced::Task::done(AppMessage::BackgroundSubscribe(
+                                topic,
+                                bootstrap.clone(),
+                            ))
+                        })
+                        .collect::<Vec<_>>(),
+                )
             }
             // ── Background conversation subscriptions (startup auto-subscribe) ──
             AppMessage::SubscribeStoredConversations => {
@@ -2085,5 +2110,29 @@ impl IcedChat {
             // variants can never reach this method (defensive catch-all).
             _ => iced::Task::none(),
         }
+    }
+}
+
+impl IcedChat {
+    /// BORU-CP-08: direct topics the local user is already entitled to
+    /// restore after `peer` becomes reachable again.
+    ///
+    /// Computed from existing local metadata only (friend record +
+    /// conversation store) via the pure
+    /// [`required_reconnect_topics`](boru_core::control_plane::reconcile::required_reconnect_topics)
+    /// decision. Never derives topics from discovery advertisements,
+    /// never auto-joins groups/public chats, and never resurrects
+    /// deleted/blocked relationships.
+    pub(crate) fn reconnect_required_topics(&self, peer: PublicKey) -> Vec<TopicId> {
+        let fid = FriendId::from_public_key(peer);
+        let friend = self.friends.get(&fid);
+        let store_entries: Vec<boru_core::conversations::ConversationEntry> =
+            self.conversation_store.iter().cloned().collect();
+        boru_core::control_plane::reconcile::required_reconnect_topics(
+            &self.local_public,
+            &peer,
+            friend,
+            &store_entries,
+        )
     }
 }

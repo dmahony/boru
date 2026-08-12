@@ -28,6 +28,12 @@
 //!   cadence, the one-active-attempt-per-peer dedup guarantee, and the
 //!   [`ReconnectSignal`] the data plane consumes to re-join the
 //!   deterministic direct topic after connectivity is re-established.
+//! * [`reconcile`] — the BORU-CP-08 conversation-reconciliation decision:
+//!   given a reconnected peer, the friend record, and the local
+//!   conversation store, compute the direct topics the local user is
+//!   already entitled to (existing direct conversations only — never
+//!   auto-joined groups/public chats, never resurrected deleted/blocked
+//!   relationships).
 //!
 //! Later tasks in the BORU-CP chain add capability negotiation (CP-05 is
 //! the state machine; capabilities are Phase 4) and diagnostics (Phase 5)
@@ -38,7 +44,13 @@ pub mod message;
 pub mod privacy;
 pub mod reconnect;
 
+#[cfg(feature = "net")]
+pub mod reconcile;
+
 pub use connectivity::*;
 pub use message::*;
 pub use privacy::*;
 pub use reconnect::*;
+
+#[cfg(feature = "net")]
+pub use reconcile::*;
