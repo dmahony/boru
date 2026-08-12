@@ -7325,7 +7325,7 @@ impl IcedChat {
             .filter(|(_, r)| r.relationship.can_message())
             .count();
 
-        let conversation_store = {
+        let mut conversation_store = {
             let mut store = if let Some(ref st) = storage {
                 ConversationStore::load_from_sqlite(st, &data_dir)
             } else {
@@ -7345,6 +7345,25 @@ impl IcedChat {
                 store
             }
         };
+        // BORU-DISC-18: never surface a stale saved lobby conversation in the
+        // room list. Remove it from the in-memory store and persist the
+        // removal so an install upgraded from an old version that auto-joined
+        // the lobby starts clean. Only the exact canonical lobby topic is
+        // matched; unrelated public rooms are untouched. (main.rs already runs
+        // the persisted-state migration; this guard covers the load path
+        // itself and is idempotent.)
+        let lobby_pruned =
+            boru_core::lobby_migration::prune_conversation_store(&mut conversation_store);
+        if lobby_pruned > 0 {
+            tracing::info!(
+                removed = lobby_pruned,
+                "lobby migration: pruned stale saved lobby from room list"
+            );
+            if let Some(ref st) = storage {
+                let _ = conversation_store.save_to_sqlite(st);
+            }
+            let _ = conversation_store.save();
+        }
 
         // Seed the live outbound/inbound panel maps from the FS-05 projection
         // snapshot so a restart never shows an empty panel while the

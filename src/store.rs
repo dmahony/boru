@@ -1388,6 +1388,24 @@ impl MessageStore {
         Ok(deleted)
     }
 
+    /// Remove the `conversation_meta` sidebar row for a topic, if present.
+    ///
+    /// Used when purging a room's persisted state entirely (e.g. the
+    /// BORU-DISC-18 lobby migration): `insert_chat_message` /
+    /// `import_legacy_history` create one of these rows per topic, so a
+    /// removed room would otherwise leave a stale unread/preview row behind.
+    /// Returns the number of rows deleted (0 when none existed).
+    pub fn delete_conversation_meta_row(&self, conversation_id: &[u8; 32]) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let deleted = conn
+            .execute(
+                "DELETE FROM conversation_meta WHERE conversation_id = ?1",
+                [conversation_id.as_slice()],
+            )
+            .std_context("delete conversation meta row")?;
+        Ok(deleted)
+    }
+
     /// Return up to `count` most recent messages across all topics.
     pub fn get_recent_messages(&self, count: usize) -> Result<Vec<ChatMessageRow>> {
         let conn = self.conn.lock().unwrap();

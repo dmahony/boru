@@ -923,9 +923,29 @@ fn main() -> Result<()> {
             }
         }
 
+        // BORU-DISC-18: one-time startup migration — drop any stale saved
+        // lobby conversation. Older versions auto-joined the canonical
+        // public lobby and persisted it as a room (conversation store) and
+        // as per-topic chat history (SQLite messages table). Remove only
+        // that exact topic; unrelated public rooms are untouched.
+        let lobby_report =
+            boru_core::lobby_migration::migrate_legacy_lobby(&data_dir, Some(&storage));
+        if !lobby_report.is_empty() {
+            info!(
+                conversations_removed = lobby_report.conversations_removed,
+                messages_removed = lobby_report.messages_removed,
+                meta_rows_removed = lobby_report.meta_rows_removed,
+                "lobby migration: removed stale saved lobby from persisted state"
+            );
+        }
+
         let chat_history = Arc::new(std::sync::Mutex::new(
             ChatHistoryStore::load_or_default(&data_dir),
         ));
+        // BORU-DISC-18: keep the in-memory history free of the stale lobby
+        // topic too — covers the case where the legacy JSON migration failed
+        // and chat_history.json still contains lobby entries.
+        boru_core::lobby_migration::prune_chat_history(&mut chat_history.lock().unwrap());
 
         // Sync ChatHistoryStore's next_event_id with the SQLite
         // outgoing_messages table so that new event_ids never collide

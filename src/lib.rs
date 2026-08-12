@@ -243,6 +243,17 @@ pub mod room_history;
 #[cfg(feature = "net")]
 pub mod room_cleanup;
 
+/// Startup migration that removes the stale saved lobby conversation.
+///
+/// Older Boru versions auto-joined the canonical public lobby on startup and
+/// persisted it like any other room: a [`ConversationEntry`](crate::conversations::ConversationEntry)
+/// in the conversation store and per-topic message history. This migration
+/// detects those persisted entries at startup and removes them without
+/// touching unrelated public rooms (only the exact canonical lobby topic is
+/// matched).
+#[cfg(feature = "net")]
+pub mod lobby_migration;
+
 /// Secure legacy room-secret migration: owner-signed, topic-bound,
 /// epoch-versioned upgrades with deterministic conflict resolution.
 #[cfg(feature = "net")]
