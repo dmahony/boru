@@ -154,6 +154,8 @@ pub enum AdvertViolation {
         /// Maximum allowed.
         max: u32,
     },
+    /// An EXTENSIONS payload violates the metadata bounds (BORU-CP-16).
+    Extensions(crate::control_plane::extensions::ExtensionsViolation),
 }
 
 /// The minimal-advertisement whitelist policy (PDF Task 1.3 steps 1–2).
@@ -190,6 +192,8 @@ pub struct ControlAdvertPolicy {
     pub max_diagnostic_note_len: usize,
     /// Maximum advertisable presence TTL in seconds.
     pub max_presence_ttl_secs: u32,
+    /// Bounds applied to an EXTENSIONS payload (BORU-CP-16, PDF Phase 6).
+    pub extensions_bounds: crate::control_plane::extensions::ExtensionsBounds,
 }
 
 impl Default for ControlAdvertPolicy {
@@ -199,6 +203,7 @@ impl Default for ControlAdvertPolicy {
             max_capability_id_len: MAX_CAPABILITY_ID_LEN,
             max_diagnostic_note_len: MAX_DIAGNOSTIC_NOTE_LEN,
             max_presence_ttl_secs: MAX_PRESENCE_TTL_SECS,
+            extensions_bounds: crate::control_plane::extensions::ExtensionsBounds::default(),
         }
     }
 }
@@ -260,6 +265,9 @@ impl ControlAdvertPolicy {
                 }
                 Ok(())
             }
+            ControlPayload::Extensions(payload) => payload
+                .validate(&self.extensions_bounds)
+                .map_err(AdvertViolation::Extensions),
         }
     }
 }
@@ -403,6 +411,9 @@ pub struct PeerControlState {
     pub app_protocol_version: Option<u8>,
     /// Latest CAPABILITIES advertisement (bounded by the advert policy).
     pub capabilities: Vec<String>,
+    /// Latest EXTENSIONS advertisement (BORU-CP-16, PDF Phase 6), if any.
+    /// Metadata only, bounded by the advert policy's [`ExtensionsBounds`](crate::control_plane::extensions::ExtensionsBounds).
+    pub extensions: Option<crate::control_plane::extensions::ExtensionsPayload>,
     /// Effective presence TTL for this peer: the peer-suggested TTL clamped
     /// to the store default (a peer cannot make us remember it longer than
     /// our own default), or the store default when the peer suggests none.
@@ -549,6 +560,9 @@ impl PeerControlStateStore {
                 ControlPayload::Capabilities(payload) => {
                     entry.capabilities = payload.capabilities.clone();
                 }
+                ControlPayload::Extensions(payload) => {
+                    entry.extensions = Some(payload.clone());
+                }
                 _ => {}
             }
             return StoreOutcome::Refreshed;
@@ -567,6 +581,10 @@ impl PeerControlStateStore {
             ControlPayload::Capabilities(payload) => payload.capabilities.clone(),
             _ => Vec::new(),
         };
+        let extensions = match &envelope.payload {
+            ControlPayload::Extensions(payload) => Some(payload.clone()),
+            _ => None,
+        };
         self.peers.insert(
             peer_id,
             PeerControlState {
@@ -577,6 +595,7 @@ impl PeerControlStateStore {
                 protocol_version: envelope.protocol_version,
                 app_protocol_version,
                 capabilities,
+                extensions,
                 ttl,
             },
         );
@@ -609,6 +628,22 @@ impl PeerControlStateStore {
             return None;
         }
         Some(state.capability_set())
+    }
+
+    /// The latest EXTENSIONS advertisement cached for `node_id` (BORU-CP-16,
+    /// PDF Phase 6), if the peer is known and actually advertised one.
+    ///
+    /// Metadata only, bounded by the advert policy's extensions bounds.
+    /// Returns `None` for a peer that never sent an EXTENSIONS envelope —
+    /// unknown, not "empty". Like capabilities, this is a hint that grants
+    /// no authorisation; the peer's presence staleness must be checked by
+    /// the caller via [`get_active`](Self::get_active) /
+    /// [`get_stale`](Self::get_stale).
+    pub fn extensions_of(
+        &self,
+        node_id: &PublicKey,
+    ) -> Option<crate::control_plane::extensions::ExtensionsPayload> {
+        self.peers.get(node_id)?.extensions.clone()
     }
 
     /// Look up the control state for `node_id`, if present.
@@ -976,6 +1011,87 @@ mod tests {
         assert!(matches!(err, AdvertViolation::PresenceTtlTooLarge { .. }));
     }
 
+    // ── Extensions policy (BORU-CP-16, PDF Phase 6) ───────────────────
+
+    fn extensions(
+        sender: PublicKey,
+        sequence: u64,
+        payload: crate::control_plane::extensions::ExtensionsPayload,
+    ) -> ControlEnvelope {
+        ControlEnvelope::extensions(sender, sequence, 1_700_000_000, payload)
+    }
+
+    #[test]
+    fn policy_accepts_minimal_and_full_extensions() {
+        let policy = ControlAdvertPolicy::default();
+        assert!(policy
+            .check(&extensions(key(0x01), 1, Default::default()))
+            .is_ok());
+        let full = crate::control_plane::extensions::ExtensionsPayload {
+            group: Some(crate::control_plane::extensions::GroupHints { available: true }),
+            file: Some(crate::control_plane::extensions::FileReadiness {
+                protocol_versions: vec!["v2".into()],
+                can_receive: true,
+            }),
+            tunnel: Some(crate::control_plane::extensions::TunnelCapability {
+                protocol_versions: vec!["v1".into()],
+            }),
+            call: Some(crate::control_plane::extensions::CallCapability {
+                protocol_versions: vec!["v1".into()],
+                availability: Some(crate::control_plane::extensions::CallAvailability::Available),
+            }),
+            screen_share: Some(crate::control_plane::extensions::ScreenShareCapability {
+                protocol_versions: vec!["v1".into()],
+            }),
+            identity: Some(crate::control_plane::extensions::MultiDeviceIdentity {
+                identity_id: "user-alice".into(),
+                device_id: "dev-phone".into(),
+                active_device: true,
+            }),
+            path_preference: Some(
+                crate::control_plane::extensions::PathPreference::DirectPreferred,
+            ),
+            relay_health: Some(crate::control_plane::extensions::RelayHealthHint::Healthy),
+        };
+        assert!(policy.check(&extensions(key(0x01), 2, full)).is_ok());
+    }
+
+    #[test]
+    fn policy_rejects_extensions_bound_violations() {
+        let policy = ControlAdvertPolicy {
+            extensions_bounds: crate::control_plane::extensions::ExtensionsBounds {
+                max_protocol_versions: 1,
+                max_version_len: 4,
+                max_identity_id_len: 8,
+                max_device_id_len: 8,
+            },
+            ..Default::default()
+        };
+
+        let too_many = crate::control_plane::extensions::ExtensionsPayload {
+            file: Some(crate::control_plane::extensions::FileReadiness {
+                protocol_versions: vec!["v1".into(), "v2".into()],
+                can_receive: true,
+            }),
+            ..Default::default()
+        };
+        let err = policy
+            .check(&extensions(key(0x01), 1, too_many))
+            .unwrap_err();
+        assert!(matches!(err, AdvertViolation::Extensions(_)));
+
+        let bad_id = crate::control_plane::extensions::ExtensionsPayload {
+            identity: Some(crate::control_plane::extensions::MultiDeviceIdentity {
+                identity_id: "x".repeat(9),
+                device_id: "dev".into(),
+                active_device: true,
+            }),
+            ..Default::default()
+        };
+        let err = policy.check(&extensions(key(0x01), 2, bad_id)).unwrap_err();
+        assert!(matches!(err, AdvertViolation::Extensions(_)));
+    }
+
     // ── Rate limiter ──────────────────────────────────────────────────
 
     #[test]
@@ -1121,6 +1237,49 @@ mod tests {
         let state = store.get(&peer).unwrap();
         assert_eq!(state.app_protocol_version, Some(1));
         assert_eq!(state.capabilities.len(), 2);
+    }
+
+    /// The store caches the peer's EXTENSIONS advertisement (BORU-CP-16),
+    /// refreshes it on a newer sequence, and returns it via
+    /// [`PeerControlStateStore::extensions_of`]. A peer that never
+    /// advertised extensions has none cached.
+    #[test]
+    fn presence_store_extensions_update_on_refresh() {
+        let mut store = PeerControlStateStore::with_limits(16, Duration::from_secs(300));
+        let peer = key(0x0A);
+        let t0 = Instant::now();
+        let payload = crate::control_plane::extensions::ExtensionsPayload {
+            file: Some(crate::control_plane::extensions::FileReadiness {
+                protocol_versions: vec!["v2".into()],
+                can_receive: true,
+            }),
+            ..Default::default()
+        };
+        store.record(&extensions(peer, 1, payload.clone()), t0);
+        assert_eq!(store.extensions_of(&peer), Some(payload.clone()));
+
+        // A newer extensions advertisement replaces it.
+        let payload2 = crate::control_plane::extensions::ExtensionsPayload {
+            file: Some(crate::control_plane::extensions::FileReadiness {
+                protocol_versions: vec!["v2".into()],
+                can_receive: false,
+            }),
+            ..Default::default()
+        };
+        store.record(
+            &extensions(peer, 2, payload2.clone()),
+            t0 + Duration::from_secs(1),
+        );
+        assert_eq!(store.extensions_of(&peer), Some(payload2.clone()));
+
+        // A HELLO refreshes presence WITHOUT wiping the extensions cache.
+        store.record(&hello(peer, 3), t0 + Duration::from_secs(2));
+        assert_eq!(store.extensions_of(&peer), Some(payload2));
+
+        // A peer that never advertised extensions has none cached.
+        let silent = key(0x0B);
+        store.record(&hello(silent, 1), t0);
+        assert_eq!(store.extensions_of(&silent), None);
     }
 
     /// The typed capability view is lossless: unknown future ids are

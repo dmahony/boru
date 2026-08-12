@@ -128,10 +128,7 @@ use bytes::Bytes;
 use iroh_base::PublicKey;
 use n0_error::{e, stack_error};
 use n0_future::StreamExt;
-use tokio::{
-    sync::broadcast,
-    task::JoinHandle,
-};
+use tokio::{sync::broadcast, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 
@@ -142,8 +139,9 @@ use crate::control_plane::capabilities::{
 use crate::control_plane::connectivity::{
     ConnectivityEvent, PathKind, PeerConnectivityState, PeerConnectivityStore,
 };
+use crate::control_plane::extensions::{default_local_extensions, ExtensionsPayload};
 use crate::control_plane::message::{
-    ControlEnvelope, ControlPlaneDecode, CONTROL_PLANE_MAGIC, BORU_APP_PROTOCOL_VERSION,
+    ControlEnvelope, ControlPlaneDecode, BORU_APP_PROTOCOL_VERSION, CONTROL_PLANE_MAGIC,
 };
 use crate::control_plane::privacy::{
     AdvertViolation, ControlPlaneGuard, GuardRejectReason, GuardVerdict, DEFAULT_PRESENCE_TTL,
@@ -190,6 +188,16 @@ pub const DEFAULT_PRESENCE_REFRESH_JITTER: Duration = Duration::from_secs(60);
 /// current set, while remaining low-frequency (bounded resources). `0`
 /// disables periodic capability refreshes entirely.
 pub const DEFAULT_CAPABILITIES_REFRESH_EVERY: u32 = 3;
+
+/// Announce EXTENSIONS every N-th presence-refresh tick (BORU-CP-16 / PDF
+/// Phase 6). Mirrors [`DEFAULT_CAPABILITIES_REFRESH_EVERY`]: presence
+/// refreshes every [`DEFAULT_PRESENCE_REFRESH_INTERVAL`], so this
+/// re-broadcasts the local extensions advertisement roughly every 6 minutes
+/// at the default cadence — enough for a peer that joined after our startup
+/// announcement to still learn the current payload, while remaining
+/// low-frequency (bounded resources). `0` disables periodic extensions
+/// refreshes entirely.
+pub const DEFAULT_EXTENSIONS_REFRESH_EVERY: u32 = 3;
 
 /// How often the reconnection loop (BORU-CP-07) wakes to drain due
 /// reconnect attempts and apply backoff. Queued attempts are picked up
@@ -562,7 +570,10 @@ impl AnnounceThrottle {
 
     /// The configured minimum interval between announcements.
     pub fn min_interval(&self) -> Duration {
-        self.state.lock().expect("announce throttle lock poisoned").min_interval
+        self.state
+            .lock()
+            .expect("announce throttle lock poisoned")
+            .min_interval
     }
 
     /// Update the minimum interval between announcements.
@@ -570,7 +581,10 @@ impl AnnounceThrottle {
     /// Safe to call while the throttle is shared (the service handle and the
     /// drain loop use the same instance).
     pub fn set_min_interval(&self, min_interval: Duration) {
-        self.state.lock().expect("announce throttle lock poisoned").min_interval = min_interval;
+        self.state
+            .lock()
+            .expect("announce throttle lock poisoned")
+            .min_interval = min_interval;
     }
 
     /// Whether an announcement is allowed right now.
@@ -694,19 +708,15 @@ impl AnnounceHandle {
 
     /// Announce this node with a `Hello` carrying a fresh per-node event id.
     async fn announce_hello(&self) -> Result<AnnounceOutcome, DiscoveryServiceError> {
-        self.announce(|event_id| {
-            DiscoveryMessage::hello_with_event(self.local_node, event_id)
-        })
-        .await
+        self.announce(|event_id| DiscoveryMessage::hello_with_event(self.local_node, event_id))
+            .await
     }
 
     /// Announce this node with a `Presence` heartbeat carrying a fresh
     /// per-node event id.
     async fn announce_presence(&self) -> Result<AnnounceOutcome, DiscoveryServiceError> {
-        self.announce(|event_id| {
-            DiscoveryMessage::presence_with_event(self.local_node, event_id)
-        })
-        .await
+        self.announce(|event_id| DiscoveryMessage::presence_with_event(self.local_node, event_id))
+            .await
     }
 }
 
@@ -716,9 +726,10 @@ impl AnnounceHandle {
 /// announcements.
 ///
 /// Separate from the legacy [`AnnounceHandle`]: control-plane HELLO /
-/// PRESENCE / CAPABILITIES envelopes (magic `BC`) are a different wire
-/// format with their own sequence namespace, and their refresh cadence must
-/// not be starved by legacy neighbour-up hellos (or vice versa).
+/// PRESENCE / CAPABILITIES / EXTENSIONS envelopes (magic `BC`) are a
+/// different wire format with their own sequence namespace, and their
+/// refresh cadence must not be starved by legacy neighbour-up hellos (or
+/// vice versa).
 ///
 /// Shares one per-sender sequence counter across all control-plane message
 /// types so receivers' `(sender_node_id, sequence)` dedup stays monotonic
@@ -727,7 +738,7 @@ impl AnnounceHandle {
 /// control-plane presence refresh (or vice versa). CAPABILITIES gets its
 /// own throttle too: the join-time control HELLO fires immediately before
 /// the join-time capabilities announcement, and a shared throttle would
-/// suppress the second.
+/// suppress the second. EXTENSIONS (BORU-CP-16) follows the same pattern.
 #[derive(Clone, Debug)]
 struct ControlAnnounceHandle {
     sender: GossipSender,
@@ -742,6 +753,14 @@ struct ControlAnnounceHandle {
     /// Used to make `announce_capabilities(force = false)` a no-op for an
     /// unchanged set (idempotence — no duplicate advertisements).
     last_announced_caps: Arc<Mutex<Option<Vec<String>>>>,
+    /// Separate throttle for EXTENSIONS announcements (BORU-CP-16, PDF
+    /// Phase 6). The join-time HELLO + CAPABILITIES + EXTENSIONS burst
+    /// fires back-to-back; sharing either throttle would starve one.
+    extensions_throttle: Arc<AnnounceThrottle>,
+    /// The last EXTENSIONS payload actually broadcast. Used to make
+    /// `announce_extensions(force = false)` a no-op for an unchanged payload
+    /// (idempotence — no duplicate advertisements).
+    last_announced_extensions: Arc<Mutex<Option<ExtensionsPayload>>>,
 }
 
 impl ControlAnnounceHandle {
@@ -762,6 +781,10 @@ impl ControlAnnounceHandle {
                 DEFAULT_CONTROL_ANNOUNCE_MIN_INTERVAL,
             )),
             last_announced_caps: Arc::new(Mutex::new(None)),
+            extensions_throttle: Arc::new(AnnounceThrottle::with_min_interval(
+                DEFAULT_CONTROL_ANNOUNCE_MIN_INTERVAL,
+            )),
+            last_announced_extensions: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -775,6 +798,12 @@ impl ControlAnnounceHandle {
     /// (BORU-CP-11). Tests use short intervals.
     fn set_caps_min_interval(&self, min_interval: Duration) {
         self.caps_throttle.set_min_interval(min_interval);
+    }
+
+    /// Update the minimum interval for EXTENSIONS announcements
+    /// (BORU-CP-16). Tests use short intervals.
+    fn set_extensions_min_interval(&self, min_interval: Duration) {
+        self.extensions_throttle.set_min_interval(min_interval);
     }
 
     /// Throttled announce of an arbitrary control-plane envelope.
@@ -876,6 +905,62 @@ impl ControlAnnounceHandle {
             .last_announced_caps
             .lock()
             .expect("last announced caps lock poisoned") = Some(wire);
+        Ok(AnnounceOutcome::Announced)
+    }
+
+    /// Announce a control-plane EXTENSIONS envelope carrying `payload`
+    /// (BORU-CP-16 / PDF Phase 6).
+    ///
+    /// Mirrors [`announce_capabilities`](Self::announce_capabilities):
+    /// * `force = false` is the explicit startup / material-change path: an
+    ///   unchanged payload (equal to the last broadcast) is a no-op
+    ///   returning [`AnnounceOutcome::Unchanged`].
+    /// * `force = true` is the periodic-refresh path: the payload is
+    ///   re-broadcast even when unchanged so peers that joined after the
+    ///   previous announcement still learn it.
+    ///
+    /// The EXTENSIONS throttle bounds the rate, the sequence is allocated
+    /// only when a broadcast actually happens, and the broadcast is a
+    /// control-plane envelope — never a chat message.
+    async fn announce_extensions(
+        &self,
+        payload: &ExtensionsPayload,
+        force: bool,
+    ) -> Result<AnnounceOutcome, DiscoveryServiceError> {
+        if payload.is_empty() {
+            // Nothing to advertise: an all-None payload is a no-op even on
+            // the forced refresh path.
+            return Ok(AnnounceOutcome::Unchanged);
+        }
+        if !force {
+            let last = self
+                .last_announced_extensions
+                .lock()
+                .expect("last announced extensions lock poisoned");
+            if last.as_ref() == Some(payload) {
+                return Ok(AnnounceOutcome::Unchanged);
+            }
+        }
+        if !self.extensions_throttle.try_announce() {
+            debug!("discovery: extensions announcement throttled");
+            return Ok(AnnounceOutcome::Throttled);
+        }
+        let sequence = self.next_sequence();
+        let bytes = ControlEnvelope::extensions(
+            self.local_node,
+            sequence,
+            unix_now_secs(),
+            payload.clone(),
+        )
+        .encode();
+        self.sender
+            .broadcast(Bytes::from(bytes))
+            .await
+            .map_err(|source| e!(DiscoveryServiceError::Api { source }))?;
+        *self
+            .last_announced_extensions
+            .lock()
+            .expect("last announced extensions lock poisoned") = Some(payload.clone());
         Ok(AnnounceOutcome::Announced)
     }
 }
@@ -1101,7 +1186,11 @@ impl ReceiveCore {
     /// stream, never conversation/peer-registry state (PDF Task 1.2). A
     /// malformed, unknown-type, or unsupported-version frame is dropped
     /// (logged, counted) without panicking or affecting chat handling.
-    fn handle_control_incoming(&self, content: &[u8], delivered_from: PublicKey) -> IncomingOutcome {
+    fn handle_control_incoming(
+        &self,
+        content: &[u8],
+        delivered_from: PublicKey,
+    ) -> IncomingOutcome {
         let envelope = match ControlEnvelope::decode(content) {
             Ok(ControlPlaneDecode::Message(envelope)) => envelope,
             Ok(ControlPlaneDecode::UnknownType { message_type, .. }) => {
@@ -1142,7 +1231,10 @@ impl ReceiveCore {
         // delivery source) → attribution → minimal-advertisement policy →
         // dedup by (sender_node_id, sequence) → presence state update.
         let verdict = {
-            let mut guard = self.guard.lock().expect("control-plane guard lock poisoned");
+            let mut guard = self
+                .guard
+                .lock()
+                .expect("control-plane guard lock poisoned");
             guard.admit(&envelope, delivered_from, Instant::now())
         };
         match verdict {
@@ -1307,6 +1399,15 @@ pub struct DiscoveryService {
     /// when locally enabled capabilities materially change. Shared with the
     /// periodic refresh loop so it always re-announces the current set.
     local_caps: Arc<Mutex<CapabilitySet>>,
+    /// The local Phase 6 extensions advertisement this node advertises
+    /// (BORU-CP-16 / PDF Phase 6). Defaults to [`default_local_extensions`];
+    /// the app replaces it via
+    /// [`update_local_extensions`](Self::update_local_extensions) when the
+    /// locally derived extension metadata materially changes (e.g. group
+    /// reachability from known local memberships, device identity, file
+    /// readiness). Shared with the periodic refresh loop so it always
+    /// re-announces the current payload.
+    local_extensions: Arc<Mutex<ExtensionsPayload>>,
 }
 
 /// Read-only negotiated-capability view used to gate optional-feature
@@ -1458,6 +1559,27 @@ impl DiscoveryService {
                 );
             }
         }
+        // BORU-CP-16: one EXTENSIONS announcement right after the
+        // CAPABILITIES (PDF Phase 6). It has its own throttle, so the
+        // back-to-back HELLO + CAPABILITIES + EXTENSIONS burst passes. The
+        // periodic refresh loop keeps re-announcing the payload while
+        // running, so peers that join later still learn it.
+        match service.announce_extensions().await {
+            Ok(AnnounceOutcome::Announced) => {
+                info!(topic = %topic, "discovery extensions announced on join");
+            }
+            Ok(AnnounceOutcome::Throttled) => {
+                debug!(topic = %topic, "discovery extensions suppressed on join");
+            }
+            Ok(AnnounceOutcome::Unchanged) => {}
+            Err(error) => {
+                warn!(
+                    topic = %topic,
+                    error = %error,
+                    "discovery extensions on join failed; continuing without it",
+                );
+            }
+        }
         Ok(service)
     }
 
@@ -1597,16 +1719,23 @@ impl DiscoveryService {
             interval: DEFAULT_PRESENCE_REFRESH_INTERVAL,
             jitter: DEFAULT_PRESENCE_REFRESH_JITTER,
             caps_every: DEFAULT_CAPABILITIES_REFRESH_EVERY,
+            extensions_every: DEFAULT_EXTENSIONS_REFRESH_EVERY,
         }));
         // BORU-CP-11: the local capability set this node advertises, shared
         // with the refresh loop so periodic capability refreshes always
         // carry the current set (and the app can replace it on material
         // change via [`DiscoveryService::update_local_capabilities`]).
         let local_caps = Arc::new(Mutex::new(default_local_capabilities()));
+        // BORU-CP-16: the local Phase 6 extensions advertisement, shared
+        // with the refresh loop so periodic extensions refreshes always
+        // carry the current payload (and the app can replace it via
+        // [`DiscoveryService::update_local_extensions`]).
+        let local_extensions = Arc::new(Mutex::new(default_local_extensions()));
         let refresh_cancel = cancel.clone();
         let refresh_task = tokio::spawn(presence_refresh_loop(
             control_announce.clone(),
             local_caps.clone(),
+            local_extensions.clone(),
             refresh_config.clone(),
             refresh_cancel,
         ));
@@ -1640,6 +1769,7 @@ impl DiscoveryService {
             expiry_config,
             refresh_config,
             local_caps,
+            local_extensions,
         }
     }
 
@@ -1695,7 +1825,9 @@ impl DiscoveryService {
     /// PDF Task 2.1 step 3) — the refresh announcement that keeps this
     /// node's presence alive while it is running. Throttled like
     /// [`announce_control_hello`](Self::announce_control_hello).
-    pub async fn announce_control_presence(&self) -> Result<AnnounceOutcome, DiscoveryServiceError> {
+    pub async fn announce_control_presence(
+        &self,
+    ) -> Result<AnnounceOutcome, DiscoveryServiceError> {
         self.control_announce.announce_presence().await
     }
 
@@ -1743,6 +1875,77 @@ impl DiscoveryService {
         self.control_announce
             .announce_capabilities(&caps, false)
             .await
+    }
+
+    // ── Phase 6 extensions (BORU-CP-16 / PDF Phase 6) ──────────────────
+
+    /// The local Phase 6 extensions advertisement this node currently
+    /// advertises.
+    ///
+    /// Defaults to [`default_local_extensions`] (every capability-backed
+    /// extension section this build implements). The app replaces it via
+    /// [`update_local_extensions`](Self::update_local_extensions) when the
+    /// locally derived extension metadata materially changes.
+    pub fn local_extensions(&self) -> ExtensionsPayload {
+        self.local_extensions
+            .lock()
+            .expect("local extensions lock poisoned")
+            .clone()
+    }
+
+    /// Replace the local extensions advertisement and announce it when it
+    /// materially changed (BORU-CP-16 / PDF Phase 6).
+    ///
+    /// The new payload is stored; if it differs from the last announced one
+    /// an EXTENSIONS envelope is broadcast on the discovery topic — a
+    /// control-plane message, never a chat message. If the payload is
+    /// identical to the last announced one, nothing is broadcast
+    /// ([`AnnounceOutcome::Unchanged`]) — an idempotent no-op. An all-`None`
+    /// payload is never broadcast (nothing to advertise).
+    pub async fn update_local_extensions(
+        &self,
+        payload: ExtensionsPayload,
+    ) -> Result<AnnounceOutcome, DiscoveryServiceError> {
+        {
+            let mut local = self
+                .local_extensions
+                .lock()
+                .expect("local extensions lock poisoned");
+            *local = payload;
+        }
+        self.announce_extensions().await
+    }
+
+    /// Broadcast the current local extensions advertisement (startup +
+    /// material-change path, BORU-CP-16 / PDF Phase 6).
+    ///
+    /// Returns [`AnnounceOutcome::Unchanged`] when the payload is identical
+    /// to the last announced one (no duplicate advertisement) or empty. The
+    /// periodic refresh loop re-announces the payload on its own cadence so
+    /// peers that joined after the previous announcement still learn it.
+    pub async fn announce_extensions(&self) -> Result<AnnounceOutcome, DiscoveryServiceError> {
+        let payload = self.local_extensions();
+        self.control_announce
+            .announce_extensions(&payload, false)
+            .await
+    }
+
+    /// The latest Phase 6 extensions advertisement cached for `peer`
+    /// (BORU-CP-16 / PDF Phase 6).
+    ///
+    /// Returns `None` when the peer is unknown, when its presence has gone
+    /// stale (beyond its TTL — stale extension data is never treated as
+    /// current), or when the peer never advertised extensions. The payload
+    /// is metadata only: it grants no authorisation — friendship, group
+    /// membership, tunnel/file/call permissions are still enforced when a
+    /// feature is invoked on the private path.
+    pub fn peer_extensions(&self, node_id: &PublicKey) -> Option<ExtensionsPayload> {
+        let guard = self
+            .core
+            .guard
+            .lock()
+            .expect("control-plane guard lock poisoned");
+        guard.presence().extensions_of(node_id)
     }
 
     /// The latest valid capability set cached for `peer` (BORU-CP-11 / PDF
@@ -1814,6 +2017,33 @@ impl DiscoveryService {
         self
     }
 
+    /// Override the minimum interval between **EXTENSIONS** control-plane
+    /// announcements (BORU-CP-16).
+    ///
+    /// Defaults to [`DEFAULT_CONTROL_ANNOUNCE_MIN_INTERVAL`]. EXTENSIONS
+    /// has its own throttle so the join-time HELLO + capabilities +
+    /// extensions burst and the periodic presence refresh never starve each
+    /// other. Tests use short intervals to exercise the throttle without
+    /// sleeping.
+    pub fn with_extensions_announce_min_interval(self, min_interval: Duration) -> Self {
+        self.control_announce
+            .set_extensions_min_interval(min_interval);
+        self
+    }
+
+    /// Override how often the periodic refresh loop re-announces EXTENSIONS
+    /// (BORU-CP-16).
+    ///
+    /// Defaults to [`DEFAULT_EXTENSIONS_REFRESH_EVERY`] (every 3rd
+    /// presence-refresh tick). `0` disables periodic extensions refreshes.
+    pub fn with_extensions_refresh_every(self, every: u32) -> Self {
+        self.refresh_config
+            .lock()
+            .expect("refresh config lock poisoned")
+            .extensions_every = every;
+        self
+    }
+
     /// Override the minimum interval between **control-plane**
     /// announcements (BORU-CP-04).
     ///
@@ -1872,10 +2102,17 @@ impl DiscoveryService {
     /// short TTLs to exercise expiry without sleeping.
     pub fn with_presence_ttl(self, ttl: Duration) -> Self {
         {
-            let mut guard = self.core.guard.lock().expect("control-plane guard lock poisoned");
+            let mut guard = self
+                .core
+                .guard
+                .lock()
+                .expect("control-plane guard lock poisoned");
             guard.set_default_presence_ttl(ttl);
         }
-        self.expiry_config.lock().expect("expiry config lock poisoned").ttl = ttl;
+        self.expiry_config
+            .lock()
+            .expect("expiry config lock poisoned")
+            .ttl = ttl;
         self
     }
 
@@ -1955,20 +2192,35 @@ impl DiscoveryService {
     /// Each entry pairs the node id with its registry metadata. Use
     /// [`peer_count`](Self::peer_count) for a cheap size check.
     pub fn known_peers(&self) -> Vec<(PublicKey, PeerRegistryEntry)> {
-        let registry = self.core.registry.lock().expect("peer registry lock poisoned");
-        registry.peers().map(|(node_id, entry)| (*node_id, entry.clone())).collect()
+        let registry = self
+            .core
+            .registry
+            .lock()
+            .expect("peer registry lock poisoned");
+        registry
+            .peers()
+            .map(|(node_id, entry)| (*node_id, entry.clone()))
+            .collect()
     }
 
     /// Number of peers currently in the registry.
     pub fn peer_count(&self) -> usize {
-        let registry = self.core.registry.lock().expect("peer registry lock poisoned");
+        let registry = self
+            .core
+            .registry
+            .lock()
+            .expect("peer registry lock poisoned");
         registry.len()
     }
 
     /// Number of peers currently in the control-plane presence store
     /// (BORU-CP-03 active presence hints).
     pub fn control_presence_count(&self) -> usize {
-        let guard = self.core.guard.lock().expect("control-plane guard lock poisoned");
+        let guard = self
+            .core
+            .guard
+            .lock()
+            .expect("control-plane guard lock poisoned");
         guard.presence_count()
     }
 
@@ -1977,8 +2229,14 @@ impl DiscoveryService {
     /// Each entry is the metadata-only presence hint recorded from the
     /// peer's control-plane advertisements. This is a hint cache — it grants
     /// no authorisation and is never consulted by friendship/trust checks.
-    pub fn control_presence_peers(&self) -> Vec<(PublicKey, crate::control_plane::privacy::PeerControlState)> {
-        let guard = self.core.guard.lock().expect("control-plane guard lock poisoned");
+    pub fn control_presence_peers(
+        &self,
+    ) -> Vec<(PublicKey, crate::control_plane::privacy::PeerControlState)> {
+        let guard = self
+            .core
+            .guard
+            .lock()
+            .expect("control-plane guard lock poisoned");
         guard
             .presence()
             .peers()
@@ -2572,7 +2830,10 @@ async fn classify_peer_path(endpoint: &iroh::Endpoint, peer: PublicKey) -> PathK
         } else {
             PathAddrKind::Other
         };
-        (kind, matches!(addr.usage(), iroh::endpoint::TransportAddrUsage::Active))
+        (
+            kind,
+            matches!(addr.usage(), iroh::endpoint::TransportAddrUsage::Active),
+        )
     }))
 }
 
@@ -2656,14 +2917,18 @@ async fn maybe_dial(
         return;
     }
     {
-        let mut store = connectivity.lock().expect("connectivity store lock poisoned");
+        let mut store = connectivity
+            .lock()
+            .expect("connectivity store lock poisoned");
         store.apply(peer, ConnectivityEvent::EndpointConnecting, Instant::now());
     }
     match sender.join_peers(vec![endpoint]).await {
         Ok(()) => {
             info!(peer = %peer.fmt_short(), "discovery: dialed discovered peer for connectivity");
             {
-                let mut store = connectivity.lock().expect("connectivity store lock poisoned");
+                let mut store = connectivity
+                    .lock()
+                    .expect("connectivity store lock poisoned");
                 store.apply(peer, ConnectivityEvent::EndpointConnected, Instant::now());
             }
             // BORU-CP-07: the endpoint dial succeeded — a real connection
@@ -2681,7 +2946,9 @@ async fn maybe_dial(
                 "discovery: join_peers failed",
             );
             {
-                let mut store = connectivity.lock().expect("connectivity store lock poisoned");
+                let mut store = connectivity
+                    .lock()
+                    .expect("connectivity store lock poisoned");
                 store.apply_with_error(
                     peer,
                     ConnectivityEvent::EndpointFailed,
@@ -2784,7 +3051,8 @@ async fn drain_reconnect_attempts(
                     // PeerReachable when a pending reconnect exists), don't
                     // emit a duplicate. Exactly one signal per recovery.
                     let cleared = {
-                        let mut sched = scheduler.lock().expect("reconnect scheduler lock poisoned");
+                        let mut sched =
+                            scheduler.lock().expect("reconnect scheduler lock poisoned");
                         let had = sched.is_queued(&peer);
                         sched.reset(&peer);
                         had
@@ -2808,8 +3076,9 @@ async fn drain_reconnect_attempts(
                         "reconnect: dial not confirmed, backing off",
                     );
                     {
-                        let mut store =
-                            connectivity.lock().expect("connectivity store lock poisoned");
+                        let mut store = connectivity
+                            .lock()
+                            .expect("connectivity store lock poisoned");
                         store.apply_with_error(
                             peer,
                             ConnectivityEvent::EndpointFailed,
@@ -2818,7 +3087,8 @@ async fn drain_reconnect_attempts(
                         );
                     }
                     {
-                        let mut sched = scheduler.lock().expect("reconnect scheduler lock poisoned");
+                        let mut sched =
+                            scheduler.lock().expect("reconnect scheduler lock poisoned");
                         sched.on_failure(&peer, now);
                     }
                 }
@@ -2830,7 +3100,9 @@ async fn drain_reconnect_attempts(
                     "reconnect: attempt failed, backing off",
                 );
                 {
-                    let mut store = connectivity.lock().expect("connectivity store lock poisoned");
+                    let mut store = connectivity
+                        .lock()
+                        .expect("connectivity store lock poisoned");
                     store.apply_with_error(
                         peer,
                         ConnectivityEvent::EndpointFailed,
@@ -2858,7 +3130,9 @@ async fn wait_for_reconnect_confirmation(
     let deadline = Instant::now() + timeout;
     loop {
         let online = {
-            let store = connectivity.lock().expect("connectivity store lock poisoned");
+            let store = connectivity
+                .lock()
+                .expect("connectivity store lock poisoned");
             store.state(peer).is_online()
         };
         if online {
@@ -3001,6 +3275,10 @@ struct PresenceRefreshConfig {
     /// capabilities announcement uses its own throttle so the periodic
     /// presence and capability refreshes never starve each other.
     caps_every: u32,
+    /// Announce EXTENSIONS every N-th refresh tick (`0` = never).
+    /// Defaults to [`DEFAULT_EXTENSIONS_REFRESH_EVERY`]; each extensions
+    /// announcement uses its own throttle (BORU-CP-16).
+    extensions_every: u32,
 }
 
 /// Background task that keeps this node's control-plane presence alive
@@ -3035,14 +3313,20 @@ struct PresenceRefreshConfig {
 async fn presence_refresh_loop(
     control_announce: ControlAnnounceHandle,
     local_caps: Arc<Mutex<CapabilitySet>>,
+    local_extensions: Arc<Mutex<ExtensionsPayload>>,
     config: Arc<Mutex<PresenceRefreshConfig>>,
     cancel: CancellationToken,
 ) {
     let mut tick: u64 = 0;
     loop {
-        let (interval, jitter, caps_every) = {
+        let (interval, jitter, caps_every, extensions_every) = {
             let cfg = config.lock().expect("refresh config lock poisoned");
-            (cfg.interval, cfg.jitter, cfg.caps_every)
+            (
+                cfg.interval,
+                cfg.jitter,
+                cfg.caps_every,
+                cfg.extensions_every,
+            )
         };
         let delay = interval + random_jitter(jitter);
         tokio::select! {
@@ -3095,6 +3379,29 @@ async fn presence_refresh_loop(
                         }
                     }
                 }
+                // BORU-CP-16: periodic extensions refresh (force=true so an
+                // unchanged payload still reaches peers that joined late).
+                if extensions_every > 0 && tick % extensions_every as u64 == 0 {
+                    let extensions = local_extensions
+                        .lock()
+                        .expect("local extensions lock poisoned")
+                        .clone();
+                    match control_announce.announce_extensions(&extensions, true).await {
+                        Ok(AnnounceOutcome::Announced) => {
+                            info!("control: extensions refresh announced");
+                        }
+                        Ok(AnnounceOutcome::Throttled) => {
+                            trace!("control: extensions refresh suppressed by throttle");
+                        }
+                        Ok(AnnounceOutcome::Unchanged) => {}
+                        Err(error) => {
+                            warn!(
+                                error = %error,
+                                "control: extensions refresh failed; continuing",
+                            );
+                        }
+                    }
+                }
             }
         }
     }
@@ -3121,6 +3428,7 @@ mod tests {
     use super::*;
     use crate::api::Command;
     use crate::control_plane::capabilities::{features, ids};
+    use crate::control_plane::extensions::{PathPreference, RelayHealthHint};
     use crate::proto::DeliveryScope;
     use irpc::channel::mpsc as irpc_mpsc;
     use std::collections::BTreeSet;
@@ -3224,11 +3532,8 @@ mod tests {
         // Insert the "stale" peer, then backdate it (tests are a child
         // module, so they can reach the private map directly).
         registry.upsert(stale, PeerSource::Hello, topic, None);
-        registry
-            .peers
-            .get_mut(&stale)
-            .unwrap()
-            .last_seen = Instant::now() - Duration::from_secs(3600);
+        registry.peers.get_mut(&stale).unwrap().last_seen =
+            Instant::now() - Duration::from_secs(3600);
         registry.upsert(fresh, PeerSource::Presence, topic, None);
 
         let removed = registry.prune_older_than(Duration::from_secs(60));
@@ -3247,9 +3552,8 @@ mod tests {
         let mut registry = PeerRegistry::new();
         let node = test_key(0x21);
         let topic_a = test_topic();
-        let topic_b = crate::discovery_topic::discovery_topic(
-            crate::public_room::PublicNetwork::Development,
-        );
+        let topic_b =
+            crate::discovery_topic::discovery_topic(crate::public_room::PublicNetwork::Development);
         assert_ne!(topic_a, topic_b);
 
         assert_eq!(
@@ -3573,7 +3877,10 @@ mod tests {
 
         // Register the peer with a current-version hello.
         let hello = postcard::to_stdvec(&DiscoveryMessage::hello(peer)).unwrap();
-        assert_eq!(service.handle_incoming(&hello, peer), IncomingOutcome::Processed);
+        assert_eq!(
+            service.handle_incoming(&hello, peer),
+            IncomingOutcome::Processed
+        );
         let known = service.known_peers();
         assert_eq!(known.len(), 1);
         let first_seen = known[0].1.last_seen;
@@ -3597,7 +3904,11 @@ mod tests {
 
         let after = service.known_peers();
         assert_eq!(after.len(), 1);
-        assert_eq!(after[0].1.source, PeerSource::Hello, "source must not refresh");
+        assert_eq!(
+            after[0].1.source,
+            PeerSource::Hello,
+            "source must not refresh"
+        );
         assert_eq!(
             after[0].1.last_seen, first_seen,
             "last_seen must not refresh"
@@ -3684,7 +3995,10 @@ mod tests {
         let service = test_service_with_counters(local, counters.clone());
 
         let bytes = postcard::to_stdvec(&DiscoveryMessage::hello(peer)).unwrap();
-        assert_eq!(service.handle_incoming(&bytes, peer), IncomingOutcome::Processed);
+        assert_eq!(
+            service.handle_incoming(&bytes, peer),
+            IncomingOutcome::Processed
+        );
 
         let snap = counters.snapshot();
         assert_eq!(snap.discovery_peers_seen, 1);
@@ -3747,11 +4061,17 @@ mod tests {
         let service = test_service_with_counters(local, counters.clone());
 
         let first = postcard::to_stdvec(&DiscoveryMessage::hello_with_event(peer, 42)).unwrap();
-        assert_eq!(service.handle_incoming(&first, peer), IncomingOutcome::Processed);
+        assert_eq!(
+            service.handle_incoming(&first, peer),
+            IncomingOutcome::Processed
+        );
         assert_eq!(counters.discovery_peers_seen(), 1);
 
         let second = postcard::to_stdvec(&DiscoveryMessage::presence_with_event(peer, 42)).unwrap();
-        assert_eq!(service.handle_incoming(&second, peer), IncomingOutcome::Duplicate);
+        assert_eq!(
+            service.handle_incoming(&second, peer),
+            IncomingOutcome::Duplicate
+        );
         assert_eq!(counters.discovery_peers_seen(), 1);
         assert_eq!(counters.malformed_discovery_packets(), 0);
         assert_eq!(counters.unsupported_version_packets(), 0);
@@ -3767,7 +4087,10 @@ mod tests {
         let service = test_service_with_counters(local, counters.clone());
 
         let hello = postcard::to_stdvec(&DiscoveryMessage::hello(peer)).unwrap();
-        assert_eq!(service.handle_incoming(&hello, peer), IncomingOutcome::Processed);
+        assert_eq!(
+            service.handle_incoming(&hello, peer),
+            IncomingOutcome::Processed
+        );
         assert_eq!(counters.discovery_peers_seen(), 1);
 
         let presence = postcard::to_stdvec(&DiscoveryMessage::presence(peer)).unwrap();
@@ -3775,7 +4098,11 @@ mod tests {
             service.handle_incoming(&presence, peer),
             IncomingOutcome::Processed
         );
-        assert_eq!(counters.discovery_peers_seen(), 1, "refresh is not a new peer");
+        assert_eq!(
+            counters.discovery_peers_seen(),
+            1,
+            "refresh is not a new peer"
+        );
     }
 
     /// A self-originated message never bumps any counter.
@@ -3786,7 +4113,10 @@ mod tests {
         let service = test_service_with_counters(local, counters.clone());
 
         let bytes = postcard::to_stdvec(&DiscoveryMessage::hello(local)).unwrap();
-        assert_eq!(service.handle_incoming(&bytes, local), IncomingOutcome::SelfMessage);
+        assert_eq!(
+            service.handle_incoming(&bytes, local),
+            IncomingOutcome::SelfMessage
+        );
 
         let snap = counters.snapshot();
         assert_eq!(snap.discovery_peers_seen, 0);
@@ -3808,7 +4138,10 @@ mod tests {
         let mut updates = service.peer_updates();
 
         let first = postcard::to_stdvec(&DiscoveryMessage::hello_with_event(peer, 42)).unwrap();
-        assert_eq!(service.handle_incoming(&first, peer), IncomingOutcome::Processed);
+        assert_eq!(
+            service.handle_incoming(&first, peer),
+            IncomingOutcome::Processed
+        );
         assert_eq!(service.peer_count(), 1);
 
         // A duplicate Seen update was emitted for the first delivery.
@@ -3852,7 +4185,10 @@ mod tests {
 
         // First contact: same event id as a restart would reuse (0).
         let first = postcard::to_stdvec(&DiscoveryMessage::hello_with_event(peer, 0)).unwrap();
-        assert_eq!(service.handle_incoming(&first, peer), IncomingOutcome::Processed);
+        assert_eq!(
+            service.handle_incoming(&first, peer),
+            IncomingOutcome::Processed
+        );
         assert_eq!(service.peer_count(), 1);
         assert_eq!(
             updates.try_recv(),
@@ -3896,11 +4232,15 @@ mod tests {
         let mut updates = service.peer_updates();
 
         let hello = postcard::to_stdvec(&DiscoveryMessage::hello_with_event(peer, 1)).unwrap();
-        assert_eq!(service.handle_incoming(&hello, peer), IncomingOutcome::Processed);
+        assert_eq!(
+            service.handle_incoming(&hello, peer),
+            IncomingOutcome::Processed
+        );
         let first_seen = service.known_peers()[0].1.last_seen;
 
         // A new event id (presence refresh) updates the same single entry.
-        let presence = postcard::to_stdvec(&DiscoveryMessage::presence_with_event(peer, 2)).unwrap();
+        let presence =
+            postcard::to_stdvec(&DiscoveryMessage::presence_with_event(peer, 2)).unwrap();
         assert_eq!(
             service.handle_incoming(&presence, peer),
             IncomingOutcome::Processed
@@ -3936,7 +4276,10 @@ mod tests {
         let service = test_service(local);
 
         let hello = postcard::to_stdvec(&DiscoveryMessage::hello(peer)).unwrap();
-        assert_eq!(service.handle_incoming(&hello, peer), IncomingOutcome::Processed);
+        assert_eq!(
+            service.handle_incoming(&hello, peer),
+            IncomingOutcome::Processed
+        );
         let presence = postcard::to_stdvec(&DiscoveryMessage::presence(peer)).unwrap();
         assert_eq!(
             service.handle_incoming(&presence, peer),
@@ -4179,7 +4522,10 @@ mod tests {
                         }
                     )
                 );
-                assert!(env.timestamp_secs > 0, "announcements carry a real timestamp");
+                assert!(
+                    env.timestamp_secs > 0,
+                    "announcements carry a real timestamp"
+                );
             }
             other => panic!("expected decoded envelope, got {other:?}"),
         }
@@ -4558,7 +4904,8 @@ mod tests {
         let (ev_tx, ev_rx) = irpc_mpsc::channel::<Event>(64);
         let sender = GossipSender::new(cmd_tx);
         let receiver = GossipReceiver::new(ev_rx);
-        let service = DiscoveryService::from_subscription(test_topic(), sender, receiver, local_node);
+        let service =
+            DiscoveryService::from_subscription(test_topic(), sender, receiver, local_node);
         (service, cmd_rx, ev_tx)
     }
 
@@ -4771,7 +5118,11 @@ mod tests {
         }
 
         // The peer registry is NOT touched by control-plane traffic.
-        assert_eq!(service.peer_count(), 0, "control plane must not register peers");
+        assert_eq!(
+            service.peer_count(),
+            0,
+            "control plane must not register peers"
+        );
     }
 
     /// The same control-plane envelope (same sender + same sequence)
@@ -4785,7 +5136,10 @@ mod tests {
         let mut events = service.control_events();
 
         let bytes = control_hello(peer, 7);
-        assert_eq!(service.handle_incoming(&bytes, peer), IncomingOutcome::ControlMessage);
+        assert_eq!(
+            service.handle_incoming(&bytes, peer),
+            IncomingOutcome::ControlMessage
+        );
         assert!(
             tokio::time::timeout(Duration::from_secs(5), events.recv())
                 .await
@@ -4815,7 +5169,10 @@ mod tests {
         let mut events = service.control_events();
 
         let bytes = control_hello(local, 1);
-        assert_eq!(service.handle_incoming(&bytes, local), IncomingOutcome::SelfMessage);
+        assert_eq!(
+            service.handle_incoming(&bytes, local),
+            IncomingOutcome::SelfMessage
+        );
         assert_eq!(service.peer_count(), 0);
         assert!(
             tokio::time::timeout(Duration::from_millis(80), events.recv())
@@ -4838,7 +5195,10 @@ mod tests {
         let mut bytes = control_hello(peer, 1);
         bytes[3] = 0x7F; // rewrite the message_type byte to an unknown tag
         let outcome = service.handle_incoming(&bytes, peer);
-        assert_eq!(outcome, IncomingOutcome::UnknownControlType { message_type: 0x7F });
+        assert_eq!(
+            outcome,
+            IncomingOutcome::UnknownControlType { message_type: 0x7F }
+        );
         assert_eq!(service.peer_count(), 0);
         assert!(
             tokio::time::timeout(Duration::from_millis(80), events.recv())
@@ -5225,10 +5585,269 @@ mod tests {
             gate.peer_supports(&peer, features::VOICE),
             service.peer_supports(&peer, features::VOICE)
         );
+        assert_eq!(gate.local_capabilities(), service.local_capabilities());
+    }
+
+    // ── Phase 6 extensions (BORU-CP-16 / PDF Phase 6) ─────────────────
+
+    /// Encode an EXTENSIONS control-plane envelope for `sender`.
+    fn control_extensions(sender: PublicKey, sequence: u64, payload: ExtensionsPayload) -> Vec<u8> {
+        ControlEnvelope::extensions(sender, sequence, 1_700_000_000, payload).encode()
+    }
+
+    fn sample_extensions() -> ExtensionsPayload {
+        ExtensionsPayload {
+            group: Some(crate::control_plane::extensions::GroupHints { available: true }),
+            file: Some(crate::control_plane::extensions::FileReadiness {
+                protocol_versions: vec!["v2".into()],
+                can_receive: true,
+            }),
+            tunnel: Some(crate::control_plane::extensions::TunnelCapability {
+                protocol_versions: vec!["v1".into()],
+            }),
+            call: Some(crate::control_plane::extensions::CallCapability {
+                protocol_versions: vec!["v1".into()],
+                availability: Some(crate::control_plane::extensions::CallAvailability::Available),
+            }),
+            screen_share: Some(crate::control_plane::extensions::ScreenShareCapability {
+                protocol_versions: vec!["v1".into()],
+            }),
+            identity: Some(crate::control_plane::extensions::MultiDeviceIdentity {
+                identity_id: "user-alice".into(),
+                device_id: "dev-phone".into(),
+                active_device: true,
+            }),
+            path_preference: Some(PathPreference::DirectPreferred),
+            relay_health: Some(RelayHealthHint::Healthy),
+        }
+    }
+
+    /// `announce_extensions` broadcasts an EXTENSIONS control-plane envelope
+    /// carrying the current local extensions payload — a control-plane
+    /// message, never a chat message.
+    #[tokio::test]
+    async fn announce_extensions_broadcasts_extensions_envelope() {
+        let local = test_key(0xAA);
+        let (cmd_tx, mut cmd_rx) = irpc_mpsc::channel::<Command>(64);
+        let (_ev_tx, ev_rx) = irpc_mpsc::channel::<Event>(64);
+        let sender = GossipSender::new(cmd_tx);
+        let receiver = GossipReceiver::new(ev_rx);
+        let service = DiscoveryService::from_subscription(test_topic(), sender, receiver, local)
+            .with_extensions_announce_min_interval(Duration::ZERO);
+
         assert_eq!(
-            gate.local_capabilities(),
-            service.local_capabilities()
+            service.announce_extensions().await.unwrap(),
+            AnnounceOutcome::Announced
         );
+
+        let command = tokio::time::timeout(Duration::from_secs(5), cmd_rx.recv())
+            .await
+            .expect("timed out waiting for extensions broadcast")
+            .expect("channel receive failed")
+            .expect("channel closed before broadcast");
+        let Command::Broadcast(bytes) = command else {
+            panic!("expected Broadcast command, got {command:?}");
+        };
+        // Control-plane envelope, never a chat message or legacy discovery
+        // message.
+        assert!(bytes.starts_with(&CONTROL_PLANE_MAGIC));
+        assert!(
+            postcard::from_bytes::<DiscoveryMessage>(&bytes).is_err(),
+            "an extensions envelope must never decode as a legacy DiscoveryMessage"
+        );
+        match ControlEnvelope::decode(&bytes).expect("control envelope decodes") {
+            ControlPlaneDecode::Message(env) => {
+                assert_eq!(env.sender_node_id, local);
+                assert_eq!(
+                    env.message_type,
+                    crate::control_plane::message::ControlMessageType::Extensions
+                );
+                let crate::control_plane::message::ControlPayload::Extensions(payload) =
+                    &env.payload
+                else {
+                    panic!("expected Extensions payload, got {:?}", env.payload);
+                };
+                // The wire payload equals the default local extensions.
+                let local_payload = service.local_extensions();
+                assert_eq!(payload, &local_payload);
+                assert!(payload.file.is_some());
+            }
+            other => panic!("expected decoded envelope, got {other:?}"),
+        }
+    }
+
+    /// Re-announcing the SAME local extensions payload is an idempotent
+    /// no-op: [`AnnounceOutcome::Unchanged`] and no second broadcast. An
+    /// all-`None` payload is never broadcast (nothing to advertise).
+    #[tokio::test]
+    async fn announce_extensions_dedups_unchanged_and_empty() {
+        let local = test_key(0xAA);
+        let (cmd_tx, mut cmd_rx) = irpc_mpsc::channel::<Command>(64);
+        let (_ev_tx, ev_rx) = irpc_mpsc::channel::<Event>(64);
+        let sender = GossipSender::new(cmd_tx);
+        let receiver = GossipReceiver::new(ev_rx);
+        let service = DiscoveryService::from_subscription(test_topic(), sender, receiver, local)
+            .with_extensions_announce_min_interval(Duration::ZERO);
+
+        assert_eq!(
+            service.announce_extensions().await.unwrap(),
+            AnnounceOutcome::Announced
+        );
+        let first = tokio::time::timeout(Duration::from_secs(5), cmd_rx.recv())
+            .await
+            .expect("timed out waiting for first extensions broadcast")
+            .expect("channel receive failed")
+            .expect("channel closed before broadcast");
+        assert!(matches!(first, Command::Broadcast(_)));
+
+        // Same payload again — no duplicate broadcast.
+        assert_eq!(
+            service.announce_extensions().await.unwrap(),
+            AnnounceOutcome::Unchanged
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), cmd_rx.recv())
+                .await
+                .is_err(),
+            "unchanged extensions payload must not be re-broadcast"
+        );
+
+        // Replacing the local payload with an all-None payload is stored but
+        // never broadcast (nothing to advertise).
+        assert_eq!(
+            service
+                .update_local_extensions(ExtensionsPayload::default())
+                .await
+                .unwrap(),
+            AnnounceOutcome::Unchanged
+        );
+        assert!(service.local_extensions().is_empty());
+    }
+
+    /// Replacing the local extensions payload broadcasts the NEW payload
+    /// (the "locally derived extension metadata materially changes" path)
+    /// without any chat message; `local_extensions()` reflects the change.
+    #[tokio::test]
+    async fn update_local_extensions_announces_material_change() {
+        let local = test_key(0xAA);
+        let (cmd_tx, mut cmd_rx) = irpc_mpsc::channel::<Command>(64);
+        let (_ev_tx, ev_rx) = irpc_mpsc::channel::<Event>(64);
+        let sender = GossipSender::new(cmd_tx);
+        let receiver = GossipReceiver::new(ev_rx);
+        let service = DiscoveryService::from_subscription(test_topic(), sender, receiver, local)
+            .with_extensions_announce_min_interval(Duration::ZERO);
+
+        let full = sample_extensions();
+        assert_eq!(
+            service.update_local_extensions(full.clone()).await.unwrap(),
+            AnnounceOutcome::Announced
+        );
+        assert_eq!(service.local_extensions(), full);
+
+        let command = tokio::time::timeout(Duration::from_secs(5), cmd_rx.recv())
+            .await
+            .expect("timed out waiting for extensions broadcast")
+            .expect("channel receive failed")
+            .expect("channel closed before broadcast");
+        let Command::Broadcast(bytes) = command else {
+            panic!("expected Broadcast command, got {command:?}");
+        };
+        match ControlEnvelope::decode(&bytes).expect("control envelope decodes") {
+            ControlPlaneDecode::Message(env) => {
+                let crate::control_plane::message::ControlPayload::Extensions(payload) =
+                    &env.payload
+                else {
+                    panic!("expected Extensions payload, got {:?}", env.payload);
+                };
+                assert_eq!(payload, &full);
+            }
+            other => panic!("expected decoded envelope, got {other:?}"),
+        }
+    }
+
+    /// `peer_extensions` reads the peer's cached Phase 6 extensions
+    /// advertisement; unknown peers and peers that never advertised have
+    /// none.
+    #[tokio::test]
+    async fn peer_extensions_reads_cached_advertisement() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let service = test_service(local);
+
+        // Unknown peer: no extensions.
+        assert_eq!(service.peer_extensions(&peer), None);
+
+        // Bob advertises a full extensions payload.
+        let full = sample_extensions();
+        let outcome = service.handle_incoming(&control_extensions(peer, 1, full.clone()), peer);
+        assert_eq!(outcome, IncomingOutcome::ControlMessage);
+        assert_eq!(service.peer_extensions(&peer), Some(full.clone()));
+
+        // A newer extensions advertisement replaces the cached one.
+        let updated = ExtensionsPayload {
+            file: Some(crate::control_plane::extensions::FileReadiness {
+                protocol_versions: vec!["v2".into()],
+                can_receive: false,
+            }),
+            ..Default::default()
+        };
+        let outcome = service.handle_incoming(&control_extensions(peer, 2, updated.clone()), peer);
+        assert_eq!(outcome, IncomingOutcome::ControlMessage);
+        assert_eq!(service.peer_extensions(&peer), Some(updated));
+    }
+
+    /// Stale extensions data is not treated as current: once the peer's
+    /// presence expires past its TTL, `peer_extensions` returns None.
+    #[tokio::test]
+    async fn extensions_expire_with_presence_ttl() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let service = test_service(local)
+            .with_presence_ttl(Duration::from_millis(60))
+            .with_presence_sweep_interval(Duration::from_millis(20));
+
+        let outcome =
+            service.handle_incoming(&control_extensions(peer, 1, sample_extensions()), peer);
+        assert_eq!(outcome, IncomingOutcome::ControlMessage);
+        assert!(
+            service.peer_extensions(&peer).is_some(),
+            "extensions must be current while presence is active"
+        );
+
+        // Wait well past the TTL (60ms) with several sweep ticks (20ms).
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        assert_eq!(
+            service.peer_extensions(&peer),
+            None,
+            "stale extensions data must not be treated as current"
+        );
+    }
+
+    /// An EXTENSIONS advertisement is metadata only: it never registers the
+    /// peer in the legacy registry and never grants authorisation (the peer
+    /// is not a friend/group member/tunnel client/file recipient by virtue
+    /// of advertising extensions).
+    #[tokio::test]
+    async fn extensions_advertisement_never_authorises() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let service = test_service(local);
+
+        let outcome =
+            service.handle_incoming(&control_extensions(peer, 1, sample_extensions()), peer);
+        assert_eq!(outcome, IncomingOutcome::ControlMessage);
+
+        // Control-plane traffic does not touch the peer registry.
+        assert_eq!(
+            service.peer_count(),
+            0,
+            "extensions must not register peers"
+        );
+        // The extensions cache is a hint store with no authorisation
+        // surface: nothing here creates a friendship, group membership,
+        // tunnel, or transfer.
+        assert!(service.peer_extensions(&peer).is_some());
     }
 
     /// The drain loop routes a received control-plane envelope to
@@ -5265,7 +5884,11 @@ mod tests {
                 assert_eq!(envelope.sequence, 3);
             }
         }
-        assert_eq!(service.peer_count(), 0, "control plane must not register peers");
+        assert_eq!(
+            service.peer_count(),
+            0,
+            "control plane must not register peers"
+        );
     }
 
     // ── control-plane privacy/abuse guards (BORU-CP-03) ──────────────
@@ -5520,7 +6143,10 @@ mod tests {
             service.handle_incoming(&control_hello(peer, 1), peer),
             IncomingOutcome::ControlMessage
         );
-        assert_eq!(service.connectivity_state(&peer), PeerConnectivityState::Discovered);
+        assert_eq!(
+            service.connectivity_state(&peer),
+            PeerConnectivityState::Discovered
+        );
 
         // A duplicate announcement (different sequence, same sender) is a
         // NoChange — the state machine never re-enters Connecting, so no
@@ -5557,7 +6183,10 @@ mod tests {
         let bytes = postcard::to_stdvec(&DiscoveryMessage::hello(peer)).unwrap();
         service.handle_incoming(&bytes, peer);
         service.report_connectivity_event(peer, CE::EndpointConnected);
-        assert_eq!(service.connectivity_state(&peer), PeerConnectivityState::Reachable);
+        assert_eq!(
+            service.connectivity_state(&peer),
+            PeerConnectivityState::Reachable
+        );
         assert!(service.connectivity_state(&peer).is_online());
 
         // Topic join fails -> Degraded, last_error recorded, NOT online.
@@ -5570,7 +6199,10 @@ mod tests {
             outcome,
             crate::control_plane::connectivity::TransitionOutcome::Transitioned { .. }
         ));
-        assert_eq!(service.connectivity_state(&peer), PeerConnectivityState::Degraded);
+        assert_eq!(
+            service.connectivity_state(&peer),
+            PeerConnectivityState::Degraded
+        );
         assert!(
             !service.connectivity_state(&peer).is_online(),
             "a failed direct-topic setup must never be reported as online"
@@ -5589,7 +6221,10 @@ mod tests {
             entry.last_error.as_deref(),
             Some("direct topic subscribe timed out")
         );
-        assert_eq!(entry.path_kind, crate::control_plane::connectivity::PathKind::Unknown);
+        assert_eq!(
+            entry.path_kind,
+            crate::control_plane::connectivity::PathKind::Unknown
+        );
     }
 
     /// The expiry sweep moves a peer to OfflineStale in the connectivity
@@ -5606,7 +6241,10 @@ mod tests {
 
         let bytes = postcard::to_stdvec(&DiscoveryMessage::hello(peer)).unwrap();
         service.handle_incoming(&bytes, peer);
-        assert_eq!(service.connectivity_state(&peer), PeerConnectivityState::Discovered);
+        assert_eq!(
+            service.connectivity_state(&peer),
+            PeerConnectivityState::Discovered
+        );
 
         tokio::time::sleep(Duration::from_millis(150)).await;
 
@@ -5644,12 +6282,18 @@ mod tests {
         // NeighborUp through the drain loop -> Reachable.
         ev_tx.send(Event::NeighborUp(peer)).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(service.connectivity_state(&peer), PeerConnectivityState::Reachable);
+        assert_eq!(
+            service.connectivity_state(&peer),
+            PeerConnectivityState::Reachable
+        );
 
         // NeighborDown through the drain loop -> Degraded (not 'online').
         ev_tx.send(Event::NeighborDown(peer)).await.unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(service.connectivity_state(&peer), PeerConnectivityState::Degraded);
+        assert_eq!(
+            service.connectivity_state(&peer),
+            PeerConnectivityState::Degraded
+        );
         assert!(!service.connectivity_state(&peer).is_online());
     }
 
@@ -5666,10 +6310,16 @@ mod tests {
 
         let bytes = postcard::to_stdvec(&DiscoveryMessage::hello(peer)).unwrap();
         service.handle_incoming(&bytes, peer);
-        assert_eq!(service.connectivity_state(&peer), PeerConnectivityState::Discovered);
+        assert_eq!(
+            service.connectivity_state(&peer),
+            PeerConnectivityState::Discovered
+        );
 
         service.report_connectivity_event(peer, CE::DirectMessageReceived);
-        assert_eq!(service.connectivity_state(&peer), PeerConnectivityState::DirectTopicReady);
+        assert_eq!(
+            service.connectivity_state(&peer),
+            PeerConnectivityState::DirectTopicReady
+        );
         assert!(service.connectivity_state(&peer).is_ready_for_direct());
         assert!(service.connectivity_state(&peer).is_online());
     }
@@ -5682,17 +6332,11 @@ mod tests {
     fn classify_direct_when_any_active_ip_path() {
         use crate::control_plane::connectivity::PathKind;
         assert_eq!(
-            classify_path_addrs([
-                (PathAddrKind::Relay, true),
-                (PathAddrKind::Ip, true),
-            ]),
+            classify_path_addrs([(PathAddrKind::Relay, true), (PathAddrKind::Ip, true),]),
             PathKind::Direct
         );
         assert_eq!(
-            classify_path_addrs([
-                (PathAddrKind::Ip, true),
-                (PathAddrKind::Relay, true),
-            ]),
+            classify_path_addrs([(PathAddrKind::Ip, true), (PathAddrKind::Relay, true),]),
             PathKind::Direct
         );
         assert_eq!(
@@ -5707,17 +6351,11 @@ mod tests {
     fn classify_relay_when_only_active_relay_path() {
         use crate::control_plane::connectivity::PathKind;
         assert_eq!(
-            classify_path_addrs([
-                (PathAddrKind::Ip, false),
-                (PathAddrKind::Relay, true),
-            ]),
+            classify_path_addrs([(PathAddrKind::Ip, false), (PathAddrKind::Relay, true),]),
             PathKind::Relay
         );
         assert_eq!(
-            classify_path_addrs([
-                (PathAddrKind::Relay, true),
-                (PathAddrKind::Other, true),
-            ]),
+            classify_path_addrs([(PathAddrKind::Relay, true), (PathAddrKind::Other, true),]),
             PathKind::Relay,
             "custom transports never beat an active relay path"
         );
@@ -5737,10 +6375,7 @@ mod tests {
             PathKind::Transitioning
         );
         assert_eq!(
-            classify_path_addrs([
-                (PathAddrKind::Ip, false),
-                (PathAddrKind::Relay, false),
-            ]),
+            classify_path_addrs([(PathAddrKind::Ip, false), (PathAddrKind::Relay, false),]),
             PathKind::Transitioning
         );
     }
@@ -5750,7 +6385,10 @@ mod tests {
     #[test]
     fn classify_unknown_when_no_addresses() {
         use crate::control_plane::connectivity::PathKind;
-        assert_eq!(classify_path_addrs([] as [(PathAddrKind, bool); 0]), PathKind::Unknown);
+        assert_eq!(
+            classify_path_addrs([] as [(PathAddrKind, bool); 0]),
+            PathKind::Unknown
+        );
     }
 
     /// BORU-CP-14: a relay-only path recorded through the service keeps the
@@ -5766,11 +6404,17 @@ mod tests {
         let bytes = postcard::to_stdvec(&DiscoveryMessage::hello(peer)).unwrap();
         service.handle_incoming(&bytes, peer);
         service.report_connectivity_event(peer, CE::EndpointConnected);
-        assert_eq!(service.connectivity_state(&peer), PeerConnectivityState::Reachable);
+        assert_eq!(
+            service.connectivity_state(&peer),
+            PeerConnectivityState::Reachable
+        );
 
         // Path becomes relay-only: state stays Reachable, path hint relays.
         service.report_connectivity_event(peer, CE::PathChangedRelay);
-        assert_eq!(service.connectivity_state(&peer), PeerConnectivityState::Reachable);
+        assert_eq!(
+            service.connectivity_state(&peer),
+            PeerConnectivityState::Reachable
+        );
         assert!(service.connectivity_state(&peer).is_online());
         let entry = service
             .connectivity_peers()
@@ -5778,7 +6422,10 @@ mod tests {
             .find(|(id, _)| *id == peer)
             .unwrap()
             .1;
-        assert_eq!(entry.path_kind, crate::control_plane::connectivity::PathKind::Relay);
+        assert_eq!(
+            entry.path_kind,
+            crate::control_plane::connectivity::PathKind::Relay
+        );
     }
 
     /// BORU-CP-14: `with_endpoint` attaches the path-refresh sweep; without
@@ -5833,9 +6480,18 @@ mod tests {
         assert_eq!(snap.topic_join_status, "ready");
         assert!(snap.subscription_ready);
         assert!(snap.discovery_last_seen_ms.is_some());
-        assert!(snap.last_outbound_direct_ms.is_some(), "outbound broadcast recorded");
-        assert!(snap.last_inbound_gossip_ms.is_some(), "inbound gossip recorded");
-        assert!(snap.last_decoded_message_ms.is_some(), "decoded message recorded");
+        assert!(
+            snap.last_outbound_direct_ms.is_some(),
+            "outbound broadcast recorded"
+        );
+        assert!(
+            snap.last_inbound_gossip_ms.is_some(),
+            "inbound gossip recorded"
+        );
+        assert!(
+            snap.last_decoded_message_ms.is_some(),
+            "decoded message recorded"
+        );
         assert!(
             snap.direct_topic_id_prefix.is_some(),
             "direct-topic hash prefix present for debugging"
@@ -5933,7 +6589,10 @@ mod tests {
         assert_eq!(signal, ReconnectSignal::PeerReachable { peer });
 
         // The state machine reflects the real connection.
-        assert_eq!(service.connectivity_state(&peer), PeerConnectivityState::Reachable);
+        assert_eq!(
+            service.connectivity_state(&peer),
+            PeerConnectivityState::Reachable
+        );
         assert!(service.connectivity_state(&peer).is_online());
     }
 
@@ -5957,7 +6616,10 @@ mod tests {
             service.reconnect_state(&peer).is_none(),
             "successful direct-topic readiness must clear retry/backoff state"
         );
-        assert_eq!(service.connectivity_state(&peer), PeerConnectivityState::DirectTopicReady);
+        assert_eq!(
+            service.connectivity_state(&peer),
+            PeerConnectivityState::DirectTopicReady
+        );
         assert!(service.connectivity_state(&peer).is_ready_for_direct());
     }
 
@@ -5994,11 +6656,7 @@ mod tests {
 
         // Phase 1 — the peer goes down (a restart equivalent): Degraded,
         // explicitly NOT online.
-        service.report_connectivity_failure(
-            peer,
-            CE::EndpointFailed,
-            "peer down".to_string(),
-        );
+        service.report_connectivity_failure(peer, CE::EndpointFailed, "peer down".to_string());
         assert!(!service.connectivity_state(&peer).is_online());
 
         // The app queues ONE reconnect attempt for its known friend.
@@ -6049,6 +6707,9 @@ mod tests {
             service.reconnect_state(&peer).is_none(),
             "a real successful dial must clear retry/backoff state"
         );
-        assert_eq!(service.connectivity_state(&peer), PeerConnectivityState::Reachable);
+        assert_eq!(
+            service.connectivity_state(&peer),
+            PeerConnectivityState::Reachable
+        );
     }
 }

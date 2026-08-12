@@ -104,7 +104,8 @@ pub const BORU_APP_PROTOCOL_VERSION: u8 = 1;
 /// `message_type` enum for the control plane (PDF Task 1.1 step 3).
 ///
 /// Tag values are stable wire constants: `0 = HELLO`, `1 = PRESENCE`,
-/// `2 = CAPABILITIES`, `3 = DIAGNOSTIC_HINT`. Unknown tags are tolerated by
+/// `2 = CAPABILITIES`, `3 = DIAGNOSTIC_HINT`, `4 = EXTENSIONS` (BORU-CP-16,
+/// PDF Phase 6). Unknown tags are tolerated by
 /// [`ControlEnvelope::decode`] as [`ControlPlaneDecode::UnknownType`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -117,6 +118,9 @@ pub enum ControlMessageType {
     Capabilities = 2,
     /// Structured connectivity hint for diagnostics (never chat contents).
     DiagnosticHint = 3,
+    /// Optional Phase 6 extensions (metadata only — see
+    /// [`ExtensionsPayload`](crate::control_plane::extensions::ExtensionsPayload)).
+    Extensions = 4,
 }
 
 impl ControlMessageType {
@@ -128,6 +132,7 @@ impl ControlMessageType {
             1 => Some(Self::Presence),
             2 => Some(Self::Capabilities),
             3 => Some(Self::DiagnosticHint),
+            4 => Some(Self::Extensions),
             _ => None,
         }
     }
@@ -221,6 +226,14 @@ pub struct DiagnosticHintPayload {
 /// The payload enum is self-describing on the wire (postcard variant tag),
 /// which lets [`ControlEnvelope::decode`] cross-check that the payload's own
 /// type matches the envelope's `message_type` — a mismatch is malformed.
+///
+/// # Adding a payload type
+///
+/// Append the new variant at the END of the enum so existing postcard
+/// variant indices (and therefore existing wire tags) stay stable. Update
+/// [`ControlMessageType`] (new tag + `from_u8`), [`ControlPayload::message_type`],
+/// [`ControlEnvelope::decode`]'s cross-check (it uses `message_type`), and
+/// the strict-decoder tests.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ControlPayload {
     /// [`HelloPayload`] — initial announcement.
@@ -231,6 +244,10 @@ pub enum ControlPayload {
     Capabilities(CapabilitiesPayload),
     /// [`DiagnosticHintPayload`] — structured connectivity hint.
     DiagnosticHint(DiagnosticHintPayload),
+    /// [`ExtensionsPayload`] — optional Phase 6 metadata extensions
+    /// (BORU-CP-16; see
+    /// [`crate::control_plane::extensions`](crate::control_plane::extensions)).
+    Extensions(crate::control_plane::extensions::ExtensionsPayload),
 }
 
 impl ControlPayload {
@@ -241,6 +258,7 @@ impl ControlPayload {
             Self::Presence(_) => ControlMessageType::Presence,
             Self::Capabilities(_) => ControlMessageType::Capabilities,
             Self::DiagnosticHint(_) => ControlMessageType::DiagnosticHint,
+            Self::Extensions(_) => ControlMessageType::Extensions,
         }
     }
 }
@@ -348,6 +366,23 @@ impl ControlEnvelope {
             sequence,
             timestamp_secs,
             ControlPayload::DiagnosticHint(DiagnosticHintPayload { hint_code, note }),
+        )
+    }
+
+    /// Convenience constructor for an EXTENSIONS envelope (BORU-CP-16, PDF
+    /// Phase 6). Carries optional metadata-only Phase 6 extensions; the
+    /// payload is bounded by the privacy layer's [`ExtensionsBounds`](crate::control_plane::extensions::ExtensionsBounds).
+    pub fn extensions(
+        sender_node_id: PublicKey,
+        sequence: u64,
+        timestamp_secs: u64,
+        extensions: crate::control_plane::extensions::ExtensionsPayload,
+    ) -> Self {
+        Self::new(
+            sender_node_id,
+            sequence,
+            timestamp_secs,
+            ControlPayload::Extensions(extensions),
         )
     }
 
@@ -645,6 +680,16 @@ mod tests {
                     note: None,
                 }),
             ),
+            (
+                ControlMessageType::Extensions,
+                ControlPayload::Extensions(crate::control_plane::extensions::ExtensionsPayload {
+                    file: Some(crate::control_plane::extensions::FileReadiness {
+                        protocol_versions: vec!["v2".into()],
+                        can_receive: true,
+                    }),
+                    ..Default::default()
+                }),
+            ),
         ]
     }
 
@@ -680,6 +725,17 @@ mod tests {
                 vec!["voice-v1".into(), "video-v1".into()],
             ),
             ControlEnvelope::diagnostic_hint(node, 4, 1_700_000_000, 7, None),
+            ControlEnvelope::extensions(
+                node,
+                5,
+                1_700_000_000,
+                crate::control_plane::extensions::ExtensionsPayload {
+                    tunnel: Some(crate::control_plane::extensions::TunnelCapability {
+                        protocol_versions: vec!["v1".into()],
+                    }),
+                    ..Default::default()
+                },
+            ),
         ];
         for envelope in envelopes {
             let bytes = envelope.encode();
@@ -713,6 +769,7 @@ mod tests {
         assert_eq!(ControlMessageType::Presence.to_u8(), 1);
         assert_eq!(ControlMessageType::Capabilities.to_u8(), 2);
         assert_eq!(ControlMessageType::DiagnosticHint.to_u8(), 3);
+        assert_eq!(ControlMessageType::Extensions.to_u8(), 4);
         assert_eq!(
             ControlMessageType::from_u8(0),
             Some(ControlMessageType::Hello)
@@ -721,7 +778,11 @@ mod tests {
             ControlMessageType::from_u8(3),
             Some(ControlMessageType::DiagnosticHint)
         );
-        assert_eq!(ControlMessageType::from_u8(4), None);
+        assert_eq!(
+            ControlMessageType::from_u8(4),
+            Some(ControlMessageType::Extensions)
+        );
+        assert_eq!(ControlMessageType::from_u8(5), None);
         assert_eq!(ControlMessageType::from_u8(255), None);
     }
 
@@ -1010,6 +1071,18 @@ mod tests {
             ControlEnvelope::presence(node, 2, 1_700_000_000, None),
             ControlEnvelope::capabilities(node, 3, 1_700_000_000, vec!["files-v2".into()]),
             ControlEnvelope::diagnostic_hint(node, 4, 1_700_000_000, 1, None),
+            ControlEnvelope::extensions(
+                node,
+                5,
+                1_700_000_000,
+                crate::control_plane::extensions::ExtensionsPayload {
+                    file: Some(crate::control_plane::extensions::FileReadiness {
+                        protocol_versions: vec!["v2".into()],
+                        can_receive: true,
+                    }),
+                    ..Default::default()
+                },
+            ),
         ];
         for envelope in envelopes {
             let bytes = envelope.encode();
