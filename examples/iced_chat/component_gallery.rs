@@ -581,6 +581,12 @@ fn avatar_gallery() -> Element<'static, AppMessage> {
                 .height(Length::Shrink),
         )
         .push(avatar_example("Eve", "Size: SM (36px)"))
+        .push(
+            Space::new()
+                .width(Length::Fixed(design_tokens::SPACE_12))
+                .height(Length::Shrink),
+        )
+        .push(avatar_example("Frank", "Size: PROFILE (72px)"))
         .spacing(0)
         .align_y(Alignment::End)
         .into()
@@ -590,6 +596,9 @@ fn avatar_example(name: &str, label: &str) -> Element<'static, AppMessage> {
     let mut avatar = Avatar::<AppMessage>::new(name);
     if name == "Eve" {
         avatar = avatar.size(design_tokens::AVATAR_SM);
+    }
+    if name == "Frank" {
+        avatar = avatar.profile_size();
     }
 
     Column::new()
