@@ -591,3 +591,8 @@ name = "test_discovery_startup"
 path = "tests/test_discovery_startup.rs"
 required-features = ["net"]
 
+[[test]]
+name = "test_discovery_two_node"
+path = "tests/test_discovery_two_node.rs"
+required-features = ["net"]
+
