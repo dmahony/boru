@@ -611,3 +611,8 @@ name = "test_discovery_ui_isolation"
 path = "tests/test_discovery_ui_isolation.rs"
 required-features = ["net"]
 
+[[test]]
+name = "test_discovery_restart"
+path = "tests/test_discovery_restart.rs"
+required-features = ["net"]
+
