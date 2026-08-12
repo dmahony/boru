@@ -134,7 +134,7 @@ use tracing::{debug, info, trace, warn};
 
 use crate::api::{ApiError, Event, GossipReceiver, GossipSender, Message as GossipMessage};
 use crate::control_plane::advertisement::{
-    AdvertisementAuth, PublicRoomAdvertisement as AdvertisementPayload,
+    AdvertisementAuth, PublicRoomAdvertisement as AdvertisementPayload, RoomVisibility,
 };
 use crate::control_plane::capabilities::{
     compatible_version, default_local_capabilities, CapabilitySet,
@@ -573,6 +573,11 @@ pub enum AnnounceOutcome {
     /// broadcast (BORU-CP-11 idempotence — no duplicate advertisements for
     /// an unchanged capability set).
     Unchanged,
+    /// The announcement was refused by the visibility guard (BORU-DIR-04):
+    /// a room advertisement for a Private or PublicUnlisted room was
+    /// submitted, and only PublicDiscoverable rooms may be advertised.
+    /// Nothing was broadcast.
+    NotDiscoverable,
 }
 
 /// Minimum-interval throttle for discovery announcements.
@@ -1040,6 +1045,16 @@ impl ControlAnnounceHandle {
         &self,
         advert: AdvertisementPayload,
     ) -> Result<AnnounceOutcome, DiscoveryServiceError> {
+        // BORU-DIR-04 (PDF 2.1): only PublicDiscoverable rooms are ever
+        // advertised. Private and PublicUnlisted rooms must not emit a
+        // PUBLIC_ROOM_ADVERTISEMENT — this is the emit-site guard.
+        if !advert.visibility.is_discoverable() {
+            debug!(
+                visibility = ?advert.visibility,
+                "discovery: refusing to advertise non-discoverable room",
+            );
+            return Ok(AnnounceOutcome::NotDiscoverable);
+        }
         if !self.advert_throttle.try_announce() {
             debug!("discovery: room-advertisement announcement throttled");
             return Ok(AnnounceOutcome::Throttled);
@@ -1664,6 +1679,7 @@ impl DiscoveryService {
                 debug!(topic = %topic, "discovery hello suppressed on join");
             }
             Ok(AnnounceOutcome::Unchanged) => {}
+            Ok(_) => {}
             Err(error) => {
                 warn!(
                     topic = %topic,
@@ -1683,6 +1699,7 @@ impl DiscoveryService {
                 debug!(topic = %topic, "discovery control hello suppressed on join");
             }
             Ok(AnnounceOutcome::Unchanged) => {}
+            Ok(_) => {}
             Err(error) => {
                 warn!(
                     topic = %topic,
@@ -1705,6 +1722,7 @@ impl DiscoveryService {
                 debug!(topic = %topic, "discovery capabilities suppressed on join");
             }
             Ok(AnnounceOutcome::Unchanged) => {}
+            Ok(_) => {}
             Err(error) => {
                 warn!(
                     topic = %topic,
@@ -1726,6 +1744,7 @@ impl DiscoveryService {
                 debug!(topic = %topic, "discovery extensions suppressed on join");
             }
             Ok(AnnounceOutcome::Unchanged) => {}
+            Ok(_) => {}
             Err(error) => {
                 warn!(
                     topic = %topic,
@@ -2094,6 +2113,11 @@ impl DiscoveryService {
     /// broadcast but receivers treat it as clearly untrusted (never
     /// canonical).
     ///
+    /// Visibility guard (BORU-DIR-04, PDF Phase 2 Task 2.1): only
+    /// [`RoomVisibility::PublicDiscoverable`] rooms are advertised. A
+    /// Private or PublicUnlisted advertisement is refused with
+    /// [`AnnounceOutcome::NotDiscoverable`] and nothing is broadcast.
+    ///
     /// The room-advertisement throttle bounds the rate; the broadcast is a
     /// control-plane envelope, never a chat message, and never a room join
     /// (PDF Core rule: advertisements only advertise existence).
@@ -2101,7 +2125,16 @@ impl DiscoveryService {
         &self,
         advert: crate::control_plane::advertisement::PublicRoomAdvertisement,
     ) -> Result<AnnounceOutcome, DiscoveryServiceError> {
-        self.control_announce.announce_room_advertisement(advert).await
+        if !advert.visibility.is_discoverable() {
+            debug!(
+                visibility = ?advert.visibility,
+                "discovery: refusing to announce non-discoverable room advertisement",
+            );
+            return Ok(AnnounceOutcome::NotDiscoverable);
+        }
+        self.control_announce
+            .announce_room_advertisement(advert)
+            .await
     }
 
     /// The latest Phase 6 extensions advertisement cached for `peer`
@@ -2778,6 +2811,7 @@ async fn drain_loop(
                                 }
                                 Ok(AnnounceOutcome::Throttled) => {}
                                 Ok(AnnounceOutcome::Unchanged) => {}
+                                Ok(_) => {}
                                 Err(error) => {
                                     warn!(
                                         peer = %peer.fmt_short(),
@@ -3523,6 +3557,7 @@ async fn presence_refresh_loop(
                         trace!("control: presence refresh suppressed by throttle");
                     }
                     Ok(AnnounceOutcome::Unchanged) => {}
+                    Ok(_) => {}
                     Err(error) => {
                         warn!(
                             error = %error,
@@ -3545,6 +3580,7 @@ async fn presence_refresh_loop(
                             trace!("control: capabilities refresh suppressed by throttle");
                         }
                         Ok(AnnounceOutcome::Unchanged) => {}
+                        Ok(_) => {}
                         Err(error) => {
                             warn!(
                                 error = %error,
@@ -3568,6 +3604,7 @@ async fn presence_refresh_loop(
                             trace!("control: extensions refresh suppressed by throttle");
                         }
                         Ok(AnnounceOutcome::Unchanged) => {}
+                        Ok(_) => {}
                         Err(error) => {
                             warn!(
                                 error = %error,
@@ -5849,7 +5886,10 @@ mod tests {
                     ControlMessageType::PublicRoomAdvertisement
                 );
                 let ControlPayload::PublicRoomAdvertisement(payload) = &env.payload else {
-                    panic!("expected PublicRoomAdvertisement payload, got {:?}", env.payload);
+                    panic!(
+                        "expected PublicRoomAdvertisement payload, got {:?}",
+                        env.payload
+                    );
                 };
                 assert!(
                     payload.signature.is_some(),
@@ -5863,6 +5903,69 @@ mod tests {
             }
             other => panic!("expected decoded envelope, got {other:?}"),
         }
+    }
+
+    /// BORU-DIR-04 (PDF 2.1): the advertisement emit site refuses
+    /// Private and PublicUnlisted rooms — only PublicDiscoverable rooms
+    /// may emit a PUBLIC_ROOM_ADVERTISEMENT.
+    #[tokio::test]
+    async fn announce_room_advertisement_refuses_non_discoverable() {
+        use crate::control_plane::advertisement::{PublicRoomAdvertisement, RoomVisibility};
+
+        // Helper: a minimal advertisement with a chosen visibility.
+        fn advert_with(visibility: RoomVisibility) -> PublicRoomAdvertisement {
+            let mut advert = PublicRoomAdvertisement::minimal(
+                crate::proto::state::TopicId::from_bytes([0x42; 32]),
+                "Room".into(),
+                test_key(0xAA).as_bytes().to_owned(),
+            );
+            advert.visibility = visibility;
+            advert
+        }
+
+        for visibility in [RoomVisibility::Private, RoomVisibility::PublicUnlisted] {
+            let local = test_key(0xAA);
+            let (cmd_tx, mut cmd_rx) = irpc_mpsc::channel::<Command>(64);
+            let (_ev_tx, ev_rx) = irpc_mpsc::channel::<Event>(64);
+            let sender = GossipSender::new(cmd_tx);
+            let receiver = GossipReceiver::new(ev_rx);
+            let service =
+                DiscoveryService::from_subscription(test_topic(), sender, receiver, local);
+
+            let outcome = service
+                .announce_room_advertisement(advert_with(visibility))
+                .await
+                .expect("guard returns ok outcome, not an error");
+            assert_eq!(
+                outcome,
+                AnnounceOutcome::NotDiscoverable,
+                "{visibility:?} rooms must never be advertised"
+            );
+            // Nothing was broadcast.
+            assert!(
+                tokio::time::timeout(Duration::from_millis(200), cmd_rx.recv())
+                    .await
+                    .is_err(),
+                "{visibility:?} advertisement must not be emitted"
+            );
+        }
+
+        // PublicDiscoverable still announces (the positive path is fully
+        // covered by announce_room_advertisement_broadcasts_signed_envelope).
+        let local = test_key(0xAA);
+        let (cmd_tx, cmd_rx) = irpc_mpsc::channel::<Command>(64);
+        let (_ev_tx, ev_rx) = irpc_mpsc::channel::<Event>(64);
+        let sender = GossipSender::new(cmd_tx);
+        let receiver = GossipReceiver::new(ev_rx);
+        let service = DiscoveryService::from_subscription(test_topic(), sender, receiver, local);
+        assert_eq!(
+            service
+                .announce_room_advertisement(advert_with(RoomVisibility::PublicDiscoverable))
+                .await
+                .unwrap(),
+            AnnounceOutcome::Announced
+        );
+        let _ = cmd_rx;
     }
 
     /// `send_control` serialises a control-plane envelope (magic `BC`) and

@@ -103,6 +103,7 @@ use boru_core::conversations::{
 };
 use boru_core::discovery_backend::MainlineDhtBackend;
 use boru_core::discovery_secret::DiscoverySecret;
+use boru_core::control_plane::advertisement::RoomVisibility;
 use boru_core::control_plane::connectivity::{
     ConnectivityEvent, PeerConnectivityState, PeerConnectivityStore,
 };
@@ -7430,6 +7431,35 @@ impl IcedChat {
                 store
             }
         };
+        // BORU-DIR-04 (PDF 2.1): conservative visibility migration. Rooms
+        // that this node advertised into the directory under the legacy
+        // model (local-authored rows in the persisted directory store) are
+        // migrated to PublicUnlisted — shareable but not browsable — so no
+        // existing public room is unexpectedly exposed by the new directory.
+        // Entries that already carry an explicit visibility are untouched.
+        {
+            let legacy_public_topics: std::collections::HashSet<TopicId> = {
+                let store = directory_store.lock().unwrap();
+                store
+                    .list_active()
+                    .into_iter()
+                    .filter(|(_, author)| *author == local_public)
+                    .map(|(ad, _)| ad.topic)
+                    .collect()
+            };
+            let migrated =
+                conversation_store.migrate_legacy_public_rooms(&legacy_public_topics);
+            if migrated > 0 {
+                info!(
+                    migrated,
+                    "BORU-DIR-04: migrated legacy public rooms to PublicUnlisted"
+                );
+                if let Some(ref st) = storage {
+                    let _ = conversation_store.save_to_sqlite(st);
+                }
+                let _ = conversation_store.save();
+            }
+        }
         // BORU-DISC-18: never surface a stale saved lobby conversation in the
         // room list. Remove it from the in-memory store and persist the
         // removal so an install upgraded from an old version that auto-joined
@@ -11403,6 +11433,11 @@ impl IcedChat {
                     // the room can be unarchived into the CHATS sidebar later.
                     let mut entry = ConversationEntry::new(topic, "", &display_name);
                     entry.archived = true;
+                    // BORU-DIR-04 (PDF 2.1): the "Advertise in Directory"
+                    // checkbox is an explicit discoverability choice — the
+                    // room is PublicDiscoverable, so it is the only kind of
+                    // room allowed to emit directory advertisements.
+                    entry.visibility = RoomVisibility::PublicDiscoverable;
                     self.conversation_store.upsert(entry);
                     self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
                     // Upsert into the local directory store so the creator
@@ -14757,18 +14792,25 @@ impl IcedChat {
                                 advertised
                                     .into_iter()
                                     .filter_map(|topic| {
+                                        // BORU-DIR-04 (PDF 2.1): only
+                                        // PublicDiscoverable rooms are
+                                        // advertised. Rooms whose persisted
+                                        // visibility is Private or
+                                        // PublicUnlisted must not emit
+                                        // directory advertisements (this is
+                                        // the legacy emit path; the
+                                        // control-plane path is guarded in
+                                        // the discovery service).
+                                        let entry = self.conversation_store.find(&topic)?;
+                                        if entry.visibility != RoomVisibility::PublicDiscoverable {
+                                            return None;
+                                        }
                                         // Look up the room's name from conversation_store
-                                        let name = self
-                                            .conversation_store
-                                            .find(&topic)
-                                            .map(|e| {
-                                                if e.name.is_empty() {
-                                                    topic.to_string()
-                                                } else {
-                                                    e.name.clone()
-                                                }
-                                            })
-                                            .unwrap_or_else(|| topic.to_string());
+                                        let name = if entry.name.is_empty() {
+                                            topic.to_string()
+                                        } else {
+                                            entry.name.clone()
+                                        };
                                         // Count neighbors in this specific room.
                                         let neighbor_count = self
                                             .room_neighbor_counts

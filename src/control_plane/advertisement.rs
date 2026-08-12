@@ -216,6 +216,23 @@ pub enum RoomVisibility {
     PublicDiscoverable,
 }
 
+impl RoomVisibility {
+    /// Whether this room may emit directory advertisements
+    /// (BORU-DIR-04, PDF visibility model): only
+    /// [`RoomVisibility::PublicDiscoverable`] rooms are advertised.
+    pub fn is_discoverable(self) -> bool {
+        self == RoomVisibility::PublicDiscoverable
+    }
+}
+
+impl Default for RoomVisibility {
+    fn default() -> Self {
+        // Conservative default: a room is private unless the creator
+        // explicitly opts into unlisted/discoverable visibility.
+        RoomVisibility::Private
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Advertisement bounds
 // ---------------------------------------------------------------------------

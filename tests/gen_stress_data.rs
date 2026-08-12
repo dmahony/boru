@@ -71,6 +71,7 @@ fn generate_stress_data() {
             created_at_unix_ms: 1700000000000u64,
             last_seen_at_unix_ms: 1700000000000u64,
             archived: false,
+            visibility: boru_core::control_plane::advertisement::RoomVisibility::Private,
         });
     }
     conv_store.save().unwrap();

@@ -12,6 +12,14 @@ see the [git log](https://github.com/dmahony/boru/commits/main/).
 
 ### Added
 
+- Public room directory (BORU-DIR chain): room visibility model with
+  `Private`, `PublicUnlisted`, and `PublicDiscoverable` states, persisted on
+  room metadata (`ConversationEntry.visibility`). Only `PublicDiscoverable`
+  rooms emit directory advertisements — the emit site refuses
+  Private/PublicUnlisted with `AnnounceOutcome::NotDiscoverable`, and legacy
+  public rooms are conservatively migrated to `PublicUnlisted` on startup so
+  no existing room is unexpectedly exposed. See
+  `docs/public-room-directory/room-visibility-state.md`.
 - File Sharing dashboard screen with five tabs — Shared by Me, Downloading,
   Downloaded, Shared with Me, and Activity Log — backed by live transfer
   projections and durable SQLite projections. Includes a per-tab search,

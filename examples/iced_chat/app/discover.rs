@@ -1530,10 +1530,57 @@ impl IcedChat {
                 // Toggle advertising for this room.
                 if self.advertised_rooms.contains(&topic) {
                     self.advertised_rooms.remove(&topic);
+                    // BORU-DIR-04 (PDF 2.1): disabling advertising moves the
+                    // room to PublicUnlisted — shareable but not browsable.
+                    let changed = {
+                        let changed = self
+                            .conversation_store
+                            .find_mut(&topic)
+                            .map(|entry| {
+                                if entry.visibility == RoomVisibility::PublicDiscoverable {
+                                    entry.visibility = RoomVisibility::PublicUnlisted;
+                                    true
+                                } else {
+                                    false
+                                }
+                            })
+                            .unwrap_or(false);
+                        changed
+                    };
+                    if changed {
+                        let _ = self.conversation_store.save();
+                        if let Some(ref st) = self.storage {
+                            let _ = self.conversation_store.save_to_sqlite(st);
+                        }
+                    }
                     info!(%topic, "room advertising disabled");
                     iced::Task::none()
                 } else {
                     self.advertised_rooms.insert(topic);
+                    // BORU-DIR-04 (PDF 2.1): enabling advertising makes the
+                    // room PublicDiscoverable — the only visibility allowed
+                    // to emit directory advertisements.
+                    let changed = {
+                        let changed = self
+                            .conversation_store
+                            .find_mut(&topic)
+                            .map(|entry| {
+                                if entry.visibility != RoomVisibility::PublicDiscoverable {
+                                    entry.visibility = RoomVisibility::PublicDiscoverable;
+                                    true
+                                } else {
+                                    false
+                                }
+                            })
+                            .unwrap_or(false);
+                        changed
+                    };
+                    if changed {
+                        let _ = self.conversation_store.save();
+                        if let Some(ref st) = self.storage {
+                            let _ = self.conversation_store.save_to_sqlite(st);
+                        }
+                    }
                     info!(%topic, "room advertising enabled");
                     let room_name = self
                         .conversation_store

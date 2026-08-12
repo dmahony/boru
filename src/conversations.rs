@@ -32,6 +32,7 @@ use n0_error::{Result, StdResultExt};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
+use crate::control_plane::advertisement::RoomVisibility;
 use crate::group_id::GroupId;
 use crate::peer_names;
 use crate::proto::TopicId;
@@ -133,6 +134,14 @@ pub struct ConversationEntry {
     /// default conversation list.
     #[serde(default)]
     pub archived: bool,
+    /// Room visibility (BORU-DIR-04, PDF Phase 2 Task 2.1).
+    ///
+    /// Defaults to [`RoomVisibility::Private`] for legacy entries and
+    /// direct chats. Only [`RoomVisibility::PublicDiscoverable`] rooms may
+    /// emit directory advertisements; existing public rooms are migrated
+    /// conservatively to [`RoomVisibility::PublicUnlisted`].
+    #[serde(default)]
+    pub visibility: RoomVisibility,
 }
 
 impl ConversationEntry {
@@ -152,6 +161,7 @@ impl ConversationEntry {
             last_message_preview: String::new(),
             unread_count: 0,
             archived: false,
+            visibility: RoomVisibility::Private,
         }
     }
 
@@ -181,6 +191,7 @@ impl ConversationEntry {
             last_message_preview: String::new(),
             unread_count: 0,
             archived: false,
+            visibility: RoomVisibility::Private,
         }
     }
 
@@ -611,6 +622,36 @@ impl ConversationStore {
     /// Returns the previous entry for the same topic, if any.
     pub fn upsert(&mut self, entry: ConversationEntry) -> Option<ConversationEntry> {
         self.insert_or_update(entry)
+    }
+
+    /// Migrate legacy public rooms to conservative visibility (BORU-DIR-04,
+    /// PDF Phase 2 Task 2.1 step 2).
+    ///
+    /// Entries whose topic is in `legacy_public_topics` — rooms that were
+    /// advertised into the directory by the legacy model — are set to
+    /// [`RoomVisibility::PublicUnlisted`] unless they already carry an
+    /// explicit visibility. Only entries that are still
+    /// [`RoomVisibility::Private`] (the legacy/unspecified default) are
+    /// touched, so an entry the user has already made discoverable is left
+    /// alone. Returns the number of entries migrated.
+    ///
+    /// This is deliberately conservative: existing public rooms become
+    /// shareable-but-unlisted rather than discoverable, so no room is
+    /// unexpectedly exposed after an upgrade.
+    pub fn migrate_legacy_public_rooms(
+        &mut self,
+        legacy_public_topics: &std::collections::HashSet<TopicId>,
+    ) -> usize {
+        let mut migrated = 0;
+        for entry in &mut self.conversations {
+            if entry.visibility == RoomVisibility::Private
+                && legacy_public_topics.contains(&entry.topic)
+            {
+                entry.visibility = RoomVisibility::PublicUnlisted;
+                migrated += 1;
+            }
+        }
+        migrated
     }
 
     /// Remove a conversation by topic.
@@ -1313,5 +1354,124 @@ mod tests {
             "expected a Message NetEvent, got {:?}",
             conv_event.event
         );
+    }
+
+    // ── Room visibility (BORU-DIR-04, PDF Phase 2 Task 2.1) ───────────
+
+    #[test]
+    fn visibility_defaults_to_private_for_new_entries() {
+        let direct = ConversationEntry::new(make_topic(0x01), "peer", "Direct");
+        assert_eq!(direct.visibility, RoomVisibility::Private);
+        let group = ConversationEntry::new_group(make_topic(0x02), "Group");
+        assert_eq!(group.visibility, RoomVisibility::Private);
+    }
+
+    #[test]
+    fn visibility_round_trips_json_persistence() {
+        // Direct entry with explicit visibility survives store save/load.
+        let dir = temp_dir("visibility-json");
+        let mut store = ConversationStore::empty_at(&dir);
+        let mut entry = ConversationEntry::new_group(make_topic(0xAA), "Discoverable");
+        entry.visibility = RoomVisibility::PublicDiscoverable;
+        store.upsert(entry);
+        store.save().expect("save store");
+
+        let loaded = ConversationStore::load(&dir).expect("load store");
+        let restored = loaded.find(&make_topic(0xAA)).expect("entry restored");
+        assert_eq!(restored.visibility, RoomVisibility::PublicDiscoverable);
+        assert_eq!(restored.name, "Discoverable");
+        // Topic identity must be untouched by persistence.
+        assert_eq!(restored.topic, make_topic(0xAA));
+    }
+
+    #[test]
+    fn legacy_json_without_visibility_defaults_to_private() {
+        // Old persisted entries (pre-BORU-DIR-04) have no `visibility` field;
+        // serde default must yield Private so nothing is accidentally
+        // advertised after an upgrade.
+        let json = r#"{
+            "topic": [170,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            "peer_id": "",
+            "name": "Legacy Room",
+            "kind": "Group",
+            "created_at_unix_ms": 1700000000000,
+            "archived": false
+        }"#;
+        let restored: ConversationEntry = serde_json::from_str(json).expect("parse legacy json");
+        assert_eq!(restored.visibility, RoomVisibility::Private);
+        assert_eq!(restored.name, "Legacy Room");
+    }
+
+    #[test]
+    fn migrate_legacy_public_rooms_sets_unlisted() {
+        let dir = temp_dir("migrate-visibility");
+        let mut store = ConversationStore::empty_at(&dir);
+
+        // Room A was advertised in the old model (legacy public).
+        let a = make_topic(0xA1);
+        store.upsert(ConversationEntry::new_group(a, "Legacy Public A"));
+        // Room B was advertised too.
+        let b = make_topic(0xB2);
+        store.upsert(ConversationEntry::new_group(b, "Legacy Public B"));
+        // Room C was private (never in the directory).
+        let c = make_topic(0xC3);
+        store.upsert(ConversationEntry::new_group(c, "Private C"));
+        // Room D is already explicitly discoverable — must not be downgraded.
+        let d = make_topic(0xD4);
+        let mut d_entry = ConversationEntry::new_group(d, "Explicitly Discoverable");
+        d_entry.visibility = RoomVisibility::PublicDiscoverable;
+        store.upsert(d_entry);
+
+        let legacy_topics: std::collections::HashSet<TopicId> =
+            [a, b].into_iter().collect();
+        let migrated = store.migrate_legacy_public_rooms(&legacy_topics);
+
+        assert_eq!(migrated, 2);
+        assert_eq!(
+            store.find(&a).unwrap().visibility,
+            RoomVisibility::PublicUnlisted
+        );
+        assert_eq!(
+            store.find(&b).unwrap().visibility,
+            RoomVisibility::PublicUnlisted
+        );
+        // Non-legacy rooms stay Private.
+        assert_eq!(store.find(&c).unwrap().visibility, RoomVisibility::Private);
+        // Explicit discoverability is preserved.
+        assert_eq!(
+            store.find(&d).unwrap().visibility,
+            RoomVisibility::PublicDiscoverable
+        );
+
+        // Idempotent: a second pass migrates nothing.
+        assert_eq!(store.migrate_legacy_public_rooms(&legacy_topics), 0);
+    }
+
+    #[test]
+    fn visibility_change_keeps_topic_identity_and_history() {
+        let dir = temp_dir("visibility-change");
+        let mut store = ConversationStore::empty_at(&dir);
+        let topic = make_topic(0xE5);
+        let entry = ConversationEntry::new_group(topic, "Room");
+        store.upsert(entry);
+
+        // Change discoverability — same topic, same entry (no recreation).
+        let mut changed = ConversationEntry::new_group(topic, "Room");
+        changed.visibility = RoomVisibility::PublicDiscoverable;
+        store.upsert(changed);
+
+        assert_eq!(store.len(), 1, "no duplicate entry created");
+        let restored = store.find(&topic).expect("same topic present");
+        assert_eq!(restored.topic, topic, "topic identity unchanged");
+        assert_eq!(restored.name, "Room", "name preserved");
+        assert_eq!(restored.kind, ConversationKind::Group, "kind preserved");
+        assert_eq!(
+            restored.visibility,
+            RoomVisibility::PublicDiscoverable,
+            "visibility updated"
+        );
+        // Visibility is metadata only — it never participates in topic
+        // identity or group history, so the entry was updated in place.
+        assert_eq!(store.len(), 1, "no duplicate entry created");
     }
 }
