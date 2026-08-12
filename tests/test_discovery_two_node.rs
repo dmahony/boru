@@ -649,3 +649,160 @@ async fn control_presence_goes_stale_after_peer_disappears() -> Result<()> {
     harness.b.service.shutdown().await;
     Ok(())
 }
+
+// =========================================================================
+// 5. Peer connectivity state machine (BORU-CP-05) — no chat
+// =========================================================================
+
+/// A and B discover each other over the real mesh. Each side's connectivity
+/// state machine marks the peer [`PeerConnectivityState::Discovered`] — the
+/// core PDF acceptance criterion that a peer can be Discovered but NOT
+/// DirectTopicReady. The deterministic transition trail shows the
+/// DiscoverySeen event. A direct-topic failure reported via the data plane
+/// is then visible as Degraded (not 'online').
+#[tokio::test]
+async fn two_nodes_state_machine_discovered_but_not_direct_topic_ready() -> Result<()> {
+    use boru_core::control_plane::connectivity::{
+        ConnectivityEvent as CE, PeerConnectivityState,
+    };
+
+    let mut rng = rand::rngs::ChaCha12Rng::seed_from_u64(0xD15C22A5);
+    let harness = TwoNodeHarness::spawn(&mut rng, PublicNetwork::Test).await?;
+
+    wait_for_peer(&harness.a.service, harness.pk_b, "A to learn B").await?;
+    wait_for_peer(&harness.b.service, harness.pk_a, "B to learn A").await?;
+
+    // ── Both sides see the peer as known but NOT DirectTopicReady ──────
+    // Over a real mesh the endpoint dial may complete quickly, so the peer
+    // can legitimately be `Discovered` or `Reachable` — but NEVER
+    // `DirectTopicReady`: discovery announcements alone never make a peer
+    // ready for direct messaging (the core PDF distinction).
+    let deadline = Instant::now() + MESH_TIMEOUT;
+    let mut a_sees_b = false;
+    let mut b_sees_a = false;
+    while Instant::now() < deadline {
+        if harness.a.service.connectivity_state(&harness.pk_b).is_known()
+            && !harness.a.service.connectivity_state(&harness.pk_b).is_ready_for_direct()
+        {
+            a_sees_b = true;
+        }
+        if harness.b.service.connectivity_state(&harness.pk_a).is_known()
+            && !harness.b.service.connectivity_state(&harness.pk_a).is_ready_for_direct()
+        {
+            b_sees_a = true;
+        }
+        if a_sees_b && b_sees_a {
+            break;
+        }
+        tokio::time::sleep(POLL_TICK).await;
+    }
+
+    assert!(
+        a_sees_b,
+        "A's state machine must track B as known but NOT DirectTopicReady"
+    );
+    assert!(
+        b_sees_a,
+        "B's state machine must track A as known but NOT DirectTopicReady"
+    );
+
+    let state_a_on_b = harness.b.service.connectivity_state(&harness.pk_a);
+    assert!(
+        !state_a_on_b.is_ready_for_direct(),
+        "a discovered peer must NOT be DirectTopicReady"
+    );
+    assert!(
+        state_a_on_b.is_known(),
+        "the peer must be tracked in the state machine"
+    );
+
+    // ── Deterministic transition trail (BORU-CP-05 acceptance) ─────────
+    // The trail preserves the full deterministic path. Over a real mesh the
+    // first record may be either `DiscoverySeen` (announcement arrived
+    // first) or `EndpointConnected` (the gossip edge formed first, e.g.
+    // NeighborUp before Hello) — both are real networking events and both
+    // start from `Unknown`.
+    let trail = harness.b.service.connectivity_trail(&harness.pk_a);
+    assert!(
+        !trail.is_empty(),
+        "the state machine must log a deterministic transition trail"
+    );
+    assert_eq!(
+        trail[0].from,
+        PeerConnectivityState::Unknown,
+        "trail starts from Unknown"
+    );
+    assert!(
+        matches!(
+            trail[0].event,
+            CE::DiscoverySeen | CE::EndpointConnected
+        ),
+        "first transition is a real networking event (discovery or endpoint)"
+    );
+    assert!(
+        trail[0].to.is_known() && !trail[0].to.is_ready_for_direct(),
+        "first transition lands on a known, not-direct-ready state"
+    );
+    // All subsequent records are real networking events, never fabricated.
+    for record in &trail {
+        assert!(
+            matches!(
+                record.event,
+                CE::DiscoverySeen
+                    | CE::EndpointConnecting
+                    | CE::EndpointConnected
+                    | CE::EndpointFailed
+                    | CE::Timeout
+                    | CE::TopicJoined
+                    | CE::TopicJoinFailed
+                    | CE::DirectMessageReceived
+                    | CE::PathChangedDirect
+                    | CE::PathChangedRelay
+            ),
+            "trail must only contain real networking events"
+        );
+    }
+
+    // ── Failed direct-topic setup is visible, not 'online' ─────────────
+    let outcome = harness.b.service.report_connectivity_failure(
+        harness.pk_a,
+        CE::TopicJoinFailed,
+        "direct topic subscribe timed out".to_string(),
+    );
+    assert!(matches!(
+        outcome,
+        boru_core::control_plane::connectivity::TransitionOutcome::Transitioned { .. }
+    ));
+    assert_eq!(
+        harness.b.service.connectivity_state(&harness.pk_a),
+        PeerConnectivityState::Degraded,
+        "a failed direct-topic setup must be Degraded"
+    );
+    assert!(
+        !harness.b.service.connectivity_state(&harness.pk_a).is_online(),
+        "failed direct-topic setup must never be reported simply as online"
+    );
+    let entry = harness
+        .b
+        .service
+        .connectivity_peers()
+        .into_iter()
+        .find(|(id, _)| *id == harness.pk_a)
+        .map(|(_, e)| e)
+        .expect("connectivity entry for A");
+    assert_eq!(
+        entry.direct_topic_state,
+        boru_core::control_plane::connectivity::DirectTopicState::Failed
+    );
+
+    // No chat was ever created.
+    assert_no_visible_lobby_chat(&harness.a, &harness.topic, "A");
+    assert_no_visible_lobby_chat(&harness.b, &harness.topic, "B");
+    let spy_a = harness.spy_a.lock().expect("spy lock poisoned").clone();
+    let spy_b = harness.spy_b.lock().expect("spy lock poisoned").clone();
+    assert_no_chat_payloads(&spy_a, "A spy");
+    assert_no_chat_payloads(&spy_b, "B spy");
+
+    harness.shutdown().await;
+    Ok(())
+}

@@ -18,13 +18,20 @@
 //! * [`privacy`] — the BORU-CP-03 privacy/abuse layer: minimal-advertisement
 //!   whitelist policy, per-sender rate limiting, `(sender, sequence)` dedup,
 //!   TTL-based presence expiry, and sender attribution ([`ControlPlaneGuard`]).
+//! * [`connectivity`] — the BORU-CP-05 explicit peer connectivity state
+//!   machine: states (Unknown / Discovered / Connecting / Reachable /
+//!   DirectTopicReady / Degraded / OfflineStale), the deterministic
+//!   transition table, and a bounded per-peer transition trail
+//!   ([`PeerConnectivityStore`]).
 //!
-//! Later tasks in the BORU-CP chain add the service boundary (CP-02),
-//! presence state (CP-04), capability negotiation (CP-05), and diagnostics
-//! (CP-06) as siblings of [`message`].
+//! Later tasks in the BORU-CP chain add capability negotiation (CP-05 is
+//! the state machine; capabilities are Phase 4) and diagnostics (Phase 5)
+//! as siblings of [`message`].
 
+pub mod connectivity;
 pub mod message;
 pub mod privacy;
 
+pub use connectivity::*;
 pub use message::*;
 pub use privacy::*;

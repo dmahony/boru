@@ -136,6 +136,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 
 use crate::api::{ApiError, Event, GossipReceiver, GossipSender, Message as GossipMessage};
+use crate::control_plane::connectivity::{ConnectivityEvent, PeerConnectivityStore};
 use crate::control_plane::message::{
     ControlEnvelope, ControlPlaneDecode, CONTROL_PLANE_MAGIC, BORU_APP_PROTOCOL_VERSION,
 };
@@ -763,6 +764,11 @@ struct ReceiveCore {
     /// sender attribution, and the TTL-expiring control-plane presence
     /// store. Shared between the receive path and the presence-expiry sweep.
     guard: Arc<Mutex<ControlPlaneGuard>>,
+    /// The BORU-CP-05 explicit peer connectivity state machine: per-peer
+    /// connectivity state + deterministic transition trail, updated only
+    /// from real networking events. Shared between the receive path, the
+    /// connectivity loop, and the presence-expiry sweep.
+    connectivity: Arc<Mutex<PeerConnectivityStore>>,
     /// Atomic discovery counters (BORU-DISC-20). Cloned from the global
     /// [`DIAGNOSTIC_COUNTERS`] by default so the frontend/MCP can read the
     /// same values; tests inject an isolated instance.
@@ -857,6 +863,18 @@ impl ReceiveCore {
             .peer_updates_tx
             .send(PeerUpdate::Seen { node_id, source });
 
+        // BORU-CP-05: a real discovery event — feed the peer connectivity
+        // state machine. Duplicates are already filtered above (registry
+        // dedup), and re-delivering the same event is an idempotent no-op
+        // in the state machine, so this can never cause a connection loop.
+        {
+            let mut connectivity = self
+                .connectivity
+                .lock()
+                .expect("connectivity store lock poisoned");
+            connectivity.apply(node_id, ConnectivityEvent::DiscoverySeen, Instant::now());
+        }
+
         if let DiscoveryMessage::PeerAdvertisement { advertised, .. } = message {
             // BORU-DISC-20: log peer advertisements at debug level with the
             // sender node id + the advertised peer + the source topic. Never
@@ -941,6 +959,21 @@ impl ReceiveCore {
                     sequence = envelope.sequence,
                     "discovery: control-plane message received",
                 );
+                // BORU-CP-05: a real discovery event — feed the peer
+                // connectivity state machine. The guard already deduplicated
+                // by (sender, sequence), so a duplicate delivery is an
+                // idempotent no-op here (never a connection loop).
+                {
+                    let mut connectivity = self
+                        .connectivity
+                        .lock()
+                        .expect("connectivity store lock poisoned");
+                    connectivity.apply(
+                        envelope.sender_node_id,
+                        ConnectivityEvent::DiscoverySeen,
+                        Instant::now(),
+                    );
+                }
                 let _ = self
                     .control_events_tx
                     .send(ControlEvent::Received(envelope));
@@ -1203,6 +1236,7 @@ impl DiscoveryService {
         let (peer_updates_tx, _) = broadcast::channel(PEER_UPDATES_CAPACITY);
         let (control_events_tx, _) = broadcast::channel(PEER_UPDATES_CAPACITY);
         let guard = Arc::new(Mutex::new(ControlPlaneGuard::new()));
+        let connectivity = Arc::new(Mutex::new(PeerConnectivityStore::new()));
         let core = ReceiveCore {
             local_node,
             topic,
@@ -1210,6 +1244,7 @@ impl DiscoveryService {
             peer_updates_tx,
             control_events_tx,
             guard,
+            connectivity,
             counters,
         };
         let announce = AnnounceHandle::new(sender.clone(), local_node);
@@ -1227,6 +1262,7 @@ impl DiscoveryService {
         let connectivity_task = tokio::spawn(connectivity_loop(
             announce.sender.clone(),
             core.peer_updates_tx.subscribe(),
+            core.connectivity.clone(),
             local_node,
             connectivity_cancel,
         ));
@@ -1243,6 +1279,7 @@ impl DiscoveryService {
             expiry_config.clone(),
             core.registry.clone(),
             core.guard.clone(),
+            core.connectivity.clone(),
             core.peer_updates_tx.clone(),
             expiry_cancel,
         ));
@@ -1504,6 +1541,99 @@ impl DiscoveryService {
             .collect()
     }
 
+    /// Current connectivity state for `peer` (BORU-CP-05).
+    ///
+    /// Returns [`PeerConnectivityState::Unknown`] when the peer is not
+    /// tracked. This is the state-machine-derived status that replaces
+    /// scattered 'online' booleans — UI (BORU-CP-06) and diagnostics read
+    /// from here, never from ad-hoc flags.
+    pub fn connectivity_state(
+        &self,
+        peer: &PublicKey,
+    ) -> crate::control_plane::connectivity::PeerConnectivityState {
+        let store = self
+            .core
+            .connectivity
+            .lock()
+            .expect("connectivity store lock poisoned");
+        store.state(peer)
+    }
+
+    /// The deterministic transition trail for `peer` (BORU-CP-05), oldest
+    /// first. Empty when the peer is not tracked.
+    pub fn connectivity_trail(
+        &self,
+        peer: &PublicKey,
+    ) -> Vec<crate::control_plane::connectivity::TransitionRecord> {
+        let store = self
+            .core
+            .connectivity
+            .lock()
+            .expect("connectivity store lock poisoned");
+        store.trail(peer)
+    }
+
+    /// Snapshot of the full connectivity state machine (BORU-CP-05): every
+    /// tracked peer with its state, path hint, direct-topic state, last
+    /// errors, and transition trail.
+    pub fn connectivity_peers(
+        &self,
+    ) -> Vec<(
+        PublicKey,
+        crate::control_plane::connectivity::PeerConnectivityEntry,
+    )> {
+        let store = self
+            .core
+            .connectivity
+            .lock()
+            .expect("connectivity store lock poisoned");
+        store
+            .peers()
+            .map(|(node_id, entry)| (*node_id, entry.clone()))
+            .collect()
+    }
+
+    /// Report a data-plane networking event into the connectivity state
+    /// machine (BORU-CP-05).
+    ///
+    /// This is the explicit event feed for events the discovery service
+    /// cannot observe itself: deterministic direct-topic join success /
+    /// failure, direct (non-discovery) message receipt, and relay/direct
+    /// path changes. The chat/data-plane layer calls these; the state
+    /// machine is updated ONLY from real networking events (PDF Task 2.2
+    /// step 3). The direction is data-plane → control-plane state; the
+    /// discovery service never calls chat code.
+    pub fn report_connectivity_event(
+        &self,
+        peer: PublicKey,
+        event: crate::control_plane::connectivity::ConnectivityEvent,
+    ) -> crate::control_plane::connectivity::TransitionOutcome {
+        let mut store = self
+            .core
+            .connectivity
+            .lock()
+            .expect("connectivity store lock poisoned");
+        store.apply(peer, event, Instant::now())
+    }
+
+    /// Report a data-plane failure event (topic join failed / endpoint
+    /// failed) with an error string, into the connectivity state machine
+    /// (BORU-CP-05). The failure is visible as `Degraded` with
+    /// `last_error` — never reported simply as 'online'.
+    pub fn report_connectivity_failure(
+        &self,
+        peer: PublicKey,
+        event: crate::control_plane::connectivity::ConnectivityEvent,
+        error: String,
+    ) -> crate::control_plane::connectivity::TransitionOutcome {
+        let mut store = self
+            .core
+            .connectivity
+            .lock()
+            .expect("connectivity store lock poisoned");
+        store.apply_with_error(peer, event, Some(error), Instant::now())
+    }
+
     /// Return a cloneable joiner handle bound to the discovery gossip
     /// sender.
     ///
@@ -1561,6 +1691,19 @@ async fn drain_loop(
                     }
                     Some(Ok(Event::NeighborUp(peer))) => {
                         trace!(peer = %peer.fmt_short(), "discovery: neighbor up");
+                        // BORU-CP-05: a real endpoint-connection success —
+                        // feed the peer connectivity state machine.
+                        {
+                            let mut connectivity = core
+                                .connectivity
+                                .lock()
+                                .expect("connectivity store lock poisoned");
+                            connectivity.apply(
+                                peer,
+                                ConnectivityEvent::EndpointConnected,
+                                Instant::now(),
+                            );
+                        }
                         // A new gossip neighbour joined the mesh — re-announce
                         // our presence so it can discover this node even if
                         // the join-time hello was broadcast before the
@@ -1590,6 +1733,21 @@ async fn drain_loop(
                     }
                     Some(Ok(Event::NeighborDown(peer))) => {
                         trace!(peer = %peer.fmt_short(), "discovery: neighbor down");
+                        // BORU-CP-05: a real endpoint-connection failure —
+                        // feed the peer connectivity state machine. If the
+                        // peer was DirectTopicReady this degrades it; if it
+                        // was already Degraded this is an idempotent no-op.
+                        {
+                            let mut connectivity = core
+                                .connectivity
+                                .lock()
+                                .expect("connectivity store lock poisoned");
+                            connectivity.apply(
+                                peer,
+                                ConnectivityEvent::EndpointFailed,
+                                Instant::now(),
+                            );
+                        }
                     }
                     Some(Ok(Event::Lagged)) => {
                         warn!("discovery receiver lagged — events dropped");
@@ -1640,6 +1798,7 @@ async fn drain_loop(
 async fn connectivity_loop(
     sender: GossipSender,
     mut updates: broadcast::Receiver<PeerUpdate>,
+    connectivity: Arc<Mutex<PeerConnectivityStore>>,
     local_node: PublicKey,
     cancel: CancellationToken,
 ) {
@@ -1654,10 +1813,10 @@ async fn connectivity_loop(
             update = updates.recv() => {
                 match update {
                     Ok(PeerUpdate::Seen { node_id, .. }) => {
-                        maybe_dial(&sender, &mut dialed, local_node, node_id).await;
+                        maybe_dial(&sender, &connectivity, &mut dialed, local_node, node_id).await;
                     }
                     Ok(PeerUpdate::Advertised { advertised, .. }) => {
-                        maybe_dial(&sender, &mut dialed, local_node, advertised).await;
+                        maybe_dial(&sender, &connectivity, &mut dialed, local_node, advertised).await;
                     }
                     Ok(PeerUpdate::Expired { .. }) => {
                         // The peer went stale (BORU-CP-03 TTL expiry). No
@@ -1682,8 +1841,16 @@ async fn connectivity_loop(
 /// Connectivity only: `join_peers` makes the gossip actor establish a mesh
 /// edge / resolve the peer's address book entry through the existing
 /// mechanisms — it never creates friends, groups, or conversations.
+///
+/// BORU-CP-05: feeds the peer connectivity state machine with the dial
+/// result — [`ConnectivityEvent::EndpointConnecting`] before the dial and
+/// [`ConnectivityEvent::EndpointConnected`] / [`ConnectivityEvent::EndpointFailed`]
+/// afterwards. Duplicate dials are filtered by `dialed`, and a duplicate
+/// `EndpointConnecting` is an idempotent no-op in the state machine, so a
+/// flood of announcements can never cause a connection loop.
 async fn maybe_dial(
     sender: &GossipSender,
+    connectivity: &Arc<Mutex<PeerConnectivityStore>>,
     dialed: &mut HashSet<iroh_base::EndpointId>,
     local_node: PublicKey,
     peer: PublicKey,
@@ -1697,9 +1864,17 @@ async fn maybe_dial(
         trace!(peer = %peer.fmt_short(), "discovery: peer already dialed");
         return;
     }
+    {
+        let mut store = connectivity.lock().expect("connectivity store lock poisoned");
+        store.apply(peer, ConnectivityEvent::EndpointConnecting, Instant::now());
+    }
     match sender.join_peers(vec![endpoint]).await {
         Ok(()) => {
             info!(peer = %peer.fmt_short(), "discovery: dialed discovered peer for connectivity");
+            {
+                let mut store = connectivity.lock().expect("connectivity store lock poisoned");
+                store.apply(peer, ConnectivityEvent::EndpointConnected, Instant::now());
+            }
         }
         Err(error) => {
             warn!(
@@ -1707,6 +1882,15 @@ async fn maybe_dial(
                 error = %error,
                 "discovery: join_peers failed",
             );
+            {
+                let mut store = connectivity.lock().expect("connectivity store lock poisoned");
+                store.apply_with_error(
+                    peer,
+                    ConnectivityEvent::EndpointFailed,
+                    Some(error.to_string()),
+                    Instant::now(),
+                );
+            }
         }
     }
 }
@@ -1744,6 +1928,7 @@ async fn presence_expiry_loop(
     config: Arc<Mutex<PresenceExpiryConfig>>,
     registry: Arc<Mutex<PeerRegistry>>,
     guard: Arc<Mutex<ControlPlaneGuard>>,
+    connectivity: Arc<Mutex<PeerConnectivityStore>>,
     peer_updates_tx: broadcast::Sender<PeerUpdate>,
     cancel: CancellationToken,
 ) {
@@ -1776,6 +1961,12 @@ async fn presence_expiry_loop(
                         ttl_secs = ttl.as_secs(),
                         "discovery: peer expired from active presence (TTL)",
                     );
+                    // BORU-CP-05: the timeout event moves the peer to
+                    // OfflineStale in the connectivity state machine.
+                    {
+                        let mut store = connectivity.lock().expect("connectivity store lock poisoned");
+                        store.apply(*node, ConnectivityEvent::Timeout, now);
+                    }
                     let _ = peer_updates_tx.send(PeerUpdate::Expired { node_id: *node });
                 }
 
@@ -1790,6 +1981,12 @@ async fn presence_expiry_loop(
                         ttl_secs = ttl.as_secs(),
                         "control: presence expired from active presence (TTL)",
                     );
+                    // BORU-CP-05: feed the timeout into the connectivity
+                    // state machine too (idempotent if already offline).
+                    {
+                        let mut store = connectivity.lock().expect("connectivity store lock poisoned");
+                        store.apply(*node, ConnectivityEvent::Timeout, now);
+                    }
                 }
             }
         }
@@ -3861,5 +4058,207 @@ mod tests {
             1,
             "a peer refreshed within its TTL must stay in active presence"
         );
+    }
+
+    // ── BORU-CP-05: peer connectivity state machine wiring ─────────────
+
+    /// A legacy discovery message moves the peer to Discovered in the
+    /// connectivity state machine — but NOT DirectTopicReady.
+    #[tokio::test]
+    async fn connectivity_legacy_discovery_marks_peer_discovered_not_ready() {
+        use crate::control_plane::connectivity::PeerConnectivityState;
+
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let service = test_service(local);
+
+        let bytes = postcard::to_stdvec(&DiscoveryMessage::hello(peer)).unwrap();
+        assert_eq!(
+            service.handle_incoming(&bytes, peer),
+            IncomingOutcome::Processed
+        );
+
+        assert_eq!(
+            service.connectivity_state(&peer),
+            PeerConnectivityState::Discovered,
+            "a peer seen on discovery must be Discovered, not DirectTopicReady"
+        );
+        assert!(!service.connectivity_state(&peer).is_ready_for_direct());
+        assert!(!service.connectivity_state(&peer).is_online());
+
+        // The deterministic transition trail records exactly one transition.
+        let trail = service.connectivity_trail(&peer);
+        assert_eq!(trail.len(), 1);
+        assert_eq!(trail[0].event, ConnectivityEvent::DiscoverySeen);
+        assert_eq!(trail[0].from, PeerConnectivityState::Unknown);
+        assert_eq!(trail[0].to, PeerConnectivityState::Discovered);
+    }
+
+    /// A control-plane HELLO also feeds the state machine (Discovered),
+    /// and duplicate announcements are idempotent no-ops.
+    #[tokio::test]
+    async fn connectivity_control_hello_marks_peer_discovered_idempotently() {
+        use crate::control_plane::connectivity::PeerConnectivityState;
+
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let service = test_service(local);
+
+        assert_eq!(
+            service.handle_incoming(&control_hello(peer, 1), peer),
+            IncomingOutcome::ControlMessage
+        );
+        assert_eq!(service.connectivity_state(&peer), PeerConnectivityState::Discovered);
+
+        // A duplicate announcement (different sequence, same sender) is a
+        // NoChange — the state machine never re-enters Connecting, so no
+        // connection loop.
+        for seq in 2..12u64 {
+            assert_eq!(
+                service.handle_incoming(&control_hello(peer, seq), peer),
+                IncomingOutcome::ControlMessage
+            );
+            assert_eq!(
+                service.connectivity_state(&peer),
+                PeerConnectivityState::Discovered,
+                "duplicate announcements must not advance or loop the state machine"
+            );
+        }
+        assert_eq!(
+            service.connectivity_trail(&peer).len(),
+            1,
+            "duplicate announcements must not append trail records"
+        );
+    }
+
+    /// Reporting a failed direct-topic join makes the failure VISIBLE as
+    /// Degraded with a recorded error — never reported simply as 'online'.
+    #[tokio::test]
+    async fn connectivity_failed_direct_topic_is_visible_not_online() {
+        use crate::control_plane::connectivity::{ConnectivityEvent as CE, PeerConnectivityState};
+
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let service = test_service(local);
+
+        // Discovered -> Reachable (endpoint connected).
+        let bytes = postcard::to_stdvec(&DiscoveryMessage::hello(peer)).unwrap();
+        service.handle_incoming(&bytes, peer);
+        service.report_connectivity_event(peer, CE::EndpointConnected);
+        assert_eq!(service.connectivity_state(&peer), PeerConnectivityState::Reachable);
+        assert!(service.connectivity_state(&peer).is_online());
+
+        // Topic join fails -> Degraded, last_error recorded, NOT online.
+        let outcome = service.report_connectivity_failure(
+            peer,
+            CE::TopicJoinFailed,
+            "direct topic subscribe timed out".to_string(),
+        );
+        assert!(matches!(
+            outcome,
+            crate::control_plane::connectivity::TransitionOutcome::Transitioned { .. }
+        ));
+        assert_eq!(service.connectivity_state(&peer), PeerConnectivityState::Degraded);
+        assert!(
+            !service.connectivity_state(&peer).is_online(),
+            "a failed direct-topic setup must never be reported as online"
+        );
+        let entry = service
+            .connectivity_peers()
+            .into_iter()
+            .find(|(id, _)| *id == peer)
+            .unwrap()
+            .1;
+        assert_eq!(
+            entry.direct_topic_state,
+            crate::control_plane::connectivity::DirectTopicState::Failed
+        );
+        assert_eq!(
+            entry.last_error.as_deref(),
+            Some("direct topic subscribe timed out")
+        );
+        assert_eq!(entry.path_kind, crate::control_plane::connectivity::PathKind::Unknown);
+    }
+
+    /// The expiry sweep moves a peer to OfflineStale in the connectivity
+    /// state machine (the timeout event is a real networking event).
+    #[tokio::test]
+    async fn connectivity_expiry_sweep_marks_peer_offline_stale() {
+        use crate::control_plane::connectivity::PeerConnectivityState;
+
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let service = test_service(local)
+            .with_presence_ttl(Duration::from_millis(60))
+            .with_presence_sweep_interval(Duration::from_millis(20));
+
+        let bytes = postcard::to_stdvec(&DiscoveryMessage::hello(peer)).unwrap();
+        service.handle_incoming(&bytes, peer);
+        assert_eq!(service.connectivity_state(&peer), PeerConnectivityState::Discovered);
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        assert_eq!(
+            service.connectivity_state(&peer),
+            PeerConnectivityState::OfflineStale,
+            "expiry sweep must feed the timeout event into the state machine"
+        );
+        let trail = service.connectivity_trail(&peer);
+        assert_eq!(
+            trail.last().unwrap().event,
+            ConnectivityEvent::Timeout,
+            "the transition trail must show the timeout"
+        );
+    }
+
+    /// NeighborUp / NeighborDown events from the drain loop feed the state
+    /// machine (endpoint connected / failed).
+    #[tokio::test]
+    async fn connectivity_drain_loop_neighbor_events_feed_state_machine() {
+        use crate::control_plane::connectivity::PeerConnectivityState;
+
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let (cmd_tx, _cmd_rx) = irpc_mpsc::channel::<Command>(64);
+        let (ev_tx, ev_rx) = irpc_mpsc::channel::<Event>(64);
+        let sender = GossipSender::new(cmd_tx);
+        let receiver = GossipReceiver::new(ev_rx);
+        let service = DiscoveryService::from_subscription(test_topic(), sender, receiver, local);
+
+        // First discover the peer so the state machine has an entry.
+        let bytes = postcard::to_stdvec(&DiscoveryMessage::hello(peer)).unwrap();
+        service.handle_incoming(&bytes, peer);
+
+        // NeighborUp through the drain loop -> Reachable.
+        ev_tx.send(Event::NeighborUp(peer)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(service.connectivity_state(&peer), PeerConnectivityState::Reachable);
+
+        // NeighborDown through the drain loop -> Degraded (not 'online').
+        ev_tx.send(Event::NeighborDown(peer)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(service.connectivity_state(&peer), PeerConnectivityState::Degraded);
+        assert!(!service.connectivity_state(&peer).is_online());
+    }
+
+    /// A direct-message receive (reported by the data plane) advances the
+    /// state machine to DirectTopicReady even if only Discovered — the
+    /// message proves the direct topic works.
+    #[tokio::test]
+    async fn connectivity_direct_message_receive_reports_topic_ready() {
+        use crate::control_plane::connectivity::{ConnectivityEvent as CE, PeerConnectivityState};
+
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let service = test_service(local);
+
+        let bytes = postcard::to_stdvec(&DiscoveryMessage::hello(peer)).unwrap();
+        service.handle_incoming(&bytes, peer);
+        assert_eq!(service.connectivity_state(&peer), PeerConnectivityState::Discovered);
+
+        service.report_connectivity_event(peer, CE::DirectMessageReceived);
+        assert_eq!(service.connectivity_state(&peer), PeerConnectivityState::DirectTopicReady);
+        assert!(service.connectivity_state(&peer).is_ready_for_direct());
+        assert!(service.connectivity_state(&peer).is_online());
     }
 }
