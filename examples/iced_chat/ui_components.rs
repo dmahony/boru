@@ -1123,6 +1123,27 @@ impl<Message: 'static> Avatar<Message> {
         self
     }
 
+    /// Convenience presets so callers don't need to memorise the numbers.
+    pub fn profile_size(mut self) -> Self {
+        self.size = design_tokens::AVATAR_PROFILE;
+        self
+    }
+
+    pub fn chat_list_size(mut self) -> Self {
+        self.size = design_tokens::AVATAR_CHAT_LIST;
+        self
+    }
+
+    pub fn chat_header_size(mut self) -> Self {
+        self.size = design_tokens::AVATAR_CHAT_HEADER;
+        self
+    }
+
+    pub fn message_size(mut self) -> Self {
+        self.size = design_tokens::AVATAR_MSG;
+        self
+    }
+
     /// Build the avatar element.
     pub fn build(self) -> Element<'static, Message> {
         let radius = self.size / 2.0;
@@ -1178,6 +1199,13 @@ impl<Message: 'static> Avatar<Message> {
                 .into()
         };
 
+        // Dynamic dot size: larger avatars get the bigger status dot.
+        let dot_size = if self.size >= design_tokens::AVATAR_PROFILE {
+            design_tokens::STATUS_DOT_LG
+        } else {
+            design_tokens::STATUS_DOT_SM
+        };
+
         // Build badge overlay if needed
         let has_badge = self.online_dot || self.unread_count.is_some();
         if has_badge {
@@ -1207,7 +1235,7 @@ impl<Message: 'static> Avatar<Message> {
                 // The online dot is colour-coded; give it a text label so
                 // status is never communicated by colour alone (UI-19).
                 iced_tooltip::Tooltip::new(
-                    status_dot::<Message>(StatusDotKind::Online, crate::design_tokens::STATUS_DOT_SM),
+                    status_dot::<Message>(StatusDotKind::Online, dot_size),
                     text("Online")
                         .size(TypeRole::Metadata.size_px())
                         .font(TypeRole::Metadata.font()),
@@ -1234,7 +1262,9 @@ impl<Message: 'static> Avatar<Message> {
             // Overlay the status badge at bottom-right while retaining the
             // avatar circle itself. (The badge-only layout would otherwise
             // make online avatars disappear entirely.)
-            let badge_offset = self.size - 12.0;
+            // 2 px inset from the bottom-right edge so the dot/ badge sits
+            // cleanly inside the avatar boundary.
+            let badge_offset = self.size - dot_size - 2.0;
             Stack::new()
                 .push(circle)
                 .push(
