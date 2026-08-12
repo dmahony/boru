@@ -21,7 +21,7 @@ so Boru never conflates presence with direct-messaging readiness.
 | `Connecting` | An endpoint dial / connection attempt is in flight. | no |
 | `Reachable` | Endpoint connected — gossip mesh edge established (`NeighborUp`, `join_peers` ok). | no (topic not yet joined) |
 | `DirectTopicReady` | Deterministic direct topic joined AND direct messaging possible. | **yes** |
-| `Degraded` | Previously reachable but a failure occurred (dial failed, topic join failed, relay-only path) — explicitly NOT 'online'. | no |
+| `Degraded` | Previously reachable but a failure occurred (dial failed, topic join failed) — explicitly NOT 'online'. A relay-only path is NOT a failure (BORU-CP-14): path type is a diagnostic, so a relay peer stays `Reachable`. | no |
 | `OfflineStale` | Not heard from within the presence TTL / explicitly timed out. | no |
 
 Derived accessors (the state-machine replacement for scattered 'online'
@@ -48,8 +48,25 @@ fabricates a transition.
 | `TopicJoinFailed` | deterministic direct topic subscribe/join failure (data plane reports) |
 | `DirectMessageReceived` | a direct (non-discovery) message received (data plane reports) |
 | `Timeout` | presence TTL expiry sweep |
-| `PathChangedDirect` | relay/direct path changed to direct |
-| `PathChangedRelay` | relay/direct path changed to relay-only |
+| `PathChangedDirect` | **diagnostic only** (BORU-CP-14): an active direct (IP) path was observed — updates `path_kind`, never moves the state machine |
+| `PathChangedRelay` | **diagnostic only** (BORU-CP-14): a relay-only path was observed — updates `path_kind`, never moves the state machine; a relay connection is still considered reachable |
+| `PathChangedTransitioning` | **diagnostic only** (BORU-CP-14): addresses known but none active (path in flux) — updates `path_kind`, never moves the state machine |
+
+## Path type is diagnostic (BORU-CP-14 / PDF Task 5.2)
+
+Path events record **how** a peer is currently reachable (direct /
+relay / transitioning) without coupling application logic to one path:
+
+- Path type is diagnostic/optimization information, **not proof of
+  application-level success**.
+- A **relay connection is still considered reachable** — `PathChangedRelay`
+  never degrades a `Reachable` / `DirectTopicReady` peer and never resets
+  `DirectTopicReady`.
+- **Path transitions do not reset or duplicate conversation state** — they
+  never move the state machine, never append trail records, and never
+  create conversations.
+- If the networking layer provides no reliable classification the path
+  stays `unknown` — Boru reports Unknown rather than guessing.
 
 ## Transition table
 
@@ -60,17 +77,19 @@ means the event does not move the peer (idempotent no-op).
 | From | Event → To |
 |------|-----------|
 | `Unknown` | `DiscoverySeen`→`Discovered`, `EndpointConnecting`→`Connecting`, `EndpointConnected`→`Reachable`, `DirectMessageReceived`→`DirectTopicReady`, `TopicJoined`→`DirectTopicReady` |
-| `Discovered` | `EndpointConnecting`→`Connecting`, `EndpointConnected`→`Reachable`, `EndpointFailed`→`Degraded`, `TopicJoined`→`DirectTopicReady`, `TopicJoinFailed`→`Degraded`, `DirectMessageReceived`→`DirectTopicReady`, `Timeout`→`OfflineStale`, `PathChangedDirect`→`Reachable`, `PathChangedRelay`→`Degraded` |
-| `Connecting` | `EndpointConnected`→`Reachable`, `EndpointFailed`→`Degraded`, `TopicJoined`→`DirectTopicReady`, `TopicJoinFailed`→`Degraded`, `DirectMessageReceived`→`DirectTopicReady`, `Timeout`→`OfflineStale`, `PathChangedDirect`→`Reachable`, `PathChangedRelay`→`Degraded` |
-| `Reachable` | `EndpointFailed`→`Degraded`, `TopicJoined`→`DirectTopicReady`, `TopicJoinFailed`→`Degraded`, `DirectMessageReceived`→`DirectTopicReady`, `Timeout`→`OfflineStale`, `PathChangedRelay`→`Degraded` |
-| `DirectTopicReady` | `EndpointFailed`→`Degraded`, `TopicJoinFailed`→`Degraded`, `Timeout`→`OfflineStale`, `PathChangedRelay`→`Degraded` |
-| `Degraded` | `EndpointConnecting`→`Connecting`, `EndpointConnected`→`Reachable`, `TopicJoined`→`DirectTopicReady`, `DirectMessageReceived`→`DirectTopicReady`, `Timeout`→`OfflineStale`, `PathChangedDirect`→`Reachable` |
+| `Discovered` | `EndpointConnecting`→`Connecting`, `EndpointConnected`→`Reachable`, `EndpointFailed`→`Degraded`, `TopicJoined`→`DirectTopicReady`, `TopicJoinFailed`→`Degraded`, `DirectMessageReceived`→`DirectTopicReady`, `Timeout`→`OfflineStale` |
+| `Connecting` | `EndpointConnected`→`Reachable`, `EndpointFailed`→`Degraded`, `TopicJoined`→`DirectTopicReady`, `TopicJoinFailed`→`Degraded`, `DirectMessageReceived`→`DirectTopicReady`, `Timeout`→`OfflineStale` |
+| `Reachable` | `EndpointFailed`→`Degraded`, `TopicJoined`→`DirectTopicReady`, `TopicJoinFailed`→`Degraded`, `DirectMessageReceived`→`DirectTopicReady`, `Timeout`→`OfflineStale` |
+| `DirectTopicReady` | `EndpointFailed`→`Degraded`, `TopicJoinFailed`→`Degraded`, `Timeout`→`OfflineStale` |
+| `Degraded` | `EndpointConnecting`→`Connecting`, `EndpointConnected`→`Reachable`, `TopicJoined`→`DirectTopicReady`, `DirectMessageReceived`→`DirectTopicReady`, `Timeout`→`OfflineStale` |
 | `OfflineStale` | `DiscoverySeen`→`Discovered`, `EndpointConnecting`→`Connecting`, `EndpointConnected`→`Reachable`, `TopicJoined`→`DirectTopicReady`, `DirectMessageReceived`→`DirectTopicReady` |
 
 Every pair not listed is a `None` no-op (e.g. a second `DiscoverySeen` while
 `Discovered` / `Reachable` / `DirectTopicReady` refreshes `last_seen` but
 does not change state; a duplicate `EndpointConnecting` while `Connecting`
-does not re-enter `Connecting`).
+does not re-enter `Connecting`). Since BORU-CP-14 every `PathChanged*`
+event is a `None` no-op from every state — they update the per-peer
+`path_kind` hint and log path changes, but never move the state machine.
 
 ## Idempotence & connection-loop safety
 

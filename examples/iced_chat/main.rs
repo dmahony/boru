@@ -1153,8 +1153,14 @@ fn main() -> Result<()> {
         .await
         {
             Ok(service) => {
-                info!(topic = %service.topic(), "joined internal discovery topic");
-                Some(service)
+                let topic = service.topic();
+                info!(topic = %topic, "joined internal discovery topic");
+                // BORU-CP-14: attach the iroh endpoint so per-peer path
+                // diagnostics (direct / relay / transitioning) are
+                // classified from iroh's remote-info snapshots. Path type
+                // is diagnostic metadata only — chat delivery never depends
+                // on being direct.
+                Some(service.with_endpoint(endpoint.clone()))
             }
             Err(error) => {
                 warn!(

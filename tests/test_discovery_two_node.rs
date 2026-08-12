@@ -758,6 +758,7 @@ async fn two_nodes_state_machine_discovered_but_not_direct_topic_ready() -> Resu
                     | CE::DirectMessageReceived
                     | CE::PathChangedDirect
                     | CE::PathChangedRelay
+                    | CE::PathChangedTransitioning
             ),
             "trail must only contain real networking events"
         );

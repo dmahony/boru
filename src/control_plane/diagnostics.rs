@@ -86,7 +86,11 @@ pub struct PeerDiagnosticsSnapshot {
     /// Elapsed ms since the endpoint was last observed (any connectivity
     /// event), or `None` when the peer is not tracked yet.
     pub endpoint_observed_ms: Option<u64>,
-    /// Current path kind: `unknown | direct | relay`.
+    /// Current path kind: `unknown | direct | relay | transitioning`.
+    ///
+    /// Diagnostic/optimization metadata only (BORU-CP-14): it never proves
+    /// application-level success, and a relay path is still considered
+    /// reachable.
     pub path_kind: String,
     /// Whether a relay server is currently involved (`path_kind == "relay"`).
     pub relay_involved: bool,
@@ -263,6 +267,7 @@ fn path_label(kind: PathKind) -> &'static str {
         PathKind::Unknown => "unknown",
         PathKind::Direct => "direct",
         PathKind::Relay => "relay",
+        PathKind::Transitioning => "transitioning",
     }
 }
 
@@ -481,7 +486,9 @@ mod tests {
         assert_eq!(snaps[1].peer_id, b.fmt_short().to_string());
     }
 
-    /// A relay-only peer reports relay involvement.
+    /// A relay-only peer reports relay involvement and is still reachable
+    /// (BORU-CP-14 acceptance: a relay connection can still be considered
+    /// reachable).
     #[test]
     fn relay_path_is_reported() {
         let local = key(0x0E);
@@ -497,6 +504,27 @@ mod tests {
 
         assert_eq!(snap.path_kind, "relay");
         assert!(snap.relay_involved);
-        assert_eq!(snap.state, "degraded", "relay-only is not reported as online");
+        assert_eq!(snap.state, "reachable", "relay-only is still reachable");
+    }
+
+    /// A transitioning path is reported as `transitioning` with no relay
+    /// involvement, and the peer's connectivity state is untouched.
+    #[test]
+    fn transitioning_path_is_reported() {
+        let local = key(0x10);
+        let peer = key(0x11);
+        let t0 = Instant::now();
+        let mut store = PeerConnectivityStore::new();
+
+        store.apply(peer, E::DiscoverySeen, t0);
+        store.apply(peer, E::EndpointConnected, t0 + Duration::from_millis(1));
+        store.apply(peer, E::PathChangedTransitioning, t0 + Duration::from_millis(2));
+
+        let snap = PeerDiagnosticsSnapshot::from_entry(store.get(&peer).unwrap(), &local, t0);
+
+        assert_eq!(snap.path_kind, "transitioning");
+        assert!(!snap.relay_involved);
+        assert_eq!(snap.state, "reachable");
+        assert_eq!(snap.trail.len(), 2, "path events never add trail records");
     }
 }

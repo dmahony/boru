@@ -18,7 +18,7 @@
 //! | [`Connecting`](PeerConnectivityState::Connecting) | An endpoint dial / connection attempt is in flight. |
 //! | [`Reachable`](PeerConnectivityState::Reachable) | Endpoint connected (gossip mesh edge / `join_peers` succeeded). |
 //! | [`DirectTopicReady`](PeerConnectivityState::DirectTopicReady) | Deterministic direct topic joined AND direct messaging possible. |
-//! | [`Degraded`](PeerConnectivityState::Degraded) | Previously reachable, but a failure occurred (dial failed, topic join failed, relay-only path) — explicitly NOT 'online'. |
+//! | [`Degraded`](PeerConnectivityState::Degraded) | Previously reachable, but a failure occurred (dial failed, topic join failed) — explicitly NOT 'online'. A relay-only path is NOT a failure (BORU-CP-14): the path kind is a diagnostic, so a peer on a relay path stays `Reachable`. |
 //! | [`OfflineStale`](PeerConnectivityState::OfflineStale) | Not heard from within the presence TTL, or explicitly timed out. |
 //!
 //! # Events (real networking events only)
@@ -28,6 +28,16 @@
 //! success/failure, topic join/subscription success, direct message
 //! receive, timeout, and relay/direct path changes. No timer, UI action, or
 //! gossip *metadata* ever fabricates a transition.
+//!
+//! BORU-CP-14 makes the relay/direct **path** events
+//! ([`ConnectivityEvent::PathChangedDirect`],
+//! [`ConnectivityEvent::PathChangedRelay`],
+//! [`ConnectivityEvent::PathChangedTransitioning`]) diagnostic-only: they
+//! update the per-peer `path_kind` hint and log path changes in structured
+//! logs, but they **never move the state machine**. Path type is
+//! diagnostic/optimization information (PDF Task 5.2 step 2), not proof of
+//! application-level success — a relay connection is still reachable, and
+//! chat delivery never depends on being direct (PDF Task 5.2 step 4).
 //!
 //! BORU-CP-13 adds three **timestamp-only** diagnostic events that refresh
 //! per-peer timing fields without ever moving the state machine:
@@ -172,10 +182,26 @@ pub enum ConnectivityEvent {
     DirectMessageReceived,
     /// The peer was not heard from within its presence TTL.
     Timeout,
-    /// The relay/direct path changed to a direct (IP) path.
+    /// The relay/direct path changed to a direct (IP) path (BORU-CP-14).
+    ///
+    /// Diagnostic-only: records `path_kind = Direct` and logs the path
+    /// change in structured logs, but never moves the state machine. Path
+    /// type is not proof of application-level success.
     PathChangedDirect,
-    /// The relay/direct path changed to a relay-only path.
+    /// The relay/direct path changed to a relay-only path (BORU-CP-14).
+    ///
+    /// Diagnostic-only: records `path_kind = Relay` and logs the path
+    /// change in structured logs, but never moves the state machine — a
+    /// relay connection is still considered reachable (PDF Task 5.2
+    /// acceptance: "A relay connection can still be considered reachable").
     PathChangedRelay,
+    /// The path is transitioning: addresses are known but none is currently
+    /// active (BORU-CP-14).
+    ///
+    /// Diagnostic-only: records `path_kind = Transitioning` and logs the
+    /// path change in structured logs, but never moves the state machine.
+    /// A path transition does not reset or duplicate conversation state.
+    PathChangedTransitioning,
     /// An outbound direct broadcast was attempted to the peer (BORU-CP-13).
     ///
     /// Timestamp-only diagnostic event: it records *when* the data plane
@@ -212,6 +238,7 @@ impl ConnectivityEvent {
             Self::Timeout => "timeout",
             Self::PathChangedDirect => "path-changed-direct",
             Self::PathChangedRelay => "path-changed-relay",
+            Self::PathChangedTransitioning => "path-changed-transitioning",
             Self::DirectMessageSent => "direct-message-sent",
             Self::InboundGossipEvent => "inbound-gossip-event",
             Self::ApplicationMessageDecoded => "application-message-decoded",
@@ -225,6 +252,16 @@ impl ConnectivityEvent {
 /// out of its current state (an idempotent no-op). Every rule depends only
 /// on `(state, event)` — never on history — so duplicate / reordered gossip
 /// events converge and can never cause connection loops.
+///
+/// BORU-CP-14: the relay/direct **path** events
+/// ([`ConnectivityEvent::PathChangedDirect`],
+/// [`ConnectivityEvent::PathChangedRelay`],
+/// [`ConnectivityEvent::PathChangedTransitioning`]) always return `None`
+/// here — they never move the state machine. They update the per-peer
+/// `path_kind` diagnostic hint and log path changes via
+/// [`PeerConnectivityStore::apply`]'s side effects, so a relay connection
+/// stays reachable and a path transition never resets or duplicates
+/// conversation state.
 ///
 /// This function IS the documented transition table (PDF Task 2.2 step 2);
 /// keep it in sync with `docs/discovery-refactor/05-peer-connectivity-state-machine.md`.
@@ -254,8 +291,10 @@ pub fn transition(
         (Discovered, TopicJoinFailed) => Degraded,
         (Discovered, DirectMessageReceived) => DirectTopicReady,
         (Discovered, Timeout) => OfflineStale,
-        (Discovered, PathChangedDirect) => Reachable,
-        (Discovered, PathChangedRelay) => Degraded,
+        // Path events (PathChangedDirect / Relay / Transitioning) are
+        // diagnostic-only (BORU-CP-14): they fall through to the no-op
+        // catch-all and never move the state machine. A relay path is
+        // still reachable; a path transition is not a failure.
 
         // ── Connecting ─────────────────────────────────────────────────
         (Connecting, DiscoverySeen) => return None, // idempotent
@@ -266,8 +305,6 @@ pub fn transition(
         (Connecting, TopicJoinFailed) => Degraded,
         (Connecting, DirectMessageReceived) => DirectTopicReady,
         (Connecting, Timeout) => OfflineStale,
-        (Connecting, PathChangedDirect) => Reachable,
-        (Connecting, PathChangedRelay) => Degraded,
 
         // ── Reachable ──────────────────────────────────────────────────
         (Reachable, DiscoverySeen) => return None, // idempotent refresh
@@ -278,8 +315,6 @@ pub fn transition(
         (Reachable, TopicJoinFailed) => Degraded,
         (Reachable, DirectMessageReceived) => DirectTopicReady,
         (Reachable, Timeout) => OfflineStale,
-        (Reachable, PathChangedDirect) => return None, // already direct
-        (Reachable, PathChangedRelay) => Degraded,
 
         // ── DirectTopicReady ───────────────────────────────────────────
         (DirectTopicReady, DiscoverySeen) => return None, // idempotent
@@ -290,8 +325,6 @@ pub fn transition(
         (DirectTopicReady, TopicJoinFailed) => Degraded,
         (DirectTopicReady, DirectMessageReceived) => return None, // idempotent
         (DirectTopicReady, Timeout) => OfflineStale,
-        (DirectTopicReady, PathChangedDirect) => return None, // already direct
-        (DirectTopicReady, PathChangedRelay) => Degraded,
 
         // ── Degraded ───────────────────────────────────────────────────
         (Degraded, DiscoverySeen) => return None, // idempotent; not revived by an announcement
@@ -302,8 +335,6 @@ pub fn transition(
         (Degraded, TopicJoinFailed) => return None, // idempotent
         (Degraded, DirectMessageReceived) => DirectTopicReady,
         (Degraded, Timeout) => OfflineStale,
-        (Degraded, PathChangedDirect) => Reachable,
-        (Degraded, PathChangedRelay) => return None, // idempotent
 
         // ── OfflineStale ───────────────────────────────────────────────
         (OfflineStale, DiscoverySeen) => Discovered, // fresh announcement revives
@@ -314,12 +345,12 @@ pub fn transition(
         (OfflineStale, TopicJoinFailed) => return None, // idempotent
         (OfflineStale, DirectMessageReceived) => DirectTopicReady,
         (OfflineStale, Timeout) => return None, // idempotent
-        (OfflineStale, PathChangedDirect) => Reachable,
-        (OfflineStale, PathChangedRelay) => return None, // idempotent
 
         // Everything else — an event that does not move the peer (e.g. an
         // `Unknown` peer receiving a failure/timeout/path event) — is an
         // idempotent no-op. The state machine never fabricates progress.
+        // This includes every PathChanged* event: path type is diagnostic
+        // only and never moves the state machine (BORU-CP-14).
         _ => return None,
     };
     Some(next)
@@ -357,15 +388,35 @@ pub struct TransitionRecord {
     pub event: ConnectivityEvent,
 }
 
-/// How the peer's relay/direct path currently looks (hint only).
+/// How the peer's relay/direct path currently looks (BORU-CP-14).
+///
+/// This is **diagnostic/optimization information only** (PDF Task 5.2 step
+/// 2). It never proves application-level success and chat delivery never
+/// depends on it — a relay connection is still considered reachable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathKind {
-    /// No path information yet.
+    /// No path information yet (or the networking layer does not expose a
+    /// reliable classification — report Unknown rather than guessing).
     Unknown,
-    /// At least one direct (IP) path is available.
+    /// At least one direct (IP) path is currently open.
     Direct,
-    /// The peer is reachable only via a relay server.
+    /// The peer is currently reachable only via a relay server.
     Relay,
+    /// The path is in flux: addresses are known but none is currently
+    /// active (connecting / re-negotiating between direct and relay).
+    Transitioning,
+}
+
+impl PathKind {
+    /// Stable short label for logs and diagnostics.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Direct => "direct",
+            Self::Relay => "relay",
+            Self::Transitioning => "transitioning",
+        }
+    }
 }
 
 /// Whether the deterministic direct topic has been set up.
@@ -537,12 +588,35 @@ impl PeerConnectivityStore {
                 // idempotent no-op (e.g. `PathChangedDirect` on an already
                 // Reachable peer) — the peer IS on that path, and the
                 // diagnostics snapshot must not report `unknown` for a
-                // healthy direct/relay peer (BORU-CP-13/14).
-                ConnectivityEvent::PathChangedDirect => {
-                    entry.path_kind = PathKind::Direct;
-                }
-                ConnectivityEvent::PathChangedRelay => {
-                    entry.path_kind = PathKind::Relay;
+                // healthy direct/relay peer (BORU-CP-13/14). Path events
+                // never move the state machine (BORU-CP-14); a *changed*
+                // path kind is logged in a structured `info!` line so path
+                // transitions are observable without reading message
+                // contents.
+                ConnectivityEvent::PathChangedDirect
+                | ConnectivityEvent::PathChangedRelay
+                | ConnectivityEvent::PathChangedTransitioning => {
+                    let new_kind = match event {
+                        ConnectivityEvent::PathChangedDirect => PathKind::Direct,
+                        ConnectivityEvent::PathChangedRelay => PathKind::Relay,
+                        _ => PathKind::Transitioning,
+                    };
+                    let old_kind = entry.path_kind;
+                    entry.path_kind = new_kind;
+                    if old_kind != new_kind {
+                        info!(
+                            peer = %peer_id.fmt_short(),
+                            from_path = old_kind.label(),
+                            to_path = new_kind.label(),
+                            "connectivity: peer path changed",
+                        );
+                    } else {
+                        trace!(
+                            peer = %peer_id.fmt_short(),
+                            path = new_kind.label(),
+                            "connectivity: peer path unchanged",
+                        );
+                    }
                 }
                 _ => {}
             }
@@ -620,6 +694,12 @@ impl PeerConnectivityStore {
                 }
                 ConnectivityEvent::PathChangedRelay => {
                     entry.path_kind = PathKind::Relay;
+                }
+                ConnectivityEvent::PathChangedTransitioning => {
+                    // Unreachable in practice: `transition(Unknown, …)`
+                    // returns `None` for path events, so no entry is
+                    // created from a path event alone. Kept exhaustive.
+                    entry.path_kind = PathKind::Transitioning;
                 }
                 _ => {}
             }
@@ -1111,7 +1191,9 @@ mod tests {
         assert_eq!(trail.last().unwrap().event, E::EndpointConnecting);
     }
 
-    /// Path changes update the path hint and move state appropriately.
+    /// Path changes update the path hint; the path kind is diagnostic
+    /// (BORU-CP-14) so it never moves the state machine — a relay
+    /// connection is still considered reachable.
     #[test]
     fn path_changes_are_reflected() {
         let mut store = PeerConnectivityStore::new();
@@ -1120,11 +1202,12 @@ mod tests {
 
         store.apply(peer, E::DiscoverySeen, t0);
         store.apply(peer, E::EndpointConnected, t0 + Duration::from_secs(1));
-        // Degrade to relay-only.
+        // Relay-only path: the peer stays Reachable (still online), the
+        // path hint records relay.
         store.apply(peer, E::PathChangedRelay, t0 + Duration::from_secs(2));
-        assert_eq!(store.state(&peer), S::Degraded);
+        assert_eq!(store.state(&peer), S::Reachable);
         assert_eq!(store.get(&peer).unwrap().path_kind, PathKind::Relay);
-        assert!(!store.state(&peer).is_online());
+        assert!(store.state(&peer).is_online());
         // Back to direct.
         store.apply(peer, E::PathChangedDirect, t0 + Duration::from_secs(3));
         assert_eq!(store.state(&peer), S::Reachable);
@@ -1156,10 +1239,134 @@ mod tests {
         assert_eq!(store.get(&peer).unwrap().path_kind, PathKind::Direct);
         assert_eq!(store.state(&peer), S::Reachable);
 
-        // Same for relay.
+        // Same for relay: the hint flips to relay, the peer stays
+        // Reachable (a relay connection is still considered reachable,
+        // BORU-CP-14 acceptance).
         store.apply(peer, E::PathChangedRelay, t0 + Duration::from_secs(3));
         assert_eq!(store.get(&peer).unwrap().path_kind, PathKind::Relay);
-        assert_eq!(store.state(&peer), S::Degraded, "relay-only degrades the peer");
+        assert_eq!(store.state(&peer), S::Reachable, "relay-only is still reachable");
+        assert!(store.state(&peer).is_online());
+    }
+
+    /// BORU-CP-14 acceptance: a relay connection is still considered
+    /// reachable — a DirectTopicReady peer never degrades because its path
+    /// became relay-only, and chat readiness is untouched.
+    #[test]
+    fn relay_connection_remains_reachable() {
+        let mut store = PeerConnectivityStore::new();
+        let peer = key(0x0D3);
+        let t0 = Instant::now();
+
+        store.apply(peer, E::DiscoverySeen, t0);
+        store.apply(peer, E::EndpointConnected, t0 + Duration::from_secs(1));
+        store.apply(peer, E::TopicJoined, t0 + Duration::from_secs(2));
+        assert_eq!(store.state(&peer), S::DirectTopicReady);
+        assert!(store.state(&peer).is_online());
+        assert!(store.state(&peer).is_ready_for_direct());
+
+        // Path flips to relay-only: state, direct-topic readiness, and the
+        // trail are all untouched — only the path hint changes.
+        let trail_len_before = store.trail(&peer).len();
+        assert_eq!(
+            store.apply(peer, E::PathChangedRelay, t0 + Duration::from_secs(3)),
+            TransitionOutcome::NoChange
+        );
+        assert_eq!(store.state(&peer), S::DirectTopicReady);
+        assert!(store.state(&peer).is_online(), "relay connection is still reachable");
+        assert!(store.state(&peer).is_ready_for_direct());
+        assert_eq!(store.trail(&peer).len(), trail_len_before);
+        assert_eq!(store.get(&peer).unwrap().path_kind, PathKind::Relay);
+
+        // Back to direct: still no state movement, no duplicate trail
+        // records (path transitions never reset or duplicate state).
+        assert_eq!(
+            store.apply(peer, E::PathChangedDirect, t0 + Duration::from_secs(4)),
+            TransitionOutcome::NoChange
+        );
+        assert_eq!(store.state(&peer), S::DirectTopicReady);
+        assert_eq!(store.get(&peer).unwrap().path_kind, PathKind::Direct);
+        assert_eq!(store.trail(&peer).len(), trail_len_before);
+    }
+
+    /// BORU-CP-14: a transitioning path (addresses known, none active) is
+    /// diagnostic-only — it never moves the state machine and never resets
+    /// conversation state.
+    #[test]
+    fn path_transitioning_is_diagnostic_only() {
+        let mut store = PeerConnectivityStore::new();
+        let peer = key(0x0D4);
+        let t0 = Instant::now();
+
+        store.apply(peer, E::DiscoverySeen, t0);
+        store.apply(peer, E::EndpointConnected, t0 + Duration::from_secs(1));
+        store.apply(peer, E::TopicJoined, t0 + Duration::from_secs(2));
+        assert_eq!(store.state(&peer), S::DirectTopicReady);
+
+        assert_eq!(
+            store.apply(peer, E::PathChangedTransitioning, t0 + Duration::from_secs(3)),
+            TransitionOutcome::NoChange
+        );
+        assert_eq!(store.state(&peer), S::DirectTopicReady);
+        assert!(store.state(&peer).is_online());
+        assert_eq!(store.get(&peer).unwrap().path_kind, PathKind::Transitioning);
+
+        // A transition from transitioning → relay → direct only flips the
+        // hint; the trail stays at the three real transitions.
+        store.apply(peer, E::PathChangedRelay, t0 + Duration::from_secs(4));
+        store.apply(peer, E::PathChangedDirect, t0 + Duration::from_secs(5));
+        assert_eq!(store.state(&peer), S::DirectTopicReady);
+        assert_eq!(store.get(&peer).unwrap().path_kind, PathKind::Direct);
+        assert_eq!(store.trail(&peer).len(), 3);
+    }
+
+    /// BORU-CP-14: no path event moves the state machine from any state —
+    /// path type is diagnostic/optimization information only.
+    #[test]
+    fn path_events_never_move_the_state_machine() {
+        let all_states = [
+            S::Unknown,
+            S::Discovered,
+            S::Connecting,
+            S::Reachable,
+            S::DirectTopicReady,
+            S::Degraded,
+            S::OfflineStale,
+        ];
+        let path_events = [
+            E::PathChangedDirect,
+            E::PathChangedRelay,
+            E::PathChangedTransitioning,
+        ];
+        for state in all_states {
+            for event in path_events {
+                assert_eq!(
+                    transition(state, event),
+                    None,
+                    "path event {event:?} must never move {state:?}"
+                );
+            }
+        }
+        // And via the store: a fully-healthy peer receiving every path
+        // event in sequence keeps its state, trail, and online status.
+        let mut store = PeerConnectivityStore::new();
+        let peer = key(0x0D5);
+        let t0 = Instant::now();
+        store.apply(peer, E::DiscoverySeen, t0);
+        store.apply(peer, E::EndpointConnected, t0 + Duration::from_secs(1));
+        store.apply(peer, E::TopicJoined, t0 + Duration::from_secs(2));
+        let before = store.trail(&peer).len();
+        for (i, event) in [E::PathChangedTransitioning, E::PathChangedRelay, E::PathChangedDirect]
+            .into_iter()
+            .enumerate()
+        {
+            assert_eq!(
+                store.apply(peer, event, t0 + Duration::from_secs(3 + i as u64)),
+                TransitionOutcome::NoChange
+            );
+        }
+        assert_eq!(store.state(&peer), S::DirectTopicReady);
+        assert_eq!(store.trail(&peer).len(), before, "no trail records from path events");
+        assert!(store.state(&peer).is_online());
     }
 
     /// Direct message receive proves the direct topic works even if the
