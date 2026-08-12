@@ -125,6 +125,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 
 use crate::api::{ApiError, Event, GossipReceiver, GossipSender, Message as GossipMessage};
+use crate::diagnostics::{DiagnosticCounters, DIAGNOSTIC_COUNTERS};
 use crate::discovery_message::{check_discovery_version, DiscoveryMessage, DiscoveryVersionCheck};
 use crate::proto::TopicId;
 
@@ -573,6 +574,10 @@ struct ReceiveCore {
     registry: Arc<Mutex<PeerRegistry>>,
     /// Broadcast channel of peer updates for callers.
     peer_updates_tx: broadcast::Sender<PeerUpdate>,
+    /// Atomic discovery counters (BORU-DISC-20). Cloned from the global
+    /// [`DIAGNOSTIC_COUNTERS`] by default so the frontend/MCP can read the
+    /// same values; tests inject an isolated instance.
+    counters: DiagnosticCounters,
 }
 
 impl ReceiveCore {
@@ -585,6 +590,7 @@ impl ReceiveCore {
         let message = match postcard::from_bytes::<DiscoveryMessage>(content) {
             Ok(message) => message,
             Err(error) => {
+                self.counters.record_malformed_discovery_packet();
                 debug!(
                     delivered_from = %delivered_from.fmt_short(),
                     error = %error,
@@ -597,6 +603,7 @@ impl ReceiveCore {
         match check_discovery_version(message.protocol_version()) {
             DiscoveryVersionCheck::Supported => {}
             DiscoveryVersionCheck::Unsupported { found, expected } => {
+                self.counters.record_unsupported_version_packet();
                 warn!(
                     delivered_from = %delivered_from.fmt_short(),
                     found,
@@ -619,9 +626,11 @@ impl ReceiveCore {
             let mut registry = self.registry.lock().expect("peer registry lock poisoned");
             match registry.upsert(node_id, source, self.topic, event_id) {
                 UpsertOutcome::New => {
+                    self.counters.record_discovery_peer_seen();
                     info!(
                         node = %node_id.fmt_short(),
                         source = ?source,
+                        topic = %self.topic,
                         "discovery: new peer seen",
                     );
                 }
@@ -629,6 +638,7 @@ impl ReceiveCore {
                     trace!(
                         node = %node_id.fmt_short(),
                         source = ?source,
+                        topic = %self.topic,
                         "discovery: peer refresh",
                     );
                 }
@@ -650,6 +660,16 @@ impl ReceiveCore {
             .send(PeerUpdate::Seen { node_id, source });
 
         if let DiscoveryMessage::PeerAdvertisement { advertised, .. } = message {
+            // BORU-DISC-20: log peer advertisements at debug level with the
+            // sender node id + the advertised peer + the source topic. Never
+            // log message contents or private chat data — discovery payloads
+            // carry only node ids, never chat payloads.
+            debug!(
+                node = %node_id.fmt_short(),
+                advertised = %advertised.fmt_short(),
+                source_topic = %self.topic,
+                "discovery: peer advertisement received",
+            );
             if advertised != self.local_node && advertised != node_id {
                 let _ = self.peer_updates_tx.send(PeerUpdate::Advertised {
                     node_id,
@@ -780,6 +800,28 @@ impl DiscoveryService {
         receiver: GossipReceiver,
         local_node: PublicKey,
     ) -> Self {
+        Self::from_subscription_with_counters(
+            topic,
+            sender,
+            receiver,
+            local_node,
+            DIAGNOSTIC_COUNTERS.clone(),
+        )
+    }
+
+    /// Build a running service with an explicit counter set.
+    ///
+    /// Production callers use [`from_subscription`](Self::from_subscription),
+    /// which shares the global [`DIAGNOSTIC_COUNTERS`]; tests inject an
+    /// isolated [`DiagnosticCounters`] so counter assertions never race with
+    /// other tests or live app traffic.
+    fn from_subscription_with_counters(
+        topic: TopicId,
+        sender: GossipSender,
+        receiver: GossipReceiver,
+        local_node: PublicKey,
+        counters: DiagnosticCounters,
+    ) -> Self {
         let registry = Arc::new(Mutex::new(PeerRegistry::new()));
         let (peer_updates_tx, _) = broadcast::channel(PEER_UPDATES_CAPACITY);
         let core = ReceiveCore {
@@ -787,6 +829,7 @@ impl DiscoveryService {
             topic,
             registry,
             peer_updates_tx,
+            counters,
         };
         let announce = AnnounceHandle::new(sender, local_node);
         let cancel = CancellationToken::new();
@@ -1127,6 +1170,28 @@ mod tests {
         let sender = GossipSender::new(cmd_tx);
         let receiver = GossipReceiver::new(ev_rx);
         DiscoveryService::from_subscription(test_topic(), sender, receiver, local_node)
+    }
+
+    /// Build a running service with an ISOLATED counter set (BORU-DISC-20).
+    ///
+    /// Counter assertions read this instance directly, so they never race
+    /// with other tests or live app traffic on the global
+    /// [`DIAGNOSTIC_COUNTERS`].
+    fn test_service_with_counters(
+        local_node: PublicKey,
+        counters: DiagnosticCounters,
+    ) -> DiscoveryService {
+        let (cmd_tx, _cmd_rx) = irpc_mpsc::channel::<Command>(64);
+        let (_ev_tx, ev_rx) = irpc_mpsc::channel::<Event>(64);
+        let sender = GossipSender::new(cmd_tx);
+        let receiver = GossipReceiver::new(ev_rx);
+        DiscoveryService::from_subscription_with_counters(
+            test_topic(),
+            sender,
+            receiver,
+            local_node,
+            counters,
+        )
     }
 
     /// Encode a `Hello` with a mutated protocol-version byte.
@@ -1630,6 +1695,128 @@ mod tests {
         assert_eq!(outcome, IncomingOutcome::SelfMessage);
         assert_eq!(service.peer_count(), 0);
         assert!(updates.try_recv().is_err());
+    }
+
+    // ── Discovery counters (BORU-DISC-20) ────────────────────────────
+
+    /// A fresh peer registration increments the discovery-peers-seen counter
+    /// and nothing else.
+    #[tokio::test]
+    async fn counters_new_peer_increments_peers_seen() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let counters = DiagnosticCounters::new();
+        let service = test_service_with_counters(local, counters.clone());
+
+        let bytes = postcard::to_stdvec(&DiscoveryMessage::hello(peer)).unwrap();
+        assert_eq!(service.handle_incoming(&bytes, peer), IncomingOutcome::Processed);
+
+        let snap = counters.snapshot();
+        assert_eq!(snap.discovery_peers_seen, 1);
+        assert_eq!(snap.malformed_discovery_packets, 0);
+        assert_eq!(snap.unsupported_version_packets, 0);
+        assert_eq!(snap.direct_topics_joined, 0);
+        assert_eq!(snap.group_topics_joined, 0);
+    }
+
+    /// A malformed (undecodable) payload increments the malformed-packet
+    /// counter but never the peers-seen counter (the peer is not registered).
+    #[tokio::test]
+    async fn counters_malformed_increments_malformed_only() {
+        let local = test_key(0xAA);
+        let counters = DiagnosticCounters::new();
+        let service = test_service_with_counters(local, counters.clone());
+
+        let outcome = service.handle_incoming(b"this is not a discovery message", test_key(0x42));
+        assert_eq!(outcome, IncomingOutcome::Undecodable);
+
+        let snap = counters.snapshot();
+        assert_eq!(snap.malformed_discovery_packets, 1);
+        assert_eq!(snap.discovery_peers_seen, 0);
+        assert_eq!(snap.unsupported_version_packets, 0);
+    }
+
+    /// An unsupported-version payload increments the unsupported-version
+    /// counter (the BORU-DISC-19 gate is observable) but is NOT counted as a
+    /// malformed packet and never registers a peer.
+    #[tokio::test]
+    async fn counters_unsupported_version_increments_unsupported_only() {
+        let local = test_key(0xAA);
+        let peer = test_key(0x07);
+        let counters = DiagnosticCounters::new();
+        let service = test_service_with_counters(local, counters.clone());
+
+        let bytes = hello_with_version(0x07, 99);
+        let outcome = service.handle_incoming(&bytes, peer);
+        assert_eq!(
+            outcome,
+            IncomingOutcome::UnsupportedVersion {
+                found: 99,
+                expected: crate::discovery_topic::BORU_DISCOVERY_PROTOCOL_VERSION,
+            }
+        );
+
+        let snap = counters.snapshot();
+        assert_eq!(snap.unsupported_version_packets, 1);
+        assert_eq!(snap.discovery_peers_seen, 0);
+        assert_eq!(snap.malformed_discovery_packets, 0);
+    }
+
+    /// A duplicate event id (same node, same event) is ignored and does NOT
+    /// bump the peers-seen counter — dedup keeps the counter truthful.
+    #[tokio::test]
+    async fn counters_duplicate_does_not_increment_peers_seen() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let counters = DiagnosticCounters::new();
+        let service = test_service_with_counters(local, counters.clone());
+
+        let first = postcard::to_stdvec(&DiscoveryMessage::hello_with_event(peer, 42)).unwrap();
+        assert_eq!(service.handle_incoming(&first, peer), IncomingOutcome::Processed);
+        assert_eq!(counters.discovery_peers_seen(), 1);
+
+        let second = postcard::to_stdvec(&DiscoveryMessage::presence_with_event(peer, 42)).unwrap();
+        assert_eq!(service.handle_incoming(&second, peer), IncomingOutcome::Duplicate);
+        assert_eq!(counters.discovery_peers_seen(), 1);
+        assert_eq!(counters.malformed_discovery_packets(), 0);
+        assert_eq!(counters.unsupported_version_packets(), 0);
+    }
+
+    /// A Presence refresh from an already-registered peer does NOT bump the
+    /// peers-seen counter (only fresh registrations count as "seen").
+    #[tokio::test]
+    async fn counters_refresh_does_not_increment_peers_seen() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xCC);
+        let counters = DiagnosticCounters::new();
+        let service = test_service_with_counters(local, counters.clone());
+
+        let hello = postcard::to_stdvec(&DiscoveryMessage::hello(peer)).unwrap();
+        assert_eq!(service.handle_incoming(&hello, peer), IncomingOutcome::Processed);
+        assert_eq!(counters.discovery_peers_seen(), 1);
+
+        let presence = postcard::to_stdvec(&DiscoveryMessage::presence(peer)).unwrap();
+        assert_eq!(
+            service.handle_incoming(&presence, peer),
+            IncomingOutcome::Processed
+        );
+        assert_eq!(counters.discovery_peers_seen(), 1, "refresh is not a new peer");
+    }
+
+    /// A self-originated message never bumps any counter.
+    #[tokio::test]
+    async fn counters_self_message_increments_nothing() {
+        let local = test_key(0xAA);
+        let counters = DiagnosticCounters::new();
+        let service = test_service_with_counters(local, counters.clone());
+
+        let bytes = postcard::to_stdvec(&DiscoveryMessage::hello(local)).unwrap();
+        assert_eq!(service.handle_incoming(&bytes, local), IncomingOutcome::SelfMessage);
+
+        let snap = counters.snapshot();
+        assert_eq!(snap.discovery_peers_seen, 0);
+        assert_eq!(snap.malformed_discovery_packets, 0);
+        assert_eq!(snap.unsupported_version_packets, 0);
     }
 
     // ── Dedup in the receive path (BORU-DISC-17) ─────────────────────

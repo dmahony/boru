@@ -12240,6 +12240,21 @@ impl IcedChat {
                 // and MCP room-membership checks reflect the active subscription.
                 DIAGNOSTICS.record(Some(topic), DiagnosticEventKind::RoomJoined);
 
+                // BORU-DISC-20: log explicit room joins independently for
+                // direct vs group topics and bump the matching counter, so
+                // debugging can prove which conversation topics were joined
+                // (separate from the discovery-topic join in main.rs).
+                match self.conversation_store.find(&topic).map(|e| &e.kind) {
+                    Some(ConversationKind::Direct) => {
+                        boru_core::diagnostics::DIAGNOSTIC_COUNTERS.record_direct_topic_joined();
+                        info!(topic = %topic, "room opened: direct conversation topic joined");
+                    }
+                    _ => {
+                        boru_core::diagnostics::DIAGNOSTIC_COUNTERS.record_group_topic_joined();
+                        info!(topic = %topic, "room opened: group conversation topic joined");
+                    }
+                }
+
                 self.screen = Screen::Chat { topic };
                 self.topic = topic;
                 self.ticket_str = ticket.clone();

@@ -1987,7 +1987,26 @@ impl IcedChat {
                 // if no sender was installed.
                 self.background_subscriptions_in_flight.remove(&topic);
                 if conv.sender.is_some() {
-                    info!("background subscribed to {topic}");
+                    // BORU-DISC-20: log direct/group conversation topic
+                    // subscriptions independently and bump the matching
+                    // counter, so debugging can prove which conversation
+                    // topics were actually joined (separate from the
+                    // discovery-topic join in main.rs).
+                    let kind = self
+                        .conversation_store
+                        .find(&topic)
+                        .map(|e| e.kind.clone())
+                        .unwrap_or(boru_core::conversations::ConversationKind::Group);
+                    match kind {
+                        boru_core::conversations::ConversationKind::Direct => {
+                            boru_core::diagnostics::DIAGNOSTIC_COUNTERS.record_direct_topic_joined();
+                            info!(topic=%topic, "background subscribed to direct conversation topic");
+                        }
+                        boru_core::conversations::ConversationKind::Group => {
+                            boru_core::diagnostics::DIAGNOSTIC_COUNTERS.record_group_topic_joined();
+                            info!(topic=%topic, "background subscribed to group conversation topic");
+                        }
+                    }
                 } else {
                     warn!("background subscribe failed for {topic}");
                 }

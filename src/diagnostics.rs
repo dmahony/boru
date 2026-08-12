@@ -44,7 +44,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use chrono::{DateTime, Utc};
 use iroh_base::PublicKey;
@@ -1060,6 +1060,132 @@ struct DiagnosticsInner {
     #[cfg(feature = "net")]
     event_watch: tokio::sync::watch::Sender<u64>,
 }
+
+// =============================================================================
+// DiagnosticCounters — atomic counters (BORU-DISC-20, PDF Phase 6)
+// =============================================================================
+
+/// Atomic counters for discovery/conversation-topic diagnostics.
+///
+/// Complements the [`DiagnosticEvent`] ring buffer: events answer *"what
+/// happened when"*, counters answer *"how many so far"* without any storage
+/// pressure. The four counters required by the discovery logging step are
+/// here — discovery peers seen, direct topics joined, group topics joined,
+/// and malformed discovery packets — plus a separate unsupported-version
+/// packet counter so the BORU-DISC-19 protocol gate is observable on its
+/// own.
+///
+/// Instances are cheaply cloneable and share the underlying atomics, so a
+/// single global ([`DIAGNOSTIC_COUNTERS`]) can be observed from multiple
+/// modules (the discovery service, the iced frontend, the MCP layer) while
+/// tests use isolated instances.
+#[derive(Debug, Clone, Default)]
+pub struct DiagnosticCounters {
+    /// Peers seen on the internal discovery topic (fresh registry entries).
+    discovery_peers_seen: Arc<AtomicU64>,
+    /// Direct (deterministic pairwise) conversation topics joined.
+    direct_topics_joined: Arc<AtomicU64>,
+    /// Group/room conversation topics joined.
+    group_topics_joined: Arc<AtomicU64>,
+    /// Malformed (undecodable) discovery packets dropped.
+    malformed_discovery_packets: Arc<AtomicU64>,
+    /// Discovery packets dropped for speaking an unsupported protocol
+    /// version (the BORU-DISC-19 version gate).
+    unsupported_version_packets: Arc<AtomicU64>,
+}
+
+impl DiagnosticCounters {
+    /// Create an isolated counter set (tests use this; production shares
+    /// the global [`DIAGNOSTIC_COUNTERS`] via `Clone`).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A fresh peer was registered from the discovery topic.
+    pub fn record_discovery_peer_seen(&self) {
+        self.discovery_peers_seen.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A direct (deterministic pairwise) conversation topic was joined.
+    pub fn record_direct_topic_joined(&self) {
+        self.direct_topics_joined.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A group/room conversation topic was joined.
+    pub fn record_group_topic_joined(&self) {
+        self.group_topics_joined.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A malformed (undecodable) discovery packet was dropped.
+    pub fn record_malformed_discovery_packet(&self) {
+        self.malformed_discovery_packets.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A discovery packet speaking an unsupported protocol version was
+    /// dropped by the version gate.
+    pub fn record_unsupported_version_packet(&self) {
+        self.unsupported_version_packets.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Number of peers seen on the discovery topic (fresh registrations).
+    pub fn discovery_peers_seen(&self) -> u64 {
+        self.discovery_peers_seen.load(Ordering::Relaxed)
+    }
+
+    /// Number of direct conversation topics joined.
+    pub fn direct_topics_joined(&self) -> u64 {
+        self.direct_topics_joined.load(Ordering::Relaxed)
+    }
+
+    /// Number of group conversation topics joined.
+    pub fn group_topics_joined(&self) -> u64 {
+        self.group_topics_joined.load(Ordering::Relaxed)
+    }
+
+    /// Number of malformed (undecodable) discovery packets dropped.
+    pub fn malformed_discovery_packets(&self) -> u64 {
+        self.malformed_discovery_packets.load(Ordering::Relaxed)
+    }
+
+    /// Number of unsupported-version discovery packets dropped.
+    pub fn unsupported_version_packets(&self) -> u64 {
+        self.unsupported_version_packets.load(Ordering::Relaxed)
+    }
+
+    /// Point-in-time snapshot of all counters.
+    pub fn snapshot(&self) -> DiagnosticCountersSnapshot {
+        DiagnosticCountersSnapshot {
+            discovery_peers_seen: self.discovery_peers_seen(),
+            direct_topics_joined: self.direct_topics_joined(),
+            group_topics_joined: self.group_topics_joined(),
+            malformed_discovery_packets: self.malformed_discovery_packets(),
+            unsupported_version_packets: self.unsupported_version_packets(),
+        }
+    }
+}
+
+/// Point-in-time snapshot of [`DiagnosticCounters`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DiagnosticCountersSnapshot {
+    /// Peers seen on the internal discovery topic (fresh registrations).
+    pub discovery_peers_seen: u64,
+    /// Direct (deterministic pairwise) conversation topics joined.
+    pub direct_topics_joined: u64,
+    /// Group/room conversation topics joined.
+    pub group_topics_joined: u64,
+    /// Malformed (undecodable) discovery packets dropped.
+    pub malformed_discovery_packets: u64,
+    /// Discovery packets dropped by the unsupported-version gate.
+    pub unsupported_version_packets: u64,
+}
+
+/// Global atomic counters for discovery/conversation-topic diagnostics.
+///
+/// Lazily initialised on first access. Clones share the same underlying
+/// atomics, so the discovery service and the frontends can all bump and read
+/// the same counters without a lock.
+pub static DIAGNOSTIC_COUNTERS: LazyLock<DiagnosticCounters> =
+    LazyLock::new(DiagnosticCounters::new);
 
 impl Diagnostics {
     /// Create a new diagnostics store with default capacities.
@@ -11048,5 +11174,62 @@ mod tests {
             let decoded: GuiTestCommand = serde_json::from_str(&json).unwrap();
             assert_eq!(decoded, command);
         }
+    }
+}
+
+// =============================================================================
+// DiagnosticCounters tests (BORU-DISC-20)
+// =============================================================================
+
+#[cfg(test)]
+mod counters_tests {
+    use super::*;
+
+    /// Every record_* method bumps exactly its own counter, and the snapshot
+    /// reflects the four required discovery counters plus the
+    /// unsupported-version counter.
+    #[test]
+    fn diagnostic_counters_record_and_snapshot() {
+        let counters = DiagnosticCounters::new();
+        assert_eq!(counters.snapshot(), DiagnosticCountersSnapshot::default());
+
+        counters.record_discovery_peer_seen();
+        counters.record_direct_topic_joined();
+        counters.record_group_topic_joined();
+        counters.record_malformed_discovery_packet();
+        counters.record_unsupported_version_packet();
+
+        let snap = counters.snapshot();
+        assert_eq!(snap.discovery_peers_seen, 1);
+        assert_eq!(snap.direct_topics_joined, 1);
+        assert_eq!(snap.group_topics_joined, 1);
+        assert_eq!(snap.malformed_discovery_packets, 1);
+        assert_eq!(snap.unsupported_version_packets, 1);
+
+        // A second bump accumulates.
+        counters.record_direct_topic_joined();
+        assert_eq!(counters.direct_topics_joined(), 2);
+        assert_eq!(counters.group_topics_joined(), 1);
+    }
+
+    /// Clones share the same underlying atomics — the global
+    /// [`DIAGNOSTIC_COUNTERS`] can be bumped from the discovery service and
+    /// read from the frontend without a lock.
+    #[test]
+    fn diagnostic_counters_clone_shares_atomics() {
+        let a = DiagnosticCounters::new();
+        let b = a.clone();
+        b.record_direct_topic_joined();
+        b.record_group_topic_joined();
+        assert_eq!(a.direct_topics_joined(), 1);
+        assert_eq!(a.group_topics_joined(), 1);
+    }
+
+    /// The snapshot type derives PartialEq/Eq so assertions read cleanly.
+    #[test]
+    fn diagnostic_counters_snapshot_eq() {
+        let a = DiagnosticCounters::new().snapshot();
+        let b = DiagnosticCounters::new().snapshot();
+        assert_eq!(a, b);
     }
 }
