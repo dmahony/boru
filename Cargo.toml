@@ -621,3 +621,8 @@ name = "test_discovery_e2e_matrix"
 path = "tests/test_discovery_e2e_matrix.rs"
 required-features = ["net"]
 
+[[test]]
+name = "test_reconnect_asymmetric"
+path = "tests/test_reconnect_asymmetric.rs"
+required-features = ["net"]
+
