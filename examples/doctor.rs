@@ -18,7 +18,7 @@ use std::{
     str::FromStr,
 };
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use iroh::SecretKey;
 use n0_error::Result;
 
@@ -32,6 +32,11 @@ use boru_core::room_history::RoomHistoryStore;
 #[derive(Parser, Debug)]
 #[command(name = "doctor", about = "Check Boru install health")]
 struct Args {
+    /// Optional subcommand (e.g. `health` for the live networking health
+    /// view). When omitted, the install sanity checks run.
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Override the data directory to check (default: auto-detect).
     #[arg(long)]
     data_dir: Option<PathBuf>,
@@ -47,6 +52,51 @@ struct Args {
     /// Skip checks that require network connectivity or endpoint binding.
     #[arg(long)]
     offline: bool,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// BORU-CP-15: live networking health view (debug-only, needs `net`).
+    ///
+    /// Boots a real node, joins the internal discovery topic, probes each
+    /// discovered peer's deterministic direct topic, and prints a per-peer
+    /// health view with six separate indicators (Discovery, Endpoint,
+    /// Direct Topic, Inbound Delivery, Outbound Delivery, Path) plus a
+    /// stable copy-diagnostics block for side-by-side machine comparison.
+    Health(HealthArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct HealthArgs {
+    /// Observation window in seconds (default 30).
+    #[arg(long, default_value_t = 30)]
+    duration: u64,
+
+    /// Relay URL override (default: iroh default relay).
+    #[arg(long)]
+    relay: Option<String>,
+
+    /// Disable relay entirely (LAN-only discovery).
+    #[arg(long)]
+    no_relay: bool,
+
+    /// Bootstrap peer node ids to dial into the discovery mesh at startup
+    /// (repeatable). On machine A run `--bootstrap <B-node-id>`; on machine
+    /// B run `--bootstrap <A-node-id>`.
+    #[arg(long)]
+    bootstrap: Vec<String>,
+
+    /// Data directory for the node identity (default: auto-detect).
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
+
+    /// Print only the copy-diagnostics block (stable labels).
+    #[arg(long)]
+    copy: bool,
+
+    /// Do not send direct-topic probes (report store state only).
+    #[arg(long)]
+    no_probe: bool,
 }
 
 // ── Check result type ───────────────────────────────────────────────────────
@@ -626,6 +676,13 @@ fn format_json(checks: &[Check], data_dir: &Path) {
 fn main() -> Result<()> {
     let args = Args::parse();
 
+    // BORU-CP-15: the `health` subcommand boots a real node and prints the
+    // live networking health view. It is debug-only; it needs the `net`
+    // feature and an async runtime.
+    if let Some(Command::Health(health)) = args.command {
+        return run_health(health).map_err(Into::into);
+    }
+
     #[cfg(feature = "net")]
     let _gossip = (); // ensure net feature is available
 
@@ -642,4 +699,197 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+// ── Health view (BORU-CP-15, PDF 5.3) ──────────────────────────────────────
+
+/// Build a fresh tokio runtime for the health view.
+#[cfg(feature = "net")]
+fn run_health(args: HealthArgs) -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("build tokio runtime for health view");
+    runtime.block_on(run_health_async(args))
+}
+
+/// Fallback when the `net` feature is off (should not happen: the doctor
+/// example declares `required-features = ["net"]`).
+#[cfg(not(feature = "net"))]
+fn run_health(_args: HealthArgs) -> anyhow::Result<()> {
+    anyhow::bail!("health view requires the `net` feature")
+}
+
+/// BORU-CP-15: the live networking health view.
+///
+/// Boots a real iroh endpoint + gossip actor, joins the internal discovery
+/// topic via [`DiscoveryService`], probes each discovered peer's
+/// deterministic direct topic, and prints the per-peer health view plus a
+/// stable copy-diagnostics block. Run on two machines with matching
+/// `--relay`/`--bootstrap` flags and diff the copy-diagnostics blocks side
+/// by side: the labels are stable and sorted by peer id, so an asymmetric
+/// A→B vs B→A failure is obvious.
+#[cfg(feature = "net")]
+async fn run_health_async(args: HealthArgs) -> anyhow::Result<()> {
+    use std::collections::HashSet;
+    use std::time::{Duration, Instant};
+
+    use boru_core::control_plane::health::{
+        build_health_rows, probe_direct_topic, render_copy_diagnostics, render_health_view,
+    };
+    use boru_core::discovery_service::{DiscoveryService, PeerUpdate};
+    use boru_core::discovery_topic::discovery_topic;
+    use boru_core::net::{Gossip, GOSSIP_ALPN};
+    use boru_core::public_room::PublicNetwork;
+    use iroh::address_lookup::memory::MemoryLookup;
+    use iroh::endpoint::presets;
+    use iroh::protocol::Router;
+    use iroh::{Endpoint, PublicKey, RelayMode, RelayUrl};
+
+    let data_dir = resolve_data_dir(args.data_dir.clone());
+    let secret_key = load_or_generate_secret_key(&data_dir)?;
+    let local_public = secret_key.public();
+
+    // Endpoint with a shared in-memory address book (bootstrap peers dial by
+    // node id; relay mode is configurable for LAN-only tests).
+    let relay_mode = if args.no_relay {
+        RelayMode::Disabled
+    } else if let Some(url) = args.relay {
+        let relay_url = RelayUrl::from_str(&url).expect("valid relay URL");
+        RelayMode::Custom(relay_url.into())
+    } else {
+        RelayMode::Custom(
+            RelayUrl::from_str("https://relay.iroh.network/")
+                .expect("valid default relay URL")
+                .into(),
+        )
+    };
+    let memory = MemoryLookup::new();
+    let endpoint = Endpoint::builder(presets::Minimal)
+        .secret_key(secret_key)
+        .address_lookup(memory)
+        .relay_mode(relay_mode)
+        .bind()
+        .await?;
+    if !args.no_relay {
+        match tokio::time::timeout(Duration::from_secs(15), endpoint.online()).await {
+            Ok(()) => eprintln!("relay connection established"),
+            Err(_) => eprintln!("relay online() timed out after 15s (continuing)"),
+        }
+    }
+    eprintln!("node: {}", endpoint.id());
+
+    let gossip = Gossip::builder().spawn(endpoint.clone());
+    let router = Router::builder(endpoint.clone())
+        .accept(GOSSIP_ALPN, gossip.clone())
+        .spawn();
+
+    let bootstrap: Vec<PublicKey> = args
+        .bootstrap
+        .iter()
+        .filter_map(|s| PublicKey::from_str(s).ok())
+        .collect();
+    let service = std::sync::Arc::new(
+        DiscoveryService::start(
+            &gossip,
+            discovery_topic(PublicNetwork::Mainnet),
+            bootstrap,
+            local_public,
+        )
+        .await?
+        .with_endpoint(endpoint.clone()),
+    );
+
+    // Track peers we have already probed so each peer gets at most one
+    // direct-topic probe (bounded resources; idempotence guardrail).
+    let mut probed: HashSet<PublicKey> = HashSet::new();
+    let started = Instant::now();
+    let window = Duration::from_secs(args.duration.max(1));
+
+    // Watch peer updates; probe each newly discovered peer's direct topic.
+    let mut updates = service.peer_updates();
+    let mut probe_tasks = tokio::task::JoinSet::new();
+    loop {
+        let elapsed = started.elapsed();
+        if elapsed >= window {
+            break;
+        }
+        tokio::select! {
+            update = updates.recv() => {
+                match update {
+                    Ok(PeerUpdate::Seen { node_id, .. })
+                    | Ok(PeerUpdate::Advertised { advertised: node_id, .. }) => {
+                        if node_id != local_public && probed.insert(node_id) && !args.no_probe {
+                            let gossip = gossip.clone();
+                            let service = std::sync::Arc::clone(&service);
+                            probe_tasks.spawn(async move {
+                                probe_direct_topic(&gossip, &service, local_public, node_id).await
+                            });
+                        }
+                    }
+                    Ok(PeerUpdate::Expired { .. }) => {}
+                    Err(_) => break,
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+        }
+    }
+
+    // Let in-flight probes settle briefly so their events land in the store.
+    while probe_tasks.join_next().await.is_some() {}
+
+    let uptime = started.elapsed();
+    let rows = build_health_rows(&service.peer_diagnostics());
+    let node = local_public.fmt_short().to_string();
+
+    if args.copy {
+        print!("{}", render_copy_diagnostics(&node, uptime, &rows));
+    } else {
+        print!("{}", render_health_view(&node, uptime, &rows));
+        println!();
+        println!("── copy-diagnostics ───────────────────────────────────────");
+        print!("{}", render_copy_diagnostics(&node, uptime, &rows));
+    }
+
+    // Clean shutdown. All probe tasks have finished (JoinSet drained), so
+    // the Arc should be unique — unwrap it to consume the service. Stop the
+    // gossip actor before the router: the router's protocol-handler shutdown
+    // already tells gossip to stop, so shutting gossip down later would
+    // error with ActorDropped.
+    if let Ok(service) = std::sync::Arc::try_unwrap(service) {
+        service.shutdown().await;
+    }
+    let _ = gossip.shutdown().await;
+    router.shutdown().await?;
+    Ok(())
+}
+
+/// Load the node secret key from the data dir, generating one on first run
+/// (same behaviour as the main app's `load_or_generate_secret_key_at`).
+#[cfg(feature = "net")]
+fn load_or_generate_secret_key(data_dir: &Path) -> anyhow::Result<SecretKey> {
+    let path = data_dir.join("secret_key.txt");
+    if path.exists() {
+        let raw = std::fs::read_to_string(&path)?;
+        let trimmed = raw.trim();
+        if let Ok(key) = SecretKey::from_str(trimmed) {
+            return Ok(key);
+        }
+        anyhow::bail!("invalid secret key in {}", path.display());
+    }
+    let key = SecretKey::generate();
+    let key_str = data_encoding::HEXLOWER.encode(&key.to_bytes());
+    std::fs::create_dir_all(data_dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(data_dir, std::fs::Permissions::from_mode(0o700));
+    }
+    std::fs::write(&path, format!("{key_str}\n"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(key)
 }

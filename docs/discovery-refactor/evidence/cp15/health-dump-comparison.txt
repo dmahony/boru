@@ -1,0 +1,38 @@
+BORU-CP-15 evidence — two-node in-process health dump comparison
+Captured from a real two-node run of the probe harness (throwaway
+test test_health_view_evidence.rs, run on debsrv 2026-08-13, seed 0x5A17):
+  - Two in-process nodes A and B join the internal discovery topic via
+    DiscoveryService (relay disabled, shared MemoryLookup, loopback).
+  - Both sides discover each other, then probe the deterministic direct
+    topic concurrently via probe_direct_topic.
+  - Both probes returned topic_joined=true probe_sent=true probe_received=true.
+  - render_health_view / render_copy_diagnostics called with uptime=30s.
+
+===MACHINE A (human view) ===
+BORU network health (BORU-HEALTH-V1 · node A · uptime 30s · 1 peer(s))
+  peer     │ state             │ discovery │ endpoint      │ direct_topic │ inbound  │ outbound │ path
+  c2ccb841a9 │ direct-topic-ready │ seen-314ms │ connected-301ms │ ready        │ ok-301ms │ ok-302ms │ unknown
+  ── c2ccb841a9:
+      transition reachable→direct-topic-ready (topic-joined)
+      transition unknown→reachable (endpoint-connected)
+
+===MACHINE A (copy-diagnostics) ===
+BORU-HEALTH-V1
+node=A uptime=30s peers=1
+peer=c2ccb841a9 discovery=seen-314ms endpoint=connected-301ms direct_topic=ready inbound=ok-301ms outbound=ok-302ms path=unknown state=direct-topic-ready
+
+===MACHINE B (copy-diagnostics) ===
+BORU-HEALTH-V1
+node=B uptime=30s peers=1
+peer=c657b0e3c6 discovery=seen-316ms endpoint=connected-301ms direct_topic=ready inbound=ok-301ms outbound=ok-303ms path=unknown state=direct-topic-ready
+
+Both blocks: same version header, same label set, one sorted peer line.
+Discovery is separate from direct-message delivery (inbound/outbound).
+Path stays unknown in the short test window (15s refresh sweep has not run);
+it is diagnostic-only and does not affect delivery indicators.
+Asymmetric failure visibility is proven by the unit/integration tests
+(asymmetric_failure_is_visible_in_the_dump /
+asymmetric_failure_renders_obviously_in_both_dumps): when A has an
+outbound broadcast but B never received it, A's line shows
+outbound=ok-… inbound=never while B's shows inbound=never
+direct_topic=not_attempted.
