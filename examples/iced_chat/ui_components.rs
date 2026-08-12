@@ -1207,7 +1207,7 @@ impl<Message: 'static> Avatar<Message> {
                 // The online dot is colour-coded; give it a text label so
                 // status is never communicated by colour alone (UI-19).
                 iced_tooltip::Tooltip::new(
-                    status_dot::<Message>(StatusDotKind::Online, 12.0),
+                    status_dot::<Message>(StatusDotKind::Online, crate::design_tokens::STATUS_DOT_SM),
                     text("Online")
                         .size(TypeRole::Metadata.size_px())
                         .font(TypeRole::Metadata.font()),
