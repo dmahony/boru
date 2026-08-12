@@ -2567,7 +2567,7 @@ impl IcedChat {
                 controls = controls.push(
                     crate::download_progress_view::primary_button(
                         None,
-                        "Resume",
+                        crate::i18n::t("common.resume"),
                         AppMessage::DownloadingResume(row.id.clone()),
                     ),
                 );
@@ -2575,14 +2575,14 @@ impl IcedChat {
                 controls = controls.push(
                     crate::download_progress_view::secondary_button(
                         None,
-                        "Pause",
+                        crate::i18n::t("common.pause"),
                         AppMessage::DownloadingPause(row.id.clone()),
                     ),
                 );
             }
             controls = controls.push(
                 crate::download_progress_view::text_button(
-                    "Cancel",
+                    crate::i18n::t("common.cancel"),
                     AppMessage::DownloadingCancel(row.id.clone()),
                 ),
             );
@@ -2728,7 +2728,7 @@ impl IcedChat {
         if !row.state.is_terminal() && !matches!(row.state, OutboundState::Disconnected) {
             controls = controls.push(
                 crate::download_progress_view::text_button(
-                    "Stop",
+                    crate::i18n::t("common.stop"),
                     AppMessage::DownloadingStop(row.id.clone()),
                 ),
             );
@@ -3999,7 +3999,7 @@ impl IcedChat {
             )
             .width(Length::Fill);
 
-        let search_input = text_input("Search files or peers...", &dep.dashboard_search_input)
+        let search_input = text_input(&crate::i18n::t("files.search_placeholder"), &dep.dashboard_search_input)
             .on_input(|s| AppMessage::DashboardSearchChanged(s))
             .padding([SPACE_6, SPACE_12])
             .size(crate::fonts::TypeRole::Body.size_px())

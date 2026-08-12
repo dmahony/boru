@@ -19,15 +19,15 @@ impl IcedChat {
         let Some(call) = self.incoming_call else { return base.into(); };
         let name = self.resolve_name(&call.peer);
         let kind = match call.kind {
-            CallKind::Voice => "Incoming voice call",
-            CallKind::Video => "Incoming video call",
+            CallKind::Voice => crate::i18n::t("calls.incoming_voice"),
+            CallKind::Video => crate::i18n::t("calls.incoming_video"),
         };
         let avatar: iced::Element<'a, AppMessage> = self.friend_image_handles.get(&call.peer).and_then(|h| h.clone())
             .map(|h| iced::widget::image(h).width(Length::Fixed(72.0)).height(Length::Fixed(72.0)).into())
             .unwrap_or_else(|| text("👤").size(48).into());
         let card = container(column![avatar, text(name).size(22), text(kind).size(15), row![
-            button(text("Decline")).on_press(AppMessage::RejectIncomingCall(call.call_id)),
-            button(text("Accept")).on_press(AppMessage::AcceptIncomingCall(call.call_id)),
+            button(text(crate::i18n::t("calls.decline"))).on_press(AppMessage::RejectIncomingCall(call.call_id)),
+            button(text(crate::i18n::t("calls.accept"))).on_press(AppMessage::AcceptIncomingCall(call.call_id)),
         ].spacing(12)].spacing(12).align_x(Alignment::Center))
             .padding(32)
             .style(|_| iced::widget::container::Style {
@@ -277,39 +277,39 @@ impl IcedChat {
         if name_valid && !submitting {
             name_field = name_field.on_submit(AppMessage::ConfirmCreateNewRoom);
         }
-        let room_details = FormSection::new("Room Details").push(name_field.build());
+        let room_details = FormSection::new(crate::i18n::t("dialogs.create_room.room_details")).push(name_field.build());
 
         // ── Visibility / Discovery ──────────────────────────────────────
-        let visibility = FormSection::new("Visibility / Discovery")
-            .helper("Choose how other Boru users can find this room.")
+        let visibility = FormSection::new(crate::i18n::t("dialogs.create_room.visibility"))
+            .helper(crate::i18n::t("dialogs.create_room.visibility_helper"))
             .push(checkbox_field(
-                "Advertise in Directory",
+                crate::i18n::t("dialogs.create_room.advertise_directory"),
                 self.create_room_advertise,
                 AppMessage::CreateNewRoomAdvertiseToggled,
-                Some("List the room in the directory so others can discover and join it."),
+                Some(crate::i18n::t("dialogs.create_room.advertise_directory_helper")),
             ))
             .push(checkbox_field(
-                "Enable DHT discovery",
+                crate::i18n::t("dialogs.create_room.dht_discovery"),
                 self.create_room_dht_enabled,
                 AppMessage::CreateNewRoomDhtToggled,
-                Some("Publish a discovery record on the DHT so the room can be found on the network."),
+                Some(crate::i18n::t("dialogs.create_room.dht_discovery_helper")),
             ));
 
         // ── Access / Participation Options ──────────────────────────────
         // Public rooms are open by design; the backend exposes no join
         // limits, invite gates, or access rules, so this section is helper
         // text only.
-        let access = FormSection::new("Access / Participation Options").push(helper_text(
-            "Public rooms are open to everyone. Anyone who discovers the room can join it directly — no approval or invitation is required.",
+        let access = FormSection::new(crate::i18n::t("dialogs.create_room.access")).push(helper_text(
+            &crate::i18n::t("dialogs.create_room.access_helper"),
         ));
 
         // ── Preview / Info ──────────────────────────────────────────────
-        let info = FormSection::new("Preview / Info").push(helper_text(
-            "A public room is advertised in the directory and discoverable over DHT. Other Boru users can find and join it while it stays online.",
+        let info = FormSection::new(crate::i18n::t("dialogs.create_room.preview")).push(helper_text(
+            &crate::i18n::t("dialogs.create_room.preview_helper"),
         ));
 
-        let overlay = BoruDialog::new("Create Public Room")
-            .subtitle("Create a room others can discover and join.")
+        let overlay = BoruDialog::new(crate::i18n::t("dialogs.create_room.dialog_title"))
+            .subtitle(crate::i18n::t("dialogs.create_room.dialog_subtitle"))
             .width(self.dialog_width(BORU_DIALOG_WIDTH_STANDARD))
             .push_body(room_details.build())
             .push_body(visibility.build())
@@ -400,10 +400,10 @@ impl IcedChat {
             );
         }
 
-        let empty_text: &'a str = if available.is_empty() {
-            "No peers available to add right now."
+        let empty_text: String = if available.is_empty() {
+            crate::i18n::t("dialogs.create_group.no_peers_available")
         } else {
-            "No peers match your search."
+            crate::i18n::t("dialogs.create_group.no_peers_match")
         };
 
         // Participants picker: search + chips + peer list + summary.
@@ -695,12 +695,12 @@ impl IcedChat {
             );
         }
 
-        let connection_section = FormSection::new("Connection Target")
-            .helper("Choose a friend who will be able to connect through this tunnel.")
+        let connection_section = FormSection::new(crate::i18n::t("dialogs.create_tunnel.connection_target"))
+            .helper(crate::i18n::t("dialogs.create_tunnel.connection_target_helper"))
             .push(SelectablePeerList::new(
                 rows,
                 250.0,
-                Some("No friends available to share tunnels with yet."),
+                Some(crate::i18n::t("dialogs.create_tunnel.no_friends_available")),
             )
             .build())
             .build();
@@ -761,11 +761,11 @@ impl IcedChat {
             );
         }
 
-        let body = FormSection::new("Participants")
+        let body = FormSection::new(crate::i18n::t("dialogs.invite_member.participants"))
             .push(SelectablePeerList::new(
                 rows,
                 250.0,
-                Some("No friends available to invite yet."),
+                Some(crate::i18n::t("dialogs.invite_member.no_friends_available")),
             )
             .build())
             .build();

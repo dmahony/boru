@@ -575,8 +575,8 @@ pub(crate) fn action_button<'a>(label: &'a str, msg: AppMessage) -> iced::Elemen
 }
 
 /// A subtle text-only button (borderless, uses muted/destructive colour).
-pub(crate) fn text_button<'a>(label: &'a str, msg: AppMessage) -> iced::Element<'a, AppMessage> {
-    let lbl = crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, label);
+pub(crate) fn text_button(label: impl Into<String>, msg: AppMessage) -> iced::Element<'static, AppMessage> {
+    let lbl = crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, label.into());
     crate::focusable_button::focusable_button(
         button(lbl)
             .on_press(msg.clone())
@@ -610,11 +610,11 @@ pub(crate) fn text_button<'a>(label: &'a str, msg: AppMessage) -> iced::Element<
 /// plus the label.  The icon is coloured with `icon_color(theme)` so it
 /// tracks the surrounding theme (white on the green primary fill, the
 /// system text colour on bordered secondary buttons).
-fn action_content<'a>(
+fn action_content(
     icon: Option<&'static [u8]>,
-    label: &'a str,
+    label: String,
     icon_color: fn(&iced::Theme) -> Color,
-) -> iced::Element<'a, AppMessage> {
+) -> iced::Element<'static, AppMessage> {
     let text_el = crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, label);
     match icon {
         Some(svg_bytes) => row![
@@ -633,13 +633,13 @@ fn action_content<'a>(
 ///
 /// Keyboard-focusable: wrapped in [`crate::focusable_button::FocusableButton`]
 /// so Tab traversal reaches it and Enter/Space activates it (spec Task 17).
-pub(crate) fn primary_button<'a>(
+pub(crate) fn primary_button(
     icon: Option<&'static [u8]>,
-    label: &'a str,
+    label: impl Into<String>,
     msg: AppMessage,
-) -> iced::Element<'a, AppMessage> {
+) -> iced::Element<'static, AppMessage> {
     crate::focusable_button::focusable_button(
-        button(action_content(icon, label, |_t| Color::WHITE))
+        button(action_content(icon, label.into(), |_t| Color::WHITE))
             .on_press(msg.clone())
             .padding([SPACE_6, SPACE_12])
             .style(super::app::BUTTON_PRIMARY_GREEN),
@@ -653,13 +653,13 @@ pub(crate) fn primary_button<'a>(
 ///
 /// Keyboard-focusable: wrapped in [`crate::focusable_button::FocusableButton`]
 /// so Tab traversal reaches it and Enter/Space activates it (spec Task 17).
-pub(crate) fn secondary_button<'a>(
+pub(crate) fn secondary_button(
     icon: Option<&'static [u8]>,
-    label: &'a str,
+    label: impl Into<String>,
     msg: AppMessage,
-) -> iced::Element<'a, AppMessage> {
+) -> iced::Element<'static, AppMessage> {
     crate::focusable_button::focusable_button(
-        button(action_content(icon, label, text_system))
+        button(action_content(icon, label.into(), text_system))
             .on_press(msg.clone())
             .padding([SPACE_6, SPACE_12])
             .style(|theme, status| {
@@ -693,8 +693,8 @@ pub(crate) fn secondary_button<'a>(
 
 /// Disabled / loading button — no press handler, muted styling, and NOT
 /// part of the keyboard focus order (no action to activate).
-pub(crate) fn disabled_button<'a>(label: &'a str) -> iced::Element<'a, AppMessage> {
-    let lbl = crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, label);
+pub(crate) fn disabled_button(label: impl Into<String>) -> iced::Element<'static, AppMessage> {
+    let lbl = crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, label.into());
     crate::focusable_button::focusable_button(
         button(lbl)
             .padding([SPACE_6, SPACE_12])
@@ -728,15 +728,24 @@ pub(crate) fn policy_selector<'a>(
 
     let label = crate::fonts::type_role_text(
         crate::fonts::TypeRole::Metadata,
-        "If a file with this name exists:",
+        crate::i18n::t("files.if_name_exists"),
     );
 
     let mut row = Row::new().push(label).spacing(SPACE_6).align_y(Alignment::Center);
 
     for (candidate, label) in [
-        (OverwritePolicy::KeepBoth, "Keep Both"),
-        (OverwritePolicy::Overwrite, "Overwrite"),
-        (OverwritePolicy::Skip, "Skip"),
+        (
+            OverwritePolicy::KeepBoth,
+            crate::i18n::t("files.keep_both"),
+        ),
+        (
+            OverwritePolicy::Overwrite,
+            crate::i18n::t("files.overwrite"),
+        ),
+        (
+            OverwritePolicy::Skip,
+            crate::i18n::t("files.skip"),
+        ),
     ] {
         let selected = candidate == policy;
         let msg = AppMessage::SetOverwritePolicy(entry_index, candidate);
@@ -1024,7 +1033,7 @@ fn view_download_progress_inner<'a>(
     let playback_action_row: Option<iced::Element<'a, AppMessage>> =
         attachment.playback_error.as_ref().and_then(|error| {
             error.retry_available().then(|| {
-                secondary_button(None, "Retry player", AppMessage::PlayInlineVideo(entry_index))
+                secondary_button(None, crate::i18n::t("files.retry_player"), AppMessage::PlayInlineVideo(entry_index))
                     .into()
             })
         });
@@ -1269,118 +1278,118 @@ pub(crate) fn action_buttons<'a>(
     let buttons: Vec<iced::Element<'a, AppMessage>> = match (kind, state) {
         // ── Video: verifying (download complete, save pending) ──────────
         (Video, DownloadState::Completed { saved_path: None, .. }) => {
-            vec![disabled_button("Verifying…").into()]
+            vec![disabled_button(crate::i18n::t("common.verifying")).into()]
         }
         // ── Video: local file missing → re-download ─────────────────────
         (Video, DownloadState::Completed { saved_path: Some(path), .. }) if !path.exists() => {
-            vec![primary_button(Some(ICON_RETRY), "Download", ExecuteDownloadAt(entry_index)).into()]
+            vec![primary_button(Some(ICON_RETRY), crate::i18n::t("common.download"), ExecuteDownloadAt(entry_index)).into()]
         }
         (Video, DownloadState::Failed { failure })
             if matches!(failure, super::app::DownloadFailure::FileRemoved) =>
         {
-            vec![primary_button(Some(ICON_RETRY), "Download", ExecuteDownloadAt(entry_index)).into()]
+            vec![primary_button(Some(ICON_RETRY), crate::i18n::t("common.download"), ExecuteDownloadAt(entry_index)).into()]
         }
         // ── Video: download complete & playable ─────────────────────────
         (Video, DownloadState::Completed { saved_path: Some(path), .. }) if path.exists() => {
             vec![
-                primary_button(Some(ICON_PLAY), "Play", PlayInlineVideo(entry_index)).into(),
+                primary_button(Some(ICON_PLAY), crate::i18n::t("files.play"), PlayInlineVideo(entry_index)).into(),
                 secondary_button(
                     Some(ICON_FILES),
-                    "Open File",
+                    crate::i18n::t("files.open_file"),
                     OpenDownloadedFile(name.to_string()),
                 )
                 .into(),
-                secondary_button(Some(ICON_FOLDER), "Open Folder", OpenDownloadsFolder).into(),
-                secondary_button(Some(ICON_MESH), "Re-share", ReshareFile(entry_index)).into(),
+                secondary_button(Some(ICON_FOLDER), crate::i18n::t("files.open_folder"), OpenDownloadsFolder).into(),
+                secondary_button(Some(ICON_MESH), crate::i18n::t("files.reshare"), ReshareFile(entry_index)).into(),
             ]
         }
         // ── Video: outgoing shared file with a local copy ───────────────
         (Video, DownloadState::Shared { ref path, .. }) if path.exists() => {
             vec![
-                primary_button(Some(ICON_PLAY), "Play", PlayInlineVideo(entry_index)).into(),
+                primary_button(Some(ICON_PLAY), crate::i18n::t("files.play"), PlayInlineVideo(entry_index)).into(),
                 secondary_button(
                     Some(ICON_FILES),
-                    "Open File",
+                    crate::i18n::t("files.open_file"),
                     OpenDownloadedFile(name.to_string()),
                 )
                 .into(),
-                secondary_button(Some(ICON_FOLDER), "Open Folder", OpenDownloadsFolder).into(),
-                secondary_button(Some(ICON_MESH), "Re-share", ReshareFile(entry_index)).into(),
+                secondary_button(Some(ICON_FOLDER), crate::i18n::t("files.open_folder"), OpenDownloadsFolder).into(),
+                secondary_button(Some(ICON_MESH), crate::i18n::t("files.reshare"), ReshareFile(entry_index)).into(),
             ]
         }
         // ── Video: ready to download — Download or Stream ───────────────
         (Video, DownloadState::Ready { .. }) => {
             vec![
-                primary_button(Some(ICON_RETRY), "Download", ExecuteDownloadAt(entry_index))
+                primary_button(Some(ICON_RETRY), crate::i18n::t("common.download"), ExecuteDownloadAt(entry_index))
                     .into(),
-                secondary_button(Some(ICON_PLAY), "Stream", StreamInlineVideo(entry_index)).into(),
+                secondary_button(Some(ICON_PLAY), crate::i18n::t("files.stream"), StreamInlineVideo(entry_index)).into(),
             ]
         }
         // ── Video: download in progress — Stream now, Pause, Cancel ──────
         (Video, DownloadState::Active { .. }) => {
             vec![
-                secondary_button(Some(ICON_PLAY), "Stream", StreamInlineVideo(entry_index))
+                secondary_button(Some(ICON_PLAY), crate::i18n::t("files.stream"), StreamInlineVideo(entry_index))
                     .into(),
-                secondary_button(None, "Pause", PauseDownloadAt(entry_index)).into(),
-                text_button("Cancel", CancelDownloadAt(entry_index)).into(),
+                secondary_button(None, crate::i18n::t("common.pause"), PauseDownloadAt(entry_index)).into(),
+                text_button(crate::i18n::t("common.cancel"), CancelDownloadAt(entry_index)).into(),
             ]
         }
         // ── Ready / not yet downloaded ──────────────────────────────────
         (_, DownloadState::Ready { .. }) => {
-            vec![primary_button(Some(ICON_RETRY), "Download", ExecuteDownloadAt(entry_index)).into()]
+            vec![primary_button(Some(ICON_RETRY), crate::i18n::t("common.download"), ExecuteDownloadAt(entry_index)).into()]
         }
         // ── Download in progress: progress is the primary area; Cancel ──
         (_, DownloadState::Active { .. }) => {
             vec![
-                secondary_button(None, "Pause", PauseDownloadAt(entry_index)).into(),
-                text_button("Cancel", CancelDownloadAt(entry_index)).into(),
+                secondary_button(None, crate::i18n::t("common.pause"), PauseDownloadAt(entry_index)).into(),
+                text_button(crate::i18n::t("common.cancel"), CancelDownloadAt(entry_index)).into(),
             ]
         }
         (_, DownloadState::Paused { .. }) => {
             vec![
-                primary_button(Some(ICON_PLAY), "Resume", ResumeDownloadAt(entry_index)).into(),
-                text_button("Cancel", CancelDownloadAt(entry_index)).into(),
+                primary_button(Some(ICON_PLAY), crate::i18n::t("common.resume"), ResumeDownloadAt(entry_index)).into(),
+                text_button(crate::i18n::t("common.cancel"), CancelDownloadAt(entry_index)).into(),
             ]
         }
         // ── Generic completed / shared ──────────────────────────────────
         (_, DownloadState::Completed { .. }) => {
             vec![
-                primary_button(Some(ICON_FILES), "Open", OpenDownloadedFile(name.to_string()))
+                primary_button(Some(ICON_FILES), crate::i18n::t("common.open"), OpenDownloadedFile(name.to_string()))
                     .into(),
-                secondary_button(Some(ICON_FOLDER), "Open Folder", OpenDownloadsFolder).into(),
-                secondary_button(Some(ICON_COPY), "Copy Ticket", CopyShareTicket(entry_index))
+                secondary_button(Some(ICON_FOLDER), crate::i18n::t("files.open_folder"), OpenDownloadsFolder).into(),
+                secondary_button(Some(ICON_COPY), crate::i18n::t("files.copy_ticket"), CopyShareTicket(entry_index))
                     .into(),
                 // FS-26: mint a 7-character short code that resolves to this
                 // card's ticket (additive — the full ticket stays available).
-                secondary_button(None, "Share Code", MintShortCode(entry_index)).into(),
-                secondary_button(Some(ICON_MESH), "Re-share", ReshareFile(entry_index)).into(),
+                secondary_button(None, crate::i18n::t("files.share_code"), MintShortCode(entry_index)).into(),
+                secondary_button(Some(ICON_MESH), crate::i18n::t("files.reshare"), ReshareFile(entry_index)).into(),
             ]
         }
         (_, DownloadState::Shared { .. }) => {
             vec![
-                primary_button(Some(ICON_FILES), "Open", OpenDownloadedFile(name.to_string()))
+                primary_button(Some(ICON_FILES), crate::i18n::t("common.open"), OpenDownloadedFile(name.to_string()))
                     .into(),
-                secondary_button(Some(ICON_FOLDER), "Open Folder", OpenDownloadsFolder).into(),
-                secondary_button(Some(ICON_COPY), "Copy Ticket", CopyShareTicket(entry_index))
+                secondary_button(Some(ICON_FOLDER), crate::i18n::t("files.open_folder"), OpenDownloadsFolder).into(),
+                secondary_button(Some(ICON_COPY), crate::i18n::t("files.copy_ticket"), CopyShareTicket(entry_index))
                     .into(),
-                secondary_button(None, "Share Code", MintShortCode(entry_index)).into(),
-                secondary_button(Some(ICON_MESH), "Re-share", ReshareFile(entry_index)).into(),
+                secondary_button(None, crate::i18n::t("files.share_code"), MintShortCode(entry_index)).into(),
+                secondary_button(Some(ICON_MESH), crate::i18n::t("files.reshare"), ReshareFile(entry_index)).into(),
             ]
         }
         // ── Failed: Retry primary, Remove secondary ─────────────────────
         (_, DownloadState::Failed { failure }) if failure.retry_available() => {
             vec![
-                primary_button(Some(ICON_RETRY), "Retry", ExecuteDownloadAt(entry_index)).into(),
-                text_button("Remove", CancelDownloadAt(entry_index)).into(),
+                primary_button(Some(ICON_RETRY), crate::i18n::t("common.retry"), ExecuteDownloadAt(entry_index)).into(),
+                text_button(crate::i18n::t("common.remove"), CancelDownloadAt(entry_index)).into(),
             ]
         }
         (_, DownloadState::Failed { .. }) => {
-            vec![text_button("Remove", CancelDownloadAt(entry_index)).into()]
+            vec![text_button(crate::i18n::t("common.remove"), CancelDownloadAt(entry_index)).into()]
         }
         (_, DownloadState::Cancelled) => {
             vec![
-                primary_button(Some(ICON_RETRY), "Retry", ExecuteDownloadAt(entry_index)).into(),
-                text_button("Remove", CancelDownloadAt(entry_index)).into(),
+                primary_button(Some(ICON_RETRY), crate::i18n::t("common.retry"), ExecuteDownloadAt(entry_index)).into(),
+                text_button(crate::i18n::t("common.remove"), CancelDownloadAt(entry_index)).into(),
             ]
         }
     };

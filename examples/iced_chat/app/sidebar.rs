@@ -142,6 +142,30 @@ pub(crate) struct SidebarRequestsDependency {
     pub(crate) tunnel_requests: Vec<SidebarTunnelRequestRow>,
 }
 
+/// Translate `key` to a `&'static str` (cached per key).
+///
+/// The shared widget helpers used by this module (`sidebar_empty_state`,
+/// `SidebarSectionHeader::new`, `ghost_icon_button`, `text_input_field`,
+/// `secondary_button`) take `&str` and build elements that are returned to
+/// the caller, so the translated strings must have `'static` lifetime.
+/// The active locale is fixed at startup before any view runs, so caching
+/// the first translation of each key is safe; each value is leaked once on
+/// first use (bounded, one entry per key).
+fn t_static(key: &'static str) -> &'static str {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<&'static str, &'static str>>> = OnceLock::new();
+    let mut cache = CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap();
+    cache.get(key).copied().unwrap_or_else(|| {
+        let value: &'static str = Box::leak(crate::i18n::t(key).into_boxed_str());
+        cache.insert(key, value);
+        value
+    })
+}
+
 impl IcedChat {
     // ── Sidebar ────────────────────────────────────────────────────────
 
@@ -175,7 +199,7 @@ impl IcedChat {
             brand_row = brand_row.push(ghost_icon_button(
                 Icon::Terminal,
                 IconSize::Md,
-                Some("Terminal"),
+                Some(t_static("common.terminal")),
                 Some(AppMessage::OpenTerminal),
                 false,
                 false,
@@ -188,7 +212,7 @@ impl IcedChat {
             .push(ghost_icon_button(
                 Icon::Settings,
                 IconSize::Md,
-                Some("Settings"),
+                Some(t_static("settings.title")),
                 Some(AppMessage::OpenSettings),
                 false,
                 false,
@@ -268,7 +292,7 @@ impl IcedChat {
 
         // CHATS section
         sections = sections.push(
-            SidebarSectionHeader::new("CHATS")
+            SidebarSectionHeader::new(t_static("sidebar.section_chats"))
                 .count(chat_count)
                 .collapsed(chats_collapsed)
                 .on_toggle(AppMessage::ToggleSidebarSectionCollapsed(0))
@@ -284,7 +308,7 @@ impl IcedChat {
 
         // GROUPS section
         sections = sections.push(
-            SidebarSectionHeader::new("GROUPS")
+            SidebarSectionHeader::new(t_static("sidebar.section_groups"))
                 .count(group_count)
                 .collapsed(groups_collapsed)
                 .on_toggle(AppMessage::ToggleSidebarSectionCollapsed(1))
@@ -300,7 +324,7 @@ impl IcedChat {
 
         // FRIENDS section
         sections = sections.push(
-            SidebarSectionHeader::new("FRIENDS")
+            SidebarSectionHeader::new(t_static("sidebar.section_friends"))
                 .count(friend_count)
                 .collapsed(friends_collapsed)
                 .on_toggle(AppMessage::ToggleSidebarSectionCollapsed(2))
@@ -316,7 +340,7 @@ impl IcedChat {
 
         // DISCOVER section
         sections = sections.push(
-            SidebarSectionHeader::new("DISCOVER")
+            SidebarSectionHeader::new(t_static("sidebar.section_discover"))
                 .count(discover_count)
                 .collapsed(discover_collapsed)
                 .on_toggle(AppMessage::ToggleSidebarSectionCollapsed(3))
@@ -331,7 +355,7 @@ impl IcedChat {
 
         // PUBLIC ROOMS section
         sections = sections.push(
-            SidebarSectionHeader::new("PUBLIC ROOMS")
+            SidebarSectionHeader::new(t_static("sidebar.section_public_rooms"))
                 .count(public_room_count)
                 .collapsed(public_rooms_collapsed)
                 .on_toggle(AppMessage::ToggleSidebarSectionCollapsed(5))
@@ -347,7 +371,7 @@ impl IcedChat {
 
         // REQUESTS section
         sections = sections.push(
-            SidebarSectionHeader::new("REQUESTS")
+            SidebarSectionHeader::new(t_static("sidebar.section_requests"))
                 .count(request_count)
                 .collapsed(requests_collapsed)
                 .on_toggle(AppMessage::ToggleSidebarSectionCollapsed(4))
@@ -374,7 +398,7 @@ impl IcedChat {
             .push(ghost_icon_button(
                 Icon::Home,
                 IconSize::Md,
-                Some("Home"),
+                Some(t_static("common.home")),
                 Some(AppMessage::GoToChatList),
                 false,
                 false,
@@ -384,7 +408,7 @@ impl IcedChat {
             .push(ghost_icon_button(
                 Icon::Plus,
                 IconSize::Md,
-                Some("New chat"),
+                Some(t_static("home.new_chat")),
                 Some(AppMessage::CreateNewRoom),
                 false,
                 false,
@@ -394,7 +418,7 @@ impl IcedChat {
             .push(ghost_icon_button(
                 Icon::Search,
                 IconSize::Md,
-                Some("Search"),
+                Some(t_static("common.search")),
                 Some(AppMessage::Noop),
                 false,
                 false,
@@ -404,7 +428,7 @@ impl IcedChat {
             .push(ghost_icon_button(
                 Icon::Folder,
                 IconSize::Md,
-                Some("File Sharing"),
+                Some(t_static("files.title")),
                 Some(AppMessage::OpenFileSharing),
                 false,
                 false,
@@ -414,7 +438,7 @@ impl IcedChat {
             .push(ghost_icon_button(
                 Icon::Mesh,
                 IconSize::Md,
-                Some("Network"),
+                Some(t_static("common.network")),
                 Some(AppMessage::OpenConnectionDetails),
                 false,
                 false,
@@ -424,7 +448,7 @@ impl IcedChat {
             .push(ghost_icon_button(
                 Icon::Notification,
                 IconSize::Md,
-                Some("Notifications"),
+                Some(t_static("common.notifications")),
                 Some(AppMessage::OpenSettings),
                 false,
                 false,
@@ -707,9 +731,9 @@ impl IcedChat {
         if dep.is_empty {
             section = section.push(sidebar_empty_state(
                 Icon::Chat,
-                "No conversations yet",
-                "Start a chat with one of your friends.",
-                Some(("Start Chat", AppMessage::CreateNewRoom)),
+                t_static("sidebar.no_chats"),
+                t_static("sidebar.no_chats_hint"),
+                Some((t_static("sidebar.start_chat"), AppMessage::CreateNewRoom)),
             ));
         }
 
@@ -770,7 +794,7 @@ impl IcedChat {
                         .push(
                             crate::fonts::type_role_text(
                                 crate::fonts::TypeRole::ButtonLabel,
-                                "Back",
+                                crate::i18n::t("common.back"),
                             ),
                         )
                         .spacing(SPACE_4)
@@ -781,8 +805,11 @@ impl IcedChat {
                 .style(BUTTON_GHOST_BG),
             )
             .push(
-                crate::fonts::type_role_text(crate::fonts::TypeRole::SectionTitle, "Groups")
-                    .width(Length::Fill),
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::SectionTitle,
+                    crate::i18n::t("groups.title"),
+                )
+                .width(Length::Fill),
             )
             .align_y(Alignment::Center)
             .spacing(SPACE_12);
@@ -824,7 +851,7 @@ impl IcedChat {
                 )
                 .push(crate::fonts::type_role_text(
                     crate::fonts::TypeRole::ButtonLabel,
-                    "Create Group",
+                    crate::i18n::t("groups.create_group"),
                 ))
                 .align_y(Alignment::Center),
         )
@@ -899,8 +926,8 @@ impl IcedChat {
         if group_data.is_empty() {
             section = section.push(sidebar_empty_state(
                 Icon::Chat,
-                "No groups yet",
-                "Create a group to chat with multiple friends.",
+                t_static("groups.no_groups"),
+                t_static("sidebar.no_groups_hint"),
                 None::<(&str, AppMessage)>,
             ));
         }
@@ -916,8 +943,11 @@ impl IcedChat {
 
         section = section.push(
             container(
-                crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, "Join by ticket")
-                    .style(text_muted_style),
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::SupportingText,
+                    crate::i18n::t("sidebar.join_ticket_title"),
+                )
+                .style(text_muted_style),
             )
                 .padding(iced::Padding {
                     top: SPACE_8,
@@ -931,16 +961,19 @@ impl IcedChat {
         section = section.push(
             container(
                 row![
-                    text_input("Enter ticket ID", &self.join_ticket_input)
-                        .on_input(AppMessage::JoinTicketInputChanged)
-                        .on_submit(AppMessage::JoinFromTicket)
-                        .size(crate::fonts::TypeRole::Body.size_px())
-                        .font(crate::fonts::TypeRole::Body.font())
-                        .padding([SPACE_4, SPACE_8])
-                        .width(Length::Fill),
+                    {
+                        let placeholder = crate::i18n::t("sidebar.join_ticket_placeholder");
+                        text_input(&placeholder, &self.join_ticket_input)
+                            .on_input(AppMessage::JoinTicketInputChanged)
+                            .on_submit(AppMessage::JoinFromTicket)
+                            .size(crate::fonts::TypeRole::Body.size_px())
+                            .font(crate::fonts::TypeRole::Body.font())
+                            .padding([SPACE_4, SPACE_8])
+                            .width(Length::Fill)
+                    },
                     button(crate::fonts::type_role_text(
                         crate::fonts::TypeRole::ButtonLabel,
-                        "Join",
+                        crate::i18n::t("sidebar.join_ticket_button"),
                     ))
                     .on_press(AppMessage::JoinFromTicket)
                     .padding([SPACE_4, SPACE_8]),
@@ -1107,7 +1140,7 @@ impl IcedChat {
             container(if is_deleting {
                 iced::Element::<'_, AppMessage>::from(crate::fonts::type_role_text(
                     crate::fonts::TypeRole::ButtonLabel,
-                    "Delete?",
+                    crate::i18n::t("sidebar.delete_confirm"),
                 ))
             } else {
                 iced::Element::<'_, AppMessage>::from(icon_svg(ICON_CLOSE, TYPO_XS))
@@ -1384,7 +1417,7 @@ impl IcedChat {
             row_el = row_el.push(
                 button(crate::fonts::type_role_text(
                     crate::fonts::TypeRole::ButtonLabel,
-                    "Chat",
+                    crate::i18n::t("contacts.chat"),
                 ))
                 .on_press(AppMessage::OpenFriendChat(peer.peer))
                     .style(crate::ui_components::button_secondary_style)
@@ -1395,7 +1428,7 @@ impl IcedChat {
             row_el = row_el.push(
                 button(crate::fonts::type_role_text(
                     crate::fonts::TypeRole::ButtonLabel,
-                    "Browse Files",
+                    crate::i18n::t("files.browse"),
                 ))
                 .on_press(AppMessage::BrowsePeerCatalogue(peer.peer))
                     .style(crate::ui_components::button_secondary_style)
@@ -1408,8 +1441,8 @@ impl IcedChat {
         if !has_peers {
             section = section.push(sidebar_empty_state(
                 Icon::Search,
-                "No peers discovered yet",
-                "Peers on your local network will appear here.",
+                t_static("sidebar.no_discovered"),
+                t_static("sidebar.no_discovered_hint"),
                 None,
             ));
         }
@@ -1476,7 +1509,7 @@ impl IcedChat {
         for room in &dep.rooms {
             let room_name = room.room_name.clone();
             let member_info = if room.member_count > 0 {
-                format!("{} members", room.member_count)
+                crate::i18n::t_args("chat.header.members", &[("count", &room.member_count.to_string())])
             } else {
                 String::new()
             };
@@ -1485,7 +1518,7 @@ impl IcedChat {
             let mut actions = Row::new().push(
                 button(crate::fonts::type_role_text(
                     crate::fonts::TypeRole::ButtonLabel,
-                    "Join",
+                    crate::i18n::t("common.join"),
                 ))
                 .on_press(AppMessage::DirectoryRoomJoin(ad_for_join))
                 .style(crate::ui_components::button_secondary_style)
@@ -1495,7 +1528,7 @@ impl IcedChat {
                 actions = actions.push(
                     button(crate::fonts::type_role_text(
                         crate::fonts::TypeRole::ButtonLabel,
-                        "Delete",
+                        crate::i18n::t("common.delete"),
                     ))
                     .on_press(AppMessage::DeleteDirectoryRoom(room.advertisement.topic))
                         .style(crate::ui_components::button_secondary_style)
@@ -1549,8 +1582,8 @@ impl IcedChat {
         if dep.rooms.is_empty() {
             section = section.push(sidebar_empty_state(
                 Icon::Chat,
-                "No public rooms discovered yet",
-                "Rooms advertised on the directory will appear here.",
+                t_static("sidebar.no_public_rooms"),
+                t_static("sidebar.no_public_rooms_hint"),
                 None,
             ));
         }
@@ -1681,7 +1714,7 @@ impl IcedChat {
         // button submits the same message, and the field shows an error state
         // when a previous submission failed.
         let add_input = text_input_field(
-            "Add friend by key…",
+            t_static("friends.add_friend_placeholder"),
             &dep.friend_request_search_input,
             AppMessage::FriendRequestSearchChanged,
             !dep.friend_request_error.is_empty(),
@@ -1838,9 +1871,9 @@ impl IcedChat {
         if !has_friends {
             section = section.push(sidebar_empty_state(
                 Icon::Friend,
-                "No friends added yet",
-                "Add someone using a key or invitation.",
-                Some(("Add Friend", AppMessage::OpenFriendRequests)),
+                t_static("contacts.no_friends"),
+                t_static("sidebar.no_friends_hint"),
+                Some((t_static("profile.add_friend"), AppMessage::OpenFriendRequests)),
             ));
         }
 
@@ -1898,7 +1931,7 @@ impl IcedChat {
                             arr[..len].copy_from_slice(&inv.inviter_public_key[..len]);
                             PublicKey::from_bytes(&arr)
                                 .map(|pk| self.resolve_name(&pk))
-                                .unwrap_or_else(|_| "Unknown".to_string())
+                                .unwrap_or_else(|_| crate::i18n::t("common.unknown"))
                         },
                     })
                     .collect()
@@ -1947,7 +1980,7 @@ impl IcedChat {
         // Manage button for opening the full friend requests screen
         section = section.push(
             container(secondary_button(
-                "Manage Requests",
+                t_static("sidebar.manage_requests"),
                 Some(AppMessage::OpenFriendRequests),
                 false,
             ))
@@ -1967,8 +2000,8 @@ impl IcedChat {
         if !has_requests {
             section = section.push(sidebar_empty_state(
                 Icon::Notification,
-                "No pending requests",
-                "New friend requests will appear here.",
+                t_static("sidebar.no_requests"),
+                t_static("sidebar.no_requests_hint"),
                 None,
             ));
         } else {
@@ -2029,14 +2062,14 @@ impl IcedChat {
                         .push(
                             crate::fonts::type_role_text(
                                 crate::fonts::TypeRole::Body,
-                                format!("Group invite from {inviter_label}"),
+                                crate::i18n::t_args("sidebar.group_invite_from", &[("name", inviter_label)]),
                             )
                             .width(Length::Fill),
                         )
                         .push(
                             button(crate::fonts::type_role_text(
                                 crate::fonts::TypeRole::ButtonLabel,
-                                "Join",
+                                crate::i18n::t("common.join"),
                             ))
                             .on_press(AppMessage::AcceptGroupInvite(invite_id))
                                 .padding([SPACE_2, SPACE_4])
@@ -2071,7 +2104,7 @@ impl IcedChat {
                                 container(
                                     crate::fonts::type_role_text(
                                         crate::fonts::TypeRole::Metadata,
-                                        "Tunnel",
+                                        crate::i18n::t("tunnels.tunnel"),
                                     )
                                     .color(accent_primary(&theme)),
                                 )

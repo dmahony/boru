@@ -6740,7 +6740,7 @@ fn profile_identity_card(
     use iced::{Alignment, Length};
 
     let nickname_input = container(
-        text_input("Your display name…", &local_label)
+        text_input(&crate::i18n::t("profile.display_name_placeholder"), &local_label)
             .on_input(AppMessage::SetNickname)
             .width(Length::Fill),
     )
@@ -17135,12 +17135,12 @@ impl IcedChat {
     }
 
     /// Human-readable label for a join request state.
-    pub fn join_request_state_label(state: &OutgoingRequestState) -> &'static str {
+    pub fn join_request_state_label(state: &OutgoingRequestState) -> String {
         match state {
-            OutgoingRequestState::Pending => "Pending",
-            OutgoingRequestState::Accepted => "Accepted",
-            OutgoingRequestState::Declined => "Rejected",
-            OutgoingRequestState::Failed(_) => "Failed",
+            OutgoingRequestState::Pending => crate::i18n::t("common.pending"),
+            OutgoingRequestState::Accepted => crate::i18n::t("common.accepted"),
+            OutgoingRequestState::Declined => crate::i18n::t("common.rejected"),
+            OutgoingRequestState::Failed(_) => crate::i18n::t("common.failed"),
         }
     }
 
@@ -17163,38 +17163,38 @@ impl IcedChat {
     }
 
     /// Section title string for the join requests list.
-    pub fn join_request_section_title() -> &'static str {
-        "Join requests"
+    pub fn join_request_section_title() -> String {
+        crate::i18n::t("contacts.join_requests")
     }
 
     /// Total count label for the join requests section.
     pub fn join_request_total_label(count: usize) -> String {
-        format!("{count} total")
+        crate::i18n::t_args("contacts.total", &[("count", &count.to_string())])
     }
 
     /// Prefix label for the target user field in a join request row.
-    pub fn join_request_target_user_prefix() -> &'static str {
-        "Target user"
+    pub fn join_request_target_user_prefix() -> String {
+        crate::i18n::t("contacts.target_user")
     }
 
     /// Prefix label for the chat identifier in a join request row.
-    pub fn join_request_chat_prefix() -> &'static str {
-        "Chat"
+    pub fn join_request_chat_prefix() -> String {
+        crate::i18n::t("contacts.chat")
     }
 
     /// Label for the \"open chat\" action button.
-    pub fn join_request_open_chat_label() -> &'static str {
-        "Open chat"
+    pub fn join_request_open_chat_label() -> String {
+        crate::i18n::t("contacts.open_chat")
     }
 
     /// Label for the retry action button on failed requests.
-    pub fn join_request_retry_label() -> &'static str {
-        "Retry"
+    pub fn join_request_retry_label() -> String {
+        crate::i18n::t("common.retry")
     }
 
     /// Prefix label for the failure reason in a failed request row.
-    pub fn join_request_failure_prefix() -> &'static str {
-        "Failure"
+    pub fn join_request_failure_prefix() -> String {
+        crate::i18n::t("contacts.failure")
     }
 
     /// A single animation frame character for the pending spinner indicator.
@@ -17232,7 +17232,7 @@ impl IcedChat {
             // App name — Raleway ExtraBold wordmark
             boru_logo(LogoSize::Large).color(text_color).into_element(),
             // Version or tagline
-            text("private peer-to-peer chat")
+            text(crate::i18n::t("app.splash.tagline"))
                 .size(14)
                 .style(move |t| text::Style {
                     color: Some(muted_color)
@@ -17244,7 +17244,7 @@ impl IcedChat {
                     color: Some(muted_color)
                 }),
                 Space::new().width(Length::Fixed(12.0)),
-                text("Loading…").size(16).style(move |t| text::Style {
+                text(crate::i18n::t("app.splash.loading")).size(16).style(move |t| text::Style {
                     color: Some(muted_color)
                 }),
             ]
@@ -18532,10 +18532,11 @@ impl IcedChat {
         use iced::widget::{button, column, container, row, text, Space};
         use iced::{Alignment, Length};
 
-        let dialog = column![]
+        let dialog = column![] 
             .push(
-                text(format!(
-                    "Are you sure you want to remove {name} as a friend?"
+                text(crate::i18n::t_args(
+                    "dialogs.remove_confirm.friend_message",
+                    &[("name", name)],
                 ))
                 .size(TYPO_SM)
                 .width(Length::Shrink),
@@ -18544,7 +18545,7 @@ impl IcedChat {
             .push(
                 row![]
                     .push(
-                        button(text("Cancel").size(TYPO_SM))
+                        button(text(crate::i18n::t("common.cancel")).size(TYPO_SM))
                             .on_press(AppMessage::CancelRemoveFriend)
                             .padding([SPACE_6, SPACE_12])
                             .width(Length::Fill)
@@ -18560,7 +18561,7 @@ impl IcedChat {
                             }),
                     )
                     .push(
-                        button(text("Remove").size(TYPO_SM))
+                        button(text(crate::i18n::t("common.remove")).size(TYPO_SM))
                             .on_press(AppMessage::ConfirmRemoveFriend)
                             .padding([SPACE_6, SPACE_12])
                             .width(Length::Fill)
@@ -18617,7 +18618,10 @@ impl IcedChat {
 
         let dialog = column![]
             .push(
-                text(format!("Are you sure you want to block {name}? You will no longer receive messages from them."))
+                text(crate::i18n::t_args(
+                    "dialogs.block_confirm.message_with_name",
+                    &[("name", name)],
+                ))
                     .size(TYPO_SM)
                     .width(Length::Shrink),
             )
@@ -18625,7 +18629,7 @@ impl IcedChat {
             .push(
                 row![]
                     .push(
-                        button(text("Cancel").size(TYPO_SM))
+                        button(text(crate::i18n::t("common.cancel")).size(TYPO_SM))
                             .on_press(AppMessage::CancelBlockFriend)
                             .padding([SPACE_6, SPACE_12])
                             .width(Length::Fill)
@@ -18643,7 +18647,7 @@ impl IcedChat {
                             }),
                     )
                     .push(
-                        button(text("Block").size(TYPO_SM))
+                        button(text(crate::i18n::t("common.block")).size(TYPO_SM))
                             .on_press(AppMessage::ConfirmBlockFriend)
                             .padding([SPACE_6, SPACE_12])
                             .width(Length::Fill)
@@ -27920,18 +27924,18 @@ mod tests {
     #[test]
     fn home_rail_empty_state_copy_matches_ui_home_16_spec() {
         assert_eq!(
-            ONLINE_PEERS_EMPTY_MESSAGE,
+            online_peers_empty_message(),
             "No peers are online right now. Connected peers will appear here."
         );
         assert_eq!(
-            RECENT_ACTIVITY_EMPTY_MESSAGE,
+            recent_activity_empty_message(),
             "No recent activity. Network events will appear here."
         );
         assert_eq!(
-            TUNNELS_EMPTY_MESSAGE,
+            tunnels_empty_message(),
             "No active tunnels. Create or join a tunnel to securely route traffic."
         );
-        assert_eq!(MESH_EVENTS_EMPTY_MESSAGE, "No recent mesh events");
+        assert_eq!(mesh_events_empty_message(), "No recent mesh events");
     }
 
     /// The Recent Activity and Tunnels cards render their intentional empty

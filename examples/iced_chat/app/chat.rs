@@ -25,11 +25,11 @@ impl IcedChat {
                     widget::text(spinner)
                         .size(40.0)
                         .color(accent_primary(&theme)),
-                    widget::text("Loading conversation\u{2026}")
+                    widget::text(crate::i18n::t("chat.loading_conversation"))
                         .size(crate::fonts::TypeRole::Body.size_px())
                         .font(crate::fonts::TypeRole::Body.font())
                         .color(Self::muted_color(dark_mode)),
-                    widget::text("Setting up your conversation")
+                    widget::text(crate::i18n::t("chat.setting_up_conversation"))
                         .size(crate::fonts::TypeRole::SupportingText.size_px())
                         .font(crate::fonts::TypeRole::SupportingText.font())
                         .color(Self::muted_color(dark_mode)),
@@ -56,11 +56,11 @@ impl IcedChat {
                     widget::text(spinner)
                         .size(40.0)
                         .color(accent_primary(&theme)),
-                    widget::text("Connecting…")
+                    widget::text(crate::i18n::t("status.connecting"))
                         .size(crate::fonts::TypeRole::Body.size_px())
                         .font(crate::fonts::TypeRole::Body.font())
                         .color(Self::muted_color(dark_mode)),
-                    widget::text("The conversation will be ready shortly")
+                    widget::text(crate::i18n::t("chat.ready_shortly"))
                         .size(crate::fonts::TypeRole::SupportingText.size_px())
                         .font(crate::fonts::TypeRole::SupportingText.font())
                         .color(Self::muted_color(dark_mode)),
@@ -355,8 +355,8 @@ impl IcedChat {
             column![
                 text(format!("{inviter} wants to share their screen")),
                 row![
-                    button(text("Accept")).on_press(AppMessage::AcceptScreenShare),
-                    button(text("Decline")).on_press(AppMessage::DeclineScreenShare),
+                    button(text(crate::i18n::t("common.accept"))).on_press(AppMessage::AcceptScreenShare),
+                    button(text(crate::i18n::t("common.decline"))).on_press(AppMessage::DeclineScreenShare),
                 ].spacing(SPACE_8),
             ].spacing(SPACE_6)
         } else if self.screen_share_host_state != ScreenShareHostState::Idle {
@@ -376,31 +376,31 @@ impl IcedChat {
                 items.push(text(format!("{viewer} requests control: {caps}")).into());
                 items.push(
                     row![
-                        button(text("Grant Pointer"))
+                        button(text(crate::i18n::t("screenshare.grant_pointer")))
                             .on_press(AppMessage::ScreenShareGrantControl(vec![
                                 Capability::ControlPointer,
                             ])),
-                        button(text("Grant Pointer + Keyboard"))
+                        button(text(crate::i18n::t("screenshare.grant_pointer_keyboard")))
                             .on_press(AppMessage::ScreenShareGrantControl(vec![
                                 Capability::ControlPointer,
                                 Capability::ControlKeyboard,
                             ])),
-                        button(text("Deny")).on_press(AppMessage::ScreenShareDenyControl),
+                        button(text(crate::i18n::t("common.deny"))).on_press(AppMessage::ScreenShareDenyControl),
                     ].spacing(SPACE_8).into(),
                 );
             }
             if self.screen_share_control_active {
                 items.push(
-                    text("Remote control active — the viewer is driving the pointer/keyboard")
+                    text(crate::i18n::t("screenshare.remote_control_active"))
                         .into(),
                 );
                 items.push(
-                    button(text("Revoke Control"))
+                    button(text(crate::i18n::t("screenshare.revoke_control")))
                         .on_press(AppMessage::ScreenShareRevokeControl)
                         .into(),
                 );
             }
-            items.push(button(text("Stop Sharing")).on_press(AppMessage::StopScreenShare).into());
+            items.push(button(text(crate::i18n::t("screenshare.stop_sharing"))).on_press(AppMessage::StopScreenShare).into());
             column(items).spacing(SPACE_6)
         } else if self.screen_share_viewing {
             let video: iced::Element<'_, AppMessage> = if let Some(handle) = &self.screen_share_frame_handle {
@@ -438,7 +438,7 @@ impl IcedChat {
                         .into()
                 }
             } else {
-                text("Waiting for the next decoded frame…").into()
+                text(crate::i18n::t("screenshare.waiting_frame")).into()
             };
             let mut actions: Vec<iced::Element<'_, AppMessage>> = vec![
                 button(text(if self.screen_share_fullscreen { "Inline" } else { "Fullscreen" }))
@@ -447,16 +447,16 @@ impl IcedChat {
             ];
             if self.screen_share_control_active {
                 actions.push(
-                    text("Control granted — move the mouse or type to control the host").into(),
+                    text(crate::i18n::t("screenshare.control_granted")).into(),
                 );
             } else {
                 actions.push(
-                    button(text("Request Control"))
+                    button(text(crate::i18n::t("screenshare.request_control")))
                         .on_press(AppMessage::ScreenShareRequestControl)
                         .into(),
                 );
             }
-            actions.push(button(text("Stop Viewing")).on_press(AppMessage::StopScreenShare).into());
+            actions.push(button(text(crate::i18n::t("screenshare.stop_viewing"))).on_press(AppMessage::StopScreenShare).into());
             column![
                 video,
                 row(actions).spacing(SPACE_8),
@@ -514,7 +514,7 @@ impl IcedChat {
         match kind {
             ContextMenuKind::Text => {
                 let copy_btn = button(
-                    crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Copy Text"),
+                    crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, crate::i18n::t("common.copy_text")),
                 )
                 .on_press(AppMessage::ContextCopyText(idx))
                 .padding([SPACE_4, SPACE_8])
@@ -527,7 +527,7 @@ impl IcedChat {
             }
             ContextMenuKind::Image => {
                 let copy_img = button(
-                    crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Copy Image"),
+                    crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, crate::i18n::t("common.copy_image")),
                 )
                 .on_press(AppMessage::ContextCopyImage(idx))
                 .padding([SPACE_4, SPACE_8])
@@ -585,7 +585,7 @@ impl IcedChat {
             "💯", "✅", "❌", "⚠️", "💡", "📌", "🎵", "🌈", "🍕", "☕", "🕐", "💤",
         ];
 
-        let head = crate::fonts::type_role_text(crate::fonts::TypeRole::CardTitle, "Emojis")
+        let head = crate::fonts::type_role_text(crate::fonts::TypeRole::CardTitle, crate::i18n::t("emoji.title"))
             .color(text_muted(&theme));
 
         let mut grid = column![].spacing(SPACE_2);
@@ -760,12 +760,12 @@ impl IcedChat {
                 .on_press(AppMessage::ToggleGifPicker)
                 .padding([SPACE_2, SPACE_4])
                 .style(|_t, _s| iced::widget::button::Style::default()),
-            crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, "Close"),
+            crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, crate::i18n::t("common.close")),
             iced::widget::tooltip::Position::Bottom,
         );
 
         let header = row![
-            crate::fonts::type_role_text(crate::fonts::TypeRole::CardTitle, "GIF Search")
+            crate::fonts::type_role_text(crate::fonts::TypeRole::CardTitle, crate::i18n::t("gif.search_title"))
                 .color(text_muted(&theme)),
             iced::widget::Space::new().width(iced::Length::Fill),
             close_btn,
@@ -774,7 +774,7 @@ impl IcedChat {
         .align_y(iced::Alignment::Center);
 
         // Search input
-        let search_input = text_input("Search KLIPY", &self.gif_search_text)
+        let search_input = text_input(&crate::i18n::t("gif.search_placeholder"), &self.gif_search_text)
             .on_input(AppMessage::GifSearchChanged)
             .on_submit(AppMessage::GifSearchSubmit)
             .size(crate::fonts::TypeRole::Body.size_px())
@@ -782,7 +782,7 @@ impl IcedChat {
             .padding([SPACE_4, SPACE_6]);
 
         let search_btn =
-            button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Search"))
+            button(crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, crate::i18n::t("common.search")))
                 .on_press_maybe(if !self.gif_search_text.is_empty() {
                     Some(AppMessage::GifSearchSubmit)
                 } else {
@@ -1087,12 +1087,12 @@ impl IcedChat {
                 .map(|r| r.member_count)
                 .unwrap_or(0);
             let member_label = if member_count > 0 {
-                format!(
-                    "{member_count} member{}",
-                    if member_count == 1 { "" } else { "s" }
+                crate::i18n::t_args(
+                    "chat.header.member_count",
+                    &[("count", &member_count.to_string())]
                 )
             } else {
-                "Group".to_string()
+                crate::i18n::t("chat.group")
             };
 
             let group_identity = column![
@@ -1273,7 +1273,7 @@ impl IcedChat {
             b = b.on_press(AppMessage::ConfirmClearHistory);
             iced::widget::tooltip::Tooltip::new(
                 b,
-                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, "Confirm delete"),
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, crate::i18n::t("common.confirm_delete")),
                 iced::widget::tooltip::Position::Bottom,
             )
             .into()
@@ -1467,7 +1467,7 @@ impl IcedChat {
                 .on_press(AppMessage::ToggleChatSearch)
                 .padding([SPACE_2, SPACE_4])
                 .style(BUTTON_ICON),
-            crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, "Close"),
+            crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, crate::i18n::t("common.close")),
             iced::widget::tooltip::Position::Bottom,
         );
 
@@ -1482,7 +1482,7 @@ impl IcedChat {
         .spacing(SPACE_4)
         .align_y(Alignment::Center);
 
-        let input = text_input("Search messages…", &self.chat_search_query)
+        let input = text_input(&crate::i18n::t("chat.search.placeholder"), &self.chat_search_query)
             .on_input(AppMessage::ChatSearchQueryChanged)
             .on_submit(AppMessage::ToggleChatSearch)
             .size(crate::fonts::TypeRole::Body.size_px())
@@ -1647,14 +1647,14 @@ impl IcedChat {
         let bg = bg_surface(&theme);
 
         let header = row![
-            crate::fonts::type_role_text(crate::fonts::TypeRole::CardTitle, "Group Members"),
+            crate::fonts::type_role_text(crate::fonts::TypeRole::CardTitle, crate::i18n::t("chat.group_members")),
             Space::new().width(Length::Fill),
             iced::widget::tooltip::Tooltip::new(
                 button(icon_svg(ICON_CLOSE, TYPO_SM))
                     .on_press(AppMessage::ToggleMemberList)
                     .padding([SPACE_4, SPACE_6])
                     .style(BUTTON_ICON),
-                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, "Close"),
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, crate::i18n::t("common.close")),
                 iced::widget::tooltip::Position::Bottom,
             ),
         ]
@@ -1818,13 +1818,13 @@ impl IcedChat {
                 .color(self.color_muted()),
             // ── Room info ──
             row![
-                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, "Topic: ")
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, crate::i18n::t("chat.topic_label"))
                     .color(self.color_muted()),
                 crate::fonts::type_role_text(crate::fonts::TypeRole::TechnicalValue, topic_hex.clone()),
             ]
             .spacing(SPACE_4),
             row![
-                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, "Ticket: ")
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, crate::i18n::t("chat.ticket_label"))
                     .color(self.color_muted()),
                 button(
                     crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, ticket_short.clone())
@@ -1836,7 +1836,7 @@ impl IcedChat {
             ]
             .spacing(SPACE_4),
             row![
-                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, "Online: ")
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, crate::i18n::t("chat.online_label"))
                     .color(self.color_muted()),
                 crate::fonts::type_role_text(
                     crate::fonts::TypeRole::Metadata,
@@ -1952,7 +1952,7 @@ impl IcedChat {
 
         // Common badge
         let kind_badge =
-            container(crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, "Group")
+            container(crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, crate::i18n::t("chat.group"))
                 .color(accent_primary(&theme)))
             .padding([SPACE_2, SPACE_8])
             .style(move |t| container::Style {
@@ -2070,7 +2070,7 @@ impl IcedChat {
                 icon_svg(ICON_USER_PLUS, TYPO_SM).style(|t, _| iced::widget::svg::Style {
                     color: Some(accent_primary(t))
                 }),
-                crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Invite member")
+                crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, crate::i18n::t("groups.invite_member"))
                     .color(accent_primary(&theme)),
             ]
             .spacing(SPACE_6)
@@ -2088,7 +2088,7 @@ impl IcedChat {
                     color: Some(text_secondary(t))
                 }),
                 Space::new().width(Length::Fixed(SPACE_8)),
-                crate::fonts::type_role_text(crate::fonts::TypeRole::Body, "Notifications"),
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Body, crate::i18n::t("groups.notifications")),
                 Space::new().width(Length::Fill),
             ]
             .spacing(SPACE_4)
@@ -2100,7 +2100,7 @@ impl IcedChat {
                     color: Some(text_secondary(t))
                 }),
                 Space::new().width(Length::Fixed(SPACE_8)),
-                crate::fonts::type_role_text(crate::fonts::TypeRole::Body, "Shared files"),
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Body, crate::i18n::t("files.shared")),
                 Space::new().width(Length::Fill),
             ]
             .spacing(SPACE_4)
@@ -2112,7 +2112,7 @@ impl IcedChat {
                     color: Some(text_secondary(t))
                 }),
                 Space::new().width(Length::Fixed(SPACE_8)),
-                crate::fonts::type_role_text(crate::fonts::TypeRole::Body, "Group information"),
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Body, crate::i18n::t("groups.information")),
                 Space::new().width(Length::Fill),
             ]
             .spacing(SPACE_4)
@@ -2133,16 +2133,16 @@ impl IcedChat {
         // ── Assemble the panel ──
         let panel_body = column![
             // Heading
-            crate::fonts::type_role_text(crate::fonts::TypeRole::CardTitle, "Details"),
+            crate::fonts::type_role_text(crate::fonts::TypeRole::CardTitle, crate::i18n::t("common.details")),
             Space::new().height(Length::Fixed(SPACE_8)),
             // Info section
-            crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, "Group info")
+            crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, crate::i18n::t("groups.info_short"))
                 .color(text_secondary(&theme)),
             Space::new().height(Length::Fixed(SPACE_2)),
             column(info_items).spacing(SPACE_4),
             divider(&theme),
             // Members section
-            crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, "Members")
+            crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, crate::i18n::t("groups.members"))
                 .color(text_secondary(&theme)),
             Space::new().height(Length::Fixed(SPACE_2)),
             column(member_rows).spacing(SPACE_8),
@@ -2237,7 +2237,7 @@ impl IcedChat {
 
         // Kind badge
         let kind_badge = container(
-            crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, "Direct")
+            crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, crate::i18n::t("status.direct"))
                 .color(accent_primary(&theme)),
         )
             .padding([SPACE_2, SPACE_8])
@@ -2279,7 +2279,7 @@ impl IcedChat {
             let full_id = pk.to_string();
             let fid = full_id.clone();
             let copy_btn = button(
-                crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Copy")
+                crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, crate::i18n::t("common.copy"))
                     .color(text_muted(&theme)),
             )
             .on_press(AppMessage::CopyToClipboard(fid))
@@ -2292,7 +2292,7 @@ impl IcedChat {
                 full_id.clone()
             };
             let peer_id_row = row![
-                crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, "Peer ID")
+                crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, crate::i18n::t("profile.peer_id"))
                     .color(text_secondary(&theme)),
                 Space::new().width(Length::Fill),
                 crate::fonts::type_role_text(crate::fonts::TypeRole::TechnicalValue, truncated)
@@ -2343,7 +2343,7 @@ impl IcedChat {
 
         conn_items.push(
             info_row(
-                "Connection".to_string(),
+                crate::i18n::t("connection.title"),
                 connection_type.to_string(),
                 &theme,
             )
@@ -2352,7 +2352,7 @@ impl IcedChat {
 
         // Relay mode
         let relay_label = fmt_relay_mode(&self.relay_mode);
-        conn_items.push(info_row("Relay".to_string(), relay_label, &theme).into());
+        conn_items.push(info_row(crate::i18n::t("connection.relay"), relay_label, &theme).into());
 
         // Latency
         if let Some(pk) = peer {
@@ -2378,7 +2378,7 @@ impl IcedChat {
             let full_key = pk.to_string();
             let fpr = fingerprint.clone();
             let copy_btn = button(
-                crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Copy")
+                crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, crate::i18n::t("common.copy"))
                     .color(text_muted(&theme)),
             )
             .on_press(AppMessage::CopyToClipboard(full_key.clone()))
@@ -2456,7 +2456,7 @@ impl IcedChat {
                     }),
                     crate::fonts::type_role_text(
                         crate::fonts::TypeRole::ButtonLabel,
-                        "Create Tunnel",
+                        crate::i18n::t("tunnels.create"),
                     )
                     .color(accent_primary(&theme)),
                 ]
@@ -2472,24 +2472,24 @@ impl IcedChat {
 
         // ── Assemble the panel ──
         let panel_body = column![
-            crate::fonts::type_role_text(crate::fonts::TypeRole::CardTitle, "Details"),
+            crate::fonts::type_role_text(crate::fonts::TypeRole::CardTitle, crate::i18n::t("common.details")),
             Space::new().height(Length::Fixed(SPACE_8)),
-            crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, "Contact")
+            crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, crate::i18n::t("connection.contact"))
                 .color(text_secondary(&theme)),
             Space::new().height(Length::Fixed(SPACE_2)),
             column(contact_items).spacing(SPACE_4),
             divider(&theme),
-            crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, "Connection")
+            crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, crate::i18n::t("connection.title"))
                 .color(text_secondary(&theme)),
             Space::new().height(Length::Fixed(SPACE_2)),
             column(conn_items).spacing(SPACE_4),
             divider(&theme),
-            crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, "Security")
+            crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, crate::i18n::t("connection.security"))
                 .color(text_secondary(&theme)),
             Space::new().height(Length::Fixed(SPACE_2)),
             column(security_items).spacing(SPACE_4),
             divider(&theme),
-            crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, "Tools")
+            crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, crate::i18n::t("common.tools"))
                 .color(text_secondary(&theme)),
             Space::new().height(Length::Fixed(SPACE_2)),
             column(tool_btns).spacing(SPACE_4),
@@ -2515,7 +2515,7 @@ impl IcedChat {
         let display_name = conversation
             .as_ref()
             .map(|entry| entry.display_name())
-            .unwrap_or_else(|| "Group".to_string());
+            .unwrap_or_else(|| crate::i18n::t("chat.group"));
         let room_entry = self.room_history.find(&self.topic);
         let description = room_entry
             .and_then(|r| {
@@ -2545,18 +2545,17 @@ impl IcedChat {
 
         // Member count
         let member_label = if member_count > 0 {
-            format!(
-                "{} member{}",
-                member_count,
-                if member_count == 1 { "" } else { "s" }
+            crate::i18n::t_args(
+                "chat.header.member_count",
+                &[("count", &member_count.to_string())]
             )
         } else {
-            "Group".to_string()
+            crate::i18n::t("chat.group")
         };
-        info_items.push(info_row("Members".to_string(), member_label, &theme).into());
+        info_items.push(info_row(crate::i18n::t("groups.members"), member_label, &theme).into());
 
         if is_owner {
-            info_items.push(info_row("Role".to_string(), "Owner".to_string(), &theme).into());
+            info_items.push(info_row(crate::i18n::t("chat.role"), crate::i18n::t("chat.role_owner"), &theme).into());
         }
 
         // ── Section: Members ──
@@ -2648,7 +2647,7 @@ impl IcedChat {
                 icon_svg(ICON_CLOSE, TYPO_SM).style(|t, _| iced::widget::svg::Style {
                     color: Some(color_error(t))
                 }),
-                crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, "Leave Group")
+                crate::fonts::type_role_text(crate::fonts::TypeRole::ButtonLabel, crate::i18n::t("groups.leave"))
                     .color(color_error(&theme)),
             ]
             .spacing(SPACE_6)
@@ -2694,22 +2693,22 @@ impl IcedChat {
         // ── Assemble the panel ──
         let panel_body = column![
             // Heading
-            crate::fonts::type_role_text(crate::fonts::TypeRole::CardTitle, "Group Info"),
+            crate::fonts::type_role_text(crate::fonts::TypeRole::CardTitle, crate::i18n::t("groups.info")),
             Space::new().height(Length::Fixed(SPACE_8)),
             // Group Info section
-            crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, "About")
+            crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, crate::i18n::t("groups.about"))
                 .color(text_secondary(&theme)),
             Space::new().height(Length::Fixed(SPACE_2)),
             column(info_items).spacing(SPACE_4),
             divider(&theme),
             // Members section
-            crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, "Members")
+            crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, crate::i18n::t("groups.members"))
                 .color(text_secondary(&theme)),
             Space::new().height(Length::Fixed(SPACE_2)),
             column(member_items).spacing(SPACE_4),
             divider(&theme),
             // Advanced section
-            crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, "Advanced")
+            crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, crate::i18n::t("common.advanced"))
                 .color(text_secondary(&theme)),
             Space::new().height(Length::Fixed(SPACE_2)),
             column(advanced_items).spacing(SPACE_4),
@@ -2727,7 +2726,7 @@ impl IcedChat {
         full_panel = full_panel.push(divider(&theme));
         full_panel = full_panel.push(
             column![
-                crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, "Actions")
+                crate::fonts::type_role_text(crate::fonts::TypeRole::SupportingText, crate::i18n::t("common.actions"))
                     .color(text_secondary(&theme)),
                 Space::new().height(Length::Fixed(SPACE_2)),
                 column(action_items).spacing(SPACE_4),
@@ -3705,7 +3704,7 @@ impl IcedChat {
                     .on_press(AppMessage::AttachPressed)
                     .style(BUTTON_ICON)
                     .padding([SPACE_4, SPACE_6]),
-                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, "Attach a file"),
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, crate::i18n::t("chat.composer.attach")),
                 iced::widget::tooltip::Position::Bottom,
             )
             .into();
@@ -3717,13 +3716,13 @@ impl IcedChat {
                     .on_press(AppMessage::AttachFolderPressed)
                     .style(BUTTON_ICON)
                     .padding([SPACE_4, SPACE_6]),
-                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, "Share a folder"),
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, crate::i18n::t("chat.composer.share_folder")),
                 iced::widget::tooltip::Position::Bottom,
             )
             .into();
 
         // ── Center: expandable message input ── transparent bg, fills space
-        let input = text_input("Type a message…", &self.composer_text)
+        let input = text_input(&crate::i18n::t("chat.composer.placeholder"), &self.composer_text)
             .id(COMPOSER_INPUT)
             .on_input(AppMessage::InputChanged)
             .on_submit(AppMessage::SendPressed)
@@ -3777,7 +3776,7 @@ impl IcedChat {
                     .on_press(AppMessage::ToggleEmojiPicker)
                     .style(BUTTON_ICON)
                     .padding([SPACE_4, SPACE_6]),
-                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, "Emoji"),
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, crate::i18n::t("chat.composer.emoji")),
                 iced::widget::tooltip::Position::Bottom,
             )
             .into();
@@ -3832,7 +3831,7 @@ impl IcedChat {
         let send_btn: iced::Element<'_, AppMessage> =
             iced::widget::tooltip::Tooltip::new(
                 send_btn,
-                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, "Send (Enter)"),
+                crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, crate::i18n::t("chat.send_enter")),
                 iced::widget::tooltip::Position::Bottom,
             )
             .into();
@@ -3876,7 +3875,7 @@ impl IcedChat {
 
         // ── Header: title + accessible close button ──
         let header = iced::widget::row![
-            crate::fonts::type_role_text(crate::fonts::TypeRole::CardTitle, "Help")
+            crate::fonts::type_role_text(crate::fonts::TypeRole::CardTitle, crate::i18n::t("common.help"))
                 .width(Length::Fill),
             button(crate::fonts::type_role_text(
                 crate::fonts::TypeRole::ButtonLabel,
@@ -3992,7 +3991,7 @@ impl IcedChat {
             .push(report_bug_btn)
             .push(Space::new().height(Length::Fixed(SPACE_8)))
             .push(
-                text("Press Esc to close")
+                text(crate::i18n::t("chat.press_esc_close"))
                     .size(crate::fonts::TypeRole::SupportingText.size_px())
                     .style(text_muted_style),
             );

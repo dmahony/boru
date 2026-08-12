@@ -24,6 +24,7 @@ mod focusable_button;
 mod fonts;
 mod form_components;
 mod gui_test_actions;
+mod i18n;
 mod icon_system;
 mod link_preview;
 mod log_viewer;
@@ -159,6 +160,10 @@ struct Args {
 
     #[clap(short, long)]
     name: Option<String>,
+    /// Active UI locale (e.g. "en", "fr"). Defaults to the BORU_LOCALE env
+    /// var, then English.
+    #[clap(long)]
+    locale: Option<String>,
     #[clap(long, default_value = "0")]
     bind_port: u16,
     /// Enable performance instrumentation and print baseline report at exit.
@@ -479,6 +484,13 @@ fn main() -> Result<()> {
     let _ = boru_core::data_dir::auto_migrate_data_dir();
 
     let data_dir = get_data_dir(args.data_dir.clone());
+
+    // Initialize the i18n provider before any view code runs. The active
+    // locale is `--locale <code>` (CLI), then BORU_LOCALE env var, then
+    // English. Locale files are loaded from BORU_LOCALE_DIR, `<data_dir>/locales/`,
+    // and the repo `locales/` dir (dev); English is embedded in the binary as
+    // the guaranteed-complete default.
+    i18n::init(args.locale.as_deref(), Some(&data_dir));
 
     if matches!(&args.command, Some(Command::Logs)) {
         return log_viewer::run(log_viewer::log_file_path(&data_dir));

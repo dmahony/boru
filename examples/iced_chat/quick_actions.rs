@@ -56,26 +56,26 @@ pub(crate) struct QuickAction {
 const ACTIONS: &[QuickAction] = &[
     QuickAction {
         icon: Icon::Friend,
-        label: "Start Chat",
-        description: "Find or start a direct conversation.",
+        label: "home.quick_start_chat",
+        description: "home.quick_start_chat_desc",
         message: AppMessage::OpenFriendRequests,
     },
     QuickAction {
         icon: Icon::Users,
-        label: "Create Group",
-        description: "Start a private group conversation.",
+        label: "groups.create_group",
+        description: "home.quick_create_group_desc",
         message: AppMessage::ShowCreateGroupDialog,
     },
     QuickAction {
         icon: Icon::Chat,
-        label: "Create Public Room",
-        description: "Open a public room for anyone to join.",
+        label: "home.quick_create_public_room",
+        description: "home.quick_create_room_desc",
         message: AppMessage::CreateNewRoom,
     },
     QuickAction {
         icon: Icon::Terminal,
-        label: "Create Tunnel",
-        description: "Create a tunnel to share connectivity.",
+        label: "tunnels.create",
+        description: "home.quick_create_tunnel_desc",
         message: AppMessage::ShowCreateTunnelDialog,
     },
 ];
@@ -140,9 +140,12 @@ pub fn quick_action_card<'a>(
             // Quick-action title — TypeRole::CardTitle (IBM Plex Sans
             // SemiBold) at the FONTS-07 quick-action size (16 px; the role
             // default 18 px stays shared with other dashboard cards).
-            crate::fonts::type_role_text(crate::fonts::TypeRole::CardTitle, action.label)
-                .size(QUICK_ACTION_TITLE_SIZE)
-                .width(Length::Fill),
+            crate::fonts::type_role_text(
+                crate::fonts::TypeRole::CardTitle,
+                crate::i18n::t(action.label),
+            )
+            .size(QUICK_ACTION_TITLE_SIZE)
+            .width(Length::Fill),
         )
         // HOME-02: title→description gap tightened from SPACE_8 to SPACE_4.
         .push(Space::new().height(Length::Fixed(SPACE_4)))
@@ -156,7 +159,7 @@ pub fn quick_action_card<'a>(
             // descriptions — that box is gone).
             crate::fonts::type_role_text_lh(
                 crate::fonts::TypeRole::SupportingText,
-                action.description,
+                crate::i18n::t(action.description),
                 QUICK_ACTION_DESCRIPTION_LINE_HEIGHT,
             )
             .size(QUICK_ACTION_DESCRIPTION_SIZE)
@@ -308,16 +311,17 @@ mod tests {
     #[test]
     fn exposes_the_four_home_actions() {
         assert_eq!(ACTIONS.len(), 4);
+        // Labels are i18n keys resolved at render time via crate::i18n::t.
         assert_eq!(
             ACTIONS
                 .iter()
                 .map(|action| action.label)
                 .collect::<Vec<_>>(),
             vec![
-                "Start Chat",
-                "Create Group",
-                "Create Public Room",
-                "Create Tunnel",
+                "home.quick_start_chat",
+                "groups.create_group",
+                "home.quick_create_public_room",
+                "tunnels.create",
             ]
         );
     }
@@ -334,16 +338,18 @@ mod tests {
     #[test]
     fn action_descriptions_match_approved_copy() {
         // UI-HOME-06: these exact descriptions must never be truncated.
+        // Descriptions are i18n keys resolved at render time via
+        // crate::i18n::t; the values in en.json hold the approved copy.
         assert_eq!(
             ACTIONS
                 .iter()
                 .map(|action| action.description)
                 .collect::<Vec<_>>(),
             vec![
-                "Find or start a direct conversation.",
-                "Start a private group conversation.",
-                "Open a public room for anyone to join.",
-                "Create a tunnel to share connectivity.",
+                "home.quick_start_chat_desc",
+                "home.quick_create_group_desc",
+                "home.quick_create_room_desc",
+                "home.quick_create_tunnel_desc",
             ]
         );
     }

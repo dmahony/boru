@@ -73,8 +73,8 @@ impl IcedChat {
                     // Keep the dialog open and show the error inline under
                     // the name field instead of only logging/toasting it.
                     self.create_group_name = group_name;
-                    self.create_group_error = Some("Group name is required.".to_string());
-                    self.push_system("Group name is required.".to_string());
+                    self.create_group_error = Some(crate::i18n::t("groups.name_required"));
+                    self.push_system(crate::i18n::t("groups.name_required"));
                     return iced::Task::none();
                 }
                 self.create_group_error = None;
@@ -272,7 +272,7 @@ impl IcedChat {
                 self.show_invite_member_dialog = false;
 
                 if selected.is_empty() {
-                    self.push_system("Select at least one friend to invite.".to_string());
+                    self.push_system(crate::i18n::t("groups.select_friend_required"));
                     return iced::Task::none();
                 }
 
@@ -291,14 +291,14 @@ impl IcedChat {
                         bytes
                     }
                     None => {
-                        self.push_system("Group not found. Cannot send invite.".to_string());
+                        self.push_system(crate::i18n::t("groups.not_found"));
                         return iced::Task::none();
                     }
                 };
 
                 let group_name = room_entry
                     .map(|e| e.name.clone())
-                    .unwrap_or_else(|| "Group".to_string());
+                    .unwrap_or_else(|| crate::i18n::t("groups.group"));
                 let inviter_pk = self.secret_key.public();
                 let inviter_name = self.local_label.clone();
                 let whisper_handle = self.whisper_handle.clone();
@@ -376,8 +376,12 @@ impl IcedChat {
                         }
 
                         let count = selected.len();
-                        AppMessage::SystemMsg(format!(
-                            "Group invite sent to {count} friend(s) for \"{group_name}\"."
+                        AppMessage::SystemMsg(crate::i18n::t_args(
+                            "groups.invite_sent",
+                            &[
+                                ("count", &count.to_string()),
+                                ("group_name", &group_name),
+                            ],
                         ))
                     },
                     |msg| msg,
@@ -402,7 +406,7 @@ impl IcedChat {
                         // can find and unarchive it after JoinFromTicket succeeds.
                         // RoomOpened only unarchives — it never creates entries.
                         let group_name = if inv.group_name.is_empty() {
-                            "Group".to_string()
+                            crate::i18n::t("groups.group")
                         } else {
                             inv.group_name.clone()
                         };
@@ -434,11 +438,9 @@ impl IcedChat {
                         self.refresh_sidebar_counts();
                         return iced::Task::done(AppMessage::JoinFromTicket);
                     }
-                    self.push_system(
-                        "Cannot accept group invite: no ticket available. Ask the sender to re-invite.".to_string(),
-                    );
+                    self.push_system(crate::i18n::t("groups.invite_no_ticket"));
                 } else {
-                    self.push_system("Group invite not found or expired.".to_string());
+                    self.push_system(crate::i18n::t("groups.invite_not_found"));
                 }
                 iced::Task::none()
             }
@@ -577,17 +579,24 @@ impl IcedChat {
                                 }
                             }
 
-                            AppMessage::SystemMsg(format!(
-                                "Group \"{group_name}\" created with {member_count} member(s). Invites sent — ticket copied to clipboard."
+                            AppMessage::SystemMsg(crate::i18n::t_args(
+                                "groups.created_with_members",
+                                &[
+                                    ("group_name", &group_name),
+                                    ("member_count", &member_count.to_string()),
+                                ],
                             ))
                         },
                         |msg| msg,
                     );
                     tasks.push(invite_task);
                 } else {
-                    tasks.push(iced::Task::done(AppMessage::SystemMsg(format!(
-                        "Group \"{display_name}\" created. Ticket copied to clipboard — share it to invite others.",
-                    ))));
+                    tasks.push(iced::Task::done(AppMessage::SystemMsg(
+                        crate::i18n::t_args(
+                            "groups.created_ticket_copied",
+                            &[("display_name", &display_name)],
+                        ),
+                    )));
                 }
 
                 return iced::Task::batch(tasks);

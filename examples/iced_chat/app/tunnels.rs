@@ -24,13 +24,13 @@ impl IcedChat {
 
         // Tunnel Details — the service name the friend sees.
         let mut name_field = TextInput::new(
-            "Tunnel name",
-            "Development Server",
+            crate::i18n::t("tunnels.name"),
+            &crate::i18n::t("tunnels.development_server"),
             &self.share_service_name,
             AppMessage::ShareLocalServiceNameChanged,
         )
         .id(SHARE_SERVICE_NAME_INPUT)
-        .helper("A descriptive name so your friend knows what this service is.");
+        .helper(crate::i18n::t("tunnels.name_helper"));
         let port_valid = self
             .share_service_port
             .trim()
@@ -44,27 +44,27 @@ impl IcedChat {
         if port_valid && !share_submitting {
             name_field = name_field.on_submit(AppMessage::ConfirmShareLocalService);
         }
-        let details_section = FormSection::new("Tunnel Details")
+        let details_section = FormSection::new(crate::i18n::t("tunnels.details"))
             .push(name_field.build())
             .build();
 
         // Connection Target — who it is shared with + the local port exposed.
         let mut port_field = TextInput::new(
-            "Local port",
+            crate::i18n::t("tunnels.local_port"),
             "3000",
             &self.share_service_port,
             AppMessage::ShareLocalServicePortChanged,
         )
         .id(SHARE_SERVICE_PORT_INPUT)
-        .helper("Port of the local service on this computer to expose.");
+        .helper(crate::i18n::t("tunnels.port_helper"));
         if let Some(error) = &self.share_service_error {
             port_field = port_field.error(error.clone());
         }
         if port_valid && !share_submitting {
             port_field = port_field.on_submit(AppMessage::ConfirmShareLocalService);
         }
-        let target_section = FormSection::new("Connection Target")
-            .push(form_label("Share with"))
+        let target_section = FormSection::new(crate::i18n::t("tunnels.connection_target"))
+            .push(form_label(&crate::i18n::t("tunnels.share_with")))
             .push(SelectablePeerRow::new(display_name.clone()).selected(true).build(&theme))
             .push(port_field.build())
             .build();
@@ -72,14 +72,14 @@ impl IcedChat {
         // Local Services — discovered running services the user can pick.
         // Suggestions are convenience; manual port entry remains the primary
         // path (the port field above always works).
-        let mut suggestions_section = FormSection::new("Local Services");
+        let mut suggestions_section = FormSection::new(crate::i18n::t("tunnels.local_services"));
         if self.share_service_scanning {
             suggestions_section =
-                suggestions_section.push(helper_text("Scanning for local services…"));
+                suggestions_section.push(helper_text(&crate::i18n::t("tunnels.scanning")));
         } else if self.share_service_suggestions.is_empty() {
-            suggestions_section = suggestions_section.push(helper_text(
-                "No local services found. You can still enter a port above.",
-            ));
+            suggestions_section = suggestions_section.push(helper_text(&crate::i18n::t(
+                "tunnels.no_local_services",
+            )));
         } else {
             for suggestion in &self.share_service_suggestions {
                 suggestions_section = suggestions_section.push(
@@ -90,39 +90,49 @@ impl IcedChat {
         let suggestions_section = suggestions_section.build();
 
         // Permissions / Options — access duration.
-        let options_section = FormSection::new("Permissions / Options")
+        let options_section = FormSection::new(crate::i18n::t("tunnels.permissions_options"))
             .push(
                 SearchableSelect::new(
-                    "Expires after",
+                    crate::i18n::t("tunnels.expires_after"),
                     &self.share_expiry_combo,
-                    "Expires after…",
+                    &crate::i18n::t("tunnels.expires_after_placeholder"),
                     Some(&self.share_service_expiry),
                     AppMessage::ShareLocalServiceExpiryChanged,
                 )
-                .helper("How long the tunnel stays active before it expires.")
+                .helper(crate::i18n::t("tunnels.expires_after_helper"))
                 .build(),
             )
             .build();
 
         // Status / Guidance — what the tunnel does for the friend.
-        let guidance_section = FormSection::new("Status / Guidance")
-            .push(helper_text(&format!(
-                "{display_name} will be able to connect to this local service while the tunnel is active."
+        let guidance_section = FormSection::new(crate::i18n::t("tunnels.status_guidance"))
+            .push(helper_text(&crate::i18n::t_args(
+                "tunnels.guidance",
+                &[("name", &display_name)],
             )))
             .build();
 
-        let overlay = BoruDialog::new("Create Tunnel")
-            .subtitle("Securely route traffic between peers.")
+        // The dialog header/footer labels are borrowed by BoruDialog for
+        // the lifetime of the built element, so they must outlive this
+        // function. Resolve them once (the active locale is fixed at
+        // startup) and cache them in a static.
+        let labels = share_dialog_labels();
+        let overlay = BoruDialog::new(labels.title)
+            .subtitle(labels.subtitle)
             .width(self.dialog_width(BORU_DIALOG_WIDTH_STANDARD))
             .push_body(details_section)
             .push_body(target_section)
             .push_body(suggestions_section)
             .push_body(options_section)
             .push_body(guidance_section)
-            .secondary("Cancel", AppMessage::CancelShareLocalService)
+            .secondary(labels.cancel, AppMessage::CancelShareLocalService)
             .secondary_enabled(!share_submitting)
             .primary(
-                if share_submitting { "Creating…" } else { "Create Tunnel" },
+                if share_submitting {
+                    labels.creating
+                } else {
+                    labels.create
+                },
                 AppMessage::ConfirmShareLocalService,
             )
             .primary_enabled(port_valid && !share_submitting)
@@ -260,14 +270,10 @@ impl IcedChat {
                     match port.parse::<u16>() {
                         Ok(parsed) if parsed != 0 => {}
                         _ => {
-                            self.create_tunnel_port_error = Some(
-                                "Enter a valid port (1-65535), or leave empty for an automatic port."
-                                    .to_string(),
-                            );
-                            self.toast_message = Some(
-                                "Enter a valid port (1-65535), or leave empty for an automatic port."
-                                    .to_string(),
-                            );
+                            self.create_tunnel_port_error =
+                                Some(crate::i18n::t("tunnels.invalid_port"));
+                            self.toast_message =
+                                Some(crate::i18n::t("tunnels.invalid_port"));
                             self.toast_counter = 160;
                             return iced::Task::none();
                         }
@@ -282,7 +288,7 @@ impl IcedChat {
                 self.screen = Screen::FriendProfile(peer);
                 self.friend_profile_menu_open = false;
                 self.share_local_service_open = true;
-                self.share_service_name = "Development Server".to_string();
+                self.share_service_name = crate::i18n::t("tunnels.development_server");
                 self.share_service_port = "3000".to_string();
                 self.share_service_expiry = boru_core::tunnel::service::TunnelDuration::OneHour;
                 self.share_service_is_http = true;
@@ -334,7 +340,7 @@ impl IcedChat {
                         }
                     }
                 }
-                self.push_system("Tunnel request accepted".to_string());
+                self.push_system(crate::i18n::t("tunnels.request_accepted"));
                 iced::Task::none()
             }
             AppMessage::DeclineTunnelRequest(tunnel_id) => {
@@ -349,20 +355,20 @@ impl IcedChat {
                             .remove(&boru_core::tunnel::TunnelId(id));
                     }
                 }
-                self.push_system("Tunnel request declined".to_string());
+                self.push_system(crate::i18n::t("tunnels.request_declined"));
                 iced::Task::none()
             }
 
             AppMessage::CloseTunnel(tunnel_id) => {
                 let _ = self.tunnel_service.revoke_tunnel(tunnel_id);
-                self.push_system("Tunnel closed".to_string());
+                self.push_system(crate::i18n::t("tunnels.closed"));
                 iced::Task::none()
             }
 
             AppMessage::OpenShareLocalService => {
                 self.friend_profile_menu_open = false;
                 self.share_local_service_open = true;
-                self.share_service_name = "Development Server".to_string();
+                self.share_service_name = crate::i18n::t("tunnels.development_server");
                 self.share_service_port = "3000".to_string();
                 self.share_service_expiry = boru_core::tunnel::service::TunnelDuration::OneHour;
                 self.share_service_is_http = true;
@@ -383,10 +389,8 @@ impl IcedChat {
                 self.share_service_expiry = boru_core::tunnel::service::TunnelDuration::OneHour;
                 self.share_service_is_http = false;
                 self.share_service_submitting = false;
-                self.share_service_error = Some(
-                    "Experimental: run VNC on 127.0.0.1 only; Boru never carries VNC credentials."
-                        .to_string(),
-                );
+                self.share_service_error =
+                    Some(crate::i18n::t("tunnels.vnc_experimental"));
                 self.share_service_scanning = false;
                 iced::widget::operation::focus(SHARE_SERVICE_PORT_INPUT)
             }
@@ -450,17 +454,17 @@ impl IcedChat {
                 // error inline under the port field.
                 let Ok(port) = self.share_service_port.trim().parse::<u16>() else {
                     self.share_service_error =
-                        Some("Enter a valid local port (1-65535) to share.".to_string());
+                        Some(crate::i18n::t("tunnels.invalid_local_port"));
                     self.toast_message =
-                        Some("Enter a valid local port (1-65535) to share.".to_string());
+                        Some(crate::i18n::t("tunnels.invalid_local_port"));
                     self.toast_counter = 120;
                     return iced::Task::none();
                 };
                 if port == 0 {
                     self.share_service_error =
-                        Some("Enter a valid local port (1-65535) to share.".to_string());
+                        Some(crate::i18n::t("tunnels.invalid_local_port"));
                     self.toast_message =
-                        Some("Enter a valid local port (1-65535) to share.".to_string());
+                        Some(crate::i18n::t("tunnels.invalid_local_port"));
                     self.toast_counter = 120;
                     return iced::Task::none();
                 }
@@ -485,7 +489,7 @@ impl IcedChat {
                 self.share_service_submitting = true;
                 let service_name = self.share_service_name.trim().to_string();
                 let service_name = if service_name.is_empty() {
-                    "Development Server".to_string()
+                    crate::i18n::t("tunnels.development_server")
                 } else {
                     service_name
                 };
@@ -572,8 +576,10 @@ impl IcedChat {
                     }
                     Err(err) => {
                         self.share_service_submitting = false;
-                        self.share_service_error =
-                            Some(format!("Failed to create tunnel: {err:?}"));
+                        self.share_service_error = Some(crate::i18n::t_args(
+                            "tunnels.create_failed",
+                            &[("error", &format!("{err:?}"))],
+                        ));
                         iced::Task::done(AppMessage::TunnelShareFailed {
                             message: format!("{err:?}"),
                         })
@@ -587,31 +593,48 @@ impl IcedChat {
             } => {
                 let remaining = expires_at_ms.saturating_sub(now_ms() as u64);
                 let when = if remaining >= 24 * 60 * 60 * 1_000 {
-                    format!("{} days", remaining / (24 * 60 * 60 * 1_000))
+                    crate::i18n::t_args(
+                        "tunnels.days",
+                        &[("count", &(remaining / (24 * 60 * 60 * 1_000)).to_string())],
+                    )
                 } else if remaining >= 60 * 60 * 1_000 {
-                    format!("{} hours", remaining / (60 * 60 * 1_000))
+                    crate::i18n::t_args(
+                        "tunnels.hours",
+                        &[("count", &(remaining / (60 * 60 * 1_000)).to_string())],
+                    )
                 } else if remaining >= 60 * 1_000 {
-                    format!("{} minutes", remaining / (60 * 1_000))
+                    crate::i18n::t_args(
+                        "tunnels.minutes",
+                        &[("count", &(remaining / (60 * 1_000)).to_string())],
+                    )
                 } else {
-                    "less than a minute".to_string()
+                    crate::i18n::t("tunnels.less_than_minute")
                 };
-                self.toast_message =
-                    Some(format!("Sharing {name} with {friend} (expires in {when})"));
+                self.toast_message = Some(crate::i18n::t_args(
+                    "tunnels.sharing_with",
+                    &[("name", &name), ("friend", &friend), ("when", &when)],
+                ));
                 self.toast_counter = 160;
                 iced::Task::none()
             }
             AppMessage::TunnelShareFailed { message } => {
-                self.toast_message = Some(format!("Could not share service: {message}"));
+                self.toast_message = Some(crate::i18n::t_args(
+                    "tunnels.share_failed",
+                    &[("message", &message)],
+                ));
                 self.toast_counter = 160;
                 iced::Task::none()
             }
             AppMessage::TunnelOfferSent => {
-                self.toast_message = Some("Tunnel offer sent".to_string());
+                self.toast_message = Some(crate::i18n::t("tunnels.offer_sent"));
                 self.toast_counter = 120;
                 iced::Task::none()
             }
             AppMessage::TunnelOfferSendFailed { message } => {
-                self.toast_message = Some(format!("Could not send tunnel offer: {message}"));
+                self.toast_message = Some(crate::i18n::t_args(
+                    "tunnels.offer_send_failed",
+                    &[("message", &message)],
+                ));
                 self.toast_counter = 160;
                 iced::Task::none()
             }
@@ -714,9 +737,12 @@ impl IcedChat {
                 // not left pointing at a port the tunnel does not use.
                 if let Some(requested) = requested_port {
                     if requested != local_addr.port() {
-                        self.toast_message = Some(format!(
-                            "Port {requested} was unavailable; the tunnel is listening on port {}.",
-                            local_addr.port()
+                        self.toast_message = Some(crate::i18n::t_args(
+                            "tunnels.port_unavailable",
+                            &[
+                                ("requested", &requested.to_string()),
+                                ("actual", &local_addr.port().to_string()),
+                            ],
                         ));
                         self.toast_counter = 200;
                     }
@@ -730,8 +756,10 @@ impl IcedChat {
                     state.cancellation = None;
                     state.connection_failed = true;
                 }
-                self.toast_message =
-                    Some(format!("Could not connect to shared service: {message}"));
+                self.toast_message = Some(crate::i18n::t_args(
+                    "tunnels.connect_failed",
+                    &[("message", &message)],
+                ));
                 self.toast_counter = 160;
                 iced::Task::none()
             }
@@ -754,19 +782,24 @@ impl IcedChat {
                     .shared_tunnels
                     .get(&tunnel_id)
                     .map(|state| state.service_name.clone())
-                    .unwrap_or_else(|| "service".to_string());
+                    .unwrap_or_else(|| crate::i18n::t("tunnels.service"));
                 let revoked = self
                     .tunnel_service
                     .revoke_tunnel_with_termination(tunnel_id, true);
                 self.shared_tunnels.remove(&tunnel_id);
                 match revoked {
                     Ok(_) => {
-                        self.toast_message = Some(format!("Stopped sharing {name}"));
+                        self.toast_message = Some(crate::i18n::t_args(
+                            "tunnels.stopped_sharing",
+                            &[("name", &name)],
+                        ));
                         self.toast_counter = 160;
                     }
                     Err(error) => {
-                        self.toast_message =
-                            Some(format!("Could not stop sharing {name}: {error:?}"));
+                        self.toast_message = Some(crate::i18n::t_args(
+                            "tunnels.stop_failed",
+                            &[("name", &name), ("error", &format!("{error:?}"))],
+                        ));
                         self.toast_counter = 160;
                     }
                 }
@@ -784,7 +817,7 @@ impl IcedChat {
                 // browser; anything else has no scheme to open.
                 if !state.offer.is_http {
                     self.toast_message =
-                        Some("This service is not HTTP; use Copy Address instead.".to_string());
+                        Some(crate::i18n::t("tunnels.not_http"));
                     self.toast_counter = 160;
                     return iced::Task::none();
                 }
@@ -807,7 +840,7 @@ impl IcedChat {
                     return iced::Task::none();
                 };
                 let display = tunnel_local_address(&state.offer, local_addr);
-                self.toast_message = Some("Local address copied to clipboard".to_string());
+                self.toast_message = Some(crate::i18n::t("tunnels.address_copied"));
                 self.toast_counter = 120;
                 return iced::clipboard::write(display);
             }
@@ -816,4 +849,31 @@ impl IcedChat {
             _ => iced::Task::none(),
         }
     }
+}
+
+/// Translated labels for the share-local-service dialog.
+///
+/// `BoruDialog` borrows `&'a str` labels for the lifetime of the built
+/// element, so they must outlive the view function that constructs the
+/// dialog. The active locale is fixed at startup, so resolving the labels
+/// once and caching them in a static is safe and adds no per-frame
+/// allocation.
+struct ShareDialogLabels {
+    title: &'static str,
+    subtitle: &'static str,
+    cancel: &'static str,
+    creating: &'static str,
+    create: &'static str,
+}
+
+fn share_dialog_labels() -> &'static ShareDialogLabels {
+    use std::sync::OnceLock;
+    static LABELS: OnceLock<ShareDialogLabels> = OnceLock::new();
+    LABELS.get_or_init(|| ShareDialogLabels {
+        title: Box::leak(crate::i18n::t("tunnels.create").into_boxed_str()),
+        subtitle: Box::leak(crate::i18n::t("tunnels.subtitle").into_boxed_str()),
+        cancel: Box::leak(crate::i18n::t("common.cancel").into_boxed_str()),
+        creating: Box::leak(crate::i18n::t("tunnels.creating").into_boxed_str()),
+        create: Box::leak(crate::i18n::t("tunnels.create").into_boxed_str()),
+    })
 }

@@ -16,13 +16,13 @@ impl IcedChat {
         let name = peer
             .as_ref()
             .map(|key| self.resolve_name(key))
-            .unwrap_or_else(|| "Unknown contact".to_string());
+            .unwrap_or_else(|| crate::i18n::t("calls.unknown_contact"));
         let status = match self.outgoing_call_status {
-            Some(OutgoingCallStatus::Ringing) => "Ringing…",
-            Some(OutgoingCallStatus::Declined) => "Call declined",
-            Some(OutgoingCallStatus::Busy) => "User is busy",
-            Some(OutgoingCallStatus::Failed) => "Call failed",
-            None => "Calling…",
+            Some(OutgoingCallStatus::Ringing) => crate::i18n::t("calls.ringing"),
+            Some(OutgoingCallStatus::Declined) => crate::i18n::t("calls.declined"),
+            Some(OutgoingCallStatus::Busy) => crate::i18n::t("calls.busy"),
+            Some(OutgoingCallStatus::Failed) => crate::i18n::t("calls.failed"),
+            None => crate::i18n::t("calls.outgoing"),
         };
         let initials = crate::presentation::initials(&name);
         let avatar_label = if initials.is_empty() { "?".to_string() } else { initials };
@@ -37,7 +37,7 @@ impl IcedChat {
                 ..Default::default()
             });
         let controls: iced::Element<'_, AppMessage> = match self.active_call_id {
-            Some(call_id) => button(text("Cancel"))
+            Some(call_id) => button(text(crate::i18n::t("common.cancel")))
                 .on_press(AppMessage::HangUp(call_id))
                 .padding([SPACE_8, SPACE_24])
                 .style(BUTTON_DANGER)
@@ -58,7 +58,7 @@ impl IcedChat {
         use iced::widget::{button, column, container, row, text};
         use iced::{Alignment, Length};
 
-        let name = self.outgoing_call_peer.as_ref().map(|peer| self.resolve_name(peer)).unwrap_or_else(|| "Unknown contact".to_string());
+        let name = self.outgoing_call_peer.as_ref().map(|peer| self.resolve_name(peer)).unwrap_or_else(|| crate::i18n::t("calls.unknown_contact"));
         let initials = crate::presentation::initials(&name);
         let avatar_label = if initials.is_empty() { "?".to_string() } else { initials };
         let remote_fallback = || container(column![text(avatar_label.clone()).size(44.0), text(name.clone()).size(18.0)]
@@ -103,7 +103,7 @@ impl IcedChat {
         });
         #[cfg(not(feature = "video-calls"))]
         let local: Option<iced::Element<'_, AppMessage>> = None;
-        let local_pip: iced::Element<'_, AppMessage> = local.unwrap_or_else(|| container(text("You").size(18.0))
+        let local_pip: iced::Element<'_, AppMessage> = local.unwrap_or_else(|| container(text(crate::i18n::t("calls.you")).size(18.0))
             .width(Length::Fixed(220.0)).height(Length::Fixed(150.0))
             .center_x(Length::Fixed(220.0)).center_y(Length::Fixed(150.0))
             .style(|theme| iced::widget::container::Style {
@@ -113,14 +113,29 @@ impl IcedChat {
             }).into());
         let elapsed = self.call_started_at.map(|start| start.elapsed().as_secs()).unwrap_or_default();
         let duration = format!("{:02}:{:02}", elapsed / 60, elapsed % 60);
-        let status = if self.call_audio_muted { "Connected · Microphone muted" } else { "Connected · Audio" };
-        let mute_label = if self.call_audio_muted { "Unmute" } else { "Mute" };
+        let status = if self.call_audio_muted {
+            crate::i18n::t("calls.connected_mic_muted")
+        } else {
+            crate::i18n::t("calls.connected_audio")
+        };
+        let mute_label = if self.call_audio_muted {
+            crate::i18n::t("calls.unmute")
+        } else {
+            crate::i18n::t("calls.mute")
+        };
         let mute = button(text(mute_label)).on_press_maybe(self.active_call_id.map(|_| AppMessage::ToggleCallMute));
-        let camera_label = if self.call_camera_enabled { "Camera Off" } else { "Camera On" };
+        let camera_label = if self.call_camera_enabled {
+            crate::i18n::t("calls.camera_off")
+        } else {
+            crate::i18n::t("calls.camera_on")
+        };
         let camera = button(text(camera_label)).on_press_maybe(self.active_call_id.map(|_| AppMessage::ToggleCallCamera));
-        let switch_camera = button(text(format!("Switch Camera · {}", self.call_camera_selection)))
-            .on_press_maybe(self.active_call_id.map(|_| AppMessage::SelectCamera("next".to_string())));
-        let hang_up = button(text("Hang Up"))
+        let switch_camera = button(text(crate::i18n::t_args(
+            "calls.switch_camera",
+            &[("camera", &self.call_camera_selection)],
+        )))
+        .on_press_maybe(self.active_call_id.map(|_| AppMessage::SelectCamera("next".to_string())));
+        let hang_up = button(text(crate::i18n::t("calls.hang_up")))
             .on_press_maybe(self.active_call_id.map(AppMessage::HangUp))
             .style(BUTTON_DANGER);
         let stage = container(local_pip)

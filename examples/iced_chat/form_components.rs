@@ -648,13 +648,13 @@ fn checkbox_style(theme: &Theme, status: checkbox::Status) -> checkbox::Style {
 
 /// A styled checkbox with an optional helper line.
 pub fn checkbox_field<'a>(
-    label: &'a str,
+    label: impl Into<String>,
     is_checked: bool,
     on_toggle: impl Fn(bool) -> AppMessage + 'a,
-    helper: Option<&'a str>,
+    helper: Option<String>,
 ) -> Element<'a, AppMessage> {
     let cb = checkbox(is_checked)
-        .label(label)
+        .label(label.into())
         .on_toggle(on_toggle)
         .text_size(TypeRole::Body.size_px())
         // FONTS Task 11: checkbox label is IBM Plex Sans Regular (Body role).
@@ -664,7 +664,7 @@ pub fn checkbox_field<'a>(
     match helper {
         Some(h) => Column::new()
             .push(cb)
-            .push(helper_text(h))
+            .push(helper_text(&h))
             .spacing(design_tokens::SPACE_2)
             .width(Length::Fill)
             .into(),
@@ -850,12 +850,12 @@ impl<'a> SelectablePeerRow<'a> {
 pub fn peer_list<'a>(
     rows: Vec<Element<'a, AppMessage>>,
     max_height: f32,
-    empty_text: Option<&'a str>,
+    empty_text: Option<String>,
 ) -> Element<'a, AppMessage> {
     let inner: Element<'a, AppMessage> = if rows.is_empty() {
         match empty_text {
             Some(empty) => container(
-                text(empty.to_string())
+                text(empty)
                     .font(TypeRole::SupportingText.font())
                     .size(TypeRole::SupportingText.size_px())
                     .style(|t| text::Style {
@@ -979,10 +979,10 @@ pub fn selection_summary(count: usize, noun: &str) -> Element<'static, AppMessag
 pub struct SelectablePeerList<'a> {
     rows: Vec<Element<'a, AppMessage>>,
     max_height: f32,
-    empty_text: Option<&'a str>,
-    search: Option<(&'a str, &'a str, Box<dyn Fn(String) -> AppMessage + 'a>)>,
+    empty_text: Option<String>,
+    search: Option<(String, &'a str, Box<dyn Fn(String) -> AppMessage + 'a>)>,
     chips: Vec<Element<'a, AppMessage>>,
-    summary: Option<(usize, &'a str)>,
+    summary: Option<(usize, String)>,
 }
 
 impl<'a> SelectablePeerList<'a> {
@@ -991,7 +991,7 @@ impl<'a> SelectablePeerList<'a> {
     pub fn new(
         rows: Vec<Element<'a, AppMessage>>,
         max_height: f32,
-        empty_text: Option<&'a str>,
+        empty_text: Option<String>,
     ) -> Self {
         Self {
             rows,
@@ -1006,11 +1006,11 @@ impl<'a> SelectablePeerList<'a> {
     /// Add a search/filter field above the list.
     pub fn search(
         mut self,
-        placeholder: &'a str,
+        placeholder: impl Into<String>,
         value: &'a str,
         on_input: impl Fn(String) -> AppMessage + 'a,
     ) -> Self {
-        self.search = Some((placeholder, value, Box::new(on_input)));
+        self.search = Some((placeholder.into(), value, Box::new(on_input)));
         self
     }
 
@@ -1021,18 +1021,18 @@ impl<'a> SelectablePeerList<'a> {
     }
 
     /// Add an "N noun(s) selected" summary line below the list.
-    pub fn summary(mut self, count: usize, noun: &'a str) -> Self {
-        self.summary = Some((count, noun));
+    pub fn summary(mut self, count: usize, noun: impl Into<String>) -> Self {
+        self.summary = Some((count, noun.into()));
         self
     }
 
     /// Build the picker column: search field, chips row, peer list, summary.
-    pub fn build(self) -> Element<'a, AppMessage> {
+    pub fn build(mut self) -> Element<'a, AppMessage> {
         let mut col = Column::new().spacing(design_tokens::SPACE_8);
 
         if let Some((placeholder, value, on_input)) = self.search {
             col = col.push(ui_components::text_input_field(
-                placeholder,
+                &placeholder,
                 value,
                 on_input,
                 false,
@@ -1047,10 +1047,14 @@ impl<'a> SelectablePeerList<'a> {
             col = col.push(chip_row);
         }
 
-        col = col.push(peer_list(self.rows, self.max_height, self.empty_text));
+        col = col.push(peer_list(
+            self.rows,
+            self.max_height,
+            self.empty_text.take(),
+        ));
 
         if let Some((count, noun)) = self.summary {
-            col = col.push(selection_summary(count, noun));
+            col = col.push(selection_summary(count, &noun));
         }
 
         col.into()
@@ -1304,10 +1308,10 @@ mod tests {
         let row: Element<'static, AppMessage> =
             SelectablePeerRow::new("Alice").build(&theme);
         let el: Element<'static, AppMessage> =
-            peer_list(vec![row], 200.0, Some("No peers available"));
+            peer_list(vec![row], 200.0, Some("No peers available".to_string()));
         let _ = el;
         let el: Element<'static, AppMessage> =
-            peer_list(vec![], 200.0, Some("No peers available"));
+            peer_list(vec![], 200.0, Some("No peers available".to_string()));
         let _ = el;
     }
 
@@ -1334,12 +1338,13 @@ mod tests {
         let row: Element<'static, AppMessage> =
             SelectablePeerRow::new("Alice").build(&theme);
         let el: Element<'static, AppMessage> =
-            SelectablePeerList::new(vec![row], 200.0, Some("No peers available")).build();
+            SelectablePeerList::new(vec![row], 200.0, Some("No peers available".to_string()))
+                .build();
         let _ = el;
         let el: Element<'static, AppMessage> = SelectablePeerList::new(
             vec![SelectablePeerRow::new("Alice").build(&theme)],
             200.0,
-            Some("No peers available"),
+            Some("No peers available".to_string()),
         )
         .search("Search…", "", |_| AppMessage::Noop)
         .chips(vec![remove_chip("Alice", Some(AppMessage::Noop))])
