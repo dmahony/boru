@@ -69,9 +69,10 @@ use boru_core::{
     chat_callbacks::ChatCallbacks,
     chat_core::{ChatEntry, MessageHash, SignedMessage},
     chat_history::{ChatHistoryStore, DeliveryState},
+    control_plane::message::{ControlEnvelope, ControlPlaneDecode, CONTROL_PLANE_MAGIC},
     conversations::{spawn_conversation_forwarder, ConversationNetEvent, ConversationStore},
     discovery_message::DiscoveryMessage,
-    discovery_service::{DiscoveryService, IncomingOutcome, PeerSource, PeerUpdate},
+    discovery_service::{ControlEvent, DiscoveryService, IncomingOutcome, PeerSource, PeerUpdate},
     discovery_topic::{discovery_topic, BORU_DISCOVERY_PROTOCOL_VERSION},
     friends::{FriendId, FriendsStore},
     net::{Gossip, GOSSIP_ALPN},
@@ -928,5 +929,163 @@ async fn handle_incoming_rejects_malformed_discovery_payloads() -> Result<()> {
 
     service.shutdown().await;
     drop((router, ep));
+    Ok(())
+}
+
+// =========================================================================
+// 4. Control-plane boundary (BORU-CP-02): control envelopes route to
+//    DiscoveryService events, never to chat/UI
+// =========================================================================
+
+/// BORU-CP-02 (PDF Task 1.2): a **control-plane** envelope (magic "BC",
+/// BORU-CP-01 wire format) sent by A via `DiscoveryService::send_control`
+/// over a real loopback mesh is received by B's DiscoveryService through
+/// its `control_events()` callback stream — the explicit event-callback
+/// boundary. B's user-visible state (chat rows, history, unread,
+/// notifications, conversation store) stays untouched, and the wire spy
+/// proves the control envelope never decodes as a chat `SignedMessage`.
+#[tokio::test]
+async fn control_plane_envelope_routes_to_service_and_ui_stays_isolated() -> Result<()> {
+    let mut rng = rand::rngs::ChaCha12Rng::seed_from_u64(0xC0DEC0DE); // BORU-CP-02
+    let mut harness = UiIsolationHarness::spawn(&mut rng, PublicNetwork::Test).await?;
+
+    // ── Mesh forms: both discovery services see each other ────────────
+    wait_for_peer(&harness.b.service, harness.pk_a, "B to learn A").await?;
+    wait_for_peer(&harness.a.service, harness.pk_b, "A to learn B").await?;
+
+    // B subscribes to the control-plane event stream BEFORE A sends.
+    let mut control_events = harness.b.service.control_events();
+
+    // ── A sends a valid control-plane envelope via send_control ───────
+    let envelope = ControlEnvelope::hello(harness.pk_a, 42, 1_700_000_000, 1);
+    harness
+        .a
+        .service
+        .send_control(envelope.clone())
+        .await
+        .expect("A sends a control-plane envelope");
+
+    // ── B's DiscoveryService receives it as a ControlEvent::Received ──
+    let deadline = Instant::now() + MESH_TIMEOUT;
+    let mut received = None;
+    while Instant::now() < deadline {
+        match tokio::time::timeout(POLL_TICK, control_events.recv()).await {
+            Ok(Ok(ControlEvent::Received(env))) => {
+                received = Some(env);
+                break;
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) => break,
+            Err(_) => {} // poll timeout — keep waiting
+        }
+    }
+    let received = received.expect("B must receive the control-plane envelope");
+    assert_eq!(received.sender_node_id, harness.pk_a, "sender node id");
+    assert_eq!(received.sequence, 42, "sequence round-trip");
+    assert_eq!(
+        received.message_type,
+        boru_core::control_plane::message::ControlMessageType::Hello,
+        "message type round-trip"
+    );
+
+    // ── UI isolation: none of the six surfaces was touched ────────────
+    assert_ui_isolated(&harness.ui, &harness.store, &harness.topic, "B");
+
+    // ── Wire-level isolation: the control envelope never decodes as chat
+    let spy_b = harness.spy_b.lock().expect("spy lock poisoned").clone();
+    assert!(
+        !spy_b.is_empty(),
+        "B spy must have captured the control-plane exchange"
+    );
+    let envelope_bytes = envelope.encode();
+    assert!(
+        spy_b.iter().any(|content| content == &envelope_bytes),
+        "the control envelope must be on the wire"
+    );
+    // The control envelope's own bytes never decode as a legacy
+    // DiscoveryMessage (the two wire formats are disjoint — CP-01 unit
+    // proof, re-asserted here on the exact bytes that crossed the mesh).
+    assert!(
+        postcard::from_bytes::<DiscoveryMessage>(&envelope_bytes).is_err(),
+        "a control-plane envelope must never decode as a legacy DiscoveryMessage"
+    );
+    // Nothing on the wire ever decodes as a chat SignedMessage. (Legacy
+    // DiscoveryMessage hellos are expected — A's own join announcement —
+    // but chat payloads are never routed through the discovery topic.)
+    for content in &spy_b {
+        assert!(
+            SignedMessage::verify_and_decode(content).is_err(),
+            "B spy: discovery topic carried a chat payload (SignedMessage)"
+        );
+    }
+
+    harness.shutdown().await;
+    Ok(())
+}
+
+/// BORU-CP-02: a **malformed** control-plane frame (magic "BC" + garbage)
+/// over a real loopback mesh is dropped by B's DiscoveryService — no
+/// `ControlEvent`, no UI state, no panic — while a follow-up valid control
+/// envelope is still processed (fail-closed per-feature, not per-client).
+#[tokio::test]
+async fn malformed_control_frame_dropped_but_valid_still_processed() -> Result<()> {
+    let mut rng = rand::rngs::ChaCha12Rng::seed_from_u64(0xC0DEC0DF); // BORU-CP-02
+    let mut harness = UiIsolationHarness::spawn(&mut rng, PublicNetwork::Test).await?;
+
+    wait_for_peer(&harness.b.service, harness.pk_a, "B to learn A").await?;
+    wait_for_peer(&harness.a.service, harness.pk_b, "A to learn B").await?;
+
+    let mut control_events = harness.b.service.control_events();
+
+    // Malformed control frame: magic "BC" + supported version byte + garbage
+    // header/body (the version gate passes, the header parse fails).
+    let mut malformed: Vec<u8> = CONTROL_PLANE_MAGIC.to_vec();
+    malformed.push(boru_core::control_plane::message::CONTROL_PLANE_PROTOCOL_VERSION);
+    malformed.extend_from_slice(b"not a valid envelope at all\x00\xff");
+    assert!(
+        !matches!(ControlEnvelope::decode(&malformed), Ok(ControlPlaneDecode::Message(_))),
+        "fixture must be malformed"
+    );
+    harness.broadcast_raw(&malformed).await?;
+
+    // Let the malformed broadcast drain.
+    tokio::time::sleep(MALFORMED_DRAIN).await;
+
+    // No control event was emitted for the malformed frame.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(80), control_events.recv())
+            .await
+            .is_err(),
+        "malformed control frame must not emit a ControlEvent"
+    );
+    assert_ui_isolated(&harness.ui, &harness.store, &harness.topic, "B");
+
+    // A valid control envelope is still processed (fail closed per feature).
+    let envelope = ControlEnvelope::presence(harness.pk_a, 7, 1_700_000_000, Some(60));
+    harness
+        .a
+        .service
+        .send_control(envelope)
+        .await
+        .expect("A sends a valid control-plane envelope");
+
+    let deadline = Instant::now() + MESH_TIMEOUT;
+    let mut received = false;
+    while Instant::now() < deadline {
+        match tokio::time::timeout(POLL_TICK, control_events.recv()).await {
+            Ok(Ok(ControlEvent::Received(env))) => {
+                assert_eq!(env.sender_node_id, harness.pk_a);
+                received = true;
+                break;
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) => break,
+            Err(_) => {}
+        }
+    }
+    assert!(received, "valid control envelope after a malformed frame");
+    assert_ui_isolated(&harness.ui, &harness.store, &harness.topic, "B");
+
+    harness.shutdown().await;
     Ok(())
 }

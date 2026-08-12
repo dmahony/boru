@@ -24,20 +24,31 @@
 //!
 //! # API surfaces
 //!
-//! 1. [`join`](DiscoveryService::join) / [`from_subscription`](DiscoveryService::from_subscription)
+//! 1. [`start`](DiscoveryService::start) / [`join`](DiscoveryService::join) /
+//!    [`from_subscription`](DiscoveryService::from_subscription)
 //!    — join the discovery gossip topic and start the receive drain.
-//! 2. [`publish`](DiscoveryService::publish) — broadcast a
+//! 2. [`stop`](DiscoveryService::stop) / [`shutdown`](DiscoveryService::shutdown)
+//!    — stop the receive drain and connectivity wiring.
+//! 3. [`publish`](DiscoveryService::publish) — broadcast a
 //!    [`DiscoveryMessage`] (Hello / Presence / PeerAdvertisement).
-//! 3. [`handle_incoming`](DiscoveryService::handle_incoming) — deserialise +
+//! 4. [`send_control`](DiscoveryService::send_control) — broadcast a
+//!    **control-plane** envelope ([`ControlEnvelope`], magic `BC`) on the
+//!    discovery topic (BORU-CP-02).
+//! 5. [`handle_incoming`](DiscoveryService::handle_incoming) — deserialise +
 //!    dispatch one received payload. This is the pure receive-path core: it
-//!    takes bytes (no network), so it is directly unit-testable.
-//! 4. [`peer_updates`](DiscoveryService::peer_updates) — a live stream of
+//!    takes bytes (no network), so it is directly unit-testable. Control-plane
+//!    envelopes are routed to [`ControlEvent`] subscribers; legacy discovery
+//!    messages update the peer registry.
+//! 6. [`peer_updates`](DiscoveryService::peer_updates) — a live stream of
 //!    [`PeerUpdate`]s for callers, backed by the authoritative
 //!    [`PeerRegistry`].
-//! 5. [`announce_hello`](DiscoveryService::announce_hello) /
+//! 7. [`control_events`](DiscoveryService::control_events) — a live stream of
+//!    [`ControlEvent`]s (decoded control-plane envelopes), the explicit
+//!    event-callback boundary demanded by PDF Task 1.2.
+//! 8. [`announce_hello`](DiscoveryService::announce_hello) /
 //!    [`announce_presence`](DiscoveryService::announce_presence) — throttled
 //!    presence announcements (guarded by [`AnnounceThrottle`]).
-//! 6. **Connectivity wiring (Phase 4, BORU-DISC-11)** — every newly
+//! 9. **Connectivity wiring (Phase 4, BORU-DISC-11)** — every newly
 //!    discovered peer (Hello / Presence / PeerAdvertisement) is dialed into
 //!    the discovery gossip mesh via [`GossipSender::join_peers`], the same
 //!    mechanism the mDNS and DHT discovery paths use today. This improves
@@ -125,12 +136,25 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 
 use crate::api::{ApiError, Event, GossipReceiver, GossipSender, Message as GossipMessage};
+use crate::control_plane::message::{
+    ControlEnvelope, ControlPlaneDecode, CONTROL_PLANE_MAGIC,
+};
 use crate::diagnostics::{DiagnosticCounters, DIAGNOSTIC_COUNTERS};
 use crate::discovery_message::{check_discovery_version, DiscoveryMessage, DiscoveryVersionCheck};
 use crate::proto::TopicId;
 
 /// Capacity of the peer-update broadcast channel.
 const PEER_UPDATES_CAPACITY: usize = 256;
+
+/// Maximum number of `(sender_node_id, sequence)` keys tracked for
+/// control-plane envelope dedup (BORU-CP-02).
+///
+/// The PDF bounded-resources guardrail: a peer flooding the discovery topic
+/// with control frames cannot grow this set without bound. When the set
+/// reaches the cap it is cleared — announcements are throttled /
+/// low-frequency in practice, so a full clear is safe and keeps memory
+/// bounded.
+const CONTROL_DEDUP_CAP: usize = 4096;
 
 /// Default minimum interval between discovery announcements (Hello /
 /// Presence). Announcements are throttled to at most one per interval so a
@@ -188,12 +212,40 @@ pub enum PeerUpdate {
     },
 }
 
+/// Live control-plane event notifications for callers of
+/// [`DiscoveryService::control_events`].
+///
+/// The service's receive path routes **control-plane** envelopes (the
+/// versioned "BC"-magic wire format from BORU-CP-01) to this stream. This
+/// is the explicit event-callback boundary demanded by PDF Task 1.2:
+/// control-plane messages are delivered to the service's own subscribers —
+/// never to chat-message handlers, conversation state, unread counts, or
+/// rendering. Unknown message types and malformed frames are dropped at the
+/// receive gate (logged, never emitted).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ControlEvent {
+    /// A valid control-plane envelope was received on the discovery topic.
+    Received(ControlEnvelope),
+}
+
 /// Outcome of [`DiscoveryService::handle_incoming`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IncomingOutcome {
     /// The payload was accepted: the peer registry was updated and a
     /// [`PeerUpdate`] was emitted.
     Processed,
+    /// A valid **control-plane** envelope (magic `BC`, BORU-CP-01) was
+    /// decoded and routed to [`ControlEvent`] subscribers. The peer registry
+    /// is intentionally NOT touched — control-plane traffic is the service
+    /// boundary's own event stream (PDF Task 1.2).
+    ControlMessage,
+    /// A control-plane envelope with an unknown (future) `message_type` was
+    /// ignored safely (forward compatibility — fail closed for that
+    /// feature).
+    UnknownControlType {
+        /// The unknown message_type tag byte.
+        message_type: u8,
+    },
     /// The payload duplicated an already-accepted event from the same node
     /// (same `node_id` + same `event_id`, e.g. the same advertisement
     /// delivered over two discovery paths). It was ignored — no registry
@@ -574,6 +626,17 @@ struct ReceiveCore {
     registry: Arc<Mutex<PeerRegistry>>,
     /// Broadcast channel of peer updates for callers.
     peer_updates_tx: broadcast::Sender<PeerUpdate>,
+    /// Broadcast channel of control-plane events for callers (BORU-CP-02).
+    /// Valid `ControlEnvelope`s decoded from the discovery topic are
+    /// delivered here — the explicit event-callback boundary that keeps
+    /// control-plane messages out of chat-message handlers.
+    control_events_tx: broadcast::Sender<ControlEvent>,
+    /// Bounded dedup set for control-plane envelopes, keyed by
+    /// `(sender_node_id, sequence)` (the [`ControlEnvelope::dedup_key`]).
+    /// Duplicate control frames (same sender + same sequence re-delivered)
+    /// are ignored without emitting a second [`ControlEvent`]. The set is
+    /// cleared when it reaches [`CONTROL_DEDUP_CAP`] (bounded resources).
+    control_dedup: Arc<Mutex<HashSet<(PublicKey, u64)>>>,
     /// Atomic discovery counters (BORU-DISC-20). Cloned from the global
     /// [`DIAGNOSTIC_COUNTERS`] by default so the frontend/MCP can read the
     /// same values; tests inject an isolated instance.
@@ -587,6 +650,15 @@ impl ReceiveCore {
     /// version check → self-filter → registry update. Unknown versions and
     /// undecodable payloads are dropped (and logged), never interpreted.
     fn handle_incoming(&self, content: &[u8], delivered_from: PublicKey) -> IncomingOutcome {
+        // BORU-CP-02: control-plane envelopes (magic "BC") are routed to
+        // the control-plane event stream — never to the peer registry and
+        // never to chat handling. The magic prefix is unambiguous: the
+        // legacy DiscoveryMessage wire format starts with a postcard enum
+        // tag (0..=2), so `0x42 0x43` can never be a discovery message.
+        if content.starts_with(&CONTROL_PLANE_MAGIC) {
+            return self.handle_control_incoming(content, delivered_from);
+        }
+
         let message = match postcard::from_bytes::<DiscoveryMessage>(content) {
             Ok(message) => message,
             Err(error) => {
@@ -679,6 +751,83 @@ impl ReceiveCore {
         }
 
         IncomingOutcome::Processed
+    }
+
+    /// Deserialise + dispatch one received control-plane envelope (magic
+    /// `BC`, BORU-CP-01 wire format).
+    ///
+    /// The control-plane gate order is: decode → protocol-version check →
+    /// self-filter → dedup by `(sender_node_id, sequence)` → emit
+    /// [`ControlEvent::Received`]. The peer registry is deliberately NOT
+    /// touched: control-plane traffic is the service boundary's own event
+    /// stream, never conversation/peer-registry state (PDF Task 1.2). A
+    /// malformed, unknown-type, or unsupported-version frame is dropped
+    /// (logged, counted) without panicking or affecting chat handling.
+    fn handle_control_incoming(&self, content: &[u8], delivered_from: PublicKey) -> IncomingOutcome {
+        let envelope = match ControlEnvelope::decode(content) {
+            Ok(ControlPlaneDecode::Message(envelope)) => envelope,
+            Ok(ControlPlaneDecode::UnknownType { message_type, .. }) => {
+                debug!(
+                    delivered_from = %delivered_from.fmt_short(),
+                    message_type,
+                    "discovery: unknown control message type ignored",
+                );
+                return IncomingOutcome::UnknownControlType { message_type };
+            }
+            Ok(ControlPlaneDecode::UnsupportedVersion { found, expected }) => {
+                self.counters.record_unsupported_version_packet();
+                warn!(
+                    delivered_from = %delivered_from.fmt_short(),
+                    found,
+                    expected,
+                    "discovery: unsupported control-plane protocol version dropped",
+                );
+                return IncomingOutcome::UnsupportedVersion { found, expected };
+            }
+            Err(error) => {
+                self.counters.record_malformed_discovery_packet();
+                debug!(
+                    delivered_from = %delivered_from.fmt_short(),
+                    error = %error,
+                    "discovery: malformed control-plane envelope dropped",
+                );
+                return IncomingOutcome::Undecodable;
+            }
+        };
+
+        if envelope.sender_node_id == self.local_node {
+            trace!(node = %envelope.sender_node_id.fmt_short(), "discovery: ignoring self control message");
+            return IncomingOutcome::SelfMessage;
+        }
+
+        // Bounded dedup by (sender_node_id, sequence): the same envelope
+        // re-delivered (e.g. over two discovery paths) is emitted once.
+        let dedup_key = envelope.dedup_key();
+        {
+            let mut seen = self.control_dedup.lock().expect("control dedup lock poisoned");
+            if seen.len() >= CONTROL_DEDUP_CAP {
+                seen.clear();
+            }
+            if !seen.insert(dedup_key) {
+                trace!(
+                    sender = %dedup_key.0.fmt_short(),
+                    sequence = dedup_key.1,
+                    "discovery: duplicate control envelope ignored",
+                );
+                return IncomingOutcome::Duplicate;
+            }
+        }
+
+        info!(
+            sender = %envelope.sender_node_id.fmt_short(),
+            message_type = ?envelope.message_type,
+            sequence = envelope.sequence,
+            "discovery: control-plane message received",
+        );
+        let _ = self
+            .control_events_tx
+            .send(ControlEvent::Received(envelope));
+        IncomingOutcome::ControlMessage
     }
 }
 
@@ -784,6 +933,37 @@ impl DiscoveryService {
         Ok(service)
     }
 
+    /// Start the discovery service: join the fixed internal discovery topic
+    /// and begin draining (PDF Task 1.2 `start()`).
+    ///
+    /// This is the explicit lifecycle entry point for the hidden discovery
+    /// service boundary. It is exactly the startup call made by
+    /// `examples/iced_chat/main.rs` — every Boru node joins the versioned
+    /// internal discovery gossip topic at startup as networking
+    /// infrastructure, without creating any conversation/UI state.
+    ///
+    /// Equivalent to [`join`](Self::join); the `start` name is provided so
+    /// the PDF's lifecycle API (`start()` / [`stop()`](Self::stop) /
+    /// [`send_control`](Self::send_control) / [`control_events`](Self::control_events))
+    /// is explicit on the service.
+    pub async fn start(
+        gossip: &crate::net::Gossip,
+        topic: TopicId,
+        bootstrap: Vec<PublicKey>,
+        local_node: PublicKey,
+    ) -> Result<Self, ApiError> {
+        Self::join(gossip, topic, bootstrap, local_node).await
+    }
+
+    /// Stop the discovery service: cancel the drain and connectivity tasks
+    /// and await them (PDF Task 1.2 `stop()`).
+    ///
+    /// Equivalent to [`shutdown`](Self::shutdown); the `stop` name is
+    /// provided so the PDF's lifecycle API is explicit on the service.
+    pub async fn stop(self) {
+        self.shutdown().await
+    }
+
     /// Build a running service from an already-created subscription.
     ///
     /// Splits the [`GossipSender`] / [`GossipReceiver`] halves, spawns the
@@ -824,11 +1004,14 @@ impl DiscoveryService {
     ) -> Self {
         let registry = Arc::new(Mutex::new(PeerRegistry::new()));
         let (peer_updates_tx, _) = broadcast::channel(PEER_UPDATES_CAPACITY);
+        let (control_events_tx, _) = broadcast::channel(PEER_UPDATES_CAPACITY);
         let core = ReceiveCore {
             local_node,
             topic,
             registry,
             peer_updates_tx,
+            control_events_tx,
+            control_dedup: Arc::new(Mutex::new(HashSet::new())),
             counters,
         };
         let announce = AnnounceHandle::new(sender, local_node);
@@ -924,6 +1107,40 @@ impl DiscoveryService {
     /// authoritative snapshot; this channel is a live notification stream.
     pub fn peer_updates(&self) -> broadcast::Receiver<PeerUpdate> {
         self.core.peer_updates_tx.subscribe()
+    }
+
+    /// Subscribe to live **control-plane** events (BORU-CP-02).
+    ///
+    /// The returned receiver observes [`ControlEvent::Received`] for every
+    /// valid control-plane envelope decoded from the discovery topic (magic
+    /// `BC`, BORU-CP-01 wire format). This is the explicit event-callback
+    /// boundary demanded by PDF Task 1.2: control-plane messages are
+    /// delivered to the service's own subscribers — never to chat-message
+    /// handlers, conversation state, unread counts, or rendering. Unknown
+    /// message types, unsupported protocol versions, and malformed frames
+    /// are dropped at the receive gate (logged, never emitted).
+    pub fn control_events(&self) -> broadcast::Receiver<ControlEvent> {
+        self.core.control_events_tx.subscribe()
+    }
+
+    /// Send a control-plane envelope on the discovery topic (BORU-CP-02).
+    ///
+    /// Serialises `envelope` with the BORU-CP-01 wire format (magic `BC`)
+    /// and broadcasts it through the gossip sender. This is the explicit
+    /// control-plane outbound path — distinct from the legacy
+    /// [`publish`](Self::publish) ([`DiscoveryMessage`]) path, and never a
+    /// chat message. The event id / sequence is caller-supplied; receivers
+    /// deduplicate by `(sender_node_id, sequence)`.
+    pub async fn send_control(
+        &self,
+        envelope: ControlEnvelope,
+    ) -> Result<(), DiscoveryServiceError> {
+        let bytes = envelope.encode();
+        self.announce
+            .sender
+            .broadcast(Bytes::from(bytes))
+            .await
+            .map_err(|source| e!(DiscoveryServiceError::Api { source }))
     }
 
     /// Snapshot of the currently known peers.
@@ -2344,5 +2561,242 @@ mod tests {
                 .is_err(),
             "undecodable payload must not produce any gossip command"
         );
+    }
+
+    // ── control-plane boundary (BORU-CP-02) ─────────────────────────
+
+    /// Encode a `Hello` control-plane envelope for `sender`.
+    fn control_hello(sender: PublicKey, sequence: u64) -> Vec<u8> {
+        ControlEnvelope::hello(sender, sequence, 1_700_000_000, 1).encode()
+    }
+
+    /// A valid control-plane envelope is routed to [`ControlEvent`]
+    /// subscribers and does NOT touch the peer registry (the boundary: the
+    /// service's own event stream, never conversation/registry state).
+    #[tokio::test]
+    async fn handle_incoming_control_envelope_emits_control_event() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let service = test_service(local);
+        let mut events = service.control_events();
+
+        let bytes = control_hello(peer, 7);
+        let outcome = service.handle_incoming(&bytes, peer);
+        assert_eq!(outcome, IncomingOutcome::ControlMessage);
+
+        // The control event was emitted with the decoded envelope.
+        let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("timed out waiting for control event")
+            .expect("control event channel closed");
+        match event {
+            ControlEvent::Received(envelope) => {
+                assert_eq!(envelope.sender_node_id, peer);
+                assert_eq!(envelope.sequence, 7);
+                assert_eq!(
+                    envelope.message_type,
+                    crate::control_plane::message::ControlMessageType::Hello
+                );
+            }
+        }
+
+        // The peer registry is NOT touched by control-plane traffic.
+        assert_eq!(service.peer_count(), 0, "control plane must not register peers");
+    }
+
+    /// The same control-plane envelope (same sender + same sequence)
+    /// re-delivered is deduplicated: one event, then a `Duplicate` outcome
+    /// with no second event.
+    #[tokio::test]
+    async fn handle_incoming_control_duplicate_sequence_ignored() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let service = test_service(local);
+        let mut events = service.control_events();
+
+        let bytes = control_hello(peer, 7);
+        assert_eq!(service.handle_incoming(&bytes, peer), IncomingOutcome::ControlMessage);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), events.recv())
+                .await
+                .is_ok(),
+            "first control envelope must emit an event"
+        );
+
+        // Same (sender, sequence) re-delivered — ignored.
+        assert_eq!(
+            service.handle_incoming(&bytes, peer),
+            IncomingOutcome::Duplicate,
+            "duplicate control envelope must be deduplicated"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), events.recv())
+                .await
+                .is_err(),
+            "duplicate control envelope must not emit a second event"
+        );
+    }
+
+    /// A control-plane envelope from this node is ignored (self-filter).
+    #[tokio::test]
+    async fn handle_incoming_control_self_message_ignored() {
+        let local = test_key(0xAA);
+        let service = test_service(local);
+        let mut events = service.control_events();
+
+        let bytes = control_hello(local, 1);
+        assert_eq!(service.handle_incoming(&bytes, local), IncomingOutcome::SelfMessage);
+        assert_eq!(service.peer_count(), 0);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), events.recv())
+                .await
+                .is_err(),
+            "self control envelope must not emit an event"
+        );
+    }
+
+    /// A control-plane envelope with an unknown (future) message_type is
+    /// ignored safely (forward compatibility — fail closed for that
+    /// feature).
+    #[tokio::test]
+    async fn handle_incoming_control_unknown_type_ignored() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let service = test_service(local);
+        let mut events = service.control_events();
+
+        let mut bytes = control_hello(peer, 1);
+        bytes[3] = 0x7F; // rewrite the message_type byte to an unknown tag
+        let outcome = service.handle_incoming(&bytes, peer);
+        assert_eq!(outcome, IncomingOutcome::UnknownControlType { message_type: 0x7F });
+        assert_eq!(service.peer_count(), 0);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), events.recv())
+                .await
+                .is_err(),
+            "unknown-type control envelope must not emit an event"
+        );
+    }
+
+    /// A control-plane envelope speaking an unsupported protocol version is
+    /// dropped (fail closed) without panicking.
+    #[tokio::test]
+    async fn handle_incoming_control_unsupported_version_fails_closed() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let service = test_service(local);
+        let mut events = service.control_events();
+
+        let mut bytes = control_hello(peer, 1);
+        bytes[2] = 99; // rewrite the protocol-version byte
+        let outcome = service.handle_incoming(&bytes, peer);
+        assert_eq!(
+            outcome,
+            IncomingOutcome::UnsupportedVersion {
+                found: 99,
+                expected: crate::control_plane::message::CONTROL_PLANE_PROTOCOL_VERSION,
+            }
+        );
+        assert_eq!(service.peer_count(), 0);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), events.recv())
+                .await
+                .is_err(),
+            "unsupported-version control envelope must not emit an event"
+        );
+    }
+
+    /// A malformed control-plane frame (magic prefix + current version byte
+    /// but garbage after it) is dropped without panicking or emitting an
+    /// event. (A frame whose version byte is wrong hits the version gate
+    /// first and is reported as `UnsupportedVersion` — the malformed branch
+    /// is only reachable with a supported version.)
+    #[tokio::test]
+    async fn handle_incoming_control_malformed_dropped() {
+        let local = test_key(0xAA);
+        let service = test_service(local);
+        let mut events = service.control_events();
+
+        // Magic "BC" + supported version byte + garbage header/body.
+        let mut bytes = CONTROL_PLANE_MAGIC.to_vec();
+        bytes.push(crate::control_plane::message::CONTROL_PLANE_PROTOCOL_VERSION);
+        bytes.extend_from_slice(b"garbage that is not a valid envelope");
+        let outcome = service.handle_incoming(&bytes, test_key(0x42));
+        assert_eq!(outcome, IncomingOutcome::Undecodable);
+        assert_eq!(service.peer_count(), 0);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), events.recv())
+                .await
+                .is_err(),
+            "malformed control frame must not emit an event"
+        );
+    }
+
+    /// `send_control` serialises a control-plane envelope (magic `BC`) and
+    /// broadcasts it through the gossip sender — never a chat message.
+    #[tokio::test]
+    async fn send_control_serializes_and_broadcasts() {
+        let local = test_key(0xAA);
+        let (cmd_tx, mut cmd_rx) = irpc_mpsc::channel::<Command>(64);
+        let (_ev_tx, ev_rx) = irpc_mpsc::channel::<Event>(64);
+        let sender = GossipSender::new(cmd_tx);
+        let receiver = GossipReceiver::new(ev_rx);
+        let service = DiscoveryService::from_subscription(test_topic(), sender, receiver, local);
+
+        let envelope = ControlEnvelope::hello(local, 42, 1_700_000_000, 1);
+        service.send_control(envelope.clone()).await.unwrap();
+
+        let command = tokio::time::timeout(Duration::from_secs(5), cmd_rx.recv())
+            .await
+            .expect("timed out waiting for broadcast command")
+            .expect("channel receive failed")
+            .expect("channel closed before broadcast");
+        let Command::Broadcast(bytes) = command else {
+            panic!("expected Broadcast command, got {command:?}");
+        };
+        // The wire bytes are a control-plane envelope (magic "BC"), not a
+        // chat message and not a legacy DiscoveryMessage.
+        assert!(bytes.starts_with(&CONTROL_PLANE_MAGIC));
+        match ControlEnvelope::decode(&bytes).expect("control envelope decodes") {
+            ControlPlaneDecode::Message(decoded) => assert_eq!(decoded, envelope),
+            other => panic!("expected decoded envelope, got {other:?}"),
+        }
+    }
+
+    /// The drain loop routes a received control-plane envelope to
+    /// [`ControlEvent`] subscribers (the end-to-end service boundary: the
+    /// receive task, not just the pure core).
+    #[tokio::test]
+    async fn drain_loop_forwards_control_events() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let (cmd_tx, _cmd_rx) = irpc_mpsc::channel::<Command>(64);
+        let (ev_tx, ev_rx) = irpc_mpsc::channel::<Event>(64);
+        let sender = GossipSender::new(cmd_tx);
+        let receiver = GossipReceiver::new(ev_rx);
+        let service = DiscoveryService::from_subscription(test_topic(), sender, receiver, local);
+        let mut events = service.control_events();
+
+        let bytes = control_hello(peer, 3);
+        ev_tx
+            .send(Event::Received(GossipMessage {
+                content: Bytes::from(bytes),
+                scope: DeliveryScope::Neighbors,
+                delivered_from: peer,
+            }))
+            .await
+            .unwrap();
+
+        let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("timed out waiting for control event")
+            .expect("control event channel closed");
+        match event {
+            ControlEvent::Received(envelope) => {
+                assert_eq!(envelope.sender_node_id, peer);
+                assert_eq!(envelope.sequence, 3);
+            }
+        }
+        assert_eq!(service.peer_count(), 0, "control plane must not register peers");
     }
 }

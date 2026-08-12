@@ -1138,7 +1138,7 @@ fn main() -> Result<()> {
         // handle is returned to main() and held there for the app lifetime
         // so its background drain task is not dropped.
         splash_send("Joining discovery mesh...");
-        let discovery_service = match boru_core::discovery_service::DiscoveryService::join(
+        let discovery_service = match boru_core::discovery_service::DiscoveryService::start(
             &gossip,
             boru_core::discovery_topic::discovery_topic(
                 boru_core::public_room::PublicNetwork::Mainnet,
