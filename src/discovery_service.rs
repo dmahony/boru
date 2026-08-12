@@ -1136,6 +1136,15 @@ mod tests {
         bytes
     }
 
+    /// Rewrite the protocol-version byte (index 1 — after the variant tag,
+    /// the `DiscoveryHeader` is the first field of every variant) of an
+    /// already-encoded discovery message.
+    fn with_protocol_version(bytes: Vec<u8>, version: u8) -> Vec<u8> {
+        let mut bytes = bytes;
+        bytes[1] = version;
+        bytes
+    }
+
     // ── Registry ──────────────────────────────────────────────────────
 
     #[test]
@@ -1440,6 +1449,171 @@ mod tests {
         let mut updates = service.peer_updates();
 
         let outcome = service.handle_incoming(b"this is not a discovery message", test_key(0x42));
+        assert_eq!(outcome, IncomingOutcome::Undecodable);
+        assert_eq!(service.peer_count(), 0);
+        assert!(updates.try_recv().is_err());
+    }
+
+    /// Every discovery message variant with an unknown (higher) protocol
+    /// version is dropped before its payload is interpreted — none may
+    /// register a peer or emit a peer update (BORU-DISC-19).
+    #[tokio::test]
+    async fn handle_incoming_unknown_version_all_variants_ignored() {
+        let local = test_key(0xAA);
+        let peer = test_key(0x07);
+        let advertised = test_key(0x08);
+        let service = test_service(local);
+        let mut updates = service.peer_updates();
+
+        for bytes in [
+            with_protocol_version(
+                postcard::to_stdvec(&DiscoveryMessage::hello(peer)).unwrap(),
+                99,
+            ),
+            with_protocol_version(
+                postcard::to_stdvec(&DiscoveryMessage::presence(peer)).unwrap(),
+                99,
+            ),
+            with_protocol_version(
+                postcard::to_stdvec(&DiscoveryMessage::peer_advertisement(peer, advertised))
+                    .unwrap(),
+                99,
+            ),
+        ] {
+            assert_eq!(
+                service.handle_incoming(&bytes, peer),
+                IncomingOutcome::UnsupportedVersion {
+                    found: 99,
+                    expected: crate::discovery_topic::BORU_DISCOVERY_PROTOCOL_VERSION,
+                },
+                "unknown-version payload must be dropped before interpretation"
+            );
+        }
+        assert_eq!(service.peer_count(), 0, "no variant may register a peer");
+        assert!(
+            updates.try_recv().is_err(),
+            "no variant may emit a PeerUpdate"
+        );
+    }
+
+    /// Protocol version 0 is as unknown as any future version: rejected with
+    /// the strict `found != expected` gate (BORU-DISC-19).
+    #[tokio::test]
+    async fn handle_incoming_version_zero_ignored() {
+        let local = test_key(0xAA);
+        let peer = test_key(0x09);
+        let service = test_service(local);
+        let mut updates = service.peer_updates();
+
+        let bytes = with_protocol_version(
+            postcard::to_stdvec(&DiscoveryMessage::hello(peer)).unwrap(),
+            0,
+        );
+        assert_eq!(
+            service.handle_incoming(&bytes, peer),
+            IncomingOutcome::UnsupportedVersion {
+                found: 0,
+                expected: crate::discovery_topic::BORU_DISCOVERY_PROTOCOL_VERSION,
+            }
+        );
+        assert_eq!(service.peer_count(), 0);
+        assert!(updates.try_recv().is_err());
+    }
+
+    /// An unknown-version payload from an already-known peer must NOT mutate
+    /// the registry: `last_seen`/`source` stay exactly as they were and no
+    /// `PeerUpdate` is emitted — the gate runs before any state write
+    /// (BORU-DISC-19).
+    #[tokio::test]
+    async fn handle_incoming_unknown_version_does_not_mutate_existing_peer() {
+        let local = test_key(0xAA);
+        let peer = test_key(0x0B);
+        let service = test_service(local);
+        let mut updates = service.peer_updates();
+
+        // Register the peer with a current-version hello.
+        let hello = postcard::to_stdvec(&DiscoveryMessage::hello(peer)).unwrap();
+        assert_eq!(service.handle_incoming(&hello, peer), IncomingOutcome::Processed);
+        let known = service.known_peers();
+        assert_eq!(known.len(), 1);
+        let first_seen = known[0].1.last_seen;
+        assert_eq!(known[0].1.source, PeerSource::Hello);
+        // Consume the Seen update from the registration.
+        assert!(updates.try_recv().is_ok());
+
+        // Same peer now speaks an unknown protocol version — dropped before
+        // the registry is touched.
+        let bogus = with_protocol_version(
+            postcard::to_stdvec(&DiscoveryMessage::presence(peer)).unwrap(),
+            99,
+        );
+        assert_eq!(
+            service.handle_incoming(&bogus, peer),
+            IncomingOutcome::UnsupportedVersion {
+                found: 99,
+                expected: crate::discovery_topic::BORU_DISCOVERY_PROTOCOL_VERSION,
+            }
+        );
+
+        let after = service.known_peers();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].1.source, PeerSource::Hello, "source must not refresh");
+        assert_eq!(
+            after[0].1.last_seen, first_seen,
+            "last_seen must not refresh"
+        );
+        assert!(
+            updates.try_recv().is_err(),
+            "unknown-version payload must not emit a PeerUpdate"
+        );
+    }
+
+    /// A truncated (mid-field) discovery payload is ignored without panicking
+    /// and without touching registry state (mirrors the hostile-input
+    /// malformed-envelope handling for chat).
+    #[tokio::test]
+    async fn handle_incoming_truncated_payload_ignored_without_panic() {
+        let local = test_key(0xAA);
+        let peer = test_key(0x0C);
+        let service = test_service(local);
+        let mut updates = service.peer_updates();
+
+        let full = postcard::to_stdvec(&DiscoveryMessage::hello(peer)).unwrap();
+        let truncated = full[..full.len() / 2].to_vec();
+        assert!(!truncated.is_empty());
+
+        let outcome = service.handle_incoming(&truncated, peer);
+        assert_eq!(outcome, IncomingOutcome::Undecodable);
+        assert_eq!(service.peer_count(), 0);
+        assert!(updates.try_recv().is_err());
+    }
+
+    /// An out-of-range enum discriminant (postcard varint 128 — the same
+    /// hostile input the chat layer rejects) is ignored without panicking:
+    /// it can never deserialise into a `DiscoveryMessage`.
+    #[tokio::test]
+    async fn handle_incoming_unknown_discriminant_ignored_without_panic() {
+        let local = test_key(0xAA);
+        let service = test_service(local);
+        let mut updates = service.peer_updates();
+
+        for bytes in [vec![0x80u8, 0x01], vec![0x03u8], vec![0xFFu8, 0xFFu8]] {
+            let outcome = service.handle_incoming(&bytes, test_key(0x0D));
+            assert_eq!(outcome, IncomingOutcome::Undecodable);
+        }
+        assert_eq!(service.peer_count(), 0);
+        assert!(updates.try_recv().is_err());
+    }
+
+    /// The empty payload is the degenerate malformed input: ignored, never
+    /// interpreted, never panics.
+    #[tokio::test]
+    async fn handle_incoming_empty_payload_ignored_without_panic() {
+        let local = test_key(0xAA);
+        let service = test_service(local);
+        let mut updates = service.peer_updates();
+
+        let outcome = service.handle_incoming(b"", test_key(0x0E));
         assert_eq!(outcome, IncomingOutcome::Undecodable);
         assert_eq!(service.peer_count(), 0);
         assert!(updates.try_recv().is_err());

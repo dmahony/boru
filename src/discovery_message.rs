@@ -97,10 +97,11 @@ impl DiscoveryHeader {
 
     /// Version-gate this header against the current protocol version.
     ///
-    /// This is the "unknown-protocol-version handling hook": the receive-path
-    /// gate that actually drops unsupported messages is wired in a later
-    /// discovery task (BORU-DISC-19), but the check already lives here so the
-    /// field is used and tested now.
+    /// This is the "unknown-protocol-version handling hook" the receive path
+    /// uses: [`DiscoveryService::handle_incoming`](crate::discovery_service::DiscoveryService::handle_incoming)
+    /// drops any message whose check returns [`DiscoveryVersionCheck::Unsupported`]
+    /// (logged at warn, never interpreted — verified by the BORU-DISC-19
+    /// version-gate tests).
     pub fn check_version(&self) -> DiscoveryVersionCheck {
         check_discovery_version(self.protocol_version)
     }
@@ -277,9 +278,10 @@ pub enum DiscoveryVersionCheck {
 ///
 /// Unknown versions are rejected rather than interpreted optimistically: a
 /// node that does not understand a message's version must not guess at its
-/// meaning. The receive-path wiring that drops unsupported messages is
-/// introduced in a later discovery task; this function is the check the wire
-/// carries today (via [`DiscoveryHeader::check_version`]).
+/// meaning. The receive path wires this check in
+/// [`DiscoveryService::handle_incoming`](crate::discovery_service::DiscoveryService::handle_incoming)
+/// (gate order: deserialise → version check → self-filter → registry update);
+/// callers outside the service use it via [`DiscoveryHeader::check_version`].
 pub fn check_discovery_version(version: u8) -> DiscoveryVersionCheck {
     if version == BORU_DISCOVERY_PROTOCOL_VERSION {
         DiscoveryVersionCheck::Supported
