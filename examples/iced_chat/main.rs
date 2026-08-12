@@ -1565,7 +1565,6 @@ fn main() -> Result<()> {
                 chat_history,
                 backfill_handle,
                 initial_topic.is_some() && args.command.is_none(),
-                None, // continuous_tracker: the startup public-lobby tracker is gone (BORU-DISC-12)
                 Arc::clone(&discovered_peers_rx),
                 directory_room_rx,
                 dht_for_private,
@@ -2580,12 +2579,15 @@ mod tests {
         tracker.shutdown().await;
     }
 
-    /// Test D: `--no-dht` suppresses the member-discovery DHT client and
-    /// the public continuous tracker.  This isolates the startup decision
-    /// logic (the `(!args.no_dht).then(...)` guard) rather than requiring
-    /// a full network stack.
+    /// Test D: `--no-dht` suppresses the member-discovery DHT client that
+    /// backs explicit room trackers (private rooms + user-created public
+    /// rooms).  This isolates the startup decision logic (the
+    /// `(!args.no_dht).then(...)` guard) rather than requiring a full
+    /// network stack.  The startup public-lobby continuous tracker is gone
+    /// (BORU-DISC-12); public-room trackers are created per user-created
+    /// room inside `IcedChat`, not at startup.
     #[test]
-    fn no_dht_flag_disables_member_discovery_and_tracker() {
+    fn no_dht_flag_disables_member_discovery_client() {
         // — with --no-dht:
         let args = Args::try_parse_from(["boru", "--no-dht"].iter()).unwrap();
         assert!(args.no_dht);
@@ -2595,14 +2597,6 @@ mod tests {
         assert!(
             room_discovery_dht.is_none(),
             "--no-dht must suppress the member-discovery DHT client"
-        );
-        // The continuous tracker stays `None` because the DHT guard above
-        // is false — main.rs never enters the `if let Some(ref dht) = ...`
-        // branch.
-        let continuous_tracker: Option<()> = None;
-        assert!(
-            continuous_tracker.is_none(),
-            "--no-dht must not start the public continuous tracker"
         );
 
         // — without --no-dht:

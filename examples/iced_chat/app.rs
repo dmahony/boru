@@ -4126,11 +4126,6 @@ pub struct IcedChat {
     /// Separate from peer_presence_map to avoid conflating friend vs
     /// discovered-peer online status.
     discovered_online_cache: HashSet<PublicKey>,
-    /// Handle to the continuous DHT discovery & publication tracker.
-    /// Kept alive for the lifetime of the app — dropping it cancels the
-    /// background publish/discover tasks.
-    #[expect(dead_code)]
-    continuous_tracker: Option<PublicContinuousTracker>,
     /// Receiver handle for discovered peers from the DHT discovery loop.
     /// Read by the subscription stream to produce NewDiscoveredPeers events.
     pub discovered_peers_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<DiscoveredPeersUpdate>>>,
@@ -7159,7 +7154,6 @@ impl IcedChat {
         chat_history: Arc<std::sync::Mutex<ChatHistoryStore>>,
         backfill_handle: BackfillHandle,
         return_to_chat_list_after_open: bool,
-        continuous_tracker: Option<PublicContinuousTracker>,
         discovered_peers_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<DiscoveredPeersUpdate>>>,
         directory_room_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<DirectoryRoomUpdate>>>,
         dht: Option<distributed_topic_tracker::Dht>,
@@ -7690,7 +7684,6 @@ impl IcedChat {
             conversation_store,
             discovered_peers: Vec::new(),
             discovered_online_cache: HashSet::new(),
-            continuous_tracker,
             discovered_peers_rx,
             pending_neighbor_status: HashMap::new(),
             pending_backfill_topics: Vec::new(),
@@ -23627,7 +23620,6 @@ mod tests {
             chat_history,
             backfill_handle,
             false,
-            None,
             Arc::new(Mutex::new(dummy_discovered_rx)),
             dummy_directory_rx,
             None, // dht (private-room discovery disabled by default in tests)
@@ -23824,7 +23816,6 @@ mod tests {
             chat_history,
             backfill_handle,
             false,
-            None,
             Arc::new(Mutex::new(dummy_discovered_rx)),
             dummy_directory_rx,
             None, // dht (private-room discovery disabled by default in tests)
@@ -29527,6 +29518,54 @@ fn vr_create_public_room_confirm_cancel_and_validation() {
             .iter()
             .any(|e| e.archived && !e.name.is_empty() && e.name == e.topic.to_string()),
         "empty-name fallback persists entry named by topic id"
+    );
+}
+
+#[test]
+fn vr_created_public_room_is_conversation_never_discovery_topic() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    // Create an advertised public room via the explicit user flow.
+    let _ = app.update(AppMessage::CreateNewRoom);
+    let _ = app.update(AppMessage::CreateNewRoomNameChanged("Beach House".into()));
+    let _ = app.update(AppMessage::CreateNewRoomAdvertiseToggled(true));
+    let _ = app.update(AppMessage::ConfirmCreateNewRoom);
+
+    // The public room is an ordinary conversation: a conversation-store
+    // entry with its own topic + name metadata.
+    let entry = app
+        .conversation_store
+        .iter()
+        .find(|e| e.name == "Beach House")
+        .expect("created public room must have a conversation-store entry");
+    assert!(
+        !boru_core::discovery_topic::is_discovery_topic(entry.topic),
+        "public-room topic must not be the internal discovery topic"
+    );
+    assert_eq!(
+        boru_core::discovery_topic::topic_kind(entry.topic),
+        boru_core::discovery_topic::TopicKind::Conversation,
+        "public-room topic must classify as Conversation, never Discovery"
+    );
+
+    // The discovery topic itself must never appear as a conversation entry.
+    assert!(
+        !app
+            .conversation_store
+            .iter()
+            .any(|e| boru_core::discovery_topic::is_discovery_topic(e.topic)),
+        "the discovery topic must never be persisted as a conversation"
+    );
+
+    // BORU-DISC-13 guard: OpenRoom refuses the discovery topic, keeping
+    // the discovery mesh separate from the public-chat conversation model.
+    let disc = boru_core::discovery_topic::discovery_topic(
+        boru_core::public_room::PublicNetwork::Mainnet,
+    );
+    let _ = app.update(AppMessage::OpenRoom(disc));
+    assert!(
+        !matches!(app.screen, Screen::Chat { topic } if topic == disc),
+        "OpenRoom must refuse the discovery topic"
     );
 }
 
