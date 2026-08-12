@@ -606,3 +606,8 @@ name = "test_discovery_group_isolation"
 path = "tests/test_discovery_group_isolation.rs"
 required-features = ["net"]
 
+[[test]]
+name = "test_discovery_ui_isolation"
+path = "tests/test_discovery_ui_isolation.rs"
+required-features = ["net"]
+
