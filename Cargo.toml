@@ -586,3 +586,8 @@ name = "protocol_registration"
 path = "tests/protocol_registration.rs"
 required-features = ["net"]
 
+[[test]]
+name = "test_discovery_startup"
+path = "tests/test_discovery_startup.rs"
+required-features = ["net"]
+
