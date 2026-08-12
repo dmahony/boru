@@ -21952,14 +21952,15 @@ mod tests {
 
     #[test]
     fn sidebar03_profile_header_avatar_is_compact() {
-        // SIDEBAR-03 / BORU-HOME-09: the top-left profile header avatar renders
-        // at PROFILE_HEADER_AVATAR_SIZE (48 px) — larger than list-row avatars
-        // (AVATAR_SM = 36 px) but compact enough to not dominate the sidebar.
+        // PROFILE-SIDEBAR: the top-left profile header avatar renders at
+        // PROFILE_HEADER_AVATAR_SIZE (= design_tokens::AVATAR_PROFILE, 72 px)
+        // — larger than list-row avatars (AVATAR_CHAT_LIST = 56 px) so the
+        // local-user identity block stands out from conversation rows.
         let src = include_str!("app.rs");
         let sidebar_src = include_str!("app/sidebar.rs");
         assert!(
-            src.contains("const PROFILE_HEADER_AVATAR_SIZE: f32 = 48.0;"),
-            "profile header avatar token must be 48 px"
+            src.contains("const PROFILE_HEADER_AVATAR_SIZE: f32 = crate::design_tokens::AVATAR_PROFILE;"),
+            "profile header avatar token must resolve to AVATAR_PROFILE (72 px)"
         );
         let profile = method_source(src, "fn view_local_profile_block(", "fn profile_identity_card(");
         assert!(
@@ -21974,15 +21975,15 @@ mod tests {
             !profile.contains("Length::Fixed(AVATAR_SM)"),
             "profile header must NOT use the list-row AVATAR_SM size"
         );
-        // List-row avatars keep AVATAR_SM (unchanged by SIDEBAR-03).
+        // List-row avatars use AVATAR_CHAT_LIST (56 px) per PROFILE-SIDEBAR.
         let conversation_row = method_source(
             sidebar_src,
             "fn view_sidebar_conversation_row(",
             "fn view_sidebar_discovered_peers(",
         );
         assert!(
-            conversation_row.contains("AVATAR_SM"),
-            "sidebar list-row avatars must keep AVATAR_SM"
+            conversation_row.contains("AVATAR_CHAT_LIST"),
+            "sidebar list-row avatars must use AVATAR_CHAT_LIST (56 px)"
         );
     }
 
