@@ -268,6 +268,16 @@ impl ControlAdvertPolicy {
             ControlPayload::Extensions(payload) => payload
                 .validate(&self.extensions_bounds)
                 .map_err(AdvertViolation::Extensions),
+            ControlPayload::PublicRoomAdvertisement(_payload) => {
+                // BORU-DIR-01: the advertisement payload is a single u8
+                // version anchor (BORU-DIR-02 adds the bounded metadata
+                // fields). The u8 is inherently bounded; the payload itself
+                // is capped by the envelope's MAX_CONTROL_PAYLOAD_LEN.
+                // Field-level bounds (room name/description/tags lengths,
+                // field counts) arrive with the BORU-DIR-02 metadata model
+                // and are enforced by this same policy check.
+                Ok(())
+            }
         }
     }
 }
@@ -942,6 +952,20 @@ mod tests {
             .check(&hint(peer, 5, Some("relay-only".into())))
             .is_ok());
         assert!(policy.check(&hint(peer, 6, None)).is_ok());
+    }
+
+    /// BORU-DIR-01: a PUBLIC_ROOM_ADVERTISEMENT envelope passes the
+    /// minimal-content whitelist (it is metadata only — a version anchor —
+    /// with no free-form fields that could smuggle content).
+    #[test]
+    fn policy_accepts_public_room_advertisement() {
+        let policy = ControlAdvertPolicy::default();
+        let peer = key(0x01);
+        let advert = ControlEnvelope::public_room_advertisement(peer, 1, 1_700_000_000, 1);
+        assert!(
+            policy.check(&advert).is_ok(),
+            "a bounded metadata-only room advertisement must be accepted"
+        );
     }
 
     #[test]

@@ -105,7 +105,8 @@ pub const BORU_APP_PROTOCOL_VERSION: u8 = 1;
 ///
 /// Tag values are stable wire constants: `0 = HELLO`, `1 = PRESENCE`,
 /// `2 = CAPABILITIES`, `3 = DIAGNOSTIC_HINT`, `4 = EXTENSIONS` (BORU-CP-16,
-/// PDF Phase 6). Unknown tags are tolerated by
+/// PDF Phase 6), `5 = PUBLIC_ROOM_ADVERTISEMENT` (BORU-DIR-01, PDF Phase 1
+/// Task 1.1). Unknown tags are tolerated by
 /// [`ControlEnvelope::decode`] as [`ControlPlaneDecode::UnknownType`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -121,6 +122,13 @@ pub enum ControlMessageType {
     /// Optional Phase 6 extensions (metadata only — see
     /// [`ExtensionsPayload`](crate::control_plane::extensions::ExtensionsPayload)).
     Extensions = 4,
+    /// A room-discovery advertisement — "this public room exists and is
+    /// discoverable" (BORU-DIR-01, PDF Phase 1 Task 1.1). Metadata only:
+    /// the advertisement describes a room for the local directory cache; it
+    /// never joins the room, subscribes to its chat topic, downloads its
+    /// history, or grants permission. Fully separate from peer presence and
+    /// from normal chat messages.
+    PublicRoomAdvertisement = 5,
 }
 
 impl ControlMessageType {
@@ -133,6 +141,7 @@ impl ControlMessageType {
             2 => Some(Self::Capabilities),
             3 => Some(Self::DiagnosticHint),
             4 => Some(Self::Extensions),
+            5 => Some(Self::PublicRoomAdvertisement),
             _ => None,
         }
     }
@@ -221,6 +230,36 @@ pub struct DiagnosticHintPayload {
     pub note: Option<String>,
 }
 
+/// PUBLIC_ROOM_ADVERTISEMENT payload (BORU-DIR-01, PDF Phase 1 Task 1.1).
+///
+/// A room-discovery advertisement: "this public room exists and is
+/// discoverable". Metadata only — it describes a room for the local
+/// directory cache; it never joins the room, subscribes to its chat topic,
+/// downloads its history, or grants permission (PDF Core rule).
+///
+/// This task establishes the typed control-plane message and its
+/// versioning anchor. The **advertised metadata payload design** (room_id,
+/// room_name, short_description, room_protocol_version, owner_peer_id,
+/// visibility, expiry/refresh, optional tags/activity/member-count) is
+/// defined by the next task in the chain (BORU-DIR-02 / PDF Task 1.2);
+/// this struct is intentionally minimal so the wire type and decode path
+/// land first, and the metadata fields are appended forward-compatibly by
+/// BORU-DIR-02 (older clients ignore the new trailing fields).
+///
+/// Fully separate from peer presence and normal chat messages: the
+/// envelope's `message_type` is `PublicRoomAdvertisement` (tag 5), its
+/// payload is this typed struct, and the decoder's cross-type guard rejects
+/// any frame that mixes this payload with a different `message_type`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicRoomAdvertisementPayload {
+    /// Advertisement payload version (PDF Task 1.2: "Define a versioned
+    /// PublicRoomAdvertisement payload"). `0` is reserved for the pre-DIR-02
+    /// placeholder; BORU-DIR-02 assigns version `1` when the metadata model
+    /// lands. Receivers treat an unknown future version as metadata to
+    /// cache — never as an authorisation signal (PDF Task 1.3 step 4).
+    pub advert_version: u8,
+}
+
 /// Typed payload carried by a [`ControlEnvelope`].
 ///
 /// The payload enum is self-describing on the wire (postcard variant tag),
@@ -248,6 +287,10 @@ pub enum ControlPayload {
     /// (BORU-CP-16; see
     /// [`crate::control_plane::extensions`](crate::control_plane::extensions)).
     Extensions(crate::control_plane::extensions::ExtensionsPayload),
+    /// [`PublicRoomAdvertisementPayload`] — a room-discovery advertisement
+    /// (BORU-DIR-01, PDF Phase 1 Task 1.1). Metadata only; the advertised
+    /// metadata model is defined by BORU-DIR-02 (PDF Task 1.2).
+    PublicRoomAdvertisement(PublicRoomAdvertisementPayload),
 }
 
 impl ControlPayload {
@@ -259,6 +302,7 @@ impl ControlPayload {
             Self::Capabilities(_) => ControlMessageType::Capabilities,
             Self::DiagnosticHint(_) => ControlMessageType::DiagnosticHint,
             Self::Extensions(_) => ControlMessageType::Extensions,
+            Self::PublicRoomAdvertisement(_) => ControlMessageType::PublicRoomAdvertisement,
         }
     }
 }
@@ -272,7 +316,8 @@ pub struct ControlEnvelope {
     /// Control-plane envelope format version
     /// ([`CONTROL_PLANE_PROTOCOL_VERSION`]).
     pub protocol_version: u8,
-    /// Typed message kind (HELLO / PRESENCE / CAPABILITIES / DIAGNOSTIC_HINT).
+    /// Typed message kind (HELLO / PRESENCE / CAPABILITIES /
+    /// DIAGNOSTIC_HINT / EXTENSIONS / PUBLIC_ROOM_ADVERTISEMENT).
     pub message_type: ControlMessageType,
     /// Identity (iroh Ed25519 public key) of the sending node.
     pub sender_node_id: PublicKey,
@@ -383,6 +428,25 @@ impl ControlEnvelope {
             sequence,
             timestamp_secs,
             ControlPayload::Extensions(extensions),
+        )
+    }
+
+    /// Convenience constructor for a PUBLIC_ROOM_ADVERTISEMENT envelope
+    /// (BORU-DIR-01, PDF Phase 1 Task 1.1). Carries a typed room-discovery
+    /// advertisement, fully separate from peer presence and chat messages.
+    pub fn public_room_advertisement(
+        sender_node_id: PublicKey,
+        sequence: u64,
+        timestamp_secs: u64,
+        advert_version: u8,
+    ) -> Self {
+        Self::new(
+            sender_node_id,
+            sequence,
+            timestamp_secs,
+            ControlPayload::PublicRoomAdvertisement(PublicRoomAdvertisementPayload {
+                advert_version,
+            }),
         )
     }
 
@@ -521,13 +585,17 @@ impl ControlEnvelope {
 /// [`PublicKey`] happens in [`ControlEnvelope::decode`] so an invalid key is
 /// reported as [`ControlPlaneError::InvalidNodeId`] rather than a generic
 /// decode error.
+///
+/// `pub(crate)` so integration tests (e.g. the discovery service's receive
+/// path) can craft precise malformed/future-field frames; it is not part of
+/// the public API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-struct WireHeader {
-    message_type: u8,
-    sender_node_id: [u8; 32],
-    sequence: u64,
-    timestamp_secs: u64,
-    payload_len: u32,
+pub(crate) struct WireHeader {
+    pub(crate) message_type: u8,
+    pub(crate) sender_node_id: [u8; 32],
+    pub(crate) sequence: u64,
+    pub(crate) timestamp_secs: u64,
+    pub(crate) payload_len: u32,
 }
 
 /// Outcome of a successful (non-malformed) decode.
@@ -690,6 +758,12 @@ mod tests {
                     ..Default::default()
                 }),
             ),
+            (
+                ControlMessageType::PublicRoomAdvertisement,
+                ControlPayload::PublicRoomAdvertisement(PublicRoomAdvertisementPayload {
+                    advert_version: 1,
+                }),
+            ),
         ]
     }
 
@@ -736,6 +810,7 @@ mod tests {
                     ..Default::default()
                 },
             ),
+            ControlEnvelope::public_room_advertisement(node, 6, 1_700_000_000, 1),
         ];
         for envelope in envelopes {
             let bytes = envelope.encode();
@@ -770,6 +845,7 @@ mod tests {
         assert_eq!(ControlMessageType::Capabilities.to_u8(), 2);
         assert_eq!(ControlMessageType::DiagnosticHint.to_u8(), 3);
         assert_eq!(ControlMessageType::Extensions.to_u8(), 4);
+        assert_eq!(ControlMessageType::PublicRoomAdvertisement.to_u8(), 5);
         assert_eq!(
             ControlMessageType::from_u8(0),
             Some(ControlMessageType::Hello)
@@ -782,7 +858,11 @@ mod tests {
             ControlMessageType::from_u8(4),
             Some(ControlMessageType::Extensions)
         );
-        assert_eq!(ControlMessageType::from_u8(5), None);
+        assert_eq!(
+            ControlMessageType::from_u8(5),
+            Some(ControlMessageType::PublicRoomAdvertisement)
+        );
+        assert_eq!(ControlMessageType::from_u8(6), None);
         assert_eq!(ControlMessageType::from_u8(255), None);
     }
 
@@ -1083,6 +1163,7 @@ mod tests {
                     ..Default::default()
                 },
             ),
+            ControlEnvelope::public_room_advertisement(node, 6, 1_700_000_000, 1),
         ];
         for envelope in envelopes {
             let bytes = envelope.encode();
@@ -1122,6 +1203,153 @@ mod tests {
                     panic!("chat bytes must never decode as a control envelope, got {other:?}")
                 }
             }
+        }
+    }
+
+    // ── BORU-DIR-01: PUBLIC_ROOM_ADVERTISEMENT separation ─────────────
+
+    /// A PUBLIC_ROOM_ADVERTISEMENT envelope decodes as a room advertisement —
+    /// never as a PRESENCE payload and never as a chat message. The typed
+    /// payload is versioned and carries only room-discovery metadata.
+    #[cfg(feature = "net")]
+    #[test]
+    fn advertisement_never_decodes_as_presence_or_chat() {
+        use crate::chat_core::Message as ChatMessage;
+        let node = test_key(0x12);
+        let envelope = ControlEnvelope::public_room_advertisement(node, 1, 1_700_000_000, 1);
+        let bytes = envelope.encode();
+
+        // Decodes as a room advertisement with the version anchor intact.
+        match ControlEnvelope::decode(&bytes).expect("advertisement decodes") {
+            ControlPlaneDecode::Message(decoded) => {
+                assert_eq!(
+                    decoded.message_type,
+                    ControlMessageType::PublicRoomAdvertisement
+                );
+                match decoded.payload {
+                    ControlPayload::PublicRoomAdvertisement(payload) => {
+                        assert_eq!(payload.advert_version, 1);
+                    }
+                    other => panic!(
+                        "advertisement must decode as PublicRoomAdvertisement, got {other:?}"
+                    ),
+                }
+            }
+            other => panic!("expected Message, got {other:?}"),
+        }
+
+        // The wire bytes never deserialise as a chat message.
+        assert!(
+            postcard::from_bytes::<ChatMessage>(&bytes).is_err(),
+            "advertisement bytes must never decode as a chat message"
+        );
+
+        // A chat PRESENCE payload never decodes as a room advertisement.
+        let presence_chat = postcard::to_stdvec(&ChatMessage::Presence).unwrap();
+        assert!(
+            postcard::from_bytes::<ControlPayload>(&presence_chat).is_err(),
+            "chat presence bytes must never decode as a control payload"
+        );
+
+        // A control-plane PRESENCE envelope's payload is a Presence payload,
+        // never a PublicRoomAdvertisement (the cross-type guard enforces it).
+        let presence = ControlEnvelope::presence(node, 2, 1_700_000_000, None);
+        match ControlEnvelope::decode(&presence.encode()).expect("presence decodes") {
+            ControlPlaneDecode::Message(decoded) => match decoded.payload {
+                ControlPayload::Presence(_) => {}
+                other => panic!("presence must decode as Presence, got {other:?}"),
+            },
+            other => panic!("expected Message, got {other:?}"),
+        }
+    }
+
+    /// Malformed room advertisements are rejected safely — never a panic,
+    /// never a misinterpretation. Garbage payload, truncated frame, and
+    /// header/payload type mismatch all return a structured error.
+    #[test]
+    fn malformed_advertisement_rejected_safely() {
+        let node = test_key(0x13);
+
+        // Header says PUBLIC_ROOM_ADVERTISEMENT but the payload section is
+        // garbage — MalformedPayload.
+        let header = postcard::to_stdvec(&WireHeader {
+            message_type: ControlMessageType::PublicRoomAdvertisement.to_u8(),
+            sender_node_id: *node.as_bytes(),
+            sequence: 1,
+            timestamp_secs: 1_700_000_000,
+            payload_len: 3,
+        })
+        .unwrap();
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&CONTROL_PLANE_MAGIC);
+        frame.push(CONTROL_PLANE_PROTOCOL_VERSION);
+        frame.extend_from_slice(&header);
+        frame.extend_from_slice(&[0xFF, 0xFF, 0xFF]); // garbage payload
+        let err = ControlEnvelope::decode(&frame).unwrap_err();
+        assert!(
+            matches!(err, ControlPlaneError::MalformedPayload { .. }),
+            "expected MalformedPayload, got {err:?}"
+        );
+
+        // Header says PUBLIC_ROOM_ADVERTISEMENT but the payload is a PRESENCE
+        // payload — cross-type confusion is malformed (TypeMismatch).
+        let presence = ControlEnvelope::presence(node, 1, 1_700_000_000, None);
+        let mut mismatched = presence.encode();
+        mismatched[3] = ControlMessageType::PublicRoomAdvertisement.to_u8();
+        let err = ControlEnvelope::decode(&mismatched).unwrap_err();
+        assert!(
+            matches!(err, ControlPlaneError::TypeMismatch { .. }),
+            "expected TypeMismatch, got {err:?}"
+        );
+
+        // Truncated advertisement frame — TooShort/Truncated, not a panic.
+        let full = ControlEnvelope::public_room_advertisement(node, 1, 1_700_000_000, 1).encode();
+        for cut in 0..full.len() {
+            let err = ControlEnvelope::decode(&full[..cut]).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    ControlPlaneError::TooShort | ControlPlaneError::Truncated
+                ),
+                "truncated advertisement (cut={cut}) must be TooShort/Truncated, got {err:?}"
+            );
+        }
+    }
+
+    /// Unknown future advertisement fields are ignored safely: a newer
+    /// sender appends metadata fields after the current payload; an older
+    /// client decodes the known prefix and discards the trailing bytes.
+    #[test]
+    fn unknown_future_advertisement_fields_tolerated() {
+        let node = test_key(0x14);
+        let payload = postcard::to_stdvec(&ControlPayload::PublicRoomAdvertisement(
+            PublicRoomAdvertisementPayload { advert_version: 1 },
+        ))
+        .unwrap();
+        let header = postcard::to_stdvec(&WireHeader {
+            message_type: ControlMessageType::PublicRoomAdvertisement.to_u8(),
+            sender_node_id: *node.as_bytes(),
+            sequence: 5,
+            timestamp_secs: 1_700_000_000,
+            payload_len: payload.len() as u32 + 4, // +4 fake future fields
+        })
+        .unwrap();
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&CONTROL_PLANE_MAGIC);
+        frame.push(CONTROL_PLANE_PROTOCOL_VERSION);
+        frame.extend_from_slice(&header);
+        frame.extend_from_slice(&payload);
+        frame.extend_from_slice(&[0x01, 0x00, 0x2A, 0x7F]); // future fields
+
+        match ControlEnvelope::decode(&frame).expect("future fields are ignored") {
+            ControlPlaneDecode::Message(decoded) => {
+                assert_eq!(
+                    decoded,
+                    ControlEnvelope::public_room_advertisement(node, 5, 1_700_000_000, 1),
+                    "future fields must not change decoding"
+                );
+            }
+            other => panic!("expected Message, got {other:?}"),
         }
     }
 }

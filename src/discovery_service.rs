@@ -141,7 +141,8 @@ use crate::control_plane::connectivity::{
 };
 use crate::control_plane::extensions::{default_local_extensions, ExtensionsPayload};
 use crate::control_plane::message::{
-    ControlEnvelope, ControlPlaneDecode, BORU_APP_PROTOCOL_VERSION, CONTROL_PLANE_MAGIC,
+    ControlEnvelope, ControlPayload, ControlPlaneDecode, BORU_APP_PROTOCOL_VERSION,
+    CONTROL_PLANE_MAGIC,
 };
 use crate::control_plane::privacy::{
     AdvertViolation, ControlPlaneGuard, GuardRejectReason, GuardVerdict, DEFAULT_PRESENCE_TTL,
@@ -282,6 +283,37 @@ pub enum PeerUpdate {
 pub enum ControlEvent {
     /// A valid control-plane envelope was received on the discovery topic.
     Received(ControlEnvelope),
+    /// A PUBLIC_ROOM_ADVERTISEMENT envelope was received and decoded into its
+    /// typed room-discovery payload (BORU-DIR-01, PDF Phase 1 Task 1.1).
+    ///
+    /// This is the service-boundary decode path for room advertisements:
+    /// the advertisement payload is interpreted **here** — inside the
+    /// discovery/control-plane service — and surfaced to subscribers as a
+    /// typed [`RoomAdvertisementEvent`]. It never joins a room, subscribes
+    /// to a chat topic, downloads history, or grants permission (PDF Core
+    /// rule); a malformed or oversized advertisement is rejected at the
+    /// receive gate and never reaches this event. Fully separate from peer
+    /// presence ([`ControlEvent::Received`] still carries PRESENCE
+    /// envelopes) and from normal chat messages.
+    RoomAdvertisement(RoomAdvertisementEvent),
+}
+
+/// A decoded PUBLIC_ROOM_ADVERTISEMENT (BORU-DIR-01).
+///
+/// Carries the envelope metadata (sender, sequence, timestamp) plus the
+/// typed advertisement payload. The full advertised-metadata model (room_id,
+/// room_name, description, ...) is added by BORU-DIR-02; this task delivers
+/// the versioned wire type + decode path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoomAdvertisementEvent {
+    /// The node that published the advertisement (envelope sender).
+    pub sender_node_id: PublicKey,
+    /// Per-sender sequence counter (dedup key part).
+    pub sequence: u64,
+    /// Unix epoch seconds when the advertisement was created.
+    pub timestamp_secs: u64,
+    /// The typed advertisement payload (version anchor for BORU-DIR-02).
+    pub advert: crate::control_plane::message::PublicRoomAdvertisementPayload,
 }
 
 /// Outcome of [`DiscoveryService::handle_incoming`].
@@ -1260,6 +1292,34 @@ impl ReceiveCore {
                         Instant::now(),
                     );
                 }
+                // BORU-DIR-01: decode room advertisements ONLY here — at the
+                // discovery/control-plane service boundary. A
+                // PUBLIC_ROOM_ADVERTISEMENT envelope is interpreted into its
+                // typed payload and emitted as the dedicated
+                // `ControlEvent::RoomAdvertisement` event — never as a
+                // generic `Received` envelope, never into peer-presence,
+                // conversation, or chat handling. Malformed/oversized
+                // advertisements are already rejected by decode + guard
+                // above, so reaching this point means the advertisement is
+                // well-formed, bounded, and attributed to its real sender.
+                if let ControlPayload::PublicRoomAdvertisement(advert) = &envelope.payload {
+                    info!(
+                        sender = %envelope.sender_node_id.fmt_short(),
+                        sequence = envelope.sequence,
+                        advert_version = advert.advert_version,
+                        "discovery: public-room advertisement received",
+                    );
+                    let _ = self.control_events_tx.send(ControlEvent::RoomAdvertisement(
+                        RoomAdvertisementEvent {
+                            sender_node_id: envelope.sender_node_id,
+                            sequence: envelope.sequence,
+                            timestamp_secs: envelope.timestamp_secs,
+                            advert: *advert,
+                        },
+                    ));
+                    return IncomingOutcome::ControlMessage;
+                }
+
                 let _ = self
                     .control_events_tx
                     .send(ControlEvent::Received(envelope));
@@ -3429,6 +3489,7 @@ mod tests {
     use crate::api::Command;
     use crate::control_plane::capabilities::{features, ids};
     use crate::control_plane::extensions::{PathPreference, RelayHealthHint};
+    use crate::control_plane::message::{ControlMessageType, ControlPayload};
     use crate::proto::DeliveryScope;
     use irpc::channel::mpsc as irpc_mpsc;
     use std::collections::BTreeSet;
@@ -5115,6 +5176,7 @@ mod tests {
                     crate::control_plane::message::ControlMessageType::Hello
                 );
             }
+            other => panic!("expected Received(Hello), got {other:?}"),
         }
 
         // The peer registry is NOT touched by control-plane traffic.
@@ -5260,6 +5322,138 @@ mod tests {
                 .is_err(),
             "malformed control frame must not emit an event"
         );
+    }
+
+    // ── BORU-DIR-01: PUBLIC_ROOM_ADVERTISEMENT decode path ─────────────
+
+    /// A valid PUBLIC_ROOM_ADVERTISEMENT envelope is decoded **only inside
+    /// the discovery/control-plane service** and surfaced as the dedicated
+    /// `ControlEvent::RoomAdvertisement` event — never as a generic
+    /// `Received` envelope, never into the peer registry, and never into
+    /// chat handling.
+    #[tokio::test]
+    async fn handle_incoming_room_advertisement_emits_dedicated_event() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let service = test_service(local);
+        let mut events = service.control_events();
+
+        let bytes = ControlEnvelope::public_room_advertisement(peer, 7, 1_700_000_000, 1).encode();
+        let outcome = service.handle_incoming(&bytes, peer);
+        assert_eq!(outcome, IncomingOutcome::ControlMessage);
+
+        // The dedicated typed event carries the decoded advertisement.
+        let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("timed out waiting for room advertisement event")
+            .expect("control event channel closed");
+        match event {
+            ControlEvent::RoomAdvertisement(ad) => {
+                assert_eq!(ad.sender_node_id, peer);
+                assert_eq!(ad.sequence, 7);
+                assert_eq!(ad.timestamp_secs, 1_700_000_000);
+                assert_eq!(ad.advert.advert_version, 1);
+            }
+            other => panic!("expected RoomAdvertisement, got {other:?}"),
+        }
+
+        // The peer registry is NOT touched by room advertisements either.
+        assert_eq!(
+            service.peer_count(),
+            0,
+            "room advertisements must not register peers"
+        );
+    }
+
+    /// A malformed room advertisement (a PUBLIC_ROOM_ADVERTISEMENT header
+    /// whose payload section is garbage) is rejected safely at the receive
+    /// gate: `Undecodable`, no event, no panic, no registry change — chat
+    /// and gossip processing are unaffected.
+    #[tokio::test]
+    async fn handle_incoming_malformed_room_advertisement_dropped() {
+        let local = test_key(0xAA);
+        let service = test_service(local);
+        let mut events = service.control_events();
+
+        // Magic + version + a header that claims PUBLIC_ROOM_ADVERTISEMENT
+        // with a garbage payload section.
+        let mut bytes = CONTROL_PLANE_MAGIC.to_vec();
+        bytes.push(crate::control_plane::message::CONTROL_PLANE_PROTOCOL_VERSION);
+        let header = postcard::to_stdvec(&crate::control_plane::message::WireHeader {
+            message_type: ControlMessageType::PublicRoomAdvertisement.to_u8(),
+            sender_node_id: *test_key(0xBB).as_bytes(),
+            sequence: 1,
+            timestamp_secs: 1_700_000_000,
+            payload_len: 3,
+        })
+        .unwrap();
+        bytes.extend_from_slice(&header);
+        bytes.extend_from_slice(&[0xFF, 0xFF, 0xFF]); // garbage payload
+
+        let outcome = service.handle_incoming(&bytes, test_key(0xBB));
+        assert_eq!(outcome, IncomingOutcome::Undecodable);
+        assert_eq!(service.peer_count(), 0);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), events.recv())
+                .await
+                .is_err(),
+            "malformed room advertisement must not emit an event"
+        );
+    }
+
+    /// Unknown future advertisement fields are ignored safely end-to-end:
+    /// a newer sender appends metadata fields after the known payload; the
+    /// older client decodes the known prefix, discards the trailing bytes,
+    /// and emits the advertisement event unchanged.
+    #[tokio::test]
+    async fn handle_incoming_room_advertisement_unknown_fields_tolerated() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let service = test_service(local);
+        let mut events = service.control_events();
+
+        // Encode the payload alone to compute its exact length, then build a
+        // frame whose payload section claims 4 extra trailing bytes.
+        let payload = postcard::to_stdvec(&ControlPayload::PublicRoomAdvertisement(
+            crate::control_plane::message::PublicRoomAdvertisementPayload { advert_version: 1 },
+        ))
+        .unwrap();
+        let mut bytes = CONTROL_PLANE_MAGIC.to_vec();
+        bytes.push(crate::control_plane::message::CONTROL_PLANE_PROTOCOL_VERSION);
+        let header = postcard::to_stdvec(&crate::control_plane::message::WireHeader {
+            message_type: ControlMessageType::PublicRoomAdvertisement.to_u8(),
+            sender_node_id: *peer.as_bytes(),
+            sequence: 9,
+            timestamp_secs: 1_700_000_000,
+            payload_len: payload.len() as u32 + 4,
+        })
+        .unwrap();
+        bytes.extend_from_slice(&header);
+        bytes.extend_from_slice(&payload);
+        bytes.extend_from_slice(&[0x01, 0x00, 0x2A, 0x7F]); // future fields
+
+        let outcome = service.handle_incoming(&bytes, peer);
+        assert_eq!(
+            outcome,
+            IncomingOutcome::ControlMessage,
+            "advertisement with unknown future fields must be accepted"
+        );
+        let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("timed out waiting for room advertisement event")
+            .expect("control event channel closed");
+        match event {
+            ControlEvent::RoomAdvertisement(ad) => {
+                assert_eq!(ad.sender_node_id, peer);
+                assert_eq!(ad.sequence, 9);
+                assert_eq!(
+                    ad.advert.advert_version, 1,
+                    "future fields must not change the decoded advertisement"
+                );
+            }
+            other => panic!("expected RoomAdvertisement, got {other:?}"),
+        }
+        assert_eq!(service.peer_count(), 0);
     }
 
     /// `send_control` serialises a control-plane envelope (magic `BC`) and
@@ -5883,6 +6077,7 @@ mod tests {
                 assert_eq!(envelope.sender_node_id, peer);
                 assert_eq!(envelope.sequence, 3);
             }
+            other => panic!("expected Received, got {other:?}"),
         }
         assert_eq!(
             service.peer_count(),
