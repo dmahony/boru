@@ -39,6 +39,7 @@
 //! the state machine; capabilities are Phase 4) and diagnostics (Phase 5)
 //! as siblings of [`message`].
 
+pub mod capabilities;
 pub mod connectivity;
 pub mod message;
 pub mod privacy;
@@ -47,6 +48,7 @@ pub mod reconnect;
 #[cfg(feature = "net")]
 pub mod reconcile;
 
+pub use capabilities::*;
 pub use connectivity::*;
 pub use message::*;
 pub use privacy::*;

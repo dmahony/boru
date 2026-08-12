@@ -36,6 +36,29 @@ The following are exchanged after negotiation and therefore remain protocol iden
 - `src/inbox.rs`, `src/whisper/mod.rs`, `src/mailbox.rs`: `MailboxEnvelope`, `MailboxAck`, `SignedInboxMessage`, and `WhisperWireMessage` fields are serialized transport data. Keep field names/ordering and signature-covered bytes. Existing pending envelopes must remain decodable.
 - `src/transfer_telemetry.rs:149`: telemetry `schema_version = 1` and event names in `src/diagnostics.rs:472-494` (`download_queued`, `access_requested`, `access_granted`, `transfer_started`, `progress_checkpoint`, `pause`, `resume`, `verification`, `completion`, `failure`, `cancellation`) are stored diagnostic data. They may be display-renamed only through an explicit data migration or an old-name reader.
 
+### 2a. Control-plane capability identifiers — MUST KEEP once advertised
+
+The namespaced, versioned capability ids exchanged on the hidden-discovery
+control plane (BORU-CP-10, PDF Phase 4) are forward-compatibility contract:
+an older client must be able to ignore a new id without breaking, and two
+versions of the same feature must coexist during migration. The canonical
+registry lives in `src/control_plane/capabilities.rs`
+(`KNOWN_CAPABILITIES`); ids are `feature-version` strings.
+
+| Id | Meaning |
+|---|---|
+| `files-v2` | File transfer over the private file-access path. |
+| `tunnels-v1` | Boru secure-tunnel service. |
+| `voice-v1` | Voice calls. |
+| `video-v1` | Video calls (implies voice). |
+| `screen-share-v1` | Screen sharing over the private session. |
+| `rich-text-v1` | Rich-text rendering in chat messages. |
+
+Changing an advertised capability id, renumbering a version without a
+migration window, or inferring feature availability from app version strings
+breaks mixed-version negotiation; keep ids stable and let unknown ids pass
+through losslessly.
+
 ## 3. Cryptographic domain separators and signing inputs — MUST NOT CHANGE
 
 These literals are domain separation values or inputs to deterministic keys/signatures. Changing them silently creates different keys, namespaces, signatures, or trust domains. They are security-sensitive and must remain byte-for-byte identical:

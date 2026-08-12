@@ -177,6 +177,30 @@ pub struct CapabilitiesPayload {
     pub capabilities: Vec<String>,
 }
 
+impl CapabilitiesPayload {
+    /// Build a payload from a typed [`CapabilitySet`]
+    /// (crate::control_plane::capabilities::CapabilitySet).
+    ///
+    /// The wire form is the set's ordered, deduplicated id list; unknown
+    /// future ids are preserved verbatim.
+    pub fn from_set(set: &crate::control_plane::capabilities::CapabilitySet) -> Self {
+        Self {
+            capabilities: set.to_wire(),
+        }
+    }
+
+    /// Decode this payload into a typed [`CapabilitySet`]
+    /// (crate::control_plane::capabilities::CapabilitySet).
+    ///
+    /// Lossless: every id this client does not understand is preserved
+    /// rather than dropped.
+    pub fn to_set(&self) -> crate::control_plane::capabilities::CapabilitySet {
+        crate::control_plane::capabilities::CapabilitySet::from_wire(
+            self.capabilities.iter().cloned(),
+        )
+    }
+}
+
 /// DIAGNOSTIC_HINT payload — a structured connectivity hint.
 ///
 /// Carries a stable numeric hint code plus an optional short note. Never
