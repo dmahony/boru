@@ -626,3 +626,8 @@ name = "test_reconnect_asymmetric"
 path = "tests/test_reconnect_asymmetric.rs"
 required-features = ["net"]
 
+[[test]]
+name = "test_required_matrix"
+path = "tests/test_required_matrix.rs"
+required-features = ["net"]
+
