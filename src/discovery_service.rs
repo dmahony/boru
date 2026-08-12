@@ -144,6 +144,8 @@ use crate::control_plane::privacy::{
     AdvertViolation, ControlPlaneGuard, GuardRejectReason, GuardVerdict, DEFAULT_PRESENCE_TTL,
     EXPIRY_SWEEP_INTERVAL,
 };
+pub use crate::control_plane::reconnect::ReconnectSignal;
+use crate::control_plane::reconnect::{ReconnectHandle, ReconnectScheduler, ReconnectState};
 use crate::diagnostics::{DiagnosticCounters, DIAGNOSTIC_COUNTERS};
 use crate::discovery_message::{check_discovery_version, DiscoveryMessage, DiscoveryVersionCheck};
 use crate::proto::TopicId;
@@ -174,6 +176,17 @@ pub const DEFAULT_PRESENCE_REFRESH_INTERVAL: Duration = Duration::from_secs(120)
 /// per-cycle delay desynchronises nodes so they do not announce in
 /// synchronised bursts (PDF Task 2.1 step 3).
 pub const DEFAULT_PRESENCE_REFRESH_JITTER: Duration = Duration::from_secs(60);
+
+/// How often the reconnection loop (BORU-CP-07) wakes to drain due
+/// reconnect attempts and apply backoff. Queued attempts are picked up
+/// within one tick; backoff deadlines are checked every tick.
+pub const RECONNECT_LOOP_TICK: Duration = Duration::from_secs(1);
+
+/// How long the reconnect loop waits for a queued dial to be CONFIRMED by
+/// the network (a gossip `NeighborUp` → the peer reaches `Reachable`)
+/// before treating the attempt as failed and backing off. A queued-but-
+/// unconfirmed dial is never message-path recovery (PDF Task 3.1).
+pub const RECONNECT_CONFIRM_TIMEOUT: Duration = Duration::from_secs(3);
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -769,6 +782,16 @@ struct ReceiveCore {
     /// from real networking events. Shared between the receive path, the
     /// connectivity loop, and the presence-expiry sweep.
     connectivity: Arc<Mutex<PeerConnectivityStore>>,
+    /// The BORU-CP-07 reconnection scheduler: per-peer reconnect queue with
+    /// exponential backoff and a maximum retry cadence. Shared between the
+    /// reconnect loop, the drain loop (real connection success resets
+    /// backoff), the expiry sweep (offline cancels pending attempts), and
+    /// the report API (direct-topic readiness resets backoff).
+    reconnect: Arc<Mutex<ReconnectScheduler>>,
+    /// Broadcast channel of [`ReconnectSignal`]s (BORU-CP-07): emitted when
+    /// a reconnect attempt succeeds, consumed by the app layer to re-join
+    /// the deterministic direct topic.
+    reconnect_tx: broadcast::Sender<ReconnectSignal>,
     /// Atomic discovery counters (BORU-DISC-20). Cloned from the global
     /// [`DIAGNOSTIC_COUNTERS`] by default so the frontend/MCP can read the
     /// same values; tests inject an isolated instance.
@@ -1090,6 +1113,10 @@ pub struct DiscoveryService {
     /// Join handle of the control-plane presence-refresh task (BORU-CP-04):
     /// low-frequency PRESENCE announcements with jitter.
     refresh_task: JoinHandle<()>,
+    /// Join handle of the reconnection task (BORU-CP-07): drains queued
+    /// reconnect attempts with exponential backoff and emits
+    /// [`ReconnectSignal`]s when a dial succeeds.
+    reconnect_task: JoinHandle<()>,
     /// Shared presence-expiry configuration (TTL + sweep interval) so the
     /// builder can tune it after construction and the sweep observes it.
     expiry_config: Arc<Mutex<PresenceExpiryConfig>>,
@@ -1235,8 +1262,12 @@ impl DiscoveryService {
         let registry = Arc::new(Mutex::new(PeerRegistry::new()));
         let (peer_updates_tx, _) = broadcast::channel(PEER_UPDATES_CAPACITY);
         let (control_events_tx, _) = broadcast::channel(PEER_UPDATES_CAPACITY);
+        let (reconnect_tx, _) = broadcast::channel(PEER_UPDATES_CAPACITY);
         let guard = Arc::new(Mutex::new(ControlPlaneGuard::new()));
         let connectivity = Arc::new(Mutex::new(PeerConnectivityStore::new()));
+        // BORU-CP-07: per-peer reconnect scheduler (exponential backoff +
+        // maximum retry cadence, one active attempt per peer).
+        let reconnect = Arc::new(Mutex::new(ReconnectScheduler::new()));
         let core = ReceiveCore {
             local_node,
             topic,
@@ -1245,6 +1276,8 @@ impl DiscoveryService {
             control_events_tx,
             guard,
             connectivity,
+            reconnect,
+            reconnect_tx,
             counters,
         };
         let announce = AnnounceHandle::new(sender.clone(), local_node);
@@ -1263,6 +1296,7 @@ impl DiscoveryService {
             announce.sender.clone(),
             core.peer_updates_tx.subscribe(),
             core.connectivity.clone(),
+            core.reconnect.clone(),
             local_node,
             connectivity_cancel,
         ));
@@ -1280,6 +1314,7 @@ impl DiscoveryService {
             core.registry.clone(),
             core.guard.clone(),
             core.connectivity.clone(),
+            core.reconnect.clone(),
             core.peer_updates_tx.clone(),
             expiry_cancel,
         ));
@@ -1297,6 +1332,20 @@ impl DiscoveryService {
             refresh_config.clone(),
             refresh_cancel,
         ));
+        // BORU-CP-07: reconnection task — drains queued reconnect attempts
+        // (queued by the app for freshly-announced known friends) using the
+        // existing authenticated connection path (`join_peers`), with
+        // exponential backoff and a maximum retry cadence. Emits
+        // [`ReconnectSignal::PeerReachable`] when a dial succeeds so the
+        // data plane can re-join the deterministic direct topic.
+        let reconnect_cancel = cancel.clone();
+        let reconnect_task = tokio::spawn(reconnect_loop(
+            announce.sender.clone(),
+            core.reconnect.clone(),
+            core.connectivity.clone(),
+            core.reconnect_tx.clone(),
+            reconnect_cancel,
+        ));
         info!(topic = %topic, "discovery service joined");
         Self {
             topic,
@@ -1308,6 +1357,7 @@ impl DiscoveryService {
             connectivity_task,
             expiry_task,
             refresh_task,
+            reconnect_task,
             expiry_config,
             refresh_config,
         }
@@ -1622,12 +1672,32 @@ impl DiscoveryService {
         peer: PublicKey,
         event: crate::control_plane::connectivity::ConnectivityEvent,
     ) -> crate::control_plane::connectivity::TransitionOutcome {
-        let mut store = self
-            .core
-            .connectivity
-            .lock()
-            .expect("connectivity store lock poisoned");
-        store.apply(peer, event, Instant::now())
+        let outcome = {
+            let mut store = self
+                .core
+                .connectivity
+                .lock()
+                .expect("connectivity store lock poisoned");
+            store.apply(peer, event, Instant::now())
+        };
+        // BORU-CP-07: a REAL connection/topic success cancels/resets any
+        // queued reconnect retry/backoff state (PDF Task 3.1 step 6). Only
+        // real events do this — discovery announcements never reach this
+        // path, so discovery traffic alone can never clear backoff.
+        match event {
+            crate::control_plane::connectivity::ConnectivityEvent::EndpointConnected
+            | crate::control_plane::connectivity::ConnectivityEvent::TopicJoined
+            | crate::control_plane::connectivity::ConnectivityEvent::DirectMessageReceived => {
+                let mut scheduler = self
+                    .core
+                    .reconnect
+                    .lock()
+                    .expect("reconnect scheduler lock poisoned");
+                scheduler.reset(&peer);
+            }
+            _ => {}
+        }
+        outcome
     }
 
     /// Report a data-plane failure event (topic join failed / endpoint
@@ -1662,14 +1732,72 @@ impl DiscoveryService {
         }
     }
 
-    /// Shut down the service: cancel the drain, connectivity, expiry, and
-    /// presence-refresh tasks and await them.
+    /// A cloneable handle for the reconnection subsystem (BORU-CP-07),
+    /// safe to hand to the app layer.
+    ///
+    /// The app uses it to queue a reconnect attempt for a freshly-announced
+    /// **known friend** ([`ReconnectHandle::queue_reconnect`]) and to
+    /// report real direct-topic readiness
+    /// ([`ReconnectHandle::report_topic_ready`]). Friendship stays in the
+    /// app layer — this handle never decides friend-ness (no authorisation
+    /// by presence).
+    pub fn reconnect_handle(&self) -> ReconnectHandle {
+        ReconnectHandle::new(self.core.reconnect.clone(), self.core.connectivity.clone())
+    }
+
+    /// Subscribe to live reconnection signals (BORU-CP-07).
+    ///
+    /// [`ReconnectSignal::PeerReachable`] is emitted ONLY after a reconnect
+    /// attempt succeeds (a real dial via the existing authenticated
+    /// connection path) — the data plane consumes it to re-join the
+    /// deterministic direct topic. Discovery announcements alone never
+    /// produce a signal.
+    pub fn reconnect_events(&self) -> broadcast::Receiver<ReconnectSignal> {
+        self.core.reconnect_tx.subscribe()
+    }
+
+    /// Queue ONE reconnection attempt for `peer` (BORU-CP-07).
+    ///
+    /// Convenience wrapper over [`ReconnectHandle::queue_reconnect`] for
+    /// callers that already hold the service. Deduplicated: repeated
+    /// announcements while an attempt is queued or in flight are no-ops;
+    /// an already-online peer is never queued.
+    pub fn queue_reconnect(&self, peer: PublicKey) -> bool {
+        self.reconnect_handle().queue_reconnect(peer)
+    }
+
+    /// Snapshot of a peer's reconnect state (BORU-CP-07), if queued.
+    pub fn reconnect_state(&self, peer: &PublicKey) -> Option<ReconnectState> {
+        self.core
+            .reconnect
+            .lock()
+            .expect("reconnect scheduler lock poisoned")
+            .state(peer)
+    }
+
+    /// Override the reconnect backoff policy (BORU-CP-07).
+    ///
+    /// Defaults to [`DEFAULT_RECONNECT_INITIAL_BACKOFF`] /
+    /// [`DEFAULT_RECONNECT_MAX_BACKOFF`]. Tests use short values to
+    /// exercise retries without sleeping.
+    pub fn with_reconnect_backoff(self, initial: Duration, max: Duration) -> Self {
+        self.core
+            .reconnect
+            .lock()
+            .expect("reconnect scheduler lock poisoned")
+            .set_backoff(initial, max);
+        self
+    }
+
+    /// Shut down the service: cancel the drain, connectivity, expiry,
+    /// presence-refresh, and reconnection tasks and await them.
     pub async fn shutdown(self) {
         self.cancel.cancel();
         let _ = self.task.await;
         let _ = self.connectivity_task.await;
         let _ = self.expiry_task.await;
         let _ = self.refresh_task.await;
+        let _ = self.reconnect_task.await;
         info!(topic = %self.topic, "discovery service shut down");
     }
 }
@@ -1717,6 +1845,17 @@ async fn drain_loop(
                                 ConnectivityEvent::EndpointConnected,
                                 Instant::now(),
                             );
+                        }
+                        // BORU-CP-07: a real connection event cancels/resets
+                        // any queued reconnect retry/backoff state (PDF Task
+                        // 3.1 step 6). NeighborUp is a real endpoint success,
+                        // not discovery metadata.
+                        {
+                            let mut scheduler = core
+                                .reconnect
+                                .lock()
+                                .expect("reconnect scheduler lock poisoned");
+                            scheduler.reset(&peer);
                         }
                         // A new gossip neighbour joined the mesh — re-announce
                         // our presence so it can discover this node even if
@@ -1813,6 +1952,7 @@ async fn connectivity_loop(
     sender: GossipSender,
     mut updates: broadcast::Receiver<PeerUpdate>,
     connectivity: Arc<Mutex<PeerConnectivityStore>>,
+    reconnect: Arc<Mutex<ReconnectScheduler>>,
     local_node: PublicKey,
     cancel: CancellationToken,
 ) {
@@ -1827,10 +1967,26 @@ async fn connectivity_loop(
             update = updates.recv() => {
                 match update {
                     Ok(PeerUpdate::Seen { node_id, .. }) => {
-                        maybe_dial(&sender, &connectivity, &mut dialed, local_node, node_id).await;
+                        maybe_dial(
+                            &sender,
+                            &connectivity,
+                            &reconnect,
+                            &mut dialed,
+                            local_node,
+                            node_id,
+                        )
+                        .await;
                     }
                     Ok(PeerUpdate::Advertised { advertised, .. }) => {
-                        maybe_dial(&sender, &connectivity, &mut dialed, local_node, advertised).await;
+                        maybe_dial(
+                            &sender,
+                            &connectivity,
+                            &reconnect,
+                            &mut dialed,
+                            local_node,
+                            advertised,
+                        )
+                        .await;
                     }
                     Ok(PeerUpdate::Expired { .. }) => {
                         // The peer went stale (BORU-CP-03 TTL expiry). No
@@ -1865,6 +2021,7 @@ async fn connectivity_loop(
 async fn maybe_dial(
     sender: &GossipSender,
     connectivity: &Arc<Mutex<PeerConnectivityStore>>,
+    reconnect: &Arc<Mutex<ReconnectScheduler>>,
     dialed: &mut HashSet<iroh_base::EndpointId>,
     local_node: PublicKey,
     peer: PublicKey,
@@ -1889,6 +2046,13 @@ async fn maybe_dial(
                 let mut store = connectivity.lock().expect("connectivity store lock poisoned");
                 store.apply(peer, ConnectivityEvent::EndpointConnected, Instant::now());
             }
+            // BORU-CP-07: the endpoint dial succeeded — a real connection
+            // event. Cancel any queued reconnect attempt for this peer so
+            // the reconnect loop does not dial again redundantly.
+            {
+                let mut scheduler = reconnect.lock().expect("reconnect scheduler lock poisoned");
+                scheduler.reset(&peer);
+            }
         }
         Err(error) => {
             warn!(
@@ -1906,6 +2070,170 @@ async fn maybe_dial(
                 );
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Reconnection (BORU-CP-07)
+// ---------------------------------------------------------------------------
+
+/// Background task that drains queued reconnect attempts (PDF Task 3.1).
+///
+/// The app queues a reconnect attempt for a freshly-announced **known
+/// friend** via [`ReconnectHandle::queue_reconnect`]. This loop wakes every
+/// [`RECONNECT_LOOP_TICK`], takes every due attempt (deduplicated and
+/// marked in-flight by the scheduler), and performs it with the **existing
+/// authenticated connection path** — [`GossipSender::join_peers`], the
+/// same mechanism mDNS/DHT and the BORU-DISC-11 wiring use. No second
+/// transport is invented.
+///
+/// * **Success** — feeds `EndpointConnected` into the connectivity state
+///   machine, clears the peer's retry/backoff state, and emits
+///   [`ReconnectSignal::PeerReachable`] so the data plane can re-join the
+///   deterministic direct topic.
+/// * **Failure** — feeds `EndpointFailed` and backs the peer off
+///   exponentially ([`ReconnectScheduler::on_failure`], capped at the
+///   maximum retry cadence).
+///
+/// Discovery traffic alone never succeeds here: a fresh announcement only
+/// *queues* an attempt, and only a real successful dial produces a signal
+/// or clears backoff.
+async fn reconnect_loop(
+    sender: GossipSender,
+    scheduler: Arc<Mutex<ReconnectScheduler>>,
+    connectivity: Arc<Mutex<PeerConnectivityStore>>,
+    reconnect_tx: broadcast::Sender<ReconnectSignal>,
+    cancel: CancellationToken,
+) {
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                debug!("discovery reconnect loop cancelled");
+                break;
+            }
+            // A fresh sleep future each iteration gives a deterministic
+            // one-tick cadence: the first drain runs one tick after the
+            // loop starts, subsequent drains one tick after the previous
+            // drain finishes. (An `interval` fires its first tick
+            // immediately, which made unit tests race the very first
+            // drain.)
+            _ = tokio::time::sleep(RECONNECT_LOOP_TICK) => {
+                drain_reconnect_attempts(&sender, &scheduler, &connectivity, &reconnect_tx).await;
+            }
+        }
+    }
+    debug!("discovery reconnect loop exited");
+}
+
+/// Perform every due reconnect attempt (one per peer, already marked
+/// in-flight by the scheduler).
+async fn drain_reconnect_attempts(
+    sender: &GossipSender,
+    scheduler: &Arc<Mutex<ReconnectScheduler>>,
+    connectivity: &Arc<Mutex<PeerConnectivityStore>>,
+    reconnect_tx: &broadcast::Sender<ReconnectSignal>,
+) {
+    let due = {
+        let mut sched = scheduler.lock().expect("reconnect scheduler lock poisoned");
+        sched.due(Instant::now())
+    };
+    if due.is_empty() {
+        return;
+    }
+    for peer in due {
+        // Re-use the existing Iroh endpoint/address information and the
+        // normal authenticated connection path — join_peers resolves and
+        // dials the peer exactly as mDNS/DHT discovery does.
+        let endpoint: iroh_base::EndpointId = peer.into();
+        let now = Instant::now();
+        match sender.join_peers(vec![endpoint]).await {
+            Ok(()) => {
+                // The dial was queued. Wait for the REAL connection to be
+                // confirmed by the network (a gossip `NeighborUp` moves the
+                // peer to `Reachable`) before declaring success — a
+                // queued-but-unconnected dial is not message-path recovery,
+                // and only a confirmed dial clears retry/backoff state.
+                let confirmed =
+                    wait_for_reconnect_confirmation(connectivity, &peer, RECONNECT_CONFIRM_TIMEOUT)
+                        .await;
+                if confirmed {
+                    info!(peer = %peer.fmt_short(), "reconnect: endpoint connectivity re-established");
+                    {
+                        let mut sched = scheduler.lock().expect("reconnect scheduler lock poisoned");
+                        sched.reset(&peer);
+                    }
+                    // Tell the data plane the endpoint is reachable again so
+                    // it can ensure the deterministic direct topic is
+                    // joined/subscribed (friend-scoped; the app owns direct
+                    // topics).
+                    let _ = reconnect_tx.send(ReconnectSignal::PeerReachable { peer });
+                } else {
+                    warn!(
+                        peer = %peer.fmt_short(),
+                        "reconnect: dial not confirmed, backing off",
+                    );
+                    {
+                        let mut store =
+                            connectivity.lock().expect("connectivity store lock poisoned");
+                        store.apply_with_error(
+                            peer,
+                            ConnectivityEvent::EndpointFailed,
+                            Some("reconnect dial not confirmed".to_string()),
+                            now,
+                        );
+                    }
+                    {
+                        let mut sched = scheduler.lock().expect("reconnect scheduler lock poisoned");
+                        sched.on_failure(&peer, now);
+                    }
+                }
+            }
+            Err(error) => {
+                warn!(
+                    peer = %peer.fmt_short(),
+                    error = %error,
+                    "reconnect: attempt failed, backing off",
+                );
+                {
+                    let mut store = connectivity.lock().expect("connectivity store lock poisoned");
+                    store.apply_with_error(
+                        peer,
+                        ConnectivityEvent::EndpointFailed,
+                        Some(error.to_string()),
+                        now,
+                    );
+                }
+                {
+                    let mut sched = scheduler.lock().expect("reconnect scheduler lock poisoned");
+                    sched.on_failure(&peer, now);
+                }
+            }
+        }
+    }
+}
+
+/// Poll the connectivity state machine until `peer` is online
+/// (`Reachable` / `DirectTopicReady`) — i.e. the queued dial was confirmed
+/// by a real gossip `NeighborUp` — or the timeout elapses.
+async fn wait_for_reconnect_confirmation(
+    connectivity: &Arc<Mutex<PeerConnectivityStore>>,
+    peer: &PublicKey,
+    timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let online = {
+            let store = connectivity.lock().expect("connectivity store lock poisoned");
+            store.state(peer).is_online()
+        };
+        if online {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -1943,6 +2271,7 @@ async fn presence_expiry_loop(
     registry: Arc<Mutex<PeerRegistry>>,
     guard: Arc<Mutex<ControlPlaneGuard>>,
     connectivity: Arc<Mutex<PeerConnectivityStore>>,
+    reconnect: Arc<Mutex<ReconnectScheduler>>,
     peer_updates_tx: broadcast::Sender<PeerUpdate>,
     cancel: CancellationToken,
 ) {
@@ -1981,6 +2310,14 @@ async fn presence_expiry_loop(
                         let mut store = connectivity.lock().expect("connectivity store lock poisoned");
                         store.apply(*node, ConnectivityEvent::Timeout, now);
                     }
+                    // BORU-CP-07: the peer went offline — cancel any queued
+                    // reconnect attempt. A later fresh announcement will
+                    // re-queue from an immediate attempt (no residual
+                    // backoff).
+                    {
+                        let mut scheduler = reconnect.lock().expect("reconnect scheduler lock poisoned");
+                        scheduler.reset(node);
+                    }
                     let _ = peer_updates_tx.send(PeerUpdate::Expired { node_id: *node });
                 }
 
@@ -2000,6 +2337,11 @@ async fn presence_expiry_loop(
                     {
                         let mut store = connectivity.lock().expect("connectivity store lock poisoned");
                         store.apply(*node, ConnectivityEvent::Timeout, now);
+                    }
+                    // BORU-CP-07: offline cancels any queued reconnect.
+                    {
+                        let mut scheduler = reconnect.lock().expect("reconnect scheduler lock poisoned");
+                        scheduler.reset(node);
                     }
                 }
             }
@@ -4274,5 +4616,194 @@ mod tests {
         assert_eq!(service.connectivity_state(&peer), PeerConnectivityState::DirectTopicReady);
         assert!(service.connectivity_state(&peer).is_ready_for_direct());
         assert!(service.connectivity_state(&peer).is_online());
+    }
+
+    // ── BORU-CP-07: reconnection triggered by discovery events ──────────
+
+    /// `queue_reconnect` queues ONE attempt per peer (dedup), and never
+    /// queues an already-online peer.
+    #[tokio::test]
+    async fn reconnect_queue_queues_once_and_skips_online() {
+        use crate::control_plane::connectivity::ConnectivityEvent as CE;
+
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let service = test_service(local);
+
+        // Fresh queue.
+        assert!(service.queue_reconnect(peer));
+        assert_eq!(
+            service.reconnect_state(&peer),
+            Some(ReconnectState {
+                attempts: 0,
+                in_flight: false,
+            })
+        );
+
+        // Duplicate queue is a no-op — several discovery messages queue one
+        // reconnection attempt.
+        assert!(!service.queue_reconnect(peer));
+        assert!(!service.queue_reconnect(peer));
+
+        // An online peer is never queued (already Reachable).
+        service.report_connectivity_event(peer, CE::EndpointConnected);
+        assert!(
+            !service.queue_reconnect(peer),
+            "an online peer must not be queued for reconnection"
+        );
+    }
+
+    /// The reconnect loop performs the queued attempt via the existing
+    /// connection path (`join_peers`), emits `PeerReachable` on success,
+    /// and clears the retry/backoff state.
+    #[tokio::test]
+    async fn reconnect_loop_dials_queued_peer_and_emits_signal() {
+        use crate::control_plane::connectivity::{ConnectivityEvent as CE, PeerConnectivityState};
+
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let (service, mut cmd_rx, _ev_tx) = test_service_with_cmd(local);
+        let mut signals = service.reconnect_events();
+
+        assert!(service.queue_reconnect(peer));
+
+        // The reconnect loop (1s tick) drains the queue and dials the peer
+        // with the existing join_peers path.
+        let command = next_command(&mut cmd_rx).await;
+        let Command::JoinPeers(peers) = command else {
+            panic!("expected JoinPeers reconnect command, got {command:?}");
+        };
+        let expected: iroh_base::EndpointId = peer.into();
+        assert_eq!(peers, vec![expected]);
+
+        // Only ONE attempt: the scheduler entry is cleared after success.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if service.reconnect_state(&peer).is_none() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                panic!("reconnect state not cleared after successful dial");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // A real success signal was emitted for the data plane.
+        let signal = tokio::time::timeout(Duration::from_secs(5), signals.recv())
+            .await
+            .expect("timed out waiting for reconnect signal")
+            .expect("reconnect signal channel closed");
+        assert_eq!(signal, ReconnectSignal::PeerReachable { peer });
+
+        // The state machine reflects the real connection.
+        assert_eq!(service.connectivity_state(&peer), PeerConnectivityState::Reachable);
+        assert!(service.connectivity_state(&peer).is_online());
+    }
+
+    /// A real direct-topic readiness report (the data plane's
+    /// `report_connectivity_event(TopicJoined)` path) clears queued
+    /// retry/backoff state and advances the peer to DirectTopicReady.
+    #[tokio::test]
+    async fn reconnect_direct_topic_readiness_clears_backoff() {
+        use crate::control_plane::connectivity::{ConnectivityEvent as CE, PeerConnectivityState};
+
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let service = test_service(local);
+
+        assert!(service.queue_reconnect(peer));
+        assert!(service.reconnect_state(&peer).is_some());
+
+        service.report_connectivity_event(peer, CE::TopicJoined);
+
+        assert!(
+            service.reconnect_state(&peer).is_none(),
+            "successful direct-topic readiness must clear retry/backoff state"
+        );
+        assert_eq!(service.connectivity_state(&peer), PeerConnectivityState::DirectTopicReady);
+        assert!(service.connectivity_state(&peer).is_ready_for_direct());
+    }
+
+    /// Discovery traffic ALONE is never treated as message-path recovery:
+    /// a fresh announcement neither emits `PeerReachable` nor clears queued
+    /// retry/backoff state. Only a real dial (the reconnect loop's
+    /// `join_peers`) recovers the path.
+    #[tokio::test]
+    async fn reconnect_discovery_traffic_alone_never_recovers() {
+        use crate::control_plane::connectivity::{ConnectivityEvent as CE, PeerConnectivityState};
+
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let (service, mut cmd_rx, ev_tx) = test_service_with_cmd(local);
+        let mut signals = service.reconnect_events();
+
+        // Phase 0 — first contact: the connectivity loop performs its
+        // once-per-lifetime dial (the harness join_peers always succeeds)
+        // and the peer becomes Reachable.
+        let bytes = postcard::to_stdvec(&DiscoveryMessage::hello(peer)).unwrap();
+        deliver(&ev_tx, peer, bytes).await;
+        let command = next_command(&mut cmd_rx).await;
+        assert!(matches!(command, Command::JoinPeers(_)));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if service.connectivity_state(&peer) == PeerConnectivityState::Reachable {
+                break;
+            }
+            if Instant::now() >= deadline {
+                panic!("peer never reached Reachable after first-contact dial");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // Phase 1 — the peer goes down (a restart equivalent): Degraded,
+        // explicitly NOT online.
+        service.report_connectivity_failure(
+            peer,
+            CE::EndpointFailed,
+            "peer down".to_string(),
+        );
+        assert!(!service.connectivity_state(&peer).is_online());
+
+        // The app queues ONE reconnect attempt for its known friend.
+        assert!(service.queue_reconnect(peer));
+        assert!(service.reconnect_state(&peer).is_some());
+
+        // Phase 2 — a fresh announcement arrives (the restarted peer
+        // re-announces). Processing it must NOT by itself clear
+        // retry/backoff state or emit a recovery signal: the peer was
+        // already dialed once, so the connectivity loop does not re-dial,
+        // and the receive path only feeds the state machine. (The
+        // reconnect loop's next tick fires ~1s after service creation — the
+        // assertions below complete well before it.)
+        let bytes = postcard::to_stdvec(&DiscoveryMessage::hello(peer)).unwrap();
+        deliver(&ev_tx, peer, bytes).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert!(
+            service.reconnect_state(&peer).is_some(),
+            "a fresh announcement alone must never clear retry/backoff state"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), signals.recv())
+                .await
+                .is_err(),
+            "a fresh announcement alone must never produce a recovery signal"
+        );
+
+        // Phase 3 — the reconnect loop's REAL dial (the existing
+        // authenticated connection path) recovers the path: it emits
+        // PeerReachable and clears the queue.
+        let command = next_command(&mut cmd_rx).await;
+        assert!(matches!(command, Command::JoinPeers(_)));
+        let signal = tokio::time::timeout(Duration::from_secs(5), signals.recv())
+            .await
+            .expect("timed out waiting for reconnect signal")
+            .expect("reconnect signal channel closed");
+        assert_eq!(signal, ReconnectSignal::PeerReachable { peer });
+        assert!(
+            service.reconnect_state(&peer).is_none(),
+            "a real successful dial must clear retry/backoff state"
+        );
+        assert_eq!(service.connectivity_state(&peer), PeerConnectivityState::Reachable);
     }
 }

@@ -23,6 +23,11 @@
 //!   DirectTopicReady / Degraded / OfflineStale), the deterministic
 //!   transition table, and a bounded per-peer transition trail
 //!   ([`PeerConnectivityStore`]).
+//! * [`reconnect`] — the BORU-CP-07 automatic-reconnection scheduler:
+//!   per-peer reconnect queue with exponential backoff and a maximum retry
+//!   cadence, the one-active-attempt-per-peer dedup guarantee, and the
+//!   [`ReconnectSignal`] the data plane consumes to re-join the
+//!   deterministic direct topic after connectivity is re-established.
 //!
 //! Later tasks in the BORU-CP chain add capability negotiation (CP-05 is
 //! the state machine; capabilities are Phase 4) and diagnostics (Phase 5)
@@ -31,7 +36,9 @@
 pub mod connectivity;
 pub mod message;
 pub mod privacy;
+pub mod reconnect;
 
 pub use connectivity::*;
 pub use message::*;
 pub use privacy::*;
+pub use reconnect::*;

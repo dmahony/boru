@@ -650,3 +650,203 @@ async fn wait_for_control_presence_opt(
     }
     Ok(None)
 }
+
+// =========================================================================
+// BORU-CP-07 (PDF Task 3.1): reconnection triggered by discovery events
+// =========================================================================
+
+/// Restarting Bob while Alice remains open results in Alice automatically
+/// re-establishing endpoint connectivity: a fresh announcement from a known
+/// friend queues ONE reconnect attempt (the app layer decides friend-ness),
+/// the reconnect loop dials with the existing connection path, a
+/// `PeerReachable` signal is emitted, and reporting direct-topic readiness
+/// clears the retry/backoff state — with no conversation and no chat
+/// payload anywhere.
+#[tokio::test]
+async fn restart_b_while_a_open_triggers_automatic_reconnect() -> Result<()> {
+    use boru_core::control_plane::connectivity::PeerConnectivityState;
+    use boru_core::control_plane::reconnect::ReconnectSignal;
+
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .try_init();
+    let network = PublicNetwork::Test;
+    let topic = discovery_topic(network);
+    let id_a = seed(0xCA);
+    let id_b = seed(0xCB);
+    let id_c = seed(0xCC);
+    let pk_a = SecretKey::from_bytes(&id_a).public();
+    let pk_b = SecretKey::from_bytes(&id_b).public();
+
+    // SEPARATE address books per node so the transport cannot self-heal on
+    // its own: A deliberately does NOT learn B2's fresh address until the
+    // test injects it. Only the reconnect loop (whose dial we drive) can
+    // re-establish the direct edge — proving the automatic reconnection
+    // path deterministically instead of racing the gossip actor's retry.
+    let memory_a = MemoryLookup::new();
+    let memory_c = MemoryLookup::new();
+    let memory_b = MemoryLookup::new();
+
+    // ── Phase 0: A, B, C up — A and B have a DIRECT edge (B dials A), and
+    //    C relays mesh traffic between them ────────────────────────────────
+    let (node_a, _) = start_node(memory_a.clone(), id_a, Vec::new(), network).await?;
+    // Relay C: neighbour of A (C dials A), so C forwards B's announcements
+    // to A even when A has no direct edge to B.
+    memory_c.set_endpoint_info(node_a._endpoint.addr());
+    let (node_c, _) = start_node(
+        memory_c.clone(),
+        id_c,
+        vec![node_a._endpoint.id()],
+        network,
+    )
+    .await?;
+    // Give A C's real address so A's own connectivity wiring can dial C.
+    memory_a.set_endpoint_info(node_c._endpoint.addr());
+    // B: direct edge to A (B dials A) + an edge to C.
+    memory_b.set_endpoint_info(node_a._endpoint.addr());
+    memory_b.set_endpoint_info(node_c._endpoint.addr());
+    let (node_b, _) = start_node(
+        memory_b.clone(),
+        id_b,
+        vec![node_a._endpoint.id(), node_c._endpoint.id()],
+        network,
+    )
+    .await?;
+    // A learns B's Phase-0 address (the pre-restart address; A must NOT
+    // learn B2's fresh address later).
+    memory_a.set_endpoint_info(node_b._endpoint.addr());
+
+    // A's conversation store must stay untouched throughout (isolation).
+    let spy_a: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+    let spy_task_a = spawn_spy(&node_a._gossip, topic, spy_a.clone()).await?;
+
+    // ── The app layer: B is a KNOWN FRIEND of A ─────────────────────────
+    // A background task (mirroring the main.rs wiring) watches A's peer
+    // updates and queues ONE reconnect attempt per fresh announcement of B.
+    // The discovery service itself never decides friend-ness. Subscribed
+    // BEFORE the mesh exchange so every Seen is observed.
+    let reconnect_handle = node_a.service.reconnect_handle();
+    let mut peer_updates = node_a.service.peer_updates();
+    let friend = pk_b;
+    let friend_watcher = tokio::spawn(async move {
+        loop {
+            match peer_updates.recv().await {
+                Ok(boru_core::discovery_service::PeerUpdate::Seen { node_id, .. }) => {
+                    if node_id == friend {
+                        reconnect_handle.queue_reconnect(node_id);
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+    });
+    wait_for_peer(&node_a.service, pk_b, "A to learn B").await?;
+    wait_for_peer(&node_b.service, pk_a, "B to learn A").await?;
+    // First contact is handled by the BORU-DISC-11 connectivity loop (the
+    // once-per-lifetime dial), so no reconnect signal is expected yet — the
+    // reconnect machinery exists for KNOWN peers that come back after going
+    // away.
+
+    // ── Phase 1: B restarts while A stays open ───────────────────────────
+    let LiveNode {
+        _router,
+        _endpoint,
+        _gossip,
+        service,
+        store,
+        _dir,
+    } = node_b;
+    service.shutdown().await;
+    _gossip.shutdown().await?;
+    drop((_router, _endpoint, store, _dir));
+    // Give A's gossip actor a moment to process B's disconnect (NeighborDown
+    // → Degraded, so B is no longer online from A's perspective).
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // ── Phase 2: B comes back with the SAME identity on a fresh endpoint ─
+    // Crucially, B2 does NOT dial A directly — it only joins C's mesh, so
+    // A has NO direct edge to B2. B2's announcement reaches A through the
+    // relay (C forwards it), exactly the case where discovery says "B is
+    // back" but the direct path is still down — the automatic-reconnection
+    // trigger. A does NOT know B2's fresh address yet, so the transport
+    // cannot self-heal: only the reconnect loop can re-establish the edge.
+    let (node_b2, pk_b2) = start_node(memory_b.clone(), id_b, vec![node_c._endpoint.id()], network)
+        .await?;
+    assert_eq!(pk_b2, pk_b, "restarted node must keep its identity");
+
+    // The test observes the backend's reconnection signals from here on
+    // (fresh receiver — broadcast only delivers post-subscription events).
+    let mut reconnect_events = node_a.service.reconnect_events();
+
+    // B2's announcement reaches A via C; A's friend watcher queues a
+    // reconnect. The reconnect loop attempts the dial but A cannot resolve
+    // B2's fresh address yet — the attempt FAILS and backs off. Assert the
+    // peer is genuinely queued (backoff state visible), then inject B2's
+    // address so the NEXT retry succeeds and emits PeerReachable
+    // automatically.
+    let deadline = Instant::now() + MESH_TIMEOUT;
+    while Instant::now() < deadline {
+        if node_a
+            .service
+            .reconnect_state(&pk_b)
+            .is_some_and(|s| s.attempts >= 1)
+        {
+            break;
+        }
+        tokio::time::sleep(POLL_TICK).await;
+    }
+    assert!(
+        node_a
+            .service
+            .reconnect_state(&pk_b)
+            .is_some_and(|s| s.attempts >= 1),
+        "the reconnect loop must attempt (and back off on) the unreachable dial"
+    );
+
+    // The transport still cannot self-heal (A lacks B2's address) — give
+    // the reconnect loop the address it needs and let it retry.
+    memory_a.set_endpoint_info(node_b2._endpoint.addr());
+
+    let signal = tokio::time::timeout(MESH_TIMEOUT, reconnect_events.recv())
+        .await
+        .expect("timed out waiting for automatic reconnect after B restart")
+        .expect("reconnect signal channel closed");
+    assert_eq!(
+        signal,
+        ReconnectSignal::PeerReachable { peer: pk_b },
+        "restarting B while A is open must trigger an automatic reconnect"
+    );
+
+    // ── Phase 3: direct-topic readiness clears retry/backoff state ──────
+    // The data plane reports the deterministic direct topic is ready (the
+    // app does this after BackgroundSubscribed success in production).
+    node_a
+        .service
+        .report_connectivity_event(
+            pk_b,
+            boru_core::control_plane::connectivity::ConnectivityEvent::TopicJoined,
+        );
+    assert_eq!(
+        node_a.service.connectivity_state(&pk_b),
+        PeerConnectivityState::DirectTopicReady,
+        "a real direct-topic readiness report must advance the state machine"
+    );
+    assert!(
+        node_a.service.reconnect_state(&pk_b).is_none(),
+        "successful direct-topic readiness must clear retry/backoff state"
+    );
+
+    // ── No visible lobby chat; no chat payload anywhere ──────────────────
+    assert_no_visible_lobby_chat(&node_a.store, &topic, "A");
+    assert_no_visible_lobby_chat(&node_b2.store, &topic, "B2");
+    let spy_a = spy_a.lock().expect("spy lock poisoned").clone();
+    assert_no_chat_payloads(&spy_a, "A spy");
+
+    friend_watcher.abort();
+    node_a.service.shutdown().await;
+    node_c.service.shutdown().await;
+    node_b2.service.shutdown().await;
+    spy_task_a.abort();
+    Ok(())
+}

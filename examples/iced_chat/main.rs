@@ -757,6 +757,10 @@ fn main() -> Result<()> {
         // topic); holding it here for the rest of main() keeps its
         // background drain task alive for the entire GUI lifetime.
         _discovery_service,
+        // BORU-CP-07: reconnection signal channel + handle handed to the
+        // app so it can re-join direct topics and report readiness.
+        reconnect_ready_rx,
+        reconnect_handle,
         dht_for_private,
         tunnel_service,
     ) = runtime.block_on(async {
@@ -1161,6 +1165,35 @@ fn main() -> Result<()> {
             }
         };
 
+        // ── BORU-CP-07: automatic reconnection wiring ─────────────────────
+        // The discovery service's reconnect loop emits ReconnectSignal when
+        // a reconnect attempt succeeds. Forward those signals into the app
+        // so it can ensure the deterministic direct topic is
+        // joined/subscribed (the data-plane action the discovery service
+        // never performs itself). The app also gets a ReconnectHandle to
+        // report real direct-topic readiness back (clears retry/backoff).
+        let (reconnect_ready_tx, reconnect_ready_rx) =
+            tokio::sync::mpsc::channel::<PublicKey>(64);
+        let reconnect_handle = discovery_service.as_ref().map(|service| service.reconnect_handle());
+        if let Some(service) = &discovery_service {
+            let mut reconnect_events = service.reconnect_events();
+            let tx = reconnect_ready_tx.clone();
+            tokio::spawn(async move {
+                loop {
+                    match reconnect_events.recv().await {
+                        Ok(boru_core::discovery_service::ReconnectSignal::PeerReachable {
+                            peer,
+                        }) => {
+                            info!(peer = %peer.fmt_short(), "reconnect signal forwarded to app");
+                            let _ = tx.try_send(peer);
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+        }
+
         // mDNS-based LAN peer discovery: when a peer appears on the LAN,
         // join it into the internal discovery gossip mesh (the mesh role the
         // lobby previously played, BORU-DISC-12), and forward the peer ID to
@@ -1232,6 +1265,12 @@ fn main() -> Result<()> {
         if let Some(service) = &discovery_service {
             let tx = discovered_peers_tx.clone();
             let mut peer_updates = service.peer_updates();
+            // BORU-CP-07: the app (this task) owns the friendship check —
+            // a fresh announcement from a KNOWN FRIEND is the trigger for a
+            // reconnect attempt. The discovery service never decides
+            // friend-ness (no authorisation by presence).
+            let reconnect_handle_for_task = reconnect_handle.clone();
+            let friends_for_reconnect = friends.clone();
             tokio::spawn(async move {
                 loop {
                     match peer_updates.recv().await {
@@ -1242,6 +1281,22 @@ fn main() -> Result<()> {
                                         added: vec![node_id],
                                         removed: Vec::new(),
                                     });
+                                    // BORU-CP-07: a fresh announcement from a
+                                    // known friend is a reconnect trigger.
+                                    // queue_reconnect dedups (one active
+                                    // attempt per peer) and skips online
+                                    // peers, so presence refreshes never
+                                    // spam the scheduler.
+                                    if let Some(handle) = &reconnect_handle_for_task {
+                                        if friends_for_reconnect
+                                            .get(&boru_core::friends::FriendId::from_public_key(
+                                                node_id,
+                                            ))
+                                            .is_some()
+                                        {
+                                            handle.queue_reconnect(node_id);
+                                        }
+                                    }
                                 }
                                 boru_core::discovery_service::PeerUpdate::Advertised {
                                     advertised,
@@ -1443,6 +1498,8 @@ fn main() -> Result<()> {
             discovered_peers_rx,
             directory_room_rx,
             discovery_service,
+            reconnect_ready_rx,
+            reconnect_handle,
             room_discovery_dht,
             tunnel_service,
         ))
@@ -1600,6 +1657,11 @@ fn main() -> Result<()> {
                 backfill_handle,
                 initial_topic.is_some() && args.command.is_none(),
                 Arc::clone(&discovered_peers_rx),
+                // BORU-CP-07: reconnect signals from the backend (peers
+                // whose endpoint connectivity was re-established) + the
+                // handle to report real direct-topic readiness back.
+                Arc::new(tokio::sync::Mutex::new(reconnect_ready_rx)),
+                reconnect_handle,
                 directory_room_rx,
                 dht_for_private,
                 args.no_dht,
@@ -1744,6 +1806,7 @@ fn main() -> Result<()> {
                 Arc::clone(&state.whisper_events_rx),
                 Arc::clone(&state.inbox_events_rx),
                 Arc::clone(&state.discovered_peers_rx),
+                Arc::clone(&state.reconnect_ready_rx),
                 state.gui_action_rx.clone(),
                 Arc::clone(&state.transfer_update_rx),
                 Arc::clone(&state.call_events_rx),

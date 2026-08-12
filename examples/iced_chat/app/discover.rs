@@ -1731,6 +1731,47 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
+            // ── BORU-CP-07: backend reconnection success ──────────────────
+            AppMessage::ReconnectPeerReady(peer) => {
+                // The backend re-established endpoint connectivity to a
+                // friend (a reconnect attempt succeeded). Ensure the
+                // deterministic direct topic is joined/subscribed — the
+                // data-plane action the discovery service never performs
+                // itself (deterministic topic ownership). No authorisation
+                // by presence: only current friends are reconnected.
+                let fid = FriendId::from_public_key(peer);
+                if self.friends.get(&fid).is_none() {
+                    trace!(peer = %peer.fmt_short(), "reconnect: peer is not a friend; skipping direct-topic join");
+                    return iced::Task::none();
+                }
+                info!(peer = %peer.fmt_short(), "reconnect: ensuring direct topic for friend");
+                // 1. Re-join the peer into live conversation senders so the
+                //    direct-topic mesh edge re-forms immediately (the same
+                //    retroactive-join pattern as NewDiscoveredPeers) instead
+                //    of waiting for the gossip dial cooldown.
+                for (_, conv) in &self.conversations {
+                    if let Some(ref sender) = conv.sender {
+                        let s = sender.clone();
+                        let peers = vec![peer];
+                        tokio::spawn(async move {
+                            if let Err(e) = s.join_peers(peers).await {
+                                warn!(peer = %peer, error = %e,
+                                    "reconnect join_peers failed");
+                            }
+                        });
+                    }
+                }
+                // 2. Ensure the deterministic direct topic is subscribed.
+                //    BackgroundSubscribe is idempotent: it skips when the
+                //    topic already has a live sender or a subscription is in
+                //    flight, so several reconnect signals can never create
+                //    duplicate subscriptions.
+                let topic = direct_topic(&self.local_public, &peer);
+                iced::Task::done(AppMessage::BackgroundSubscribe(
+                    topic,
+                    self.discovered_peers.clone(),
+                ))
+            }
             // ── Background conversation subscriptions (startup auto-subscribe) ──
             AppMessage::SubscribeStoredConversations => {
                 // Subscribe to all stored conversations at startup so messages
@@ -2001,6 +2042,24 @@ impl IcedChat {
                         boru_core::conversations::ConversationKind::Direct => {
                             boru_core::diagnostics::DIAGNOSTIC_COUNTERS.record_direct_topic_joined();
                             info!(topic=%topic, "background subscribed to direct conversation topic");
+                            // BORU-CP-07: a REAL direct-topic readiness
+                            // success — report it so the backend clears the
+                            // peer's retry/backoff state (acceptance
+                            // criterion: successful direct-topic readiness
+                            // clears retry/backoff). The report is
+                            // friend-scoped: only a deterministic direct
+                            // topic of a current friend qualifies. This is
+                            // never called for discovery metadata.
+                            if let Some(handle) = &self.reconnect_handle {
+                                for (fid, _) in self.friends.iter() {
+                                    if let Ok(peer_pk) = fid.parse_public_key() {
+                                        if direct_topic(&self.local_public, &peer_pk) == topic {
+                                            handle.report_topic_ready(peer_pk);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
                         }
                         boru_core::conversations::ConversationKind::Group => {
                             boru_core::diagnostics::DIAGNOSTIC_COUNTERS.record_group_topic_joined();

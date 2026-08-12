@@ -4176,6 +4176,15 @@ pub struct IcedChat {
     /// Receiver handle for discovered peers from the DHT discovery loop.
     /// Read by the subscription stream to produce NewDiscoveredPeers events.
     pub discovered_peers_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<DiscoveredPeersUpdate>>>,
+    /// Receiver for backend reconnection signals (BORU-CP-07): the backend
+    /// re-established endpoint connectivity to a friend via a reconnect
+    /// attempt. The app ensures the deterministic direct topic is
+    /// joined/subscribed (friend-scoped, deduplicated by BackgroundSubscribe).
+    pub reconnect_ready_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<PublicKey>>>,
+    /// Backend reconnection handle (BORU-CP-07): used to report REAL
+    /// direct-topic readiness (BackgroundSubscribed success), which clears
+    /// the backend's retry/backoff state. Never used for discovery metadata.
+    reconnect_handle: Option<boru_core::control_plane::reconnect::ReconnectHandle>,
     /// Debounce buffer for NeighborUp/NeighborDown events.
     /// Maps `PublicKey -> is_online`. Flushed on every ConnMonitorTick (~1s).
     pending_neighbor_status: HashMap<PublicKey, bool>,
@@ -6041,6 +6050,10 @@ pub enum AppMessage {
     },
     /// An update to the peers currently advertised by local discovery.
     NewDiscoveredPeers(DiscoveredPeersUpdate),
+    /// BORU-CP-07: the backend re-established endpoint connectivity to a
+    /// friend (reconnect attempt succeeded). The app ensures the
+    /// deterministic direct topic is joined/subscribed.
+    ReconnectPeerReady(PublicKey),
 
     // ── Remote catalogue browsing ──
     /// Initiate fetching a remote peer's shared file catalogue.
@@ -7205,6 +7218,8 @@ impl IcedChat {
         backfill_handle: BackfillHandle,
         return_to_chat_list_after_open: bool,
         discovered_peers_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<DiscoveredPeersUpdate>>>,
+        reconnect_ready_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<PublicKey>>>,
+        reconnect_handle: Option<boru_core::control_plane::reconnect::ReconnectHandle>,
         directory_room_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<DirectoryRoomUpdate>>>,
         dht: Option<distributed_topic_tracker::Dht>,
         private_dht_disabled: bool,
@@ -7756,6 +7771,8 @@ impl IcedChat {
             discovered_peers: Vec::new(),
             discovered_online_cache: HashSet::new(),
             discovered_peers_rx,
+            reconnect_ready_rx,
+            reconnect_handle,
             pending_neighbor_status: HashMap::new(),
             pending_backfill_topics: Vec::new(),
             friend_id_copied: false,
@@ -9806,6 +9823,7 @@ impl IcedChat {
             AppMessage::FriendRequestReceived { .. } => "FriendRequestReceived",
             AppMessage::FriendRequestRetry(_) => "FriendRequestRetry",
             AppMessage::NewDiscoveredPeers(_) => "NewDiscoveredPeers",
+            AppMessage::ReconnectPeerReady(_) => "ReconnectPeerReady",
             AppMessage::BrowsePeerCatalogue(_) => "BrowsePeerCatalogue",
             AppMessage::PeerCatalogueReceived { .. } => "PeerCatalogueReceived",
             AppMessage::PeerCatalogueFailed(_) => "PeerCatalogueFailed",
@@ -15318,6 +15336,9 @@ impl IcedChat {
             | AppMessage::SharedFileRemoved(_) => self.update_files(message),
 
             AppMessage::NewDiscoveredPeers(_) => self.update_discover(message),
+            // BORU-CP-07: backend reconnection success — ensure the direct
+            // topic is joined/subscribed (data-plane action, friend-scoped).
+            AppMessage::ReconnectPeerReady(_) => self.update_discover(message),
 
             // ── Chat log scroll (state layer) ──────────────────
             AppMessage::Scrolled(..) => self.update_chat(message),
@@ -17736,6 +17757,15 @@ impl std::hash::Hash for InboxRxHandle {
 /// Wrapper for the continuous tracker's discovered-peers channel.
 /// Uses a bounded mpsc receiver wrapped in Arc<Mutex<>>.
 struct DiscoveredPeersRxHandle(Arc<Mutex<tokio::sync::mpsc::Receiver<DiscoveredPeersUpdate>>>);
+/// Subscription-stream handle for BORU-CP-07 reconnection signals (peers
+/// whose endpoint connectivity was re-established by the backend).
+struct ReconnectReadyRxHandle(Arc<Mutex<tokio::sync::mpsc::Receiver<PublicKey>>>);
+
+impl std::hash::Hash for ReconnectReadyRxHandle {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (Arc::as_ptr(&self.0) as usize).hash(state);
+    }
+}
 
 impl std::hash::Hash for DiscoveredPeersRxHandle {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
@@ -17897,6 +17927,7 @@ fn subscription_stream(
     whisper_rx: &WhisperRxHandle,
     inbox_rx: &InboxRxHandle,
     discovered_rx: &DiscoveredPeersRxHandle,
+    reconnect_rx: &ReconnectReadyRxHandle,
     gui_action_rx: &GuiActionHandle,
     transfer_rx: &TransferProjectionHandle,
 ) -> Pin<Box<dyn Stream<Item = AppMessage> + Send>> {
@@ -17905,6 +17936,7 @@ fn subscription_stream(
     let whisper_rx = Arc::clone(&whisper_rx.0);
     let inbox_rx = Arc::clone(&inbox_rx.0);
     let discovered_rx = Arc::clone(&discovered_rx.0);
+    let reconnect_rx = Arc::clone(&reconnect_rx.0);
     let gui_action_rx = Arc::clone(&gui_action_rx.0);
     let transfer_rx = Arc::clone(&transfer_rx.0);
     Box::pin(n0_future::stream::unfold(
@@ -17914,10 +17946,11 @@ fn subscription_stream(
             whisper_rx,
             inbox_rx,
             discovered_rx,
+            reconnect_rx,
             gui_action_rx,
             transfer_rx,
         ),
-        |(rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx, transfer_rx)| async move {
+        |(rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, reconnect_rx, gui_action_rx, transfer_rx)| async move {
             // A closed GUI-action sender is a normal shutdown condition.  Do
             // not let it terminate this combined subscription: the network
             // and friend streams still belong to the application and must
@@ -17935,6 +17968,7 @@ fn subscription_stream(
             let mut whisper_open = true;
             let mut inbox_open = true;
             let mut discovered_open = true;
+            let mut reconnect_open = true;
             let mut gui_action_open = true;
             let mut transfer_open = true;
             // Identify this stream instance so duplicate/competing consumers
@@ -17950,6 +17984,7 @@ fn subscription_stream(
                 whisper_rx = format!("{:p}", whisper_rx.as_ref() as *const _),
                 inbox_rx = format!("{:p}", inbox_rx.as_ref() as *const _),
                 discovered_rx = format!("{:p}", discovered_rx.as_ref() as *const _),
+                reconnect_rx = format!("{:p}", reconnect_rx.as_ref() as *const _),
                 gui_action_rx = format!("{:p}", gui_action_rx.as_ref() as *const _),
                 transfer_rx = format!("{:p}", transfer_rx.as_ref() as *const _),
                 "SUBSCRIPTION_STREAM_START: combined subscription stream running",
@@ -17968,7 +18003,7 @@ fn subscription_stream(
                                 tracing::debug!(
                                     "APP_NET_RX: combined stream received net event",
                                 );
-                                return Some((AppMessage::NetEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx, transfer_rx)));
+                                return Some((AppMessage::NetEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, reconnect_rx, gui_action_rx, transfer_rx)));
                             }
                             None => {
                                 tracing::warn!(
@@ -17981,33 +18016,39 @@ fn subscription_stream(
                     }
                     event = async { friend_rx.lock().await.recv().await }, if friend_open => {
                         match event {
-                            Some(e) => return Some((AppMessage::FriendEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx, transfer_rx))),
+                            Some(e) => return Some((AppMessage::FriendEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, reconnect_rx, gui_action_rx, transfer_rx))),
                             None => { friend_open = false; continue; }
                         }
                     }
                     event = async { whisper_rx.lock().await.recv().await }, if whisper_open => {
                         match event {
-                            Some(e) => return Some((AppMessage::WhisperEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx, transfer_rx))),
+                            Some(e) => return Some((AppMessage::WhisperEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, reconnect_rx, gui_action_rx, transfer_rx))),
                             None => { whisper_open = false; continue; }
                         }
                     }
                     event = async { inbox_rx.lock().await.recv().await }, if inbox_open => {
                         match event {
-                            Some(e) => return Some((AppMessage::InboxEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx, transfer_rx))),
+                            Some(e) => return Some((AppMessage::InboxEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, reconnect_rx, gui_action_rx, transfer_rx))),
                             None => { inbox_open = false; continue; }
                         }
                     }
                     peers = async { discovered_rx.lock().await.recv().await }, if discovered_open => {
                         match peers {
-                            Some(peers) => return Some((AppMessage::NewDiscoveredPeers(peers), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx, transfer_rx))),
+                            Some(peers) => return Some((AppMessage::NewDiscoveredPeers(peers), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, reconnect_rx, gui_action_rx, transfer_rx))),
                             None => { discovered_open = false; continue; }
+                        }
+                    }
+                    reconnect_peer = async { reconnect_rx.lock().await.recv().await }, if reconnect_open => {
+                        match reconnect_peer {
+                            Some(peer) => return Some((AppMessage::ReconnectPeerReady(peer), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, reconnect_rx, gui_action_rx, transfer_rx))),
+                            None => { reconnect_open = false; continue; }
                         }
                     }
                     action = async { gui_action_rx.lock().await.recv().await }, if gui_action_open => {
                         match action {
                             Some(a) => return Some((
                                 map_gui_action(a),
-                                (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx, transfer_rx),
+                                (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, reconnect_rx, gui_action_rx, transfer_rx),
                             )),
                             None => {
                                 // The MCP/GUI sender was dropped.  Disable only
@@ -18020,13 +18061,13 @@ fn subscription_stream(
                     }
                     transfer_update = async { transfer_rx.lock().await.recv().await }, if transfer_open => {
                         match transfer_update {
-                            Ok(update) => return Some((AppMessage::TransferProjectionUpdate(update), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx, transfer_rx))),
+                            Ok(update) => return Some((AppMessage::TransferProjectionUpdate(update), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, reconnect_rx, gui_action_rx, transfer_rx))),
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                                 // The broadcast receiver fell behind (progress is
                                 // coalesced to 250 ms but a long UI stall can still
                                 // drop messages). The snapshot is authoritative, so
                                 // rebuild the panel maps instead of replaying.
-                                return Some((AppMessage::TransferSnapshotResync, (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx, transfer_rx)));
+                                return Some((AppMessage::TransferSnapshotResync, (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, reconnect_rx, gui_action_rx, transfer_rx)));
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                                 // The projection store was dropped (shutdown). Keep
@@ -18357,6 +18398,7 @@ impl IcedChat {
         whisper_rx: Arc<Mutex<Receiver<WhisperEvent>>>,
         inbox_rx: Arc<Mutex<Receiver<InboxEvent>>>,
         discovered_peers_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<DiscoveredPeersUpdate>>>,
+        reconnect_ready_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<PublicKey>>>,
         gui_action_rx: Option<Arc<Mutex<tokio::sync::mpsc::Receiver<GuiActionRequest>>>>,
         transfer_rx: Arc<Mutex<TransferUpdateReceiver>>,
         call_events_rx: Arc<Mutex<Receiver<CallEvent>>>,
@@ -18436,16 +18478,18 @@ impl IcedChat {
                 WhisperRxHandle(whisper_rx),
                 InboxRxHandle(inbox_rx),
                 DiscoveredPeersRxHandle(discovered_peers_rx),
+                ReconnectReadyRxHandle(reconnect_ready_rx),
                 GuiActionHandle(gui_action_inner),
                 TransferProjectionHandle(transfer_rx),
             ),
-            |(rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, gui_action_rx, transfer_rx)| {
+            |(rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, reconnect_rx, gui_action_rx, transfer_rx)| {
                 subscription_stream(
                     rx,
                     friend_rx,
                     whisper_rx,
                     inbox_rx,
                     discovered_rx,
+                    reconnect_rx,
                     gui_action_rx,
                     transfer_rx,
                 )
@@ -25773,6 +25817,7 @@ mod tests {
         let (_whisper_tx, whisper_rx) = tokio::sync::mpsc::channel(64);
         let (_inbox_tx, inbox_rx) = tokio::sync::mpsc::channel(64);
         let (_peers_tx, peers_rx) = tokio::sync::mpsc::channel(1);
+        let (_reconnect_tx, reconnect_rx) = tokio::sync::mpsc::channel::<PublicKey>(1);
         let (gui_tx, gui_rx) = tokio::sync::mpsc::channel(1);
         let (_transfer_tx, transfer_rx) = tokio::sync::broadcast::channel(8);
         let request = GuiActionRequest {
@@ -25786,6 +25831,7 @@ mod tests {
             &WhisperRxHandle(Arc::new(Mutex::new(whisper_rx))),
             &InboxRxHandle(Arc::new(Mutex::new(inbox_rx))),
             &DiscoveredPeersRxHandle(Arc::new(Mutex::new(peers_rx))),
+            &ReconnectReadyRxHandle(Arc::new(Mutex::new(reconnect_rx))),
             &GuiActionHandle(Arc::new(Mutex::new(gui_rx))),
             &TransferProjectionHandle(Arc::new(Mutex::new(transfer_rx))),
         );
@@ -25819,6 +25865,7 @@ mod tests {
         let (_whisper_tx, whisper_rx) = tokio::sync::mpsc::channel(64);
         let (_inbox_tx, inbox_rx) = tokio::sync::mpsc::channel(64);
         let (_discovered_tx, discovered_rx) = tokio::sync::mpsc::channel(1);
+        let (_reconnect_tx, reconnect_rx) = tokio::sync::mpsc::channel::<PublicKey>(1);
         let (_transfer_tx, transfer_rx) = tokio::sync::broadcast::channel(8);
         let (handle, gui_rx) =
             boru_core::diagnostics::GuiTestHandle::channel(PRODUCERS * PER_PRODUCER);
@@ -25852,6 +25899,7 @@ mod tests {
             &WhisperRxHandle(Arc::new(tokio::sync::Mutex::new(whisper_rx))),
             &InboxRxHandle(Arc::new(tokio::sync::Mutex::new(inbox_rx))),
             &DiscoveredPeersRxHandle(Arc::new(tokio::sync::Mutex::new(discovered_rx))),
+            &ReconnectReadyRxHandle(Arc::new(tokio::sync::Mutex::new(reconnect_rx))),
             &GuiActionHandle(Arc::new(tokio::sync::Mutex::new(gui_rx))),
             &TransferProjectionHandle(Arc::new(tokio::sync::Mutex::new(transfer_rx))),
         );
