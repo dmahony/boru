@@ -635,7 +635,7 @@ fn blob_ticket_string(
 
 // ── Spacing units (4px base) ─────────────────────────────────────────
 pub(crate) const SPACE_2: f32 = 2.0;
-pub(crate) use crate::design_tokens::{AVATAR_MD, AVATAR_SM};
+pub(crate) use crate::design_tokens::{AVATAR_CHAT_HEADER, AVATAR_MD, AVATAR_MSG, AVATAR_SM};
 pub(crate) use crate::design_tokens::{
     DETAILS_PANEL_WIDTH, RADIUS_SM, SIDEBAR_INSET, SIDEBAR_WIDTH, SPACE_12, SPACE_16, SPACE_18,
     SPACE_20, SPACE_24, SPACE_28, SPACE_32, SPACE_4, SPACE_8,

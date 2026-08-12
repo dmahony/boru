@@ -174,6 +174,20 @@ pub const AVATAR_SM: f32 = 36.0;
 pub const AVATAR_MD: f32 = 48.0;
 pub const AVATAR_LG: f32 = 64.0;
 
+/// Sidebar profile header avatar — target 72px per spec.
+pub const AVATAR_PROFILE: f32 = 72.0;
+/// Chat-list conversation row avatars — target 56px per spec.
+pub const AVATAR_CHAT_LIST: f32 = 56.0;
+/// Chat conversation header avatar — target 52px per spec.
+pub const AVATAR_CHAT_HEADER: f32 = 52.0;
+/// Message bubble avatars — target 46px per spec.
+pub const AVATAR_MSG: f32 = 46.0;
+
+/// Status dot for normal-sized avatars (chat-list, chat-header, messages).
+pub const STATUS_DOT_SM: f32 = 10.0;
+/// Status dot for the large 72px profile avatar.
+pub const STATUS_DOT_LG: f32 = 12.0;
+
 // ── Layout dimensions ─────────────────────────────────────────────────
 /// Target sidebar width at reference viewport (1280×800). Range: 288–320 px.
 pub const SIDEBAR_WIDTH: f32 = 304.0;
@@ -1127,6 +1141,12 @@ mod tests {
         assert!(AVATAR_SM > 0.0);
         assert!(AVATAR_MD > 0.0);
         assert!(AVATAR_LG > 0.0);
+        assert!(AVATAR_PROFILE > 0.0);
+        assert!(AVATAR_CHAT_LIST > 0.0);
+        assert!(AVATAR_CHAT_HEADER > 0.0);
+        assert!(AVATAR_MSG > 0.0);
+        assert!(STATUS_DOT_SM > 0.0);
+        assert!(STATUS_DOT_LG > 0.0);
     }
 
     // ── Responsive thresholds ──────────────────────────────────────────
