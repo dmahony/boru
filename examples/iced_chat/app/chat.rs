@@ -4896,7 +4896,7 @@ impl IcedChat {
                     // (AboutMe, Presence, Heartbeat, NeighborUp/Down,
                     // announcements) are not renderable chat history — queueing
                     // them fills the 256-event cap and triggers a warning storm
-                    // on dense public topics like the shared lobby.  They are
+                    // on dense public topics.  They are
                     // also excluded from the unread counter below.
                     let should_count = Self::_is_user_visible_event(&event);
                     if !should_count {

@@ -1175,12 +1175,12 @@ impl IcedChat {
         // UI-HOME-05: full dashboard card. Header carries a mesh glyph +
         // title + real status badge + the existing "View details" action.
         // Body shows the live status row, three real connection counts
-        // (neighbors / direct / relayed), lobby state + connection duration
+        // (neighbors / direct / relayed), connection state + duration
         // when available, and a short recent-events list fed from the same
         // bounded mesh event log the rest of the app uses — no invented
         // statistics. UI-28 keeps transient startup lines from lingering:
-        // the watchdog clears "Starting up...", "Connecting to lobby...",
-        // "Connected to lobby..." and "Subscribing to..." once the mesh is
+        // the watchdog clears "Starting up...", "Connecting to room...",
+        // "Connected to room..." and "Subscribing to..." once the mesh is
         // Good, so the log stays truthful.
         let (health_label, health_color): (&str, fn(&iced::Theme) -> Color) =
             match &mesh_health {

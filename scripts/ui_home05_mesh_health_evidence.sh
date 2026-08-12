@@ -6,7 +6,7 @@
 #
 # Populated state: two seeded instances (seed_two_instances.py) that connect
 # directly over localhost QUIC, so the Mesh Health card shows real values
-# (neighbors / direct / relayed) and REAL mesh events ("Connected to lobby — 1
+# (neighbors / direct / relayed) and REAL mesh events ("Connected to room — 1
 # peer online", "Discovered 1 direct, 0 relayed peers").
 #
 # No-events state: a fresh --no-dht --no-relay instance whose mesh event log is
@@ -116,8 +116,8 @@ capture_noevents() {
     win=$(wait_window "$display" n)
     if [[ -n "$win" ]]; then
         DISPLAY=":$display" xdotool windowsize "$win" "$w" "$h"
-        # Let startup events ("Starting up...", "Connecting to lobby...") land
-        # and the lobby subscription settle BEFORE clearing, so the card's
+        # Let startup events ("Starting up...", "Connecting to room...") land
+        # and the discovery subscription settle BEFORE clearing, so the card's
         # empty state is captured rather than a mid-startup log.
         sleep 8
         # Test-only command: clear the mesh event log so the card shows its

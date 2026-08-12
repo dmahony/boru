@@ -164,47 +164,37 @@ to avoid redundant writes:
 
 ### 4.5 GUI Startup Flow
 
-The GUI (`examples/iced_chat/main.rs`) wires the public-lobby continuous
-tracker into the Iced startup path.  The full flow is:
+The GUI (`examples/iced_chat/main.rs`) no longer auto-joins the public lobby
+at startup.  The auto-joined lobby conversation was removed (BORU-DISC-12)
+and the startup `ContinuousTracker` for the lobby is gone (BORU-DISC-14).
+The current startup flow is:
 
 ```
 GUI starts
-  -> canonical Mainnet public-lobby identity  (public_lobby_topic)
-  -> lobby gossip subscription                (gossip.subscribe)
-  -> shared member-discovery DHT client       (distributed_topic_tracker::Dht)
-  -> MainlineDhtBackend                       (wraps the shared DHT handle)
-  -> PublicRoomTracker                        (Mainnet + endpoint.id + secret_key)
-  -> ContinuousTracker::start_with_joiner     (lobby GossipSender)
-  -> DynamicPeerJoiner                        (dedup, self-filter, bounded concurrency, retry)
-  -> GossipSender::join_peers                 (discovered peers join the gossip mesh)
+  -> internal discovery topic subscription  (DiscoveryService, BORU-DISC-05)
+  -> shared member-discovery DHT client     (distributed_topic_tracker::Dht)
+  -> mDNS LAN discovery                     (joins peers into the discovery mesh)
 ```
 
-Key properties:
-
-- The **same** `lobby_topic` is used for the gossip subscription, the
-  `PublicRoomTracker::start(PublicNetwork::Mainnet, ...)` identity, and the
-  initial selected room (`IcedChat::default_lobby_topic()`).  A
-  `debug_assert_eq!` confirms the tracker's gossip topic matches the lobby
-  topic at startup.
-- The lobby gossip receiver task drains all events and forwards
-  `NeighborUp` / `NeighborDown` lifecycle events to the
-  `DynamicPeerJoiner` via the `NeighborEvent` sender returned by
-  `start_with_joiner()`.  A `NeighborDown` lets the joiner remove the peer
-  from its known set so a later DHT discovery can retry it.
-- The `ContinuousTracker` handle is stored in `IcedChat` for the lifetime of
-  the app, preventing its background tasks from being dropped.
-- The **mDNS** path is preserved and independent — both mDNS and the DHT
-  tracker feed the same lobby `GossipSender`.
+- The internal discovery topic (`BORU_DISCOVERY_TOPIC_V1`) is networking
+  infrastructure only: it is never rendered as a conversation, never stored,
+  and never counted as an unread chat.
+- Public rooms are explicit user features: a user-created public room starts
+  its own `PublicRoomTracker` + `ContinuousTracker` in the GUI
+  (`IcedChat::ConfirmCreateNewRoom`), keyed by the room's own topic.
+- mDNS and the discovery-topic peer feed both populate the Discover sidebar;
+  neither creates a conversation.
 
 ### 4.6 `--no-dht` Behaviour
 
 When `--no-dht` is supplied:
 
-- No member-discovery DHT client is created.
-- No `ContinuousTracker` is started for the public lobby.
+- No shared member-discovery DHT client is created.
+- User-created public-room and private-room trackers are disabled (they share
+  the same DHT handle).
 - The GUI continues to start normally with mDNS, relay, tickets, and known
   addresses.
-- Private-room DHT discovery is also disabled.
+- The internal discovery gossip topic is not affected (it is gossip, not DHT).
 - Iroh's `DhtAddressLookup` (address resolution) is a separate layer and has
   its own `--no-dht` gate — it is not the same DHT instance.
 

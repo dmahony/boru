@@ -101,7 +101,7 @@ Result: the command reached `running 1789 tests`, exposed 33 failures in the cap
 - `examples/iced_chat/main.rs:178-210`: data directory and secret-key loading; generated key/data directory permissions are restrictive (`0700`/`0600`).
 - `examples/iced_chat/main.rs:214-264`: rotating file/terminal logging.
 - `examples/iced_chat/main.rs:454-515`: data migration, logging, panic handling, Tokio runtime.
-- `examples/iced_chat/main.rs:518-566`: initial room selection; no subcommand opens the canonical lobby topic.
+- `examples/iced_chat/main.rs:518-566`: initial room selection; no subcommand opens a room (the lobby auto-join was removed, BORU-DISC-12).
 - `examples/iced_chat/main.rs:685-760`: endpoint, address lookup, relay mode, and gossip/router construction.
 - `examples/iced_chat/main.rs:~1000-1400`: protocol handlers and event channel wiring.
 - `examples/iced_chat/main.rs:~1350-1500`: `IcedChat` construction, snapshot throttling, and application launch.
@@ -191,7 +191,7 @@ flowchart LR
 
 Important flows:
 
-1. Startup: CLI → data directory/secret key → endpoint and protocol router → IcedChat. No command selects the lobby topic, then Home is displayed while the lobby/network state initializes.
+1. Startup: CLI → data directory/secret key → endpoint and protocol router → IcedChat. No command selects a room, then Home is displayed while the discovery/network state initializes.
 2. Sidebar room selection: row → `RoomSelected(topic)`/`OpenRoom(topic)` → generation guard → async gossip subscribe → `RoomOpened` → active `ConversationLive`/screen cache → Chat view.
 3. Send: text input → `InputChanged(String)` → `composer_text`; Enter or Send → `SendPressed` → local queued entry + gossip sender → `MessageSent`/delivery state updates.
 4. Incoming room data: forwarder → `NetEvent(ConversationNetEvent)` → hidden-room pending queue or active-room reducer → entries, names, presence, unread, activity, and mesh state.

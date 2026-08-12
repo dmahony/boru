@@ -14,7 +14,7 @@ settings files. This document covers all available options.
 | `--data-dir` | Path | See below | Persistent data directory |
 | `--relay` | URL | `https://boru.chat:8443` | iroh relay server URL |
 | `--no-relay` | Flag | Off | Disable relay mode entirely |
-| `--no-dht` | Flag | Off | Disable private-room DHT discovery (public lobby unaffected) |
+| `--no-dht` | Flag | Off | Disable member-discovery DHT (private-room and user-created public-room trackers) |
 | `--bind-port` | u16 | `0` (OS-assigned) | Local QUIC bind port |
 | `--perf` | Flag | Off | Enable performance instrumentation |
 | `--mcp` | Flag | Off | Enable MCP diagnostic server |

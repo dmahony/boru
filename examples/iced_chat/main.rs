@@ -2574,7 +2574,7 @@ mod tests {
         assert_eq!(
             tracker.identity().topic,
             IcedChat::default_lobby_topic(),
-            "public-room tracker topic must match the GUI lobby topic"
+            "public-room tracker topic must match the GUI public-room topic"
         );
         tracker.shutdown().await;
     }

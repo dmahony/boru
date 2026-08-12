@@ -73,7 +73,7 @@ The startup order is in `examples/iced_chat/main.rs`:
 3. spawn gossip and initialize blobs/history;
 4. construct backfill, whisper, inbox, catalogue, and file-access handlers;
 5. build the shared Router with all existing ALPN handlers;
-6. subscribe to lobby/directory rooms and start discovery/background trackers;
+6. subscribe to directory/discovery topics and start discovery/background trackers;
 7. create `FriendPingManager`, register persisted friends, and construct `IcedChat`.
 
 A future `TunnelService` should be constructed after the endpoint and friends store are available, before Router construction if its protocol handler is registered there. Its handle and event receiver should be passed into `IcedChat` similarly to the existing whisper/inbox/friend-ping services.

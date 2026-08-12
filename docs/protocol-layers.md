@@ -282,9 +282,12 @@ at decode time.
 
 ### Known Limitations
 
-- **Public lobby DHT not wired in GUI**: `ContinuousTracker` exists and is
-  unit-tested but is never spawned in `main.rs`. Public-lobby users rely on
-  mDNS (LAN) and tickets (out-of-band) for discovery.
+- **Public-room DHT trackers are per user-created room**: `ContinuousTracker`
+  is spawned for each public room the user explicitly creates (or joins);
+  there is no always-on startup tracker for a canonical public lobby
+  (removed with the auto-joined lobby, BORU-DISC-12/14).  Public-room users
+  rely on mDNS (LAN), tickets (out-of-band), and their room's DHT tracker for
+  discovery.
 - **DHT-discovered peers not in UI**: Private-room DHT peers join the gossip
   mesh directly via `spawn_join_fanout()` but do not appear in the
   "discovered peers" panel (which is mDNS-only).

@@ -1628,8 +1628,8 @@ struct MeshEvent {
 fn is_transient_mesh_event(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     lower.contains("starting up")
-        || lower.contains("connecting to lobby")
-        || lower.contains("connected to lobby")
+        || lower.contains("connecting to room")
+        || lower.contains("connected to room")
         || lower.contains("subscribing to")
 }
 
@@ -3940,7 +3940,7 @@ pub struct IcedChat {
     /// Bootstrap peer addresses from the initial join ticket (if any).
     /// Used only for the first room subscription; cleared after use.
     initial_bootstrap_peers: Vec<EndpointAddr>,
-    /// Whether the initial default lobby should leave the UI on the chat list.
+    /// Whether the initial room open should leave the UI on the chat list.
     return_to_chat_list_after_open: bool,
     /// Handle for sending whisper/private messages.
     whisper_handle: WhisperHandle,
@@ -7876,13 +7876,13 @@ impl IcedChat {
         }
     }
 
-    /// Stable room used as the default lobby for discovering online users.
+    /// Canonical public-room topic helper (the explicit "public-lobby" room).
     ///
     /// The GUI uses the canonical versioned public-room identity
     /// ([`boru_core::public_room::public_lobby_topic`] with
-    /// [`PublicNetwork::Mainnet`]) so the gossip mesh topic, the DHT
-    /// [`PublicRoomTracker`] namespace, and the initial selected room all
-    /// resolve to the exact same topic.  See `docs/discovery-architecture.md`.
+    /// [`PublicNetwork::Mainnet`]) so the gossip mesh topic and the DHT
+    /// [`PublicRoomTracker`] namespace resolve to the exact same topic.  See
+    /// `docs/discovery-architecture.md`.
     pub fn default_lobby_topic() -> TopicId {
         boru_core::public_room::public_lobby_topic(boru_core::public_room::PublicNetwork::Mainnet)
     }
@@ -9073,7 +9073,7 @@ impl IcedChat {
 
     /// UI-28: remove transient startup/connection-progress messages from the
     /// mesh event log. Called when the mesh reaches `MeshHealth::Good` so
-    /// "Starting up...", "Connecting to lobby..." and similar status lines
+    /// "Starting up...", "Connecting to room..." and similar status lines
     /// never linger after connect. Real lifecycle events (degraded/offline/
     /// recovered transitions, errors) are preserved.
     fn clear_transient_mesh_events(&mut self) {
@@ -11823,7 +11823,7 @@ impl IcedChat {
                     // resolution), so we wrap them in a bare EndpointAddr.
                     // Filter out our own identity — discovered_peers may
                     // transiently include it from a discovery source that
-                    // doesn't self-filter (e.g. lobby bootstrap exchange).
+                    // doesn't self-filter (e.g. discovery bootstrap exchange).
                     let discovered_bootstrap_addrs: Vec<EndpointAddr> = self
                         .discovered_peers
                         .iter()
@@ -11853,7 +11853,7 @@ impl IcedChat {
                 let share_direct_addresses = self.share_direct_addresses;
                 // Show a loading spinner while the gossip subscription is in flight.
                 self.room_loading = true;
-                self.push_mesh_event("Connecting to lobby...");
+                self.push_mesh_event("Connecting to room...");
 
                 iced::Task::perform(
                     async move {
@@ -12126,11 +12126,11 @@ impl IcedChat {
                 self.sender = Some(sender.clone());
                 if neighbor_count > 0 {
                     self.push_mesh_event(format!(
-                        "Connected to lobby — {neighbor_count} peer{} online",
+                        "Connected to room — {neighbor_count} peer{} online",
                         if neighbor_count == 1 { "" } else { "s" },
                     ));
                 } else {
-                    self.push_mesh_event("Connected to lobby — waiting for peers...");
+                    self.push_mesh_event("Connected to room — waiting for peers...");
                 }
                 // Subscription creation is not proof that the room has a
                 // usable route.  However, the gossip protocol may have already
@@ -15615,7 +15615,7 @@ impl IcedChat {
             } else {
                 // Protocol traffic (AboutMe, Presence, Heartbeat,
                 // LatencyPing, NeighborUp/Down, ...) is exchanged ~1/s
-                // between peers while a lobby is the active conversation;
+                // between peers while a conversation is active;
                 // log it at trace so INFO stays readable.
                 trace!(
                     topic = %topic,
@@ -16086,8 +16086,9 @@ impl IcedChat {
     /// - Never announce a peer more than once per room (dedup via
     ///   [`IcedChat::known_peers`], cleared on room leave).
     /// - Only announce friends, or peers that are part of the current room's
-    ///   gossip mesh.  Random lobby participants who are not friends stay
-    ///   silent — the lobby churns with strangers and would spam the log.
+    ///   gossip mesh.  Random public-room participants who are not friends
+    ///   stay silent — a busy public room churns with strangers and would
+    ///   spam the log.
     fn should_announce_new_peer(&self, peer: &PublicKey) -> bool {
         if *peer == self.local_public {
             return false;
@@ -16744,7 +16745,7 @@ impl ChatCallbacks for IcedChat {
 
         // Announce genuinely-new peers (first seen this session/room).
         // `should_announce_new_peer` filters out our own node, duplicates,
-        // and non-friend lobby strangers.
+        // and non-friend public-room strangers.
         if self.should_announce_new_peer(&peer) {
             self.known_peers.insert(peer);
             let name = self.resolve_name(&peer);
@@ -16816,7 +16817,7 @@ impl ChatCallbacks for IcedChat {
 
         // Announce genuinely-new peers (first presence seen this
         // session/room).  Same guard as on_neighbor_up: no self, no
-        // duplicates, no non-friend lobby strangers.
+        // duplicates, no non-friend public-room strangers.
         if self.should_announce_new_peer(&peer) {
             self.known_peers.insert(peer);
             let name = self.resolve_name(&peer);
@@ -19291,7 +19292,7 @@ mod tests {
         assert_eq!(mesh_event_tone("Mesh recovered: all peers active."), MeshEventTone::Success);
         // Discovery / connection summaries are positive but not fabrications.
         assert_eq!(mesh_event_tone("Discovered 2 direct, 1 relayed peers"), MeshEventTone::Success);
-        assert_eq!(mesh_event_tone("Connected to lobby — 3 peers online"), MeshEventTone::Success);
+        assert_eq!(mesh_event_tone("Connected to room — 3 peers online"), MeshEventTone::Success);
         // Unknown future messages fall back to neutral rather than lying.
         assert_eq!(mesh_event_tone("Some unexpected future event"), MeshEventTone::Neutral);
     }
@@ -21309,7 +21310,7 @@ mod tests {
         let home = method_source(home_src, "fn view_chat_list_content(", "fn view_chat_panel(");
         assert!(
             home.contains("Wrapping::WordOrGlyph"),
-            "greeting / hero / mesh status / lobby text must glyph-wrap long values"
+            "greeting / hero / mesh status / room text must glyph-wrap long values"
         );
         assert!(
             home.contains("status_detail")
@@ -26022,8 +26023,8 @@ mod tests {
     fn transient_mesh_event_detection_removes_startup_lines() {
         // Startup/connection-progress lines must be dropped once healthy.
         assert!(is_transient_mesh_event("Starting up..."));
-        assert!(is_transient_mesh_event("Connecting to lobby..."));
-        assert!(is_transient_mesh_event("Connected to lobby — 3 peers online"));
+        assert!(is_transient_mesh_event("Connecting to room..."));
+        assert!(is_transient_mesh_event("Connected to room — 3 peers online"));
         assert!(is_transient_mesh_event("Subscribing to 2 stored conversation(s)…"));
     }
 

@@ -165,14 +165,14 @@ mcp__boru_b__boru_get_peer_status(peer_id="<vm-a-id>")
 
 ## Critical pitfalls
 
-### 1. `boru_get_room_status` returns "Room not found" for the lobby
+### 1. `boru_get_room_status` returns "Room not found" for the discovery topic
 
-The lobby subscription runs at the gossip protocol layer and is NOT
-registered in the app-level room-status map. `boru_get_room_status` only
-knows about rooms joined through `OpenRoom`. To verify lobby connectivity,
-check the app log instead:
+The internal discovery topic subscription runs at the gossip protocol layer
+and is NOT registered in the app-level room-status map. `boru_get_room_status`
+only knows about rooms joined through `OpenRoom`. To verify discovery-topic
+connectivity, check the app log instead:
 ```
-grep "subscribed to lobby topic" <data_dir>/logs/boru.log
+grep "joined internal discovery topic" <data_dir>/logs/boru.log
 ```
 
 ### 2. `boru_get_discovery_events` returns 0 events despite active mDNS
@@ -287,7 +287,7 @@ mcp__boru_b__boru_send_probe(room_id="<topic-hex>")
 | Does peer X see peer Y? | `boru_get_peer_status` | — |
 | Is room R active? | `boru_get_room_status` | — |
 | What discovery events happened? | `boru_get_discovery_events` | — |
-| Is the lobby subscribed? | — | `grep "subscribed to lobby"` |
+| Is the discovery topic subscribed? | — | `grep "joined internal discovery topic"` |
 | Is mDNS working? | — | `grep "join_peers succeeded"` |
 | Did a message get delivered? | — | VNC or debug logging |
 | What crashed? | — | `grep "ERROR\|panic" boru.log` |
