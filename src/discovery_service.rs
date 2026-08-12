@@ -136,7 +136,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 
 use crate::api::{ApiError, Event, GossipReceiver, GossipSender, Message as GossipMessage};
-use crate::control_plane::connectivity::{ConnectivityEvent, PeerConnectivityStore};
+use crate::control_plane::connectivity::{ConnectivityEvent, PeerConnectivityState, PeerConnectivityStore};
 use crate::control_plane::message::{
     ControlEnvelope, ControlPlaneDecode, CONTROL_PLANE_MAGIC, BORU_APP_PROTOCOL_VERSION,
 };
@@ -461,6 +461,31 @@ impl PeerRegistry {
         self.peers.clear();
         removed
     }
+
+    /// Refresh an existing entry's last-seen / source after a RESTART
+    /// re-discovery (BORU-CP-07).
+    ///
+    /// The registry's `(node_id, event_id)` dedup would otherwise classify
+    /// a restarted node's first HELLO (which reuses event id 0) as a
+    /// duplicate delivery and silently drop the announcement that must
+    /// trigger automatic reconnection. This method updates the entry's
+    /// metadata WITHOUT touching `last_event_id` — the restarted node's
+    /// counter produces fresh ids next, and the entry is no longer stale.
+    /// Returns `false` (no-op) if the peer is not registered.
+    pub fn refresh_after_restart(
+        &mut self,
+        node_id: PublicKey,
+        source: PeerSource,
+        source_topic: TopicId,
+    ) -> bool {
+        let Some(entry) = self.peers.get_mut(&node_id) else {
+            return false;
+        };
+        entry.last_seen = Instant::now();
+        entry.source = source;
+        entry.source_topic = source_topic;
+        true
+    }
 }
 
 /// Outcome of a throttled discovery announcement.
@@ -600,7 +625,17 @@ impl AnnounceHandle {
             sender,
             local_node,
             throttle: Arc::new(AnnounceThrottle::new()),
-            next_event_id: Arc::new(AtomicU64::new(0)),
+            // BORU-CP-07: seed the event-id counter RANDOMLY so a restarted
+            // process (same identity) does not reuse the pre-restart id
+            // space. The gossip actor dedups by message content (blake3,
+            // plumtree `MessageId`), so a byte-identical HELLO from a
+            // restarted peer is dropped at the gossip layer and never
+            // reaches the discovery service — silently breaking the
+            // automatic-reconnection trigger. A random start makes every
+            // process incarnation's announcements distinct while keeping
+            // within-process monotonicity for the (node_id, event_id)
+            // dedup key.
+            next_event_id: Arc::new(AtomicU64::new(rand::random::<u64>())),
         }
     }
 
@@ -677,7 +712,12 @@ impl ControlAnnounceHandle {
         Self {
             sender,
             local_node,
-            sequence: Arc::new(AtomicU64::new(0)),
+            // BORU-CP-07: seed the sequence counter RANDOMLY (same restart
+            // rationale as the legacy event-id counter): a restarted
+            // process must not reuse the pre-restart sequence space, or
+            // its byte-identical control HELLO is deduped by the gossip
+            // actor (blake3 content hash) and never reaches peers.
+            sequence: Arc::new(AtomicU64::new(rand::random::<u64>())),
             throttle: Arc::new(AnnounceThrottle::with_min_interval(
                 DEFAULT_CONTROL_ANNOUNCE_MIN_INTERVAL,
             )),
@@ -870,12 +910,46 @@ impl ReceiveCore {
                     );
                 }
                 UpsertOutcome::Duplicate => {
-                    trace!(
-                        node = %node_id.fmt_short(),
-                        event = ?event_id,
-                        "discovery: duplicate event ignored",
-                    );
-                    return IncomingOutcome::Duplicate;
+                    // BORU-CP-07: a same-id announcement from a peer that is
+                    // currently Degraded / OfflineStale is NOT a duplicate
+                    // delivery — it is a RESTART re-discovery. A restarted
+                    // node reuses its event-id counter from 0, so its fresh
+                    // HELLO collides with the pre-restart id; treating it as
+                    // a duplicate would silently swallow the announcement
+                    // that must trigger the automatic-reconnection path
+                    // (PDF Task 3.1 step 1). The registry's dedup exists for
+                    // duplicate *deliveries* of the same advertisement over
+                    // two paths while the peer is alive/online — a peer that
+                    // went Degraded/OfflineStale cannot deliver anything, so
+                    // a same-id message is a new process incarnation.
+                    //
+                    // We do NOT mutate `last_event_id` here: the restarted
+                    // node's counter will produce fresh ids next, and the
+                    // registry refresh below records the new last-seen.
+                    let peer_lost = {
+                        let connectivity = self
+                            .connectivity
+                            .lock()
+                            .expect("connectivity store lock poisoned");
+                        matches!(
+                            connectivity.state(&node_id),
+                            PeerConnectivityState::Degraded | PeerConnectivityState::OfflineStale
+                        )
+                    };
+                    if peer_lost {
+                        info!(
+                            node = %node_id.fmt_short(),
+                            "discovery: same-id announcement from a restarted (lost) peer treated as rediscovery",
+                        );
+                        registry.refresh_after_restart(node_id, source, self.topic);
+                    } else {
+                        trace!(
+                            node = %node_id.fmt_short(),
+                            event = ?event_id,
+                            "discovery: duplicate event ignored",
+                        );
+                        return IncomingOutcome::Duplicate;
+                    }
                 }
             }
         }
@@ -1850,12 +1924,29 @@ async fn drain_loop(
                         // any queued reconnect retry/backoff state (PDF Task
                         // 3.1 step 6). NeighborUp is a real endpoint success,
                         // not discovery metadata.
+                        //
+                        // If a reconnect attempt was pending for this peer,
+                        // the connection is exactly the recovery the
+                        // reconnect machinery exists to produce — surface it
+                        // to the data plane so it re-joins the deterministic
+                        // direct topic (PDF Task 3.1 step 3). This covers the
+                        // case where the mesh self-heals (the gossip actor's
+                        // own retry succeeds) BEFORE the reconnect loop's next
+                        // attempt: without this emit, a real connection
+                        // success would silently clear the queue and the data
+                        // plane would never re-join the direct topic.
                         {
                             let mut scheduler = core
                                 .reconnect
                                 .lock()
                                 .expect("reconnect scheduler lock poisoned");
+                            let had_pending = scheduler.is_queued(&peer);
                             scheduler.reset(&peer);
+                            if had_pending {
+                                let _ = core
+                                    .reconnect_tx
+                                    .send(ReconnectSignal::PeerReachable { peer });
+                            }
                         }
                         // A new gossip neighbour joined the mesh — re-announce
                         // our presence so it can discover this node even if
@@ -2158,16 +2249,30 @@ async fn drain_reconnect_attempts(
                     wait_for_reconnect_confirmation(connectivity, &peer, RECONNECT_CONFIRM_TIMEOUT)
                         .await;
                 if confirmed {
-                    info!(peer = %peer.fmt_short(), "reconnect: endpoint connectivity re-established");
-                    {
+                    // The dial was confirmed by a real connection event. If
+                    // the drain loop's NeighborUp handler already surfaced
+                    // this recovery (it resets the entry AND emits
+                    // PeerReachable when a pending reconnect exists), don't
+                    // emit a duplicate. Exactly one signal per recovery.
+                    let cleared = {
                         let mut sched = scheduler.lock().expect("reconnect scheduler lock poisoned");
+                        let had = sched.is_queued(&peer);
                         sched.reset(&peer);
+                        had
+                    };
+                    if cleared {
+                        info!(peer = %peer.fmt_short(), "reconnect: endpoint connectivity re-established");
+                        // Tell the data plane the endpoint is reachable again
+                        // so it can ensure the deterministic direct topic is
+                        // joined/subscribed (friend-scoped; the app owns
+                        // direct topics).
+                        let _ = reconnect_tx.send(ReconnectSignal::PeerReachable { peer });
+                    } else {
+                        trace!(
+                            peer = %peer.fmt_short(),
+                            "reconnect: recovery already surfaced by the drain loop"
+                        );
                     }
-                    // Tell the data plane the endpoint is reachable again so
-                    // it can ensure the deterministic direct topic is
-                    // joined/subscribed (friend-scoped; the app owns direct
-                    // topics).
-                    let _ = reconnect_tx.send(ReconnectSignal::PeerReachable { peer });
                 } else {
                     warn!(
                         peer = %peer.fmt_short(),
@@ -3156,6 +3261,58 @@ mod tests {
         );
     }
 
+    /// BORU-CP-07: a same-id announcement from a peer that has gone
+    /// Degraded / OfflineStale is a RESTART re-discovery, not a duplicate
+    /// delivery. A restarted node reuses its event-id counter from 0, so
+    /// its fresh HELLO collides with the pre-restart id; treating it as a
+    /// duplicate would swallow the announcement that must trigger automatic
+    /// reconnection. When the peer is lost, the same-id message refreshes
+    /// the registry entry and emits `PeerUpdate::Seen`.
+    #[tokio::test]
+    async fn handle_incoming_restart_rediscovery_when_peer_lost() {
+        use crate::control_plane::connectivity::ConnectivityEvent as CE;
+
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let service = test_service(local);
+        let mut updates = service.peer_updates();
+
+        // First contact: same event id as a restart would reuse (0).
+        let first = postcard::to_stdvec(&DiscoveryMessage::hello_with_event(peer, 0)).unwrap();
+        assert_eq!(service.handle_incoming(&first, peer), IncomingOutcome::Processed);
+        assert_eq!(service.peer_count(), 1);
+        assert_eq!(
+            updates.try_recv(),
+            Ok(PeerUpdate::Seen {
+                node_id: peer,
+                source: PeerSource::Hello,
+            })
+        );
+
+        // The peer goes down (a restart equivalent): Degraded, NOT online.
+        service.report_connectivity_failure(peer, CE::EndpointFailed, "peer down".to_string());
+        assert!(!service.connectivity_state(&peer).is_online());
+
+        // The restarted peer re-announces with the SAME event id. This is a
+        // re-discovery, not a duplicate: the entry refreshes, a Seen update
+        // fires (the reconnect trigger), and the message is processed.
+        let second = postcard::to_stdvec(&DiscoveryMessage::hello_with_event(peer, 0)).unwrap();
+        assert_eq!(
+            service.handle_incoming(&second, peer),
+            IncomingOutcome::Processed,
+            "same-id announcement from a lost peer must be a rediscovery"
+        );
+        assert_eq!(service.peer_count(), 1);
+        assert_eq!(
+            updates.try_recv(),
+            Ok(PeerUpdate::Seen {
+                node_id: peer,
+                source: PeerSource::Hello,
+            }),
+            "restart rediscovery must emit a Seen update for the reconnect trigger"
+        );
+    }
+
     /// Distinct event ids from the same node update last-seen: the peer stays
     /// one registry entry, but its source/`last_seen` refresh.
     #[tokio::test]
@@ -3271,10 +3428,11 @@ mod tests {
         };
         let decoded: DiscoveryMessage = postcard::from_bytes(&bytes).unwrap();
         // The service stamps a per-node event id on its announcements
-        // (BORU-DISC-17): the first hello carries event id 0.
-        assert_eq!(decoded, DiscoveryMessage::hello_with_event(local, 0));
+        // (BORU-DISC-17). The counter is seeded RANDOMLY (BORU-CP-07) so a
+        // restarted process never reuses the pre-restart id space — assert
+        // the id is present and the node is ours, not an exact value.
         assert_eq!(decoded.node_id(), local);
-        assert_eq!(decoded.event_id(), Some(0));
+        assert!(decoded.event_id().is_some(), "hello carries an event id");
 
         // The gossip mesh echoes our own broadcast back; the receive path
         // must ignore it so we never register ourselves.
@@ -3304,7 +3462,12 @@ mod tests {
             panic!("expected Broadcast command, got {command:?}");
         };
         let decoded: DiscoveryMessage = postcard::from_bytes(&bytes).unwrap();
-        assert_eq!(decoded, DiscoveryMessage::presence_with_event(local, 0));
+        // The service stamps a per-node event id on its announcements
+        // (BORU-DISC-17). The counter is seeded RANDOMLY (BORU-CP-07) so a
+        // restarted process never reuses the pre-restart id space — assert
+        // the id is present, not an exact value.
+        assert_eq!(decoded.node_id(), local);
+        assert!(decoded.event_id().is_some(), "presence carries an event id");
     }
 
     #[tokio::test]
@@ -3338,7 +3501,12 @@ mod tests {
             panic!("expected Broadcast command, got {command:?}");
         };
         let decoded: DiscoveryMessage = postcard::from_bytes(&bytes).unwrap();
-        assert_eq!(decoded, DiscoveryMessage::hello_with_event(local, 0));
+        // The event-id counter is seeded RANDOMLY (BORU-CP-07) so a
+        // restarted process never reuses the pre-restart id space; capture
+        // the actual first id and assert the second announcement is
+        // monotonic +1.
+        let first_id = decoded.event_id().expect("hello carries an event id");
+        assert_eq!(decoded.node_id(), local);
         assert!(
             tokio::time::timeout(Duration::from_millis(40), cmd_rx.recv())
                 .await
@@ -3362,7 +3530,11 @@ mod tests {
         };
         // The second announcement carries the next monotonic event id.
         let decoded: DiscoveryMessage = postcard::from_bytes(&bytes).unwrap();
-        assert_eq!(decoded, DiscoveryMessage::hello_with_event(local, 1));
+        assert_eq!(
+            decoded.event_id(),
+            Some(first_id + 1),
+            "announcement event ids must be monotonic within a process"
+        );
     }
 
     #[test]
@@ -3417,7 +3589,11 @@ mod tests {
                     env.message_type,
                     crate::control_plane::message::ControlMessageType::Hello
                 );
-                assert_eq!(env.sequence, 0, "first control announcement carries sequence 0");
+                // BORU-CP-07: control sequences are seeded RANDOMLY so a
+                // restarted process never reuses the pre-restart sequence
+                // space (the gossip actor dedups byte-identical payloads).
+                // The exact value is not asserted — only that a sequence is
+                // present and the envelope carries the protocol version.
                 assert_eq!(
                     env.protocol_version,
                     crate::control_plane::message::CONTROL_PLANE_PROTOCOL_VERSION
@@ -3484,7 +3660,9 @@ mod tests {
     }
 
     /// Control-plane sequences are per-sender monotonic: HELLO then
-    /// PRESENCE carry 0, 1 — receivers dedup on this.
+    /// PRESENCE carry consecutive ids (seeded RANDOMLY per process,
+    /// BORU-CP-07, so a restarted process never reuses the pre-restart
+    /// sequence space) — receivers dedup on this.
     #[tokio::test]
     async fn control_announce_sequences_are_monotonic() {
         let local = test_key(0xAA);
@@ -3518,9 +3696,12 @@ mod tests {
         ) else {
             panic!("both broadcasts must be control envelopes");
         };
-        assert_eq!(e1.sequence, 0);
-        assert_eq!(e2.sequence, 1, "control sequences must be strictly monotonic");
         assert_eq!(e2.sender_node_id, local);
+        assert_eq!(
+            e2.sequence,
+            e1.sequence.wrapping_add(1),
+            "control sequences must be strictly monotonic within a process"
+        );
     }
 
     /// The control-plane announce throttle suppresses a rapid repeat — one
@@ -3781,7 +3962,11 @@ mod tests {
             panic!("expected Broadcast command, got {command:?}");
         };
         let decoded: DiscoveryMessage = postcard::from_bytes(&bytes).unwrap();
-        assert_eq!(decoded, DiscoveryMessage::hello_with_event(local, 0));
+        // BORU-CP-07: the event-id counter is seeded RANDOMLY per process
+        // so a restarted node never reuses the pre-restart id space — assert
+        // the re-announcement is ours and carries an event id.
+        assert_eq!(decoded.node_id(), local);
+        assert!(decoded.event_id().is_some(), "hello carries an event id");
     }
 
     // ── connectivity wiring (BORU-DISC-11) ─────────────────────────────
@@ -4658,11 +4843,11 @@ mod tests {
     /// and clears the retry/backoff state.
     #[tokio::test]
     async fn reconnect_loop_dials_queued_peer_and_emits_signal() {
-        use crate::control_plane::connectivity::{ConnectivityEvent as CE, PeerConnectivityState};
+        use crate::control_plane::connectivity::PeerConnectivityState;
 
         let local = test_key(0xAA);
         let peer = test_key(0xBB);
-        let (service, mut cmd_rx, _ev_tx) = test_service_with_cmd(local);
+        let (service, mut cmd_rx, ev_tx) = test_service_with_cmd(local);
         let mut signals = service.reconnect_events();
 
         assert!(service.queue_reconnect(peer));
@@ -4675,6 +4860,13 @@ mod tests {
         };
         let expected: iroh_base::EndpointId = peer.into();
         assert_eq!(peers, vec![expected]);
+        // The mesh confirms the dial with a gossip NeighborUp (feeds
+        // EndpointConnected → Reachable, resets the scheduler). Without this
+        // the reconnect loop's confirmation poll times out and backs off.
+        ev_tx
+            .send(Event::NeighborUp(expected))
+            .await
+            .expect("send neighbor-up confirmation");
 
         // Only ONE attempt: the scheduler entry is cleared after success.
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -4795,6 +4987,14 @@ mod tests {
         // PeerReachable and clears the queue.
         let command = next_command(&mut cmd_rx).await;
         assert!(matches!(command, Command::JoinPeers(_)));
+        // The mesh confirms the dial with a gossip NeighborUp (feeds
+        // EndpointConnected → Reachable, resets the scheduler). Without this
+        // the reconnect loop's confirmation poll times out and backs off.
+        let endpoint: iroh_base::EndpointId = peer.into();
+        ev_tx
+            .send(Event::NeighborUp(endpoint))
+            .await
+            .expect("send neighbor-up confirmation");
         let signal = tokio::time::timeout(Duration::from_secs(5), signals.recv())
             .await
             .expect("timed out waiting for reconnect signal")
