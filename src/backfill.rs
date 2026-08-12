@@ -231,6 +231,16 @@ impl BackfillAuthorizer {
     /// IDs, counts, or metadata.  Unknown and forbidden topics both return
     /// `false` so an attacker cannot distinguish them externally.
     pub fn authorize(&self, peer: &PublicKey, topic: &TopicId) -> bool {
+        // 0. The internal discovery topic is NOT a conversation store
+        //    (BORU-DISC-13). Even if a peer somehow derived it, history
+        //    backfill for the discovery mesh must never be served:
+        //    discovery payloads are networking infrastructure, not chat
+        //    history. This explicit exclusion keeps the policy honest even
+        //    if a future storage layout made the topic look like a room.
+        if crate::discovery_topic::is_discovery_topic(*topic) {
+            return false;
+        }
+
         // 1. Group epoch topic — membership is authoritative.  A group topic
         //    never falls through to the other checks even when the requester
         //    is not a member.
@@ -949,6 +959,42 @@ mod tests {
         assert_eq!(decoded.skipped, 10);
         assert!(!decoded.truncated_by_bytes);
         assert_eq!(decoded.messages[0].as_ref(), &[1u8; 64]);
+    }
+
+    /// The internal DISCOVERY topic is networking infrastructure, never a
+    /// conversation store (BORU-DISC-13): backfill authorization must deny
+    /// it for every network — even to the node's own key or a peer that
+    /// could derive the topic. Discovery payloads must never be served as
+    /// chat history.
+    #[test]
+    fn authorize_denies_discovery_topic() {
+        let local = SecretKey::generate();
+        let storage = Arc::new(Storage::memory().unwrap());
+        let authorizer = BackfillAuthorizer::new(storage, local.public());
+        let peer = SecretKey::generate().public();
+        for network in [
+            crate::public_room::PublicNetwork::Mainnet,
+            crate::public_room::PublicNetwork::Development,
+            crate::public_room::PublicNetwork::Test,
+        ] {
+            let topic = crate::discovery_topic::discovery_topic(network);
+            assert!(
+                !authorizer.authorize(&local.public(), &topic),
+                "discovery topic must be denied backfill on {network:?}"
+            );
+            assert!(
+                !authorizer.authorize(&peer, &topic),
+                "discovery topic must be denied backfill for any peer on {network:?}"
+            );
+        }
+        // Positive control: a real direct-chat topic between the two
+        // participants remains authorized, proving the exclusion did not
+        // weaken conversation backfill.
+        let direct = crate::contact::direct_topic(&local.public(), &peer);
+        assert!(
+            authorizer.authorize(&peer, &direct),
+            "direct-chat topic must remain authorized"
+        );
     }
 
     #[test]

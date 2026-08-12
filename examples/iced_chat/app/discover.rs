@@ -1741,6 +1741,11 @@ impl IcedChat {
                     .into_iter()
                     .map(|e| e.topic)
                     .filter(|t| !self.conversations.contains_key(t))
+                    // BORU-DISC-13: the internal discovery topic is never a
+                    // conversation — exclude it from stored-conversation
+                    // auto-subscribe so it can never be materialized as a
+                    // ConversationLive with a sender in self.conversations.
+                    .filter(|t| !boru_core::discovery_topic::is_discovery_topic(*t))
                     .collect();
                 if store_topics.is_empty() {
                     return iced::Task::none();
@@ -1778,6 +1783,18 @@ impl IcedChat {
                     .background_subscriptions_in_flight
                     .contains(&topic);
                 if already_subscribed || subscribing {
+                    return iced::Task::none();
+                }
+                // ── BORU-DISC-13 guard ────────────────────────────────
+                // The discovery topic is owned by DiscoveryService (joined
+                // at startup in main.rs). Never background-subscribe it as a
+                // conversation: no ConversationLive, no sender kept in
+                // self.conversations, no history replay for the mesh.
+                if boru_core::discovery_topic::is_discovery_topic(topic) {
+                    tracing::warn!(
+                        topic = %topic,
+                        "refusing to background-subscribe discovery topic as conversation"
+                    );
                     return iced::Task::none();
                 }
                 self.background_subscriptions_in_flight.insert(topic);

@@ -11654,6 +11654,23 @@ impl IcedChat {
             AppMessage::OpenRoom(topic) => {
                 let _timer = PerfTracker::timer("open_room", format!("topic={topic}"));
 
+                // ── BORU-DISC-13 guard ─────────────────────────────────
+                // The internal discovery topic is networking infrastructure,
+                // never a conversation. Refuse to open it as a chat room from
+                // any caller (UI, MCP OpenRoom action, ticket join, test
+                // harness): materializing a ConversationLive here would
+                // persist history, seed unread state, and render the
+                // discovery mesh as a user chat.
+                if boru_core::discovery_topic::topic_kind(topic)
+                    == boru_core::discovery_topic::TopicKind::Discovery
+                {
+                    tracing::warn!(
+                        topic = %topic,
+                        "refusing to open discovery topic as a conversation room"
+                    );
+                    return iced::Task::none();
+                }
+
                 // A GUI test action is complete only after the normal room
                 // opening path has selected the requested topic and rendered
                 // the chat screen.  This covers both the cached fast path and
@@ -12068,6 +12085,22 @@ impl IcedChat {
                 neighbor_ids,
                 generation,
             } => {
+                // ── BORU-DISC-13 guard (defense in depth) ─────────────
+                // Even if an OpenRoom task for the discovery topic somehow
+                // completed (e.g. a stale in-flight subscription spawned
+                // before the OpenRoom guard shipped), never materialize the
+                // discovery mesh as a conversation: no ConversationLive, no
+                // Screen::Chat, no history replay, no room-history upsert,
+                // no backfill deferral, no unread state.
+                if boru_core::discovery_topic::topic_kind(topic)
+                    == boru_core::discovery_topic::TopicKind::Discovery
+                {
+                    tracing::warn!(
+                        topic = %topic,
+                        "dropping RoomOpened for discovery topic"
+                    );
+                    return iced::Task::none();
+                }
                 // Dismiss any open video-card overflow menu when the room
                 // changes (entry indices are not stable across rooms).
                 self.video_card_menu_open = None;
@@ -16470,6 +16503,18 @@ impl ChatCallbacks for IcedChat {
             warn!("received message without topic; skipping durable persistence");
             return;
         };
+        // ── BORU-DISC-13 guard ────────────────────────────────────────
+        // The internal discovery topic is NOT a conversation store. Even if
+        // a discovery-topic payload somehow reached protocol dispatch (the
+        // NetEvent guard should prevent it), never write it into the message
+        // DB — discovery traffic must leave zero history side effects.
+        if boru_core::discovery_topic::is_discovery_topic(topic) {
+            warn!(
+                topic = %topic,
+                "skipping message-DB persistence for discovery-topic payload"
+            );
+            return;
+        }
         let store_path = self.data_dir.join("message_store.db");
         match MessageStore::open(&store_path).and_then(|store| {
             store.insert_chat_message(
@@ -16503,6 +16548,17 @@ impl ChatCallbacks for IcedChat {
             warn!("received file share without topic; skipping durable persistence");
             return;
         };
+        // ── BORU-DISC-13 guard ────────────────────────────────────────
+        // Same invariant as persist_remote_message: the discovery topic is
+        // never a conversation store, so file-share payloads on it must not
+        // be persisted (or surface download cards / notifications).
+        if boru_core::discovery_topic::is_discovery_topic(topic) {
+            warn!(
+                topic = %topic,
+                "skipping message-DB persistence for discovery-topic file share"
+            );
+            return;
+        }
         let store_path = self.data_dir.join("message_store.db");
         let result = MessageStore::open(&store_path).and_then(|store| {
             store.insert_chat_message(
