@@ -148,6 +148,17 @@ impl TwoNodeHarness {
     /// discovery topic. A subscribes with no bootstrap (B dials in); B
     /// bootstraps to A. Each side publishes its join `Hello` on the topic.
     async fn spawn(rng: &mut impl rand::Rng, network: PublicNetwork) -> Result<Self> {
+        Self::spawn_with(rng, network, |service| service).await
+    }
+
+    /// Like [`spawn`](Self::spawn), but applies `configure` to both
+    /// discovery services after they join (tests tune TTLs / announce
+    /// intervals / refresh cadence without duplicating the harness).
+    async fn spawn_with(
+        rng: &mut impl rand::Rng,
+        network: PublicNetwork,
+        configure: impl Fn(DiscoveryService) -> DiscoveryService,
+    ) -> Result<Self> {
         let topic = discovery_topic(network);
 
         // Shared in-memory address book: both endpoints can dial each other
@@ -175,15 +186,22 @@ impl TwoNodeHarness {
         // The startup path from `examples/iced_chat/main.rs`: join the
         // internal discovery topic via DiscoveryService::join. A short
         // announce interval lets the test drive presence exchange without
-        // sleeping through the production 30s throttle.
-        let service_a = DiscoveryService::join(&gossip_a, topic, Vec::new(), pk_a)
-            .await
-            .expect("A joins the internal discovery topic")
-            .with_announce_min_interval(Duration::ZERO);
-        let service_b = DiscoveryService::join(&gossip_b, topic, vec![ep_a.id()], pk_b)
-            .await
-            .expect("B joins the internal discovery topic")
-            .with_announce_min_interval(Duration::ZERO);
+        // sleeping through the production 30s throttle (both the legacy
+        // discovery announcements and the BORU-CP-04 control-plane ones).
+        let service_a = configure(
+            DiscoveryService::join(&gossip_a, topic, Vec::new(), pk_a)
+                .await
+                .expect("A joins the internal discovery topic")
+                .with_announce_min_interval(Duration::ZERO)
+                .with_control_announce_min_interval(Duration::ZERO),
+        );
+        let service_b = configure(
+            DiscoveryService::join(&gossip_b, topic, vec![ep_a.id()], pk_b)
+                .await
+                .expect("B joins the internal discovery topic")
+                .with_announce_min_interval(Duration::ZERO)
+                .with_control_announce_min_interval(Duration::ZERO),
+        );
 
         Ok(Self {
             a: DiscoveryNode {
@@ -257,6 +275,27 @@ async fn wait_for_source(
     bail_any!("timed out waiting for {what} to report source {source:?}")
 }
 
+/// Wait until `service`'s **control-plane** presence store contains `peer`
+/// (BORU-CP-04), returning its in-memory peer-state cache entry.
+async fn wait_for_control_presence(
+    service: &DiscoveryService,
+    peer: PublicKey,
+    what: &str,
+) -> Result<boru_core::control_plane::privacy::PeerControlState> {
+    let deadline = Instant::now() + MESH_TIMEOUT;
+    while Instant::now() < deadline {
+        if let Some((_, state)) = service
+            .control_presence_peers()
+            .into_iter()
+            .find(|(id, _)| *id == peer)
+        {
+            return Ok(state);
+        }
+        tokio::time::sleep(POLL_TICK).await;
+    }
+    bail_any!("timed out waiting for {what} in the control-plane presence store")
+}
+
 /// Assert the no-conversation half of the discovery invariant on one node:
 /// no lobby chat is visible anywhere (store, topic classification).
 fn assert_no_visible_lobby_chat(node: &DiscoveryNode, topic: &TopicId, who: &str) {
@@ -285,22 +324,36 @@ fn assert_no_visible_lobby_chat(node: &DiscoveryNode, topic: &TopicId, who: &str
     );
 }
 
+/// True when `content` is a valid control-plane envelope (magic "BC",
+/// BORU-CP-01 wire format) — the second legitimate wire format on the
+/// discovery topic since BORU-CP-04.
+fn is_control_envelope(content: &[u8]) -> bool {
+    content.starts_with(&boru_core::control_plane::message::CONTROL_PLANE_MAGIC)
+        && matches!(
+            boru_core::control_plane::message::ControlEnvelope::decode(content),
+            Ok(boru_core::control_plane::message::ControlPlaneDecode::Message(_))
+        )
+}
+
 /// Prove the isolation guarantee on the wire: every payload that crossed the
-/// discovery topic decodes as a [`DiscoveryMessage`] and NONE verify as a
-/// chat [`SignedMessage`] payload — i.e. the discovery exchange happened
-/// without any chat message being created or routed through discovery.
+/// discovery topic decodes as a [`DiscoveryMessage`] OR a valid
+/// control-plane envelope (BORU-CP-04 presence announcements), and NONE
+/// verify as a chat [`SignedMessage`] payload.
 fn assert_no_chat_payloads(collected: &[Vec<u8>], who: &str) {
     assert!(
         !collected.is_empty(),
         "{who}: spy must have observed the discovery exchange on the topic"
     );
     for content in collected {
-        let decoded = postcard::from_bytes::<DiscoveryMessage>(content).unwrap_or_else(|error| {
-            panic!("{who}: discovery topic carried a non-discovery payload: {error}")
-        });
+        let is_discovery = postcard::from_bytes::<DiscoveryMessage>(content).is_ok();
+        let is_control = is_control_envelope(content);
+        assert!(
+            is_discovery || is_control,
+            "{who}: discovery topic carried a non-discovery payload"
+        );
         assert!(
             SignedMessage::verify_and_decode(content).is_err(),
-            "{who}: discovery topic carried a chat payload (SignedMessage): {decoded:?}"
+            "{who}: discovery topic carried a chat payload (SignedMessage)"
         );
     }
 }
@@ -435,5 +488,164 @@ async fn two_nodes_advertisement_creates_dial_candidate_without_chat() -> Result
     assert_no_chat_payloads(&spy_b, "B spy");
 
     harness.shutdown().await;
+    Ok(())
+}
+
+// =========================================================================
+// 3. Control-plane presence exchange (BORU-CP-04) — no chat
+// =========================================================================
+
+/// A and B exchange **control-plane** presence announcements (BORU-CP-04,
+/// PDF Task 2.1): A's HELLO/PRESENCE envelope lands in B's in-memory
+/// peer-state cache (`control_presence_peers`) with protocol_version,
+/// app_protocol_version, discovery_seen_at, and derived Active presence —
+/// with no chat open and no chat payload on the wire.
+#[tokio::test]
+async fn two_nodes_exchange_control_presence_without_chat() -> Result<()> {
+    let mut rng = rand::rngs::ChaCha12Rng::seed_from_u64(0xD15C22A3);
+    let harness = TwoNodeHarness::spawn(&mut rng, PublicNetwork::Test).await?;
+
+    wait_for_peer(&harness.a.service, harness.pk_b, "A to learn B").await?;
+    wait_for_peer(&harness.b.service, harness.pk_a, "B to learn A").await?;
+
+    // ── A announces its control-plane presence (HELLO + refresh) ────────
+    assert_eq!(
+        harness.a.service.announce_control_hello().await?,
+        AnnounceOutcome::Announced,
+        "A's control HELLO must broadcast"
+    );
+    assert_eq!(
+        harness.a.service.announce_control_presence().await?,
+        AnnounceOutcome::Announced,
+        "A's control PRESENCE must broadcast"
+    );
+
+    // B's in-memory peer-state cache now has A: identity + protocol
+    // metadata + discovery_seen_at + derived Active presence — no chat.
+    let state_a =
+        wait_for_control_presence(&harness.b.service, harness.pk_a, "B's cache for A").await?;
+    assert_eq!(state_a.peer_id, harness.pk_a);
+    assert_eq!(
+        state_a.protocol_version,
+        boru_core::control_plane::message::CONTROL_PLANE_PROTOCOL_VERSION
+    );
+    assert_eq!(
+        state_a.app_protocol_version,
+        Some(boru_core::control_plane::message::BORU_APP_PROTOCOL_VERSION),
+        "HELLO must carry the peer's application protocol version"
+    );
+    assert!(
+        state_a.discovery_seen_at.elapsed() < Duration::from_secs(30),
+        "discovery_seen_at must be recorded in memory"
+    );
+    assert_eq!(
+        state_a.presence_state(Instant::now()),
+        boru_core::control_plane::privacy::PresenceState::Active,
+        "a recently-heard peer is Active (derived from activity + TTL)"
+    );
+
+    // ── B announces; A's cache gets B ──────────────────────────────────
+    assert_eq!(
+        harness.b.service.announce_control_hello().await?,
+        AnnounceOutcome::Announced,
+        "B's control HELLO must broadcast"
+    );
+    let state_b =
+        wait_for_control_presence(&harness.a.service, harness.pk_b, "A's cache for B").await?;
+    assert_eq!(state_b.peer_id, harness.pk_b);
+    assert_eq!(
+        state_b.protocol_version,
+        boru_core::control_plane::message::CONTROL_PLANE_PROTOCOL_VERSION
+    );
+    assert_eq!(
+        state_b.presence_state(Instant::now()),
+        boru_core::control_plane::privacy::PresenceState::Active
+    );
+
+    // ── No visible lobby chat; no chat payload ever crossed the topic ──
+    assert_no_visible_lobby_chat(&harness.a, &harness.topic, "A");
+    assert_no_visible_lobby_chat(&harness.b, &harness.topic, "B");
+    let spy_a = harness.spy_a.lock().expect("spy lock poisoned").clone();
+    let spy_b = harness.spy_b.lock().expect("spy lock poisoned").clone();
+    assert_no_chat_payloads(&spy_a, "A spy");
+    assert_no_chat_payloads(&spy_b, "B spy");
+
+    harness.shutdown().await;
+    Ok(())
+}
+
+// =========================================================================
+// 4. Presence becomes stale after a peer disappears (BORU-CP-04)
+// =========================================================================
+
+/// A announces control presence; B's cache records A as Active. A then
+/// disappears (its discovery service shuts down — no more announces). After
+/// the TTL, A's presence naturally goes stale and is pruned from B's cache —
+/// "online" was never permanent truth. No chat history was created.
+#[tokio::test]
+async fn control_presence_goes_stale_after_peer_disappears() -> Result<()> {
+    let mut rng = rand::rngs::ChaCha12Rng::seed_from_u64(0xD15C22A4);
+    let mut harness = TwoNodeHarness::spawn_with(&mut rng, PublicNetwork::Test, |service| {
+        service
+            .with_presence_ttl(Duration::from_millis(200))
+            .with_presence_sweep_interval(Duration::from_millis(50))
+    })
+    .await?;
+
+    wait_for_peer(&harness.a.service, harness.pk_b, "A to learn B").await?;
+    wait_for_peer(&harness.b.service, harness.pk_a, "B to learn A").await?;
+
+    // A announces control presence; B records A as Active.
+    assert_eq!(
+        harness.a.service.announce_control_hello().await?,
+        AnnounceOutcome::Announced,
+    );
+    let state_a =
+        wait_for_control_presence(&harness.b.service, harness.pk_a, "B's cache for A").await?;
+    assert_eq!(
+        state_a.presence_state(Instant::now()),
+        boru_core::control_plane::privacy::PresenceState::Active,
+        "A is Active while announcing"
+    );
+
+    // A disappears: its discovery service shuts down, so no further
+    // announcements reach B (the app's normal stop path).
+    harness._spy_task_a.abort();
+    // A's conversation store is still clean (no chat history was ever
+    // created) — assert before shutdown moves the service out of the node.
+    assert_no_visible_lobby_chat(&harness.a, &harness.topic, "A");
+    harness.a.service.shutdown().await;
+
+    // Wait well past the 200 ms TTL: A's presence must go stale and be
+    // pruned from B's control-plane cache — no permanent 'online' state.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut gone = false;
+    while Instant::now() < deadline {
+        if !harness
+            .b
+            .service
+            .control_presence_peers()
+            .iter()
+            .any(|(id, _)| *id == harness.pk_a)
+        {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(POLL_TICK).await;
+    }
+    assert!(
+        gone,
+        "A's presence must expire from B's control-plane cache after the TTL"
+    );
+
+    // None of the presence exchange ever created chat history (A's store
+    // was asserted clean before its service was shut down above).
+    assert_no_visible_lobby_chat(&harness.b, &harness.topic, "B");
+    let spy_b = harness.spy_b.lock().expect("spy lock poisoned").clone();
+    assert_no_chat_payloads(&spy_b, "B spy");
+
+    harness._spy_task_b.abort();
+    harness.b.service.shutdown().await;
     Ok(())
 }

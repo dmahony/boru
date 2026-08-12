@@ -88,6 +88,19 @@ pub const CONTROL_PLANE_PROTOCOL_VERSION: u8 = 1;
 /// any current or planned payload needs while still capping abuse.
 pub const MAX_CONTROL_PAYLOAD_LEN: u32 = 4096;
 
+/// Application-protocol version this client advertises in its HELLO
+/// (BORU-CP-04 / PDF Task 2.1).
+///
+/// Distinct from [`CONTROL_PLANE_PROTOCOL_VERSION`] (the envelope/header
+/// format version) and from the discovery-topic derivation version
+/// ([`BORU_DISCOVERY_PROTOCOL_VERSION`](crate::discovery_topic::BORU_DISCOVERY_PROTOCOL_VERSION)).
+/// Bump it when the *application-level* control-plane semantics change
+/// (new presence semantics, capability negotiation rules); receivers store
+/// it per-peer in [`crate::control_plane::privacy::PeerControlState`] but
+/// never fail the whole client on an unknown value (fail closed per
+/// feature).
+pub const BORU_APP_PROTOCOL_VERSION: u8 = 1;
+
 /// `message_type` enum for the control plane (PDF Task 1.1 step 3).
 ///
 /// Tag values are stable wire constants: `0 = HELLO`, `1 = PRESENCE`,

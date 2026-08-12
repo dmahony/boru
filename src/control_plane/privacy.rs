@@ -376,12 +376,24 @@ impl Default for ControlPlaneRateLimiter {
 /// Metadata only: what the peer advertised and when we last heard from it.
 /// This is a **hint** until the actual private/direct connection succeeds,
 /// and it grants no authorisation.
+///
+/// "Online" is never stored as permanent truth: presence is **derived**
+/// from recent activity + TTL. [`PeerControlState::presence_state`]
+/// computes [`PresenceState::Active`] vs [`PresenceState::Stale`] from
+/// [`last_seen`](Self::last_seen) and [`ttl`](Self::ttl) at read time, and
+/// [`expire_stale`](PeerControlStateStore::expire_stale) removes stale
+/// entries entirely (PDF Task 2.1 step 6).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerControlState {
     /// Stable peer identity (envelope `sender_node_id`).
     pub peer_id: PublicKey,
     /// When this peer was last heard from (drives TTL expiry).
     pub last_seen: Instant,
+    /// When this peer was FIRST seen on the discovery topic (BORU-CP-04 /
+    /// PDF Task 2.1 step 5: `discovery_seen_at`). Set on the first
+    /// advertisement and preserved across refreshes — it is the peer's
+    /// discovery age, not its activity recency.
+    pub discovery_seen_at: Instant,
     /// Highest sequence accepted from this peer (monotonic per sender).
     pub last_sequence: u64,
     /// Control-plane envelope protocol version the peer speaks.
@@ -396,10 +408,34 @@ pub struct PeerControlState {
     pub ttl: Duration,
 }
 
+/// Derived presence state (PDF Task 2.1 step 5: "current reachability
+/// state" stored in memory). Deliberately NOT a persisted field — it is
+/// recomputed from recent activity + TTL so "online" is never permanent
+/// truth. A peer is [`PresenceState::Active`] only while it has been heard
+/// from within its TTL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresenceState {
+    /// The peer has been heard from within its TTL — recently reachable.
+    Active,
+    /// The peer has not been heard from within its TTL — stale/offline.
+    Stale,
+}
+
 impl PeerControlState {
     /// Whether this peer's presence is stale at `now` (beyond its TTL).
     pub fn is_stale(&self, now: Instant) -> bool {
         now.duration_since(self.last_seen) >= self.ttl
+    }
+
+    /// The derived presence state at `now` — active while within TTL, stale
+    /// after. Never stored, always derived from recent activity (PDF Task
+    /// 2.1 step 6).
+    pub fn presence_state(&self, now: Instant) -> PresenceState {
+        if self.is_stale(now) {
+            PresenceState::Stale
+        } else {
+            PresenceState::Active
+        }
     }
 }
 
@@ -524,6 +560,7 @@ impl PeerControlStateStore {
             PeerControlState {
                 peer_id,
                 last_seen: now,
+                discovery_seen_at: now,
                 last_sequence: envelope.sequence,
                 protocol_version: envelope.protocol_version,
                 app_protocol_version,
@@ -954,6 +991,59 @@ mod tests {
         );
         // A lower sequence never regresses state.
         assert_eq!(store.get(&peer).unwrap().last_sequence, 2);
+    }
+
+    #[test]
+    fn presence_store_tracks_discovery_seen_at_across_refresh() {
+        let mut store = PeerControlStateStore::with_limits(16, Duration::from_secs(300));
+        let peer = key(0x0A);
+        let t0 = Instant::now();
+
+        // First sighting stamps discovery_seen_at.
+        assert_eq!(store.record(&hello(peer, 1), t0), StoreOutcome::New);
+        let state = store.get(&peer).unwrap();
+        assert_eq!(state.discovery_seen_at, t0);
+        assert_eq!(state.last_seen, t0);
+
+        // A refresh moves last_seen but preserves the original discovery
+        // time (discovery age is not activity recency).
+        store.record(&presence(peer, 2, None), t0 + Duration::from_secs(30));
+        let state = store.get(&peer).unwrap();
+        assert_eq!(
+            state.discovery_seen_at, t0,
+            "discovery_seen_at must be preserved"
+        );
+        assert_eq!(state.last_seen, t0 + Duration::from_secs(30));
+
+        // A duplicate/older delivery changes nothing.
+        store.record(&hello(peer, 1), t0 + Duration::from_secs(60));
+        let state = store.get(&peer).unwrap();
+        assert_eq!(state.discovery_seen_at, t0);
+        assert_eq!(state.last_seen, t0 + Duration::from_secs(30));
+    }
+
+    #[test]
+    fn presence_state_is_derived_from_activity_and_ttl_never_stored() {
+        let mut store = PeerControlStateStore::with_limits(16, Duration::from_secs(10));
+        let peer = key(0x0A);
+        let t0 = Instant::now();
+        store.record(&hello(peer, 1), t0);
+
+        // Within TTL → Active; after TTL → Stale — always computed, never
+        // persisted as a permanent 'online' flag.
+        let state = store.get(&peer).unwrap();
+        assert_eq!(
+            state.presence_state(t0 + Duration::from_secs(5)),
+            PresenceState::Active
+        );
+        assert_eq!(
+            state.presence_state(t0 + Duration::from_secs(11)),
+            PresenceState::Stale
+        );
+        assert_eq!(
+            state.presence_state(t0 + Duration::from_secs(11)),
+            state.presence_state(t0 + Duration::from_secs(50))
+        );
     }
 
     #[test]

@@ -397,12 +397,23 @@ fn assert_discovery_only(samples: &[WireSample], expected_topic: &TopicId, who: 
             &sample.topic, expected_topic,
             "{who}: discovery payload arrived on the wrong topic: {sample:?}"
         );
-        let decoded = postcard::from_bytes::<DiscoveryMessage>(&sample.content).unwrap_or_else(
-            |error| panic!("{who}: discovery topic carried a non-discovery payload: {error}"),
+        let is_discovery = postcard::from_bytes::<DiscoveryMessage>(&sample.content).is_ok();
+        // BORU-CP-04: control-plane presence envelopes (magic "BC") are the
+        // second legitimate wire format on the discovery topic.
+        let is_control = sample
+            .content
+            .starts_with(&boru_core::control_plane::message::CONTROL_PLANE_MAGIC)
+            && matches!(
+                boru_core::control_plane::message::ControlEnvelope::decode(&sample.content),
+                Ok(boru_core::control_plane::message::ControlPlaneDecode::Message(_))
+            );
+        assert!(
+            is_discovery || is_control,
+            "{who}: discovery topic carried a non-discovery payload"
         );
         assert!(
             SignedMessage::verify_and_decode(&sample.content).is_err(),
-            "{who}: discovery topic carried a chat payload (SignedMessage): {decoded:?}"
+            "{who}: discovery topic carried a chat payload (SignedMessage)"
         );
     }
 }

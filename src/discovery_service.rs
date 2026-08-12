@@ -137,7 +137,7 @@ use tracing::{debug, info, trace, warn};
 
 use crate::api::{ApiError, Event, GossipReceiver, GossipSender, Message as GossipMessage};
 use crate::control_plane::message::{
-    ControlEnvelope, ControlPlaneDecode, CONTROL_PLANE_MAGIC,
+    ControlEnvelope, ControlPlaneDecode, CONTROL_PLANE_MAGIC, BORU_APP_PROTOCOL_VERSION,
 };
 use crate::control_plane::privacy::{
     AdvertViolation, ControlPlaneGuard, GuardRejectReason, GuardVerdict, DEFAULT_PRESENCE_TTL,
@@ -155,6 +155,24 @@ const PEER_UPDATES_CAPACITY: usize = 256;
 /// join hello plus neighbour-up re-announcements cannot become an aggressive
 /// broadcast loop on the discovery topic.
 pub const DEFAULT_ANNOUNCE_MIN_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Default minimum interval between **control-plane** announcements
+/// (HELLO / PRESENCE envelopes, BORU-CP-04). A separate throttle instance
+/// from the legacy discovery announcements so the control-plane presence
+/// refresh cannot be starved by legacy neighbour-up hellos (and vice
+/// versa).
+pub const DEFAULT_CONTROL_ANNOUNCE_MIN_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Default base interval between control-plane PRESENCE refresh
+/// announcements (BORU-CP-04 / PDF Task 2.1 step 3). Deliberately low
+/// frequency and comfortably under [`DEFAULT_PRESENCE_TTL`] so a peer's
+/// presence never goes stale between refreshes.
+pub const DEFAULT_PRESENCE_REFRESH_INTERVAL: Duration = Duration::from_secs(120);
+
+/// Default jitter added to each presence-refresh sleep. Randomising the
+/// per-cycle delay desynchronises nodes so they do not announce in
+/// synchronised bursts (PDF Task 2.1 step 3).
+pub const DEFAULT_PRESENCE_REFRESH_JITTER: Duration = Duration::from_secs(60);
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -624,6 +642,102 @@ impl AnnounceHandle {
     }
 }
 
+/// Shared control-plane announcement state (BORU-CP-04): the gossip sender,
+/// the local node identity, a per-sender monotonic sequence counter
+/// (BORU-CP-01 dedup key), and a throttle for control-plane announcements.
+///
+/// Separate from the legacy [`AnnounceHandle`]: control-plane HELLO /
+/// PRESENCE envelopes (magic `BC`) are a different wire format with their
+/// own sequence namespace, and their refresh cadence must not be starved
+/// by legacy neighbour-up hellos (or vice versa).
+#[derive(Clone, Debug)]
+struct ControlAnnounceHandle {
+    sender: GossipSender,
+    local_node: PublicKey,
+    sequence: Arc<AtomicU64>,
+    throttle: Arc<AnnounceThrottle>,
+}
+
+impl ControlAnnounceHandle {
+    fn new(sender: GossipSender, local_node: PublicKey) -> Self {
+        Self {
+            sender,
+            local_node,
+            sequence: Arc::new(AtomicU64::new(0)),
+            throttle: Arc::new(AnnounceThrottle::with_min_interval(
+                DEFAULT_CONTROL_ANNOUNCE_MIN_INTERVAL,
+            )),
+        }
+    }
+
+    /// Allocate the next per-sender control-plane sequence (monotonic,
+    /// starts at 0). Receivers dedup by `(sender_node_id, sequence)`.
+    fn next_sequence(&self) -> u64 {
+        self.sequence.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Throttled announce of an arbitrary control-plane envelope.
+    ///
+    /// The sequence is allocated ONLY when the announcement passes the
+    /// throttle — a suppressed announcement does not consume a sequence, so
+    /// the sequence space tracks actually-broadcast envelopes.
+    async fn announce<F>(&self, build: F) -> Result<AnnounceOutcome, DiscoveryServiceError>
+    where
+        F: FnOnce(u64) -> ControlEnvelope,
+    {
+        if !self.throttle.try_announce() {
+            debug!("discovery: control announcement throttled");
+            return Ok(AnnounceOutcome::Throttled);
+        }
+        let sequence = self.next_sequence();
+        let bytes = build(sequence).encode();
+        self.sender
+            .broadcast(Bytes::from(bytes))
+            .await
+            .map_err(|source| e!(DiscoveryServiceError::Api { source }))?;
+        Ok(AnnounceOutcome::Announced)
+    }
+
+    /// Announce this node with a control-plane HELLO: the stable peer
+    /// identity (envelope `sender_node_id`) plus the minimum protocol
+    /// metadata ([`BORU_APP_PROTOCOL_VERSION`]) — PDF Task 2.1 step 1.
+    async fn announce_hello(&self) -> Result<AnnounceOutcome, DiscoveryServiceError> {
+        self.announce(|sequence| {
+            ControlEnvelope::hello(
+                self.local_node,
+                sequence,
+                unix_now_secs(),
+                BORU_APP_PROTOCOL_VERSION,
+            )
+        })
+        .await
+    }
+
+    /// Announce a control-plane PRESENCE heartbeat suggesting our own
+    /// default presence TTL (receivers clamp it to their own default —
+    /// BORU-CP-03).
+    async fn announce_presence(&self) -> Result<AnnounceOutcome, DiscoveryServiceError> {
+        self.announce(|sequence| {
+            ControlEnvelope::presence(
+                self.local_node,
+                sequence,
+                unix_now_secs(),
+                Some(DEFAULT_PRESENCE_TTL.as_secs() as u32),
+            )
+        })
+        .await
+    }
+}
+
+/// Current unix epoch seconds; `0` (unknown) on clock failure, which the
+/// envelope treats as "timestamp unknown".
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 // ---------------------------------------------------------------------------
 // Receive core (pure, offline-testable)
 // ---------------------------------------------------------------------------
@@ -925,6 +1039,9 @@ pub struct DiscoveryService {
     /// Announcement handle: gossip sender + throttle + local identity. The
     /// sender half keeps the discovery topic joined for the service lifetime.
     announce: AnnounceHandle,
+    /// Control-plane announcement handle (BORU-CP-04): HELLO / PRESENCE
+    /// envelopes with their own sequence counter and throttle.
+    control_announce: ControlAnnounceHandle,
     /// Receive-path core (registry + update channel + dispatch logic).
     core: ReceiveCore,
     /// Cancellation token shared with the drain and connectivity tasks.
@@ -937,9 +1054,16 @@ pub struct DiscoveryService {
     /// Join handle of the presence-expiry sweep task (BORU-CP-03): removes
     /// peers not heard from within the configured presence TTL.
     expiry_task: JoinHandle<()>,
+    /// Join handle of the control-plane presence-refresh task (BORU-CP-04):
+    /// low-frequency PRESENCE announcements with jitter.
+    refresh_task: JoinHandle<()>,
     /// Shared presence-expiry configuration (TTL + sweep interval) so the
     /// builder can tune it after construction and the sweep observes it.
     expiry_config: Arc<Mutex<PresenceExpiryConfig>>,
+    /// Shared control-plane presence-refresh configuration (base interval +
+    /// jitter) so the builder can tune it after construction and the
+    /// refresh loop observes it.
+    refresh_config: Arc<Mutex<PresenceRefreshConfig>>,
 }
 
 impl DiscoveryService {
@@ -954,8 +1078,13 @@ impl DiscoveryService {
     /// published so existing nodes on the discovery topic learn about this
     /// node (the join-time announcement; see the module-level
     /// [announcement policy](self#announcement-policy-boru-disc-09)). A
-    /// failed announcement is non-fatal: the receive path still works and
-    /// the drain loop re-announces on neighbour-up.
+    /// **control-plane HELLO** (BORU-CP-04, PDF Task 2.1 step 2) is
+    /// published right after — the formal presence announcement carrying
+    /// the stable peer identity + minimum protocol metadata, so peers'
+    /// [`PeerControlStateStore`](crate::control_plane::privacy::PeerControlStateStore)
+    /// learns this node without any chat message. A failed announcement is
+    /// non-fatal: the receive path still works and the drain loop
+    /// re-announces on neighbour-up.
     pub async fn join(
         gossip: &crate::net::Gossip,
         topic: TopicId,
@@ -977,6 +1106,24 @@ impl DiscoveryService {
                     topic = %topic,
                     error = %error,
                     "discovery hello on join failed; continuing without it",
+                );
+            }
+        }
+        // BORU-CP-04: one control-plane HELLO shortly after the discovery
+        // subscription becomes ready (PDF Task 2.1 step 2). Separate
+        // throttle from the legacy hello, so both announcements pass.
+        match service.announce_control_hello().await {
+            Ok(AnnounceOutcome::Announced) => {
+                info!(topic = %topic, "discovery control hello announced on join");
+            }
+            Ok(AnnounceOutcome::Throttled) => {
+                debug!(topic = %topic, "discovery control hello suppressed on join");
+            }
+            Err(error) => {
+                warn!(
+                    topic = %topic,
+                    error = %error,
+                    "discovery control hello on join failed; continuing without it",
                 );
             }
         }
@@ -1065,7 +1212,8 @@ impl DiscoveryService {
             guard,
             counters,
         };
-        let announce = AnnounceHandle::new(sender, local_node);
+        let announce = AnnounceHandle::new(sender.clone(), local_node);
+        let control_announce = ControlAnnounceHandle::new(sender, local_node);
         let cancel = CancellationToken::new();
         let task_core = core.clone();
         let task_announce = announce.clone();
@@ -1098,16 +1246,33 @@ impl DiscoveryService {
             core.peer_updates_tx.clone(),
             expiry_cancel,
         ));
+        // BORU-CP-04: control-plane presence refresh — low-frequency
+        // PRESENCE announcements with jitter so presence stays fresh without
+        // synchronised bursts. The join-time HELLO already covers the
+        // immediate announcement; this loop keeps it alive while running.
+        let refresh_config = Arc::new(Mutex::new(PresenceRefreshConfig {
+            interval: DEFAULT_PRESENCE_REFRESH_INTERVAL,
+            jitter: DEFAULT_PRESENCE_REFRESH_JITTER,
+        }));
+        let refresh_cancel = cancel.clone();
+        let refresh_task = tokio::spawn(presence_refresh_loop(
+            control_announce.clone(),
+            refresh_config.clone(),
+            refresh_cancel,
+        ));
         info!(topic = %topic, "discovery service joined");
         Self {
             topic,
             announce,
+            control_announce,
             core,
             cancel,
             task,
             connectivity_task,
             expiry_task,
+            refresh_task,
             expiry_config,
+            refresh_config,
         }
     }
 
@@ -1141,6 +1306,70 @@ impl DiscoveryService {
     /// [`announce_hello`](Self::announce_hello).
     pub async fn announce_presence(&self) -> Result<AnnounceOutcome, DiscoveryServiceError> {
         self.announce.announce_presence().await
+    }
+
+    /// Announce this node with a **control-plane HELLO** (BORU-CP-04).
+    ///
+    /// Broadcasts a [`ControlEnvelope`] HELLO carrying the stable peer
+    /// identity (`sender_node_id`) plus the minimum protocol metadata
+    /// ([`BORU_APP_PROTOCOL_VERSION`]) — the formal presence announcement
+    /// from PDF Task 2.1 step 1. Peers record it in their
+    /// [`PeerControlStateStore`](crate::control_plane::privacy::PeerControlStateStore);
+    /// no chat message is created and nothing touches chat history.
+    ///
+    /// Throttled by the control-plane announce throttle
+    /// ([`DEFAULT_CONTROL_ANNOUNCE_MIN_INTERVAL`]); the join-time
+    /// announcement always passes.
+    pub async fn announce_control_hello(&self) -> Result<AnnounceOutcome, DiscoveryServiceError> {
+        self.control_announce.announce_hello().await
+    }
+
+    /// Announce a periodic **control-plane PRESENCE** heartbeat (BORU-CP-04,
+    /// PDF Task 2.1 step 3) — the refresh announcement that keeps this
+    /// node's presence alive while it is running. Throttled like
+    /// [`announce_control_hello`](Self::announce_control_hello).
+    pub async fn announce_control_presence(&self) -> Result<AnnounceOutcome, DiscoveryServiceError> {
+        self.control_announce.announce_presence().await
+    }
+
+    /// Override the minimum interval between **control-plane**
+    /// announcements (BORU-CP-04).
+    ///
+    /// Defaults to [`DEFAULT_CONTROL_ANNOUNCE_MIN_INTERVAL`]. Tests use
+    /// short intervals to exercise the control-plane throttle without
+    /// sleeping.
+    pub fn with_control_announce_min_interval(self, min_interval: Duration) -> Self {
+        self.control_announce
+            .throttle
+            .set_min_interval(min_interval);
+        self
+    }
+
+    /// Override the control-plane presence-refresh base interval
+    /// (BORU-CP-04).
+    ///
+    /// Defaults to [`DEFAULT_PRESENCE_REFRESH_INTERVAL`]. Tests use short
+    /// intervals to exercise the refresh loop without sleeping.
+    pub fn with_presence_refresh_interval(self, interval: Duration) -> Self {
+        self.refresh_config
+            .lock()
+            .expect("refresh config lock poisoned")
+            .interval = interval;
+        self
+    }
+
+    /// Override the control-plane presence-refresh jitter (BORU-CP-04).
+    ///
+    /// Defaults to [`DEFAULT_PRESENCE_REFRESH_JITTER`]. Each refresh sleep
+    /// is `interval + random(0..=jitter)` so nodes desynchronise (PDF Task
+    /// 2.1 step 3: avoid synchronised bursts). Tests use `Duration::ZERO`
+    /// for deterministic timing.
+    pub fn with_presence_refresh_jitter(self, jitter: Duration) -> Self {
+        self.refresh_config
+            .lock()
+            .expect("refresh config lock poisoned")
+            .jitter = jitter;
+        self
     }
 
     /// Override the minimum interval between announcements.
@@ -1289,13 +1518,14 @@ impl DiscoveryService {
         }
     }
 
-    /// Shut down the service: cancel the drain, connectivity, and expiry
-    /// tasks and await them.
+    /// Shut down the service: cancel the drain, connectivity, expiry, and
+    /// presence-refresh tasks and await them.
     pub async fn shutdown(self) {
         self.cancel.cancel();
         let _ = self.task.await;
         let _ = self.connectivity_task.await;
         let _ = self.expiry_task.await;
+        let _ = self.refresh_task.await;
         info!(topic = %self.topic, "discovery service shut down");
     }
 }
@@ -1565,6 +1795,92 @@ async fn presence_expiry_loop(
         }
     }
     debug!("discovery presence expiry loop exited");
+}
+
+// ---------------------------------------------------------------------------
+// Control-plane presence refresh (BORU-CP-04)
+// ---------------------------------------------------------------------------
+
+/// Runtime-tunable control-plane presence-refresh configuration shared
+/// between the [`DiscoveryService`] builders and the refresh task.
+#[derive(Debug, Clone, Copy)]
+struct PresenceRefreshConfig {
+    /// Base delay between PRESENCE refresh announcements.
+    interval: Duration,
+    /// Jitter added to each sleep: `sleep(interval + random(0..=jitter))`.
+    jitter: Duration,
+}
+
+/// Background task that keeps this node's control-plane presence alive
+/// (BORU-CP-04, PDF Task 2.1 step 3).
+///
+/// Every `interval + random(0..=jitter)` it broadcasts one control-plane
+/// PRESENCE envelope (magic `BC`), so peers refresh this node's entry in
+/// their [`PeerControlStateStore`](crate::control_plane::privacy::PeerControlStateStore).
+/// The join-time HELLO covers the immediate announcement; this loop is the
+/// low-frequency refresh "while running".
+///
+/// The per-cycle jitter desynchronises nodes so a fleet of clients does not
+/// announce in synchronised bursts. The interval is deliberately well under
+/// [`DEFAULT_PRESENCE_TTL`] so a peer's presence never goes stale between
+/// refreshes. The announcement still passes the control-plane announce
+/// throttle, so an explicit announce right before a tick suppresses that
+/// tick (idempotence — no duplicate bursts).
+///
+/// The configured interval/jitter are re-read every cycle so builder tuning
+/// (e.g. short intervals in tests) takes effect immediately. Logs state
+/// transitions only, never message contents.
+async fn presence_refresh_loop(
+    control_announce: ControlAnnounceHandle,
+    config: Arc<Mutex<PresenceRefreshConfig>>,
+    cancel: CancellationToken,
+) {
+    loop {
+        let (interval, jitter) = {
+            let cfg = config.lock().expect("refresh config lock poisoned");
+            (cfg.interval, cfg.jitter)
+        };
+        let delay = interval + random_jitter(jitter);
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                debug!("discovery presence refresh loop cancelled");
+                break;
+            }
+            _ = tokio::time::sleep(delay) => {
+                match control_announce.announce_presence().await {
+                    Ok(AnnounceOutcome::Announced) => {
+                        info!(
+                            interval_secs = interval.as_secs(),
+                            jitter_secs = jitter.as_secs(),
+                            "control: presence refresh announced",
+                        );
+                    }
+                    Ok(AnnounceOutcome::Throttled) => {
+                        trace!("control: presence refresh suppressed by throttle");
+                    }
+                    Err(error) => {
+                        warn!(
+                            error = %error,
+                            "control: presence refresh failed; continuing",
+                        );
+                    }
+                }
+            }
+        }
+    }
+    debug!("discovery presence refresh loop exited");
+}
+
+/// Random delay in `0..=jitter` (0 when `jitter` is zero, so tests get
+/// deterministic timing). `rand::random` is cryptographically seeded; the
+/// distribution shape does not matter here, only that nodes desynchronise.
+fn random_jitter(jitter: Duration) -> Duration {
+    if jitter.is_zero() {
+        return Duration::ZERO;
+    }
+    let millis = jitter.as_millis().max(1) as u64;
+    Duration::from_millis(rand::random::<u64>() % millis)
 }
 
 // ---------------------------------------------------------------------------
@@ -2510,6 +2826,338 @@ mod tests {
         assert_eq!(
             AnnounceThrottle::new().min_interval(),
             DEFAULT_ANNOUNCE_MIN_INTERVAL
+        );
+    }
+
+    // ── control-plane announce (BORU-CP-04) ──────────────────────────
+
+    /// `announce_control_hello` broadcasts a control-plane HELLO envelope
+    /// (magic "BC") carrying the stable peer identity + minimum protocol
+    /// metadata — never a chat message and never a legacy DiscoveryMessage.
+    #[tokio::test]
+    async fn announce_control_hello_broadcasts_control_envelope() {
+        let local = test_key(0xAA);
+        let (cmd_tx, mut cmd_rx) = irpc_mpsc::channel::<Command>(64);
+        let (_ev_tx, ev_rx) = irpc_mpsc::channel::<Event>(64);
+        let sender = GossipSender::new(cmd_tx);
+        let receiver = GossipReceiver::new(ev_rx);
+        let service = DiscoveryService::from_subscription(test_topic(), sender, receiver, local);
+
+        assert_eq!(
+            service.announce_control_hello().await.unwrap(),
+            AnnounceOutcome::Announced
+        );
+
+        let command = tokio::time::timeout(Duration::from_secs(5), cmd_rx.recv())
+            .await
+            .expect("timed out waiting for control hello broadcast")
+            .expect("channel receive failed")
+            .expect("channel closed before broadcast");
+        let Command::Broadcast(bytes) = command else {
+            panic!("expected Broadcast command, got {command:?}");
+        };
+        assert!(bytes.starts_with(&CONTROL_PLANE_MAGIC));
+        match ControlEnvelope::decode(&bytes).expect("control envelope decodes") {
+            ControlPlaneDecode::Message(env) => {
+                assert_eq!(env.sender_node_id, local);
+                assert_eq!(
+                    env.message_type,
+                    crate::control_plane::message::ControlMessageType::Hello
+                );
+                assert_eq!(env.sequence, 0, "first control announcement carries sequence 0");
+                assert_eq!(
+                    env.protocol_version,
+                    crate::control_plane::message::CONTROL_PLANE_PROTOCOL_VERSION
+                );
+                assert_eq!(
+                    env.payload,
+                    crate::control_plane::message::ControlPayload::Hello(
+                        crate::control_plane::message::HelloPayload {
+                            app_protocol_version: BORU_APP_PROTOCOL_VERSION,
+                        }
+                    )
+                );
+                assert!(env.timestamp_secs > 0, "announcements carry a real timestamp");
+            }
+            other => panic!("expected decoded envelope, got {other:?}"),
+        }
+        assert!(
+            postcard::from_bytes::<DiscoveryMessage>(&bytes).is_err(),
+            "a control envelope must never decode as a legacy DiscoveryMessage"
+        );
+    }
+
+    /// `announce_control_presence` broadcasts a control-plane PRESENCE
+    /// envelope suggesting our default presence TTL.
+    #[tokio::test]
+    async fn announce_control_presence_broadcasts_control_envelope() {
+        let local = test_key(0xAA);
+        let (cmd_tx, mut cmd_rx) = irpc_mpsc::channel::<Command>(64);
+        let (_ev_tx, ev_rx) = irpc_mpsc::channel::<Event>(64);
+        let sender = GossipSender::new(cmd_tx);
+        let receiver = GossipReceiver::new(ev_rx);
+        let service = DiscoveryService::from_subscription(test_topic(), sender, receiver, local);
+
+        assert_eq!(
+            service.announce_control_presence().await.unwrap(),
+            AnnounceOutcome::Announced
+        );
+
+        let command = tokio::time::timeout(Duration::from_secs(5), cmd_rx.recv())
+            .await
+            .expect("timed out waiting for control presence broadcast")
+            .expect("channel receive failed")
+            .expect("channel closed before broadcast");
+        let Command::Broadcast(bytes) = command else {
+            panic!("expected Broadcast command, got {command:?}");
+        };
+        match ControlEnvelope::decode(&bytes).expect("control envelope decodes") {
+            ControlPlaneDecode::Message(env) => {
+                assert_eq!(
+                    env.message_type,
+                    crate::control_plane::message::ControlMessageType::Presence
+                );
+                assert_eq!(
+                    env.payload,
+                    crate::control_plane::message::ControlPayload::Presence(
+                        crate::control_plane::message::PresencePayload {
+                            ttl_secs: Some(DEFAULT_PRESENCE_TTL.as_secs() as u32),
+                        }
+                    )
+                );
+            }
+            other => panic!("expected decoded envelope, got {other:?}"),
+        }
+    }
+
+    /// Control-plane sequences are per-sender monotonic: HELLO then
+    /// PRESENCE carry 0, 1 — receivers dedup on this.
+    #[tokio::test]
+    async fn control_announce_sequences_are_monotonic() {
+        let local = test_key(0xAA);
+        let (cmd_tx, mut cmd_rx) = irpc_mpsc::channel::<Command>(64);
+        let (_ev_tx, ev_rx) = irpc_mpsc::channel::<Event>(64);
+        let sender = GossipSender::new(cmd_tx);
+        let receiver = GossipReceiver::new(ev_rx);
+        let service = DiscoveryService::from_subscription(test_topic(), sender, receiver, local)
+            .with_control_announce_min_interval(Duration::ZERO);
+
+        assert_eq!(
+            service.announce_control_hello().await.unwrap(),
+            AnnounceOutcome::Announced
+        );
+        assert_eq!(
+            service.announce_control_presence().await.unwrap(),
+            AnnounceOutcome::Announced
+        );
+
+        let first = next_command(&mut cmd_rx).await;
+        let Command::Broadcast(first_bytes) = first else {
+            panic!("expected Broadcast, got {first:?}");
+        };
+        let second = next_command(&mut cmd_rx).await;
+        let Command::Broadcast(second_bytes) = second else {
+            panic!("expected Broadcast, got {second:?}");
+        };
+        let (ControlPlaneDecode::Message(e1), ControlPlaneDecode::Message(e2)) = (
+            ControlEnvelope::decode(&first_bytes).unwrap(),
+            ControlEnvelope::decode(&second_bytes).unwrap(),
+        ) else {
+            panic!("both broadcasts must be control envelopes");
+        };
+        assert_eq!(e1.sequence, 0);
+        assert_eq!(e2.sequence, 1, "control sequences must be strictly monotonic");
+        assert_eq!(e2.sender_node_id, local);
+    }
+
+    /// The control-plane announce throttle suppresses a rapid repeat — one
+    /// broadcast, one throttled outcome, no sequence consumed.
+    #[tokio::test]
+    async fn announce_control_throttle_suppresses_rapid_repeat() {
+        let local = test_key(0xAA);
+        let (cmd_tx, mut cmd_rx) = irpc_mpsc::channel::<Command>(64);
+        let (_ev_tx, ev_rx) = irpc_mpsc::channel::<Event>(64);
+        let sender = GossipSender::new(cmd_tx);
+        let receiver = GossipReceiver::new(ev_rx);
+        let service = DiscoveryService::from_subscription(test_topic(), sender, receiver, local)
+            .with_control_announce_min_interval(Duration::from_millis(60));
+
+        assert_eq!(
+            service.announce_control_hello().await.unwrap(),
+            AnnounceOutcome::Announced
+        );
+        assert_eq!(
+            service.announce_control_hello().await.unwrap(),
+            AnnounceOutcome::Throttled
+        );
+
+        let command = tokio::time::timeout(Duration::from_secs(5), cmd_rx.recv())
+            .await
+            .expect("timed out waiting for control hello")
+            .expect("channel receive failed")
+            .expect("channel closed before broadcast");
+        let Command::Broadcast(bytes) = command else {
+            panic!("expected Broadcast command, got {command:?}");
+        };
+        assert!(bytes.starts_with(&CONTROL_PLANE_MAGIC));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(40), cmd_rx.recv())
+                .await
+                .is_err(),
+            "throttled control announcement must not broadcast"
+        );
+
+        // The throttle is separate from the legacy announce throttle — a
+        // legacy hello right after is NOT suppressed by it.
+        assert_eq!(
+            service.announce_hello().await.unwrap(),
+            AnnounceOutcome::Announced,
+            "legacy and control announce throttles must be independent"
+        );
+    }
+
+    /// The presence-refresh loop broadcasts a control-plane PRESENCE every
+    /// `interval` (jitter zero in tests), keeping presence alive while
+    /// running.
+    #[tokio::test]
+    async fn presence_refresh_loop_publishes_periodic_control_presence() {
+        let local = test_key(0xAA);
+        let (cmd_tx, mut cmd_rx) = irpc_mpsc::channel::<Command>(64);
+        let (_ev_tx, ev_rx) = irpc_mpsc::channel::<Event>(64);
+        let sender = GossipSender::new(cmd_tx);
+        let receiver = GossipReceiver::new(ev_rx);
+        let service = DiscoveryService::from_subscription(test_topic(), sender, receiver, local)
+            .with_presence_refresh_interval(Duration::from_millis(40))
+            .with_presence_refresh_jitter(Duration::ZERO)
+            .with_control_announce_min_interval(Duration::ZERO);
+
+        // The first refresh tick fires after ~40 ms and announces PRESENCE.
+        let command = tokio::time::timeout(Duration::from_secs(2), cmd_rx.recv())
+            .await
+            .expect("timed out waiting for presence refresh")
+            .expect("channel receive failed")
+            .expect("channel closed before broadcast");
+        let Command::Broadcast(bytes) = command else {
+            panic!("expected Broadcast command, got {command:?}");
+        };
+        match ControlEnvelope::decode(&bytes).expect("control envelope decodes") {
+            ControlPlaneDecode::Message(env) => {
+                assert_eq!(env.sender_node_id, local);
+                assert_eq!(
+                    env.message_type,
+                    crate::control_plane::message::ControlMessageType::Presence,
+                    "the refresh loop must announce PRESENCE, not a chat message"
+                );
+            }
+            other => panic!("expected decoded envelope, got {other:?}"),
+        }
+
+        service.shutdown().await;
+    }
+
+    /// Shutting the service down stops the presence-refresh loop: no more
+    /// broadcasts after `shutdown` returns.
+    #[tokio::test]
+    async fn presence_refresh_loop_stops_on_shutdown() {
+        let local = test_key(0xAA);
+        let (cmd_tx, mut cmd_rx) = irpc_mpsc::channel::<Command>(64);
+        let (_ev_tx, ev_rx) = irpc_mpsc::channel::<Event>(64);
+        let sender = GossipSender::new(cmd_tx);
+        let receiver = GossipReceiver::new(ev_rx);
+        let service = DiscoveryService::from_subscription(test_topic(), sender, receiver, local)
+            .with_presence_refresh_interval(Duration::from_millis(30))
+            .with_presence_refresh_jitter(Duration::ZERO)
+            .with_control_announce_min_interval(Duration::ZERO);
+
+        // Consume the first tick, then stop the service.
+        let _ = tokio::time::timeout(Duration::from_secs(2), cmd_rx.recv())
+            .await
+            .expect("timed out waiting for first presence refresh")
+            .expect("channel receive failed")
+            .expect("channel closed before broadcast");
+        service.shutdown().await;
+
+        // After shutdown the loop is cancelled AND the service's gossip
+        // sender is dropped, so recv() either times out (Err) or observes
+        // the closed channel (Ok(None)) — either way, no broadcast.
+        let result = tokio::time::timeout(Duration::from_millis(120), cmd_rx.recv()).await;
+        assert!(
+            !matches!(result, Ok(Ok(Some(_)))),
+            "no presence refresh may be broadcast after shutdown"
+        );
+    }
+
+    /// Our own control-plane announcement echo is ignored by the receive
+    /// path — we never record ourselves in the presence store.
+    #[tokio::test]
+    async fn control_announce_own_echo_is_ignored() {
+        let local = test_key(0xAA);
+        let (cmd_tx, mut cmd_rx) = irpc_mpsc::channel::<Command>(64);
+        let (_ev_tx, ev_rx) = irpc_mpsc::channel::<Event>(64);
+        let sender = GossipSender::new(cmd_tx);
+        let receiver = GossipReceiver::new(ev_rx);
+        let service = DiscoveryService::from_subscription(test_topic(), sender, receiver, local);
+
+        assert_eq!(
+            service.announce_control_hello().await.unwrap(),
+            AnnounceOutcome::Announced
+        );
+        let command = tokio::time::timeout(Duration::from_secs(5), cmd_rx.recv())
+            .await
+            .expect("timed out waiting for control hello")
+            .expect("channel receive failed")
+            .expect("channel closed before broadcast");
+        let Command::Broadcast(bytes) = command else {
+            panic!("expected Broadcast command, got {command:?}");
+        };
+
+        // The gossip mesh echoes our own broadcast back; the receive path
+        // must ignore it so we never register ourselves.
+        assert_eq!(
+            service.handle_incoming(&bytes, local),
+            IncomingOutcome::SelfMessage
+        );
+        assert_eq!(service.control_presence_count(), 0);
+        assert_eq!(service.peer_count(), 0);
+    }
+
+    /// A received control-plane HELLO records discovery_seen_at,
+    /// protocol_version, and app_protocol_version in the in-memory
+    /// peer-state cache (PDF Task 2.1 step 5), and presence is derived from
+    /// activity (Active now, Stale past the TTL) — never persisted.
+    #[tokio::test]
+    async fn handle_incoming_control_hello_sets_discovery_seen_at_and_protocol() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let service = test_service(local);
+
+        assert_eq!(
+            service.handle_incoming(&control_hello(peer, 1), peer),
+            IncomingOutcome::ControlMessage
+        );
+        let (node, state) = service.control_presence_peers().pop().unwrap();
+        assert_eq!(node, peer);
+        assert_eq!(
+            state.protocol_version,
+            crate::control_plane::message::CONTROL_PLANE_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            state.app_protocol_version,
+            Some(BORU_APP_PROTOCOL_VERSION),
+            "HELLO must record the peer's application protocol version"
+        );
+        assert!(
+            state.discovery_seen_at <= state.last_seen,
+            "discovery_seen_at is the first sighting and never later than last_seen"
+        );
+        assert_eq!(
+            state.presence_state(Instant::now()),
+            crate::control_plane::privacy::PresenceState::Active,
+            "a freshly seen peer is Active"
+        );
+        assert!(
+            state.discovery_seen_at.elapsed() < Duration::from_secs(5),
+            "discovery_seen_at must be the moment the announcement was accepted"
         );
     }
 
