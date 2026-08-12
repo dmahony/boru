@@ -15,11 +15,16 @@
 //! * [`message`] — the versioned, typed control-plane message envelope
 //!   ([`ControlEnvelope`](message::ControlEnvelope)) plus its strict
 //!   forward-compatible wire decoder.
+//! * [`privacy`] — the BORU-CP-03 privacy/abuse layer: minimal-advertisement
+//!   whitelist policy, per-sender rate limiting, `(sender, sequence)` dedup,
+//!   TTL-based presence expiry, and sender attribution ([`ControlPlaneGuard`]).
 //!
 //! Later tasks in the BORU-CP chain add the service boundary (CP-02),
-//! privacy/abuse guards (CP-03), presence state (CP-04), capability
-//! negotiation (CP-05), and diagnostics (CP-06) as siblings of [`message`].
+//! presence state (CP-04), capability negotiation (CP-05), and diagnostics
+//! (CP-06) as siblings of [`message`].
 
 pub mod message;
+pub mod privacy;
 
 pub use message::*;
+pub use privacy::*;

@@ -1236,19 +1236,33 @@ fn main() -> Result<()> {
                 loop {
                     match peer_updates.recv().await {
                         Ok(update) => {
-                            let node_id = match update {
+                            match update {
                                 boru_core::discovery_service::PeerUpdate::Seen { node_id, .. } => {
-                                    node_id
+                                    let _ = tx.try_send(DiscoveredPeersUpdate {
+                                        added: vec![node_id],
+                                        removed: Vec::new(),
+                                    });
                                 }
                                 boru_core::discovery_service::PeerUpdate::Advertised {
                                     advertised,
                                     ..
-                                } => advertised,
-                            };
-                            let _ = tx.try_send(DiscoveredPeersUpdate {
-                                added: vec![node_id],
-                                removed: Vec::new(),
-                            });
+                                } => {
+                                    let _ = tx.try_send(DiscoveredPeersUpdate {
+                                        added: vec![advertised],
+                                        removed: Vec::new(),
+                                    });
+                                }
+                                // BORU-CP-03: a peer went stale past the
+                                // presence TTL — drop it from visible
+                                // presence (stale peers disappear from
+                                // active presence).
+                                boru_core::discovery_service::PeerUpdate::Expired { node_id } => {
+                                    let _ = tx.try_send(DiscoveredPeersUpdate {
+                                        added: Vec::new(),
+                                        removed: vec![node_id],
+                                    });
+                                }
+                            }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,

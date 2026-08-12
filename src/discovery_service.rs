@@ -139,22 +139,16 @@ use crate::api::{ApiError, Event, GossipReceiver, GossipSender, Message as Gossi
 use crate::control_plane::message::{
     ControlEnvelope, ControlPlaneDecode, CONTROL_PLANE_MAGIC,
 };
+use crate::control_plane::privacy::{
+    AdvertViolation, ControlPlaneGuard, GuardRejectReason, GuardVerdict, DEFAULT_PRESENCE_TTL,
+    EXPIRY_SWEEP_INTERVAL,
+};
 use crate::diagnostics::{DiagnosticCounters, DIAGNOSTIC_COUNTERS};
 use crate::discovery_message::{check_discovery_version, DiscoveryMessage, DiscoveryVersionCheck};
 use crate::proto::TopicId;
 
 /// Capacity of the peer-update broadcast channel.
 const PEER_UPDATES_CAPACITY: usize = 256;
-
-/// Maximum number of `(sender_node_id, sequence)` keys tracked for
-/// control-plane envelope dedup (BORU-CP-02).
-///
-/// The PDF bounded-resources guardrail: a peer flooding the discovery topic
-/// with control frames cannot grow this set without bound. When the set
-/// reaches the cap it is cleared — announcements are throttled /
-/// low-frequency in practice, so a full clear is safe and keeps memory
-/// bounded.
-const CONTROL_DEDUP_CAP: usize = 4096;
 
 /// Default minimum interval between discovery announcements (Hello /
 /// Presence). Announcements are throttled to at most one per interval so a
@@ -210,6 +204,14 @@ pub enum PeerUpdate {
         /// The advertised peer (candidate for a direct dial).
         advertised: PublicKey,
     },
+    /// A previously-seen peer was removed from active presence by the
+    /// TTL-based expiry sweep (BORU-CP-03): it was not heard from within the
+    /// configured presence TTL. Emitted once per expired peer so callers
+    /// (e.g. the Discover sidebar) can drop it from visible presence.
+    Expired {
+        /// The node that went stale.
+        node_id: PublicKey,
+    },
 }
 
 /// Live control-plane event notifications for callers of
@@ -264,6 +266,17 @@ pub enum IncomingOutcome {
     },
     /// The payload originated from this node and was ignored.
     SelfMessage,
+    /// A control-plane frame was dropped because the authenticated gossip
+    /// delivery source differs from the envelope's claimed
+    /// `sender_node_id` — a spoofing attempt (BORU-CP-03 attribution gate).
+    SpoofedSender,
+    /// A control-plane frame was dropped because the authenticated sender
+    /// exceeded the per-sender frame rate limit (BORU-CP-03). Bounded
+    /// logging: at most one warning per window per sender.
+    RateLimited,
+    /// A control-plane frame was dropped because it violates the
+    /// minimal-advertisement whitelist / bounds (BORU-CP-03).
+    AdvertViolation(AdvertViolation),
 }
 
 /// Outcome of [`PeerRegistry::upsert`].
@@ -631,12 +644,11 @@ struct ReceiveCore {
     /// delivered here — the explicit event-callback boundary that keeps
     /// control-plane messages out of chat-message handlers.
     control_events_tx: broadcast::Sender<ControlEvent>,
-    /// Bounded dedup set for control-plane envelopes, keyed by
-    /// `(sender_node_id, sequence)` (the [`ControlEnvelope::dedup_key`]).
-    /// Duplicate control frames (same sender + same sequence re-delivered)
-    /// are ignored without emitting a second [`ControlEvent`]. The set is
-    /// cleared when it reaches [`CONTROL_DEDUP_CAP`] (bounded resources).
-    control_dedup: Arc<Mutex<HashSet<(PublicKey, u64)>>>,
+    /// The BORU-CP-03 privacy/abuse guard: per-sender rate limiting,
+    /// `(sender_node_id, sequence)` dedup, minimal-advertisement policy,
+    /// sender attribution, and the TTL-expiring control-plane presence
+    /// store. Shared between the receive path and the presence-expiry sweep.
+    guard: Arc<Mutex<ControlPlaneGuard>>,
     /// Atomic discovery counters (BORU-DISC-20). Cloned from the global
     /// [`DIAGNOSTIC_COUNTERS`] by default so the frontend/MCP can read the
     /// same values; tests inject an isolated instance.
@@ -800,34 +812,66 @@ impl ReceiveCore {
             return IncomingOutcome::SelfMessage;
         }
 
-        // Bounded dedup by (sender_node_id, sequence): the same envelope
-        // re-delivered (e.g. over two discovery paths) is emitted once.
-        let dedup_key = envelope.dedup_key();
-        {
-            let mut seen = self.control_dedup.lock().expect("control dedup lock poisoned");
-            if seen.len() >= CONTROL_DEDUP_CAP {
-                seen.clear();
-            }
-            if !seen.insert(dedup_key) {
-                trace!(
-                    sender = %dedup_key.0.fmt_short(),
-                    sequence = dedup_key.1,
-                    "discovery: duplicate control envelope ignored",
+        // BORU-CP-03 privacy/abuse gates: rate limit (by the authenticated
+        // delivery source) → attribution → minimal-advertisement policy →
+        // dedup by (sender_node_id, sequence) → presence state update.
+        let verdict = {
+            let mut guard = self.guard.lock().expect("control-plane guard lock poisoned");
+            guard.admit(&envelope, delivered_from, Instant::now())
+        };
+        match verdict {
+            GuardVerdict::Accept => {
+                info!(
+                    sender = %envelope.sender_node_id.fmt_short(),
+                    message_type = ?envelope.message_type,
+                    sequence = envelope.sequence,
+                    "discovery: control-plane message received",
                 );
-                return IncomingOutcome::Duplicate;
+                let _ = self
+                    .control_events_tx
+                    .send(ControlEvent::Received(envelope));
+                IncomingOutcome::ControlMessage
+            }
+            GuardVerdict::Reject(reason) => {
+                // Log the state transition, never the message contents.
+                // Each rejection is bounded by the rate limiter, so a
+                // malicious peer cannot cause unbounded log spam.
+                match reason {
+                    GuardRejectReason::SpoofedSender => {
+                        self.counters.record_malformed_discovery_packet();
+                        warn!(
+                            claimed = %envelope.sender_node_id.fmt_short(),
+                            delivered_from = %delivered_from.fmt_short(),
+                            "discovery: control envelope sender mismatch dropped",
+                        );
+                        IncomingOutcome::SpoofedSender
+                    }
+                    GuardRejectReason::RateLimited => {
+                        warn!(
+                            sender = %delivered_from.fmt_short(),
+                            "discovery: control-plane rate limit exceeded",
+                        );
+                        IncomingOutcome::RateLimited
+                    }
+                    GuardRejectReason::Duplicate => {
+                        trace!(
+                            sender = %envelope.sender_node_id.fmt_short(),
+                            sequence = envelope.sequence,
+                            "discovery: duplicate control envelope ignored",
+                        );
+                        IncomingOutcome::Duplicate
+                    }
+                    GuardRejectReason::AdvertViolation(violation) => {
+                        debug!(
+                            sender = %envelope.sender_node_id.fmt_short(),
+                            violation = ?violation,
+                            "discovery: control advertisement rejected by minimal-content policy",
+                        );
+                        IncomingOutcome::AdvertViolation(violation)
+                    }
+                }
             }
         }
-
-        info!(
-            sender = %envelope.sender_node_id.fmt_short(),
-            message_type = ?envelope.message_type,
-            sequence = envelope.sequence,
-            "discovery: control-plane message received",
-        );
-        let _ = self
-            .control_events_tx
-            .send(ControlEvent::Received(envelope));
-        IncomingOutcome::ControlMessage
     }
 }
 
@@ -890,6 +934,12 @@ pub struct DiscoveryService {
     /// Join handle of the connectivity wiring task (BORU-DISC-11): dials
     /// newly discovered peers into the discovery gossip mesh.
     connectivity_task: JoinHandle<()>,
+    /// Join handle of the presence-expiry sweep task (BORU-CP-03): removes
+    /// peers not heard from within the configured presence TTL.
+    expiry_task: JoinHandle<()>,
+    /// Shared presence-expiry configuration (TTL + sweep interval) so the
+    /// builder can tune it after construction and the sweep observes it.
+    expiry_config: Arc<Mutex<PresenceExpiryConfig>>,
 }
 
 impl DiscoveryService {
@@ -1005,13 +1055,14 @@ impl DiscoveryService {
         let registry = Arc::new(Mutex::new(PeerRegistry::new()));
         let (peer_updates_tx, _) = broadcast::channel(PEER_UPDATES_CAPACITY);
         let (control_events_tx, _) = broadcast::channel(PEER_UPDATES_CAPACITY);
+        let guard = Arc::new(Mutex::new(ControlPlaneGuard::new()));
         let core = ReceiveCore {
             local_node,
             topic,
             registry,
             peer_updates_tx,
             control_events_tx,
-            control_dedup: Arc::new(Mutex::new(HashSet::new())),
+            guard,
             counters,
         };
         let announce = AnnounceHandle::new(sender, local_node);
@@ -1031,6 +1082,22 @@ impl DiscoveryService {
             local_node,
             connectivity_cancel,
         ));
+        // BORU-CP-03: presence-expiry sweep — peers not heard from within
+        // the configured presence TTL disappear from active presence
+        // (legacy registry + control-plane presence store). State
+        // transitions only, never message contents.
+        let expiry_config = Arc::new(Mutex::new(PresenceExpiryConfig {
+            ttl: DEFAULT_PRESENCE_TTL,
+            sweep_interval: EXPIRY_SWEEP_INTERVAL,
+        }));
+        let expiry_cancel = cancel.clone();
+        let expiry_task = tokio::spawn(presence_expiry_loop(
+            expiry_config.clone(),
+            core.registry.clone(),
+            core.guard.clone(),
+            core.peer_updates_tx.clone(),
+            expiry_cancel,
+        ));
         info!(topic = %topic, "discovery service joined");
         Self {
             topic,
@@ -1039,6 +1106,8 @@ impl DiscoveryService {
             cancel,
             task,
             connectivity_task,
+            expiry_task,
+            expiry_config,
         }
     }
 
@@ -1081,6 +1150,33 @@ impl DiscoveryService {
     /// shared throttle used by both the service handle and the drain loop.
     pub fn with_announce_min_interval(self, min_interval: Duration) -> Self {
         self.announce.throttle.set_min_interval(min_interval);
+        self
+    }
+
+    /// Override the presence TTL (BORU-CP-03).
+    ///
+    /// Peers not heard from within `ttl` are removed from active presence
+    /// (both the legacy peer registry and the control-plane presence store)
+    /// by the expiry sweep. Defaults to [`DEFAULT_PRESENCE_TTL`]. Tests use
+    /// short TTLs to exercise expiry without sleeping.
+    pub fn with_presence_ttl(self, ttl: Duration) -> Self {
+        {
+            let mut guard = self.core.guard.lock().expect("control-plane guard lock poisoned");
+            guard.set_default_presence_ttl(ttl);
+        }
+        self.expiry_config.lock().expect("expiry config lock poisoned").ttl = ttl;
+        self
+    }
+
+    /// Override the presence-expiry sweep interval (BORU-CP-03).
+    ///
+    /// Defaults to [`EXPIRY_SWEEP_INTERVAL`]. Tests use short intervals to
+    /// exercise the sweep without sleeping.
+    pub fn with_presence_sweep_interval(self, interval: Duration) -> Self {
+        self.expiry_config
+            .lock()
+            .expect("expiry config lock poisoned")
+            .sweep_interval = interval;
         self
     }
 
@@ -1158,6 +1254,27 @@ impl DiscoveryService {
         registry.len()
     }
 
+    /// Number of peers currently in the control-plane presence store
+    /// (BORU-CP-03 active presence hints).
+    pub fn control_presence_count(&self) -> usize {
+        let guard = self.core.guard.lock().expect("control-plane guard lock poisoned");
+        guard.presence_count()
+    }
+
+    /// Snapshot of the control-plane presence store (BORU-CP-03).
+    ///
+    /// Each entry is the metadata-only presence hint recorded from the
+    /// peer's control-plane advertisements. This is a hint cache — it grants
+    /// no authorisation and is never consulted by friendship/trust checks.
+    pub fn control_presence_peers(&self) -> Vec<(PublicKey, crate::control_plane::privacy::PeerControlState)> {
+        let guard = self.core.guard.lock().expect("control-plane guard lock poisoned");
+        guard
+            .presence()
+            .peers()
+            .map(|(node_id, state)| (*node_id, state.clone()))
+            .collect()
+    }
+
     /// Return a cloneable joiner handle bound to the discovery gossip
     /// sender.
     ///
@@ -1172,12 +1289,13 @@ impl DiscoveryService {
         }
     }
 
-    /// Shut down the service: cancel the drain and connectivity tasks and
-    /// await them.
+    /// Shut down the service: cancel the drain, connectivity, and expiry
+    /// tasks and await them.
     pub async fn shutdown(self) {
         self.cancel.cancel();
         let _ = self.task.await;
         let _ = self.connectivity_task.await;
+        let _ = self.expiry_task.await;
         info!(topic = %self.topic, "discovery service shut down");
     }
 }
@@ -1311,6 +1429,13 @@ async fn connectivity_loop(
                     Ok(PeerUpdate::Advertised { advertised, .. }) => {
                         maybe_dial(&sender, &mut dialed, local_node, advertised).await;
                     }
+                    Ok(PeerUpdate::Expired { .. }) => {
+                        // The peer went stale (BORU-CP-03 TTL expiry). No
+                        // dial action: it was already dialed when first
+                        // seen, and expiry does not revoke connectivity —
+                        // it only removes it from active presence.
+                        trace!("discovery: expired peer ignored by connectivity loop");
+                    }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
                         debug!("discovery connectivity loop lagged");
                     }
@@ -1354,6 +1479,92 @@ async fn maybe_dial(
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Presence expiry (BORU-CP-03)
+// ---------------------------------------------------------------------------
+
+/// Runtime-tunable presence-expiry configuration shared between the
+/// [`DiscoveryService`] builders and the sweep task.
+#[derive(Debug, Clone, Copy)]
+struct PresenceExpiryConfig {
+    /// Peers not heard from within this window are removed from active
+    /// presence.
+    ttl: Duration,
+    /// How often the sweep runs.
+    sweep_interval: Duration,
+}
+
+/// Background task that removes stale peers from active presence
+/// (BORU-CP-03 TTL expiry).
+///
+/// Every `sweep_interval` it:
+///
+/// 1. Prunes the legacy discovery [`PeerRegistry`] of peers not heard from
+///    within the configured TTL and emits [`PeerUpdate::Expired`] for each
+///    (so the Discover sidebar can drop them from visible presence).
+/// 2. Expires stale entries in the control-plane presence store (the
+///    BORU-CP-03 hint cache).
+///
+/// Logs state transitions only, never message contents. The sweep interval
+/// is re-read from the shared config before every sleep, so builder tuning
+/// (e.g. short intervals in tests) takes effect immediately.
+async fn presence_expiry_loop(
+    config: Arc<Mutex<PresenceExpiryConfig>>,
+    registry: Arc<Mutex<PeerRegistry>>,
+    guard: Arc<Mutex<ControlPlaneGuard>>,
+    peer_updates_tx: broadcast::Sender<PeerUpdate>,
+    cancel: CancellationToken,
+) {
+    loop {
+        // Read the current sweep interval each cycle so the builders can
+        // tune it after construction (tests use short intervals).
+        let sweep = config
+            .lock()
+            .expect("expiry config lock poisoned")
+            .sweep_interval;
+
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                debug!("discovery presence expiry loop cancelled");
+                break;
+            }
+            _ = tokio::time::sleep(sweep) => {
+                let ttl = config.lock().expect("expiry config lock poisoned").ttl;
+                let now = Instant::now();
+
+                // 1. Legacy discovery registry.
+                let expired_registry: Vec<PublicKey> = {
+                    let mut reg = registry.lock().expect("peer registry lock poisoned");
+                    reg.prune_older_than(ttl)
+                };
+                for node in &expired_registry {
+                    info!(
+                        node = %node.fmt_short(),
+                        ttl_secs = ttl.as_secs(),
+                        "discovery: peer expired from active presence (TTL)",
+                    );
+                    let _ = peer_updates_tx.send(PeerUpdate::Expired { node_id: *node });
+                }
+
+                // 2. Control-plane presence store.
+                let expired_control: Vec<PublicKey> = {
+                    let mut g = guard.lock().expect("control-plane guard lock poisoned");
+                    g.expire_stale(now)
+                };
+                for node in &expired_control {
+                    info!(
+                        node = %node.fmt_short(),
+                        ttl_secs = ttl.as_secs(),
+                        "control: presence expired from active presence (TTL)",
+                    );
+                }
+            }
+        }
+    }
+    debug!("discovery presence expiry loop exited");
 }
 
 // ---------------------------------------------------------------------------
@@ -2798,5 +3009,209 @@ mod tests {
             }
         }
         assert_eq!(service.peer_count(), 0, "control plane must not register peers");
+    }
+
+    // ── control-plane privacy/abuse guards (BORU-CP-03) ──────────────
+
+    /// A control envelope whose claimed sender differs from the
+    /// authenticated gossip delivery source is dropped as a spoof — no
+    /// event, no presence entry.
+    #[tokio::test]
+    async fn handle_incoming_control_spoofed_sender_rejected() {
+        let local = test_key(0xAA);
+        let claimed = test_key(0xBB);
+        let actual = test_key(0xCC); // authenticated delivery source
+        let service = test_service(local);
+        let mut events = service.control_events();
+
+        let bytes = control_hello(claimed, 7);
+        let outcome = service.handle_incoming(&bytes, actual);
+        assert_eq!(
+            outcome,
+            IncomingOutcome::SpoofedSender,
+            "a control envelope claiming a different identity must be dropped"
+        );
+        assert_eq!(service.peer_count(), 0);
+        assert_eq!(service.control_presence_count(), 0);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), events.recv())
+                .await
+                .is_err(),
+            "spoofed control envelope must not emit an event"
+        );
+    }
+
+    /// A sender that exceeds the per-sender frame rate limit is dropped
+    /// (bounded log spam + presence churn).
+    #[tokio::test]
+    async fn handle_incoming_control_rate_limited_sender_rejected() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let service = test_service(local);
+
+        // Fill the default 60-frame / 10s window.
+        let mut last_outcome = IncomingOutcome::SelfMessage;
+        for seq in 0..60 {
+            last_outcome = service.handle_incoming(&control_hello(peer, seq), peer);
+        }
+        assert_eq!(last_outcome, IncomingOutcome::ControlMessage);
+
+        let outcome = service.handle_incoming(&control_hello(peer, 60), peer);
+        assert_eq!(
+            outcome,
+            IncomingOutcome::RateLimited,
+            "frames beyond the rate limit must be dropped"
+        );
+        // The peer is still present (accepted frames before the limit) but
+        // no further frames get through.
+        assert!(service.control_presence_count() <= 1);
+    }
+
+    /// A control advertisement that violates the minimal-content whitelist
+    /// is dropped with no presence entry.
+    #[tokio::test]
+    async fn handle_incoming_control_advert_violation_rejected() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let service = test_service(local);
+        let mut events = service.control_events();
+
+        // A PRESENCE envelope advertising an oversized TTL.
+        let envelope = ControlEnvelope::presence(peer, 1, 1_700_000_000, Some(u32::MAX));
+        let outcome = service.handle_incoming(&envelope.encode(), peer);
+        assert!(
+            matches!(outcome, IncomingOutcome::AdvertViolation(_)),
+            "oversized presence TTL must be rejected by the minimal-content policy"
+        );
+        assert_eq!(service.control_presence_count(), 0);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), events.recv())
+                .await
+                .is_err(),
+            "violating control envelope must not emit an event"
+        );
+    }
+
+    /// Accepted control envelopes populate the TTL-expiring control-plane
+    /// presence store (metadata-only hints).
+    #[tokio::test]
+    async fn handle_incoming_control_records_presence_hints() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let service = test_service(local);
+
+        assert_eq!(
+            service.handle_incoming(&control_hello(peer, 1), peer),
+            IncomingOutcome::ControlMessage
+        );
+        assert_eq!(service.control_presence_count(), 1);
+        let (node, state) = service.control_presence_peers().pop().unwrap();
+        assert_eq!(node, peer);
+        assert_eq!(
+            state.protocol_version,
+            crate::control_plane::message::CONTROL_PLANE_PROTOCOL_VERSION
+        );
+        assert_eq!(state.app_protocol_version, Some(1));
+
+        // The legacy registry is untouched (control plane never registers
+        // peers there).
+        assert_eq!(service.peer_count(), 0);
+    }
+
+    /// The TTL-based expiry sweep removes stale peers from active presence:
+    /// both the legacy registry (with a `PeerUpdate::Expired` event) and the
+    /// control-plane presence store.
+    #[tokio::test]
+    async fn expiry_sweep_removes_stale_peers_from_active_presence() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let service = test_service(local)
+            .with_presence_ttl(Duration::from_millis(80))
+            .with_presence_sweep_interval(Duration::from_millis(20));
+        let mut updates = service.peer_updates();
+
+        // A legacy discovery hello registers the peer in the registry.
+        let legacy = postcard::to_stdvec(&DiscoveryMessage::hello(peer)).unwrap();
+        assert_eq!(
+            service.handle_incoming(&legacy, peer),
+            IncomingOutcome::Processed
+        );
+        assert_eq!(service.peer_count(), 1);
+
+        // A control-plane hello records presence in the control store.
+        assert_eq!(
+            service.handle_incoming(&control_hello(peer, 1), peer),
+            IncomingOutcome::ControlMessage
+        );
+        assert_eq!(service.control_presence_count(), 1);
+
+        // Wait past the TTL so the sweep expires the peer everywhere.
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        assert_eq!(
+            service.peer_count(),
+            0,
+            "stale peer must disappear from active presence (registry)"
+        );
+        assert_eq!(
+            service.control_presence_count(),
+            0,
+            "stale peer must disappear from active presence (control store)"
+        );
+
+        // The legacy-registry expiry emitted a PeerUpdate::Expired event.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut saw_expired = false;
+        while Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(50), updates.recv()).await {
+                Ok(Ok(PeerUpdate::Expired { node_id })) if node_id == peer => {
+                    saw_expired = true;
+                    break;
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(_)) => break,
+                Err(_) => {}
+            }
+        }
+        assert!(saw_expired, "expiry sweep must emit PeerUpdate::Expired");
+    }
+
+    /// A refresh within the TTL keeps the peer in active presence (no
+    /// spurious expiry).
+    #[tokio::test]
+    async fn expiry_sweep_keeps_refreshed_peers() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let service = test_service(local)
+            .with_presence_ttl(Duration::from_millis(80))
+            .with_presence_sweep_interval(Duration::from_millis(20));
+
+        let legacy = postcard::to_stdvec(&DiscoveryMessage::hello(peer)).unwrap();
+        assert_eq!(
+            service.handle_incoming(&legacy, peer),
+            IncomingOutcome::Processed
+        );
+        assert_eq!(service.control_presence_count(), 0);
+        assert_eq!(
+            service.handle_incoming(&control_hello(peer, 1), peer),
+            IncomingOutcome::ControlMessage
+        );
+
+        // Keep refreshing within the TTL.
+        for seq in 2..6u64 {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            assert_eq!(
+                service.handle_incoming(&control_hello(peer, seq), peer),
+                IncomingOutcome::ControlMessage,
+                "refreshed presence must stay accepted"
+            );
+        }
+
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert_eq!(
+            service.control_presence_count(),
+            1,
+            "a peer refreshed within its TTL must stay in active presence"
+        );
     }
 }
