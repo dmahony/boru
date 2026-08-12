@@ -1141,6 +1141,12 @@ mod tests {
         assert!(AVATAR_SM > 0.0);
         assert!(AVATAR_MD > 0.0);
         assert!(AVATAR_LG > 0.0);
+        assert!(AVATAR_PROFILE > 0.0);
+        assert!(AVATAR_CHAT_LIST > 0.0);
+        assert!(AVATAR_CHAT_HEADER > 0.0);
+        assert!(AVATAR_MSG > 0.0);
+        assert!(STATUS_DOT_SM > 0.0);
+        assert!(STATUS_DOT_LG > 0.0);
     }
 
     // ── Responsive thresholds ──────────────────────────────────────────

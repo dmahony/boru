@@ -1065,16 +1065,16 @@ impl IcedChat {
             let is_dark = matches!(theme_for_initials, iced::Theme::Dark);
             let letter_color = crate::presentation::initials_color(&room_name, is_dark);
             let group_avatar = container(text(display_initials).size(TYPO_SM).color(letter_color))
-                .width(Length::Fixed(AVATAR_SM))
-                .height(Length::Fixed(AVATAR_SM))
-                .center_x(Length::Fixed(AVATAR_SM))
-                .center_y(Length::Fixed(AVATAR_SM))
+                .width(Length::Fixed(AVATAR_CHAT_HEADER))
+                .height(Length::Fixed(AVATAR_CHAT_HEADER))
+                .center_x(Length::Fixed(AVATAR_CHAT_HEADER))
+                .center_y(Length::Fixed(AVATAR_CHAT_HEADER))
                 .style(move |t| iced::widget::container::Style {
                     background: Some(iced::Background::Color(bg_surface_secondary(
                         &theme_for_initials,
                     ))),
                     border: iced::Border {
-                        radius: SPACE_8.into(),
+                        radius: (AVATAR_CHAT_HEADER / 2.0).into(),
                         ..Default::default()
                     },
                     ..Default::default()
@@ -1115,11 +1115,20 @@ impl IcedChat {
             let peer_avatar: iced::Element<'_, AppMessage> = peer
                 .and_then(|key| self.friend_image_handles.get(&key).and_then(|h| h.clone()))
                 .map(|handle| {
-                    iced::widget::image(handle)
-                        .content_fit(iced::ContentFit::ScaleDown)
-                        .width(Length::Fixed(AVATAR_SM))
-                        .height(Length::Fixed(AVATAR_SM))
-                        .into()
+                    container(
+                        iced::widget::image(handle)
+                            .content_fit(iced::ContentFit::Cover)
+                            .width(Length::Fixed(AVATAR_CHAT_HEADER))
+                            .height(Length::Fixed(AVATAR_CHAT_HEADER)),
+                    )
+                    .style(|_t| iced::widget::container::Style {
+                        border: iced::Border {
+                            radius: (AVATAR_CHAT_HEADER / 2.0).into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    })
+                    .into()
                 })
                 .unwrap_or_else(|| {
                     let initials = crate::presentation::initials(&room_name);
@@ -1127,16 +1136,16 @@ impl IcedChat {
                     let is_dark = matches!(theme_for_initials, iced::Theme::Dark);
                     let letter_color = crate::presentation::initials_color(&room_name, is_dark);
                     container(text(initials).size(TYPO_SM).color(letter_color))
-                        .width(Length::Fixed(AVATAR_SM))
-                        .height(Length::Fixed(AVATAR_SM))
-                        .center_x(Length::Fixed(AVATAR_SM))
-                        .center_y(Length::Fixed(AVATAR_SM))
+                        .width(Length::Fixed(AVATAR_CHAT_HEADER))
+                        .height(Length::Fixed(AVATAR_CHAT_HEADER))
+                        .center_x(Length::Fixed(AVATAR_CHAT_HEADER))
+                        .center_y(Length::Fixed(AVATAR_CHAT_HEADER))
                         .style(move |t| iced::widget::container::Style {
                             background: Some(iced::Background::Color(bg_surface_secondary(
                                 &theme_for_initials,
                             ))),
                             border: iced::Border {
-                                radius: SPACE_8.into(),
+                                radius: (AVATAR_CHAT_HEADER / 2.0).into(),
                                 ..Default::default()
                             },
                             ..Default::default()
@@ -3288,15 +3297,24 @@ impl IcedChat {
             // groups (left) and the trailing edge for outgoing groups (right).
             let avatar_el: iced::Element<'_, AppMessage> = if group_continues {
                 space::Space::new()
-                    .width(Length::Fixed(AVATAR_SM))
-                    .height(Length::Fixed(AVATAR_SM))
+                    .width(Length::Fixed(AVATAR_MSG))
+                    .height(Length::Fixed(AVATAR_MSG))
                     .into()
             } else if let Some(ref handle) = entry.avatar_handle {
-                iced::widget::image(handle.clone())
-                    .content_fit(iced::ContentFit::ScaleDown)
-                    .width(Length::Fixed(AVATAR_SM))
-                    .height(Length::Fixed(AVATAR_SM))
-                    .into()
+                container(
+                    iced::widget::image(handle.clone())
+                        .content_fit(iced::ContentFit::Cover)
+                        .width(Length::Fixed(AVATAR_MSG))
+                        .height(Length::Fixed(AVATAR_MSG)),
+                )
+                .style(|_t| iced::widget::container::Style {
+                    border: iced::Border {
+                        radius: (AVATAR_MSG / 2.0).into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .into()
             } else {
                 // Coloured circle fallback with the sender's initial, so an
                 // entry without a profile image never renders a bare "?".
@@ -3309,14 +3327,14 @@ impl IcedChat {
                 let dark = matches!(self.theme(), iced::Theme::Dark);
                 let letter_color = crate::presentation::initials_color(name, dark);
                 container(text(initial).size(TYPO_SM).color(letter_color))
-                    .width(Length::Fixed(AVATAR_SM))
-                    .height(Length::Fixed(AVATAR_SM))
-                    .center_x(Length::Fixed(AVATAR_SM))
-                    .center_y(Length::Fixed(AVATAR_SM))
+                    .width(Length::Fixed(AVATAR_MSG))
+                    .height(Length::Fixed(AVATAR_MSG))
+                    .center_x(Length::Fixed(AVATAR_MSG))
+                    .center_y(Length::Fixed(AVATAR_MSG))
                     .style(|t| iced::widget::container::Style {
                         background: Some(iced::Background::Color(bg_surface_secondary(t))),
                         border: iced::Border {
-                            radius: (AVATAR_SM / 2.0).into(),
+                            radius: (AVATAR_MSG / 2.0).into(),
                             ..Default::default()
                         },
                         ..Default::default()
