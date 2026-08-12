@@ -120,6 +120,21 @@ pub mod discovery_topic;
 /// separation-from-chat tests that need the chat type are gated on `net`.
 pub mod discovery_message;
 
+/// Versioned, typed control-plane message envelope (BORU-CP-01).
+///
+/// The hidden-discovery control plane (PDF Phase 1) — a compact, magic-
+/// prefixed wire format for discovery metadata (HELLO / PRESENCE /
+/// CAPABILITIES / DIAGNOSTIC_HINT) that can never be confused with a chat
+/// message. The envelope is versioned and forward-compatible: unknown
+/// message types and unknown payload fields are ignored safely, while a
+/// strict decoder rejects malformed frames without touching the gossip
+/// actor or chat processing.
+///
+/// Always available (no feature gate) so the wire format, roundtrips, and
+/// strict-decoder tests run without the `net` feature; the
+/// separation-from-chat tests that need the chat type are gated on `net`.
+pub mod control_plane;
+
 /// Internal discovery subsystem — the service API for the hidden discovery
 /// gossip topic.
 ///
