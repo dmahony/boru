@@ -31,6 +31,16 @@
 //! | `Hello` / `Presence` | 1 (tag) + 1 (version) + 32 (node) = **34 B** |
 //! | `PeerAdvertisement` | 1 (tag) + 1 (version) + 32 (node) + 32 (advertised) = **66 B** |
 //!
+//! Each variant additionally carries an optional `event_id` (a per-node
+//! monotonic counter, [`DiscoveryMessage::event_id`]) appended as the LAST
+//! field. It is `None` on the legacy wire format (BORU-DISC-06 messages have
+//! no such field and decode unchanged) and `Some(n)` on the current format:
+//!
+//! | Message (with event id) | Wire size |
+//! |---------|-----------|
+//! | `Hello` / `Presence` | 34 + 1 (Some tag) + varint(event id) = **36 B** for ids < 128 |
+//! | `PeerAdvertisement` | 66 + 1 (Some tag) + varint(event id) = **68 B** for ids < 128 |
+//!
 //! The 3-variant tag space (0..=2) is disjoint from the chat
 //! [`Message`](crate::chat_core::Message) tag space (0..=19) in the sense
 //! that no discovery byte stream ever deserialises into a chat message — the
@@ -40,6 +50,25 @@ use iroh_base::PublicKey;
 use serde::{Deserialize, Serialize};
 
 use crate::discovery_topic::BORU_DISCOVERY_PROTOCOL_VERSION;
+
+/// Deserialize an `Option<u64>`, defaulting to `None` when the wire buffer
+/// is exhausted.
+///
+/// Postcard's `SeqAccess` returns `Err(EOF)` — not `Ok(None)` — when a
+/// struct-variant's declared field count exceeds the bytes on the wire, so
+/// `#[serde(default)]` alone cannot backfill a legacy BORU-DISC-06 payload
+/// that predates the `event_id` field. Treating an end-of-buffer as `None`
+/// keeps old peers' discovery messages decodable (same pattern as
+/// `chat_core::protocol::deserialize_tolerant_*`).
+fn deserialize_tolerant_opt_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<u64>::deserialize(deserializer) {
+        Ok(value) => Ok(value),
+        Err(_) => Ok(None),
+    }
+}
 
 /// Shared header carried by every discovery message.
 ///
@@ -89,11 +118,31 @@ pub enum DiscoveryMessage {
     Hello {
         /// Version + node identity of the sender.
         header: DiscoveryHeader,
+        /// Per-node monotonic advertisement/event id (BORU-DISC-17).
+        ///
+        /// `None` on the legacy wire format (BORU-DISC-06 messages carry no
+        /// event id and decode unchanged); `Some(n)` on the current format.
+        /// The receiving side uses `(node_id, event_id)` as the dedup key so
+        /// the same advertisement delivered over two discovery paths is
+        /// represented once.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "deserialize_tolerant_opt_u64"
+        )]
+        event_id: Option<u64>,
     },
     /// Periodic presence heartbeat — "I am still here".
     Presence {
         /// Version + node identity of the sender.
         header: DiscoveryHeader,
+        /// Per-node monotonic event id (see [`DiscoveryMessage::Hello`]).
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "deserialize_tolerant_opt_u64"
+        )]
+        event_id: Option<u64>,
     },
     /// Advertise a peer the sender knows about, so receivers can dial it
     /// directly (connectivity bootstrapping).
@@ -102,37 +151,87 @@ pub enum DiscoveryMessage {
         header: DiscoveryHeader,
         /// Identity of the peer being advertised.
         advertised: PublicKey,
+        /// Per-node monotonic event id (see [`DiscoveryMessage::Hello`]).
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "deserialize_tolerant_opt_u64"
+        )]
+        event_id: Option<u64>,
     },
 }
 
 impl DiscoveryMessage {
     /// Build a `Hello` for `node_id` speaking the current protocol version.
+    ///
+    /// The legacy (no event id) form: wire-identical to the BORU-DISC-06
+    /// payload. Prefer [`hello_with_event`](Self::hello_with_event) for
+    /// announcements so receivers can dedup by event id.
     pub fn hello(node_id: PublicKey) -> Self {
         Self::Hello {
             header: DiscoveryHeader::new(node_id),
+            event_id: None,
+        }
+    }
+
+    /// Build a `Hello` carrying a per-node monotonic event id.
+    pub fn hello_with_event(node_id: PublicKey, event_id: u64) -> Self {
+        Self::Hello {
+            header: DiscoveryHeader::new(node_id),
+            event_id: Some(event_id),
         }
     }
 
     /// Build a `Presence` for `node_id` speaking the current protocol version.
+    ///
+    /// The legacy (no event id) form. Prefer
+    /// [`presence_with_event`](Self::presence_with_event) for announcements.
     pub fn presence(node_id: PublicKey) -> Self {
         Self::Presence {
             header: DiscoveryHeader::new(node_id),
+            event_id: None,
+        }
+    }
+
+    /// Build a `Presence` carrying a per-node monotonic event id.
+    pub fn presence_with_event(node_id: PublicKey, event_id: u64) -> Self {
+        Self::Presence {
+            header: DiscoveryHeader::new(node_id),
+            event_id: Some(event_id),
         }
     }
 
     /// Build a `PeerAdvertisement` from `node_id` about `advertised`,
     /// speaking the current protocol version.
+    ///
+    /// The legacy (no event id) form. Prefer
+    /// [`peer_advertisement_with_event`](Self::peer_advertisement_with_event)
+    /// for advertisements so receivers can dedup by event id.
     pub fn peer_advertisement(node_id: PublicKey, advertised: PublicKey) -> Self {
         Self::PeerAdvertisement {
             header: DiscoveryHeader::new(node_id),
             advertised,
+            event_id: None,
+        }
+    }
+
+    /// Build a `PeerAdvertisement` carrying a per-node monotonic event id.
+    pub fn peer_advertisement_with_event(
+        node_id: PublicKey,
+        advertised: PublicKey,
+        event_id: u64,
+    ) -> Self {
+        Self::PeerAdvertisement {
+            header: DiscoveryHeader::new(node_id),
+            advertised,
+            event_id: Some(event_id),
         }
     }
 
     /// The protocol version carried by this message.
     pub fn protocol_version(&self) -> u8 {
         match self {
-            Self::Hello { header } | Self::Presence { header } => header.protocol_version,
+            Self::Hello { header, .. } | Self::Presence { header, .. } => header.protocol_version,
             Self::PeerAdvertisement { header, .. } => header.protocol_version,
         }
     }
@@ -140,8 +239,22 @@ impl DiscoveryMessage {
     /// The node identity carried by this message.
     pub fn node_id(&self) -> PublicKey {
         match self {
-            Self::Hello { header } | Self::Presence { header } => header.node_id,
+            Self::Hello { header, .. } | Self::Presence { header, .. } => header.node_id,
             Self::PeerAdvertisement { header, .. } => header.node_id,
+        }
+    }
+
+    /// The per-node event/advertisement id carried by this message, if any.
+    ///
+    /// `None` means the sender used the legacy wire format (no event id);
+    /// `Some(n)` is the sender's monotonic counter for this event. Receivers
+    /// dedup on `(node_id, event_id)`: the same event delivered twice (e.g.
+    /// over two discovery paths) is represented once.
+    pub fn event_id(&self) -> Option<u64> {
+        match self {
+            Self::Hello { event_id, .. }
+            | Self::Presence { event_id, .. }
+            | Self::PeerAdvertisement { event_id, .. } => *event_id,
         }
     }
 }
@@ -231,6 +344,98 @@ mod tests {
             }
             _ => panic!("expected PeerAdvertisement"),
         }
+    }
+
+    // ── Event id (BORU-DISC-17 dedup key) ────────────────────────────
+
+    /// `*_with_event` constructors roundtrip the event id on every variant.
+    #[test]
+    fn event_id_roundtrip() {
+        let node = test_key(0x11);
+        let advertised = test_key(0x22);
+        for (msg, expected) in [
+            (
+                DiscoveryMessage::hello_with_event(node, 7),
+                Some(7u64),
+            ),
+            (
+                DiscoveryMessage::presence_with_event(node, 42),
+                Some(42u64),
+            ),
+            (
+                DiscoveryMessage::peer_advertisement_with_event(node, advertised, 99),
+                Some(99u64),
+            ),
+        ] {
+            let bytes = postcard::to_stdvec(&msg).unwrap();
+            let decoded: DiscoveryMessage = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(decoded, msg);
+            assert_eq!(decoded.event_id(), expected);
+            assert_eq!(decoded.node_id(), node);
+        }
+    }
+
+    /// Legacy (no event id) messages expose `event_id() == None`.
+    #[test]
+    fn legacy_constructors_have_no_event_id() {
+        let node = test_key(0x33);
+        let advertised = test_key(0x44);
+        assert_eq!(DiscoveryMessage::hello(node).event_id(), None);
+        assert_eq!(DiscoveryMessage::presence(node).event_id(), None);
+        assert_eq!(
+            DiscoveryMessage::peer_advertisement(node, advertised).event_id(),
+            None
+        );
+    }
+
+    /// BORU-DISC-06 wire compat: a message serialised WITHOUT the event id
+    /// field (the legacy 34 B / 66 B forms) still deserialises as the current
+    /// type with `event_id == None`. This is the backward-compat guarantee
+    /// the dedup change must not break: old senders keep working.
+    #[test]
+    fn legacy_wire_format_decodes_without_event_id() {
+        let node = test_key(0x55);
+
+        // Hand-build the legacy Hello bytes: tag + version + node (34 B),
+        // i.e. exactly what BORU-DISC-06 `postcard::to_stdvec(&hello)` made.
+        let mut legacy_hello = vec![0x00, BORU_DISCOVERY_PROTOCOL_VERSION];
+        legacy_hello.extend_from_slice(node.as_bytes());
+        assert_eq!(legacy_hello.len(), 34);
+        let decoded: DiscoveryMessage = postcard::from_bytes(&legacy_hello).unwrap();
+        assert_eq!(decoded, DiscoveryMessage::hello(node));
+        assert_eq!(decoded.event_id(), None);
+
+        // Legacy Presence bytes (same shape, tag 0x01).
+        let mut legacy_presence = vec![0x01, BORU_DISCOVERY_PROTOCOL_VERSION];
+        legacy_presence.extend_from_slice(node.as_bytes());
+        assert_eq!(legacy_presence.len(), 34);
+        let decoded: DiscoveryMessage = postcard::from_bytes(&legacy_presence).unwrap();
+        assert_eq!(decoded, DiscoveryMessage::presence(node));
+        assert_eq!(decoded.event_id(), None);
+
+        // Legacy PeerAdvertisement bytes (66 B).
+        let advertised = test_key(0x66);
+        let mut legacy_ad = vec![0x02, BORU_DISCOVERY_PROTOCOL_VERSION];
+        legacy_ad.extend_from_slice(node.as_bytes());
+        legacy_ad.extend_from_slice(advertised.as_bytes());
+        assert_eq!(legacy_ad.len(), 66);
+        let decoded: DiscoveryMessage = postcard::from_bytes(&legacy_ad).unwrap();
+        assert_eq!(decoded, DiscoveryMessage::peer_advertisement(node, advertised));
+        assert_eq!(decoded.event_id(), None);
+    }
+
+    /// The current wire format is backward-compatible in the other direction
+    /// too: a legacy-constructed `hello(node)` (no event id) serialises to
+    /// exactly the 34-byte legacy form, so an old sender's bytes and a new
+    /// sender's `None` event-id bytes are indistinguishable on the wire.
+    #[test]
+    fn legacy_constructor_serializes_to_legacy_wire() {
+        let node = test_key(0x77);
+        let bytes = postcard::to_stdvec(&DiscoveryMessage::hello(node)).unwrap();
+        assert_eq!(bytes.len(), 34);
+        assert_eq!(&bytes[..2], &[0x00, BORU_DISCOVERY_PROTOCOL_VERSION]);
+        // The 32-byte node id follows the tag+version prefix.
+        assert_eq!(&bytes[2..], node.as_bytes());
     }
 
     /// All variants carry the current protocol version after a roundtrip.

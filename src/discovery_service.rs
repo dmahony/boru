@@ -62,9 +62,23 @@
 //!
 //! # Peer registry
 //!
-//! The registry maps `node_id` → last-seen / source-topic metadata. It is
-//! the dedup anchor later discovery tasks (e.g. BORU-DISC-17) build on: a
-//! node already registered is not re-announced as new.
+//! The registry maps `node_id` → last-seen / source-topic metadata, and is
+//! the **dedup anchor** (BORU-DISC-17): a node already registered is not
+//! re-announced as new. Dedup is keyed by `(node_id, event_id)` — the same
+//! peer discovered on two paths (e.g. the internal discovery topic and any
+//! legacy/compat path that forwards the same advertisement) is represented
+//! once:
+//!
+//! * **By node identity** — the map key itself. A peer seen on topic A and
+//!   again on topic B still occupies a single entry (its `source_topic`
+//!   updates to the latest hop).
+//! * **By event id** — each message carries a per-node monotonic
+//!   [`event_id`](crate::discovery_message::DiscoveryMessage::event_id).
+//!   Re-delivering the same event (same node, same id) leaves the registry
+//!   untouched ([`UpsertOutcome::Duplicate`]); a new event id from a known
+//!   node refreshes `last_seen` ([`UpsertOutcome::Refreshed`]).
+//! * **Legacy senders** (no event id on the wire) always refresh — they are
+//!   never deduplicated, preserving BORU-DISC-06 behaviour exactly.
 //!
 //! # Announcement policy (BORU-DISC-09)
 //!
@@ -92,7 +106,10 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, Instant},
 };
 
@@ -176,6 +193,11 @@ pub enum IncomingOutcome {
     /// The payload was accepted: the peer registry was updated and a
     /// [`PeerUpdate`] was emitted.
     Processed,
+    /// The payload duplicated an already-accepted event from the same node
+    /// (same `node_id` + same `event_id`, e.g. the same advertisement
+    /// delivered over two discovery paths). It was ignored — no registry
+    /// change and no [`PeerUpdate`] was emitted (BORU-DISC-17 dedup).
+    Duplicate,
     /// The payload could not be deserialised as a
     /// [`DiscoveryMessage`](crate::discovery_message::DiscoveryMessage) and
     /// was dropped.
@@ -191,6 +213,21 @@ pub enum IncomingOutcome {
     SelfMessage,
 }
 
+/// Outcome of [`PeerRegistry::upsert`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpsertOutcome {
+    /// The peer was not registered before — a fresh entry was created.
+    New,
+    /// The peer was already registered and its metadata was refreshed
+    /// (last-seen / source / source-topic). A distinct event id from a
+    /// known node updates last-seen.
+    Refreshed,
+    /// The peer was already registered AND the incoming event id equals the
+    /// last accepted event id — the same advertisement delivered twice (e.g.
+    /// over two discovery paths). The registry was **not** modified.
+    Duplicate,
+}
+
 /// Per-peer metadata held in the [`PeerRegistry`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerRegistryEntry {
@@ -200,13 +237,20 @@ pub struct PeerRegistryEntry {
     pub source: PeerSource,
     /// The gossip topic this peer was heard on.
     pub source_topic: TopicId,
+    /// The event id of the most recently accepted message from this peer
+    /// (`None` = only legacy, event-id-less messages seen). The second half
+    /// of the dedup key: a re-delivered message with the same id is a
+    /// duplicate and does not refresh the entry (BORU-DISC-17).
+    pub last_event_id: Option<u64>,
 }
 
 /// In-process registry of peers seen on the internal discovery topic.
 ///
 /// Maps `node_id` → last-seen / source-topic metadata. This is the dedup
-/// anchor later discovery tasks build on: a node that has already been
-/// registered is not re-announced as new.
+/// anchor: a node that has already been registered is not re-announced as
+/// new. Dedup is keyed by `(node_id, event_id)` (BORU-DISC-17) — the same
+/// peer discovered on two paths is represented once; a duplicate event id
+/// leaves the entry untouched.
 #[derive(Debug, Default, Clone)]
 pub struct PeerRegistry {
     peers: HashMap<PublicKey, PeerRegistryEntry>,
@@ -218,19 +262,52 @@ impl PeerRegistry {
         Self::default()
     }
 
-    /// Insert or refresh a peer entry.
+    /// Insert or refresh a peer entry, deduplicating by `(node_id, event_id)`.
     ///
-    /// If the peer is already known its `last_seen` and `source` are updated;
-    /// otherwise a fresh entry is created.
-    pub fn upsert(&mut self, node_id: PublicKey, source: PeerSource, source_topic: TopicId) {
-        self.peers.insert(
-            node_id,
-            PeerRegistryEntry {
-                last_seen: Instant::now(),
-                source,
-                source_topic,
-            },
-        );
+    /// * **New peer** — creates a fresh entry ([`UpsertOutcome::New`]).
+    /// * **Known peer, new event id** — refreshes `last_seen`/`source`/
+    ///   `source_topic` ([`UpsertOutcome::Refreshed`]).
+    /// * **Known peer, same event id** — duplicate delivery; the entry is
+    ///   **not** modified ([`UpsertOutcome::Duplicate`]).
+    ///
+    /// Legacy senders (no event id on the wire, `event_id == None`) always
+    /// refresh — they are never deduplicated, preserving BORU-DISC-06
+    /// behaviour.
+    pub fn upsert(
+        &mut self,
+        node_id: PublicKey,
+        source: PeerSource,
+        source_topic: TopicId,
+        event_id: Option<u64>,
+    ) -> UpsertOutcome {
+        if let Some(entry) = self.peers.get_mut(&node_id) {
+            // Duplicate event id from an already-known node: the same event
+            // re-delivered (e.g. over two discovery paths). Leave the entry
+            // untouched.
+            if let Some(id) = event_id {
+                if entry.last_event_id == Some(id) {
+                    return UpsertOutcome::Duplicate;
+                }
+            }
+            entry.last_seen = Instant::now();
+            entry.source = source;
+            entry.source_topic = source_topic;
+            if event_id.is_some() {
+                entry.last_event_id = event_id;
+            }
+            UpsertOutcome::Refreshed
+        } else {
+            self.peers.insert(
+                node_id,
+                PeerRegistryEntry {
+                    last_seen: Instant::now(),
+                    source,
+                    source_topic,
+                    last_event_id: event_id,
+                },
+            );
+            UpsertOutcome::New
+        }
     }
 
     /// Whether `node_id` is currently registered.
@@ -403,17 +480,20 @@ pub enum DiscoveryServiceError {
 // ---------------------------------------------------------------------------
 
 /// Shared announcement state: the gossip sender, the local node identity,
-/// and the announcement throttle.
+/// the announcement throttle, and the per-node event-id counter.
 ///
 /// Cloned into the drain loop so neighbour-up events can re-announce
 /// presence. All clones share one [`AnnounceThrottle`] via `Arc`, so
 /// join-time and neighbour-up announcements observe the same minimum-interval
-/// policy.
+/// policy. The event-id counter is shared the same way (BORU-DISC-17): every
+/// announcement gets a fresh, monotonically increasing id so receivers can
+/// dedup by `(node_id, event_id)`.
 #[derive(Clone, Debug)]
 struct AnnounceHandle {
     sender: GossipSender,
     local_node: PublicKey,
     throttle: Arc<AnnounceThrottle>,
+    next_event_id: Arc<AtomicU64>,
 }
 
 impl AnnounceHandle {
@@ -422,7 +502,13 @@ impl AnnounceHandle {
             sender,
             local_node,
             throttle: Arc::new(AnnounceThrottle::new()),
+            next_event_id: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Allocate the next per-node event id (monotonic, starts at 0).
+    fn next_event_id(&self) -> u64 {
+        self.next_event_id.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Raw, unthrottled publish (used by [`DiscoveryService::publish`]).
@@ -437,23 +523,38 @@ impl AnnounceHandle {
     }
 
     /// Throttled announce of an arbitrary discovery message.
-    async fn announce(&self, message: DiscoveryMessage) -> Result<AnnounceOutcome, DiscoveryServiceError> {
+    ///
+    /// The event id is allocated ONLY when the announcement passes the
+    /// throttle — a suppressed announcement does not consume an id, so the
+    /// id space tracks actually-broadcast events (BORU-DISC-17).
+    async fn announce<F>(&self, build: F) -> Result<AnnounceOutcome, DiscoveryServiceError>
+    where
+        F: FnOnce(u64) -> DiscoveryMessage,
+    {
         if !self.throttle.try_announce() {
-            debug!(message = ?message, "discovery: announcement throttled");
+            debug!("discovery: announcement throttled");
             return Ok(AnnounceOutcome::Throttled);
         }
-        self.publish(message).await?;
+        let event_id = self.next_event_id();
+        self.publish(build(event_id)).await?;
         Ok(AnnounceOutcome::Announced)
     }
 
-    /// Announce this node with a `Hello`.
+    /// Announce this node with a `Hello` carrying a fresh per-node event id.
     async fn announce_hello(&self) -> Result<AnnounceOutcome, DiscoveryServiceError> {
-        self.announce(DiscoveryMessage::hello(self.local_node)).await
+        self.announce(|event_id| {
+            DiscoveryMessage::hello_with_event(self.local_node, event_id)
+        })
+        .await
     }
 
-    /// Announce this node with a `Presence` heartbeat.
+    /// Announce this node with a `Presence` heartbeat carrying a fresh
+    /// per-node event id.
     async fn announce_presence(&self) -> Result<AnnounceOutcome, DiscoveryServiceError> {
-        self.announce(DiscoveryMessage::presence(self.local_node)).await
+        self.announce(|event_id| {
+            DiscoveryMessage::presence_with_event(self.local_node, event_id)
+        })
+        .await
     }
 }
 
@@ -513,22 +614,32 @@ impl ReceiveCore {
         }
 
         let source = PeerSource::from_message(&message);
+        let event_id = message.event_id();
         {
             let mut registry = self.registry.lock().expect("peer registry lock poisoned");
-            let was_new = !registry.contains(&node_id);
-            registry.upsert(node_id, source, self.topic);
-            if was_new {
-                info!(
-                    node = %node_id.fmt_short(),
-                    source = ?source,
-                    "discovery: new peer seen",
-                );
-            } else {
-                trace!(
-                    node = %node_id.fmt_short(),
-                    source = ?source,
-                    "discovery: peer refresh",
-                );
+            match registry.upsert(node_id, source, self.topic, event_id) {
+                UpsertOutcome::New => {
+                    info!(
+                        node = %node_id.fmt_short(),
+                        source = ?source,
+                        "discovery: new peer seen",
+                    );
+                }
+                UpsertOutcome::Refreshed => {
+                    trace!(
+                        node = %node_id.fmt_short(),
+                        source = ?source,
+                        "discovery: peer refresh",
+                    );
+                }
+                UpsertOutcome::Duplicate => {
+                    trace!(
+                        node = %node_id.fmt_short(),
+                        event = ?event_id,
+                        "discovery: duplicate event ignored",
+                    );
+                    return IncomingOutcome::Duplicate;
+                }
             }
         }
 
@@ -1035,7 +1146,7 @@ mod tests {
         let node = test_key(0x01);
         let topic = test_topic();
         assert!(!registry.contains(&node));
-        registry.upsert(node, PeerSource::Hello, topic);
+        registry.upsert(node, PeerSource::Hello, topic, None);
 
         assert!(registry.contains(&node));
         assert_eq!(registry.len(), 1);
@@ -1043,9 +1154,10 @@ mod tests {
         assert_eq!(entry.source, PeerSource::Hello);
         assert_eq!(entry.source_topic, topic);
         assert!(registry.last_seen(&node).is_some());
+        assert_eq!(entry.last_event_id, None);
 
         // Refresh with a different source updates the entry, not the count.
-        registry.upsert(node, PeerSource::Presence, topic);
+        registry.upsert(node, PeerSource::Presence, topic, None);
         assert_eq!(registry.len(), 1);
         assert_eq!(registry.get(&node).unwrap().source, PeerSource::Presence);
 
@@ -1062,18 +1174,156 @@ mod tests {
 
         // Insert the "stale" peer, then backdate it (tests are a child
         // module, so they can reach the private map directly).
-        registry.upsert(stale, PeerSource::Hello, topic);
+        registry.upsert(stale, PeerSource::Hello, topic, None);
         registry
             .peers
             .get_mut(&stale)
             .unwrap()
             .last_seen = Instant::now() - Duration::from_secs(3600);
-        registry.upsert(fresh, PeerSource::Presence, topic);
+        registry.upsert(fresh, PeerSource::Presence, topic, None);
 
         let removed = registry.prune_older_than(Duration::from_secs(60));
         assert_eq!(removed, vec![stale]);
         assert!(!registry.contains(&stale));
         assert!(registry.contains(&fresh));
+    }
+
+    // ── Dedup by node id + event id (BORU-DISC-17) ────────────────────
+
+    /// Same peer advertised on two topics yields ONE registry entry: the
+    /// node-identity key dominates, and the entry's source-topic metadata
+    /// updates to the latest hop.
+    #[test]
+    fn registry_same_peer_two_topics_is_one_entry() {
+        let mut registry = PeerRegistry::new();
+        let node = test_key(0x21);
+        let topic_a = test_topic();
+        let topic_b = crate::discovery_topic::discovery_topic(
+            crate::public_room::PublicNetwork::Development,
+        );
+        assert_ne!(topic_a, topic_b);
+
+        assert_eq!(
+            registry.upsert(node, PeerSource::Hello, topic_a, Some(1)),
+            UpsertOutcome::New
+        );
+        // The same peer arrives on a second discovery path with a new event.
+        assert_eq!(
+            registry.upsert(node, PeerSource::Presence, topic_b, Some(2)),
+            UpsertOutcome::Refreshed
+        );
+
+        // Still exactly ONE entry — a peer discovered on both paths is
+        // represented once.
+        assert_eq!(registry.len(), 1);
+        let entry = registry.get(&node).unwrap();
+        assert_eq!(entry.source, PeerSource::Presence);
+        assert_eq!(entry.source_topic, topic_b);
+        assert_eq!(entry.last_event_id, Some(2));
+    }
+
+    /// A duplicate event id from the same node is ignored: the entry is
+    /// untouched (no last-seen/source/source-topic change).
+    #[test]
+    fn registry_duplicate_event_id_ignored() {
+        let mut registry = PeerRegistry::new();
+        let node = test_key(0x22);
+        let topic = test_topic();
+
+        assert_eq!(
+            registry.upsert(node, PeerSource::Hello, topic, Some(7)),
+            UpsertOutcome::New
+        );
+        let first_seen = registry.get(&node).unwrap().last_seen;
+
+        // Same node, same event id re-delivered (e.g. the same advertisement
+        // forwarded over two paths) — must NOT refresh the entry.
+        assert_eq!(
+            registry.upsert(node, PeerSource::Presence, topic, Some(7)),
+            UpsertOutcome::Duplicate
+        );
+        assert_eq!(registry.len(), 1);
+        let entry = registry.get(&node).unwrap();
+        assert_eq!(entry.source, PeerSource::Hello, "source must not change");
+        assert_eq!(entry.source_topic, topic);
+        assert_eq!(
+            entry.last_seen, first_seen,
+            "last_seen must not change on duplicate"
+        );
+        assert_eq!(entry.last_event_id, Some(7));
+    }
+
+    /// Distinct event ids from the same node update last-seen.
+    #[test]
+    fn registry_distinct_event_ids_update_last_seen() {
+        let mut registry = PeerRegistry::new();
+        let node = test_key(0x23);
+        let topic = test_topic();
+
+        assert_eq!(
+            registry.upsert(node, PeerSource::Hello, topic, Some(1)),
+            UpsertOutcome::New
+        );
+        let first_seen = registry.get(&node).unwrap().last_seen;
+
+        // A new event id (a real refresh/presence) updates last_seen.
+        std::thread::sleep(Duration::from_millis(2));
+        assert_eq!(
+            registry.upsert(node, PeerSource::Presence, topic, Some(2)),
+            UpsertOutcome::Refreshed
+        );
+        let entry = registry.get(&node).unwrap();
+        assert_eq!(entry.source, PeerSource::Presence);
+        assert!(entry.last_seen > first_seen);
+        assert_eq!(entry.last_event_id, Some(2));
+    }
+
+    /// Legacy senders (no event id on the wire) always refresh — they are
+    /// never deduplicated. Two distinct legacy messages from the same node
+    /// produce Refreshed, never Duplicate.
+    #[test]
+    fn registry_legacy_messages_never_deduplicated() {
+        let mut registry = PeerRegistry::new();
+        let node = test_key(0x24);
+        let topic = test_topic();
+
+        assert_eq!(
+            registry.upsert(node, PeerSource::Hello, topic, None),
+            UpsertOutcome::New
+        );
+        assert_eq!(
+            registry.upsert(node, PeerSource::Presence, topic, None),
+            UpsertOutcome::Refreshed
+        );
+        assert_eq!(registry.len(), 1);
+        assert_eq!(registry.get(&node).unwrap().source, PeerSource::Presence);
+        assert_eq!(registry.get(&node).unwrap().last_event_id, None);
+    }
+
+    /// Mixing: a legacy message does not erase the tracked event id, and a
+    /// later duplicate of a previously-seen event id is still ignored.
+    #[test]
+    fn registry_event_id_survives_legacy_message() {
+        let mut registry = PeerRegistry::new();
+        let node = test_key(0x25);
+        let topic = test_topic();
+
+        assert_eq!(
+            registry.upsert(node, PeerSource::Hello, topic, Some(5)),
+            UpsertOutcome::New
+        );
+        // A legacy (event-id-less) message refreshes but keeps the id.
+        assert_eq!(
+            registry.upsert(node, PeerSource::Presence, topic, None),
+            UpsertOutcome::Refreshed
+        );
+        assert_eq!(registry.get(&node).unwrap().last_event_id, Some(5));
+        // The duplicate of event 5 is still ignored even after the legacy
+        // refresh.
+        assert_eq!(
+            registry.upsert(node, PeerSource::PeerAdvertisement, topic, Some(5)),
+            UpsertOutcome::Duplicate
+        );
     }
 
     // ── handle_incoming (pure, offline) ───────────────────────────────
@@ -1208,6 +1458,107 @@ mod tests {
         assert!(updates.try_recv().is_err());
     }
 
+    // ── Dedup in the receive path (BORU-DISC-17) ─────────────────────
+
+    /// The same event id from the same node (the same advertisement
+    /// delivered twice, e.g. over two discovery paths) is processed once and
+    /// ignored on re-delivery: `handle_incoming` returns `Duplicate`, the
+    /// registry is unchanged, and NO `PeerUpdate` is emitted.
+    #[tokio::test]
+    async fn handle_incoming_duplicate_event_id_ignored() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let service = test_service(local);
+        let mut updates = service.peer_updates();
+
+        let first = postcard::to_stdvec(&DiscoveryMessage::hello_with_event(peer, 42)).unwrap();
+        assert_eq!(service.handle_incoming(&first, peer), IncomingOutcome::Processed);
+        assert_eq!(service.peer_count(), 1);
+
+        // A duplicate Seen update was emitted for the first delivery.
+        assert_eq!(
+            updates.try_recv(),
+            Ok(PeerUpdate::Seen {
+                node_id: peer,
+                source: PeerSource::Hello,
+            })
+        );
+
+        // Re-deliver the same event (same node, same event id) — ignored.
+        let second = postcard::to_stdvec(&DiscoveryMessage::presence_with_event(peer, 42)).unwrap();
+        assert_eq!(
+            service.handle_incoming(&second, peer),
+            IncomingOutcome::Duplicate
+        );
+        assert_eq!(service.peer_count(), 1);
+        // No further update was emitted for the duplicate.
+        assert!(
+            updates.try_recv().is_err(),
+            "duplicate event must not emit a PeerUpdate"
+        );
+    }
+
+    /// Distinct event ids from the same node update last-seen: the peer stays
+    /// one registry entry, but its source/`last_seen` refresh.
+    #[tokio::test]
+    async fn handle_incoming_distinct_event_ids_refresh() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xCC);
+        let service = test_service(local);
+        let mut updates = service.peer_updates();
+
+        let hello = postcard::to_stdvec(&DiscoveryMessage::hello_with_event(peer, 1)).unwrap();
+        assert_eq!(service.handle_incoming(&hello, peer), IncomingOutcome::Processed);
+        let first_seen = service.known_peers()[0].1.last_seen;
+
+        // A new event id (presence refresh) updates the same single entry.
+        let presence = postcard::to_stdvec(&DiscoveryMessage::presence_with_event(peer, 2)).unwrap();
+        assert_eq!(
+            service.handle_incoming(&presence, peer),
+            IncomingOutcome::Processed
+        );
+        assert_eq!(service.peer_count(), 1);
+        assert_eq!(service.known_peers()[0].1.source, PeerSource::Presence);
+        assert!(service.known_peers()[0].1.last_seen >= first_seen);
+
+        // A Seen update is emitted for each distinct event.
+        assert_eq!(
+            updates.try_recv(),
+            Ok(PeerUpdate::Seen {
+                node_id: peer,
+                source: PeerSource::Hello,
+            })
+        );
+        assert_eq!(
+            updates.try_recv(),
+            Ok(PeerUpdate::Seen {
+                node_id: peer,
+                source: PeerSource::Presence,
+            })
+        );
+    }
+
+    /// A legacy (no event id) message always refreshes, never dedups — an old
+    /// sender's Hello then Presence both update last-seen (BORU-DISC-06
+    /// behaviour preserved).
+    #[tokio::test]
+    async fn handle_incoming_legacy_messages_never_dedup() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xDD);
+        let service = test_service(local);
+
+        let hello = postcard::to_stdvec(&DiscoveryMessage::hello(peer)).unwrap();
+        assert_eq!(service.handle_incoming(&hello, peer), IncomingOutcome::Processed);
+        let presence = postcard::to_stdvec(&DiscoveryMessage::presence(peer)).unwrap();
+        assert_eq!(
+            service.handle_incoming(&presence, peer),
+            IncomingOutcome::Processed,
+            "legacy messages must never be treated as duplicates"
+        );
+        assert_eq!(service.peer_count(), 1);
+        assert_eq!(service.known_peers()[0].1.source, PeerSource::Presence);
+    }
+
     // ── publish (offline over a channel) ──────────────────────────────
 
     #[tokio::test]
@@ -1261,8 +1612,11 @@ mod tests {
             panic!("expected Broadcast command, got {command:?}");
         };
         let decoded: DiscoveryMessage = postcard::from_bytes(&bytes).unwrap();
-        assert_eq!(decoded, DiscoveryMessage::hello(local));
+        // The service stamps a per-node event id on its announcements
+        // (BORU-DISC-17): the first hello carries event id 0.
+        assert_eq!(decoded, DiscoveryMessage::hello_with_event(local, 0));
         assert_eq!(decoded.node_id(), local);
+        assert_eq!(decoded.event_id(), Some(0));
 
         // The gossip mesh echoes our own broadcast back; the receive path
         // must ignore it so we never register ourselves.
@@ -1292,7 +1646,7 @@ mod tests {
             panic!("expected Broadcast command, got {command:?}");
         };
         let decoded: DiscoveryMessage = postcard::from_bytes(&bytes).unwrap();
-        assert_eq!(decoded, DiscoveryMessage::presence(local));
+        assert_eq!(decoded, DiscoveryMessage::presence_with_event(local, 0));
     }
 
     #[tokio::test]
@@ -1326,7 +1680,7 @@ mod tests {
             panic!("expected Broadcast command, got {command:?}");
         };
         let decoded: DiscoveryMessage = postcard::from_bytes(&bytes).unwrap();
-        assert_eq!(decoded, DiscoveryMessage::hello(local));
+        assert_eq!(decoded, DiscoveryMessage::hello_with_event(local, 0));
         assert!(
             tokio::time::timeout(Duration::from_millis(40), cmd_rx.recv())
                 .await
@@ -1345,9 +1699,12 @@ mod tests {
             .expect("timed out waiting for second hello")
             .expect("channel receive failed")
             .expect("channel closed before broadcast");
-        let Command::Broadcast(_) = command else {
+        let Command::Broadcast(bytes) = command else {
             panic!("expected Broadcast command, got {command:?}");
         };
+        // The second announcement carries the next monotonic event id.
+        let decoded: DiscoveryMessage = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded, DiscoveryMessage::hello_with_event(local, 1));
     }
 
     #[test]
@@ -1434,7 +1791,7 @@ mod tests {
             panic!("expected Broadcast command, got {command:?}");
         };
         let decoded: DiscoveryMessage = postcard::from_bytes(&bytes).unwrap();
-        assert_eq!(decoded, DiscoveryMessage::hello(local));
+        assert_eq!(decoded, DiscoveryMessage::hello_with_event(local, 0));
     }
 
     // ── connectivity wiring (BORU-DISC-11) ─────────────────────────────
