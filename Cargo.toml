@@ -616,3 +616,8 @@ name = "test_discovery_restart"
 path = "tests/test_discovery_restart.rs"
 required-features = ["net"]
 
+[[test]]
+name = "test_discovery_e2e_matrix"
+path = "tests/test_discovery_e2e_matrix.rs"
+required-features = ["net"]
+
