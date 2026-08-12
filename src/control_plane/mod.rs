@@ -37,8 +37,12 @@
 //!
 //! Later tasks in the BORU-CP chain add capability negotiation (CP-05 is
 //! the state machine; capabilities are Phase 4) and diagnostics (Phase 5)
-//! as siblings of [`message`].
+//! as siblings of [`message`]. BORU-DIR adds the room directory: the
+//! [`advertisement`] module defines the bounded, versioned room-discovery
+//! advertisement payload (BORU-DIR-02) carried by the
+//! PUBLIC_ROOM_ADVERTISEMENT control message.
 
+pub mod advertisement;
 pub mod capabilities;
 pub mod connectivity;
 #[cfg(feature = "net")]
@@ -53,6 +57,7 @@ pub mod reconnect;
 #[cfg(feature = "net")]
 pub mod reconcile;
 
+pub use advertisement::*;
 pub use capabilities::*;
 pub use connectivity::*;
 #[cfg(feature = "net")]

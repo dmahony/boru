@@ -156,6 +156,9 @@ pub enum AdvertViolation {
     },
     /// An EXTENSIONS payload violates the metadata bounds (BORU-CP-16).
     Extensions(crate::control_plane::extensions::ExtensionsViolation),
+    /// A PUBLIC_ROOM_ADVERTISEMENT payload violates the room-advertisement
+    /// metadata bounds or privacy guardrails (BORU-DIR-02).
+    Advertisement(crate::control_plane::advertisement::AdvertisementViolation),
 }
 
 /// The minimal-advertisement whitelist policy (PDF Task 1.3 steps 1–2).
@@ -194,6 +197,11 @@ pub struct ControlAdvertPolicy {
     pub max_presence_ttl_secs: u32,
     /// Bounds applied to an EXTENSIONS payload (BORU-CP-16, PDF Phase 6).
     pub extensions_bounds: crate::control_plane::extensions::ExtensionsBounds,
+    /// Bounds applied to a PUBLIC_ROOM_ADVERTISEMENT payload (BORU-DIR-02,
+    /// PDF Task 1.2): room-name/description/tag/flag limits, TTL clamp, and
+    /// total encoded size cap so the advertisement stays compact and cannot
+    /// smuggle content through the room-discovery metadata channel.
+    pub advertisement_bounds: crate::control_plane::advertisement::AdvertisementBounds,
 }
 
 impl Default for ControlAdvertPolicy {
@@ -204,6 +212,8 @@ impl Default for ControlAdvertPolicy {
             max_diagnostic_note_len: MAX_DIAGNOSTIC_NOTE_LEN,
             max_presence_ttl_secs: MAX_PRESENCE_TTL_SECS,
             extensions_bounds: crate::control_plane::extensions::ExtensionsBounds::default(),
+            advertisement_bounds: crate::control_plane::advertisement::AdvertisementBounds::default(
+            ),
         }
     }
 }
@@ -268,16 +278,9 @@ impl ControlAdvertPolicy {
             ControlPayload::Extensions(payload) => payload
                 .validate(&self.extensions_bounds)
                 .map_err(AdvertViolation::Extensions),
-            ControlPayload::PublicRoomAdvertisement(_payload) => {
-                // BORU-DIR-01: the advertisement payload is a single u8
-                // version anchor (BORU-DIR-02 adds the bounded metadata
-                // fields). The u8 is inherently bounded; the payload itself
-                // is capped by the envelope's MAX_CONTROL_PAYLOAD_LEN.
-                // Field-level bounds (room name/description/tags lengths,
-                // field counts) arrive with the BORU-DIR-02 metadata model
-                // and are enforced by this same policy check.
-                Ok(())
-            }
+            ControlPayload::PublicRoomAdvertisement(payload) => payload
+                .validate(&self.advertisement_bounds)
+                .map_err(AdvertViolation::Advertisement),
         }
     }
 }
@@ -954,18 +957,108 @@ mod tests {
         assert!(policy.check(&hint(peer, 6, None)).is_ok());
     }
 
-    /// BORU-DIR-01: a PUBLIC_ROOM_ADVERTISEMENT envelope passes the
-    /// minimal-content whitelist (it is metadata only — a version anchor —
-    /// with no free-form fields that could smuggle content).
+    /// BORU-DIR-01/02: a PUBLIC_ROOM_ADVERTISEMENT envelope passes the
+    /// minimal-content whitelist when it carries a bounded, discoverable,
+    /// metadata-only room advertisement (BORU-DIR-02 metadata model).
     #[test]
     fn policy_accepts_public_room_advertisement() {
         let policy = ControlAdvertPolicy::default();
         let peer = key(0x01);
-        let advert = ControlEnvelope::public_room_advertisement(peer, 1, 1_700_000_000, 1);
+        let advert = ControlEnvelope::public_room_advertisement(
+            peer,
+            1,
+            1_700_000_000,
+            crate::control_plane::advertisement::PublicRoomAdvertisement::minimal(
+                crate::proto::state::TopicId::from_bytes([0x61; 32]),
+                "Lobby".into(),
+                {
+                    let mut seed = [0u8; 32];
+                    seed[0] = 0x02;
+                    iroh_base::SecretKey::from_bytes(&seed)
+                        .public()
+                        .as_bytes()
+                        .to_owned()
+                },
+            ),
+        );
         assert!(
             policy.check(&advert).is_ok(),
             "a bounded metadata-only room advertisement must be accepted"
         );
+    }
+
+    /// BORU-DIR-02: a PUBLIC_ROOM_ADVERTISEMENT envelope carrying metadata
+    /// that exceeds the advertisement bounds (oversized room name) is
+    /// rejected by the minimal-content policy — it never reaches the
+    /// directory.
+    #[test]
+    fn policy_rejects_oversized_room_advertisement() {
+        let policy = ControlAdvertPolicy::default();
+        let peer = key(0x03);
+        let mut advert = crate::control_plane::advertisement::PublicRoomAdvertisement::minimal(
+            crate::proto::state::TopicId::from_bytes([0x61; 32]),
+            "Lobby".into(),
+            {
+                let mut seed = [0u8; 32];
+                seed[0] = 0x04;
+                iroh_base::SecretKey::from_bytes(&seed)
+                    .public()
+                    .as_bytes()
+                    .to_owned()
+            },
+        );
+        advert.room_name =
+            "x".repeat(crate::control_plane::advertisement::DEFAULT_MAX_ROOM_NAME_LEN + 1);
+        let envelope = ControlEnvelope::public_room_advertisement(peer, 2, 1_700_000_000, advert);
+        let err = policy.check(&envelope).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AdvertViolation::Advertisement(
+                    crate::control_plane::advertisement::AdvertisementViolation::RoomNameTooLong { .. }
+                )
+            ),
+            "oversized room name must be rejected, got {err:?}"
+        );
+    }
+
+    /// BORU-DIR-02 visibility guardrail: an advertisement claiming a
+    /// non-discoverable visibility (Private/PublicUnlisted) is rejected —
+    /// private and unlisted rooms are never advertised.
+    #[test]
+    fn policy_rejects_non_discoverable_room_advertisement() {
+        let policy = ControlAdvertPolicy::default();
+        let peer = key(0x05);
+        for visibility in [
+            crate::control_plane::advertisement::RoomVisibility::Private,
+            crate::control_plane::advertisement::RoomVisibility::PublicUnlisted,
+        ] {
+            let mut advert = crate::control_plane::advertisement::PublicRoomAdvertisement::minimal(
+                crate::proto::state::TopicId::from_bytes([0x61; 32]),
+                "Lobby".into(),
+                {
+                    let mut seed = [0u8; 32];
+                    seed[0] = 0x06;
+                    iroh_base::SecretKey::from_bytes(&seed)
+                        .public()
+                        .as_bytes()
+                        .to_owned()
+                },
+            );
+            advert.visibility = visibility;
+            let envelope =
+                ControlEnvelope::public_room_advertisement(peer, 3, 1_700_000_000, advert);
+            let err = policy.check(&envelope).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    AdvertViolation::Advertisement(
+                        crate::control_plane::advertisement::AdvertisementViolation::NotDiscoverable
+                    )
+                ),
+                "non-discoverable advertisement must be rejected, got {err:?}"
+            );
+        }
     }
 
     #[test]

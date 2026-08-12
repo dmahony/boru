@@ -298,12 +298,13 @@ pub enum ControlEvent {
     RoomAdvertisement(RoomAdvertisementEvent),
 }
 
-/// A decoded PUBLIC_ROOM_ADVERTISEMENT (BORU-DIR-01).
+/// A decoded PUBLIC_ROOM_ADVERTISEMENT (BORU-DIR-01/02).
 ///
 /// Carries the envelope metadata (sender, sequence, timestamp) plus the
-/// typed advertisement payload. The full advertised-metadata model (room_id,
-/// room_name, description, ...) is added by BORU-DIR-02; this task delivers
-/// the versioned wire type + decode path.
+/// typed, bounded advertisement payload (BORU-DIR-02 metadata model:
+/// room_id, room_name, short_description, room_protocol_version,
+/// owner_peer_id, visibility, TTL, and optional tags / activity /
+/// member-count / avatar / feature flags).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoomAdvertisementEvent {
     /// The node that published the advertisement (envelope sender).
@@ -312,8 +313,8 @@ pub struct RoomAdvertisementEvent {
     pub sequence: u64,
     /// Unix epoch seconds when the advertisement was created.
     pub timestamp_secs: u64,
-    /// The typed advertisement payload (version anchor for BORU-DIR-02).
-    pub advert: crate::control_plane::message::PublicRoomAdvertisementPayload,
+    /// The typed advertisement payload (BORU-DIR-02 metadata model).
+    pub advert: crate::control_plane::advertisement::PublicRoomAdvertisement,
 }
 
 /// Outcome of [`DiscoveryService::handle_incoming`].
@@ -1314,7 +1315,7 @@ impl ReceiveCore {
                             sender_node_id: envelope.sender_node_id,
                             sequence: envelope.sequence,
                             timestamp_secs: envelope.timestamp_secs,
-                            advert: *advert,
+                            advert: advert.clone(),
                         },
                     ));
                     return IncomingOutcome::ControlMessage;
@@ -5326,6 +5327,22 @@ mod tests {
 
     // ── BORU-DIR-01: PUBLIC_ROOM_ADVERTISEMENT decode path ─────────────
 
+    /// A valid, bounded, discoverable room advertisement for tests.
+    fn test_advert() -> crate::control_plane::advertisement::PublicRoomAdvertisement {
+        crate::control_plane::advertisement::PublicRoomAdvertisement::minimal(
+            crate::proto::state::TopicId::from_bytes([0x41; 32]),
+            "Test Room".into(),
+            {
+                let mut seed = [0u8; 32];
+                seed[0] = 0x42;
+                iroh_base::SecretKey::from_bytes(&seed)
+                    .public()
+                    .as_bytes()
+                    .to_owned()
+            },
+        )
+    }
+
     /// A valid PUBLIC_ROOM_ADVERTISEMENT envelope is decoded **only inside
     /// the discovery/control-plane service** and surfaced as the dedicated
     /// `ControlEvent::RoomAdvertisement` event — never as a generic
@@ -5338,7 +5355,9 @@ mod tests {
         let service = test_service(local);
         let mut events = service.control_events();
 
-        let bytes = ControlEnvelope::public_room_advertisement(peer, 7, 1_700_000_000, 1).encode();
+        let bytes =
+            ControlEnvelope::public_room_advertisement(peer, 7, 1_700_000_000, test_advert())
+                .encode();
         let outcome = service.handle_incoming(&bytes, peer);
         assert_eq!(outcome, IncomingOutcome::ControlMessage);
 
@@ -5414,10 +5433,8 @@ mod tests {
 
         // Encode the payload alone to compute its exact length, then build a
         // frame whose payload section claims 4 extra trailing bytes.
-        let payload = postcard::to_stdvec(&ControlPayload::PublicRoomAdvertisement(
-            crate::control_plane::message::PublicRoomAdvertisementPayload { advert_version: 1 },
-        ))
-        .unwrap();
+        let payload =
+            postcard::to_stdvec(&ControlPayload::PublicRoomAdvertisement(test_advert())).unwrap();
         let mut bytes = CONTROL_PLANE_MAGIC.to_vec();
         bytes.push(crate::control_plane::message::CONTROL_PLANE_PROTOCOL_VERSION);
         let header = postcard::to_stdvec(&crate::control_plane::message::WireHeader {
