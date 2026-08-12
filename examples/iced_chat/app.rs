@@ -104,7 +104,7 @@ use boru_core::conversations::{
 use boru_core::discovery_backend::MainlineDhtBackend;
 use boru_core::discovery_secret::DiscoverySecret;
 use boru_core::control_plane::connectivity::{
-    PeerConnectivityState, PeerConnectivityStore,
+    ConnectivityEvent, PeerConnectivityState, PeerConnectivityStore,
 };
 use boru_core::download_limits::DownloadLimitsConfig;
 use boru_core::download_manager::DownloadManager;
@@ -15733,6 +15733,12 @@ impl IcedChat {
         topic: &TopicId,
         event: &NetEvent,
     ) -> Option<iced::Task<AppMessage>> {
+        // BORU-CP-13: feed the per-peer diagnostics snapshot from real
+        // data-plane events — inbound gossip (any topic event from the
+        // peer) and successfully decoded application messages. Timestamp
+        // only; these never move the connectivity state machine and never
+        // carry message content.
+        self.report_net_diagnostics(event);
         if let NetEvent::Message { from, message, .. } = event {
             let msg_hash = message_hash(message);
             if Self::_is_user_visible_event(event) {
@@ -17051,6 +17057,47 @@ impl IcedChat {
             .into_iter()
             .find(|entry| entry.topic == self.topic)
             .and_then(|entry| PublicKey::from_str(&entry.peer_id).ok())
+    }
+
+    /// BORU-CP-13: feed the per-peer diagnostics snapshot from real inbound
+    /// data-plane events — any gossip event from the peer (message,
+    /// NeighborUp, NeighborDown) refreshes `last_inbound_gossip`, and a
+    /// decoded application message additionally refreshes
+    /// `last_decoded_message`. Timestamp-only: never moves the
+    /// connectivity state machine, never stores message content. No-op when
+    /// no connectivity store is attached (unit tests, headless builds).
+    fn report_net_diagnostics(&self, event: &NetEvent) {
+        let Some(store) = &self.connectivity_store else {
+            return;
+        };
+        let mut store = store.lock().unwrap();
+        let now = Instant::now();
+        match event {
+            NetEvent::Message { from, .. } => {
+                if *from == self.local_public {
+                    return;
+                }
+                store.apply(*from, ConnectivityEvent::InboundGossipEvent, now);
+                store.apply(*from, ConnectivityEvent::ApplicationMessageDecoded, now);
+            }
+            NetEvent::NeighborUp { peer, .. } | NetEvent::NeighborDown { peer, .. } => {
+                if *peer == self.local_public {
+                    return;
+                }
+                store.apply(*peer, ConnectivityEvent::InboundGossipEvent, now);
+            }
+            NetEvent::Closed | NetEvent::Error(_) => {}
+        }
+    }
+
+    /// BORU-CP-13: record an outbound direct broadcast into the per-peer
+    /// diagnostics snapshot (`last_outbound_direct`). Timestamp-only; no-op
+    /// when no connectivity store is attached.
+    fn report_direct_broadcast(&self, peer: PublicKey) {
+        if let Some(store) = &self.connectivity_store {
+            let mut store = store.lock().unwrap();
+            store.apply(peer, ConnectivityEvent::DirectMessageSent, Instant::now());
+        }
     }
 
     /// Downgrade stale peers to Away. Called on each ConnMonitorTick:
@@ -27980,6 +28027,90 @@ mod tests {
         assert_eq!(app.ui_presence(&peer), PeerPresence::Offline);
         // The backend store is untouched by the UI toggle.
         assert!(store.lock().unwrap().state(&peer).is_online());
+        drop(app);
+        runtime.block_on(async {});
+    }
+
+    /// BORU-CP-13: the app's data-plane wiring feeds the per-peer
+    /// diagnostics — inbound gossip + decoded application messages on
+    /// receive, outbound direct broadcast on send — without ever moving
+    /// the connectivity state machine or storing message content.
+    #[test]
+    fn report_net_diagnostics_fills_per_peer_snapshot() {
+        use boru_core::chat_core::Message as ChatMessage;
+        use boru_core::chat_core::NetEvent as CoreNetEvent;
+
+        let (mut runtime, mut app) = build_prewarm_test_app();
+        let peer = iroh::SecretKey::generate().public();
+        let store = Arc::new(StdMutex::new(PeerConnectivityStore::default()));
+        app.connectivity_store = Some(Arc::clone(&store));
+        // A peer only enters the snapshot after positive discovery evidence
+        // (diagnostics timestamps never fabricate presence); seed the
+        // normal flow: discovered → direct messages flow.
+        store
+            .lock()
+            .unwrap()
+            .apply(
+                peer,
+                boru_core::control_plane::connectivity::ConnectivityEvent::DiscoverySeen,
+                std::time::Instant::now(),
+            );
+
+        // Inbound decoded message → gossip + decode stages recorded.
+        let event = CoreNetEvent::Message {
+            from: peer,
+            message: ChatMessage::Message {
+                text: "hello".to_string(),
+            },
+            sent_at: 1,
+        };
+        app.report_net_diagnostics(&event);
+        {
+            let store = store.lock().unwrap();
+            assert!(store.get(&peer).is_some(), "peer tracked");
+            assert!(
+                store.get(&peer).unwrap().last_inbound_gossip.is_some(),
+                "inbound gossip recorded"
+            );
+            assert!(
+                store.get(&peer).unwrap().last_decoded_message.is_some(),
+                "decoded message recorded"
+            );
+            assert!(
+                store.get(&peer).unwrap().last_outbound_direct.is_none(),
+                "no outbound yet"
+            );
+        }
+
+        // Outbound direct broadcast → outbound stage recorded.
+        app.report_direct_broadcast(peer);
+        {
+            let store = store.lock().unwrap();
+            assert!(
+                store.get(&peer).unwrap().last_outbound_direct.is_some(),
+                "outbound broadcast recorded"
+            );
+            // The state machine must NOT have been moved by diagnostics
+            // traffic (no positive endpoint evidence): the peer stays
+            // exactly where discovery left it.
+            assert_eq!(
+                store.state(&peer),
+                boru_core::control_plane::connectivity::PeerConnectivityState::Discovered
+            );
+        }
+
+        // Self-traffic is never recorded.
+        let self_event = CoreNetEvent::Message {
+            from: app.local_public,
+            message: ChatMessage::Message {
+                text: "self".to_string(),
+            },
+            sent_at: 1,
+        };
+        let before = store.lock().unwrap().len();
+        app.report_net_diagnostics(&self_event);
+        assert_eq!(store.lock().unwrap().len(), before, "self events ignored");
+
         drop(app);
         runtime.block_on(async {});
     }

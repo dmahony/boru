@@ -4618,6 +4618,13 @@ impl IcedChat {
                 match self.persist_outgoing_message(self.topic, &trimmed) {
                     Ok((event_id, msg_hash, encoded)) => {
                         self.self_sent_events.insert(msg_hash, event_id);
+                        // BORU-CP-13: record the outbound direct broadcast
+                        // into the per-peer diagnostics snapshot (direct
+                        // conversations only; groups/public rooms have no
+                        // single peer). Timestamp-only, never chat content.
+                        if let Some(peer) = self.current_direct_peer() {
+                            self.report_direct_broadcast(peer);
+                        }
                         let mut local_entry = ChatEntry::local(&self.local_label, &text);
                         local_entry.event_id = event_id;
                         local_entry.message_hash = Some(msg_hash);

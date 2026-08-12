@@ -29,6 +29,16 @@
 //! receive, timeout, and relay/direct path changes. No timer, UI action, or
 //! gossip *metadata* ever fabricates a transition.
 //!
+//! BORU-CP-13 adds three **timestamp-only** diagnostic events that refresh
+//! per-peer timing fields without ever moving the state machine:
+//! [`ConnectivityEvent::DirectMessageSent`] (last outbound direct
+//! broadcast), [`ConnectivityEvent::InboundGossipEvent`] (last inbound
+//! gossip event), and [`ConnectivityEvent::ApplicationMessageDecoded`]
+//! (last successfully decoded application message). They are the raw
+//! material for the share-safe per-peer snapshot in
+//! [`super::diagnostics`]; because they never transition, they can never
+//! fabricate connectivity progress.
+//!
 //! # Idempotence
 //!
 //! Transitions are idempotent and safe under duplicate / reordered gossip
@@ -166,6 +176,26 @@ pub enum ConnectivityEvent {
     PathChangedDirect,
     /// The relay/direct path changed to a relay-only path.
     PathChangedRelay,
+    /// An outbound direct broadcast was attempted to the peer (BORU-CP-13).
+    ///
+    /// Timestamp-only diagnostic event: it records *when* the data plane
+    /// last tried to broadcast on the peer's direct topic, but it never
+    /// moves the state machine — an outbound attempt proves nothing about
+    /// the peer's receipt, so it must not fabricate connectivity progress.
+    DirectMessageSent,
+    /// An inbound gossip event (message, NeighborUp, NeighborDown) arrived
+    /// from the peer (BORU-CP-13).
+    ///
+    /// Timestamp-only diagnostic event: hearing traffic from a peer is
+    /// evidence of liveness, not of a usable direct path, so it refreshes
+    /// `last_inbound_gossip` without moving the state machine.
+    InboundGossipEvent,
+    /// A gossip message from the peer decoded to an application message and
+    /// reached application processing (BORU-CP-13).
+    ///
+    /// Timestamp-only diagnostic event: records *when* the peer's content
+    /// last decoded successfully. No message content is ever stored here.
+    ApplicationMessageDecoded,
 }
 
 impl ConnectivityEvent {
@@ -182,6 +212,9 @@ impl ConnectivityEvent {
             Self::Timeout => "timeout",
             Self::PathChangedDirect => "path-changed-direct",
             Self::PathChangedRelay => "path-changed-relay",
+            Self::DirectMessageSent => "direct-message-sent",
+            Self::InboundGossipEvent => "inbound-gossip-event",
+            Self::ApplicationMessageDecoded => "application-message-decoded",
         }
     }
 }
@@ -365,6 +398,11 @@ pub struct PeerConnectivityEntry {
     pub last_inbound_direct: Option<Instant>,
     /// Last time a direct (non-discovery) message was sent to the peer.
     pub last_outbound_direct: Option<Instant>,
+    /// Last time any inbound gossip event arrived from the peer (BORU-CP-13).
+    pub last_inbound_gossip: Option<Instant>,
+    /// Last time a message from the peer decoded to an application message
+    /// and reached application processing (BORU-CP-13).
+    pub last_decoded_message: Option<Instant>,
     /// Human-readable last failure (dial / topic / path), if any.
     pub last_error: Option<String>,
     /// Bounded, ordered transition trail (oldest first).
@@ -382,6 +420,8 @@ impl PeerConnectivityEntry {
             direct_topic_state: DirectTopicState::NotAttempted,
             last_inbound_direct: None,
             last_outbound_direct: None,
+            last_inbound_gossip: None,
+            last_decoded_message: None,
             last_error: None,
             trail: VecDeque::new(),
         }
@@ -435,9 +475,14 @@ impl PeerConnectivityStore {
     ///   trail record appended, transition logged at `info!`.
     /// * Known peer + event that does not move it → [`TransitionOutcome::NoChange`]
     ///   (idempotent; no trail record, no `info!` log). Side-effect
-    ///   timestamps (last_seen, discovery_last_seen, last_inbound_direct)
+    ///   timestamps (last_seen, discovery_last_seen, last_inbound_direct,
+    ///   last_outbound_direct, last_inbound_gossip, last_decoded_message)
     ///   are still refreshed so a no-op event keeps the peer's recency
-    ///   current.
+    ///   current — including the BORU-CP-13 timestamp-only diagnostic
+    ///   events ([`ConnectivityEvent::DirectMessageSent`],
+    ///   [`ConnectivityEvent::InboundGossipEvent`],
+    ///   [`ConnectivityEvent::ApplicationMessageDecoded`]), which never
+    ///   move the state machine.
     ///
     /// `now` is explicit so tests can drive timeout/eviction deterministically.
     pub fn apply(
@@ -479,6 +524,26 @@ impl PeerConnectivityStore {
                 ConnectivityEvent::DirectMessageReceived => {
                     entry.last_inbound_direct = Some(now);
                 }
+                ConnectivityEvent::DirectMessageSent => {
+                    entry.last_outbound_direct = Some(now);
+                }
+                ConnectivityEvent::InboundGossipEvent => {
+                    entry.last_inbound_gossip = Some(now);
+                }
+                ConnectivityEvent::ApplicationMessageDecoded => {
+                    entry.last_decoded_message = Some(now);
+                }
+                // Path hints are recorded even when the event is an
+                // idempotent no-op (e.g. `PathChangedDirect` on an already
+                // Reachable peer) — the peer IS on that path, and the
+                // diagnostics snapshot must not report `unknown` for a
+                // healthy direct/relay peer (BORU-CP-13/14).
+                ConnectivityEvent::PathChangedDirect => {
+                    entry.path_kind = PathKind::Direct;
+                }
+                ConnectivityEvent::PathChangedRelay => {
+                    entry.path_kind = PathKind::Relay;
+                }
                 _ => {}
             }
             match transition(entry.state, event) {
@@ -496,12 +561,6 @@ impl PeerConnectivityStore {
                         ConnectivityEvent::TopicJoined => {
                             entry.direct_topic_state = DirectTopicState::Ready;
                             entry.last_error = None;
-                        }
-                        ConnectivityEvent::PathChangedDirect => {
-                            entry.path_kind = PathKind::Direct;
-                        }
-                        ConnectivityEvent::PathChangedRelay => {
-                            entry.path_kind = PathKind::Relay;
                         }
                         // Success events clear the last failure so the
                         // trail reads as "recovered".
@@ -555,6 +614,12 @@ impl PeerConnectivityStore {
                 }
                 ConnectivityEvent::DirectMessageReceived => {
                     entry.last_inbound_direct = Some(now);
+                }
+                ConnectivityEvent::PathChangedDirect => {
+                    entry.path_kind = PathKind::Direct;
+                }
+                ConnectivityEvent::PathChangedRelay => {
+                    entry.path_kind = PathKind::Relay;
                 }
                 _ => {}
             }
@@ -1067,6 +1132,36 @@ mod tests {
         assert!(store.state(&peer).is_online());
     }
 
+    /// Path hints are recorded even when the path event is an idempotent
+    /// no-op (e.g. `PathChangedDirect` on an already Reachable peer), so
+    /// the diagnostics snapshot never reports `unknown` for a peer that is
+    /// demonstrably on a direct/relay path (BORU-CP-13/14).
+    #[test]
+    fn path_hint_recorded_on_noop_path_event() {
+        let mut store = PeerConnectivityStore::new();
+        let peer = key(0x0D2);
+        let t0 = Instant::now();
+
+        store.apply(peer, E::DiscoverySeen, t0);
+        store.apply(peer, E::EndpointConnected, t0 + Duration::from_secs(1));
+        assert_eq!(store.state(&peer), S::Reachable);
+        assert_eq!(store.get(&peer).unwrap().path_kind, PathKind::Unknown);
+
+        // PathChangedDirect on Reachable is an idempotent no-op — but the
+        // hint must still be recorded.
+        assert_eq!(
+            store.apply(peer, E::PathChangedDirect, t0 + Duration::from_secs(2)),
+            TransitionOutcome::NoChange
+        );
+        assert_eq!(store.get(&peer).unwrap().path_kind, PathKind::Direct);
+        assert_eq!(store.state(&peer), S::Reachable);
+
+        // Same for relay.
+        store.apply(peer, E::PathChangedRelay, t0 + Duration::from_secs(3));
+        assert_eq!(store.get(&peer).unwrap().path_kind, PathKind::Relay);
+        assert_eq!(store.state(&peer), S::Degraded, "relay-only degrades the peer");
+    }
+
     /// Direct message receive proves the direct topic works even if the
     /// peer was only Discovered — and is idempotent afterwards.
     #[test]
@@ -1090,6 +1185,107 @@ mod tests {
             Some(t0 + Duration::from_secs(2))
         );
         assert_eq!(store.trail(&peer).len(), 2);
+    }
+
+    /// BORU-CP-13 timestamp-only events refresh per-peer timestamps without
+    /// ever moving the state machine.
+    #[test]
+    fn timestamp_only_diagnostics_events_do_not_move_state() {
+        let mut store = PeerConnectivityStore::new();
+        let peer = key(0x0F);
+        let t0 = Instant::now();
+
+        store.apply(peer, E::DiscoverySeen, t0);
+        assert_eq!(store.state(&peer), S::Discovered);
+
+        // Outbound broadcast: refreshes last_outbound_direct, state stays.
+        assert_eq!(
+            store.apply(peer, E::DirectMessageSent, t0 + Duration::from_secs(1)),
+            TransitionOutcome::NoChange
+        );
+        assert_eq!(store.state(&peer), S::Discovered);
+        assert_eq!(
+            store.get(&peer).unwrap().last_outbound_direct,
+            Some(t0 + Duration::from_secs(1))
+        );
+
+        // Inbound gossip: refreshes last_inbound_gossip, state stays.
+        assert_eq!(
+            store.apply(peer, E::InboundGossipEvent, t0 + Duration::from_secs(2)),
+            TransitionOutcome::NoChange
+        );
+        assert_eq!(store.state(&peer), S::Discovered);
+        assert_eq!(
+            store.get(&peer).unwrap().last_inbound_gossip,
+            Some(t0 + Duration::from_secs(2))
+        );
+
+        // Decoded application message: refreshes last_decoded_message, and
+        // still does not advance the state machine (only a real
+        // DirectMessageReceived / TopicJoined does).
+        assert_eq!(
+            store.apply(peer, E::ApplicationMessageDecoded, t0 + Duration::from_secs(3)),
+            TransitionOutcome::NoChange
+        );
+        assert_eq!(store.state(&peer), S::Discovered);
+        assert_eq!(
+            store.get(&peer).unwrap().last_decoded_message,
+            Some(t0 + Duration::from_secs(3))
+        );
+
+        // No trail records are created for timestamp-only events.
+        assert_eq!(store.trail(&peer).len(), 1, "only DiscoverySeen transitioned");
+    }
+
+    /// BORU-CP-13 timestamp-only events never create entries for unknown
+    /// peers (they carry no positive evidence of a usable path).
+    #[test]
+    fn timestamp_only_events_do_not_create_unknown_entries() {
+        let mut store = PeerConnectivityStore::new();
+        let peer = key(0x10);
+        let t0 = Instant::now();
+
+        assert_eq!(
+            store.apply(peer, E::DirectMessageSent, t0),
+            TransitionOutcome::NoChange
+        );
+        assert_eq!(
+            store.apply(peer, E::InboundGossipEvent, t0),
+            TransitionOutcome::NoChange
+        );
+        assert_eq!(
+            store.apply(peer, E::ApplicationMessageDecoded, t0),
+            TransitionOutcome::NoChange
+        );
+        assert!(store.is_empty());
+    }
+
+    /// The full BORU-CP-13 stage timeline: discovery → endpoint → topic →
+    /// outbound broadcast → inbound gossip → decoded message, with every
+    /// timestamp recorded for the snapshot.
+    #[test]
+    fn full_stage_timeline_records_all_timestamps() {
+        let mut store = PeerConnectivityStore::new();
+        let peer = key(0x11);
+        let t0 = Instant::now();
+
+        store.apply(peer, E::DiscoverySeen, t0);
+        store.apply(peer, E::EndpointConnecting, t0 + Duration::from_millis(1));
+        store.apply(peer, E::EndpointConnected, t0 + Duration::from_millis(2));
+        store.apply(peer, E::TopicJoined, t0 + Duration::from_millis(3));
+        store.apply(peer, E::DirectMessageSent, t0 + Duration::from_millis(4));
+        store.apply(peer, E::InboundGossipEvent, t0 + Duration::from_millis(5));
+        store.apply(peer, E::ApplicationMessageDecoded, t0 + Duration::from_millis(6));
+        store.apply(peer, E::DirectMessageReceived, t0 + Duration::from_millis(7));
+
+        let entry = store.get(&peer).expect("peer tracked");
+        assert_eq!(entry.state, S::DirectTopicReady);
+        assert_eq!(entry.direct_topic_state, DirectTopicState::Ready);
+        assert_eq!(entry.discovery_last_seen, Some(t0));
+        assert_eq!(entry.last_outbound_direct, Some(t0 + Duration::from_millis(4)));
+        assert_eq!(entry.last_inbound_gossip, Some(t0 + Duration::from_millis(5)));
+        assert_eq!(entry.last_decoded_message, Some(t0 + Duration::from_millis(6)));
+        assert_eq!(entry.last_inbound_direct, Some(t0 + Duration::from_millis(7)));
     }
 
     impl PeerConnectivityStore {

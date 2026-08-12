@@ -2031,6 +2031,42 @@ impl DiscoveryService {
             .collect()
     }
 
+    /// BORU-CP-13: structured, share-safe per-peer diagnostic snapshots.
+    ///
+    /// Each snapshot lets a developer tell whether a failure is in
+    /// discovery, endpoint connectivity, topic join / subscription, gossip,
+    /// decoding, or application delivery — without needing chat contents or
+    /// secrets. Peer ids are truncated and the direct-topic id is only a
+    /// short hash prefix, so the output is safe to paste into a bug report
+    /// after normal review.
+    pub fn peer_diagnostics(
+        &self,
+    ) -> Vec<crate::control_plane::diagnostics::PeerDiagnosticsSnapshot> {
+        let store = self
+            .core
+            .connectivity
+            .lock()
+            .expect("connectivity store lock poisoned");
+        crate::control_plane::diagnostics::snapshots_for(
+            &store,
+            &self.core.local_node,
+            Instant::now(),
+        )
+    }
+
+    /// BORU-CP-13: log every tracked peer's diagnostic snapshot at `debug!`
+    /// (stable `peer=… state=…` lines). No-op when no peers are tracked.
+    pub fn log_peer_diagnostics(&self) {
+        let snapshots = self.peer_diagnostics();
+        if snapshots.is_empty() {
+            debug!("diagnostics: no peers tracked");
+            return;
+        }
+        for snap in &snapshots {
+            debug!(%snap, "diagnostics: per-peer snapshot");
+        }
+    }
+
     /// Read handle to the shared BORU-CP-05 connectivity state machine
     /// store.
     ///
@@ -2363,12 +2399,30 @@ async fn connectivity_loop(
     cancel: CancellationToken,
 ) {
     let mut dialed: HashSet<iroh_base::EndpointId> = HashSet::new();
+    // BORU-CP-13: a slow periodic debug dump of the per-peer diagnostic
+    // snapshots, so `RUST_LOG=debug` shows the full stage timeline
+    // (discovery / endpoint / path / topic / gossip / decode / delivery)
+    // without any extra tooling. Guarded by `tracing::enabled!` so the
+    // render cost is zero when debug logging is off.
+    let mut dump_interval = tokio::time::interval(Duration::from_secs(60));
+    dump_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    dump_interval.tick().await; // consume the immediate first tick
     loop {
         tokio::select! {
             biased;
             _ = cancel.cancelled() => {
                 debug!("discovery connectivity loop cancelled");
                 break;
+            }
+            _ = dump_interval.tick() => {
+                if tracing::enabled!(tracing::Level::DEBUG) {
+                    let store = connectivity.lock().expect("connectivity store lock poisoned");
+                    let snapshots =
+                        crate::control_plane::diagnostics::snapshots_for(&store, &local_node, Instant::now());
+                    for snap in &snapshots {
+                        debug!(%snap, "diagnostics: per-peer snapshot");
+                    }
+                }
             }
             update = updates.recv() => {
                 match update {
@@ -5458,6 +5512,49 @@ mod tests {
         assert_eq!(service.connectivity_state(&peer), PeerConnectivityState::DirectTopicReady);
         assert!(service.connectivity_state(&peer).is_ready_for_direct());
         assert!(service.connectivity_state(&peer).is_online());
+    }
+
+    /// BORU-CP-13: `peer_diagnostics()` exposes a share-safe per-peer
+    /// snapshot covering every stage, and the timestamp-only events from
+    /// the data plane show up in it.
+    #[tokio::test]
+    async fn peer_diagnostics_snapshot_covers_every_stage() {
+        use crate::control_plane::connectivity::ConnectivityEvent as CE;
+
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let service = test_service(local);
+
+        let bytes = postcard::to_stdvec(&DiscoveryMessage::hello(peer)).unwrap();
+        service.handle_incoming(&bytes, peer);
+        service.report_connectivity_event(peer, CE::EndpointConnected);
+        service.report_connectivity_event(peer, CE::TopicJoined);
+        service.report_connectivity_event(peer, CE::DirectMessageSent);
+        service.report_connectivity_event(peer, CE::InboundGossipEvent);
+        service.report_connectivity_event(peer, CE::ApplicationMessageDecoded);
+
+        let snapshots = service.peer_diagnostics();
+        assert_eq!(snapshots.len(), 1, "one tracked peer");
+        let snap = &snapshots[0];
+
+        assert_eq!(snap.state, "direct-topic-ready");
+        assert_eq!(snap.endpoint, "connected");
+        assert_eq!(snap.topic_join_status, "ready");
+        assert!(snap.subscription_ready);
+        assert!(snap.discovery_last_seen_ms.is_some());
+        assert!(snap.last_outbound_direct_ms.is_some(), "outbound broadcast recorded");
+        assert!(snap.last_inbound_gossip_ms.is_some(), "inbound gossip recorded");
+        assert!(snap.last_decoded_message_ms.is_some(), "decoded message recorded");
+        assert!(
+            snap.direct_topic_id_prefix.is_some(),
+            "direct-topic hash prefix present for debugging"
+        );
+        assert!(snap.last_error.is_none());
+        assert!(snap.trail.len() >= 3);
+
+        // Share-safety: the rendered snapshot never contains the full peer id.
+        let full_hex = hex::encode(peer.as_bytes());
+        assert!(!snap.render().contains(&full_hex));
     }
 
     // ── BORU-CP-07: reconnection triggered by discovery events ──────────

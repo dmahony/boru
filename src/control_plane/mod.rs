@@ -41,6 +41,8 @@
 
 pub mod capabilities;
 pub mod connectivity;
+#[cfg(feature = "net")]
+pub mod diagnostics;
 pub mod message;
 pub mod privacy;
 pub mod reconnect;
@@ -50,6 +52,8 @@ pub mod reconcile;
 
 pub use capabilities::*;
 pub use connectivity::*;
+#[cfg(feature = "net")]
+pub use diagnostics::*;
 pub use message::*;
 pub use privacy::*;
 pub use reconnect::*;
