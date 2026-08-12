@@ -151,6 +151,35 @@ impl IcedChat {
     pub(crate) fn update_calls(&mut self, message: AppMessage) -> iced::Task<AppMessage> {
         match message {
             AppMessage::StartVoiceCall(peer) => {
+                // BORU-CP-12 (PDF Task 4.3): a new client must not attempt
+                // an unsupported operation against an old/unknown client.
+                // With a capability gate wired, the call starts only when
+                // the peer negotiates a compatible voice version; otherwise
+                // the action is blocked with a clear explanation.
+                if self.capability_gate.is_some()
+                    && self
+                        .negotiated_feature_version(&peer, boru_core::control_plane::features::VOICE)
+                        .is_none()
+                {
+                    tracing::warn!(
+                        peer = %peer,
+                        feature = boru_core::control_plane::features::VOICE,
+                        "voice call blocked: peer does not negotiate a compatible voice capability"
+                    );
+                    self.toast_message = Some(
+                        "Voice calls unavailable — this peer's client does not support voice calls."
+                            .to_string(),
+                    );
+                    self.toast_counter = 160;
+                    return iced::Task::none();
+                }
+                tracing::info!(
+                    peer = %peer,
+                    feature = boru_core::control_plane::features::VOICE,
+                    negotiated_version = ?self
+                        .negotiated_feature_version(&peer, boru_core::control_plane::features::VOICE),
+                    "voice call initiated"
+                );
                 self.call_return_screen = Some(self.screen.clone());
                 self.outgoing_call_peer = Some(peer);
                 self.call_kind = Some(CallKind::Voice);
@@ -165,6 +194,32 @@ impl IcedChat {
                 )
             }
             AppMessage::StartVideoCall(peer) => {
+                // BORU-CP-12: video calls require a negotiated video
+                // capability (which also implies voice support).
+                if self.capability_gate.is_some()
+                    && self
+                        .negotiated_feature_version(&peer, boru_core::control_plane::features::VIDEO)
+                        .is_none()
+                {
+                    tracing::warn!(
+                        peer = %peer,
+                        feature = boru_core::control_plane::features::VIDEO,
+                        "video call blocked: peer does not negotiate a compatible video capability"
+                    );
+                    self.toast_message = Some(
+                        "Video calls unavailable — this peer's client does not support video calls."
+                            .to_string(),
+                    );
+                    self.toast_counter = 160;
+                    return iced::Task::none();
+                }
+                tracing::info!(
+                    peer = %peer,
+                    feature = boru_core::control_plane::features::VIDEO,
+                    negotiated_version = ?self
+                        .negotiated_feature_version(&peer, boru_core::control_plane::features::VIDEO),
+                    "video call initiated"
+                );
                 self.call_return_screen = Some(self.screen.clone());
                 self.outgoing_call_peer = Some(peer);
                 self.call_kind = Some(CallKind::Video);

@@ -1303,6 +1303,70 @@ pub struct DiscoveryService {
     local_caps: Arc<Mutex<CapabilitySet>>,
 }
 
+/// Read-only negotiated-capability view used to gate optional-feature
+/// initiation (BORU-CP-12 / PDF Task 4.3).
+///
+/// Answers "does peer X support feature Y, and at which version?" before
+/// the UI offers or attempts a feature. The concrete implementation is
+/// [`DiscoveryCapabilityGate`], produced by
+/// [`DiscoveryService::capability_gate`]; apps store it as
+/// `Arc<dyn CapabilityGate>` so unit tests can inject a fixed view.
+///
+/// The view is metadata only: it grants no authorisation. Friendship,
+/// group membership, and file-recipient permissions are still enforced
+/// when a feature is invoked.
+pub trait CapabilityGate: Send + Sync {
+    /// The highest feature version both sides support for `feature`, or
+    /// `None` when the peer is unknown/stale, does not advertise the
+    /// feature, or shares no compatible version (fail closed).
+    fn peer_supports(&self, node_id: &PublicKey, feature: &str) -> Option<u16>;
+
+    /// The latest valid capability set cached for `peer` (metadata only).
+    fn peer_capabilities(&self, node_id: &PublicKey) -> Option<CapabilitySet>;
+
+    /// The local capability set this node currently advertises.
+    fn local_capabilities(&self) -> CapabilitySet;
+}
+
+/// Live [`CapabilityGate`] backed by a discovery service's control-plane
+/// state.
+///
+/// Cheap to clone: both halves are `Arc`-backed (the control-plane guard
+/// and the local capability set), so the UI can hold one per conversation
+/// without copying the registry.
+#[derive(Clone, Debug)]
+pub struct DiscoveryCapabilityGate {
+    /// Receive-path core holding the shared control-plane guard.
+    core: ReceiveCore,
+    /// The local capability set this node advertises.
+    local_caps: Arc<Mutex<CapabilitySet>>,
+}
+
+impl CapabilityGate for DiscoveryCapabilityGate {
+    fn peer_supports(&self, node_id: &PublicKey, feature: &str) -> Option<u16> {
+        let remote = self.peer_capabilities(node_id)?;
+        let local = self.local_capabilities();
+        compatible_version(&local, &remote, feature)
+    }
+
+    fn peer_capabilities(&self, node_id: &PublicKey) -> Option<CapabilitySet> {
+        let guard = self
+            .core
+            .guard
+            .lock()
+            .expect("control-plane guard lock poisoned");
+        let state = guard.presence().get_active(node_id, Instant::now())?;
+        Some(state.capability_set())
+    }
+
+    fn local_capabilities(&self) -> CapabilitySet {
+        self.local_caps
+            .lock()
+            .expect("local caps lock poisoned")
+            .clone()
+    }
+}
+
 impl DiscoveryService {
     /// Join the internal discovery gossip topic and start the service.
     ///
@@ -1628,7 +1692,7 @@ impl DiscoveryService {
         self.control_announce.announce_presence().await
     }
 
-    // ── Capability negotiation (BORU-CP-11 / PDF Task 4.2) ────────────────
+    // ── Capability negotiation (BORU-CP-11/12 / PDF Task 4.2-4.3) ────────
 
     /// The local capability set this node currently advertises.
     ///
@@ -1637,10 +1701,7 @@ impl DiscoveryService {
     /// [`update_local_capabilities`](Self::update_local_capabilities) when
     /// locally enabled capabilities materially change.
     pub fn local_capabilities(&self) -> CapabilitySet {
-        self.local_caps
-            .lock()
-            .expect("local caps lock poisoned")
-            .clone()
+        self.capability_gate_value().local_capabilities()
     }
 
     /// Replace the local capability set and announce it when it materially
@@ -1686,13 +1747,7 @@ impl DiscoveryService {
     /// metadata only: it grants no authorisation — friendship/permissions
     /// are still enforced when a feature is invoked.
     pub fn peer_capabilities(&self, node_id: &PublicKey) -> Option<CapabilitySet> {
-        let guard = self
-            .core
-            .guard
-            .lock()
-            .expect("control-plane guard lock poisoned");
-        let state = guard.presence().get_active(node_id, Instant::now())?;
-        Some(state.capability_set())
+        self.capability_gate_value().peer_capabilities(node_id)
     }
 
     /// The highest feature version both sides support for `feature`, or
@@ -1705,9 +1760,26 @@ impl DiscoveryService {
     /// ([`compatible_version`]), so a remote-only capability never looks
     /// negotiable. `None` means "do not present/attempt this feature".
     pub fn peer_supports(&self, node_id: &PublicKey, feature: &str) -> Option<u16> {
-        let remote = self.peer_capabilities(node_id)?;
-        let local = self.local_capabilities();
-        compatible_version(&local, &remote, feature)
+        self.capability_gate_value().peer_supports(node_id, feature)
+    }
+
+    /// A read-only, clonable handle to this service's negotiated-capability
+    /// view (BORU-CP-12 / PDF Task 4.3).
+    ///
+    /// The UI stores this handle (not the [`DiscoveryService`] itself, which
+    /// owns background tasks and the discovery subscription) to gate
+    /// optional-feature initiation on the peer's advertised support.
+    pub fn capability_gate(&self) -> Arc<dyn CapabilityGate> {
+        Arc::new(self.capability_gate_value())
+    }
+
+    /// Build a value-typed gate view sharing this service's control-plane
+    /// state (cheap: both halves are `Arc`-backed clones).
+    fn capability_gate_value(&self) -> DiscoveryCapabilityGate {
+        DiscoveryCapabilityGate {
+            core: self.core.clone(),
+            local_caps: self.local_caps.clone(),
+        }
     }
 
     /// Override the minimum interval between **CAPABILITIES** control-plane
@@ -2834,6 +2906,7 @@ fn random_jitter(jitter: Duration) -> Duration {
 mod tests {
     use super::*;
     use crate::api::Command;
+    use crate::control_plane::capabilities::{features, ids};
     use crate::proto::DeliveryScope;
     use irpc::channel::mpsc as irpc_mpsc;
     use std::collections::BTreeSet;
@@ -4887,6 +4960,61 @@ mod tests {
         // The capability cache is a hint store with no authorisation
         // surface: nothing here creates a friendship or a transfer.
         assert!(service.peer_capabilities(&peer).is_some());
+    }
+
+    /// BORU-CP-12: the read-only `CapabilityGate` handle (what the UI
+    /// stores) mirrors the service's negotiated view — a compatible peer
+    /// yields the shared version, an unknown/old peer fails closed to
+    /// `None`, and the handle is object-safe (`Arc<dyn CapabilityGate>`).
+    #[tokio::test]
+    async fn capability_gate_handle_reflects_negotiated_support() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let service = test_service(local);
+        let gate: Arc<dyn CapabilityGate> = service.capability_gate();
+
+        // Unknown peer: nothing cached -> fail closed.
+        assert_eq!(gate.peer_supports(&peer, features::VOICE), None);
+
+        // Old client: present but advertises NO capabilities (no
+        // CAPABILITIES envelope) -> fail closed, never attempt.
+        let presence = ControlEnvelope::presence(peer, 1, 1_700_000_000, Some(300));
+        let outcome = service.handle_incoming(&presence.encode(), peer);
+        assert_eq!(outcome, IncomingOutcome::ControlMessage);
+        assert!(gate.peer_capabilities(&peer).is_some());
+        assert_eq!(gate.peer_supports(&peer, features::VOICE), None);
+
+        // New client: advertises voice-v1 + files-v2; local advertises both.
+        let outcome = service.handle_incoming(
+            &control_caps(
+                peer,
+                2,
+                vec![
+                    ids::VOICE_V1.to_string(),
+                    ids::FILES_V2.to_string(),
+                    "hologram-v3".to_string(),
+                ],
+            ),
+            peer,
+        );
+        assert_eq!(outcome, IncomingOutcome::ControlMessage);
+
+        // Compatible features negotiate to the shared version.
+        assert_eq!(gate.peer_supports(&peer, features::VOICE), Some(1));
+        assert_eq!(gate.peer_supports(&peer, features::FILES), Some(2));
+        // Remote-only / unknown future features are not negotiable.
+        assert_eq!(gate.peer_supports(&peer, "hologram"), None);
+        assert_eq!(gate.peer_supports(&peer, features::SCREEN_SHARE), None);
+
+        // The gate view equals the service view (single source of truth).
+        assert_eq!(
+            gate.peer_supports(&peer, features::VOICE),
+            service.peer_supports(&peer, features::VOICE)
+        );
+        assert_eq!(
+            gate.local_capabilities(),
+            service.local_capabilities()
+        );
     }
 
     /// The drain loop routes a received control-plane envelope to

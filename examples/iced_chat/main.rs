@@ -1693,6 +1693,14 @@ fn main() -> Result<()> {
             app.connectivity_store = _discovery_service
                 .as_ref()
                 .map(|svc| svc.connectivity_store());
+            // BORU-CP-12: give the UI a read-only handle to the
+            // negotiated-capability view (PDF Task 4.3) so optional
+            // features (voice/video calls, screen share, file transfer,
+            // tunnels) are gated on the peer's advertised support. The
+            // discovery service handle itself stays off the UI.
+            app.capability_gate = _discovery_service
+                .as_ref()
+                .map(|svc| svc.capability_gate());
             #[cfg(feature = "screen-sharing")]
             {
                 // Wire the screen-share protocol channels and handle into the

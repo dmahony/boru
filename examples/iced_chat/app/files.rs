@@ -4367,6 +4367,34 @@ impl IcedChat {
                     );
                     return iced::Task::none();
                 }
+                // BORU-CP-12 (PDF Task 4.3): a new client must not attempt
+                // an unsupported operation against an old/unknown client.
+                // File transfer to a direct peer requires a negotiated
+                // FILES capability; groups/public rooms are not gated.
+                if let Some(peer) = self.current_direct_peer() {
+                    if !self.feature_offered(&peer, boru_core::control_plane::features::FILES) {
+                        tracing::warn!(
+                            peer = %peer,
+                            feature = boru_core::control_plane::features::FILES,
+                            "file send blocked: peer does not negotiate a compatible file-transfer capability"
+                        );
+                        self.toast_message = Some(
+                            "File transfer unavailable — this peer's client does not support file transfer."
+                                .to_string(),
+                        );
+                        self.toast_counter = 160;
+                        return iced::Task::none();
+                    }
+                    tracing::info!(
+                        peer = %peer,
+                        feature = boru_core::control_plane::features::FILES,
+                        negotiated_version = ?self.negotiated_feature_version(
+                            &peer,
+                            boru_core::control_plane::features::FILES,
+                        ),
+                        "file send initiated"
+                    );
+                }
                 let filename = parts[0].to_string();
                 let abs_path = parts[1].to_string();
                 // Show spinner immediately while the file is uploading.
@@ -4701,6 +4729,23 @@ impl IcedChat {
                 if parts.len() < 3 {
                     return iced::Task::none();
                 }
+                // BORU-CP-12 (PDF Task 4.3): folder share is file
+                // transfer — gate on the peer's negotiated FILES support.
+                if let Some(peer) = self.current_direct_peer() {
+                    if !self.feature_offered(&peer, boru_core::control_plane::features::FILES) {
+                        tracing::warn!(
+                            peer = %peer,
+                            feature = boru_core::control_plane::features::FILES,
+                            "folder send blocked: peer does not negotiate a compatible file-transfer capability"
+                        );
+                        self.toast_message = Some(
+                            "File transfer unavailable — this peer's client does not support file transfer."
+                                .to_string(),
+                        );
+                        self.toast_counter = 160;
+                        return iced::Task::none();
+                    }
+                }
                 let folder_name = parts[0].to_string();
                 let abs_path = parts[1].to_string();
                 self.pending_file_upload = Some((folder_name.clone(), 0));
@@ -4812,6 +4857,24 @@ impl IcedChat {
                 let parts: Vec<&str> = encoded.splitn(3, '|').collect();
                 if parts.len() < 3 {
                     return iced::Task::none();
+                }
+                // BORU-CP-12 (PDF Task 4.3): image share travels the file
+                // transfer path — gate on the peer's negotiated FILES
+                // support.
+                if let Some(peer) = self.current_direct_peer() {
+                    if !self.feature_offered(&peer, boru_core::control_plane::features::FILES) {
+                        tracing::warn!(
+                            peer = %peer,
+                            feature = boru_core::control_plane::features::FILES,
+                            "image send blocked: peer does not negotiate a compatible file-transfer capability"
+                        );
+                        self.toast_message = Some(
+                            "File transfer unavailable — this peer's client does not support file transfer."
+                                .to_string(),
+                        );
+                        self.toast_counter = 160;
+                        return iced::Task::none();
+                    }
                 }
                 let filename = parts[0].to_string();
                 let abs_path = parts[1].to_string();

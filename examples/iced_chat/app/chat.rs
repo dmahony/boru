@@ -1344,38 +1344,77 @@ impl IcedChat {
             is_blocked,
             self.active_call_id.is_some(),
         );
-        let voice_call: iced::Element<'_, AppMessage> = peer
-            .filter(|_| call_enabled)
-            .map(|key| {
-                tool_btn(
-                    Icon::Phone.build().size(IconSize::Sm).build().into(),
-                    "Start voice call",
-                    Some(AppMessage::StartVoiceCall(key)),
-                )
-            })
-            .unwrap_or_else(|| iced::widget::Space::new().width(Length::Fixed(0.0)).into());
-        let video_call: iced::Element<'_, AppMessage> = peer
-            .filter(|_| call_enabled)
-            .map(|key| {
-                tool_btn(
-                    Icon::VideoCamera.build().size(IconSize::Sm).build().into(),
-                    "Start video call",
-                    Some(AppMessage::StartVideoCall(key)),
-                )
-            })
-            .unwrap_or_else(|| iced::widget::Space::new().width(Length::Fixed(0.0)).into());
+
+        // BORU-CP-12 (PDF Task 4.3): negotiated capability support. Before
+        // offering a peer-facing optional feature the UI checks that the
+        // peer's client advertises a compatible version. When the peer is
+        // unknown/unsupported the button renders DISABLED with an
+        // explanatory tooltip ("feature UI can explain why an action is
+        // unavailable") instead of silently attempting the operation.
+        let voice_offered = peer
+            .map(|key| self.feature_offered(&key, boru_core::control_plane::features::VOICE))
+            .unwrap_or(false);
+        let video_offered = peer
+            .map(|key| self.feature_offered(&key, boru_core::control_plane::features::VIDEO))
+            .unwrap_or(false);
+        let voice_call: iced::Element<'_, AppMessage> = match peer {
+            Some(key) if call_enabled && voice_offered => tool_btn(
+                Icon::Phone.build().size(IconSize::Sm).build().into(),
+                "Start voice call",
+                Some(AppMessage::StartVoiceCall(key)),
+            ),
+            Some(_) if call_enabled => tool_btn(
+                Icon::Phone.build().size(IconSize::Sm).build().into(),
+                "Voice calls unavailable — this peer's client does not support voice calls",
+                None,
+            ),
+            _ => iced::widget::Space::new().width(Length::Fixed(0.0)).into(),
+        };
+        let video_call: iced::Element<'_, AppMessage> = match peer {
+            Some(key) if call_enabled && video_offered => tool_btn(
+                Icon::VideoCamera.build().size(IconSize::Sm).build().into(),
+                "Start video call",
+                Some(AppMessage::StartVideoCall(key)),
+            ),
+            Some(_) if call_enabled => tool_btn(
+                Icon::VideoCamera.build().size(IconSize::Sm).build().into(),
+                "Video calls unavailable — this peer's client does not support video calls",
+                None,
+            ),
+            _ => iced::widget::Space::new().width(Length::Fixed(0.0)).into(),
+        };
 
         #[cfg(feature = "screen-sharing")]
-        let screen_share: iced::Element<'_, AppMessage> = peer
-            .filter(|_| {
-                !is_group && !is_blocked && self.screen_share_host_state == ScreenShareHostState::Idle
-            })
-            .map(|key| tool_btn(
-                Icon::Monitor.build().size(IconSize::Sm).build().into(),
-                "Share screen",
-                Some(AppMessage::StartScreenShare(key)),
-            ))
-            .unwrap_or_else(|| iced::widget::Space::new().width(Length::Fixed(0.0)).into());
+        let screen_share_offered = peer
+            .map(|key| self.feature_offered(&key, boru_core::control_plane::features::SCREEN_SHARE))
+            .unwrap_or(false);
+        #[cfg(feature = "screen-sharing")]
+        let screen_share: iced::Element<'_, AppMessage> = match peer {
+            Some(key)
+                if !is_group
+                    && !is_blocked
+                    && self.screen_share_host_state == ScreenShareHostState::Idle
+                    && screen_share_offered =>
+            {
+                tool_btn(
+                    Icon::Monitor.build().size(IconSize::Sm).build().into(),
+                    "Share screen",
+                    Some(AppMessage::StartScreenShare(key)),
+                )
+            }
+            Some(_)
+                if !is_group
+                    && !is_blocked
+                    && self.screen_share_host_state == ScreenShareHostState::Idle =>
+            {
+                tool_btn(
+                    Icon::Monitor.build().size(IconSize::Sm).build().into(),
+                    "Screen sharing unavailable — this peer's client does not support screen sharing",
+                    None,
+                )
+            }
+            _ => iced::widget::Space::new().width(Length::Fixed(0.0)).into(),
+        };
 
         // ── Header area (left): back button, avatar, identity ─────────
         // Identity receives Fill so it shrinks when the toolbar needs

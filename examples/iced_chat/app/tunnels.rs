@@ -250,6 +250,32 @@ impl IcedChat {
                 iced::Task::none()
             }
             AppMessage::CreateTunnel(peer) => {
+                // BORU-CP-12 (PDF Task 4.3): a new client must not attempt
+                // an unsupported operation against an old/unknown client.
+                // Tunnels require a negotiated TUNNELS capability.
+                if !self.feature_offered(&peer, boru_core::control_plane::features::TUNNELS) {
+                    tracing::warn!(
+                        peer = %peer,
+                        feature = boru_core::control_plane::features::TUNNELS,
+                        "tunnel creation blocked: peer does not negotiate a compatible tunnel capability"
+                    );
+                    self.toast_message = Some(
+                        "Tunnels unavailable — this peer's client does not support secure tunnels."
+                            .to_string(),
+                    );
+                    self.toast_counter = 160;
+                    self.show_create_tunnel_dialog = false;
+                    return iced::Task::none();
+                }
+                tracing::info!(
+                    peer = %peer,
+                    feature = boru_core::control_plane::features::TUNNELS,
+                    negotiated_version = ?self.negotiated_feature_version(
+                        &peer,
+                        boru_core::control_plane::features::TUNNELS,
+                    ),
+                    "tunnel creation initiated"
+                );
                 // Validate the port chosen in the friend-picker dialog before
                 // handing off to the share-local-service form. Port `0` is
                 // reserved for automatic selection; out-of-range values are
@@ -446,6 +472,34 @@ impl IcedChat {
                     self.share_local_service_open = false;
                     return iced::Task::none();
                 };
+                // BORU-CP-12 (PDF Task 4.3) enforcement point: the tunnel
+                // is only actually created when the peer negotiates a
+                // compatible TUNNELS capability. This is the authoritative
+                // check (guards programmatic/MCP paths that bypass the
+                // friend-picker dialog).
+                if !self.feature_offered(peer, boru_core::control_plane::features::TUNNELS) {
+                    tracing::warn!(
+                        peer = %peer,
+                        feature = boru_core::control_plane::features::TUNNELS,
+                        "tunnel creation blocked at confirm: peer does not negotiate a compatible tunnel capability"
+                    );
+                    self.toast_message = Some(
+                        "Tunnels unavailable — this peer's client does not support secure tunnels."
+                            .to_string(),
+                    );
+                    self.toast_counter = 160;
+                    self.share_local_service_open = false;
+                    return iced::Task::none();
+                }
+                tracing::info!(
+                    peer = %peer,
+                    feature = boru_core::control_plane::features::TUNNELS,
+                    negotiated_version = ?self.negotiated_feature_version(
+                        peer,
+                        boru_core::control_plane::features::TUNNELS,
+                    ),
+                    "tunnel created (negotiated)"
+                );
                 // Validate the local port; keep the dialog open and show the
                 // error inline under the port field.
                 let Ok(port) = self.share_service_port.trim().parse::<u16>() else {

@@ -3884,6 +3884,14 @@ pub struct IcedChat {
     /// unit tests) the UI falls back to the legacy timestamp-based
     /// presence model.
     pub connectivity_store: Option<Arc<StdMutex<PeerConnectivityStore>>>,
+    /// Read handle to the BORU-CP-12 negotiated-capability view (PDF Task
+    /// 4.3): answers "does this peer support feature X, and at which
+    /// version?" before the UI offers or initiates an optional feature
+    /// (voice/video calls, screen share, file transfer, tunnels). Set from
+    /// `main.rs` after construction. `None` in unit tests / when discovery
+    /// is unavailable — feature actions then keep the legacy un-gated
+    /// behaviour so offline/test paths are unchanged.
+    pub capability_gate: Option<Arc<dyn boru_core::discovery_service::CapabilityGate>>,
     /// Font size for chat message body text (pixels).
     chat_text_size: f32,
     /// Whether the "clear history" confirmation is shown.
@@ -7649,6 +7657,7 @@ impl IcedChat {
             share_direct_addresses: app_settings.share_direct_addresses,
             show_presence_indicator: app_settings.show_presence_indicator,
             connectivity_store: None,
+            capability_gate: None,
             chat_text_size: app_settings.chat_text_size,
             room_delete_confirm_topic: None,
             notice,
@@ -17012,6 +17021,38 @@ impl IcedChat {
         self.peer_presence(peer)
     }
 
+    /// BORU-CP-12 (PDF Task 4.3): the negotiated version of `feature` for
+    /// `peer`, or `None` when the capability gate is absent, the peer is
+    /// unknown/stale, does not advertise the feature, or shares no
+    /// compatible version. `None` fails closed — the action is not
+    /// offered/performed.
+    fn negotiated_feature_version(&self, peer: &PublicKey, feature: &str) -> Option<u16> {
+        self.capability_gate
+            .as_ref()
+            .and_then(|gate| gate.peer_supports(peer, feature))
+    }
+
+    /// BORU-CP-12: whether a peer-facing optional feature may be offered to
+    /// `peer`. With no gate wired (unit tests / discovery unavailable) the
+    /// legacy un-gated behaviour is kept; with a gate, the feature is only
+    /// offered when the peer negotiates a compatible version.
+    fn feature_offered(&self, peer: &PublicKey, feature: &str) -> bool {
+        self.capability_gate.is_none()
+            || self.negotiated_feature_version(peer, feature).is_some()
+    }
+
+    /// The direct-chat peer for the currently selected topic, when the
+    /// selected conversation is a direct conversation. Used to gate
+    /// optional features (file transfer) on the peer's negotiated support;
+    /// returns `None` for groups/public rooms.
+    fn current_direct_peer(&self) -> Option<PublicKey> {
+        self.conversation_store
+            .active_iter()
+            .into_iter()
+            .find(|entry| entry.topic == self.topic)
+            .and_then(|entry| PublicKey::from_str(&entry.peer_id).ok())
+    }
+
     /// Downgrade stale peers to Away. Called on each ConnMonitorTick:
     /// peers whose last-seen is older than AWAY_THRESHOLD_MS are marked
     /// Away (but stay in the map — removal happens on NeighborDown only).
@@ -18104,6 +18145,39 @@ impl IcedChat {
         if self.screen_share_host_state != ScreenShareHostState::Idle {
             return iced::Task::none();
         }
+        // BORU-CP-12 (PDF Task 4.3): a new client must not attempt an
+        // unsupported operation against an old/unknown client. With a
+        // capability gate wired, screen sharing starts only when the peer
+        // negotiates a compatible screen-share version.
+        if self.capability_gate.is_some()
+            && self
+                .negotiated_feature_version(
+                    &peer,
+                    boru_core::control_plane::features::SCREEN_SHARE,
+                )
+                .is_none()
+        {
+            tracing::warn!(
+                peer = %peer,
+                feature = boru_core::control_plane::features::SCREEN_SHARE,
+                "screen share blocked: peer does not negotiate a compatible screen-share capability"
+            );
+            self.toast_message = Some(
+                "Screen sharing unavailable — this peer's client does not support screen sharing."
+                    .to_string(),
+            );
+            self.toast_counter = 160;
+            return iced::Task::none();
+        }
+        tracing::info!(
+            peer = %peer,
+            feature = boru_core::control_plane::features::SCREEN_SHARE,
+            negotiated_version = ?self.negotiated_feature_version(
+                &peer,
+                boru_core::control_plane::features::SCREEN_SHARE,
+            ),
+            "screen share initiated"
+        );
         let Some(events_tx) = self.screen_share_events_tx.clone() else {
             return iced::Task::none();
         };
@@ -22671,6 +22745,170 @@ mod tests {
         assert!(app.outgoing_call_peer.is_none());
         assert!(app.outgoing_call_status.is_none());
         assert_eq!(app.screen, start_screen, "Cancel must return to the prior screen");
+    }
+
+    // ── BORU-CP-12 capability gating (PDF Task 4.3) ─────────────────────
+
+    /// Fixed negotiated-capability view injected into the app for gate
+    /// tests. Missing (peer, feature) entries fail closed (unsupported /
+    /// unknown — exactly how the live gate treats an old client that never
+    /// advertises capabilities).
+    #[derive(Default)]
+    struct FakeCapabilityGate {
+        supported: std::collections::HashMap<(PublicKey, String), u16>,
+    }
+
+    impl boru_core::discovery_service::CapabilityGate for FakeCapabilityGate {
+        fn peer_supports(&self, node_id: &PublicKey, feature: &str) -> Option<u16> {
+            self.supported.get(&(*node_id, feature.to_string())).copied()
+        }
+        fn peer_capabilities(
+            &self,
+            _node_id: &PublicKey,
+        ) -> Option<boru_core::control_plane::CapabilitySet> {
+            None
+        }
+        fn local_capabilities(&self) -> boru_core::control_plane::CapabilitySet {
+            boru_core::control_plane::CapabilitySet::new()
+        }
+    }
+
+    /// The pure gate decision: with no gate wired the legacy behaviour is
+    /// kept (offered), with a gate the feature is offered only when the
+    /// peer negotiates a compatible version.
+    #[test]
+    fn feature_offered_decision_fails_closed_with_gate() {
+        let peer = SecretKey::generate().public();
+        // No gate: legacy un-gated behaviour.
+        let (_runtime, mut app, _local, _other) = build_join_request_test_app();
+        assert!(app.feature_offered(&peer, "voice"));
+        // Gate wired, compatible version -> offered.
+        app.capability_gate = Some(Arc::new(FakeCapabilityGate {
+            supported: [((peer, "voice".to_string()), 1u16)].into_iter().collect(),
+        }));
+        assert!(app.feature_offered(&peer, "voice"));
+        // Gate wired, feature not advertised / incompatible -> NOT offered.
+        assert!(!app.feature_offered(&peer, "video"));
+        assert!(!app.feature_offered(&peer, "files"));
+    }
+
+    /// A new client does not attempt an unsupported operation against an
+    /// old client: with a gate that says the peer lacks voice, StartVoiceCall
+    /// is blocked (no ringing screen, no outgoing peer, explanatory toast).
+    #[test]
+    fn voice_call_blocked_when_peer_lacks_capability() {
+        let (_runtime, mut app, _local, peer) = build_join_request_test_app();
+        let start_screen = app.screen.clone();
+        app.capability_gate = Some(Arc::new(FakeCapabilityGate::default()));
+
+        let task = app.update(AppMessage::StartVoiceCall(peer));
+
+        assert!(matches!(app.screen, s if s == start_screen), "screen must not change");
+        assert_eq!(app.outgoing_call_peer, None, "no outgoing call may be armed");
+        assert!(app.toast_message.is_some(), "UI must explain why the action is unavailable");
+        assert!(app.toast_message.as_deref().unwrap().contains("does not support voice calls"));
+        let _ = task;
+    }
+
+    /// With a gate that says the peer supports voice-v1, StartVoiceCall
+    /// proceeds exactly as before (compatible -> private signalling path).
+    #[test]
+    fn voice_call_proceeds_when_peer_supports_capability() {
+        let (_runtime, mut app, _local, peer) = build_join_request_test_app();
+        app.capability_gate = Some(Arc::new(FakeCapabilityGate {
+            supported: [((peer, "voice".to_string()), 1u16)].into_iter().collect(),
+        }));
+
+        app.update(AppMessage::StartVoiceCall(peer));
+
+        assert!(matches!(app.screen, Screen::OutgoingCall), "compatible peer must proceed");
+        assert_eq!(app.outgoing_call_peer, Some(peer));
+        assert!(app.toast_message.is_none(), "no error toast on the compatible path");
+    }
+
+    /// A file send into a direct conversation with a peer that lacks the
+    /// FILES capability is blocked before any upload state is created.
+    #[test]
+    fn file_send_blocked_when_peer_lacks_capability() {
+        let (_runtime, mut app, local, peer) = build_join_request_test_app();
+        // Make the currently selected topic a direct conversation with `peer`.
+        let topic = boru_core::contact::direct_topic(&local, &peer);
+        app.conversation_store.upsert(boru_core::conversations::ConversationEntry::new(
+            topic,
+            &peer.to_string(),
+            "Peer",
+        ));
+        app.topic = topic;
+        app.capability_gate = Some(Arc::new(FakeCapabilityGate::default()));
+        let encoded = format!("notes.txt|/tmp/notes.txt|{}", peer);
+
+        app.update(AppMessage::ExecuteFileSend(encoded));
+
+        assert!(
+            app.pending_file_upload.is_none(),
+            "no upload may start against an unsupported peer"
+        );
+        assert!(app.toast_message.is_some(), "UI must explain why the action is unavailable");
+        assert!(app.toast_message.as_deref().unwrap().contains("does not support file transfer"));
+    }
+
+    /// Screen sharing with a peer that lacks the capability is blocked.
+    #[cfg(feature = "screen-sharing")]
+    #[test]
+    fn screen_share_blocked_when_peer_lacks_capability() {
+        let (_runtime, mut app, _local, peer) = build_join_request_test_app();
+        app.capability_gate = Some(Arc::new(FakeCapabilityGate::default()));
+
+        app.update(AppMessage::StartScreenShare(peer));
+
+        assert_eq!(
+            app.screen_share_host_state,
+            ScreenShareHostState::Idle,
+            "no host session may start against an unsupported peer"
+        );
+        assert!(app.toast_message.is_some(), "UI must explain why the action is unavailable");
+        assert!(app.toast_message.as_deref().unwrap().contains("does not support screen sharing"));
+    }
+
+    /// Tunnel creation against a peer that lacks the TUNNELS capability is
+    /// blocked at the friend-picker entry point.
+    #[test]
+    fn tunnel_creation_blocked_when_peer_lacks_capability() {
+        let (_runtime, mut app, _local, peer) = build_join_request_test_app();
+        app.capability_gate = Some(Arc::new(FakeCapabilityGate::default()));
+
+        app.update(AppMessage::ShowCreateTunnelDialog);
+        assert!(app.show_create_tunnel_dialog, "dialog opens before the picker confirm");
+        app.update(AppMessage::CreateTunnel(peer));
+
+        assert!(
+            !app.show_create_tunnel_dialog,
+            "picker must close after a blocked attempt"
+        );
+        assert!(!app.share_local_service_open, "share form must not open");
+        assert!(app.toast_message.is_some(), "UI must explain why the action is unavailable");
+        assert!(app.toast_message.as_deref().unwrap().contains("does not support secure tunnels"));
+    }
+
+    /// The authoritative tunnel confirm also fails closed: with the share
+    /// form open for an unsupported peer, confirming never creates a
+    /// tunnel.
+    #[test]
+    fn tunnel_confirm_blocked_when_peer_lacks_capability() {
+        let (_runtime, mut app, _local, peer) = build_join_request_test_app();
+        app.capability_gate = Some(Arc::new(FakeCapabilityGate::default()));
+        app.screen = Screen::FriendProfile(peer);
+        app.share_local_service_open = true;
+        app.share_service_name = "Dev Server".to_string();
+        app.share_service_port = "3000".to_string();
+        app.share_service_expiry = boru_core::tunnel::service::TunnelDuration::OneHour;
+        let tunnel_count_before = app.shared_tunnels.len();
+
+        app.update(AppMessage::ConfirmShareLocalService);
+
+        assert_eq!(app.shared_tunnels.len(), tunnel_count_before, "no tunnel may be created");
+        assert!(!app.share_local_service_open, "form closes on a blocked attempt");
+        assert!(app.toast_message.is_some(), "UI must explain why the action is unavailable");
     }
 
     /// Test that the button text for each state can be read from the
