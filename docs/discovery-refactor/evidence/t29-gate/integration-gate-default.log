@@ -1,0 +1,126 @@
+mode=--default start=2026-08-12T05:04:26Z
+SKIP call_audio_integration
+SKIP call_e2e
+SKIP call_logging_policy
+SKIP call_perf_measurement
+SKIP call_timeout
+SKIP call_video_integration
+PASS compression_integration | test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 27.59s
+PASS epoch_rotation | test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+PASS fs17_activity_log | test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+PASS fs22_dashboard_coverage | test result: ok. 66 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+PASS group_events | test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 118.87s
+PASS image_optimizer_integration | test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 51.04s
+PASS mailbox | test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+SKIP no_recording
+PASS phase20_multi_instance | test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s
+PASS protocol_registration | test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.77s
+HANG repro_two_iced_instances | timeout 240
+SKIP room_e2e
+PASS security | test result: ok. 58 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.16s
+SKIP sim
+SKIP stale_bootstrap
+SKIP stress_test_comprehensive
+PASS test_ack_processing | test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.41s
+PASS test_blob_size_enforcement | test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.38s
+PASS test_branding_rename | test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+PASS test_catalogue_harness | test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 33.79s
+PASS test_catalogue_lifecycle_events | test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 30.34s
+PASS test_catalogue_minimal | test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+PASS test_conversation_integration | test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
+PASS test_corrupted_content | test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+PASS test_crash_recovery | test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.59s
+PASS test_debug | test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.11s
+PASS test_delivery_failure | test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+PASS test_deterministic_discovery_integration | test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s
+SKIP test_deterministic_harness
+PASS test_discovery_dm_isolation | test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.18s
+PASS test_discovery_e2e_matrix | test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.23s
+PASS test_discovery_group_isolation | test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.88s
+PASS test_discovery_restart | test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.16s
+PASS test_discovery_startup | test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+PASS test_discovery_two_node | test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.49s
+PASS test_discovery_ui_isolation | test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.87s
+PASS test_download_initiation_integration | test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+PASS test_download_integration | test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+BUILD_FAIL test_download_queue_order | error: linking with `cc` failed: exit status: 1 error: could not compile `boru-core` (bin "boru") due to 1 previous error; 259 warnings emitted 
+BUILD_FAIL test_download_recovery | error: linking with `cc` failed: exit status: 1 error: could not compile `boru-core` (bin "boru") due to 1 previous error; 259 warnings emitted 
+BUILD_FAIL test_file_library_integration | error: linking with `cc` failed: exit status: 1 error: could not compile `boru-core` (bin "boru") due to 1 previous error; 259 warnings emitted 
+SKIP test_fixture
+resume start=2026-08-12T05:35:15Z
+SKIP call_audio_integration
+SKIP call_e2e
+SKIP call_logging_policy
+SKIP call_perf_measurement
+SKIP call_timeout
+SKIP call_video_integration
+SKIP no_recording
+SKIP room_e2e
+SKIP sim
+SKIP stale_bootstrap
+SKIP stress_test_comprehensive
+SKIP test_deterministic_harness
+PASS test_download_queue_order | test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+PASS test_download_recovery | test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+PASS test_file_library_integration | test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.76s
+SKIP test_fixture
+PASS test_friend_request_e2e | test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+PASS test_friend_ticket_persistence | test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.03s
+PASS test_full_chat_list_flow | test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 39.39s
+PASS test_hostile_input | test result: ok. 41 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s
+HANG test_iced_chat_flow | timeout 240
+PASS test_image_cache_persistence | test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+HANG test_image_iced_gui_flow | timeout 240
+HANG test_image_receiver_download | timeout 240
+BUILD_FAIL test_image_send_download | error: test failed, to rerun pass `--test test_image_send_download` 
+FAIL test_interrupted_transfer_harness | 
+FAIL test_interruption_restart | 
+PASS test_lobby_migration | test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.97s
+PASS test_local_address_lookup | test result: ok. 4 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 46.82s
+PASS test_malformed_catalogue | test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.71s
+PASS test_malicious_filenames | test result: ok. 48 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+HANG test_mcp_diagnostics_integration | timeout 240
+SKIP test_message_lifecycle
+HANG test_message_transfer | timeout 240
+PASS test_metadata_security | test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s
+HANG test_multi_image_burst | timeout 240
+HANG test_no_bootstrap | timeout 240
+PASS test_normal_downloads | test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.76s
+PASS test_offline_delivery_integration | test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.30s
+BUILD_FAIL test_onboarding_integration | error: test failed, to rerun pass `--test test_onboarding_integration` 
+PASS test_online_user_list | test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+PASS test_outbox_throughput | test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s
+PASS test_outgoing_dm_transaction | test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s
+PASS test_pairing_integration | test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.44s
+PASS test_pause_scenarios | test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+SKIP test_peer_lifecycle
+BUILD_FAIL test_performance_baseline | error: no test target named `test_performance_baseline` in default-run packages 
+HANG test_performance_regression | timeout 240
+PASS test_policy_conformance | test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+PASS test_private_room_dht_discovery | test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+PASS test_private_room_invitation_discovery | test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+PASS test_public_lobby_integration | test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.45s
+PASS test_remote_catalogue_integration | test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 30.52s
+PASS test_resource_exhaustion | test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.15s
+PASS test_restart_storm_prevention | test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+PASS test_room_invite_v2 | test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+PASS test_security | test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+PASS test_serde_format | test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+PASS test_signed_gossip_flow | test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.20s
+PASS test_simple | test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.30s
+SKIP test_stable_identities
+PASS test_stale_bootstrap | test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.55s
+PASS test_storage_integration | test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.55s
+PASS test_sync_after_downtime | test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.41s
+BUILD_FAIL test_three_peer_mesh | error: no test target named `test_three_peer_mesh` in default-run packages 
+PASS test_transfer_lifecycle_telemetry | test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+HANG test_two_instance_dht_chat | timeout 240
+PASS test_two_peers_exchange | test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.86s
+PASS test_two_peers_relay | test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.34s
+PASS test_ui_file_sharing_integration | test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.86s
+PASS test_user_uploaded_gif | test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.63s
+PASS test_verify_containment_properties | test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+PASS tunnel_reconnect | test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.18s
+PASS verify_gui_bootstrap | test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.41s
+SKIP voice_acceptance
+resume end=2026-08-12T06:41:53Z
