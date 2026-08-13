@@ -276,6 +276,7 @@ impl IcedChat {
             .unwrap_or_else(|| "Unknown Peer".to_string());
         let dep = PeerProfileDependency {
             dark_mode: self.dark_mode,
+            theme_revision: self.theme_revision,
             peer,
             display_name,
         };
@@ -366,7 +367,8 @@ impl IcedChat {
 
     pub(crate) fn view_peer_catalogue(&self, peer: PublicKey) -> iced::Element<'_, AppMessage> {
         let dep = self.peer_catalogue_dependency(peer);
-        iced::widget::lazy(dep, move |dep| Self::view_peer_catalogue_content(dep, peer)).into()
+        let btheme = self.boru_theme();
+        iced::widget::lazy(dep, move |dep| Self::view_peer_catalogue_content(dep, peer, btheme)).into()
     }
 
     /// Build the Hash-compatible snapshot the Peer Catalogue renders from.
@@ -407,6 +409,7 @@ impl IcedChat {
         };
         PeerCatalogueDependency {
             dark_mode: self.dark_mode,
+            theme_revision: self.theme_revision,
             peer,
             display_name,
             catalogue_loading: self.catalogue_loading,
@@ -418,17 +421,21 @@ impl IcedChat {
     }
 
     /// Static renderer for the Peer Catalogue screen. Reads only from the
-    /// Hash-compatible [`PeerCatalogueDependency`] snapshot.
+    /// Hash-compatible [`PeerCatalogueDependency`] snapshot. BORU-UI-07
+    /// threads the LIVE merged theme in so boru-ui.toml overrides render
+    /// immediately after a reload.
     pub(crate) fn view_peer_catalogue_content(
         dep: &PeerCatalogueDependency,
         peer: PublicKey,
+        btheme: crate::theme::BoruTheme,
     ) -> iced::Element<'static, AppMessage> {
         use iced::widget::{button, container, scrollable, space, Column, Row, Space};
         use iced::{Alignment, Color, Length};
 
         // BORU-UI-03: row height / overscan come from the typed theme
-        // (mode-independent geometry).
-        let room_theme = crate::theme::BoruTheme::default().rooms;
+        // (mode-independent geometry). BORU-UI-07: from the LIVE theme so
+        // a reload is reflected without a rebuild.
+        let room_theme = btheme.rooms;
         let catalogue_row_height = room_theme.catalogue_row_height;
         let overscan = room_theme.overscan;
 
@@ -582,7 +589,7 @@ impl IcedChat {
 
                     // Visible file rows
                     for row in &files[first_idx..=last_idx] {
-                        file_rows = file_rows.push(Self::render_catalogue_row(row, dep.dark_mode, peer));
+                        file_rows = file_rows.push(Self::render_catalogue_row(row, dep.dark_mode, peer, btheme));
                     }
 
                     // Bottom spacer
@@ -600,7 +607,7 @@ impl IcedChat {
                     let bottom_h = (total_h - initial_count as f32 * catalogue_row_height).max(0.0);
 
                     for row in &files[..initial_count] {
-                        file_rows = file_rows.push(Self::render_catalogue_row(row, dep.dark_mode, peer));
+                        file_rows = file_rows.push(Self::render_catalogue_row(row, dep.dark_mode, peer, btheme));
                     }
                     if bottom_h > 0.0 {
                         file_rows = file_rows.push(
@@ -641,6 +648,7 @@ impl IcedChat {
         row: &CatalogueRowSnapshot,
         _dark_mode: bool,
         peer: PublicKey,
+        btheme: crate::theme::BoruTheme,
     ) -> iced::Element<'static, AppMessage> {
         use iced::widget::{button, container, Column, Row, Space};
         use iced::{Alignment, Length};
@@ -710,10 +718,10 @@ impl IcedChat {
                             .push(
                                 iced::widget::progress_bar(0.0..=1.0, pct as f32 / 100.0)
                                     .length(Length::Fixed(
-                                        crate::theme::BoruTheme::default().rooms.progress_length,
+                                        btheme.rooms.progress_length,
                                     ))
                                     .girth(Length::Fixed(
-                                        crate::theme::BoruTheme::default().rooms.progress_girth,
+                                        btheme.rooms.progress_girth,
                                     )),
                             )
                             .push(
@@ -943,6 +951,7 @@ impl IcedChat {
 
         DiscoverDependency {
             dark_mode: self.dark_mode,
+            theme_revision: self.theme_revision,
             rooms,
             search_query: self.discover_search_query.clone(),
             filter_compatible: self.discover_filter_compatible,
@@ -1467,7 +1476,9 @@ impl IcedChat {
                 .spacing(SPACE_2)
                 .padding(SPACE_4)
                 .width(Length::Fixed(
-                    crate::theme::BoruTheme::default().rooms.banner_width,
+                    // BORU-UI-07: live merged theme (boru-ui.toml override
+                    // renders immediately after a reload).
+                    self.boru_theme().rooms.banner_width,
                 ));
 
             for (label, msg) in &menu_items {
@@ -1684,6 +1695,7 @@ impl IcedChat {
 
         FriendProfileDependency {
             dark_mode: self.dark_mode,
+            theme_revision: self.theme_revision,
             peer,
             display_name,
             presence,

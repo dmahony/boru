@@ -1752,7 +1752,11 @@ fn main() -> Result<()> {
             // doesn't flood the watch channel and MCP consumers.
             app.gui_snapshot_throttle_ms = 125;
             // BORU-UI-04: dev theme overrides loaded from <data_dir>/boru-ui.toml.
-            app.ui_theme_config = ui_theme_config;
+            // BORU-UI-07: route through `set_ui_theme_config` so the LIVE
+            // merged theme (`active_theme`) is computed from the startup
+            // config and the theme revision is initialized — view functions
+            // read `boru_theme()` from state from the very first frame.
+            app.set_ui_theme_config(ui_theme_config);
             // BORU-UI-06: dev theme file watcher — observes boru-ui.toml,
             // debounces save storms, parses on a background thread and sends
             // AppMessage::UiThemeReloaded into the update loop. Failure to

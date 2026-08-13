@@ -24,6 +24,9 @@ pub(crate) struct FriendRequestRow {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct FriendRequestsDependency {
     pub(crate) dark_mode: bool,
+    /// BORU-UI-07: bumps whenever the live theme is replaced so iced::lazy
+    /// cannot retain a subtree built with the previous theme.
+    pub(crate) theme_revision: u64,
     pub(crate) friend_request_search_input: String,
     pub(crate) chat_list_error: String,
     pub(crate) incoming: Vec<FriendRequestRow>,
@@ -76,6 +79,7 @@ impl IcedChat {
             .collect();
         FriendRequestsDependency {
             dark_mode: self.dark_mode,
+            theme_revision: self.theme_revision,
             friend_request_search_input: self.friend_request_search_input.clone(),
             chat_list_error: self.chat_list_error.clone(),
             incoming,

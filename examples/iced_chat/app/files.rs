@@ -21,6 +21,9 @@ use super::*;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FileSharingDependency {
     pub(crate) dark_mode: bool,
+    /// BORU-UI-07: bumps whenever the live theme is replaced so iced::lazy
+    /// cannot retain a subtree built with the previous theme.
+    pub(crate) theme_revision: u64,
     /// Responsive band derived from the window width (FS-21 breakpoints), so
     /// the cached tree only rebuilds when the layout tier changes, not on
     /// every pixel of resize.
@@ -41,6 +44,7 @@ pub(crate) struct FileSharingDependency {
 impl std::hash::Hash for FileSharingDependency {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.dark_mode.hash(state);
+        self.theme_revision.hash(state);
         self.responsive_mode.hash(state);
         self.dashboard_search_input.hash(state);
         // DashboardTab is Copy/Eq but not Hash; hash a stable tag so the
@@ -116,6 +120,9 @@ impl FileSharingResponsiveMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DownloadsCardDependency {
     pub(crate) dark_mode: bool,
+    /// BORU-UI-07: bumps whenever the live theme is replaced so iced::lazy
+    /// cannot retain a subtree built with the previous theme.
+    pub(crate) theme_revision: u64,
     pub(crate) active: bool,
     /// Completed-download history rows rendered by the tab.
     pub(crate) history: Vec<crate::dashboard_view_model::CompletedDownloadItem>,
@@ -129,6 +136,7 @@ pub(crate) struct DownloadsCardDependency {
 impl std::hash::Hash for DownloadsCardDependency {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.dark_mode.hash(state);
+        self.theme_revision.hash(state);
         self.active.hash(state);
         self.history_loaded.hash(state);
         self.history_error.hash(state);
@@ -157,6 +165,9 @@ impl std::hash::Hash for DownloadsCardDependency {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SharedByMeCardDependency {
     pub(crate) dark_mode: bool,
+    /// BORU-UI-07: bumps whenever the live theme is replaced so iced::lazy
+    /// cannot retain a subtree built with the previous theme.
+    pub(crate) theme_revision: u64,
     /// Global dashboard search query — checked trimmed-empty for the
     /// search-specific empty state.
     pub(crate) search_query: String,
@@ -175,6 +186,7 @@ pub(crate) struct SharedByMeCardDependency {
 impl std::hash::Hash for SharedByMeCardDependency {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.dark_mode.hash(state);
+        self.theme_revision.hash(state);
         self.search_query.hash(state);
         self.items_count.hash(state);
         std::mem::discriminant(&self.sort.key).hash(state);
@@ -219,6 +231,9 @@ impl std::hash::Hash for SharedByMeCardDependency {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PeersCardDependency {
     pub(crate) dark_mode: bool,
+    /// BORU-UI-07: bumps whenever the live theme is replaced so iced::lazy
+    /// cannot retain a subtree built with the previous theme.
+    pub(crate) theme_revision: u64,
     /// Live outbound rows, newest first, with peer display labels and online
     /// state resolved by the application layer.
     pub(crate) rows: Vec<crate::dashboard_view_model::PeerDownload>,
@@ -228,6 +243,7 @@ impl std::hash::Hash for PeersCardDependency {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         use std::hash::Hash;
         self.dark_mode.hash(state);
+        self.theme_revision.hash(state);
         for row in &self.rows {
             row.hash_live(state);
         }
@@ -240,6 +256,9 @@ impl std::hash::Hash for PeersCardDependency {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RecentActivityCardDependency {
     pub(crate) dark_mode: bool,
+    /// BORU-UI-07: bumps whenever the live theme is replaced so iced::lazy
+    /// cannot retain a subtree built with the previous theme.
+    pub(crate) theme_revision: u64,
     pub(crate) tick: u64,
     pub(crate) rows: Vec<crate::recent_activity_view_model::RecentActivityRow>,
 }
@@ -247,6 +266,7 @@ pub(crate) struct RecentActivityCardDependency {
 impl std::hash::Hash for RecentActivityCardDependency {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.dark_mode.hash(state);
+        self.theme_revision.hash(state);
         self.tick.hash(state);
         for row in &self.rows {
             row.id.hash(state);
@@ -266,12 +286,16 @@ impl std::hash::Hash for RecentActivityCardDependency {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SharingSummaryCardDependency {
     pub(crate) dark_mode: bool,
+    /// BORU-UI-07: bumps whenever the live theme is replaced so iced::lazy
+    /// cannot retain a subtree built with the previous theme.
+    pub(crate) theme_revision: u64,
     pub(crate) summary: Option<crate::sharing_summary::SharingSummary>,
 }
 
 impl std::hash::Hash for SharingSummaryCardDependency {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.dark_mode.hash(state);
+        self.theme_revision.hash(state);
         match &self.summary {
             None => 0u8.hash(state),
             Some(summary) => {
@@ -331,6 +355,7 @@ impl IcedChat {
     pub(crate) fn sharing_summary_card_dependency(&self) -> SharingSummaryCardDependency {
         SharingSummaryCardDependency {
             dark_mode: self.dark_mode,
+            theme_revision: self.theme_revision,
             summary: self.dashboard_sharing_summary,
         }
     }
@@ -1049,6 +1074,7 @@ impl IcedChat {
     pub(crate) fn recent_activity_card_dependency(&self) -> RecentActivityCardDependency {
         RecentActivityCardDependency {
             dark_mode: self.dark_mode,
+            theme_revision: self.theme_revision,
             tick: self.activity_tick,
             rows: self.dashboard_recent_activity.clone(),
         }
@@ -1939,6 +1965,7 @@ impl IcedChat {
     pub(crate) fn downloads_card_dependency(&self) -> DownloadsCardDependency {
         DownloadsCardDependency {
             dark_mode: self.dark_mode,
+            theme_revision: self.theme_revision,
             active: self.dashboard_active_tab
                 == crate::dashboard_view_model::DashboardTab::Downloaded,
             history: self.downloaded_history.clone(),
@@ -3666,6 +3693,7 @@ impl IcedChat {
         };
         SharedByMeCardDependency {
             dark_mode: self.dark_mode,
+            theme_revision: self.theme_revision,
             search_query: self.dashboard_search_input.clone(),
             items_count: self.dashboard_shared_by_me_filter.len(),
             rows: self.dashboard_shared_by_me_filter.clone(),
@@ -3770,6 +3798,7 @@ impl IcedChat {
         }
         PeersCardDependency {
             dark_mode: self.dark_mode,
+            theme_revision: self.theme_revision,
             rows,
         }
     }
@@ -3995,6 +4024,7 @@ impl IcedChat {
     pub(crate) fn file_sharing_dependency(&self) -> FileSharingDependency {
         FileSharingDependency {
             dark_mode: self.dark_mode,
+            theme_revision: self.theme_revision,
             responsive_mode: FileSharingResponsiveMode::from_width(self.window_width),
             dashboard_search_input: self.dashboard_search_input.clone(),
             dashboard_active_tab: self.dashboard_active_tab,

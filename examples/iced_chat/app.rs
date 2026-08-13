@@ -3954,8 +3954,19 @@ pub struct IcedChat {
     /// (BORU-UI-04). Empty config when the file is missing or malformed (the
     /// error is logged and the last known-good theme is kept). BORU-UI-05
     /// merges these overrides on top of `BoruTheme::default()`.
-    #[expect(dead_code)]
     pub(crate) ui_theme_config: crate::theme_config::UiThemeConfig,
+    /// BORU-UI-07: the live merged theme (default + `boru-ui.toml`
+    /// overrides) currently active in app state. Replaced in-place when a
+    /// valid reload arrives; view/style code reads it via
+    /// [`IcedChat::boru_theme`] so the normal Iced state/update/view cycle
+    /// redraws affected widgets without recreating any networking state.
+    pub(crate) active_theme: crate::theme::BoruTheme,
+    /// BORU-UI-07: monotonic counter bumped every time the active theme is
+    /// replaced (reload Ok or dark-mode toggle). Threaded into lazy/prewarm
+    /// dependency snapshots so cached view sections rebuild with the new
+    /// theme — without it iced's `lazy`/`Prebuilt` caches would keep
+    /// serving the old theme's widget trees.
+    pub(crate) theme_revision: u64,
     /// BORU-UI-06: receiver for debounced `boru-ui.toml` reload messages.
     /// Set by main.rs when the watcher thread starts; `None` in headless
     /// launches and tests (the subscription falls back to a closed dummy).
@@ -4912,6 +4923,9 @@ struct TunnelRequest {
 #[expect(dead_code)]
 pub(crate) struct ChatDependency {
     pub(crate) dark_mode: bool,
+    /// BORU-UI-07: bumps whenever the live theme is replaced so iced::lazy
+    /// cannot retain a subtree built with the previous theme.
+    pub(crate) theme_revision: u64,
     pub(crate) topic: TopicId,
     pub(crate) entries_len: usize,
     pub(crate) composer_text: String,
@@ -4922,6 +4936,9 @@ pub(crate) struct ChatDependency {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct PeerProfileDependency {
     pub(crate) dark_mode: bool,
+    /// BORU-UI-07: bumps whenever the live theme is replaced so iced::lazy
+    /// cannot retain a subtree built with the previous theme.
+    pub(crate) theme_revision: u64,
     pub(crate) peer: PublicKey,
     pub(crate) display_name: String,
 }
@@ -5006,6 +5023,9 @@ impl From<&CatalogueDownloadState> for CatalogueDownloadSnapshot {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct PeerCatalogueDependency {
     pub(crate) dark_mode: bool,
+    /// BORU-UI-07: bumps whenever the live theme is replaced so iced::lazy
+    /// cannot retain a subtree built with the previous theme.
+    pub(crate) theme_revision: u64,
     pub(crate) peer: PublicKey,
     pub(crate) display_name: String,
     pub(crate) catalogue_loading: bool,
@@ -5043,6 +5063,9 @@ pub(crate) struct FriendProfileServiceRow {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct FriendProfileDependency {
     pub(crate) dark_mode: bool,
+    /// BORU-UI-07: bumps whenever the live theme is replaced so iced::lazy
+    /// cannot retain a subtree built with the previous theme.
+    pub(crate) theme_revision: u64,
     pub(crate) peer: PublicKey,
     pub(crate) display_name: String,
     pub(crate) presence: PeerPresence,
@@ -5102,6 +5125,9 @@ pub(crate) struct DiscoverRoomRow {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct DiscoverDependency {
     pub(crate) dark_mode: bool,
+    /// BORU-UI-07: bumps whenever the live theme is replaced so iced::lazy
+    /// cannot retain a subtree built with the previous theme.
+    pub(crate) theme_revision: u64,
     /// Filtered + sorted rows (already limited to what passes the query,
     /// filters, selected tags, and sort order).
     pub(crate) rooms: Vec<DiscoverRoomRow>,
@@ -5125,6 +5151,9 @@ pub(crate) struct DiscoverDependency {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct GroupsDependency {
     pub(crate) dark_mode: bool,
+    /// BORU-UI-07: bumps whenever the live theme is replaced so iced::lazy
+    /// cannot retain a subtree built with the previous theme.
+    pub(crate) theme_revision: u64,
     pub(crate) groups: Vec<(TopicId, String)>,
 }
 
@@ -8259,6 +8288,16 @@ impl IcedChat {
             gui_snapshot_pending: false,
             // BORU-UI-04: dev theme overrides; main.rs sets the loaded value.
             ui_theme_config: crate::theme_config::UiThemeConfig::default(),
+            // BORU-UI-07: the live merged theme. Starts as the default theme
+            // for the current mode; main.rs replaces it via
+            // `set_ui_theme_config` (which recomputes the merge) once the
+            // startup config is loaded. Kept as Copy so `boru_theme()` is a
+            // single-field read per frame.
+            active_theme: crate::theme::BoruTheme::for_theme(&Self::theme_from_dark(
+                app_settings.dark_mode,
+            )),
+            // BORU-UI-07: revision bumped on every applied theme change.
+            theme_revision: 0,
             // BORU-UI-06: watcher receiver + staleness tracker. main.rs
             // starts the watcher thread and sets ui_theme_rx; until then
             // (and in tests/headless) the subscription uses a closed dummy.
@@ -18773,13 +18812,34 @@ impl IcedChat {
     /// Typed Boru theme matching the current dark-mode toggle.
     ///
     /// This is the seam view/style code consumes instead of raw literals
-    /// (BORU-UI-02). BORU-UI-04/05 layer file overrides on top: the
-    /// `boru-ui.toml` config (stored in `self.ui_theme_config`) is merged
-    /// over `BoruTheme::for_theme(...)` — the default theme is the source of
-    /// truth and only explicit config fields override it (BORU-UI-05).
+    /// (BORU-UI-02). BORU-UI-07 stores the LIVE merged theme
+    /// (`BoruTheme::default()`/`for_theme` + `boru-ui.toml` overrides) in
+    /// `self.active_theme`; this accessor is a single-field Copy read per
+    /// frame. `set_ui_theme_config` / the reload handler replace it so the
+    /// normal Iced state/update/view cycle redraws affected widgets.
     pub(crate) fn boru_theme(&self) -> crate::theme::BoruTheme {
+        self.active_theme
+    }
+
+    /// BORU-UI-07: recompute `active_theme` from the current dark-mode base
+    /// and the stored `ui_theme_config` overrides. Called at startup (via
+    /// [`Self::set_ui_theme_config`]) and on dark-mode toggle so the cached
+    /// merged theme always reflects both the mode and the dev overrides.
+    fn recompute_active_theme(&mut self) {
         let base = crate::theme::BoruTheme::for_theme(&self.theme());
-        crate::theme_merge::merge_ui_theme(&base, &self.ui_theme_config).0
+        self.active_theme = crate::theme_merge::merge_ui_theme(&base, &self.ui_theme_config).0;
+    }
+
+    /// BORU-UI-07: replace the stored dev-theme config AND the live merged
+    /// theme in one step, and bump the theme revision so lazy/prewarm caches
+    /// rebuild. Only theme state is touched — networking, gossip, rooms,
+    /// tunnels, media playback, chat history, selected conversation, scroll
+    /// position and composer input are all untouched.
+    pub(crate) fn set_ui_theme_config(&mut self, config: crate::theme_config::UiThemeConfig) {
+        self.ui_theme_config = config;
+        self.recompute_active_theme();
+        self.theme_revision = self.theme_revision.wrapping_add(1);
+        self.invalidate_prewarm(PREWARM_ORDER);
     }
 
     /// Handle a debounced `boru-ui.toml` reload (BORU-UI-06).
@@ -18787,9 +18847,12 @@ impl IcedChat {
     /// The file watcher thread parsed the file away from the rendering
     /// path; this is the only place shared UI state may change. Stale
     /// results (an older save racing a newer one) are dropped via the
-    /// generation tracker. Applying the fresh config to the live theme is
-    /// BORU-UI-07's job — this task only delivers + tracks the message;
-    /// on an error the last known-good theme stays active (BORU-UI-18).
+    /// generation tracker. BORU-UI-07 applies a valid reload to the live
+    /// theme in-place (via [`Self::set_ui_theme_config`]) — only the
+    /// theme/config state is replaced, never networking, gossip, rooms,
+    /// tunnels, media playback, chat history, the selected conversation,
+    /// scroll position or composer input. On an error the last known-good
+    /// theme stays active (BORU-UI-04/18).
     fn update_ui_theme_reloaded(
         &mut self,
         generation: u64,
@@ -18803,12 +18866,16 @@ impl IcedChat {
             return iced::Task::none();
         }
         self.ui_theme_reload_tracker.mark_applied(generation);
-        match &result {
-            Ok(_) => {
+        match result {
+            Ok(config) => {
                 tracing::info!(
                     generation,
-                    "boru-ui.toml reloaded; live theme apply is BORU-UI-07's job"
+                    "boru-ui.toml reloaded; applying live theme"
                 );
+                // Replace ONLY theme state. `set_ui_theme_config` also bumps
+                // `theme_revision` so lazy/prewarm caches rebuild on the
+                // next frame.
+                self.set_ui_theme_config(config);
             }
             Err(e) => {
                 tracing::warn!(
@@ -20266,8 +20333,12 @@ impl IcedChat {
             Screen::Settings => {
                 let dep = self.settings_dependency();
                 let hash = fxhash_of(&dep);
-                let element =
-                    Self::view_settings_screen_content(&dep, self.profile_image_handle.clone());
+                let btheme = self.boru_theme();
+                let element = Self::view_settings_screen_content(
+                    &dep,
+                    self.profile_image_handle.clone(),
+                    btheme,
+                );
                 (hash, element)
             }
             Screen::Discover => {
@@ -29885,18 +29956,21 @@ mod tests {
     /// to their content, and anything past five rows is capped (scrolls).
     #[test]
     fn online_peers_body_height_is_content_driven_with_min_and_cap() {
-        assert_eq!(IcedChat::online_peers_body_height(0), PEERS_BODY_MIN);
-        assert_eq!(IcedChat::online_peers_body_height(1), PEERS_BODY_MIN);
+        // BORU-UI-07: geometry comes from the live merged theme; use the
+        // default so the pure-height expectations below hold.
+        let btheme = crate::theme::BoruTheme::default();
+        assert_eq!(IcedChat::online_peers_body_height(0, btheme), PEERS_BODY_MIN);
+        assert_eq!(IcedChat::online_peers_body_height(1, btheme), PEERS_BODY_MIN);
         assert_eq!(
-            IcedChat::online_peers_body_height(2),
+            IcedChat::online_peers_body_height(2, btheme),
             PEERS_BODY_MIN,
             "two 60 px rows + one gap (122 px) is below the floor"
         );
         let three_rows = 3.0 * crate::card_shell::PEER_ROW_HEIGHT + 2.0 * SPACE_2;
-        assert_eq!(IcedChat::online_peers_body_height(3), three_rows);
-        assert_eq!(IcedChat::online_peers_body_height(5), PEERS_BODY_MAX);
+        assert_eq!(IcedChat::online_peers_body_height(3, btheme), three_rows);
+        assert_eq!(IcedChat::online_peers_body_height(5, btheme), PEERS_BODY_MAX);
         assert_eq!(
-            IcedChat::online_peers_body_height(8),
+            IcedChat::online_peers_body_height(8, btheme),
             PEERS_BODY_MAX,
             "the 6th peer must scroll, not grow the card"
         );
@@ -30168,12 +30242,18 @@ mod tests {
 
         let peers = app.online_peers_card_data();
         assert!(peers.rows.is_empty(), "fresh app has no online peers");
-        let peers_card = IcedChat::view_online_peers_card(&peers);
+        let peers_card = IcedChat::view_online_peers_card(
+            &peers,
+            crate::theme::BoruTheme::for_theme(&IcedChat::theme_from_dark(app.dark_mode)),
+        );
         let _ = peers_card;
 
         let activity = app.recent_activity_card_data();
         assert!(activity.rows.is_empty(), "fresh app has no activity");
-        let activity_card = IcedChat::view_recent_activity_card(&activity);
+        let activity_card = IcedChat::view_recent_activity_card(
+            &activity,
+            crate::theme::BoruTheme::for_theme(&IcedChat::theme_from_dark(app.dark_mode)),
+        );
         let _ = activity_card;
 
         let tunnels = app.tunnels_card_data();
@@ -30270,7 +30350,10 @@ mod tests {
         );
         assert_eq!(data.total, 5);
 
-        let card = IcedChat::view_recent_activity_card(&data);
+        let card = IcedChat::view_recent_activity_card(
+            &data,
+            crate::theme::BoruTheme::for_theme(&IcedChat::theme_from_dark(app.dark_mode)),
+        );
         let _ = card;
         let _ = app.view_main_empty_state();
     }
@@ -30898,6 +30981,7 @@ mod tests {
         // The full browse surface also renders with the minimal card in it.
         let dep = DiscoverDependency {
             dark_mode: false,
+            theme_revision: 0,
             rooms: vec![row],
             search_query: String::new(),
             filter_compatible: false,
@@ -35119,5 +35203,138 @@ fn vr_ttl_recently_refreshed_advertisement_stays_in_directory() {
         assert_eq!(store.list_active().len(), 1);
     }
     let _ = app.view();
+}
+
+// ── BORU-UI-07: live theme reload (t_b67246bf) ─────────────────────────
+//
+// The watcher (BORU-UI-06) delivers AppMessage::UiThemeReloaded into the
+// update loop. update_ui_theme_reloaded must replace ONLY the active theme
+// state: networking, gossip, rooms, tunnels, media, chat history, the
+// selected conversation, scroll position and composer input must all stay
+// untouched. A malformed/error reload keeps the last known-good theme.
+
+#[test]
+fn ui_theme_reload_replaces_only_theme_state() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    // Seed a selected conversation + composer + scroll state to prove the
+    // reload handler does not touch them.
+    let topic = TopicId::from_bytes([7; 32]);
+    app.topic = topic;
+    app.screen = Screen::Chat { topic };
+    app.composer_text = "unsent draft".to_string();
+    let mut conv = ConversationLive::new(topic);
+    conv.composer_text = "unsent draft".to_string();
+    conv.follow_latest = false;
+    conv.scroll_offset = 123.0;
+    app.conversations.insert(topic, conv);
+
+    let revision_before = app.theme_revision;
+    let theme_before = app.active_theme;
+    assert_eq!(
+        theme_before.sidebar.width, 304.0,
+        "baseline: default sidebar width"
+    );
+
+    // A valid reload with a sidebar width override.
+    let config = crate::theme_config::parse_ui_theme_config(
+        "sidebar = { width = 270.0 }",
+    )
+    .expect("test config parses");
+    let task = app.update_ui_theme_reloaded(1, Ok(config));
+    drop(task);
+
+    assert_eq!(
+        app.active_theme.sidebar.width, 270.0,
+        "valid reload replaces the active theme"
+    );
+    assert_ne!(app.active_theme, theme_before, "theme value changed");
+    assert_eq!(
+        app.theme_revision,
+        revision_before.wrapping_add(1),
+        "theme revision bumps so lazy/prewarm caches rebuild"
+    );
+
+    // Networking / conversation / composer / scroll state untouched.
+    assert_eq!(app.topic, topic, "selected conversation unchanged");
+    assert_eq!(app.screen, Screen::Chat { topic }, "screen unchanged");
+    assert_eq!(app.composer_text, "unsent draft", "composer unchanged");
+    let conv = app.conversations.get(&topic).expect("conversation kept");
+    assert_eq!(conv.composer_text, "unsent draft", "conv composer unchanged");
+    assert_eq!(conv.scroll_offset, 123.0, "scroll offset unchanged");
+    assert!(!conv.follow_latest, "follow_latest unchanged");
+    assert_eq!(app.conversations.len(), 1, "no conversations added/removed");
+}
+
+#[test]
+fn ui_theme_reload_error_keeps_last_known_good_theme() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    app.composer_text = "draft survives".to_string();
+    let topic = TopicId::from_bytes([9; 32]);
+    app.topic = topic;
+    app.screen = Screen::Chat { topic };
+    let mut conv = ConversationLive::new(topic);
+    conv.scroll_offset = 42.0;
+    app.conversations.insert(topic, conv);
+
+    // First a valid reload lands a new width…
+    let config = crate::theme_config::parse_ui_theme_config(
+        "sidebar = { width = 288.0 }",
+    )
+    .expect("test config parses");
+    let task = app.update_ui_theme_reloaded(1, Ok(config));
+    drop(task);
+    assert_eq!(app.active_theme.sidebar.width, 288.0);
+    let revision_after_ok = app.theme_revision;
+
+    // …then an error reload must NOT replace it.
+    let task = app.update_ui_theme_reloaded(2, Err("bad toml".to_string()));
+    drop(task);
+
+    assert_eq!(
+        app.active_theme.sidebar.width, 288.0,
+        "error reload keeps the last known-good theme"
+    );
+    assert_eq!(
+        app.theme_revision, revision_after_ok,
+        "error reload does not bump the theme revision"
+    );
+    assert_eq!(app.composer_text, "draft survives", "composer untouched");
+    let conv = app.conversations.get(&topic).expect("conversation kept");
+    assert_eq!(conv.scroll_offset, 42.0, "scroll offset untouched");
+}
+
+#[test]
+fn ui_theme_reload_stale_generation_is_dropped() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+    let revision_before = app.theme_revision;
+
+    // Accept generation 5…
+    let config = crate::theme_config::parse_ui_theme_config(
+        "sidebar = { width = 270.0 }",
+    )
+    .expect("test config parses");
+    let task = app.update_ui_theme_reloaded(5, Ok(config));
+    drop(task);
+    assert_eq!(app.active_theme.sidebar.width, 270.0);
+
+    // …then a stale (older) generation must be dropped entirely.
+    let stale = crate::theme_config::parse_ui_theme_config(
+        "sidebar = { width = 320.0 }",
+    )
+    .expect("test config parses");
+    let task = app.update_ui_theme_reloaded(4, Ok(stale));
+    drop(task);
+
+    assert_eq!(
+        app.active_theme.sidebar.width, 270.0,
+        "stale generation does not apply"
+    );
+    assert_eq!(
+        app.theme_revision,
+        revision_before.wrapping_add(1),
+        "only the accepted reload bumps the revision"
+    );
 }
 }

@@ -38,6 +38,9 @@ impl std::hash::Hash for SidebarAvatarHandle {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct SidebarChatsDependency {
     pub(crate) dark_mode: bool,
+    /// BORU-UI-07: bumps whenever the live theme is replaced so iced::lazy
+    /// cannot retain a subtree built with the previous theme.
+    pub(crate) theme_revision: u64,
     pub(crate) conversations: Vec<SidebarChatsRow>,
     pub(crate) is_empty: bool,
     pub(crate) room_delete_confirm_topic: Option<TopicId>,
@@ -58,6 +61,9 @@ pub(crate) struct SidebarDiscoveredPeerRow {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct SidebarDiscoveredPeersDependency {
     pub(crate) dark_mode: bool,
+    /// BORU-UI-07: bumps whenever the live theme is replaced so iced::lazy
+    /// cannot retain a subtree built with the previous theme.
+    pub(crate) theme_revision: u64,
     pub(crate) peers: Vec<SidebarDiscoveredPeerRow>,
 }
 
@@ -71,6 +77,9 @@ pub(crate) struct SidebarDiscoveredPeersDependency {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct SidebarPublicRoomsDependency {
     pub(crate) dark_mode: bool,
+    /// BORU-UI-07: bumps whenever the live theme is replaced so iced::lazy
+    /// cannot retain a subtree built with the previous theme.
+    pub(crate) theme_revision: u64,
     pub(crate) count: usize,
 }
 
@@ -87,6 +96,9 @@ pub(crate) struct SidebarFriendRow {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct SidebarFriendsDependency {
     pub(crate) dark_mode: bool,
+    /// BORU-UI-07: bumps whenever the live theme is replaced so iced::lazy
+    /// cannot retain a subtree built with the previous theme.
+    pub(crate) theme_revision: u64,
     pub(crate) sidebar_revision: u64,
     pub(crate) friend_request_search_input: String,
     pub(crate) friend_request_error: String,
@@ -95,6 +107,9 @@ pub(crate) struct SidebarFriendsDependency {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct SidebarFriendsRowsDependency {
     pub(crate) dark_mode: bool,
+    /// BORU-UI-07: bumps whenever the live theme is replaced so iced::lazy
+    /// cannot retain a subtree built with the previous theme.
+    pub(crate) theme_revision: u64,
     pub(crate) sidebar_revision: u64,
     pub(crate) friends: Vec<SidebarFriendRow>,
 }
@@ -129,6 +144,9 @@ pub(crate) struct SidebarTunnelRequestRow {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct SidebarRequestsDependency {
     pub(crate) dark_mode: bool,
+    /// BORU-UI-07: bumps whenever the live theme is replaced so iced::lazy
+    /// cannot retain a subtree built with the previous theme.
+    pub(crate) theme_revision: u64,
     /// Changes whenever the persistent request store changes so iced::lazy
     /// cannot retain a stale list after an incoming request arrives.
     pub(crate) requests_revision: u64,
@@ -577,6 +595,7 @@ impl IcedChat {
 
         let dep = SidebarChatsDependency {
             dark_mode: self.dark_mode,
+            theme_revision: self.theme_revision,
             conversations,
             is_empty: self.conversation_store.is_empty(),
             room_delete_confirm_topic: self.room_delete_confirm_topic,
@@ -594,8 +613,9 @@ impl IcedChat {
             Screen::Chat { topic } => Some(topic),
             _ => None,
         });
+        let btheme = self.boru_theme();
         iced::widget::lazy(self.sidebar_chats_dependency(), move |dep| {
-            Self::view_sidebar_chats_content(dep, selected_topic.clone())
+            Self::view_sidebar_chats_content(dep, selected_topic.clone(), btheme)
         })
         .into()
     }
@@ -684,6 +704,7 @@ impl IcedChat {
     pub(crate) fn view_sidebar_chats_content(
         dep: &SidebarChatsDependency,
         selected_topic: Rc<Cell<Option<TopicId>>>,
+        btheme: crate::theme::BoruTheme,
     ) -> iced::Element<'static, AppMessage> {
         use iced::widget::Column;
 
@@ -693,6 +714,7 @@ impl IcedChat {
         for row in &dep.conversations {
             section = section.push(Self::view_sidebar_conversation_row(
                 dep.dark_mode,
+                btheme,
                 row.topic,
                 row.name.clone(),
                 row.preview.clone(),
@@ -737,6 +759,7 @@ impl IcedChat {
 
         GroupsDependency {
             dark_mode,
+            theme_revision: self.theme_revision,
             groups: group_data,
         }
     }
@@ -989,6 +1012,7 @@ impl IcedChat {
     #[expect(clippy::too_many_arguments)]
     pub(crate) fn view_sidebar_conversation_row(
         dark_mode: bool,
+        btheme: crate::theme::BoruTheme,
         topic: TopicId,
         name: String,
         preview: String,
@@ -1004,7 +1028,8 @@ impl IcedChat {
         use iced::widget::{button, container, Column, Row};
         use iced::{Alignment, Background, Border, Length};
 
-        let btheme = crate::theme::BoruTheme::for_theme(&Self::theme_from_dark(dark_mode));
+        // BORU-UI-07: the live merged theme is threaded in by the lazy
+        // wrapper so boru-ui.toml overrides render immediately after reload.
 
         // ── Avatar (shared Avatar component, 36px) ─────────────────
         let avatar_element: iced::Element<'static, AppMessage> = {
@@ -1325,6 +1350,7 @@ impl IcedChat {
         peers.sort_by(|a, b| a.display_name.cmp(&b.display_name));
         let dep = SidebarDiscoveredPeersDependency {
             dark_mode: self.dark_mode,
+            theme_revision: self.theme_revision,
             peers,
         };
         self.cached_discovered_revision.set(cur_revision);
@@ -1449,6 +1475,7 @@ impl IcedChat {
         };
         let dep = SidebarPublicRoomsDependency {
             dark_mode: self.dark_mode,
+            theme_revision: self.theme_revision,
             count,
         };
         self.cached_public_rooms_revision.set(cur_revision);
@@ -1581,6 +1608,7 @@ impl IcedChat {
     pub(crate) fn sidebar_friends_dependency(&self) -> SidebarFriendsDependency {
         SidebarFriendsDependency {
             dark_mode: self.dark_mode,
+            theme_revision: self.theme_revision,
             sidebar_revision: self.friends_sidebar_revision,
             friend_request_search_input: self.friend_request_search_input.clone(),
             friend_request_error: self.friend_request_error.clone(),
@@ -1590,8 +1618,9 @@ impl IcedChat {
     /// "Friends" section of the sidebar — all friends with "Message" button.
     pub(crate) fn view_sidebar_friends(&self) -> iced::Element<'_, AppMessage> {
         let rows_dep = self.sidebar_friends_rows_dependency();
+        let btheme = self.boru_theme();
         iced::widget::lazy(self.sidebar_friends_dependency(), move |dep| {
-            Self::view_sidebar_friends_content(dep, rows_dep.clone())
+            Self::view_sidebar_friends_content(dep, rows_dep.clone(), btheme)
         })
         .into()
     }
@@ -1633,6 +1662,7 @@ impl IcedChat {
         friends.sort_by(|a, b| a.label.cmp(&b.label));
         let dep = SidebarFriendsRowsDependency {
             dark_mode: self.dark_mode,
+            theme_revision: self.theme_revision,
             sidebar_revision: self.friends_sidebar_revision,
             friends,
         };
@@ -1644,11 +1674,11 @@ impl IcedChat {
     pub(crate) fn view_sidebar_friends_content(
         dep: &SidebarFriendsDependency,
         rows_dep: SidebarFriendsRowsDependency,
+        btheme: crate::theme::BoruTheme,
     ) -> iced::Element<'static, AppMessage> {
         use iced::widget::{button, container, Column, Row, Space};
         use iced::{Alignment, Length};
 
-        let btheme = crate::theme::BoruTheme::for_theme(&Self::theme_from_dark(dep.dark_mode));
         let mut section = Column::new().spacing(btheme.spacing.space_2);
 
         // Add-friend field: shared text input + trailing add-person icon.
@@ -1883,6 +1913,7 @@ impl IcedChat {
 
         let dep = SidebarRequestsDependency {
             dark_mode: self.dark_mode,
+            theme_revision: self.theme_revision,
             requests_revision: self.requests_sidebar_revision,
             incoming,
             friend_request_error: self.friend_request_error.clone(),
@@ -1904,21 +1935,21 @@ impl IcedChat {
 
     /// "Friend Requests" section of the sidebar — incoming pending requests.
     pub(crate) fn view_sidebar_requests(&self) -> iced::Element<'_, AppMessage> {
-        iced::widget::lazy(
-            self.sidebar_requests_dependency(),
-            Self::view_sidebar_requests_content,
-        )
+        let btheme = self.boru_theme();
+        iced::widget::lazy(self.sidebar_requests_dependency(), move |dep| {
+            Self::view_sidebar_requests_content(dep, btheme)
+        })
         .into()
     }
 
     pub(crate) fn view_sidebar_requests_content(
         dep: &SidebarRequestsDependency,
+        btheme: crate::theme::BoruTheme,
     ) -> iced::Element<'static, AppMessage> {
         use iced::widget::{button, container, Column, Row};
         use iced::{Alignment, Length};
 
         let theme = Self::theme_from_dark(dep.dark_mode);
-        let btheme = crate::theme::BoruTheme::for_theme(&theme);
         let mut section = Column::new().spacing(btheme.spacing.space_2);
 
         // Manage button for opening the full friend requests screen

@@ -46,6 +46,9 @@ impl MeshHealthSnapshot {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct ChatListDependency {
     pub(crate) dark_mode: bool,
+    /// BORU-UI-07: bumps whenever the live theme is replaced so iced::lazy
+    /// cannot retain a subtree built with the previous theme.
+    pub(crate) theme_revision: u64,
     pub(crate) window_width_bits: u32,
     pub(crate) mesh_health: MeshHealthSnapshot,
     pub(crate) main_screen_reconnect_frame: u32,
@@ -92,6 +95,9 @@ pub(crate) struct MeshEventRow {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct OnlinePeersCardData {
     pub(crate) dark_mode: bool,
+    /// BORU-UI-07: bumps whenever the live theme is replaced so iced::lazy
+    /// cannot retain a subtree built with the previous theme.
+    pub(crate) theme_revision: u64,
     /// Number of friends the user can message (count-badge denominator).
     pub(crate) total_friends: usize,
     /// Online/Away friend rows (Offline friends are filtered out).
@@ -154,6 +160,9 @@ pub(crate) const PEERS_BODY_MAX: f32 =
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct RecentActivityCardData {
     pub(crate) dark_mode: bool,
+    /// BORU-UI-07: bumps whenever the live theme is replaced so iced::lazy
+    /// cannot retain a subtree built with the previous theme.
+    pub(crate) theme_revision: u64,
     pub(crate) tick: u64,
     /// Full ring-buffer length (drives the count badge).
     pub(crate) total: usize,
@@ -199,6 +208,9 @@ pub(crate) struct ActivityRow {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct TunnelsCardData {
     pub(crate) dark_mode: bool,
+    /// BORU-UI-07: bumps whenever the live theme is replaced so iced::lazy
+    /// cannot retain a subtree built with the previous theme.
+    pub(crate) theme_revision: u64,
     pub(crate) tick: u64,
     pub(crate) rows: Vec<TunnelRow>,
     /// UI-HOME-15: two-line compact header on narrow content widths.
@@ -265,6 +277,7 @@ impl IcedChat {
             .collect();
         OnlinePeersCardData {
             dark_mode: self.dark_mode,
+            theme_revision: self.theme_revision,
             total_friends,
             rows,
             compact_header: self.home_compact_headers(),
@@ -288,6 +301,7 @@ impl IcedChat {
             .collect();
         RecentActivityCardData {
             dark_mode: self.dark_mode,
+            theme_revision: self.theme_revision,
             tick: self.activity_tick,
             total: self.recent_activity.len(),
             rows,
@@ -343,6 +357,7 @@ impl IcedChat {
             .collect();
         TunnelsCardData {
             dark_mode: self.dark_mode,
+            theme_revision: self.theme_revision,
             tick: self.activity_tick,
             rows,
             compact_header: self.home_compact_headers(),
@@ -359,12 +374,14 @@ impl IcedChat {
 
     /// Build the Online Peers card subtree. Runs inside `iced::widget::lazy`,
     /// so it is only re-invoked when `OnlinePeersCardData` actually changes.
-    pub(crate) fn view_online_peers_card(dep: &OnlinePeersCardData) -> iced::Element<'static, AppMessage> {
+    pub(crate) fn view_online_peers_card(
+        dep: &OnlinePeersCardData,
+        btheme: crate::theme::BoruTheme,
+    ) -> iced::Element<'static, AppMessage> {
         use iced::widget::{button, container, Column, Row, Space};
         use iced::{Alignment, Length};
 
         let theme = Self::theme_from_dark(dep.dark_mode);
-        let btheme = crate::theme::BoruTheme::for_theme(&theme);
         let peer_rows: Vec<iced::Element<'static, AppMessage>> = dep
             .rows
             .iter()
@@ -487,6 +504,7 @@ impl IcedChat {
             )
             .height(Length::Fixed(Self::online_peers_body_height(
                 dep.rows.len(),
+                btheme,
             )))
             .width(Length::Fill)
             .into()
@@ -504,9 +522,13 @@ impl IcedChat {
 
     /// Content-driven height of the Online Peers body (px): the shorter of
     /// the row content and the five-visible-rows cap, floored at
-    /// [`PEERS_BODY_MIN`] so a one-peer card stays intentional.
-    pub(crate) fn online_peers_body_height(rows: usize) -> f32 {
-        let btheme = crate::theme::BoruTheme::default();
+    /// [`PEERS_BODY_MIN`] so a one-peer card stays intentional. BORU-UI-07
+    /// reads geometry from the LIVE merged theme so a boru-ui.toml reload
+    /// adjusts the card height without a rebuild.
+    pub(crate) fn online_peers_body_height(
+        rows: usize,
+        btheme: crate::theme::BoruTheme,
+    ) -> f32 {
         if rows == 0 {
             return btheme.home.peers_body_min;
         }
@@ -520,12 +542,12 @@ impl IcedChat {
     /// Build the Recent Activity card subtree (memoized via lazy).
     pub(crate) fn view_recent_activity_card(
         dep: &RecentActivityCardData,
+        btheme: crate::theme::BoruTheme,
     ) -> iced::Element<'static, AppMessage> {
         use iced::widget::{container, row, Space};
         use iced::{Alignment, Length};
 
         let theme = Self::theme_from_dark(dep.dark_mode);
-        let btheme = crate::theme::BoruTheme::for_theme(&theme);
         // UI-29: recent activity rows are denser than the 48 px peer rows —
         // a compact 32 px row keeps the feed scannable without dead vertical
         // space around the small icon + single-line title (BORU-UI-03: the
@@ -619,12 +641,12 @@ impl IcedChat {
     /// recent activity feed (up to [`PEOPLE_ACTIVITY_MAX`] rows).
     pub(crate) fn view_people_activity_card(
         dep: &PeopleActivityCardData,
+        btheme: crate::theme::BoruTheme,
     ) -> iced::Element<'static, AppMessage> {
         use iced::widget::{button, container, Column, Row, Space};
         use iced::{Alignment, Length};
 
         let theme = Self::theme_from_dark(dep.online.dark_mode);
-        let btheme = crate::theme::BoruTheme::for_theme(&theme);
 
         // ── Peers section ──
         let peers_body: iced::Element<'static, AppMessage> = if dep.online.rows.is_empty() {
@@ -1018,7 +1040,8 @@ impl IcedChat {
     /// Redesigned: connection status first, then actions, then activity.
     pub(crate) fn view_main_empty_state(&self) -> iced::Element<'_, AppMessage> {
         let dep = self.chat_list_dependency();
-        iced::widget::lazy(dep, Self::view_chat_list_content).into()
+        let btheme = self.boru_theme();
+        iced::widget::lazy(dep, move |dep| Self::view_chat_list_content(dep, btheme)).into()
     }
 
     /// Builds the ChatList (home / empty-state) screen's renderable snapshot.
@@ -1047,6 +1070,7 @@ impl IcedChat {
             .collect();
         ChatListDependency {
             dark_mode: self.dark_mode,
+            theme_revision: self.theme_revision,
             window_width_bits: (self.window_width * 100.0) as u32,
             mesh_health: MeshHealthSnapshot::from(&self.mesh_health),
             main_screen_reconnect_frame: self.main_screen_reconnect_frame as u32,
@@ -1071,7 +1095,10 @@ impl IcedChat {
     /// Static renderer for the ChatList (home / empty-state) screen, driven by
     /// [`ChatListDependency`] so `iced::widget::lazy` can cache the whole
     /// screen while any of its rendered slices is unchanged.
-    pub(crate) fn view_chat_list_content(dep: &ChatListDependency) -> iced::Element<'static, AppMessage> {
+    pub(crate) fn view_chat_list_content(
+        dep: &ChatListDependency,
+        btheme: crate::theme::BoruTheme,
+    ) -> iced::Element<'static, AppMessage> {
         use iced::widget::{button, container, row, Column, Row, Space};
         use iced::{Alignment, Length};
 
@@ -1147,7 +1174,7 @@ impl IcedChat {
             crate::fonts::TypeRole::Body,
             "Your Boru node is online and ready.",
         )
-        .size(crate::theme::BoruTheme::for_theme(&theme).typography.home_subtitle)
+        .size(btheme.typography.home_subtitle)
         .color(text_secondary(&theme))
         .width(Length::Fill);
 
@@ -1378,8 +1405,12 @@ impl IcedChat {
         // changes when either slice changes, so the merged card rebuilds
         // correctly via `iced::widget::lazy`.
         let people_activity_card =
-            iced::widget::lazy(dep.people_activity.clone(), Self::view_people_activity_card);
-        let tunnels_card = iced::widget::lazy(dep.tunnels.clone(), Self::view_tunnels_card);
+            iced::widget::lazy(dep.people_activity.clone(), move |card_dep| {
+                Self::view_people_activity_card(card_dep, btheme)
+            });
+        let tunnels_card = iced::widget::lazy(dep.tunnels.clone(), move |card_dep| {
+            Self::view_tunnels_card(card_dep)
+        });
 
         // Right rail: 20 px vertical card gaps (UI-HOME-02: 20–24 px).
         let right_col = Column::new()
@@ -1436,7 +1467,7 @@ impl IcedChat {
         // sidebar never forces an early stack.
         let rail_stacked =
             content_width < crate::design_tokens::HOME_TWO_COL_CONTENT;
-        let card_gap = crate::theme::BoruTheme::for_theme(&theme).home.quick_action_gap; // 20 px vertical card gap (plan: 20–24 px)
+        let card_gap = btheme.home.quick_action_gap; // 20 px vertical card gap (plan: 20–24 px)
 
         let left_col = Column::new()
             .push(hero_card)

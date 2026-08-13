@@ -62,6 +62,9 @@ pub(crate) struct SettingsHiddenRoomRow {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct SettingsDependency {
     pub(crate) dark_mode: bool,
+    /// BORU-UI-07: bumps whenever the live theme is replaced so iced::lazy
+    /// cannot retain a subtree built with the previous theme.
+    pub(crate) theme_revision: u64,
     pub(crate) cached_key: SettingsCachedKey,
     pub(crate) identity_key: ProfileIdentityCacheKey,
     pub(crate) shared_files: Vec<(String, String)>,
@@ -124,6 +127,9 @@ fn settings_tunnel_status_label(status_kind: u8) -> &'static str {
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub(crate) struct SettingsCachedKey {
     dark_mode: bool,
+    /// BORU-UI-07: bumps whenever the live theme is replaced so iced::lazy
+    /// cannot retain a subtree built with the previous theme.
+    pub(crate) theme_revision: u64,
     sound_enabled: bool,
     direct_address_sharing: bool,
     chat_text_size_bits: u32,
@@ -175,6 +181,7 @@ impl IcedChat {
 
         SettingsCachedKey {
             dark_mode: self.dark_mode,
+            theme_revision: self.theme_revision,
             sound_enabled: self.sound_enabled,
             direct_address_sharing: self.share_direct_addresses,
             chat_text_size_bits: self.chat_text_size.to_bits(),
@@ -350,6 +357,7 @@ impl IcedChat {
 
         SettingsDependency {
             dark_mode: self.dark_mode,
+            theme_revision: self.theme_revision,
             cached_key,
             identity_key,
             shared_files,
@@ -361,18 +369,23 @@ impl IcedChat {
     pub(crate) fn view_settings_screen(&self) -> iced::Element<'_, AppMessage> {
         let dep = self.settings_dependency();
         let profile_image_handle = self.profile_image_handle.clone();
+        // BORU-UI-07: capture the LIVE merged theme so controls/geometry
+        // overrides from boru-ui.toml render immediately after a reload.
+        let btheme = self.boru_theme();
         iced::widget::lazy(dep, move |dep| {
-            Self::view_settings_screen_content(dep, profile_image_handle.clone())
+            Self::view_settings_screen_content(dep, profile_image_handle.clone(), btheme)
         })
         .into()
     }
 
     /// Static renderer for the Settings screen. Reads only from the
     /// Hash-compatible [`SettingsDependency`] snapshot plus the (non-Hash)
-    /// profile image handle captured by the `lazy` closure.
+    /// profile image handle captured by the `lazy` closure. BORU-UI-07
+    /// threads the LIVE merged theme in for controls/geometry reads.
     pub(crate) fn view_settings_screen_content(
         dep: &SettingsDependency,
         profile_image_handle: Option<iced::widget::image::Handle>,
+        btheme: crate::theme::BoruTheme,
     ) -> iced::Element<'static, AppMessage> {
         use iced::widget::{
             button, column, container, lazy, row, text, Column, Row, Space,
@@ -400,7 +413,7 @@ impl IcedChat {
             .align_y(Alignment::Center),
         )
         .width(Length::Fill)
-        .height(Length::Fixed(crate::theme::BoruTheme::default().controls.header_height))
+        .height(Length::Fixed(btheme.controls.header_height))
         .padding([SPACE_6, SPACE_10])
         .style(container_header);
 
@@ -422,7 +435,9 @@ impl IcedChat {
 
         // ── Cacheable sections ──
         let cached_key = dep.cached_key.clone();
-        let cached_sections = lazy(cached_key, Self::view_settings_screen_cached);
+        let cached_sections = lazy(cached_key, move |key| {
+            Self::view_settings_screen_cached(key, btheme)
+        });
 
         // ── Shared files ──
         let mut shared_file_rows: Vec<iced::Element<'static, AppMessage>> = Vec::new();
@@ -702,7 +717,10 @@ impl IcedChat {
             .into()
     }
 
-    fn view_settings_screen_cached(key: &SettingsCachedKey) -> iced::Element<'static, AppMessage> {
+    fn view_settings_screen_cached(
+        key: &SettingsCachedKey,
+        btheme: crate::theme::BoruTheme,
+    ) -> iced::Element<'static, AppMessage> {
         use iced::widget::{button, container, row, text, Column, Row, Space};
         use iced::{Alignment, Color, Length};
 
@@ -922,10 +940,10 @@ impl IcedChat {
         )
         .style(move |t, _status| iced_aw::style::color_picker::Style {
             background: iced::Background::Color(bg_surface(t)),
-            border_radius: crate::theme::BoruTheme::default().controls.color_picker_radius,
+            border_radius: btheme.controls.color_picker_radius,
             border_width: 1.0,
             border_color: border_muted(t),
-            bar_border_radius: crate::theme::BoruTheme::default().controls.color_picker_bar_radius,
+            bar_border_radius: btheme.controls.color_picker_bar_radius,
             bar_border_width: 1.0,
             bar_border_color: border_muted(t),
         });
@@ -994,7 +1012,7 @@ impl IcedChat {
                             AppMessage::SetHomeMenuItemOpacity,
                         )
                         .step(0.05)
-                        .width(Length::Fixed(crate::theme::BoruTheme::default().controls.slider_width)),
+                        .width(Length::Fixed(btheme.controls.slider_width)),
                     )
                     .spacing(SPACE_12)
                     .align_y(Alignment::Center)
@@ -1438,6 +1456,11 @@ impl IcedChat {
         match message {
             AppMessage::ToggleDark(enabled) => {
                 self.dark_mode = enabled;
+                // BORU-UI-07: dark mode changes the color base of the live
+                // theme; recompute the merged active theme and bump the
+                // revision so lazy/prewarm caches rebuild with the new mode.
+                self.recompute_active_theme();
+                self.theme_revision = self.theme_revision.wrapping_add(1);
                 // Dark mode is part of every screen's dependency snapshot;
                 // forget the pre-warmed trees so the next idle cycle rebuilds
                 // them with the new theme.
