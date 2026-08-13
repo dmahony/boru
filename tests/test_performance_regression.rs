@@ -586,13 +586,16 @@ async fn test_many_messages_handle_net_event_scaling() -> n0_error::Result<()> {
 
     let _ = tracing_subscriber::fmt::try_init();
     let mut rng = rand::rngs::ChaCha12Rng::seed_from_u64(7);
+    // Local in-process relay: deterministic probes/`online()`, no external network.
+    let (relay_map, _relay_url, _relay_guard) = iroh::test_utils::run_relay_server().await?;
     let tmp_dir = tempfile::tempdir().unwrap();
 
     // Spawn two peers
-    let ep_a = iroh::Endpoint::builder(presets::N0)
+    let ep_a = iroh::Endpoint::builder(presets::Minimal)
         .secret_key(SecretKey::from_bytes(&rng.random()))
         .address_lookup(MemoryLookup::new())
-        .relay_mode(RelayMode::Default)
+        .relay_mode(RelayMode::Custom(relay_map.clone()))
+        .ca_tls_config(iroh::tls::CaTlsConfig::insecure_skip_verify())
         .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())?
         .bind()
         .await?;
@@ -604,10 +607,11 @@ async fn test_many_messages_handle_net_event_scaling() -> n0_error::Result<()> {
         .accept(GOSSIP_ALPN, gossip_a.clone())
         .spawn();
 
-    let ep_b = iroh::Endpoint::builder(presets::N0)
+    let ep_b = iroh::Endpoint::builder(presets::Minimal)
         .secret_key(SecretKey::from_bytes(&rng.random()))
         .address_lookup(MemoryLookup::new())
-        .relay_mode(RelayMode::Default)
+        .relay_mode(RelayMode::Custom(relay_map.clone()))
+        .ca_tls_config(iroh::tls::CaTlsConfig::insecure_skip_verify())
         .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())?
         .bind()
         .await?;

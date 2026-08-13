@@ -96,12 +96,15 @@ impl ChatCallbacks for SimChat {
 async fn test_full_chat_list_flow() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let mut rng = rand::rngs::ChaCha12Rng::seed_from_u64(42);
+    // Local in-process relay: deterministic probes/`online()`, no external network.
+    let (relay_map, _relay_url, _relay_guard) = iroh::test_utils::run_relay_server().await?;
 
     // Spawn two peers
-    let ep_a = Endpoint::builder(presets::N0)
+    let ep_a = Endpoint::builder(presets::Minimal)
         .secret_key(SecretKey::from_bytes(&rng.random()))
         .address_lookup(MemoryLookup::new())
-        .relay_mode(RelayMode::Default)
+        .relay_mode(RelayMode::Custom(relay_map.clone()))
+        .ca_tls_config(iroh::tls::CaTlsConfig::insecure_skip_verify())
         .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())?
         .bind()
         .await?;
@@ -115,10 +118,11 @@ async fn test_full_chat_list_flow() -> Result<()> {
     let addr_a = ep_a.addr();
     println!("A: {}", pk_a.fmt_short());
 
-    let ep_b = Endpoint::builder(presets::N0)
+    let ep_b = Endpoint::builder(presets::Minimal)
         .secret_key(SecretKey::from_bytes(&rng.random()))
         .address_lookup(MemoryLookup::new())
-        .relay_mode(RelayMode::Default)
+        .relay_mode(RelayMode::Custom(relay_map.clone()))
+        .ca_tls_config(iroh::tls::CaTlsConfig::insecure_skip_verify())
         .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())?
         .bind()
         .await?;

@@ -124,11 +124,13 @@ impl ChatCallbacks for SimChat {
 
 async fn spawn_peer(
     rng: &mut impl rand::Rng,
+    relay_map: iroh::RelayMap,
 ) -> Result<(Router, Endpoint, SecretKey, Gossip, PublicKey)> {
-    let ep = Endpoint::builder(presets::N0)
+    let ep = Endpoint::builder(presets::Minimal)
         .secret_key(SecretKey::from_bytes(&rng.random()))
         .address_lookup(MemoryLookup::new())
-        .relay_mode(RelayMode::Default)
+        .relay_mode(RelayMode::Custom(relay_map))
+        .ca_tls_config(iroh::tls::CaTlsConfig::insecure_skip_verify())
         .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())?
         .bind()
         .await?;
@@ -145,9 +147,11 @@ async fn spawn_peer(
 async fn test_iced_chat_exact_flow() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let mut rng = rand::rngs::ChaCha12Rng::seed_from_u64(42);
+    // Local in-process relay: deterministic probes/`online()`, no external network.
+    let (relay_map, _relay_url, _relay_guard) = iroh::test_utils::run_relay_server().await?;
 
-    let (router_a, ep_a, sk_a, gossip_a, pk_a) = spawn_peer(&mut rng).await?;
-    let (router_b, ep_b, sk_b, gossip_b, pk_b) = spawn_peer(&mut rng).await?;
+    let (router_a, ep_a, sk_a, gossip_a, pk_a) = spawn_peer(&mut rng, relay_map.clone()).await?;
+    let (router_b, ep_b, sk_b, gossip_b, pk_b) = spawn_peer(&mut rng, relay_map.clone()).await?;
 
     println!("Peer A: {}", pk_a.fmt_short());
     println!("Peer B: {}", pk_b.fmt_short());

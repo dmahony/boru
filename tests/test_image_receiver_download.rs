@@ -54,6 +54,11 @@ impl ChatCallbacks for RxTestPeer {
     fn is_friend(&self, _peer: &PublicKey) -> bool {
         false
     }
+    // Shared-room image flow: these peers exchange blobs as group-room members,
+    // so opt in to group-peer blob announcements (default is friend-only).
+    fn accepts_group_peer(&self, _topic: Option<boru_core::proto::TopicId>, _peer: &PublicKey) -> bool {
+        true
+    }
     fn friend_mark_online(&mut self, _fid: FriendId) {}
     fn friend_mark_offline(&mut self, _fid: FriendId) {}
     fn friend_set_name(&mut self, _fid: FriendId, _name: String) {}
@@ -109,6 +114,7 @@ impl ChatCallbacks for RxTestPeer {
 
 async fn spawn_peer_with_blobs(
     rng: &mut impl rand::Rng,
+    relay_map: iroh::RelayMap,
 ) -> Result<(
     Router,
     iroh::Endpoint,
@@ -117,10 +123,11 @@ async fn spawn_peer_with_blobs(
     PublicKey,
     MemStore,
 )> {
-    let ep = iroh::Endpoint::builder(presets::N0)
+    let ep = iroh::Endpoint::builder(presets::Minimal)
         .secret_key(SecretKey::from_bytes(&rng.random()))
         .address_lookup(MemoryLookup::new())
-        .relay_mode(RelayMode::Default)
+        .relay_mode(RelayMode::Custom(relay_map))
+        .ca_tls_config(iroh::tls::CaTlsConfig::insecure_skip_verify())
         .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())?
         .bind()
         .await?;
@@ -226,11 +233,13 @@ fn count_image_entries(entries: &[ChatEntry]) -> usize {
 async fn test_receiver_downloads_image_entry() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let mut rng = rand::rngs::ChaCha12Rng::seed_from_u64(12345);
+    // Local in-process relay: deterministic probes/`online()`, no external network.
+    let (relay_map, _relay_url, _relay_guard) = iroh::test_utils::run_relay_server().await?;
 
     let (router_a, ep_a, sk_a, gossip_a, pk_a, blob_store_a) =
-        spawn_peer_with_blobs(&mut rng).await?;
+        spawn_peer_with_blobs(&mut rng, relay_map.clone()).await?;
     let (_router_b, ep_b, sk_b, gossip_b, pk_b, blob_store_b) =
-        spawn_peer_with_blobs(&mut rng).await?;
+        spawn_peer_with_blobs(&mut rng, relay_map.clone()).await?;
 
     println!("Peer A (sender):   {}", pk_a.fmt_short());
     println!("Peer B (receiver): {}", pk_b.fmt_short());

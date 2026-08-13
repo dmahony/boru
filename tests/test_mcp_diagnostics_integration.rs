@@ -31,11 +31,13 @@ fn make_sk(rng: &mut impl rand::Rng) -> SecretKey {
 
 async fn spawn_peer_relay(
     rng: &mut impl rand::Rng,
+    relay_map: iroh::RelayMap,
 ) -> Result<(Router, Endpoint, SecretKey, Gossip)> {
-    let ep = Endpoint::builder(presets::N0)
+    let ep = Endpoint::builder(presets::Minimal)
         .secret_key(make_sk(rng))
         .address_lookup(MemoryLookup::new())
-        .relay_mode(RelayMode::Default)
+        .relay_mode(RelayMode::Custom(relay_map))
+        .ca_tls_config(iroh::tls::CaTlsConfig::insecure_skip_verify())
         .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())?
         .bind()
         .await?;
@@ -94,15 +96,28 @@ async fn drain_stale(sub_a: &mut GossipTopic, sub_b: &mut GossipTopic) {
 async fn test_diagnostics_does_not_block_text_messages() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let mut rng = rand::rngs::ChaCha12Rng::seed_from_u64(99);
+    // Local in-process relay: deterministic probes/`online()`, no external network.
+    let (relay_map, relay_url, _relay_guard) = iroh::test_utils::run_relay_server().await?;
 
-    let (router_a, _ep_a, sk_a, gossip_a) = spawn_peer_relay(&mut rng).await?;
-    let (router_b, _ep_b, _sk_b, gossip_b) = spawn_peer_relay(&mut rng).await?;
+    let (router_a, ep_a, sk_a, gossip_a) = spawn_peer_relay(&mut rng, relay_map.clone()).await?;
+    let (router_b, ep_b, _sk_b, gossip_b) = spawn_peer_relay(&mut rng, relay_map.clone()).await?;
+
+    // Rendezvous via a shared lookup: publish A's addr (with the local relay
+    // URL) so B can resolve it without the public DNS/pkarr discovery.
+    let shared = MemoryLookup::new();
+    if let Ok(al) = ep_a.address_lookup() {
+        al.add(shared.clone());
+    }
+    if let Ok(al) = ep_b.address_lookup() {
+        al.add(shared.clone());
+    }
+    shared.set_endpoint_info(ep_a.addr().with_relay_url(relay_url.clone()));
 
     let topic = TopicId::from_bytes(rng.random());
 
-    let mut sub_a = gossip_a.subscribe(topic, vec![_ep_a.id()]).await?;
+    let mut sub_a = gossip_a.subscribe(topic, vec![ep_a.id()]).await?;
     sleep(Duration::from_millis(100)).await;
-    let mut sub_b = gossip_b.subscribe(topic, vec![_ep_a.id()]).await?;
+    let mut sub_b = gossip_b.subscribe(topic, vec![ep_a.id()]).await?;
 
     assert!(
         wait_for_both_joined(&mut sub_a, &mut sub_b).await,
@@ -169,9 +184,22 @@ async fn test_diagnostics_does_not_block_text_messages() -> Result<()> {
 async fn test_two_peers_exchange_probe() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let mut rng = rand::rngs::ChaCha12Rng::seed_from_u64(100);
+    // Local in-process relay: deterministic probes/`online()`, no external network.
+    let (relay_map, relay_url, _relay_guard) = iroh::test_utils::run_relay_server().await?;
 
-    let (router_a, ep_a, sk_a, gossip_a) = spawn_peer_relay(&mut rng).await?;
-    let (router_b, ep_b, _sk_b, gossip_b) = spawn_peer_relay(&mut rng).await?;
+    let (router_a, ep_a, sk_a, gossip_a) = spawn_peer_relay(&mut rng, relay_map.clone()).await?;
+    let (router_b, ep_b, _sk_b, gossip_b) = spawn_peer_relay(&mut rng, relay_map.clone()).await?;
+
+    // Rendezvous via a shared lookup: publish A's addr (with the local relay
+    // URL) so B can resolve it without the public DNS/pkarr discovery.
+    let shared = MemoryLookup::new();
+    if let Ok(al) = ep_a.address_lookup() {
+        al.add(shared.clone());
+    }
+    if let Ok(al) = ep_b.address_lookup() {
+        al.add(shared.clone());
+    }
+    shared.set_endpoint_info(ep_a.addr().with_relay_url(relay_url.clone()));
 
     println!("Peer A: {}", ep_a.id().fmt_short());
     println!("Peer B: {}", ep_b.id().fmt_short());
