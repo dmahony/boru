@@ -1,5 +1,0 @@
-
-  ⚠️  WARNING: GUI test actions are ENABLED via --enable-gui-test-actions.
-  This exposes MCP tools that can interact with the application UI.
-  Only bind to loopback addresses when this mode is active.
-

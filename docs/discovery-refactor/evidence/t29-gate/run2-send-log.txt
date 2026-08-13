@@ -1,3 +1,0 @@
-2026-08-12T05:05:17.122817Z  INFO boru::app: room opened: group conversation topic joined topic=c7d671928f984fb99cb72f1b2fd3132b8e52b499741ad7d2f497b5c24fc8ab1a
-2026-08-12T06:49:34.537830Z  INFO boru::app: SQLite insert_outgoing_message OK for event_id=1
-2026-08-12T06:49:34.537863Z  INFO boru::app: message delivery telemetry topic=c7d671928f984fb99cb72f1b2fd3132b8e52b499741ad7d2f497b5c24fc8ab1a message_hash=[253, 139, 231, 211, 114, 196, 52, 125, 234, 221, 79, 210, 105, 158, 100, 218, 240, 117, 251, 225, 255, 20, 172, 243, 224, 43, 225, 232, 103, 80, 78, 48] local_peer=c75aa1d5dd persistence_result="queued"

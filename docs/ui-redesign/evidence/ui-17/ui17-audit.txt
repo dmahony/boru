@@ -1,6 +1,0 @@
-Total AppMessage variants: 226
-Variants referenced in match arms (=>): 262
-
-All UI-00 interactions present and handled in update().
-
-Declared but never referenced as AppMessage::X => : 0

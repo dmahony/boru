@@ -1,4 +1,0 @@
-385 190 55 14 Create
-384 249 69 10 Connection
-384 277 40 9 Choose
-401 314 24 12 Bob
