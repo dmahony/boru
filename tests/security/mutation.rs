@@ -4,8 +4,7 @@
 
 use crate::common::{now_secs, sweep_mutations};
 use boru_core::chat_core::{
-    sign_advertisement, verify_advertisement, DEFAULT_ADVERT_TTL_SECS, Message,
-    RoomAdvertisement, SignedMessage,
+    sign_advertisement, verify_advertisement, Message, RoomAdvertisement, SignedMessage,
 };
 use boru_core::contact::{ContactAction, SignedContactMessage};
 use boru_core::file_access_protocol::{
@@ -181,6 +180,13 @@ fn contact_message_flip_truncate_extend_rejected_without_panic() {
 #[test]
 fn room_advertisement_flip_truncate_extend_rejected_without_panic() {
     let sk = SecretKey::generate();
+    // Use a NON-default TTL on purpose: the legacy manual Deserialize
+    // (BORU-DIR-08) backfills a corrupted/missing trailing `expires_after_secs`
+    // varint with DEFAULT_ADVERT_TTL_SECS. If the fixture signed with the
+    // default (300), corrupting the TTL varint decodes back to the signed
+    // value and the signature still verifies, defeating the mutation
+    // invariant. With a non-default TTL (600), any TTL-varint corruption
+    // decodes to 300 != 600 and is correctly rejected.
     let ad = RoomAdvertisement {
         room_name: "Lobby".into(),
         description: "public".into(),
@@ -188,7 +194,7 @@ fn room_advertisement_flip_truncate_extend_rejected_without_panic() {
         ticket: "blob:iroh:xyz".into(),
         member_count: 1,
         last_activity: now_secs() * 1000,
-        expires_after_secs: DEFAULT_ADVERT_TTL_SECS,
+        expires_after_secs: 600,
     };
     let sig = sign_advertisement(&ad, &sk);
     let mut encoded = postcard::to_stdvec(&ad).unwrap();
