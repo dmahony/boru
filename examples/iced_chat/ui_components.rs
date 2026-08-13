@@ -1389,10 +1389,12 @@ pub fn card_header<'a>(
 /// instead of the 14 px button default. iced 0.14's text widgets expose no
 /// letter-spacing API, so the spec's "modest letter spacing" is approximated
 /// by the SemiBold weight at this small size (no API to set it explicitly).
-/// BORU-HOME-09: reduced from 12 px to 11 px so section chrome recedes behind
-/// chat/friend content.
-const SIDEBAR_SECTION_LABEL_SIZE: f32 = 11.0;
-
+/// BORU-HOME-09: reduced from 12 px to 11 px.
+///
+/// BORU-UI-03: the size now comes from the typed theme
+/// (`SidebarTheme::section_label_size`) so the live-editor chain can
+/// override it; the old `SIDEBAR_SECTION_LABEL_SIZE` const is gone.
+///
 /// A collapsible sidebar section header with an optional count badge and a
 /// trailing add action.
 ///
@@ -1467,10 +1469,11 @@ impl<'a> SidebarSectionHeader<'a> {
             .push(
                 // FONTS-06: all-caps section label in IBM Plex Sans SemiBold
                 // at the 11–12 px band (ButtonLabel family/weight, tighter
-                // sidebar size via SIDEBAR_SECTION_LABEL_SIZE).
+                // sidebar size via `SidebarTheme::section_label_size`,
+                // BORU-UI-03).
                 text(self.title)
                     .font(TypeRole::ButtonLabel.font())
-                    .size(SIDEBAR_SECTION_LABEL_SIZE)
+                    .size(crate::theme::BoruTheme::for_theme(theme).sidebar.section_label_size)
                     .color(design_tokens::text_muted(theme))
                     .width(Length::Shrink),
             );
@@ -1602,6 +1605,10 @@ pub fn gutter_scrollable<'a, Message>(
 /// scale from 96 % → 100 % applied via `Renderer::with_transformation`.
 /// Layout is untouched — the whole sidebar is not re-laid-out per frame and
 /// the section's `iced::widget::lazy` cache is preserved.
+///
+/// BORU-UI-03: mirrored by `MotionTokens::sidebar_fade_frames` in the typed
+/// theme (see `theme.rs` tests); the const remains the canonical source for
+/// the 20+ animation call sites and tests.
 pub const SIDEBAR_FADE_FRAMES: u32 = 5;
 
 /// A delegating widget that plays a short "appear" animation on its content.

@@ -151,7 +151,8 @@ impl IcedChat {
         use iced::{Alignment, Length};
 
         let theme = self.theme();
-        let inset = SIDEBAR_INSET; // 24 px
+        let btheme = self.boru_theme();
+        let inset = btheme.sidebar.inset; // 24 px
 
         // ═══════════════════════════════════════════════════════════════
         // 1. BRAND ROW — Raleway ExtraBold "BORU" + settings
@@ -162,7 +163,7 @@ impl IcedChat {
                 text("BORU")
                     .font(crate::fonts::raleway_extra_bold())
                     .size(20.0)
-                    .color(crate::design_tokens::text_primary(&theme)),
+                    .color(btheme.colors.text_primary),
             )
             .push(Space::new().width(Length::Fill));
 
@@ -226,9 +227,9 @@ impl IcedChat {
         // ═══════════════════════════════════════════════════════════════
         // 3. DIVIDER beneath identity
         // ═══════════════════════════════════════════════════════════════
-        let identity_divider = rule::horizontal(1).style(move |t| rule::Style {
-            color: crate::design_tokens::border_muted(t),
-            radius: 0.0.into(),
+        let identity_divider = rule::horizontal(1).style(move |_t| rule::Style {
+            color: btheme.colors.border_muted,
+            radius: btheme.radii.none.into(),
             fill_mode: rule::FillMode::Full,
             snap: false,
         });
@@ -245,7 +246,7 @@ impl IcedChat {
 
         let mut sections = Column::new()
             .padding(iced::Padding {
-                top: SPACE_4,
+                top: btheme.sidebar.padding.section_top,
                 right: 0.0,
                 bottom: 0.0,
                 left: 0.0,
@@ -440,16 +441,16 @@ impl IcedChat {
         Column::new()
             // Pinned: brand row
             .push(container(brand_row).padding(iced::Padding {
-                top: SPACE_16,
+                top: btheme.sidebar.padding.brand_top,
                 right: inset,
-                bottom: SPACE_8,
+                bottom: btheme.sidebar.padding.brand_bottom,
                 left: inset,
             }))
             // Pinned: identity row
             .push(container(identity_row).padding(iced::Padding {
-                top: SPACE_4,
+                top: btheme.sidebar.padding.identity_top,
                 right: inset,
-                bottom: SPACE_8,
+                bottom: btheme.sidebar.padding.identity_bottom,
                 left: inset,
             }))
             // Pinned: subtle divider
@@ -465,16 +466,16 @@ impl IcedChat {
             .push(
                 container(
                     Column::new()
-                        .push(rule::horizontal(1).style(move |t| rule::Style {
-                            color: crate::design_tokens::border_muted(t),
-                            radius: 0.0.into(),
+                        .push(rule::horizontal(1).style(move |_t| rule::Style {
+                            color: btheme.colors.border_muted,
+                            radius: btheme.radii.none.into(),
                             fill_mode: rule::FillMode::Full,
                             snap: false,
                         }))
                         .push(container(utility_row).padding(iced::Padding {
-                            top: SPACE_8,
+                            top: btheme.sidebar.padding.utility_top,
                             right: inset,
-                            bottom: SPACE_12,
+                            bottom: btheme.sidebar.padding.utility_bottom,
                             left: inset,
                         })),
                 )
@@ -914,7 +915,8 @@ impl IcedChat {
         use iced::widget::{button, container, row, text_input, Column};
         use iced::{Alignment, Length};
 
-        let mut section = Column::new().spacing(SPACE_2);
+        let btheme = self.boru_theme();
+        let mut section = Column::new().spacing(btheme.spacing.space_2);
 
         section = section.push(
             container(
@@ -922,10 +924,10 @@ impl IcedChat {
                     .style(text_muted_style),
             )
                 .padding(iced::Padding {
-                    top: SPACE_8,
-                    right: SPACE_12,
-                    bottom: SPACE_4,
-                    left: SPACE_12,
+                    top: btheme.sidebar.padding.join_top,
+                    right: btheme.sidebar.padding.row_x,
+                    bottom: btheme.sidebar.padding.join_bottom,
+                    left: btheme.sidebar.padding.row_x,
                 })
                 .width(Length::Fill),
         );
@@ -951,10 +953,10 @@ impl IcedChat {
                 .align_y(Alignment::Center),
             )
             .padding(iced::Padding {
-                top: SPACE_2,
-                right: SPACE_12,
-                bottom: SPACE_2,
-                left: SPACE_12,
+                top: btheme.spacing.space_2,
+                right: btheme.sidebar.padding.row_x,
+                bottom: btheme.spacing.space_2,
+                left: btheme.sidebar.padding.row_x,
             })
             .width(Length::Fill),
         );
@@ -966,13 +968,16 @@ impl IcedChat {
                         crate::fonts::TypeRole::SupportingText,
                         &self.chat_list_error,
                     )
-                    .color(Color::from_rgb(0.8, 0.2, 0.2)),
+                    // BORU-UI-03: the existing error red rgb(0.8,0.2,0.2) is
+                    // captured by ColorTokens::request_declined — the theme
+                    // token with the exact same value in both modes.
+                    .color(btheme.colors.request_declined),
                 )
                 .padding(iced::Padding {
                     top: 0.0,
-                    right: SPACE_12,
-                    bottom: SPACE_2,
-                    left: SPACE_12,
+                    right: btheme.sidebar.padding.row_x,
+                    bottom: btheme.spacing.space_2,
+                    left: btheme.sidebar.padding.row_x,
                 })
                 .width(Length::Fill),
             );
@@ -999,11 +1004,13 @@ impl IcedChat {
         use iced::widget::{button, container, Column, Row};
         use iced::{Alignment, Background, Border, Length};
 
+        let btheme = crate::theme::BoruTheme::for_theme(&Self::theme_from_dark(dark_mode));
+
         // ── Avatar (shared Avatar component, 36px) ─────────────────
         let avatar_element: iced::Element<'static, AppMessage> = {
             let sidebar_avatar = avatar; // SidebarAvatarHandle
             let mut avatar = Avatar::new(name.clone())
-                .size(crate::design_tokens::AVATAR_CHAT_LIST)
+                .size(btheme.avatars.chat_list)
                 .dark_mode(dark_mode);
             if !is_group {
                 if let Some(handle) = sidebar_avatar.handle.clone() {
@@ -1094,7 +1101,7 @@ impl IcedChat {
                 .padding(0)
                 .style(move |t, _status| iced_aw::style::badge::Style {
                     background: iced::Background::Color(color_error(t)),
-                    border_radius: Some(10.0),
+                    border_radius: Some(btheme.sidebar.item_radius),
                     border_width: 0.0,
                     border_color: None,
                     text_color: Color::WHITE,
@@ -1116,8 +1123,8 @@ impl IcedChat {
             })
             .center_x(Length::Fill)
             .center_y(Length::Fill)
-            .width(Length::Fixed(24.0))
-            .height(Length::Fixed(24.0)),
+            .width(Length::Fixed(btheme.icons.sidebar_utility))
+            .height(Length::Fixed(btheme.icons.sidebar_utility)),
         )
         .on_press(if is_deleting {
             AppMessage::ConfirmDeleteRoom(topic)
@@ -1149,10 +1156,10 @@ impl IcedChat {
             } else {
                 // Invisible by default — appears only on hover (hover/overflow menu pattern)
                 iced::widget::button::Style {
-                    text_color: Color::from_rgba(0.0, 0.0, 0.0, 0.0),
+                    text_color: iced::Color::TRANSPARENT,
                     background: None,
                     border: Border {
-                        radius: SPACE_4.into(),
+                        radius: btheme.radii.sm.into(),
                         ..Default::default()
                     },
                     ..Default::default()
@@ -1257,10 +1264,10 @@ impl IcedChat {
         let selected_for_unread = selected_topic.clone();
         container(btn)
             .width(Length::Fill)
-            .style(move |t| {
+            .style(move |_t| {
                 let is_selected = selected_for_unread.get() == Some(topic);
                 if unread > 0 && !is_selected {
-                    let primary = crate::design_tokens::primary(t);
+                    let primary = btheme.colors.primary;
                     container::Style {
                         background: Some(Background::Color(Color::from_rgba(
                             primary.r, primary.g, primary.b, 0.07,
@@ -1531,13 +1538,15 @@ impl IcedChat {
         avatar: SidebarAvatarHandle,
         peer: PublicKey,
     ) -> iced::Element<'static, AppMessage> {
-        use iced::widget::{container};
+        use iced::widget::container;
         use iced::{Background, Border, Length};
+
+        let btheme = crate::theme::BoruTheme::default();
 
         if let Some(handle) = avatar.handle {
             return iced::widget::image(handle)
-                .width(Length::Fixed(24.0))
-                .height(Length::Fixed(24.0))
+                .width(Length::Fixed(btheme.sidebar.utility_icon_size))
+                .height(Length::Fixed(btheme.sidebar.utility_icon_size))
                 .into();
         }
 
@@ -1556,12 +1565,12 @@ impl IcedChat {
                 .width(Length::Fill),
         )
         .center_y(Length::Fill)
-        .width(Length::Fixed(24.0))
-        .height(Length::Fixed(24.0))
+        .width(Length::Fixed(btheme.sidebar.utility_icon_size))
+        .height(Length::Fixed(btheme.sidebar.utility_icon_size))
         .style(move |_t| container::Style {
             background: Some(Background::Color(avatar_color)),
             border: Border {
-                radius: 12.0.into(),
+                radius: btheme.sidebar.avatar_container_radius.into(),
                 ..Default::default()
             },
             ..Default::default()
@@ -1639,7 +1648,8 @@ impl IcedChat {
         use iced::widget::{button, container, Column, Row, Space};
         use iced::{Alignment, Length};
 
-        let mut section = Column::new().spacing(SPACE_2);
+        let btheme = crate::theme::BoruTheme::for_theme(&Self::theme_from_dark(dep.dark_mode));
+        let mut section = Column::new().spacing(btheme.spacing.space_2);
 
         // Add-friend field: shared text input + trailing add-person icon.
         // Submission (Enter), validation (error border) and focus behaviour
@@ -1671,17 +1681,17 @@ impl IcedChat {
                     .push(add_input)
                     .push(
                         Space::new()
-                            .width(Length::Fixed(SPACE_4))
+                            .width(Length::Fixed(btheme.spacing.space_4))
                             .height(Length::Shrink),
                     )
                     .push(add_btn)
                     .align_y(Alignment::Center),
             )
             .padding(iced::Padding {
-                top: SPACE_2,
-                right: SPACE_12,
-                bottom: SPACE_4,
-                left: SPACE_12,
+                top: btheme.spacing.space_2,
+                right: btheme.sidebar.padding.row_x,
+                bottom: btheme.spacing.space_4,
+                left: btheme.sidebar.padding.row_x,
             })
             .width(Length::Fill),
         );
@@ -1908,7 +1918,8 @@ impl IcedChat {
         use iced::{Alignment, Length};
 
         let theme = Self::theme_from_dark(dep.dark_mode);
-        let mut section = Column::new().spacing(SPACE_2);
+        let btheme = crate::theme::BoruTheme::for_theme(&theme);
+        let mut section = Column::new().spacing(btheme.spacing.space_2);
 
         // Manage button for opening the full friend requests screen
         section = section.push(
@@ -1918,10 +1929,10 @@ impl IcedChat {
                 false,
             ))
             .padding(iced::Padding {
-                top: SPACE_2,
-                right: SPACE_12,
-                bottom: SPACE_4,
-                left: SPACE_12,
+                top: btheme.spacing.space_2,
+                right: btheme.sidebar.padding.row_x,
+                bottom: btheme.spacing.space_4,
+                left: btheme.sidebar.padding.row_x,
             })
             .width(Length::Fill),
         );

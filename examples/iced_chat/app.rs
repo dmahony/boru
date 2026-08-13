@@ -23719,12 +23719,18 @@ mod tests {
     fn sidebar_section_labels_use_fonts06_size() {
         // FONTS-06: all-caps sidebar section labels (CHATS / GROUPS / …)
         // keep the ButtonLabel family/weight (IBM Plex Sans SemiBold) but
-        // render at the 10–12 px band via SIDEBAR_SECTION_LABEL_SIZE.
+        // render at the 10–12 px band via the typed theme
+        // (`SidebarTheme::section_label_size`, BORU-UI-03).
         // BORU-HOME-09: reduced from 12 px to 11 px.
         let src = include_str!("ui_components.rs");
         assert!(
-            src.contains("const SIDEBAR_SECTION_LABEL_SIZE: f32 = 11.0;"),
-            "sidebar section label size const must be 11 px (BORU-HOME-09)"
+            src.contains("section_label_size"),
+            "sidebar section label size must come from SidebarTheme::section_label_size (BORU-UI-03)"
+        );
+        assert_eq!(
+            crate::theme::BoruTheme::default().sidebar.section_label_size,
+            11.0,
+            "sidebar section label size must be 11 px (BORU-HOME-09)"
         );
         let header = method_source(
             src,
@@ -23736,8 +23742,8 @@ mod tests {
             "sidebar section label must keep the IBM Plex Sans SemiBold button-label family/weight"
         );
         assert!(
-            header.contains(".size(SIDEBAR_SECTION_LABEL_SIZE)"),
-            "sidebar section label must use the FONTS-06 11 px size"
+            header.contains(".size(") && header.contains("section_label_size"),
+            "sidebar section label must use the FONTS-06 11 px size from the theme"
         );
     }
 
