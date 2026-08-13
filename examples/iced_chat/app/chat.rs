@@ -19,11 +19,12 @@ impl IcedChat {
             const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
             let spinner = SPINNER_FRAMES[self.splash_spinner_frame % SPINNER_FRAMES.len()];
             let theme = self.theme();
+            let btheme = crate::theme::BoruTheme::for_theme(&theme);
             let dark_mode = self.theme() == iced::Theme::Dark;
             return widget::container(
                 widget::column![
                     widget::text(spinner)
-                        .size(40.0)
+                        .size(btheme.chat.spinner_size)
                         .color(accent_primary(&theme)),
                     widget::text("Loading conversation\u{2026}")
                         .size(crate::fonts::TypeRole::Body.size_px())
@@ -50,11 +51,12 @@ impl IcedChat {
             const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
             let spinner = SPINNER_FRAMES[self.connecting_spinner_frame % SPINNER_FRAMES.len()];
             let theme = self.theme();
+            let btheme = crate::theme::BoruTheme::for_theme(&theme);
             let dark_mode = self.theme() == iced::Theme::Dark;
             return widget::container(
                 widget::column![
                     widget::text(spinner)
-                        .size(40.0)
+                        .size(btheme.chat.spinner_size)
                         .color(accent_primary(&theme)),
                     widget::text("Connecting…")
                         .size(crate::fonts::TypeRole::Body.size_px())
@@ -351,6 +353,10 @@ impl IcedChat {
     pub(crate) fn view_screen_share_panel(&self) -> iced::Element<'_, AppMessage> {
         use iced::widget::{button, column, container, row, text};
         use iced::Length;
+        // BORU-UI-03: viewer box geometry comes from `ChatTheme::screen_share_*`
+        // (640x360 capture aspect; the mouse-area Point maps 1:1 to normalized
+        // coordinates only while the box matches the capture aspect).
+        let btheme = crate::theme::BoruTheme::default();
         let body = if let Some((inviter, _)) = &self.screen_share_invite {
             column![
                 text(format!("{inviter} wants to share their screen")),
@@ -408,14 +414,14 @@ impl IcedChat {
                     // Fixed 640x360 box matches the capture aspect exactly, so
                     // the mouse_area Point maps 1:1 to normalized coordinates.
                     let image = iced::widget::Image::new(handle.clone())
-                        .width(Length::Fixed(Self::SCREEN_SHARE_VIDEO_W))
-                        .height(Length::Fixed(Self::SCREEN_SHARE_VIDEO_H))
+                        .width(Length::Fixed(btheme.chat.screen_share_w))
+                        .height(Length::Fixed(btheme.chat.screen_share_h))
                         .content_fit(iced::ContentFit::Contain);
                     let last = self.screen_share_last_pointer_pos.unwrap_or((0.0, 0.0));
                     iced::widget::mouse_area(image)
                         .on_move(|pos| AppMessage::ScreenSharePointerMove {
-                            x: (pos.x / Self::SCREEN_SHARE_VIDEO_W).clamp(0.0, 1.0),
-                            y: (pos.y / Self::SCREEN_SHARE_VIDEO_H).clamp(0.0, 1.0),
+                            x: (pos.x / btheme.chat.screen_share_w).clamp(0.0, 1.0),
+                            y: (pos.y / btheme.chat.screen_share_h).clamp(0.0, 1.0),
                         })
                         .on_press(AppMessage::ScreenSharePointerButton {
                             x: last.0,
@@ -485,14 +491,6 @@ impl IcedChat {
         }
     }
 
-    #[cfg(feature = "screen-sharing")]
-    /// Fixed viewer video box size (matches the 640x360 capture aspect so the
-    /// mouse_area Point maps 1:1 to normalized coordinates).
-    const SCREEN_SHARE_VIDEO_W: f32 = 640.0;
-
-    #[cfg(feature = "screen-sharing")]
-    const SCREEN_SHARE_VIDEO_H: f32 = 360.0;
-
     // ── Chat screen view ─────────────────────────────────────────────
 
     /// Render the right-click context menu overlay.
@@ -509,7 +507,9 @@ impl IcedChat {
             .padding([SPACE_2, SPACE_6])
             .style(|_t, _s| iced::widget::button::Style::default());
 
-        let mut col = column![].spacing(0).width(180.0);
+        let mut col = column![].spacing(0).width(
+            crate::theme::BoruTheme::for_theme(&theme).chat.context_menu_width,
+        );
 
         match kind {
             ContextMenuKind::Text => {
@@ -555,14 +555,17 @@ impl IcedChat {
         .padding([SPACE_4, SPACE_8]);
 
         container(column![header, col])
-            .style(move |t| iced::widget::container::Style {
-                background: Some(iced::Background::Color(bg_surface(t))),
-                border: iced::Border {
-                    color: border_muted(t),
-                    width: 1.0,
-                    radius: (8.0_f32).into(),
-                },
-                ..Default::default()
+            .style(move |t| {
+                let b = crate::theme::BoruTheme::for_theme(t);
+                iced::widget::container::Style {
+                    background: Some(iced::Background::Color(bg_surface(t))),
+                    border: iced::Border {
+                        color: border_muted(t),
+                        width: b.borders.hairline,
+                        radius: b.radii.sm.into(),
+                    },
+                    ..Default::default()
+                }
             })
             .width(200.0)
             .into()
@@ -603,25 +606,31 @@ impl IcedChat {
             grid = grid.push(r);
         }
 
-        let scroll = crate::ui_components::gutter_scrollable(grid).height(iced::Length::Fixed(160.0));
+        let scroll = crate::ui_components::gutter_scrollable(grid).height(iced::Length::Fixed(
+            crate::theme::BoruTheme::for_theme(&theme).chat.emoji_picker_scroll_height,
+        ));
 
+        let chat_theme = crate::theme::BoruTheme::for_theme(&theme).chat;
         iced_aw::Card::new(head, scroll)
-            .width(280.0)
+            .width(chat_theme.emoji_picker_width)
             .padding_head(iced::Padding::new(SPACE_8))
             .padding_body(iced::Padding::new(SPACE_8))
             .on_close(AppMessage::ToggleEmojiPicker)
-            .style(move |t, _status| iced_aw::style::card::Style {
-                background: iced::Background::Color(bg_surface(t)),
-                border_radius: 8.0,
-                border_width: 1.0,
-                border_color: border_muted(t),
-                head_background: iced::Background::Color(bg_surface(t)),
-                head_text_color: text_muted(t),
-                body_background: iced::Background::Color(iced::Color::TRANSPARENT),
-                body_text_color: text_muted(t),
-                foot_background: iced::Background::Color(iced::Color::TRANSPARENT),
-                foot_text_color: text_muted(t),
-                close_color: text_muted(t),
+            .style(move |t, _status| {
+                let b = crate::theme::BoruTheme::for_theme(t);
+                iced_aw::style::card::Style {
+                    background: iced::Background::Color(bg_surface(t)),
+                    border_radius: b.radii.sm,
+                    border_width: b.borders.hairline,
+                    border_color: border_muted(t),
+                    head_background: iced::Background::Color(bg_surface(t)),
+                    head_text_color: text_muted(t),
+                    body_background: iced::Background::Color(iced::Color::TRANSPARENT),
+                    body_text_color: text_muted(t),
+                    foot_background: iced::Background::Color(iced::Color::TRANSPARENT),
+                    foot_text_color: text_muted(t),
+                    close_color: text_muted(t),
+                }
             })
             .into()
     }
@@ -898,13 +907,14 @@ impl IcedChat {
                 for gif in chunk {
                     let title = gif.title.as_deref().filter(|s| !s.is_empty()).unwrap_or("GIF");
                     let preview = self.gif_preview_cache.get(&gif.provider_id).cloned();
+                    let thumb = crate::theme::BoruTheme::for_theme(&theme).chat;
 
                     let thumbnail: iced::Element<'_, AppMessage> = match preview {
                         Some(bytes) if !bytes.is_empty() => {
                             let handle = iced::widget::image::Handle::from_bytes(bytes);
                             iced::widget::image(handle)
-                                .width(iced::Length::Fixed(150.0))
-                                .height(iced::Length::Fixed(100.0))
+                                .width(iced::Length::Fixed(thumb.gif_thumbnail_width))
+                                .height(iced::Length::Fixed(thumb.gif_thumbnail_height))
                                 .into()
                         }
                         _ => container(
@@ -914,8 +924,8 @@ impl IcedChat {
                             )
                             .color(text_muted(&theme)),
                         )
-                        .width(150.0)
-                        .height(100.0)
+                        .width(thumb.gif_thumbnail_width)
+                        .height(thumb.gif_thumbnail_height)
                         .center_x(iced::Length::Fill)
                         .center_y(iced::Length::Fill)
                         .style(move |t| iced::widget::container::Style {
@@ -976,23 +986,28 @@ impl IcedChat {
             }
         }
 
-        let scroll = crate::ui_components::gutter_scrollable(results_col).height(iced::Length::Fixed(300.0));
+        let scroll = crate::ui_components::gutter_scrollable(results_col).height(iced::Length::Fixed(
+            crate::theme::BoruTheme::for_theme(&theme).chat.gif_picker_scroll_height,
+        ));
 
         container(
             column![header, search_row, privacy_note, scroll]
                 .spacing(SPACE_6)
                 .padding(SPACE_8),
         )
-        .style(move |t| iced::widget::container::Style {
-            background: Some(iced::Background::Color(bg_surface(t))),
-            border: iced::Border {
-                color: border_muted(t),
-                width: 1.0,
-                radius: (8.0_f32).into(),
-            },
-            ..Default::default()
+        .style(move |t| {
+            let b = crate::theme::BoruTheme::for_theme(t);
+            iced::widget::container::Style {
+                background: Some(iced::Background::Color(bg_surface(t))),
+                border: iced::Border {
+                    color: border_muted(t),
+                    width: b.borders.hairline,
+                    radius: b.radii.sm.into(),
+                },
+                ..Default::default()
+            }
         })
-        .width(320.0)
+        .width(crate::theme::BoruTheme::for_theme(&theme).chat.gif_picker_width)
         .into()
     }
 
