@@ -1394,6 +1394,22 @@ fn main() -> Result<()> {
                                 SignedMessage::verify_and_decode(&msg.content)
                             {
                                 if let Message::RoomAdvertisement { ad, .. } = message {
+                                    // BORU-DIR-19 (PDF Task 7.1): enforce
+                                    // the metadata bounds at the receive
+                                    // boundary — an oversized room name /
+                                    // description / ticket is discarded
+                                    // before it can reach the directory
+                                    // store or the UI. (The app drain
+                                    // additionally rate-limits per author,
+                                    // dedupes identical broadcasts, and
+                                    // clamps absurd TTLs.)
+                                    if let Err(violation) = boru_core::directory::
+                                        legacy_advertisement_bounds_check(&ad)
+                                    {
+                                        debug!(from=%from, topic=%ad.topic, violation=?violation,
+                                            "dropped room advertisement violating metadata bounds");
+                                        continue;
+                                    }
                                     info!(from=%from, topic=%ad.topic, name=%ad.room_name,
                                         "received room advertisement");
                                     let _ = dir_tx.try_send(app::DirectoryRoomEvent::Advertisement(ad, from));

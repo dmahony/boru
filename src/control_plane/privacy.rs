@@ -1320,6 +1320,60 @@ mod tests {
         assert!(limiter.len() <= 2, "sender map must stay bounded");
     }
 
+    /// BORU-DIR-19 (PDF Task 7.1 step 2): a flood of room advertisements
+    /// from one peer is bounded by the per-sender control-frame rate
+    /// limiter — the same sliding-window limiter that guards every control
+    /// frame, so an attacker cannot spin up unbounded directory churn.
+    #[test]
+    fn rate_limiter_bounds_room_advertisement_flood() {
+        use crate::control_plane::advertisement::{PublicRoomAdvertisement, RoomVisibility};
+
+        fn advert_envelope(peer: PublicKey, seq: u64, room_byte: u8) -> ControlEnvelope {
+            let advert = PublicRoomAdvertisement {
+                advert_version: 1,
+                room_id: crate::proto::state::TopicId::from_bytes([room_byte; 32]),
+                room_name: "flood-room".to_string(),
+                short_description: String::new(),
+                room_protocol_version: 1,
+                owner_peer_id: peer.as_bytes().to_owned(),
+                visibility: RoomVisibility::PublicDiscoverable,
+                expires_after_secs: crate::control_plane::advertisement::DEFAULT_ADVERT_TTL_SECS,
+                tags: Vec::new(),
+                last_active_hint_secs: None,
+                approximate_member_count: None,
+                room_avatar_hash: None,
+                feature_flags: Vec::new(),
+                signature: None,
+            };
+            ControlEnvelope::public_room_advertisement(peer, seq, 1_700_000_000, advert)
+        }
+
+        let limiter = ControlPlaneRateLimiter::with_limits(3, Duration::from_secs(60), 16);
+        let presence = PeerControlStateStore::with_limits(16, Duration::from_secs(300));
+        let mut guard =
+            ControlPlaneGuard::with_limits(limiter, 16, presence, ControlAdvertPolicy::default());
+        let attacker = key(0x0A);
+
+        // Distinct rooms, distinct sequences: each advertisement is
+        // well-formed and not a duplicate, but the per-sender budget is 3.
+        for seq in 1..=3u64 {
+            assert_eq!(
+                guard.admit(
+                    &advert_envelope(attacker, seq, seq as u8),
+                    attacker,
+                    Instant::now()
+                ),
+                GuardVerdict::Accept,
+                "within-budget advertisements admitted"
+            );
+        }
+        assert_eq!(
+            guard.admit(&advert_envelope(attacker, 4, 4), attacker, Instant::now()),
+            GuardVerdict::Reject(GuardRejectReason::RateLimited),
+            "the 4th advertisement within the window is rate-limited"
+        );
+    }
+
     // ── Presence store: TTL expiry ────────────────────────────────────
 
     #[test]

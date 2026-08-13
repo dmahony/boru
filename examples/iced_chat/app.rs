@@ -190,7 +190,7 @@ use boru_core::diagnostics::GuiTestCommand;
 use boru_core::diagnostics::IcedMessageJournal;
 use boru_core::diagnostics::IcedStateSnapshot;
 use boru_core::diagnostics::DEFAULT_ACTION_STATE_TIMEOUT_MS;
-use boru_core::directory::DirectoryStore;
+use boru_core::directory::{DirectoryStore, LegacyAdmitOutcome};
 use iced::Color;
 #[cfg(feature = "video-playback")]
 use iced_video_player::Video;
@@ -16201,52 +16201,85 @@ impl IcedChat {
                             match item {
                             DirectoryRoomEvent::Advertisement(ad, from) => {
                             info!(from = %from, topic = %ad.topic, "received room advertisement");
-                            // PUBLIC-02: surface genuinely new public-room
-                            // announcements in the home screen's Recent
-                            // Activity feed.  The same author re-broadcasts
-                            // every ~60 s; only the first sighting is a fresh
-                            // event worth showing.
-                            let is_new_ad = {
-                                let mut store = self.directory_store.lock().unwrap();
-                                let is_new = !store.contains(ad.topic, from);
-                                store.upsert(ad.clone(), from);
-                                is_new
-                            };
-                            if is_new_ad {
-                                let creator = self.resolve_name(&from);
-                                announced_rooms.push(format!(
-                                    "{creator} announced public room \"{}\"",
-                                    ad.room_name
-                                ));
-                            }
-                            directory_changed = true;
+                            // BORU-DIR-19 (PDF Task 7.1): the bounded
+                            // receive gate enforces metadata bounds, clamps
+                            // absurd TTLs, rate-limits per author,
+                            // deduplicates identical broadcasts, and caps
+                            // the store. The outcome drives the UI: only a
+                            // genuinely new advertisement announces +
+                            // auto-subscribes once; a metadata refresh
+                            // updates the card; a duplicate, a rate-limited
+                            // flood, or an oversized advertisement produces
+                            // no UI event at all (no constant re-rendering,
+                            // no forced subscriptions from repeated
+                            // broadcasts).
+                            let outcome = self
+                                .directory_store
+                                .lock()
+                                .unwrap()
+                                .receive(ad.clone(), from, Instant::now());
+                            match outcome {
+                                LegacyAdmitOutcome::Added => {
+                                    // PUBLIC-02: surface genuinely new
+                                    // public-room announcements in the
+                                    // home screen's Recent Activity feed.
+                                    // The same author re-broadcasts every
+                                    // ~60 s; only the first sighting is a
+                                    // fresh event worth showing.
+                                    let creator = self.resolve_name(&from);
+                                    announced_rooms.push(format!(
+                                        "{creator} announced public room \"{}\"",
+                                        ad.room_name
+                                    ));
+                                    directory_changed = true;
 
-                            // Parse the authenticated ticket and use its topic;
-                            // never subscribe to an untrusted raw advertisement
-                            // topic when the ticket disagrees with it.
-                            let Ok(ticket) = ad.ticket.parse::<Ticket>() else {
-                                warn!(from = %from, "ignoring room advertisement with invalid ticket");
-                                continue;
-                            };
-                            let topic = ticket.topic;
-                            if topic == self.topic
-                                || self.conversations.contains_key(&topic)
-                                || !self.auto_subscribed_rooms.insert(topic)
-                            {
-                                continue;
-                            }
+                                    // Parse the authenticated ticket and use
+                                    // its topic; never subscribe to an
+                                    // untrusted raw advertisement topic when
+                                    // the ticket disagrees with it.
+                                    let Ok(ticket) = ad.ticket.parse::<Ticket>() else {
+                                        warn!(from = %from, "ignoring room advertisement with invalid ticket");
+                                        continue;
+                                    };
+                                    let topic = ticket.topic;
+                                    if topic == self.topic
+                                        || self.conversations.contains_key(&topic)
+                                        || !self.auto_subscribed_rooms.insert(topic)
+                                    {
+                                        continue;
+                                    }
 
-                            let mut entry = ConversationEntry::new(topic, "", ad.room_name);
-                            entry.archived = true;
-                            self.conversation_store.upsert(entry);
-                            self.chats_sidebar_revision =
-                                self.chats_sidebar_revision.wrapping_add(1);
-                            discovered_room_tasks.push(iced::Task::done(
-                                AppMessage::BackgroundSubscribe(
-                                    topic,
-                                    self.discovered_peers.clone(),
-                                ),
-                            ));
+                                    let mut entry = ConversationEntry::new(topic, "", ad.room_name);
+                                    entry.archived = true;
+                                    self.conversation_store.upsert(entry);
+                                    self.chats_sidebar_revision =
+                                        self.chats_sidebar_revision.wrapping_add(1);
+                                    discovered_room_tasks.push(iced::Task::done(
+                                        AppMessage::BackgroundSubscribe(
+                                            topic,
+                                            self.discovered_peers.clone(),
+                                        ),
+                                    ));
+                                }
+                                LegacyAdmitOutcome::Refreshed => {
+                                    // Known room, changed metadata: refresh
+                                    // the card but never re-announce or
+                                    // re-subscribe.
+                                    directory_changed = true;
+                                }
+                                LegacyAdmitOutcome::Duplicate => {
+                                    trace!(from = %from.fmt_short(), topic = %ad.topic,
+                                        "duplicate room advertisement; no UI churn");
+                                }
+                                LegacyAdmitOutcome::RateLimited => {
+                                    debug!(from = %from.fmt_short(),
+                                        "room advertisement rate-limited");
+                                }
+                                LegacyAdmitOutcome::Rejected(violation) => {
+                                    debug!(from = %from.fmt_short(), violation = ?violation,
+                                        "room advertisement rejected by metadata bounds");
+                                }
+                            }
                             }
                             // BORU-DIR-09 (PDF Task 3.3): a verified room
                             // withdrawal removes the matching advertisement
@@ -31840,6 +31873,182 @@ mod tests {
         drop(task);
 
         assert_eq!(app.directory_store.lock().unwrap().list_active().len(), 0);
+    }
+
+    // ── BORU-DIR-19 (PDF Task 7.1): spam + resource limits ────────────
+    // The legacy directory drain routes remote advertisements through the
+    // bounded receive gate (metadata bounds, per-author rate limit, TTL
+    // clamp, dedup, entry cap). The tests below pin the acceptance
+    // criteria: repeated identical advertisements do not cause constant
+    // re-rendering, and malformed/oversized metadata is discarded.
+
+    /// Repeated identical advertisements do not cause constant re-rendering:
+    /// a periodic refresh (same user-visible metadata) does not re-announce
+    /// in the Recent Activity feed, does not re-subscribe, and does not
+    /// create a second card.
+    #[test]
+    fn directory_duplicate_advertisement_does_not_churn_ui() {
+        let (_runtime, mut app) = build_prewarm_test_app();
+
+        let (dir_tx, dir_rx) = tokio::sync::mpsc::channel::<DirectoryRoomEvent>(8);
+        app.directory_room_rx = Arc::new(Mutex::new(dir_rx));
+
+        let author = SecretKey::generate().public();
+        let topic = TopicId::from_bytes([0x77; 32]);
+        let ad = RoomAdvertisement {
+            room_name: "Lounge".to_string(),
+            description: String::new(),
+            topic,
+            ticket: boru_core::chat_core::Ticket::new(topic, vec![]).to_string(),
+            member_count: 0,
+            last_activity: 0,
+            expires_after_secs: ADVERT_TTL_SECS,
+        };
+
+        // First sighting: stored, announced, auto-subscribed once.
+        dir_tx
+            .try_send(DirectoryRoomEvent::Advertisement(ad.clone(), author))
+            .expect("feed announcement");
+        let task = app.update(AppMessage::ConnMonitorTick);
+        drop(task);
+        assert!(app.directory_store.lock().unwrap().contains(topic, author));
+        assert_eq!(app.auto_subscribed_rooms.len(), 1, "subscribed once");
+        assert_eq!(
+            app.conversation_store.find(&topic).map(|e| e.name.clone()),
+            Some("Lounge".to_string()),
+            "archived conversation record created once"
+        );
+        let activity_after_first = app.recent_activity.len();
+        assert!(
+            activity_after_first >= 1,
+            "first announcement surfaced in the Recent Activity feed"
+        );
+
+        // Identical re-broadcast (the periodic ~60 s refresh): no UI churn.
+        let mut refresh = ad.clone();
+        refresh.member_count = 12; // dynamic hint only — same user-visible metadata
+        refresh.last_activity = 9_999;
+        dir_tx
+            .try_send(DirectoryRoomEvent::Advertisement(refresh, author))
+            .expect("feed refresh");
+        let task = app.update(AppMessage::ConnMonitorTick);
+        drop(task);
+
+        assert_eq!(
+            app.directory_store.lock().unwrap().len(),
+            1,
+            "no second card from repeated gossip"
+        );
+        assert_eq!(
+            app.auto_subscribed_rooms.len(),
+            1,
+            "no re-subscribe from a duplicate advertisement"
+        );
+        assert_eq!(
+            app.conversation_store.find(&topic).map(|e| e.name.clone()),
+            Some("Lounge".to_string()),
+            "no duplicate conversation record"
+        );
+        assert_eq!(
+            app.recent_activity.len(),
+            activity_after_first,
+            "no re-announcement for an identical advertisement"
+        );
+    }
+
+    /// A metadata change for a known room refreshes the card (single entry)
+    /// but never re-announces or re-subscribes.
+    #[test]
+    fn directory_refreshed_metadata_updates_card_without_resubscribe() {
+        let (_runtime, mut app) = build_prewarm_test_app();
+
+        let (dir_tx, dir_rx) = tokio::sync::mpsc::channel::<DirectoryRoomEvent>(8);
+        app.directory_room_rx = Arc::new(Mutex::new(dir_rx));
+
+        let author = SecretKey::generate().public();
+        let topic = TopicId::from_bytes([0x78; 32]);
+        let ad = RoomAdvertisement {
+            room_name: "Lounge".to_string(),
+            description: "v1".to_string(),
+            topic,
+            ticket: boru_core::chat_core::Ticket::new(topic, vec![]).to_string(),
+            member_count: 0,
+            last_activity: 0,
+            expires_after_secs: ADVERT_TTL_SECS,
+        };
+
+        dir_tx
+            .try_send(DirectoryRoomEvent::Advertisement(ad.clone(), author))
+            .expect("feed announcement");
+        let task = app.update(AppMessage::ConnMonitorTick);
+        drop(task);
+        let activity_after_first = app.recent_activity.len();
+
+        // Same room + author, changed description: refresh, no re-announce.
+        let mut changed = ad.clone();
+        changed.description = "v2".to_string();
+        dir_tx
+            .try_send(DirectoryRoomEvent::Advertisement(changed, author))
+            .expect("feed refresh");
+        let task = app.update(AppMessage::ConnMonitorTick);
+        drop(task);
+
+        assert_eq!(app.directory_store.lock().unwrap().len(), 1);
+        assert_eq!(
+            app.auto_subscribed_rooms.len(),
+            1,
+            "refresh never re-subscribes"
+        );
+        assert_eq!(
+            app.recent_activity.len(),
+            activity_after_first,
+            "metadata refresh is not a new announcement"
+        );
+    }
+
+    /// Malformed/oversized metadata is discarded: an advertisement whose
+    /// room name exceeds the protocol limit never reaches the store, the
+    /// conversation store, or the subscription set (PDF Task 7.1
+    /// acceptance criterion).
+    #[test]
+    fn directory_oversized_advertisement_is_discarded() {
+        let (_runtime, mut app) = build_prewarm_test_app();
+
+        let (dir_tx, dir_rx) = tokio::sync::mpsc::channel::<DirectoryRoomEvent>(8);
+        app.directory_room_rx = Arc::new(Mutex::new(dir_rx));
+
+        let author = SecretKey::generate().public();
+        let topic = TopicId::from_bytes([0x79; 32]);
+        let ad = RoomAdvertisement {
+            room_name: "x".repeat(
+                boru_core::directory::LEGACY_MAX_ROOM_NAME_LEN + 1,
+            ),
+            description: String::new(),
+            topic,
+            ticket: boru_core::chat_core::Ticket::new(topic, vec![]).to_string(),
+            member_count: 0,
+            last_activity: 0,
+            expires_after_secs: ADVERT_TTL_SECS,
+        };
+
+        dir_tx
+            .try_send(DirectoryRoomEvent::Advertisement(ad, author))
+            .expect("feed oversized advertisement");
+        let task = app.update(AppMessage::ConnMonitorTick);
+        drop(task);
+
+        assert!(
+            app.directory_store.lock().unwrap().is_empty(),
+            "oversized advertisement never stored"
+        );
+        assert!(
+            !app.auto_subscribed_rooms.contains(&topic),
+            "oversized advertisement never subscribes"
+        );
+        assert!(
+            app.conversation_store.find(&topic).is_none(),
+            "oversized advertisement never creates a conversation record"
+        );
     }
 
     // ── PUBLIC-03: new-user recent-activity entries ─────────────────────

@@ -17,6 +17,10 @@ use std::{
 };
 
 use crate::chat_core::RoomAdvertisement;
+use crate::control_plane::advertisement::{
+    DEFAULT_MAX_ADVERT_TTL_SECS, DEFAULT_MIN_ADVERT_TTL_SECS,
+};
+use crate::control_plane::privacy::ControlPlaneRateLimiter;
 use crate::proto::TopicId;
 use anyhow::{anyhow, Result};
 use iroh::PublicKey;
@@ -53,6 +57,144 @@ pub fn directory_topic(relay_url: &str) -> TopicId {
 }
 
 // ---------------------------------------------------------------------------
+// Legacy advertisement abuse controls (BORU-DIR-19, PDF Task 7.1)
+// ---------------------------------------------------------------------------
+//
+// The legacy `RoomAdvertisement` gossip path is a separate, unauthenticated-
+// by-policy receive surface: any peer on the directory topic can broadcast
+// advertisements, and the receive loop must not let a peer grow our memory,
+// churn the UI, or force subscriptions without bound. The constants below
+// mirror the control-plane bounds (BORU-DIR-02) so both advertisement
+// pipelines enforce the same resource limits.
+
+/// Maximum room-name length (Unicode characters) for legacy directory
+/// advertisements — matches `DEFAULT_MAX_ROOM_NAME_LEN` (BORU-DIR-02).
+pub const LEGACY_MAX_ROOM_NAME_LEN: usize = 64;
+
+/// Maximum description length (Unicode characters) for legacy directory
+/// advertisements — matches `DEFAULT_MAX_DESCRIPTION_LEN` (BORU-DIR-02).
+pub const LEGACY_MAX_DESCRIPTION_LEN: usize = 256;
+
+/// Maximum serialized ticket length. A serialized `Ticket` is well under
+/// this; the cap prevents an attacker from smuggling an oversized payload
+/// through the join-ticket field.
+pub const LEGACY_MAX_TICKET_LEN: usize = 512;
+
+/// Maximum number of entries in the legacy [`DirectoryStore`]. The store is
+/// a bounded cache, not a database: beyond this the store evicts expired
+/// entries first, then the least-recently-received entry (bounded memory,
+/// mirrors [`crate::room_directory::MAX_DIRECTORY_ENTRIES`]).
+pub const MAX_DIRECTORY_STORE_ENTRIES: usize = 1024;
+
+/// Default per-author legacy advertisement rate limit: advertisements per
+/// sliding window. The legitimate refresh cadence is one ad per room per
+/// ~60 s, so this allows a peer to advertise a large room list while
+/// bounding a broadcast flood.
+pub const LEGACY_AD_RATE_LIMIT_MAX: u32 = 60;
+
+/// Default per-author legacy advertisement rate-limit window.
+pub const LEGACY_AD_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
+
+/// Why a legacy [`RoomAdvertisement`] was rejected at the receive boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LegacyAdViolation {
+    /// The room name is longer than [`LEGACY_MAX_ROOM_NAME_LEN`].
+    RoomNameTooLong {
+        /// Length of the offending name (Unicode chars).
+        len: usize,
+        /// Maximum allowed.
+        max: usize,
+    },
+    /// The description is longer than [`LEGACY_MAX_DESCRIPTION_LEN`].
+    DescriptionTooLong {
+        /// Length of the offending description (Unicode chars).
+        len: usize,
+        /// Maximum allowed.
+        max: usize,
+    },
+    /// The serialized ticket is longer than [`LEGACY_MAX_TICKET_LEN`].
+    TicketTooLong {
+        /// Length of the offending ticket.
+        len: usize,
+        /// Maximum allowed.
+        max: usize,
+    },
+}
+
+/// Check a legacy [`RoomAdvertisement`] against the receive-boundary bounds
+/// (BORU-DIR-19, PDF Task 7.1 step 1/5). The control-plane advertisement
+/// path enforces the same limits at decode via
+/// [`crate::control_plane::privacy::ControlAdvertPolicy`]; this is the
+/// equivalent gate for the legacy directory gossip path.
+///
+/// TTLs are intentionally **not** part of this check: an absurd
+/// `expires_after_secs` is *clamped* by [`clamp_legacy_ttl`] (the store
+/// keeps the advertisement with a bounded lifetime) rather than rejected,
+/// so a quirky or legacy advertiser never nukes a valid listing.
+pub fn legacy_advertisement_bounds_check(ad: &RoomAdvertisement) -> Result<(), LegacyAdViolation> {
+    let name_len = ad.room_name.chars().count();
+    if name_len > LEGACY_MAX_ROOM_NAME_LEN {
+        return Err(LegacyAdViolation::RoomNameTooLong {
+            len: name_len,
+            max: LEGACY_MAX_ROOM_NAME_LEN,
+        });
+    }
+    let desc_len = ad.description.chars().count();
+    if desc_len > LEGACY_MAX_DESCRIPTION_LEN {
+        return Err(LegacyAdViolation::DescriptionTooLong {
+            len: desc_len,
+            max: LEGACY_MAX_DESCRIPTION_LEN,
+        });
+    }
+    let ticket_len = ad.ticket.len();
+    if ticket_len > LEGACY_MAX_TICKET_LEN {
+        return Err(LegacyAdViolation::TicketTooLong {
+            len: ticket_len,
+            max: LEGACY_MAX_TICKET_LEN,
+        });
+    }
+    Ok(())
+}
+
+/// Clamp a legacy advertisement's TTL into the protocol-defined range
+/// (BORU-DIR-19, PDF Task 7.1 step 5: reject absurd TTL values and clamp to
+/// protocol-defined limits). An absurd `expires_after_secs` (e.g.
+/// `u32::MAX`) would otherwise keep a stale room in the directory for
+/// ~136 years; the clamp makes the effective lifetime bounded regardless of
+/// what the peer sends. The control-plane path rejects out-of-range TTLs at
+/// decode ([`AdvertisementViolation::TtlTooSmall`](crate::control_plane::advertisement::AdvertisementViolation::TtlTooSmall) /
+/// [`TtlTooLarge`](crate::control_plane::advertisement::AdvertisementViolation::TtlTooLarge));
+/// the legacy path clamps instead so a quirky advertiser's listing survives
+/// with a bounded lifetime.
+pub fn clamp_legacy_ttl(ad: &mut RoomAdvertisement) {
+    ad.expires_after_secs = ad
+        .expires_after_secs
+        .clamp(DEFAULT_MIN_ADVERT_TTL_SECS, DEFAULT_MAX_ADVERT_TTL_SECS);
+}
+
+/// Outcome of admitting a legacy advertisement through
+/// [`DirectoryStore::receive`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LegacyAdmitOutcome {
+    /// A genuinely new `(topic, author)` advertisement was stored — the UI
+    /// may announce it and (legacy behaviour) subscribe once.
+    Added,
+    /// A known `(topic, author)` refreshed with **changed** metadata — the
+    /// UI should refresh the card but not re-announce or re-subscribe.
+    Refreshed,
+    /// The advertisement is byte-identical in its user-visible metadata to
+    /// the cached one — a pure liveness refresh. No UI event (no constant
+    /// re-rendering).
+    Duplicate,
+    /// The author exceeded the per-author advertisement rate limit — the
+    /// advertisement is dropped (bounded logging, no UI churn).
+    RateLimited,
+    /// The advertisement violates the receive-boundary bounds — it is
+    /// discarded (malformed/oversized metadata never reaches the UI).
+    Rejected(LegacyAdViolation),
+}
+
+// ---------------------------------------------------------------------------
 // DirectoryStore
 // ---------------------------------------------------------------------------
 
@@ -65,11 +207,24 @@ pub fn directory_topic(relay_url: &str) -> TopicId {
 ///
 /// Old entries should be periodically evicted with [`evict_stale`](crate::directory::DirectoryStore::evict_stale) to keep
 /// the store size bounded.
+///
+/// Since BORU-DIR-19 the store is a **bounded cache** (PDF Task 7.1): the
+/// receive path ([`receive`](Self::receive)) enforces metadata bounds,
+/// clamps absurd TTLs, rate-limits per author, deduplicates identical
+/// broadcasts, and caps the entry count — a peer cannot allocate unbounded
+/// memory or cause constant re-rendering through the legacy directory
+/// gossip path.
 #[derive(Debug)]
 pub struct DirectoryStore {
     /// Active advertisements keyed by (topic, author).
     /// Each entry holds the ad + received timestamp for eviction.
     ads: HashMap<(TopicId, PublicKey), (RoomAdvertisement, Instant)>,
+    /// Per-author sliding-window rate limiter for remote advertisements
+    /// (reuses the control-plane [`ControlPlaneRateLimiter`] pattern,
+    /// keyed on the authenticated advertisement author).
+    rate_limiter: ControlPlaneRateLimiter,
+    /// Maximum number of stored entries (bounded memory).
+    max_entries: usize,
 }
 
 /// How long an advertisement stays active after it was (re)ceived
@@ -81,11 +236,46 @@ fn ad_lifetime(ad: &RoomAdvertisement) -> Duration {
     Duration::from_secs(u64::from(ad.expires_after_secs.max(1)))
 }
 
+/// Digest of the **user-visible** legacy advertisement metadata
+/// (BORU-DIR-19 dedup identity). Dynamic liveness fields
+/// (`member_count`, `last_activity`) are excluded so a periodic refresh —
+/// which only bumps those hints — is a pure liveness refresh
+/// ([`LegacyAdmitOutcome::Duplicate`]) and cannot churn the UI.
+fn legacy_metadata_digest(ad: &RoomAdvertisement) -> [u8; 32] {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    ad.topic.as_bytes().hash(&mut hasher);
+    ad.room_name.hash(&mut hasher);
+    ad.description.hash(&mut hasher);
+    ad.ticket.hash(&mut hasher);
+    let hash = hasher.finish();
+    // Fold the u64 hash into a 32-byte digest (collision-resistant enough
+    // for a dedup identity; the (topic, author) key already bounds it).
+    let mut digest = [0u8; 32];
+    digest[..8].copy_from_slice(&hash.to_le_bytes());
+    digest[8..16].copy_from_slice(&(!hash).to_le_bytes());
+    digest[16..24].copy_from_slice(&hash.to_le_bytes());
+    digest[24..32].copy_from_slice(&(!hash).to_le_bytes());
+    digest
+}
+
 impl DirectoryStore {
-    /// Create a new empty store.
+    /// Create a new empty store with the default bounds.
     pub fn new() -> Self {
+        Self::with_limits(MAX_DIRECTORY_STORE_ENTRIES)
+    }
+
+    /// Create a new empty store with an explicit entry cap (tests use small
+    /// caps to exercise the eviction path cheaply).
+    pub fn with_limits(max_entries: usize) -> Self {
         Self {
             ads: HashMap::new(),
+            rate_limiter: ControlPlaneRateLimiter::with_limits(
+                LEGACY_AD_RATE_LIMIT_MAX,
+                LEGACY_AD_RATE_LIMIT_WINDOW,
+                MAX_DIRECTORY_STORE_ENTRIES,
+            ),
+            max_entries: max_entries.max(1),
         }
     }
 
@@ -96,8 +286,111 @@ impl DirectoryStore {
     /// to the current time — a **refresh** (BORU-DIR-08).  The entry's
     /// lifetime restarts from `expires_after_secs` (see
     /// [`evict_expired`](Self::evict_expired)).
+    ///
+    /// This is the **local/trusted** publish path (the app mirrors its own
+    /// broadcasts into the store). Remote advertisements go through
+    /// [`receive`](Self::receive), which applies the abuse controls.
     pub fn upsert(&mut self, ad: RoomAdvertisement, author: PublicKey) {
-        self.ads.insert((ad.topic, author), (ad, Instant::now()));
+        self.insert_bounded(ad, author, Instant::now());
+    }
+
+    /// Admit a remote advertisement through the receive-boundary abuse
+    /// controls (BORU-DIR-19, PDF Task 7.1):
+    ///
+    /// 1. **Bounds** — room name / description / ticket length and TTL range
+    ///    are checked against the protocol limits; malformed or oversized
+    ///    advertisements are discarded ([`LegacyAdmitOutcome::Rejected`]).
+    /// 2. **TTL clamp** — an absurd `expires_after_secs` is clamped into the
+    ///    protocol range so a stale room can never linger forever.
+    /// 3. **Per-author rate limit** — a peer cannot flood the directory with
+    ///    more than [`LEGACY_AD_RATE_LIMIT_MAX`] advertisements per
+    ///    [`LEGACY_AD_RATE_LIMIT_WINDOW`].
+    /// 4. **Deduplication** — an advertisement identical in its user-visible
+    ///    metadata (name/description/ticket) to the cached one is a pure
+    ///    liveness refresh ([`LegacyAdmitOutcome::Duplicate`]); it updates
+    ///    the received timestamp but produces **no UI event**, so repeated
+    ///    identical broadcasts cannot cause constant re-rendering.
+    /// 5. **Bounded cache** — when at capacity the store evicts expired
+    ///    entries first, then the least-recently-received entry.
+    ///
+    /// `now` is explicit so tests can drive TTL expiry deterministically.
+    pub fn receive(
+        &mut self,
+        ad: RoomAdvertisement,
+        author: PublicKey,
+        now: Instant,
+    ) -> LegacyAdmitOutcome {
+        // 1. Bounds — discard malformed/oversized metadata.
+        if let Err(violation) = legacy_advertisement_bounds_check(&ad) {
+            return LegacyAdmitOutcome::Rejected(violation);
+        }
+        // 2. Clamp absurd TTLs to the protocol-defined range.
+        let mut ad = ad;
+        clamp_legacy_ttl(&mut ad);
+        // 3. Per-author rate limit.
+        if !self.rate_limiter.admit(&author) {
+            return LegacyAdmitOutcome::RateLimited;
+        }
+        // 4. Deduplicate identical user-visible metadata.
+        let key = (ad.topic, author);
+        if let Some((existing, _)) = self.ads.get(&key) {
+            if legacy_metadata_digest(existing) == legacy_metadata_digest(&ad) {
+                if let Some((_, received)) = self.ads.get_mut(&key) {
+                    *received = now;
+                }
+                return LegacyAdmitOutcome::Duplicate;
+            }
+        }
+        // 5. Bounded insert (evicts when full).
+        let is_new = self.insert_bounded(ad, author, now);
+        if is_new {
+            LegacyAdmitOutcome::Added
+        } else {
+            LegacyAdmitOutcome::Refreshed
+        }
+    }
+
+    /// Insert `(ad, author)` under the entry cap. Returns `true` when the
+    /// `(topic, author)` key was not previously stored (a genuinely new
+    /// listing).
+    fn insert_bounded(&mut self, ad: RoomAdvertisement, author: PublicKey, now: Instant) -> bool {
+        let key = (ad.topic, author);
+        let is_new = !self.ads.contains_key(&key);
+        if is_new {
+            self.evict_for_capacity(now);
+        }
+        self.ads.insert(key, (ad, now));
+        is_new
+    }
+
+    /// Evict one entry to make room when at capacity: expired entries first,
+    /// then the least-recently-received entry (bounded memory).
+    fn evict_for_capacity(&mut self, now: Instant) {
+        if self.ads.len() < self.max_entries {
+            return;
+        }
+        // Prefer evicting an expired entry.
+        let expired: Vec<(TopicId, PublicKey)> = self
+            .ads
+            .iter()
+            .filter(|(_, (ad, received))| now.duration_since(*received) >= ad_lifetime(ad))
+            .map(|(key, _)| *key)
+            .collect();
+        if !expired.is_empty() {
+            for key in expired {
+                self.ads.remove(&key);
+            }
+            return;
+        }
+        // Otherwise evict the least-recently-received entry.
+        let oldest = self
+            .ads
+            .iter()
+            .min_by_key(|(_, (_, received))| *received)
+            .map(|(key, _)| *key);
+        if let Some(key) = oldest {
+            self.ads.remove(&key);
+        }
     }
 
     /// Return `true` if an advertisement already exists for the given room
@@ -745,6 +1038,184 @@ mod tests {
         assert!(
             store.list_active().is_empty(),
             "an ad that expired while offline must not be resurrected"
+        );
+    }
+
+    // ── BORU-DIR-19 (PDF Task 7.1): spam + resource limits ────────────
+
+    /// Malformed/oversized metadata is discarded at the receive boundary:
+    /// oversized room names, descriptions, and tickets never reach the
+    /// store (PDF Task 7.1 acceptance criterion).
+    #[test]
+    fn legacy_receive_rejects_oversized_metadata() {
+        let mut store = DirectoryStore::new();
+        let author = make_public_key(42);
+
+        // Oversized room name.
+        let mut ad = make_ad("ok", make_topic(1));
+        ad.room_name = "x".repeat(LEGACY_MAX_ROOM_NAME_LEN + 1);
+        assert_eq!(
+            store.receive(ad, author, Instant::now()),
+            LegacyAdmitOutcome::Rejected(LegacyAdViolation::RoomNameTooLong {
+                len: LEGACY_MAX_ROOM_NAME_LEN + 1,
+                max: LEGACY_MAX_ROOM_NAME_LEN,
+            }),
+            "oversized room name discarded"
+        );
+
+        // Oversized description.
+        let mut ad = make_ad("ok", make_topic(1));
+        ad.description = "y".repeat(LEGACY_MAX_DESCRIPTION_LEN + 1);
+        assert!(
+            matches!(
+                store.receive(ad, author, Instant::now()),
+                LegacyAdmitOutcome::Rejected(LegacyAdViolation::DescriptionTooLong { .. })
+            ),
+            "oversized description discarded"
+        );
+
+        // Oversized ticket.
+        let mut ad = make_ad("ok", make_topic(1));
+        ad.ticket = "t".repeat(LEGACY_MAX_TICKET_LEN + 1);
+        assert!(
+            matches!(
+                store.receive(ad, author, Instant::now()),
+                LegacyAdmitOutcome::Rejected(LegacyAdViolation::TicketTooLong { .. })
+            ),
+            "oversized ticket discarded"
+        );
+
+        // Absurd TTL (would keep the room live for ~136 years) is clamped
+        // to the protocol maximum, not stored forever.
+        let mut ad = make_ad("ok", make_topic(1));
+        ad.expires_after_secs = u32::MAX;
+        assert_eq!(
+            store.receive(ad.clone(), author, Instant::now()),
+            LegacyAdmitOutcome::Added,
+            "absurd TTL is clamped, not dropped"
+        );
+        let stored = store.list_active();
+        assert_eq!(stored.len(), 1, "clamped ad is stored");
+        assert_eq!(
+            stored[0].0.expires_after_secs, DEFAULT_MAX_ADVERT_TTL_SECS,
+            "stored TTL is bounded by the protocol maximum"
+        );
+
+        assert!(
+            store.list_active().len() <= 1,
+            "every rejected advertisement left the store untouched (only the clamped ad is stored)"
+        );
+    }
+
+    /// A peer cannot allocate unbounded memory with room advertisements:
+    /// the entry count is capped, and identical re-broadcasts never grow
+    /// the store.
+    #[test]
+    fn legacy_store_caps_entries_and_evicts_lru() {
+        let mut store = DirectoryStore::with_limits(4);
+        let author = make_public_key(42);
+        let now = Instant::now();
+
+        for i in 0..4u8 {
+            let mut ad = make_ad(&format!("room-{i}"), make_topic(i));
+            ad.expires_after_secs = 300;
+            assert_eq!(
+                store.receive(ad, author, now + Duration::from_secs(u64::from(i))),
+                LegacyAdmitOutcome::Added
+            );
+        }
+        assert_eq!(store.len(), 4, "at capacity");
+
+        // A fifth distinct room evicts the least-recently-received entry
+        // (room-0 was received first).
+        let fifth = make_ad("room-4", make_topic(4));
+        assert_eq!(
+            store.receive(fifth, author, now + Duration::from_secs(4)),
+            LegacyAdmitOutcome::Added
+        );
+        assert_eq!(store.len(), 4, "entry count stays capped");
+        assert!(
+            !store.contains(make_topic(0), author),
+            "least-recently-received entry evicted"
+        );
+        assert!(store.contains(make_topic(4), author));
+    }
+
+    /// Repeated identical advertisements do not cause constant re-rendering:
+    /// the same user-visible metadata re-broadcast by the same author is a
+    /// `Duplicate` — one entry, no UI event. Dynamic liveness hints
+    /// (member_count / last_activity) do not defeat the dedup.
+    #[test]
+    fn legacy_receive_dedupes_identical_advertisements() {
+        let mut store = DirectoryStore::new();
+        let topic = make_topic(1);
+        let author = make_public_key(42);
+        let now = Instant::now();
+
+        let ad = make_ad("lounge", topic);
+        assert_eq!(
+            store.receive(ad.clone(), author, now),
+            LegacyAdmitOutcome::Added,
+            "first sighting is new"
+        );
+        assert_eq!(store.len(), 1);
+
+        // Identical re-broadcast (even with a bumped member count / activity
+        // hint): pure liveness refresh, no UI event.
+        let mut refresh = ad.clone();
+        refresh.member_count = 99;
+        refresh.last_activity = 9_999;
+        assert_eq!(
+            store.receive(refresh, author, now + Duration::from_secs(1)),
+            LegacyAdmitOutcome::Duplicate,
+            "identical metadata re-broadcast is deduped"
+        );
+        assert_eq!(store.len(), 1, "no second card from repeated gossip");
+
+        // A real metadata change (description edited) is a refresh, not a
+        // duplicate — the UI may update the card.
+        let mut changed = ad.clone();
+        changed.description = "edited".to_string();
+        assert_eq!(
+            store.receive(changed, author, now + Duration::from_secs(2)),
+            LegacyAdmitOutcome::Refreshed,
+            "metadata change is a refresh"
+        );
+        assert_eq!(store.len(), 1, "still one entry per (topic, author)");
+    }
+
+    /// Advertisements are rate-limited per peer/authority: a flood from one
+    /// author is dropped after the per-author budget, while other authors
+    /// are unaffected (PDF Task 7.1 step 2).
+    #[test]
+    fn legacy_receive_rate_limits_per_author() {
+        let mut store = DirectoryStore::new();
+        let author_a = make_public_key(42);
+        let author_b = make_public_key(43);
+        let now = Instant::now();
+
+        // Author A exhausts the per-author budget with distinct rooms.
+        for i in 0..LEGACY_AD_RATE_LIMIT_MAX {
+            let ad = make_ad(&format!("flood-{i}"), make_topic(i as u8));
+            assert_eq!(
+                store.receive(ad, author_a, now + Duration::from_secs(u64::from(i))),
+                LegacyAdmitOutcome::Added,
+                "within-budget advertisements admitted"
+            );
+        }
+        let overflow = make_ad("overflow", make_topic(0xFE));
+        assert_eq!(
+            store.receive(overflow, author_a, now + Duration::from_secs(60)),
+            LegacyAdmitOutcome::RateLimited,
+            "author over budget is rate-limited"
+        );
+
+        // A different author is independent of A's budget.
+        let fresh = make_ad("fresh", make_topic(0xFD));
+        assert_eq!(
+            store.receive(fresh, author_b, now + Duration::from_secs(61)),
+            LegacyAdmitOutcome::Added,
+            "a different author is not rate-limited by A's flood"
         );
     }
 }

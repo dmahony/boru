@@ -117,7 +117,8 @@ use crate::proto::TopicId;
 /// database: 1024 live rooms is far beyond what any single user's
 /// discovery cohort produces, while still bounding memory for a hostile
 /// network that floods advertisements. When full, entries are evicted by
-/// expiry first, then by least-recently-seen.
+/// trust tier (unverified entries before verified ones, BORU-DIR-19), then
+/// by expiry, then by least-recently-seen.
 pub const MAX_DIRECTORY_ENTRIES: usize = 1024;
 
 /// Aggregate metadata-size budget for the cache, in encoded advertisement
@@ -676,12 +677,22 @@ impl RoomDirectory {
                 while self.entries.len() >= self.max_entries
                     || self.total_bytes.saturating_add(bytes) > self.max_bytes
                 {
-                    // Deterministic victim: earliest expiry, then oldest
-                    // last_seen (least-recently-seen eviction).
+                    // Deterministic victim: unverified (untrusted) entries
+                    // are evicted before verified ones (BORU-DIR-19 trust
+                    // tier — verified maps to 1, unverified to 0, so the
+                    // minimum-key victim is unverified first), then earliest
+                    // expiry, then oldest last_seen (least-recently-seen
+                    // eviction).
                     let victim = self
                         .entries
                         .iter()
-                        .min_by_key(|(_, entry)| (entry.expires_at, entry.last_seen))
+                        .min_by_key(|(_, entry)| {
+                            (
+                                matches!(entry.auth, AdvertisementAuth::Verified { .. }) as u8,
+                                entry.expires_at,
+                                entry.last_seen,
+                            )
+                        })
                         .map(|(room_id, _)| *room_id);
                     let Some(victim) = victim else { break };
                     let removed = self.entries.remove(&victim);
@@ -1362,6 +1373,94 @@ mod tests {
         assert!(dir.contains(&topic(3)), "C survives (more recently seen)");
         assert!(dir.contains(&topic(4)));
         assert!(!dir.contains(&topic(2)), "least-recently-seen B evicted");
+    }
+
+    /// BORU-DIR-19 (PDF Task 7.1 step 3): the capacity eviction policy is
+    /// trust-aware — when the cache is full, unverified (untrusted,
+    /// `MissingSignature`) entries are evicted before verified ones, so a
+    /// flood of unsigned advertisements cannot displace signed rooms.
+    #[test]
+    fn eviction_prefers_untrusted_over_verified() {
+        let mut dir = RoomDirectory::with_limits(2, usize::MAX);
+        let now = t0();
+
+        // Room A: verified (signed by its publisher). Room B: unverified
+        // (missing signature). B is seen MORE recently than A, so a pure
+        // LRU policy would keep B — the trust tier must override recency.
+        dir.apply_advertisement_at(
+            ad_named(topic(1), 0x42, "verified-a", 300),
+            key(0x42),
+            verified_auth(key(0x42)),
+            1,
+            1000,
+            now,
+        );
+        dir.apply_advertisement_at(
+            ad_named(topic(2), 0x43, "untrusted-b", 300),
+            key(0x43),
+            AdvertisementAuth::MissingSignature,
+            1,
+            1000,
+            now + Duration::from_secs(1),
+        );
+
+        // A third room arrives: the unverified B is evicted even though A
+        // has the older last_seen.
+        dir.apply_advertisement_at(
+            ad_named(topic(3), 0x44, "c", 300),
+            key(0x44),
+            verified_auth(key(0x44)),
+            1,
+            1000,
+            now + Duration::from_secs(2),
+        );
+        assert_eq!(dir.len(), 2);
+        assert!(dir.contains(&topic(1)), "verified A survives");
+        assert!(dir.contains(&topic(3)));
+        assert!(
+            !dir.contains(&topic(2)),
+            "unverified B evicted before verified A despite newer last_seen"
+        );
+    }
+
+    /// BORU-DIR-19: among entries with the same trust tier, expiry still
+    /// beats recency (the expiry/last_seen policy is preserved within a
+    /// tier).
+    #[test]
+    fn eviction_trust_tier_preserves_expiry_preference() {
+        let mut dir = RoomDirectory::with_limits(2, usize::MAX);
+        let now = t0();
+
+        // Two unverified rooms: A expires at t0+1 (1 s TTL), B at t0+300.
+        dir.apply_advertisement_at(
+            ad_named(topic(1), 0x42, "a", 1),
+            key(0x42),
+            AdvertisementAuth::MissingSignature,
+            1,
+            1000,
+            now,
+        );
+        dir.apply_advertisement_at(
+            ad_named(topic(2), 0x43, "b", 300),
+            key(0x43),
+            AdvertisementAuth::MissingSignature,
+            1,
+            1000,
+            now + Duration::from_secs(1),
+        );
+        // A third unverified room at t0+2: A (earliest expiry) is evicted.
+        dir.apply_advertisement_at(
+            ad_named(topic(3), 0x44, "c", 300),
+            key(0x44),
+            AdvertisementAuth::MissingSignature,
+            1,
+            1000,
+            now + Duration::from_secs(2),
+        );
+        assert_eq!(dir.len(), 2);
+        assert!(!dir.contains(&topic(1)), "expired A evicted first");
+        assert!(dir.contains(&topic(2)));
+        assert!(dir.contains(&topic(3)));
     }
 
     // ── Withdrawal (BORU-DIR-09 / PDF Task 3.3) ───────────────────────
