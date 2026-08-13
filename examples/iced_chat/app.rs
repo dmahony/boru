@@ -413,6 +413,42 @@ const CONNECTION_DETAILS_FIRST_VALUE_INPUT: &str = "connection-details-first-val
 /// Stable widget ID used to restore focus to the settings-page details trigger.
 const CONNECTION_DETAILS_TRIGGER_INPUT: &str = "connection-details-trigger";
 
+// ── Room advertisement startup sweep (BORU-DIR-07, PDF Task 3.1) ─────
+/// Maximum jitter (milliseconds) applied per room in the startup
+/// advertisement burst, so many rooms do not all broadcast at the same
+/// instant (PDF Task 3.1 step 4).
+const STARTUP_ADVERT_JITTER_MAX_MS: u64 = 2_000;
+/// Dedupe window: an unchanged room advertisement is not re-broadcast
+/// within this window of the last broadcast (PDF Task 3.1 step 5 —
+/// "avoid repeatedly publishing unchanged room metadata more often than
+/// necessary"). Shorter than the ~60 s periodic refresh cadence, so the
+/// periodic tick still refreshes each room once per cadence while the
+/// startup sweep and immediate publishes never double-broadcast
+/// identical metadata back-to-back.
+const ADVERT_DEDUPE_WINDOW: Duration = Duration::from_secs(30);
+
+/// Stable fingerprint of the advertised metadata that would be broadcast
+/// for a room (BORU-DIR-07 dedupe). Computed over the fields that define
+/// the *advertisement content* (room identity, name, description, join
+/// ticket) — NOT the volatile counters (member count, last activity) that
+/// legitimately change between refreshes. Two broadcasts with the same
+/// fingerprint carry the same room metadata, so a second one within
+/// [`ADVERT_DEDUPE_WINDOW`] is redundant.
+fn startup_advertisement_fingerprint(
+    topic: TopicId,
+    room_name: &str,
+    description: &str,
+    ticket: &str,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    topic.hash(&mut hasher);
+    room_name.hash(&mut hasher);
+    description.hash(&mut hasher);
+    ticket.hash(&mut hasher);
+    hasher.finish()
+}
+
 // ── Typography scale (re-exported from typography system) ────────────
 pub(crate) use crate::fonts::{
     LG as TYPO_LG, MD as TYPO_MD, SM as TYPO_SM, XL as TYPO_XL, XS as TYPO_XS, XXS as TYPO_XXS,
@@ -4693,6 +4729,18 @@ pub struct IcedChat {
     /// Counter for periodic room-advertisement broadcast (decremented per
     /// ConnMonitorTick; broadcasts when it hits 0, resets to 60).
     advertise_counter: u32,
+    /// BORU-DIR-07 (PDF Task 3.1): fingerprint of the last advertisement
+    /// actually broadcast per room (topic + name + description + ticket).
+    /// Used to avoid repeatedly publishing unchanged room metadata more
+    /// often than necessary (dedupe unchanged advertisements).
+    last_advertised_fingerprint: HashMap<TopicId, u64>,
+    /// When each room's advertisement was last broadcast (BORU-DIR-07
+    /// dedupe window; [`ADVERT_DEDUPE_WINDOW`]).
+    last_advertised_at: HashMap<TopicId, Instant>,
+    /// BORU-DIR-07 (PDF Task 3.1): true once the startup discoverable-room
+    /// advertisement sweep has run, so a directory re-subscribe or tick
+    /// cannot re-trigger the burst.
+    startup_advertise_swept: bool,
     /// Stable gossip topic used to discover public rooms on this relay.
     directory_topic: TopicId,
     /// Gossip sender for the directory topic (subscribed lazily when the
@@ -8033,6 +8081,9 @@ impl IcedChat {
             // ── Room advertisement ──
             advertised_rooms: HashSet::new(),
             advertise_counter: 60,
+            last_advertised_fingerprint: HashMap::new(),
+            last_advertised_at: HashMap::new(),
+            startup_advertise_swept: false,
             // Derive directory topic from the relay URL — all peers on the
             // same relay share the same directory topic.
             directory_topic: Self::derive_directory_topic_from_relay(
@@ -11163,6 +11214,179 @@ impl IcedChat {
                 AppMessage::Noop
             },
         ))
+    }
+
+    /// BORU-DIR-07 (PDF Task 3.1): publish locally hosted/owned
+    /// discoverable rooms after the discovery service is ready.
+    ///
+    /// * Enumerates `conversation_store` for rooms whose persisted
+    ///   visibility is [`RoomVisibility::PublicDiscoverable`] and that the
+    ///   local user owns ([`Self::is_room_directory_owner`]).
+    /// * Marks each for periodic refresh ([`Self::advertised_rooms`]) so
+    ///   the periodic tick keeps them alive after the initial burst.
+    /// * Broadcasts one bounded advertisement per eligible room (the same
+    ///   legacy `RoomAdvertisement` gossip path DIR-06 uses), staggered
+    ///   with random jitter so many rooms do not burst at the same instant.
+    /// * Never blocks Boru startup: publish failures are logged, not fatal;
+    ///   if the directory sender is unavailable the rooms are still marked
+    ///   for the periodic tick.
+    /// * Dedupes unchanged advertisements: a room whose metadata
+    ///   fingerprint is unchanged since the last broadcast within
+    ///   [`ADVERT_DEDUPE_WINDOW`] is not re-published more often than
+    ///   necessary.
+    fn publish_startup_room_advertisements(&mut self) -> iced::Task<AppMessage> {
+        if self.startup_advertise_swept {
+            return iced::Task::none();
+        }
+        self.startup_advertise_swept = true;
+
+        // Enumerate locally authorized PublicDiscoverable rooms.
+        let eligible: Vec<TopicId> = self
+            .conversation_store
+            .iter()
+            .filter(|e| e.visibility.is_discoverable() && self.is_room_directory_owner(e.topic))
+            .map(|e| e.topic)
+            .collect();
+        if eligible.is_empty() {
+            return iced::Task::none();
+        }
+        // Mark for periodic refresh so they stay advertised after the
+        // initial burst (this is what makes them reappear after restart).
+        for topic in &eligible {
+            self.advertised_rooms.insert(*topic);
+        }
+
+        let Some(dir_sender) = self.directory_sender.clone() else {
+            warn!(
+                rooms = eligible.len(),
+                "startup advertisement: no directory sender yet; periodic tick will publish"
+            );
+            return iced::Task::none();
+        };
+
+        let sk = self.secret_key.clone();
+        let s = dir_sender;
+        // Build one bounded advertisement per eligible room. Skip rooms
+        // whose metadata is unchanged since the last broadcast within the
+        // dedupe window (PDF Task 3.1 step 5).
+        let rooms: Vec<(TopicId, String, String, String, u32)> = eligible
+            .into_iter()
+            .filter_map(|topic| {
+                let entry = self.conversation_store.find(&topic)?;
+                let name = if entry.name.is_empty() {
+                    topic.to_string()
+                } else {
+                    entry.name.clone()
+                };
+                let description = entry.description.clone();
+                let ticket = self.room_ticket(topic, &[]).to_string();
+                if !self.should_broadcast_advertisement(topic, &name, &description, &ticket) {
+                    debug!(%topic, "startup advertisement: unchanged metadata within dedupe window, skipping");
+                    return None;
+                }
+                // Record the fingerprint *before* broadcasting so the
+                // periodic tick (which shares the same dedupe state) does
+                // not immediately re-broadcast identical metadata.
+                self.record_advertisement_broadcast(topic, &name, &description, &ticket);
+                let member_count = self
+                    .room_neighbor_counts
+                    .get(&topic)
+                    .copied()
+                    .unwrap_or_default();
+                Some((topic, name, description, ticket, member_count))
+            })
+            .collect();
+        if rooms.is_empty() {
+            return iced::Task::none();
+        }
+
+        iced::Task::perform(
+            async move {
+                let mut results = Vec::new();
+                for (topic, room_name, description, ticket_str, member_count) in rooms {
+                    // Jitter: random per-room delay so many rooms do not
+                    // burst at the same instant (PDF Task 3.1 step 4).
+                    let jitter_ms = (rand::random::<u64>() % STARTUP_ADVERT_JITTER_MAX_MS) as u64;
+                    if jitter_ms > 0 {
+                        tokio::time::sleep(Duration::from_millis(jitter_ms)).await;
+                    }
+                    let ad = boru_core::chat_core::RoomAdvertisement {
+                        room_name,
+                        description,
+                        topic,
+                        ticket: ticket_str,
+                        member_count,
+                        last_activity: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64,
+                    };
+                    let ad_bytes = postcard::to_stdvec(&ad).unwrap_or_default();
+                    let signature = sk.sign(&ad_bytes);
+                    let msg = crate::Message::RoomAdvertisement {
+                        ad,
+                        signature: signature.to_bytes().to_vec(),
+                    };
+                    let delivered = match SignedMessage::sign_and_encode(&sk, &msg) {
+                        Ok(encoded) => s.broadcast(encoded).await.is_ok(),
+                        Err(_) => false,
+                    };
+                    results.push((topic, delivered));
+                }
+                results
+            },
+            |results| {
+                for (topic, ok) in &results {
+                    if *ok {
+                        tracing::debug!(%topic, "startup room advertisement broadcast");
+                    } else {
+                        tracing::warn!(%topic, "startup room advertisement broadcast failed (non-fatal)");
+                    }
+                }
+                AppMessage::Noop
+            },
+        )
+    }
+
+    /// Whether a room's advertisement should be broadcast right now
+    /// (BORU-DIR-07 dedupe, PDF Task 3.1 step 5).
+    ///
+    /// Returns `false` when the room's current metadata fingerprint is
+    /// identical to the last broadcast and that broadcast happened within
+    /// [`ADVERT_DEDUPE_WINDOW`] — re-publishing the exact same metadata
+    /// more often than necessary would only churn the directory mesh.
+    fn should_broadcast_advertisement(
+        &self,
+        topic: TopicId,
+        room_name: &str,
+        description: &str,
+        ticket: &str,
+    ) -> bool {
+        let fingerprint =
+            startup_advertisement_fingerprint(topic, room_name, description, ticket);
+        match self.last_advertised_fingerprint.get(&topic) {
+            Some(last) if *last == fingerprint => self
+                .last_advertised_at
+                .get(&topic)
+                .map(|at| at.elapsed() >= ADVERT_DEDUPE_WINDOW)
+                .unwrap_or(true),
+            _ => true,
+        }
+    }
+
+    /// Record that a room's advertisement was broadcast just now, for the
+    /// BORU-DIR-07 dedupe window.
+    fn record_advertisement_broadcast(
+        &mut self,
+        topic: TopicId,
+        room_name: &str,
+        description: &str,
+        ticket: &str,
+    ) {
+        let fingerprint =
+            startup_advertisement_fingerprint(topic, room_name, description, ticket);
+        self.last_advertised_fingerprint.insert(topic, fingerprint);
+        self.last_advertised_at.insert(topic, Instant::now());
     }
 
     fn current_connection_details_dialog(&self) -> ConnectionDetailsDialogState {
@@ -15482,7 +15706,7 @@ impl IcedChat {
                             // Collect room details for all advertised rooms, using
                             // the conversation/room-history store to get names,
                             // and the endpoint for ticket generation.
-                            let room_info: Vec<(TopicId, String, TopicId, String, u32)> =
+                            let room_info: Vec<(TopicId, String, String, String, u32)> =
                                 advertised
                                     .into_iter()
                                     .filter_map(|topic| {
@@ -15505,34 +15729,58 @@ impl IcedChat {
                                         } else {
                                             entry.name.clone()
                                         };
+                                        // BORU-DIR-07 (PDF 3.1 step 5): dedupe
+                                        // unchanged advertisements. The periodic
+                                        // refresh still fires every ~60 s (the
+                                        // cadence that keeps ads alive), but a room
+                                        // whose metadata fingerprint is unchanged
+                                        // since a broadcast within
+                                        // ADVERT_DEDUPE_WINDOW is not re-broadcast
+                                        // back-to-back with the startup sweep or an
+                                        // immediate publish.
+                                        let ticket = self.room_ticket(topic, &[]).to_string();
+                                        let description = entry.description.clone();
+                                        if !self.should_broadcast_advertisement(
+                                            topic,
+                                            &name,
+                                            &description,
+                                            &ticket,
+                                        ) {
+                                            trace!(%topic, "periodic advertisement: unchanged metadata within dedupe window, skipping");
+                                            return None;
+                                        }
+                                        self.record_advertisement_broadcast(
+                                            topic,
+                                            &name,
+                                            &description,
+                                            &ticket,
+                                        );
                                         // Count neighbors in this specific room.
                                         let neighbor_count = self
                                             .room_neighbor_counts
                                             .get(&topic)
                                             .copied()
                                             .unwrap_or_default();
-                                        // Build a join ticket for the room
-                                        let ticket = self.room_ticket(topic, &[]).to_string();
-                                        Some((topic, name, topic, ticket, neighbor_count))
+                                        Some((topic, name, description, ticket, neighbor_count))
                                     })
                                     .collect();
                             let room_info_for_upsert = room_info.clone();
                             tasks.push(iced::Task::perform(
                                 async move {
                                     let mut results = Vec::new();
-                                    for (topic, room_name, _topic_id, ticket_str, member_count) in
+                                    for (topic, room_name, description, ticket_str, member_count) in
                                         room_info
                                     {
                                         let ad = boru_core::chat_core::RoomAdvertisement {
                                             room_name,
-                            description: String::new(),
-                            topic,
-                            ticket: ticket_str,
-                            member_count,
-                            last_activity: std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_millis() as u64,
+                                            description,
+                                            topic,
+                                            ticket: ticket_str,
+                                            member_count,
+                                            last_activity: std::time::SystemTime::now()
+                                                .duration_since(std::time::UNIX_EPOCH)
+                                                .unwrap_or_default()
+                                                .as_millis() as u64,
                                         };
                                         // Sign the advertisement bytes with the node key
                                         let ad_bytes = postcard::to_stdvec(&ad).unwrap_or_default();
@@ -15570,12 +15818,12 @@ impl IcedChat {
                             // broadcasts back to us).
                             let local_pk = self.endpoint.id();
                             let mut store = self.directory_store.lock().unwrap();
-                            for (topic, room_name, _t2, ticket_str, member_count) in
+                            for (topic, room_name, description, ticket_str, member_count) in
                                 room_info_for_upsert
                             {
                                 let ad = RoomAdvertisement {
                                     room_name,
-                                    description: String::new(),
+                                    description,
                                     topic,
                                     ticket: ticket_str,
                                     member_count,
@@ -32043,5 +32291,121 @@ fn vr_create_tunnel_friend_profile_base_is_fill_sized() {
         iced::Length::Fill,
         "share-dialog stack height must be Fill"
     );
+}
+
+// ── BORU-DIR-07: publish discoverable rooms on startup ──────────────
+
+/// Seed a conversation-store entry with the given visibility.
+fn seed_room_with_visibility(
+    app: &mut IcedChat,
+    name: &str,
+    visibility: RoomVisibility,
+) -> TopicId {
+    let topic = TopicId::from_bytes(rand::random());
+    let mut entry = ConversationEntry::new(topic, "", name);
+    entry.visibility = visibility;
+    app.conversation_store.upsert(entry);
+    topic
+}
+
+#[test]
+fn vr_startup_publish_marks_discoverable_rooms_for_advertising() {
+    // BORU-DIR-07 (PDF Task 3.1): after the discovery service is ready the
+    // app must enumerate locally owned PublicDiscoverable rooms and mark
+    // them for advertising so they reappear after a client restart. A
+    // discoverable room persisted across restart (conversation-store entry
+    // with `PublicDiscoverable` visibility) must be picked up by the sweep.
+    let (_runtime, mut app) = build_prewarm_test_app();
+    let topic = seed_room_with_visibility(&mut app, "Startup Room", RoomVisibility::PublicDiscoverable);
+
+    // No directory sender in the unit harness — the sweep must still mark
+    // the room for periodic refresh (the acceptance criterion "startup
+    // remains usable if discovery broadcasting fails"), and must not panic.
+    let task = app.publish_startup_room_advertisements();
+    assert!(
+        app.advertised_rooms.contains(&topic),
+        "startup sweep must re-advertise a persisted discoverable room"
+    );
+    // The broadcast itself is fire-and-forget; dropping the task is fine.
+    drop(task);
+    let _ = app.view();
+}
+
+#[test]
+fn vr_startup_publish_ignores_unlisted_and_private_rooms() {
+    // BORU-DIR-07 (PDF visibility model): only PublicDiscoverable rooms
+    // emit advertisements. Unlisted/private rooms must NOT be marked for
+    // advertising by the startup sweep.
+    let (_runtime, mut app) = build_prewarm_test_app();
+    let discoverable = seed_room_with_visibility(&mut app, "Open Room", RoomVisibility::PublicDiscoverable);
+    let unlisted = seed_room_with_visibility(&mut app, "Hidden Room", RoomVisibility::PublicUnlisted);
+    let private_topic = seed_room_with_visibility(&mut app, "Private Room", RoomVisibility::Private);
+
+    let _ = app.publish_startup_room_advertisements();
+    assert!(app.advertised_rooms.contains(&discoverable));
+    assert!(
+        !app.advertised_rooms.contains(&unlisted),
+        "PublicUnlisted rooms must not be advertised"
+    );
+    assert!(
+        !app.advertised_rooms.contains(&private_topic),
+        "Private rooms must not be advertised"
+    );
+    let _ = app.view();
+}
+
+#[test]
+fn vr_startup_publish_is_idempotent_and_dedupes_unchanged() {
+    // BORU-DIR-07 (PDF Task 3.1 step 5): the sweep runs at most once; a
+    // second invocation must not re-publish (the `startup_advertise_swept`
+    // guard) and unchanged metadata must be deduped within the dedupe
+    // window.
+    let (_runtime, mut app) = build_prewarm_test_app();
+    let topic = seed_room_with_visibility(&mut app, "Stable Room", RoomVisibility::PublicDiscoverable);
+
+    let first = app.publish_startup_room_advertisements();
+    assert!(app.advertised_rooms.contains(&topic));
+    drop(first);
+
+    // Second sweep: one-shot guard prevents a duplicate burst.
+    let second = app.publish_startup_room_advertisements();
+    drop(second);
+    assert!(
+        app.advertised_rooms.contains(&topic),
+        "room stays marked after repeated sweeps"
+    );
+
+    // Dedupe helper: same metadata within the window is NOT re-broadcast.
+    let name = "Stable Room".to_string();
+    let ticket = app.room_ticket(topic, &[]).to_string();
+    app.record_advertisement_broadcast(topic, &name, "", &ticket);
+    assert!(
+        !app.should_broadcast_advertisement(topic, &name, "", &ticket),
+        "identical metadata within the dedupe window is suppressed"
+    );
+    // Changing the description changes the fingerprint → allowed again.
+    assert!(
+        app.should_broadcast_advertisement(topic, &name, "new description", &ticket),
+        "changed metadata must be re-broadcastable"
+    );
+    let _ = app.view();
+}
+
+#[test]
+fn vr_startup_publish_survives_missing_directory_sender() {
+    // BORU-DIR-07 acceptance: "startup remains usable if discovery
+    // broadcasting fails". With no directory sender the sweep logs and
+    // returns Task::none() — the app must not panic and the rooms stay
+    // marked for the periodic tick.
+    let (_runtime, mut app) = build_prewarm_test_app();
+    assert!(app.directory_sender.is_none(), "unit harness has no sender");
+    let topic = seed_room_with_visibility(&mut app, "Offline Room", RoomVisibility::PublicDiscoverable);
+    let task = app.publish_startup_room_advertisements();
+    assert!(
+        app.advertised_rooms.contains(&topic),
+        "rooms remain marked even when broadcasting is unavailable"
+    );
+    drop(task);
+    let _ = app.view();
 }
 }

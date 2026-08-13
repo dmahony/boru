@@ -1566,6 +1566,12 @@ impl IcedChat {
                 self.directory_sender = sender;
                 if self.directory_sender.is_some() {
                     info!("directory topic subscribed");
+                    // BORU-DIR-07 (PDF Task 3.1): after the discovery
+                    // service is ready, publish one bounded advertisement
+                    // per locally authorized PublicDiscoverable room so
+                    // they reappear after a client restart. Non-blocking:
+                    // failures are logged, not fatal.
+                    return self.publish_startup_room_advertisements();
                 } else {
                     warn!("directory topic subscription failed");
                 }
