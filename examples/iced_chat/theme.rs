@@ -1169,6 +1169,10 @@ pub struct AttachmentTheme {
     pub policy_slot_height: f32,
     /// Action-row button line height estimate (30 px).
     pub action_button_line: f32,
+    /// File-sharing search box width, medium tier (240 px, files.rs:3976).
+    pub search_width_medium: f32,
+    /// File-sharing search box width, full tier (320 px, files.rs:3978).
+    pub search_width_full: f32,
     /// File-dashboard table column widths (app/files.rs).
     pub file_table: FileTableColumns,
     /// "Files I'm Sharing" table column widths (shared_by_me_table.rs).
@@ -1191,6 +1195,12 @@ pub struct FileTableColumns {
     pub direction_col: f32,
     pub event_col: f32,
     pub details_col: f32,
+    /// Download-manager transfer row: Started column (100 px, files.rs:2616).
+    pub download_started_col: f32,
+    /// Download-manager / uploads row: State column (100 px, files.rs:2622/2754).
+    pub download_state_col: f32,
+    /// Activity-log row: Ago column (110 px, files.rs:3572).
+    pub activity_ago_col: f32,
 }
 
 /// Column widths for the "Files I'm Sharing" card (`COL_*` in
@@ -1233,6 +1243,8 @@ impl Default for AttachmentTheme {
             detail_slot_height: 18.0,
             policy_slot_height: 30.0,
             action_button_line: 30.0,
+            search_width_medium: 240.0,
+            search_width_full: 320.0,
             file_table: FileTableColumns {
                 size_col: 72.0,
                 source_col: 120.0,
@@ -1243,6 +1255,9 @@ impl Default for AttachmentTheme {
                 direction_col: 90.0,
                 event_col: 110.0,
                 details_col: 80.0,
+                download_started_col: 100.0,
+                download_state_col: 100.0,
+                activity_ago_col: 110.0,
             },
             shared_table: SharedTableColumns {
                 shared_with: 144.0,
@@ -1898,6 +1913,12 @@ mod tests {
         assert_eq!(theme.attachments.progress_slot_height, 20.0);
         assert_eq!(theme.attachments.detail_slot_height, 18.0);
         assert_eq!(theme.attachments.policy_slot_height, 30.0);
+        assert_eq!(theme.attachments.action_button_line, 30.0);
+        assert_eq!(theme.attachments.search_width_medium, 240.0);
+        assert_eq!(theme.attachments.search_width_full, 320.0);
+        assert_eq!(theme.attachments.file_table.download_started_col, 100.0);
+        assert_eq!(theme.attachments.file_table.download_state_col, 100.0);
+        assert_eq!(theme.attachments.file_table.activity_ago_col, 110.0);
         assert_eq!(theme.attachments.video.narrow_breakpoint, 560.0);
         assert_eq!(theme.attachments.video.medium_breakpoint, 780.0);
         assert_eq!(theme.attachments.video.play_overlay_size, 64.0);

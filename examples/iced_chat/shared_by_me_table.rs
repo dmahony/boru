@@ -398,12 +398,6 @@ use crate::app::{text_muted_style, AppMessage, BUTTON_PRIMARY_GREEN};
 /// from COL_SHARED_WITH ("SHARED WITH" header is only ~79 px and chips are
 /// character-capped), keeping the fixed-column total — and therefore the
 /// NAME fill column — unchanged.
-const COL_SHARED_WITH: f32 = 144.0;
-const COL_SIZE: f32 = 64.0;
-const COL_SHARED_ON: f32 = 122.0;
-const COL_DOWNLOADS: f32 = 80.0;
-const COL_ACTIONS: f32 = 36.0;
-
 /// Maximum recipient chips shown inline before the "+N more" overflow chip.
 const MAX_VISIBLE_CHIPS: usize = 3;
 /// Maximum characters of a recipient label shown inside a chip.
@@ -528,7 +522,9 @@ fn share_menu(theme: &Theme) -> Element<'static, AppMessage> {
             .push(item(SHARE_MENU_ITEMS[0].0, SHARE_MENU_ITEMS[0].1.clone()))
             .push(item(SHARE_MENU_ITEMS[1].0, SHARE_MENU_ITEMS[1].1.clone()))
             .spacing(design_tokens::SPACE_2)
-            .width(Length::Fixed(176.0)),
+            .width(Length::Fixed(
+                crate::theme::BoruTheme::for_theme(theme).attachments.menu_width,
+            )),
     )
     .padding([design_tokens::SPACE_4, design_tokens::SPACE_4])
     .style(move |t| container::Style {
@@ -536,7 +532,7 @@ fn share_menu(theme: &Theme) -> Element<'static, AppMessage> {
         border: Border {
             color: design_tokens::border_muted(t),
             radius: design_tokens::RADIUS_MD.into(),
-            width: 1.0,
+            width: crate::theme::BoruTheme::for_theme(t).borders.hairline,
         },
         ..Default::default()
     })
@@ -630,14 +626,15 @@ fn column_header(theme: &Theme) -> Element<'static, AppMessage> {
             .color(design_tokens::text_muted(theme))
             .width(width)
     };
+    let shared = crate::theme::BoruTheme::for_theme(theme).attachments.shared_table;
     container(
         Row::new()
             .push(cell("NAME", Length::Fill))
-            .push(cell("SHARED WITH", Length::Fixed(COL_SHARED_WITH)))
-            .push(cell("SIZE", Length::Fixed(COL_SIZE)))
-            .push(cell("SHARED ON", Length::Fixed(COL_SHARED_ON)))
-            .push(cell("DOWNLOADS", Length::Fixed(COL_DOWNLOADS)))
-            .push(Space::new().width(Length::Fixed(COL_ACTIONS)))
+            .push(cell("SHARED WITH", Length::Fixed(shared.shared_with)))
+            .push(cell("SIZE", Length::Fixed(shared.size)))
+            .push(cell("SHARED ON", Length::Fixed(shared.shared_on)))
+            .push(cell("DOWNLOADS", Length::Fixed(shared.downloads)))
+            .push(Space::new().width(Length::Fixed(shared.actions)))
             .spacing(design_tokens::SPACE_8)
             .align_y(Alignment::Center)
             .width(Length::Fill),
@@ -720,22 +717,23 @@ fn view_row(
 ) -> Element<'static, AppMessage> {
     let name_cell = name_cell(row, theme, thumbnails);
     let shared_with_cell = shared_with_cell(row, theme, dark_mode);
+    let shared = crate::theme::BoruTheme::for_theme(theme).attachments.shared_table;
     let size_cell = text(format_size(row.size_bytes))
         .size(TypeRole::Metadata.size_px())
         .font(TypeRole::Metadata.font())
         .color(design_tokens::text_secondary(theme))
-        .width(Length::Fixed(COL_SIZE));
+        .width(Length::Fixed(shared.size));
     let shared_on_cell = text(format_shared_on(row.shared_on_ms))
         .size(TypeRole::Metadata.size_px())
         .font(TypeRole::Metadata.font())
         .color(design_tokens::text_secondary(theme))
-        .width(Length::Fixed(COL_SHARED_ON));
+        .width(Length::Fixed(shared.shared_on));
     let downloads_cell = downloads_cell(row, theme);
     let actions_cell: Element<'static, AppMessage> = if confirm_stop {
         // During inline confirmation the trailing menu is hidden so the
         // user can only Cancel or Confirm.
         Space::new()
-            .width(Length::Fixed(COL_ACTIONS))
+            .width(Length::Fixed(shared.actions))
             .height(Length::Shrink)
             .into()
     } else {
@@ -946,7 +944,9 @@ fn shared_with_cell(
     }
 
     container(inner)
-        .width(Length::Fixed(COL_SHARED_WITH))
+        .width(Length::Fixed(
+            crate::theme::BoruTheme::for_theme(theme).attachments.shared_table.shared_with,
+        ))
         .align_x(Alignment::Start)
         .into()
 }
@@ -966,19 +966,20 @@ fn recipient_chip(
     } else {
         initial
     };
+    let chip_avatar = crate::theme::BoruTheme::for_theme(theme).attachments.chip_avatar_size;
     let dot = container(
         text(initial_label)
-            .size(9.0)
+            .size(crate::theme::BoruTheme::for_theme(theme).attachments.chip_label_size)
             .color(Color::WHITE),
     )
-    .width(Length::Fixed(16.0))
-    .height(Length::Fixed(16.0))
+    .width(Length::Fixed(chip_avatar))
+    .height(Length::Fixed(chip_avatar))
     .center_x(Length::Fill)
     .center_y(Length::Fill)
     .style(move |_t| container::Style {
         background: Some(Background::Color(color)),
         border: Border {
-            radius: 8.0.into(),
+            radius: crate::theme::BoruTheme::default().radii.sm.into(),
             ..Default::default()
         },
         ..Default::default()
@@ -1002,7 +1003,7 @@ fn recipient_chip(
         background: Some(Background::Color(design_tokens::surface_hover(t))),
         border: Border {
             color: design_tokens::border_muted(t),
-            width: 1.0,
+            width: crate::theme::BoruTheme::for_theme(t).borders.hairline,
             radius: design_tokens::SPACE_12.into(),
         },
         ..Default::default()
@@ -1022,7 +1023,7 @@ fn all_friends_chip(theme: &Theme) -> Element<'static, AppMessage> {
         background: Some(Background::Color(design_tokens::surface_hover(t))),
         border: Border {
             color: design_tokens::border_muted(t),
-            width: 1.0,
+            width: crate::theme::BoruTheme::for_theme(t).borders.hairline,
             radius: design_tokens::SPACE_12.into(),
         },
         ..Default::default()
@@ -1041,7 +1042,9 @@ fn downloads_cell(row: &SharedByMeRow, theme: &Theme) -> Element<'static, AppMes
         .size(TypeRole::Metadata.size_px())
         .font(TypeRole::Metadata.font())
         .color(design_tokens::text_muted(theme))
-        .width(Length::Fixed(COL_DOWNLOADS))
+        .width(Length::Fixed(
+            crate::theme::BoruTheme::for_theme(theme).attachments.shared_table.downloads,
+        ))
         .into()
 }
 
@@ -1075,7 +1078,9 @@ fn actions_cell(
             ..Default::default()
         });
     container(button)
-        .width(Length::Fixed(COL_ACTIONS))
+        .width(Length::Fixed(
+            crate::theme::BoruTheme::for_theme(theme).attachments.shared_table.actions,
+        ))
         .align_x(Alignment::Center)
         .into()
 }
@@ -1135,7 +1140,7 @@ fn action_menu(row: &SharedByMeRow, theme: &Theme) -> Element<'static, AppMessag
             background: Some(Background::Color(design_tokens::surface_hover(t))),
             border: Border {
                 color: design_tokens::border_muted(t),
-                width: 1.0,
+                width: crate::theme::BoruTheme::for_theme(t).borders.hairline,
                 radius: design_tokens::RADIUS_MD.into(),
             },
             ..Default::default()
@@ -1183,7 +1188,7 @@ fn stop_sharing_confirmation(
             text_color: design_tokens::text_secondary(t),
             border: Border {
                 color: design_tokens::border_muted(t),
-                width: 1.0,
+                width: crate::theme::BoruTheme::for_theme(t).borders.hairline,
                 radius: design_tokens::RADIUS_SM.into(),
             },
             ..Default::default()
@@ -1225,7 +1230,7 @@ fn stop_sharing_confirmation(
             background: Some(Background::Color(soft_bg)),
             border: Border {
                 color: destructive,
-                width: 1.0,
+                width: crate::theme::BoruTheme::for_theme(t).borders.hairline,
                 radius: design_tokens::RADIUS_MD.into(),
             },
             ..Default::default()
@@ -1247,7 +1252,11 @@ fn details_panel(
                     .size(TypeRole::Metadata.size_px())
                     .font(TypeRole::Metadata.font())
                     .color(design_tokens::text_muted(theme))
-                    .width(Length::Fixed(96.0)),
+                    .width(Length::Fixed(
+                        crate::theme::BoruTheme::for_theme(theme)
+                            .attachments
+                            .detail_label_width,
+                    )),
             )
             .push(
                 text(value)
@@ -1323,17 +1332,29 @@ fn details_panel(
                                 .take(1)
                                 .collect::<String>(),
                         )
-                        .size(9.0)
+                        .size(
+                            crate::theme::BoruTheme::for_theme(theme)
+                                .attachments
+                                .chip_label_size,
+                        )
                         .color(Color::WHITE),
                     )
-                    .width(Length::Fixed(16.0))
-                    .height(Length::Fixed(16.0))
+                    .width(Length::Fixed(
+                        crate::theme::BoruTheme::for_theme(theme)
+                            .attachments
+                            .chip_avatar_size,
+                    ))
+                    .height(Length::Fixed(
+                        crate::theme::BoruTheme::for_theme(theme)
+                            .attachments
+                            .chip_avatar_size,
+                    ))
                     .center_x(Length::Fill)
                     .center_y(Length::Fill)
                     .style(move |_t| container::Style {
                         background: Some(Background::Color(initial_color)),
                         border: Border {
-                            radius: 8.0.into(),
+                            radius: crate::theme::BoruTheme::default().radii.sm.into(),
                             ..Default::default()
                         },
                         ..Default::default()
@@ -1377,7 +1398,7 @@ fn details_panel(
                                 text_color: design_tokens::text_secondary(t),
                                 border: Border {
                                     color: design_tokens::border_muted(t),
-                                    width: 1.0,
+                                    width: crate::theme::BoruTheme::for_theme(t).borders.hairline,
                                     radius: design_tokens::RADIUS_SM.into(),
                                 },
                                 ..Default::default()
@@ -1403,7 +1424,7 @@ fn details_panel(
             text_color: design_tokens::text_secondary(t),
             border: Border {
                 color: design_tokens::border_muted(t),
-                width: 1.0,
+                width: crate::theme::BoruTheme::for_theme(t).borders.hairline,
                 radius: design_tokens::RADIUS_SM.into(),
             },
             ..Default::default()
@@ -1437,7 +1458,7 @@ fn details_panel(
         background: Some(Background::Color(design_tokens::surface(t))),
         border: Border {
             color: design_tokens::border_muted(t),
-            width: 1.0,
+            width: crate::theme::BoruTheme::for_theme(t).borders.hairline,
             radius: design_tokens::RADIUS_MD.into(),
         },
         ..Default::default()
@@ -1963,28 +1984,34 @@ mod tests {
         // nothing); FONTS-15 raised it to 80 px and rebalanced SHARED_WITH
         // (168 → 144) so the fixed-column total is unchanged and the NAME
         // fill column keeps its width.
+        // BORU-UI-03: widths now come from the typed BoruTheme.
+        let s = crate::theme::BoruTheme::default().attachments.shared_table;
         assert!(
-            COL_DOWNLOADS >= 72.0,
-            "DOWNLOADS header (~72 px @12 px IBM Plex Sans) must fit in COL_DOWNLOADS ({COL_DOWNLOADS} px)"
+            s.downloads >= 72.0,
+            "DOWNLOADS header (~72 px @12 px IBM Plex Sans) must fit in COL_DOWNLOADS ({} px)",
+            s.downloads
         );
         assert!(
-            COL_SHARED_WITH >= 79.0,
-            "SHARED WITH header (~79 px @12 px IBM Plex Sans) must fit in COL_SHARED_WITH ({COL_SHARED_WITH} px)"
+            s.shared_with >= 79.0,
+            "SHARED WITH header (~79 px @12 px IBM Plex Sans) must fit in COL_SHARED_WITH ({} px)",
+            s.shared_with
         );
         assert!(
-            COL_SHARED_ON >= 66.0,
-            "SHARED ON header (~66 px @12 px IBM Plex Sans) must fit in COL_SHARED_ON ({COL_SHARED_ON} px)"
+            s.shared_on >= 66.0,
+            "SHARED ON header (~66 px @12 px IBM Plex Sans) must fit in COL_SHARED_ON ({} px)",
+            s.shared_on
         );
         assert!(
-            COL_SIZE >= 26.0,
-            "SIZE header (~26 px @12 px IBM Plex Sans) must fit in COL_SIZE ({COL_SIZE} px)"
+            s.size >= 26.0,
+            "SIZE header (~26 px @12 px IBM Plex Sans) must fit in COL_SIZE ({} px)",
+            s.size
         );
         // Width-neutral rebalance: the fixed-column total must not grow, so
         // the NAME fill column keeps its share of the row width.
-        const FIXED_TOTAL: f32 = COL_SHARED_WITH + COL_SIZE + COL_SHARED_ON + COL_DOWNLOADS + COL_ACTIONS;
+        let fixed_total = s.shared_with + s.size + s.shared_on + s.downloads + s.actions;
         assert!(
-            (FIXED_TOTAL - (144.0 + 64.0 + 122.0 + 80.0 + 36.0)).abs() < f32::EPSILON,
-            "fixed column total must stay width-neutral ({FIXED_TOTAL} px)"
+            (fixed_total - (144.0 + 64.0 + 122.0 + 80.0 + 36.0)).abs() < f32::EPSILON,
+            "fixed column total must stay width-neutral ({fixed_total} px)"
         );
     }
 

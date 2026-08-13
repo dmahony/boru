@@ -51,14 +51,10 @@ use super::app::{
 };
 
 // ── Progress bar geometry (VIDCARD-14) ────────────────────────────────
-
-/// Height (px) of the thin modern progress-bar track.
-const PROGRESS_BAR_GIRTH: f32 = 6.0;
-
-/// Fixed width (px) of the percentage label next to the bar.  Holding the
-/// label width constant means the bar itself never re-measures as the value
-/// climbs 0% → 100% (no rapid layout changes).
-const PROGRESS_PCT_LABEL_WIDTH: f32 = 44.0;
+//
+// BORU-UI-03: the 6 px track girth and 44 px percentage-label width now
+// come from `BoruTheme::attachments` (progress_bar_girth /
+// progress_pct_label_width); the theme test pins them to these values.
 
 // ── Shape-stability geometry ───────────────────────────────────────────
 //
@@ -249,11 +245,13 @@ pub(crate) fn state_badge_color(state: &DownloadState, theme: &iced::Theme) -> C
         DownloadState::Completed { .. } => accent_green(theme),
         DownloadState::Shared { .. } => accent_primary(theme),
         DownloadState::Failed { failure } => match failure.stability_label() {
-            "Temporary" => Color::from_rgb(0.78, 0.58, 0.16),
+            "Temporary" => crate::theme::BoruTheme::for_theme(theme).colors.download_temporary,
             "Terminal" | "Permanent" => color_error(theme),
             _ => color_error(theme),
         },
-        DownloadState::Cancelled => Color::from_rgb(0.55, 0.55, 0.55),
+        DownloadState::Cancelled => {
+            crate::theme::BoruTheme::for_theme(theme).colors.download_cancelled
+        }
     }
 }
 
@@ -555,14 +553,14 @@ pub(crate) fn action_button<'a>(label: &'a str, msg: AppMessage) -> iced::Elemen
                         c.b *= 0.85;
                         c
                     }
-                    _ => Color::from_rgb(0.5, 0.5, 0.5),
+                    _ => crate::theme::BoruTheme::for_theme(theme).colors.glyph_disabled,
                 };
                 widget::button::Style {
                     text_color: base,
                     background: None,
                     border: iced::Border {
                         color: border_muted(theme),
-                        width: 1.0,
+                        width: crate::theme::BoruTheme::for_theme(theme).borders.hairline,
                         radius: SPACE_6.into(),
                     },
                     ..Default::default()
@@ -589,7 +587,7 @@ pub(crate) fn text_button<'a>(label: &'a str, msg: AppMessage) -> iced::Element<
                         c
                     }
                     widget::button::Status::Pressed => color_error(theme),
-                    _ => Color::from_rgb(0.45, 0.45, 0.45),
+                    _ => crate::theme::BoruTheme::for_theme(theme).colors.glyph_muted,
                 };
                 widget::button::Style {
                     text_color: base,
@@ -679,7 +677,7 @@ pub(crate) fn secondary_button<'a>(
                     background: None,
                     border: iced::Border {
                         color: border_muted(theme),
-                        width: 1.0,
+                        width: crate::theme::BoruTheme::for_theme(theme).borders.hairline,
                         radius: SPACE_6.into(),
                     },
                     ..Default::default()
@@ -761,7 +759,7 @@ pub(crate) fn policy_selector<'a>(
                     background,
                     border: iced::Border {
                         color: border_color,
-                        width: 1.0,
+                        width: crate::theme::BoruTheme::for_theme(theme).borders.hairline,
                         radius: SPACE_6.into(),
                     },
                     ..Default::default()
@@ -1094,7 +1092,7 @@ fn view_download_progress_inner<'a>(
             background: Some(iced::Background::Color(bg_surface(t))),
             border: iced::Border {
                 color: tone,
-                width: 1.0,
+                width: crate::theme::BoruTheme::for_theme(t).borders.hairline,
                 radius: SPACE_10.into(),
             },
             ..Default::default()
@@ -1181,9 +1179,12 @@ pub(crate) fn progress_section<'a>(
 
     if let Some(fraction) = fraction {
         let pct = (fraction * 100.0).round() as u8;
+        let bar_girth = crate::theme::BoruTheme::for_theme(&theme)
+            .attachments
+            .progress_bar_girth;
         let bar = iced::widget::progress_bar(0.0..=1.0, fraction)
             .length(Length::Fill)
-            .girth(Length::Fixed(PROGRESS_BAR_GIRTH))
+            .girth(Length::Fixed(bar_girth))
             .style(move |t| {
                 let (active, back) = if dimmed {
                     let c = border_muted(t);
@@ -1204,7 +1205,7 @@ pub(crate) fn progress_section<'a>(
                     // (with a transparent border), so a half-girth radius
                     // produces a modern thin pill in both track and fill.
                     border: iced::Border {
-                        radius: (PROGRESS_BAR_GIRTH / 2.0).into(),
+                        radius: (bar_girth / 2.0).into(),
                         ..Default::default()
                     },
                 }
@@ -1219,7 +1220,11 @@ pub(crate) fn progress_section<'a>(
                 })
                 // Fixed width keeps the row's layout stable as the value
                 // climbs from 0% to 100% (no rapid layout changes).
-                .width(Length::Fixed(PROGRESS_PCT_LABEL_WIDTH))
+                .width(Length::Fixed(
+                    crate::theme::BoruTheme::for_theme(&theme)
+                        .attachments
+                        .progress_pct_label_width,
+                ))
                 .align_x(Alignment::End);
 
         Some(

@@ -1169,7 +1169,9 @@ impl IcedChat {
                     .spacing(SPACE_2)
                     .width(Length::Fill),
             )
-            .height(Length::Fixed(200.0))
+            .height(Length::Fixed(
+                crate::theme::BoruTheme::for_theme(&theme).attachments.empty_state_height,
+            ))
             .width(Length::Fill)
             .into()
         };
@@ -2239,7 +2241,9 @@ impl IcedChat {
             .push(
                 crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, size_label)
                     .color(crate::design_tokens::text_secondary(theme))
-                    .width(Length::Fixed(72.0)),
+                    .width(Length::Fixed(
+                        crate::theme::BoruTheme::for_theme(theme).attachments.file_table.size_col,
+                    )),
             )
             .push(
                 crate::fonts::type_role_text(
@@ -2247,7 +2251,9 @@ impl IcedChat {
                     item.source_peer.clone(),
                 )
                 .color(crate::design_tokens::text_secondary(theme))
-                .width(Length::Fixed(120.0))
+                .width(Length::Fixed(
+                    crate::theme::BoruTheme::for_theme(theme).attachments.file_table.source_col,
+                ))
                 // FONTS-15: wrap long friend display names inside the fixed
                 // Source column instead of letting them spill into the
                 // Completed column (a 25+ char name is ~150 px at 12 px IBM
@@ -2257,7 +2263,9 @@ impl IcedChat {
             .push(
                 crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, ago)
                     .color(crate::design_tokens::text_secondary(theme))
-                    .width(Length::Fixed(120.0)),
+                    .width(Length::Fixed(
+                    crate::theme::BoruTheme::for_theme(theme).attachments.file_table.ago_col,
+                )),
             )
             .push(status_badge)
             .push(Space::new().width(Length::Fill))
@@ -2604,7 +2612,9 @@ impl IcedChat {
                     crate::presentation::truncate_with_ellipsis(&peer_display, 24),
                 )
                 .color(crate::design_tokens::text_secondary(theme))
-                .width(Length::Fixed(140.0))
+                .width(Length::Fixed(
+                    crate::theme::BoruTheme::for_theme(theme).attachments.file_table.peer_col,
+                ))
                 .wrapping(iced::widget::text::Wrapping::None),
             )
             .push(
@@ -2613,7 +2623,9 @@ impl IcedChat {
                     format_started(row.started_at_ms, now_ms() as u64),
                 )
                 .color(crate::design_tokens::text_secondary(theme))
-                .width(Length::Fixed(100.0))
+                .width(Length::Fixed(
+                    crate::theme::BoruTheme::for_theme(theme).attachments.file_table.download_started_col,
+                ))
                 .wrapping(iced::widget::text::Wrapping::None),
             )
             .push(
@@ -2745,13 +2757,20 @@ impl IcedChat {
                     crate::presentation::truncate_with_ellipsis(&peer_display, 24),
                 )
                 .color(crate::design_tokens::text_secondary(theme))
-                .width(Length::Fixed(140.0))
+                .width(Length::Fixed(
+                    crate::theme::BoruTheme::for_theme(theme).attachments.file_table.peer_col,
+                ))
                 .wrapping(iced::widget::text::Wrapping::None),
             )
             .push(
                 crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, state_label)
                     .color(state_color)
-                    .width(Length::Fixed(100.0))
+                    .width(Length::Fixed(
+                        crate::theme::BoruTheme::for_theme(theme)
+                            .attachments
+                            .file_table
+                            .download_state_col,
+                    ))
                     .wrapping(iced::widget::text::Wrapping::None),
             )
             .push(controls)
@@ -3055,19 +3074,28 @@ impl IcedChat {
                     crate::presentation::truncate_with_ellipsis(&peer_display, 24),
                 )
                 .color(crate::design_tokens::text_secondary(theme))
-                .width(Length::Fixed(140.0))
+                .width(Length::Fixed(
+                    crate::theme::BoruTheme::for_theme(theme).attachments.file_table.peer_col,
+                ))
                 .wrapping(iced::widget::text::Wrapping::None),
             )
             .push(
                 crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, started_label)
                     .color(crate::design_tokens::text_secondary(theme))
-                    .width(Length::Fixed(120.0))
+                    .width(Length::Fixed(
+                        crate::theme::BoruTheme::for_theme(theme)
+                            .attachments
+                            .file_table
+                            .started_col,
+                    ))
                     .wrapping(iced::widget::text::Wrapping::None),
             )
             .push(
                 crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, state_label)
                     .color(state_color)
-                    .width(Length::Fixed(110.0))
+                    .width(Length::Fixed(
+                        crate::theme::BoruTheme::for_theme(theme).attachments.file_table.state_col,
+                    ))
                     .wrapping(iced::widget::text::Wrapping::None),
             )
             .push(match cancel_btn {
@@ -3457,7 +3485,9 @@ impl IcedChat {
         // Raw error details affordance: only for rows that carry bounded
         // failure context; toggled inline under the row.
         let mut details_cell: iced::Element<'_, AppMessage> = Space::new()
-            .width(Length::Fixed(80.0))
+            .width(Length::Fixed(
+                crate::theme::BoruTheme::for_theme(theme).attachments.file_table.details_col,
+            ))
             .into();
         let mut detail_panel: Option<iced::Element<'_, AppMessage>> = None;
         if let Some(raw) = row.raw_detail.as_deref() {
@@ -3471,7 +3501,14 @@ impl IcedChat {
             .on_press(AppMessage::ActivityLogDetailsToggled(row.id.clone()))
             .padding([SPACE_2, SPACE_6])
             .style(BUTTON_GHOST_BG);
-            details_cell = details_btn.width(Length::Fixed(80.0)).into();
+            details_cell = details_btn
+                .width(Length::Fixed(
+                    crate::theme::BoruTheme::for_theme(theme)
+                        .attachments
+                        .file_table
+                        .details_col,
+                ))
+                .into();
             if is_open {
                 let raw_owned = raw.to_string();
                 let panel = container(
@@ -3522,7 +3559,12 @@ impl IcedChat {
             .push(
                 crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, direction_label)
                     .color(direction_color)
-                    .width(Length::Fixed(90.0))
+                    .width(Length::Fixed(
+                        crate::theme::BoruTheme::for_theme(theme)
+                            .attachments
+                            .file_table
+                            .direction_col,
+                    ))
                     .wrapping(iced::widget::text::Wrapping::None),
             )
             .push(
@@ -3531,7 +3573,9 @@ impl IcedChat {
                     crate::presentation::truncate_with_ellipsis(&event_label, 24),
                 )
                     .color(crate::design_tokens::text_primary(theme))
-                    .width(Length::Fixed(110.0))
+                    .width(Length::Fixed(
+                        crate::theme::BoruTheme::for_theme(theme).attachments.file_table.event_col,
+                    ))
                     .wrapping(iced::widget::text::Wrapping::None),
             )
             .push(
@@ -3563,16 +3607,25 @@ impl IcedChat {
                     crate::presentation::truncate_with_ellipsis(&row.peer_label, 24),
                 )
                 .color(crate::design_tokens::text_secondary(theme))
-                .width(Length::Fixed(140.0))
+                .width(Length::Fixed(
+                    crate::theme::BoruTheme::for_theme(theme).attachments.file_table.peer_col,
+                ))
                 .wrapping(iced::widget::text::Wrapping::None),
             )
             .push(
                 crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, ago)
                     .color(crate::design_tokens::text_secondary(theme))
-                    .width(Length::Fixed(110.0)),
+                    .width(Length::Fixed(
+                        crate::theme::BoruTheme::for_theme(theme)
+                            .attachments
+                            .file_table
+                            .activity_ago_col,
+                    )),
             )
             .push(badge(outcome_label, kind))
-            .push(Space::new().width(Length::Fixed(4.0)))
+            .push(Space::new().width(Length::Fixed(
+                crate::theme::BoruTheme::for_theme(theme).spacing.space_4,
+            )))
             .push(details_cell)
             .spacing(SPACE_10)
             .align_y(Alignment::Center)
@@ -3970,12 +4023,13 @@ impl IcedChat {
         let is_medium = dep.responsive_mode.is_medium();
 
         // Search width adapts: 320 px wide, 240 px medium, Fill compact.
+        let attachment_theme = crate::theme::BoruTheme::light().attachments;
         let search_width: Length = if is_compact {
             Length::Fill
         } else if is_medium {
-            Length::Fixed(240.0)
+            Length::Fixed(attachment_theme.search_width_medium)
         } else {
-            Length::Fixed(320.0)
+            Length::Fixed(attachment_theme.search_width_full)
         };
 
         let theme = Self::theme_from_dark(dep.dark_mode);
