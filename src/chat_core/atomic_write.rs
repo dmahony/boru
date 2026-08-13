@@ -48,6 +48,32 @@ pub fn atomic_write_json<T>(path: &Path, data: &T, label: &str) -> Result<()>
 where
     T: Serialize + DeserializeOwned,
 {
+    // ── 1. Serialise ────────────────────────────────────────────────
+    let encoded =
+        serde_json::to_vec_pretty(data).with_std_context(|_| format!("encode {label}"))?;
+
+    // ── 2. Pre-commit validation: round-trip through serde ──────────
+    //
+    // This catches NaN / infinity floats, out-of-range integer enums,
+    // and other corruption that serde_json's serialiser can produce
+    // because the type's invariants aren't expressed in the schema.
+    // If this fails the old file on disk is **untouched**.
+    serde_json::from_slice::<T>(&encoded)
+        .with_std_context(|_| format!("validate {label} — re-deserialisation check"))?;
+
+    // ── 3. Atomic file mechanics ────────────────────────────────────
+    atomic_write_bytes(path, &encoded, label)
+}
+
+/// Atomically write already-encoded bytes to `path`.
+///
+/// This is the file-mechanics half of [`atomic_write_json`]: it writes to
+/// a unique temp sibling, `fsync`s it, then renames it over the target
+/// (atomic on POSIX). Callers that serialise non-JSON formats (TOML, …)
+/// use this directly after doing their own validation.
+///
+/// A trailing newline is appended so the file stays valid POSIX text.
+pub fn atomic_write_bytes(path: &Path, encoded: &[u8], label: &str) -> Result<()> {
     let data_dir = path.parent().unwrap_or_else(|| Path::new("."));
 
     // ── 1. Ensure the directory exists ──────────────────────────────
@@ -64,7 +90,6 @@ where
         let _ = fs::set_permissions(data_dir, fs::Permissions::from_mode(0o700));
     }
 
-    // ── 2. Serialise ────────────────────────────────────────────────
     // Unique tmp name per invocation: the store saves run on spawned
     // threads (send_save_friends etc.) and can overlap, so a fixed
     // `<name>.json.tmp` lets two concurrent saves race — one truncates
@@ -82,19 +107,8 @@ where
         ".{file_stem}.{}.{seq}.tmp",
         std::process::id()
     ));
-    let encoded =
-        serde_json::to_vec_pretty(data).with_std_context(|_| format!("encode {label}"))?;
 
-    // ── 3. Pre-commit validation: round-trip through serde ──────────
-    //
-    // This catches NaN / infinity floats, out-of-range integer enums,
-    // and other corruption that serde_json's serialiser can produce
-    // because the type's invariants aren't expressed in the schema.
-    // If this fails the old file on disk is **untouched**.
-    serde_json::from_slice::<T>(&encoded)
-        .with_std_context(|_| format!("validate {label} — re-deserialisation check"))?;
-
-    // ── 4. Write to tmp file with fsync ─────────────────────────────
+    // ── 2. Write to tmp file with fsync ─────────────────────────────
     {
         let file = fs::File::create(&tmp_path).with_std_context(|_| {
             format!(
@@ -104,7 +118,7 @@ where
         })?;
         let mut writer = BufWriter::new(file);
 
-        writer.write_all(&encoded).with_std_context(|_| {
+        writer.write_all(encoded).with_std_context(|_| {
             format!(
                 "failed to write temp file for {label}: {}",
                 tmp_path.display()
@@ -134,14 +148,14 @@ where
         })?;
     }
 
-    // ── 5. Replace the old file atomically ──────────────────────────
+    // ── 3. Replace the old file atomically ──────────────────────────
     // On Linux/macOS, rename(2) atomically replaces the destination.
     // Removing the old file first is destructive — if the rename fails,
     // both files are lost.  Let rename handle the replacement.
     fs::rename(&tmp_path, path)
         .with_std_context(|_| format!("failed to replace file for {label}: {}", path.display()))?;
 
-    // ── 6. Restrictive permissions on the final file ────────────────
+    // ── 4. Restrictive permissions on the final file ────────────────
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -204,6 +218,50 @@ mod tests {
             serde_json::from_slice::<Bounded>(raw).is_err(),
             "256 should not deserialise as u8"
         );
+    }
+
+    #[test]
+    fn test_atomic_write_bytes_round_trip_and_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("boru-ui.toml");
+
+        let payload = b"# header\n[sidebar]\nwidth = 270.0\n";
+        atomic_write_bytes(&path, payload, "test bytes").unwrap();
+
+        // Target present with the exact payload + trailing newline.
+        assert!(path.exists());
+        let raw = fs::read_to_string(&path).unwrap();
+        let mut expected = payload.to_vec();
+        expected.push(b'\n');
+        assert_eq!(
+            raw.as_bytes(),
+            &expected[..],
+            "no partial/truncated content"
+        );
+
+        // No dot-prefixed tmp sibling should remain after a successful write.
+        let leftovers: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n != "boru-ui.toml" && n.contains(".tmp"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files should not remain after successful write: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn test_atomic_write_bytes_overwrites_previous_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("boru-ui.toml");
+
+        atomic_write_bytes(&path, b"first", "test bytes").unwrap();
+        atomic_write_bytes(&path, b"second", "test bytes").unwrap();
+
+        let raw = fs::read_to_string(&path).unwrap();
+        assert_eq!(raw, "second\n", "latest write wins; no stale content");
     }
 
     #[test]

@@ -19076,6 +19076,33 @@ impl IcedChat {
                 tracing::debug!("UI Inspector: reset all to defaults");
                 iced::Task::none()
             }
+            InspectorMsg::SaveTheme => {
+                // BORU-UI-12: serialize the current editable theme overrides
+                // (only theme values — never non-theme state) to
+                // `<data_dir>/boru-ui.toml`. The write is atomic (temp +
+                // rename), so the dev watcher never sees a partial file; it
+                // will reload the same values, which is expected. Success or
+                // failure is recorded in the panel's view-local status line.
+                match crate::theme_config::save_ui_theme_config(
+                    &self.data_dir,
+                    &self.ui_theme_config,
+                ) {
+                    Ok(path) => {
+                        self.inspector_draft.save_status =
+                            crate::inspector::ThemeSaveStatus::Saved;
+                        tracing::info!(
+                            path = %path.display(),
+                            "UI Inspector: theme saved to boru-ui.toml"
+                        );
+                    }
+                    Err(e) => {
+                        self.inspector_draft.save_status =
+                            crate::inspector::ThemeSaveStatus::Failed(e.clone());
+                        tracing::warn!(error = %e, "UI Inspector: theme save failed");
+                    }
+                }
+                iced::Task::none()
+            }
             InspectorMsg::SetFloat { field, value } => {
                 // Slider edit: apply immediately and clear any stale draft so
                 // the numeric field shows the live value.
@@ -35846,6 +35873,87 @@ fn inspector_reset_section_and_reset_all_via_messages() {
         app.inspector_draft.float_text.is_empty() && app.inspector_draft.color_text.is_empty(),
         "Reset All cleared all drafts"
     );
+}
+
+#[cfg(feature = "dev-ui")]
+#[test]
+fn inspector_save_theme_writes_boru_ui_toml_and_reports_status() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    // Apply an edit, then Save Theme (BORU-UI-12).
+    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetFloat {
+        field: crate::inspector::ThemeField::SidebarWidth,
+        value: 270.0,
+    }));
+    drop(task);
+    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SaveTheme));
+    drop(task);
+
+    // Success is reported inside the developer panel.
+    assert_eq!(
+        app.inspector_draft.save_status,
+        crate::inspector::ThemeSaveStatus::Saved,
+        "save success shown in the panel status line"
+    );
+
+    // The file exists and contains exactly the edited override.
+    let path = app.data_dir.join(crate::theme_config::UI_CONFIG_FILE_NAME);
+    assert!(path.exists(), "boru-ui.toml written");
+    let text = std::fs::read_to_string(&path).expect("read saved theme");
+    assert!(text.contains("width = 270.0"), "edited value persisted: {text}");
+    let cfg = crate::theme_config::parse_ui_theme_config(&text).expect("saved file parses");
+    assert_eq!(
+        cfg.sidebar.as_ref().expect("sidebar group").width,
+        Some(270.0),
+        "saved overrides match the editable theme"
+    );
+
+    // The reload path (what the dev watcher sees after the save) reproduces
+    // the same active theme — a partial write is impossible because the
+    // write is atomic temp + rename.
+    let (merged, _) =
+        crate::theme_merge::merge_ui_theme(&crate::theme::BoruTheme::default(), &cfg);
+    assert_eq!(
+        merged.sidebar.width, app.active_theme.sidebar.width,
+        "watcher reload of the saved file yields the same active theme"
+    );
+
+    // No temp sibling is left behind by the atomic write.
+    let leftovers: Vec<_> = std::fs::read_dir(&app.data_dir)
+        .expect("read data dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.contains(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "no temp files remain: {leftovers:?}");
+}
+
+#[cfg(feature = "dev-ui")]
+#[test]
+fn inspector_save_theme_failure_sets_failed_status() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    // Point the save at an unwritable location: replace data_dir with a path
+    // under a regular file so the atomic write cannot create the directory.
+    let blocker = app.data_dir.join("not-a-dir");
+    std::fs::write(&blocker, b"x").expect("create blocker file");
+    let original_data_dir = std::mem::replace(&mut app.data_dir, blocker.join("nested"));
+
+    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SaveTheme));
+    drop(task);
+
+    match &app.inspector_draft.save_status {
+        crate::inspector::ThemeSaveStatus::Failed(msg) => {
+            assert!(
+                msg.contains("boru-ui.toml"),
+                "failure names the dev theme file: {msg}"
+            );
+        }
+        other => panic!("expected Failed status, got {other:?}"),
+    }
+
+    // Restore so the app's Drop path (if any) still works.
+    app.data_dir = original_data_dir;
 }
 
 #[cfg(feature = "dev-ui")]

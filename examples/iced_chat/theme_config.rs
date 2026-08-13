@@ -77,6 +77,30 @@ impl ColorValue {
     }
 }
 
+/// Serialize as the `[r, g, b(, a)]` float array — the exact inverse of the
+/// `visit_seq` branch of the `Deserialize` impl below, so a save→load
+/// round-trip is lossless (hex-string output would quantize to 8-bit
+/// channels and break float equality). Alpha is omitted when exactly 1.0,
+/// matching the deserializer's default, so saved files stay compact
+/// (`primary = [0.1, 0.2, 0.3]` rather than `[0.1, 0.2, 0.3, 1.0]`).
+impl serde::Serialize for ColorValue {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeSeq;
+        let len = if self.a == 1.0 { 3 } else { 4 };
+        let mut seq = serializer.serialize_seq(Some(len))?;
+        seq.serialize_element(&self.r)?;
+        seq.serialize_element(&self.g)?;
+        seq.serialize_element(&self.b)?;
+        if len == 4 {
+            seq.serialize_element(&self.a)?;
+        }
+        seq.end()
+    }
+}
+
 impl<'de> serde::Deserialize<'de> for ColorValue {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -134,7 +158,7 @@ impl<'de> serde::Deserialize<'de> for ColorValue {
 macro_rules! config_group {
     ($(#[$doc:meta])* $name:ident { $($field:ident: $ty:ty),* $(,)? }) => {
         $(#[$doc])*
-        #[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
+        #[derive(Debug, Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]
         #[serde(default)]
         pub struct $name {
             $(pub $field: Option<$ty>,)*
@@ -620,7 +644,7 @@ config_group! {
 /// Every group is optional; a missing group (or a missing file) means
 /// "no overrides" and the merge step (BORU-UI-05) falls back to
 /// `BoruTheme::default()`.
-#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct UiThemeConfig {
     pub colors: Option<ColorConfig>,
@@ -717,6 +741,52 @@ pub fn load_ui_theme_config(data_dir: &Path) -> Result<UiThemeConfig, UiThemeCon
         Err(source) => return Err(UiThemeConfigError::Io { path, source }),
     };
     parse_ui_theme_config(&text).map_err(|source| UiThemeConfigError::Parse { path, source })
+}
+
+// ── Save path (BORU-UI-12 / PDF Task 12) ────────────────────────────
+
+/// Serialize the current editable theme overrides to TOML text.
+///
+/// Only `Some` (present) leaves are emitted, in stable struct field order
+/// (serde serializes struct fields in declaration order), so Git diffs of
+/// `boru-ui.toml` stay readable and minimal: editing one field adds/removes
+/// exactly that key, and defaults remain code defaults. `None` leaves are
+/// omitted entirely — the merge path (BORU-UI-05) treats a missing key as
+/// "keep `BoruTheme::default()`", so the round trip
+/// `config → toml → parse → merge` reproduces the same active theme.
+///
+/// A short header comment makes the file self-describing (parsers ignore
+/// comments, so it does not affect the round trip).
+#[cfg(feature = "dev-ui")]
+pub fn ui_theme_config_to_toml(config: &UiThemeConfig) -> Result<String, toml::ser::Error> {
+    let mut text =
+        String::from("# boru-ui.toml — Boru dev theme overrides (saved from the UI Inspector).\n");
+    text.push_str("# Visual values only; missing keys fall back to BoruTheme::default().\n");
+    text.push_str(&toml::to_string(config)?);
+    Ok(text)
+}
+
+/// Save the current editable theme overrides to `<data_dir>/boru-ui.toml`.
+///
+/// The write is **atomic** (temp sibling + `fsync` + rename via
+/// `boru_core::chat_core::atomic_write::atomic_write_bytes`), so the dev
+/// file watcher (BORU-UI-06) can never observe a partial file — it either
+/// sees the previous complete file or the new complete file. Only theme
+/// overrides are persisted; no non-theme state is ever written here.
+///
+/// Returns the path written on success, or a developer-facing error string.
+#[cfg(feature = "dev-ui")]
+pub fn save_ui_theme_config(data_dir: &Path, config: &UiThemeConfig) -> Result<PathBuf, String> {
+    let path = data_dir.join(UI_CONFIG_FILE_NAME);
+    let text = ui_theme_config_to_toml(config)
+        .map_err(|e| format!("cannot serialize {}: {e}", path.display()))?;
+    boru_core::chat_core::atomic_write::atomic_write_bytes(
+        &path,
+        text.as_bytes(),
+        "dev theme overrides",
+    )
+    .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    Ok(path)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────
@@ -1062,5 +1132,175 @@ play_overlay_size = 70.0
             }
             Err(other) => panic!("expected Io error, got {other:?}"),
         }
+    }
+
+    // ── Save path (BORU-UI-12 / PDF Task 12) — dev-ui feature only ────
+
+    /// Build the config equivalent of `FULL_TOML` by parsing it, then
+    /// serialize → parse → merge and compare to the direct merge. This is
+    /// the PDF Task 12 round trip: current theme → toml → parse → merge
+    /// reproduces the same active theme.
+    #[cfg(feature = "dev-ui")]
+    #[test]
+    fn save_round_trip_merge_reproduces_same_theme() {
+        let cfg = parse_ui_theme_config(FULL_TOML).expect("full config parses");
+        let (before, _) =
+            crate::theme_merge::merge_ui_theme(&crate::theme::BoruTheme::default(), &cfg);
+
+        let text = ui_theme_config_to_toml(&cfg).expect("serializes");
+        let reparsed = parse_ui_theme_config(&text).expect("saved text parses");
+        let (after, _) =
+            crate::theme_merge::merge_ui_theme(&crate::theme::BoruTheme::default(), &reparsed);
+
+        assert_eq!(before, after, "round trip preserves the active theme");
+        // And the reparsed config itself equals the original (sparse, exact).
+        assert_eq!(reparsed, cfg);
+    }
+
+    /// The serialized file contains ONLY present (Some) leaves, in stable
+    /// struct field order — no `None` placeholders, no default materialization.
+    #[cfg(feature = "dev-ui")]
+    #[test]
+    fn save_serialization_omits_none_and_keeps_stable_order() {
+        // A sparse config: one leaf in colors, one in sidebar, one nested.
+        let cfg = parse_ui_theme_config(
+            r#"
+[colors]
+primary = [0.1, 0.2, 0.3]
+
+[sidebar]
+width = 270.0
+
+[attachments.video]
+play_overlay_size = 64.0
+"#,
+        )
+        .expect("sparse config parses");
+        let text = ui_theme_config_to_toml(&cfg).expect("serializes");
+
+        // Present keys appear...
+        assert!(text.contains("[colors]"));
+        assert!(
+            text.contains("primary = [0.1, 0.2, 0.3]"),
+            "color array form"
+        );
+        assert!(text.contains("[sidebar]"));
+        assert!(text.contains("width = 270.0"));
+        assert!(text.contains("[attachments.video]"));
+        assert!(text.contains("play_overlay_size = 64.0"));
+        // ...absent keys never appear (no `None` serialization).
+        assert!(!text.contains("canvas"), "unset leaf not serialized");
+        assert!(!text.contains("item_radius"), "unset leaf not serialized");
+        assert!(
+            !text.contains("narrow_breakpoint"),
+            "unset leaf not serialized"
+        );
+
+        // Stable group order follows UiThemeConfig declaration order.
+        let colors = text.find("[colors]").expect("colors group");
+        let sidebar = text.find("[sidebar]").expect("sidebar group");
+        let attachments = text.find("[attachments.video]").expect("attachments group");
+        assert!(
+            colors < sidebar && sidebar < attachments,
+            "group order stable"
+        );
+    }
+
+    /// Empty config serializes to the header comment only, which parses
+    /// back to defaults — saving a reset theme is safe.
+    #[cfg(feature = "dev-ui")]
+    #[test]
+    fn save_empty_config_is_header_only_and_parses_to_defaults() {
+        let text = ui_theme_config_to_toml(&UiThemeConfig::default()).expect("serializes");
+        assert!(text.starts_with('#'), "file starts with header comment");
+        let cfg = parse_ui_theme_config(&text).expect("header-only file parses");
+        assert_eq!(cfg, UiThemeConfig::default());
+    }
+
+    /// Save writes the file atomically: target present, tmp sibling gone,
+    /// content parses to the same config.
+    #[cfg(feature = "dev-ui")]
+    #[test]
+    fn save_ui_theme_config_writes_file_atomically() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cfg = parse_ui_theme_config(FULL_TOML).expect("full config parses");
+
+        let path = save_ui_theme_config(dir.path(), &cfg).expect("save succeeds");
+        assert!(path.ends_with(UI_CONFIG_FILE_NAME));
+        assert!(path.exists(), "target file present");
+
+        // No temp sibling left behind.
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "no temp files remain: {leftovers:?}");
+
+        // Reload path parses the saved file to the same config.
+        let reloaded = load_ui_theme_config(dir.path()).expect("reloads");
+        assert_eq!(
+            reloaded, cfg,
+            "saved file round-trips through the load path"
+        );
+    }
+
+    /// Colors serialize losslessly: [r,g,b(,a)] floats → toml → parse gives
+    /// the exact same f32 values (hex output would quantize to 8-bit).
+    /// Serialized inside a real config group — TOML has no bare top-level
+    /// array, so the value is exercised through its struct field.
+    #[cfg(feature = "dev-ui")]
+    #[test]
+    fn save_color_value_serializes_losslessly() {
+        let cv = ColorValue {
+            r: 24.0 / 255.0,
+            g: 127.0 / 255.0,
+            b: 80.0 / 255.0,
+            a: 0.5,
+        };
+        let cfg = crate::theme_config::ColorConfig {
+            canvas: Some(cv),
+            ..Default::default()
+        };
+        let text = toml::to_string(&cfg).expect("color serializes");
+        assert!(text.contains("canvas = [0.09411765, 0.49803922, 0.3137255, 0.5]"));
+        let reparsed: crate::theme_config::ColorConfig =
+            toml::from_str(&text).expect("color reparses");
+        assert_eq!(reparsed.canvas, Some(cv), "exact float round trip");
+        assert!(!text.contains('#'), "serialized as array, not hex");
+    }
+
+    /// Alpha = 1.0 is omitted for compact files and defaults back on parse,
+    /// keeping the round trip exact.
+    #[cfg(feature = "dev-ui")]
+    #[test]
+    fn save_color_value_omits_default_alpha() {
+        let cfg = crate::theme_config::ColorConfig {
+            canvas: Some(ColorValue {
+                r: 0.1,
+                g: 0.2,
+                b: 0.3,
+                a: 1.0,
+            }),
+            ..Default::default()
+        };
+        let text = toml::to_string(&cfg).expect("color serializes");
+        assert!(
+            text.contains("canvas = [0.1, 0.2, 0.3]"),
+            "alpha 1.0 omitted: {text}"
+        );
+        let reparsed: crate::theme_config::ColorConfig =
+            toml::from_str(&text).expect("color reparses");
+        assert_eq!(
+            reparsed.canvas.expect("canvas"),
+            ColorValue {
+                r: 0.1,
+                g: 0.2,
+                b: 0.3,
+                a: 1.0
+            },
+            "default alpha restored on parse"
+        );
     }
 }

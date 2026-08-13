@@ -1049,6 +1049,29 @@ pub enum InspectorMsg {
     /// BORU-UI-11: a supported component was clicked while inspection mode is
     /// enabled. Jumps the inspector to the component's section.
     InspectSelect(ComponentId),
+    /// BORU-UI-12: save the current editable theme overrides to
+    /// `boru-ui.toml`. The write is atomic (temp + rename) so the watcher
+    /// never sees a partial file; success/failure is shown in the panel's
+    /// save-status line.
+    SaveTheme,
+}
+
+/// Result of the last Save Theme action (BORU-UI-12), shown as the panel's
+/// save-status line. View-local display state only — never part of the theme.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThemeSaveStatus {
+    /// No save has been attempted yet this session.
+    None,
+    /// The last Save Theme action wrote `boru-ui.toml` successfully.
+    Saved,
+    /// The last Save Theme action failed; the message is shown in the panel.
+    Failed(String),
+}
+
+impl Default for ThemeSaveStatus {
+    fn default() -> Self {
+        Self::None
+    }
 }
 
 /// Draft text for the inspector's text inputs. Kept so a half-typed value
@@ -1063,6 +1086,9 @@ pub struct InspectorDraft {
     /// Component sections the user collapsed (BORU-UI-10). View-local
     /// state only — never part of the theme.
     pub collapsed_sections: HashSet<SectionId>,
+    /// BORU-UI-12: result of the last Save Theme action (view-local status
+    /// line only — never part of the theme).
+    pub save_status: ThemeSaveStatus,
 }
 
 // ── View ──────────────────────────────────────────────────────────────
@@ -1364,6 +1390,7 @@ pub fn view_inspector(
         .push(panel_heading(dark_mode))
         .push(inspect_ui_row(inspect_enabled, inspect_hover, inspect_selected, dark_mode))
         .push(reset_actions_row(dark_mode))
+        .push(save_theme_row(dark_mode, &draft.save_status))
         .push(Space::new().height(Length::Fixed(6.0)))
         .spacing(2.0);
 
@@ -1469,6 +1496,63 @@ fn reset_actions_row(dark_mode: bool) -> Element<'static, AppMessage> {
         reset_all,
         Space::new().width(Length::Fixed(6.0)),
         hint,
+        Space::new().width(Length::Fill)
+    ]
+    .align_y(Alignment::Center)
+    .into()
+}
+
+/// Row with the Save Theme action + status line (BORU-UI-12).
+///
+/// The button serializes the current editable theme overrides to
+/// `boru-ui.toml` (atomic temp + rename) and the status line shows the
+/// result of the last save inside the panel.
+fn save_theme_row(dark_mode: bool, status: &ThemeSaveStatus) -> Element<'static, AppMessage> {
+    let save = button(text("Save Theme").size(11.0).color(if dark_mode {
+        Color::from_rgb(0.85, 0.85, 0.85)
+    } else {
+        Color::from_rgb(0.15, 0.15, 0.15)
+    }))
+    .on_press(AppMessage::Inspector(InspectorMsg::SaveTheme))
+    .padding([3, 8]);
+
+    let (msg, color) = match status {
+        ThemeSaveStatus::None => (
+            "saves current overrides to boru-ui.toml".to_string(),
+            if dark_mode {
+                Color::from_rgb(0.55, 0.55, 0.6)
+            } else {
+                Color::from_rgb(0.45, 0.45, 0.45)
+            },
+        ),
+        ThemeSaveStatus::Saved => (
+            "✓ saved".to_string(),
+            if dark_mode {
+                Color::from_rgb(0.6, 0.85, 0.65)
+            } else {
+                Color::from_rgb(0.1, 0.55, 0.25)
+            },
+        ),
+        ThemeSaveStatus::Failed(e) => {
+            // Keep the panel compact: the full error is in the logs, the
+            // status line shows a prefix.
+            let preview: String = e.chars().take(120).collect();
+            (
+                format!("✗ {preview}"),
+                if dark_mode {
+                    Color::from_rgb(0.95, 0.6, 0.6)
+                } else {
+                    Color::from_rgb(0.75, 0.2, 0.2)
+                },
+            )
+        }
+    };
+    let status_text = text(msg).size(9.0).color(color);
+
+    row![
+        save,
+        Space::new().width(Length::Fixed(6.0)),
+        status_text,
         Space::new().width(Length::Fill)
     ]
     .align_y(Alignment::Center)
