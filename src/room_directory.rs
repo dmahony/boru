@@ -98,6 +98,8 @@
 use std::{
     cmp::Ordering,
     collections::{BTreeSet, HashMap},
+    sync::atomic::AtomicU64,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -437,6 +439,63 @@ impl DirectoryEntry {
 }
 
 // ---------------------------------------------------------------------------
+// Directory diagnostics (BORU-DIR-22, PDF Phase 8 Task 8.1)
+// ---------------------------------------------------------------------------
+
+/// Developer-facing per-room diagnostics record (BORU-DIR-22, PDF Task 8.1
+/// step 2).
+///
+/// For each cached room this records **last_seen**, **expiry**,
+/// **compatibility**, **authority verification status**, and **local
+/// membership state** — exactly the fields PDF Task 8.1 step 2 requires —
+/// using a **safe shortened room identifier** ([`short_room_id`]) rather
+/// than any sensitive payload. It carries no chat contents, no private room
+/// history, no message bodies, and no member identities: directory
+/// diagnostics are metadata-level (PDF Core rule), deliberately separate
+/// from room-message diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoomDiagnosticsEntry {
+    /// Safe shortened room identifier (hex prefix; see [`short_room_id`]).
+    /// Never the full 32-byte topic, never the advertisement payload.
+    pub room_id_short: String,
+    /// Advertised room name (public metadata, not chat content).
+    pub room_name: String,
+    /// Last time a valid advertisement was received (age, seconds).
+    pub last_seen_age_secs: u64,
+    /// Seconds until expiry (`0` when already expired / not yet refreshed).
+    pub expires_in_secs: u64,
+    /// Room chat-protocol compatibility with this client.
+    pub compatibility: RoomCompatibility,
+    /// Publisher-authentication verdict at receipt (authority verification
+    /// status: [`AdvertisementAuth::Verified`] / `MissingSignature`).
+    pub auth: AdvertisementAuth,
+    /// Whether the stored publisher is the room's designated authority
+    /// (publisher == `owner_peer_id`) — canonical metadata.
+    pub is_authority: bool,
+    /// Local membership state (Joined / NotJoined / Blocked / ...).
+    pub local_join_state: LocalJoinState,
+    /// Conflict state: `true` when different non-authority sources claimed
+    /// conflicting metadata and no canonical authority could be proven.
+    pub conflict: bool,
+}
+
+/// Shorten a room id for diagnostics/logging: the first 8 hex characters of
+/// the 32-byte topic, followed by an ellipsis (e.g. `ab12cd34…`).
+///
+/// The full room id is a stable identifier, but logs and diagnostics should
+/// never dump full identifiers or advertisement payloads (PDF Task 8.1 step
+/// 3: log a safe shortened identifier rather than sensitive payloads).
+pub fn short_room_id(room_id: &TopicId) -> String {
+    let bytes = room_id.as_bytes();
+    let mut out = String::with_capacity(9);
+    for b in &bytes[..4] {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out.push('…');
+    out
+}
+
+// ---------------------------------------------------------------------------
 // RoomDirectory
 // ---------------------------------------------------------------------------
 
@@ -469,6 +528,13 @@ pub struct RoomDirectory {
     /// [`default_local_capabilities`]; the discovery service replaces it
     /// when the app updates the local capability set.
     local_capabilities: CapabilitySet,
+    /// Optional TTL-expiry counter sink (BORU-DIR-22, PDF Task 8.1 step 1).
+    /// When set, every TTL eviction bumps it so the "expired
+    /// advertisements" debug counter is truthful even though eviction runs
+    /// inside this cache rather than at the service boundary. Wired by the
+    /// discovery service from [`crate::diagnostics::DirectoryCounters`];
+    /// `None` keeps the cache usable standalone (and is the default).
+    expired_sink: Option<Arc<AtomicU64>>,
 }
 
 impl RoomDirectory {
@@ -487,7 +553,15 @@ impl RoomDirectory {
             max_bytes,
             local_facts: LocalRoomFacts::default(),
             local_capabilities: default_local_capabilities(),
+            expired_sink: None,
         }
+    }
+
+    /// Wire an optional TTL-expiry counter (BORU-DIR-22). Every eviction in
+    /// [`evict_expired_at`](Self::evict_expired_at) bumps the sink so
+    /// directory diagnostics can count expired advertisements.
+    pub fn set_expired_sink(&mut self, sink: Option<Arc<AtomicU64>>) {
+        self.expired_sink = sink;
     }
 
     /// Replace the local capability set used to negotiate optional room
@@ -774,6 +848,13 @@ impl RoomDirectory {
                 self.total_bytes = self.total_bytes.saturating_sub(entry.bytes);
             }
         }
+        // BORU-DIR-22 (PDF Task 8.1): count TTL expirations so directory
+        // diagnostics can distinguish "expired" from "never advertised" or
+        // "rejected". The sink is optional (wired by the discovery service);
+        // `None` keeps the cache usable standalone.
+        if let Some(sink) = &self.expired_sink {
+            sink.fetch_add(expired.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        }
         expired
     }
 
@@ -814,6 +895,53 @@ impl RoomDirectory {
     pub fn snapshot_all(&self) -> Vec<DirectoryEntry> {
         let mut rooms: Vec<DirectoryEntry> = self.entries.values().cloned().collect();
         rooms.sort_by(|a, b| a.advert.room_id.as_bytes().cmp(b.advert.room_id.as_bytes()));
+        rooms
+    }
+
+    /// Developer-facing per-room diagnostics (BORU-DIR-22, PDF Task 8.1
+    /// step 2).
+    ///
+    /// For **every cached room** (including hidden/blocked ones — a
+    /// developer debugging discovery wants to see why a room is *not*
+    /// visible too) this returns a metadata-level record with a safe
+    /// shortened room identifier ([`RoomDiagnosticsEntry`]): last seen,
+    /// expiry, compatibility, authority verification status, and local
+    /// membership state. It deliberately contains **no chat contents**,
+    /// no message bodies, no private room history, and no member
+    /// identities — directory diagnostics stay separate from room-message
+    /// diagnostics (PDF Core rule).
+    ///
+    /// Deterministic order (by room_id bytes) so output never churns.
+    pub fn diagnostics_snapshot(&self) -> Vec<RoomDiagnosticsEntry> {
+        self.diagnostics_snapshot_at(Instant::now())
+    }
+
+    /// [`diagnostics_snapshot`](Self::diagnostics_snapshot) with an explicit
+    /// `now` — deterministic-time core used by tests.
+    pub fn diagnostics_snapshot_at(&self, now: Instant) -> Vec<RoomDiagnosticsEntry> {
+        let mut rooms: Vec<RoomDiagnosticsEntry> = self
+            .entries
+            .values()
+            .map(|entry| {
+                let last_seen_age = now.saturating_duration_since(entry.last_seen);
+                let expires_in = entry.expires_at.saturating_duration_since(now);
+                let is_authority = entry
+                    .advert
+                    .is_authoritative_publisher(&entry.publisher);
+                RoomDiagnosticsEntry {
+                    room_id_short: short_room_id(&entry.advert.room_id),
+                    room_name: entry.advert.room_name.clone(),
+                    last_seen_age_secs: last_seen_age.as_secs(),
+                    expires_in_secs: expires_in.as_secs(),
+                    compatibility: entry.compatibility,
+                    auth: entry.auth,
+                    is_authority,
+                    local_join_state: entry.local_join_state,
+                    conflict: entry.conflict,
+                }
+            })
+            .collect();
+        rooms.sort_by(|a, b| a.room_id_short.cmp(&b.room_id_short));
         rooms
     }
 
@@ -2345,5 +2473,147 @@ mod tests {
             derive_local_state(compatible, false, false, false),
             LocalJoinState::NotJoined
         );
+    }
+
+    // ── Directory diagnostics (BORU-DIR-22, PDF Phase 8 Task 8.1) ─────
+
+    /// The per-room diagnostics view records last_seen age, expiry,
+    /// compatibility, authority verification status, and local membership
+    /// state for every cached room (including hidden ones), using a safe
+    /// shortened room id — and contains no chat contents or private room
+    /// history.
+    #[test]
+    fn diagnostics_snapshot_records_required_fields_with_short_ids() {
+        let mut dir = RoomDirectory::new();
+        let room = topic(1);
+        let owner = key(0x42);
+        let now = t0();
+
+        let mut advert = ad_named(room, 0x42, "lobby", 300);
+        advert.sign(&secret_key(0x42)); // verified + authoritative publisher
+        dir.apply_advertisement_at(
+            advert.clone(),
+            owner,
+            verified_auth(owner),
+            1,
+            1000,
+            now,
+        );
+        // Hide the room locally: the browse surface drops it, but
+        // diagnostics must still see it (a developer debugging discovery
+        // wants to know why the room is not visible).
+        dir.sync_local_states(facts(&[], &[], &[room]));
+
+        let rows = dir.diagnostics_snapshot_at(now);
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        // Safe shortened identifier — prefix + ellipsis, never the full id.
+        assert_eq!(row.room_id_short, short_room_id(&room));
+        assert!(row.room_id_short.ends_with('…'));
+        assert!(row.room_id_short.chars().count() < 10);
+        assert_ne!(row.room_id_short, format!("{room:?}"));
+        // Required per-room fields (PDF Task 8.1 step 2).
+        assert_eq!(row.room_name, "lobby");
+        assert_eq!(row.last_seen_age_secs, 0);
+        assert!(row.expires_in_secs >= 300 - 1, "expiry ~ now + TTL");
+        assert_eq!(row.compatibility, RoomCompatibility::Compatible);
+        assert!(row.auth.is_verified(), "authority verification status");
+        assert!(row.is_authority, "publisher is the room authority");
+        assert_eq!(row.local_join_state, LocalJoinState::Blocked);
+        assert!(!row.conflict);
+
+        // Metadata-level only: no chat contents, no private history, no
+        // signature payload, no member identities.
+        let debug = format!("{rows:?}");
+        assert!(!debug.contains("message"));
+        assert!(!debug.contains("history"));
+        assert!(!debug.contains("signature"));
+        assert!(!debug.contains("secret"));
+    }
+
+    /// The diagnostics view reflects recency/expiry age at the sampled
+    /// time (deterministic `_at` core).
+    #[test]
+    fn diagnostics_snapshot_reports_age_and_expiry() {
+        let mut dir = RoomDirectory::new();
+        let room = topic(1);
+        let owner = key(0x42);
+        let now = t0();
+
+        dir.apply_advertisement_at(
+            ad_named(room, 0x42, "aging", 300),
+            owner,
+            verified_auth(owner),
+            1,
+            1000,
+            now,
+        );
+
+        let later = now + Duration::from_secs(30);
+        let rows = dir.diagnostics_snapshot_at(later);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].last_seen_age_secs, 30);
+        assert!(rows[0].expires_in_secs <= 300 - 30);
+        assert!(rows[0].expires_in_secs >= 300 - 30 - 1);
+    }
+
+    /// The optional TTL-expiry counter sink is bumped once per eviction —
+    /// the discovery service wires it so "expired advertisements"
+    /// diagnostics are truthful even when eviction runs inside the cache.
+    #[test]
+    fn evict_expired_bumps_expired_sink() {
+        let mut dir = RoomDirectory::new();
+        let counters = crate::diagnostics::DirectoryCounters::new();
+        dir.set_expired_sink(Some(counters.expired_sink()));
+
+        let room = topic(1);
+        let owner = key(0x42);
+        let now = t0();
+        dir.apply_advertisement_at(
+            ad_named(room, 0x42, "room", 1),
+            owner,
+            verified_auth(owner),
+            1,
+            1000,
+            now,
+        );
+        assert_eq!(counters.advertisements_expired(), 0);
+
+        let evicted = dir.evict_expired_at(now + Duration::from_secs(2));
+        assert_eq!(evicted, vec![room]);
+        assert_eq!(counters.advertisements_expired(), 1);
+    }
+
+    /// Without a sink (the default), the cache still evicts normally —
+    /// the sink is optional and never changes eviction behaviour.
+    #[test]
+    fn evict_expired_without_sink_is_unchanged() {
+        let mut dir = RoomDirectory::new();
+        let room = topic(1);
+        let owner = key(0x42);
+        let now = t0();
+        dir.apply_advertisement_at(
+            ad_named(room, 0x42, "room", 1),
+            owner,
+            verified_auth(owner),
+            1,
+            1000,
+            now,
+        );
+        assert_eq!(dir.evict_expired_at(now + Duration::from_secs(2)).len(), 1);
+        assert!(dir.is_empty());
+    }
+
+    /// `short_room_id` produces a stable, compact, log-safe identifier.
+    #[test]
+    fn short_room_id_is_compact_and_deterministic() {
+        let a = topic(1);
+        let b = topic(2);
+        let sa = short_room_id(&a);
+        let sb = short_room_id(&b);
+        assert_eq!(sa, short_room_id(&a), "deterministic");
+        assert_ne!(sa, sb, "distinct rooms produce distinct shorts");
+        assert_eq!(sa.chars().count(), 9, "4 hex chars + ellipsis");
+        assert!(sa.ends_with('…'));
     }
 }

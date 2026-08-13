@@ -153,7 +153,7 @@ use crate::control_plane::privacy::{
 };
 pub use crate::control_plane::reconnect::ReconnectSignal;
 use crate::control_plane::reconnect::{ReconnectHandle, ReconnectScheduler, ReconnectState};
-use crate::diagnostics::{DiagnosticCounters, DIAGNOSTIC_COUNTERS};
+use crate::diagnostics::{DiagnosticCounters, DirectoryCounters, DIAGNOSTIC_COUNTERS, DIRECTORY_COUNTERS};
 use crate::discovery_message::{check_discovery_version, DiscoveryMessage, DiscoveryVersionCheck};
 use crate::proto::TopicId;
 use crate::room_directory::{AdvertiseOutcome, RoomDirectory};
@@ -1217,6 +1217,14 @@ struct ReceiveCore {
     /// [`DIAGNOSTIC_COUNTERS`] by default so the frontend/MCP can read the
     /// same values; tests inject an isolated instance.
     counters: DiagnosticCounters,
+    /// Atomic room-directory advertisement counters (BORU-DIR-22, PDF
+    /// Phase 8 Task 8.1). Cloned from the global [`DIRECTORY_COUNTERS`] by
+    /// default so the frontend/MCP can read the same values; tests inject
+    /// an isolated instance. Deliberately separate from `counters` (which
+    /// tracks discovery *peers* and *topics*) — directory diagnostics
+    /// answer *"what happened to room advertisements"* and stay distinct
+    /// from room-message diagnostics (PDF Core rule).
+    directory_counters: DirectoryCounters,
     /// Bounded local room-directory cache (BORU-DIR-10 / PDF Phase 4 Task
     /// 4.1): keyed by stable room_id, stores the latest valid advertisement
     /// plus provenance (publisher, auth verdict, first/last seen, expiry,
@@ -1496,10 +1504,20 @@ impl ReceiveCore {
                 //   metadata) is decided by
                 //   [`PublicRoomAdvertisement::is_authoritative_publisher`].
                 if let ControlPayload::PublicRoomAdvertisement(advert) = &envelope.payload {
+                    // BORU-DIR-22 (PDF Task 8.1): a decoded, guard-admitted
+                    // room advertisement was received. Count it before the
+                    // auth verdict so "received" includes both accepted and
+                    // rejected advertisements (the developer can tell a
+                    // room was *seen* even when it never entered the cache).
+                    self.directory_counters.record_advertisement_received();
                     let auth = advert.verify_signed(&envelope.sender_node_id);
                     match auth {
                         AdvertisementAuth::InvalidSignature => {
                             self.counters.record_malformed_discovery_packet();
+                            // BORU-DIR-22: auth-failed advertisement counted
+                            // as rejected (distinct from expired / withdrawn /
+                            // never-advertised).
+                            self.directory_counters.record_advertisement_rejected();
                             warn!(
                                 sender = %envelope.sender_node_id.fmt_short(),
                                 sequence = envelope.sequence,
@@ -1552,6 +1570,9 @@ impl ReceiveCore {
                                 );
                             match outcome {
                                 AdvertiseOutcome::Added | AdvertiseOutcome::Refreshed => {
+                                    // BORU-DIR-22: the advertisement entered
+                                    // or refreshed the directory cache.
+                                    self.directory_counters.record_advertisement_accepted();
                                     let _ = self
                                         .control_events_tx
                                         .send(ControlEvent::RoomAdvertisement(
@@ -1565,6 +1586,10 @@ impl ReceiveCore {
                                         ));
                                 }
                                 AdvertiseOutcome::Duplicate => {
+                                    // BORU-DIR-22: a repeated/identical
+                                    // advertisement was collapsed into the
+                                    // existing entry (no second card).
+                                    self.directory_counters.record_advertisement_deduplicated();
                                     trace!(
                                         sender = %envelope.sender_node_id.fmt_short(),
                                         sequence = envelope.sequence,
@@ -1641,10 +1666,18 @@ impl ReceiveCore {
                             // entry when the withdrawing authority matches
                             // the stored owner. TTL expiry remains the
                             // safety net if a withdrawal is missed.
-                            self.room_directory
+                            let removed = self
+                                .room_directory
                                 .lock()
                                 .expect("room directory lock poisoned")
                                 .apply_withdrawal(withdrawal.room_id, withdrawal.owner_peer_id);
+                            // BORU-DIR-22 (PDF Task 8.1): a listing removed
+                            // by a verified authoritative withdrawal is
+                            // counted as withdrawn (distinct from expired /
+                            // rejected / never-advertised).
+                            if removed {
+                                self.directory_counters.record_advertisement_withdrawn();
+                            }
                             let _ = self
                                 .control_events_tx
                                 .send(ControlEvent::RoomWithdrawal(RoomWithdrawalEvent {
@@ -1678,6 +1711,16 @@ impl ReceiveCore {
                         IncomingOutcome::SpoofedSender
                     }
                     GuardRejectReason::RateLimited => {
+                        // BORU-DIR-22 (PDF Task 8.1): count advertisement
+                        // envelopes dropped by the per-sender rate limiter
+                        // (distinct from rejected-by-auth advertisements —
+                        // the rate limiter fires before decode/policy).
+                        if matches!(
+                            &envelope.payload,
+                            ControlPayload::PublicRoomAdvertisement(_)
+                        ) {
+                            self.directory_counters.record_advertisement_rate_limited();
+                        }
                         warn!(
                             sender = %delivered_from.fmt_short(),
                             "discovery: control-plane rate limit exceeded",
@@ -2038,21 +2081,23 @@ impl DiscoveryService {
             receiver,
             local_node,
             DIAGNOSTIC_COUNTERS.clone(),
+            DIRECTORY_COUNTERS.clone(),
         )
     }
 
-    /// Build a running service with an explicit counter set.
+    /// Build a running service with explicit counter sets.
     ///
     /// Production callers use [`from_subscription`](Self::from_subscription),
-    /// which shares the global [`DIAGNOSTIC_COUNTERS`]; tests inject an
-    /// isolated [`DiagnosticCounters`] so counter assertions never race with
-    /// other tests or live app traffic.
+    /// which shares the global [`DIAGNOSTIC_COUNTERS`] and
+    /// [`DIRECTORY_COUNTERS`]; tests inject isolated instances so counter
+    /// assertions never race with other tests or live app traffic.
     fn from_subscription_with_counters(
         topic: TopicId,
         sender: GossipSender,
         receiver: GossipReceiver,
         local_node: PublicKey,
         counters: DiagnosticCounters,
+        directory_counters: DirectoryCounters,
     ) -> Self {
         let registry = Arc::new(Mutex::new(PeerRegistry::new()));
         let (peer_updates_tx, _) = broadcast::channel(PEER_UPDATES_CAPACITY);
@@ -2066,6 +2111,15 @@ impl DiscoveryService {
         // BORU-DIR-10: the bounded local room-directory cache, owned by the
         // discovery/control-plane layer (PDF Phase 4 Task 4.1).
         let room_directory = Arc::new(Mutex::new(RoomDirectory::new()));
+        // BORU-DIR-22 (PDF Phase 8 Task 8.1): wire the TTL-expiry counter
+        // into the cache so "expired advertisements" diagnostics are
+        // truthful even though eviction runs inside the cache. The
+        // directory is otherwise a pure cache with no diagnostics
+        // dependency.
+        room_directory
+            .lock()
+            .expect("room directory lock poisoned")
+            .set_expired_sink(Some(directory_counters.expired_sink()));
         let core = ReceiveCore {
             local_node,
             topic,
@@ -2077,6 +2131,7 @@ impl DiscoveryService {
             reconnect,
             reconnect_tx,
             counters,
+            directory_counters,
             room_directory,
         };
         let announce = AnnounceHandle::new(sender.clone(), local_node);
@@ -3967,6 +4022,29 @@ mod tests {
             receiver,
             local_node,
             counters,
+            DirectoryCounters::new(),
+        )
+    }
+
+    /// Build a running service with an ISOLATED **directory** counter set
+    /// (BORU-DIR-22, PDF Phase 8 Task 8.1). Counter assertions read this
+    /// instance directly, so they never race with other tests or live app
+    /// traffic on the global [`DIRECTORY_COUNTERS`].
+    fn test_service_with_directory_counters(
+        local_node: PublicKey,
+        directory_counters: DirectoryCounters,
+    ) -> DiscoveryService {
+        let (cmd_tx, _cmd_rx) = irpc_mpsc::channel::<Command>(64);
+        let (_ev_tx, ev_rx) = irpc_mpsc::channel::<Event>(64);
+        let sender = GossipSender::new(cmd_tx);
+        let receiver = GossipReceiver::new(ev_rx);
+        DiscoveryService::from_subscription_with_counters(
+            test_topic(),
+            sender,
+            receiver,
+            local_node,
+            DiagnosticCounters::new(),
+            directory_counters,
         )
     }
 
@@ -6743,6 +6821,367 @@ mod tests {
             guard.get(&advert.room_id).unwrap().local_join_state,
             crate::room_directory::LocalJoinState::NotJoined
         );
+    }
+
+    // ── BORU-DIR-22 (PDF Phase 8 Task 8.1): directory diagnostics ─────
+
+    /// A decoded, guard-admitted advertisement bumps `received`; a cache
+    /// insert bumps `accepted`. The counters stay separate from the
+    /// discovery-peer counters.
+    #[tokio::test]
+    async fn directory_counters_valid_advertisement_increments_received_and_accepted() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let directory_counters = DirectoryCounters::new();
+        let service = test_service_with_directory_counters(local, directory_counters.clone());
+
+        let mut advert = test_advert();
+        advert.sign(&test_secret_key(0xBB));
+        let bytes =
+            ControlEnvelope::public_room_advertisement(peer, 7, 1_700_000_000, advert.clone())
+                .encode();
+        assert_eq!(service.handle_incoming(&bytes, peer), IncomingOutcome::ControlMessage);
+
+        let snap = directory_counters.snapshot();
+        assert_eq!(snap.advertisements_received, 1);
+        assert_eq!(snap.advertisements_accepted, 1);
+        assert_eq!(snap.advertisements_rejected, 0);
+        assert_eq!(snap.advertisements_expired, 0);
+        assert_eq!(snap.advertisements_withdrawn, 0);
+        assert_eq!(snap.advertisements_deduplicated, 0);
+        assert_eq!(snap.advertisements_rate_limited, 0);
+    }
+
+    /// An advertisement whose signature fails verification is counted as
+    /// received AND rejected (the developer can tell the room was *seen*
+    /// but never entered the cache).
+    #[tokio::test]
+    async fn directory_counters_invalid_signature_increments_rejected() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let directory_counters = DirectoryCounters::new();
+        let service = test_service_with_directory_counters(local, directory_counters.clone());
+
+        // Sign with a DIFFERENT key than the envelope sender → invalid.
+        let mut advert = test_advert();
+        advert.sign(&test_secret_key(0xCC));
+        let bytes =
+            ControlEnvelope::public_room_advertisement(peer, 7, 1_700_000_000, advert).encode();
+        assert_eq!(
+            service.handle_incoming(&bytes, peer),
+            IncomingOutcome::AdvertisementAuthRejected
+        );
+
+        let snap = directory_counters.snapshot();
+        assert_eq!(snap.advertisements_received, 1);
+        assert_eq!(snap.advertisements_rejected, 1);
+        assert_eq!(snap.advertisements_accepted, 0);
+        assert_eq!(service.room_directory().lock().unwrap().len(), 0);
+    }
+
+    /// A repeated/identical advertisement (same content, different
+    /// publisher) is deduplicated — `deduplicated` bumps, `accepted` does
+    /// not (the entry already existed).
+    #[tokio::test]
+    async fn directory_counters_duplicate_increments_deduplicated() {
+        let local = test_key(0xAA);
+        let peer_a = test_key(0xBB);
+        let peer_b = test_key(0xCC);
+        let directory_counters = DirectoryCounters::new();
+        let service = test_service_with_directory_counters(local, directory_counters.clone());
+
+        let mut advert = test_advert();
+        advert.sign(&test_secret_key(0xBB));
+        let first =
+            ControlEnvelope::public_room_advertisement(peer_a, 7, 1_700_000_000, advert.clone())
+                .encode();
+        assert_eq!(service.handle_incoming(&first, peer_a), IncomingOutcome::ControlMessage);
+
+        // Same content from a different publisher → directory-level dedup.
+        let mut same = test_advert();
+        same.sign(&test_secret_key(0xCC));
+        let second =
+            ControlEnvelope::public_room_advertisement(peer_b, 1, 1_700_000_100, same).encode();
+        assert_eq!(service.handle_incoming(&second, peer_b), IncomingOutcome::ControlMessage);
+
+        let snap = directory_counters.snapshot();
+        assert_eq!(snap.advertisements_received, 2);
+        assert_eq!(snap.advertisements_accepted, 1, "only the first insert is accepted");
+        assert_eq!(snap.advertisements_deduplicated, 1);
+        assert_eq!(service.room_directory().lock().unwrap().len(), 1);
+    }
+
+    /// A verified authoritative withdrawal that removes a listing bumps
+    /// `withdrawn` (distinct from `expired`).
+    #[tokio::test]
+    async fn directory_counters_withdrawal_increments_withdrawn() {
+        let local = test_key(0xAA);
+        let owner = test_key(0xBB);
+        let directory_counters = DirectoryCounters::new();
+        let service = test_service_with_directory_counters(local, directory_counters.clone());
+
+        let mut advert = test_advert_signed(0xBB);
+        let bytes =
+            ControlEnvelope::public_room_advertisement(owner, 7, 1_700_000_000, advert.clone())
+                .encode();
+        assert_eq!(service.handle_incoming(&bytes, owner), IncomingOutcome::ControlMessage);
+        assert_eq!(service.room_directory().lock().unwrap().len(), 1);
+
+        let mut withdrawal = crate::control_plane::advertisement::PublicRoomWithdrawal::minimal(
+            advert.room_id,
+            owner.as_bytes().to_owned(),
+        );
+        withdrawal.sign(&test_secret_key(0xBB));
+        let bytes =
+            ControlEnvelope::public_room_withdrawal(owner, 8, 1_700_000_100, withdrawal).encode();
+        assert_eq!(service.handle_incoming(&bytes, owner), IncomingOutcome::ControlMessage);
+        assert_eq!(service.room_directory().lock().unwrap().len(), 0);
+
+        let snap = directory_counters.snapshot();
+        assert_eq!(snap.advertisements_withdrawn, 1);
+        assert_eq!(snap.advertisements_expired, 0);
+    }
+
+    /// A non-authoritative withdrawal cannot remove the listing, so
+    /// `withdrawn` does NOT bump.
+    #[tokio::test]
+    async fn directory_counters_non_authoritative_withdrawal_does_not_count() {
+        let local = test_key(0xAA);
+        let owner = test_key(0xBB);
+        let member = test_key(0xCC);
+        let directory_counters = DirectoryCounters::new();
+        let service = test_service_with_directory_counters(local, directory_counters.clone());
+
+        let mut advert = test_advert_signed(0xBB);
+        let bytes =
+            ControlEnvelope::public_room_advertisement(owner, 7, 1_700_000_000, advert.clone())
+                .encode();
+        assert_eq!(service.handle_incoming(&bytes, owner), IncomingOutcome::ControlMessage);
+
+        let mut withdrawal = crate::control_plane::advertisement::PublicRoomWithdrawal::minimal(
+            advert.room_id,
+            owner.as_bytes().to_owned(),
+        );
+        withdrawal.sign(&test_secret_key(0xCC));
+        let bytes =
+            ControlEnvelope::public_room_withdrawal(member, 24, 1_700_000_100, withdrawal).encode();
+        assert_eq!(
+            service.handle_incoming(&bytes, member),
+            IncomingOutcome::WithdrawalNotAuthoritative
+        );
+
+        let snap = directory_counters.snapshot();
+        assert_eq!(snap.advertisements_withdrawn, 0);
+        assert_eq!(service.room_directory().lock().unwrap().len(), 1);
+    }
+
+    /// Advertisements beyond the per-sender rate limit are counted as
+    /// rate-limited (the developer can tell a flood was dropped, distinct
+    /// from auth rejection).
+    #[tokio::test]
+    async fn directory_counters_rate_limited_increments_on_flood() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let directory_counters = DirectoryCounters::new();
+        let service = test_service_with_directory_counters(local, directory_counters.clone());
+
+        // Fill the default 60-frame / 10s window with ad envelopes.
+        let mut last_outcome = IncomingOutcome::SelfMessage;
+        for seq in 0..60u64 {
+            let mut advert = test_advert();
+            advert.sign(&test_secret_key(0xBB));
+            let bytes = ControlEnvelope::public_room_advertisement(
+                peer,
+                seq,
+                1_700_000_000,
+                advert,
+            )
+            .encode();
+            last_outcome = service.handle_incoming(&bytes, peer);
+        }
+        assert_eq!(last_outcome, IncomingOutcome::ControlMessage);
+
+        let mut extra = test_advert();
+        extra.sign(&test_secret_key(0xBB));
+        let bytes =
+            ControlEnvelope::public_room_advertisement(peer, 60, 1_700_000_000, extra).encode();
+        assert_eq!(service.handle_incoming(&bytes, peer), IncomingOutcome::RateLimited);
+
+        let snap = directory_counters.snapshot();
+        assert_eq!(snap.advertisements_rate_limited, 1);
+        assert_eq!(snap.advertisements_rejected, 0, "rate limit != auth rejection");
+    }
+
+    /// Expired advertisements are counted by the cache-side TTL sink wired
+    /// from [`DirectoryCounters`] (the service passes its own instance).
+    #[tokio::test]
+    async fn directory_counters_expired_increments_via_cache_sink() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let directory_counters = DirectoryCounters::new();
+        let service = test_service_with_directory_counters(local, directory_counters.clone());
+
+        // Minimum admissible TTL is 60s (guard policy); keep it valid so
+        // the advertisement is cached, then evict past the TTL.
+        let mut advert = test_advert();
+        advert.expires_after_secs = 60;
+        advert.sign(&test_secret_key(0xBB));
+        let bytes =
+            ControlEnvelope::public_room_advertisement(peer, 7, 1_700_000_000, advert.clone())
+                .encode();
+        assert_eq!(service.handle_incoming(&bytes, peer), IncomingOutcome::ControlMessage);
+        assert_eq!(service.room_directory().lock().unwrap().len(), 1);
+
+        // The service's cache has the sink wired; evict past the TTL.
+        let dir = service.room_directory();
+        let mut dir = dir.lock().unwrap();
+        let evicted = dir.evict_expired_at(std::time::Instant::now() + Duration::from_secs(61));
+        assert_eq!(evicted, vec![advert.room_id]);
+        drop(dir);
+
+        let snap = directory_counters.snapshot();
+        assert_eq!(snap.advertisements_expired, 1);
+        assert_eq!(snap.advertisements_withdrawn, 0);
+    }
+
+    /// The per-room diagnostics view surfaces last_seen, expiry,
+    /// compatibility, auth status, and local membership state for every
+    /// cached room (including hidden ones) using safe shortened ids — and
+    /// contains NO chat contents, message bodies, or private room history.
+    #[tokio::test]
+    async fn directory_diagnostics_snapshot_is_metadata_only_with_short_ids() {
+        use crate::room_directory::{LocalJoinState, RoomCompatibility};
+
+        let local = test_key(0xAA);
+        let owner = test_key(0xBB);
+        let directory_counters = DirectoryCounters::new();
+        let service = test_service_with_directory_counters(local, directory_counters.clone());
+
+        // Build + sign the advert in one step: modifying content AFTER
+        // signing would invalidate the canonical-bytes signature.
+        let mut advert = crate::control_plane::advertisement::PublicRoomAdvertisement::minimal(
+            crate::proto::state::TopicId::from_bytes([0x41; 32]),
+            "Test Room".into(),
+            owner.as_bytes().to_owned(),
+        );
+        advert.short_description = "this is public metadata".into();
+        advert.sign(&test_secret_key(0xBB));
+        let bytes =
+            ControlEnvelope::public_room_advertisement(owner, 7, 1_700_000_000, advert.clone())
+                .encode();
+        assert_eq!(service.handle_incoming(&bytes, owner), IncomingOutcome::ControlMessage);
+
+        let dir = service.room_directory();
+        let guard = dir.lock().unwrap();
+        let rows = guard.diagnostics_snapshot();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        // Safe shortened identifier: prefix + ellipsis, never the full id.
+        assert!(row.room_id_short.ends_with('…'));
+        assert_ne!(row.room_id_short, advert.room_id.to_string());
+        // Per-room diagnostics required by PDF Task 8.1 step 2.
+        assert_eq!(row.compatibility, RoomCompatibility::Compatible);
+        assert!(row.auth.is_verified());
+        assert!(row.is_authority);
+        assert_eq!(row.local_join_state, LocalJoinState::NotJoined);
+        assert!(!row.conflict);
+        // Recency/expiry are populated (>= 0 age, > 0 remaining TTL).
+        assert!(row.expires_in_secs > 0);
+        // Metadata-level only: no chat contents, no private history.
+        let debug = format!("{rows:?}");
+        assert!(!debug.contains("chat contents"));
+        assert!(!debug.contains("private history"));
+        assert!(!debug.contains("signature"));
+    }
+
+    /// A developer can tell whether a room was never advertised, rejected,
+    /// expired, or simply failed to join (PDF Task 8.1 acceptance):
+    /// * never advertised → absent from the diagnostics view;
+    /// * rejected → the rejected counter is non-zero and it is not cached;
+    /// * expired → the expired counter is non-zero after TTL eviction;
+    /// * failed to join → still cached with `local_join_state` NotJoined.
+    #[tokio::test]
+    async fn directory_diagnostics_distinguishes_room_outcomes() {
+        use crate::room_directory::LocalJoinState;
+
+        let local = test_key(0xAA);
+        let owner = test_key(0xBB);
+        let directory_counters = DirectoryCounters::new();
+        let service = test_service_with_directory_counters(local, directory_counters.clone());
+
+        // A room advertised, accepted, then expired (min TTL 60s valid).
+        let mut expired_advert = test_advert();
+        expired_advert.expires_after_secs = 60;
+        let expired_room_id = expired_advert.room_id;
+        expired_advert.sign(&test_secret_key(0xBB));
+        let bytes = ControlEnvelope::public_room_advertisement(
+            owner,
+            7,
+            1_700_000_000,
+            expired_advert,
+        )
+        .encode();
+        assert_eq!(service.handle_incoming(&bytes, owner), IncomingOutcome::ControlMessage);
+        // A room that failed verification (rejected).
+        let mut bad = test_advert();
+        bad.room_id = crate::proto::state::TopicId::from_bytes([0x66; 32]);
+        let bad_room_id = bad.room_id;
+        bad.sign(&test_secret_key(0xCC));
+        let bytes =
+            ControlEnvelope::public_room_advertisement(owner, 8, 1_700_000_000, bad).encode();
+        assert_eq!(
+            service.handle_incoming(&bytes, owner),
+            IncomingOutcome::AdvertisementAuthRejected
+        );
+
+        // Still-cached room (never joined, still advertised).
+        let mut live_advert = test_advert();
+        live_advert.room_id = crate::proto::state::TopicId::from_bytes([0x77; 32]);
+        let live_room_id = live_advert.room_id;
+        live_advert.sign(&test_secret_key(0xBB));
+        let bytes = ControlEnvelope::public_room_advertisement(
+            owner,
+            9,
+            1_700_000_000,
+            live_advert,
+        )
+        .encode();
+        assert_eq!(service.handle_incoming(&bytes, owner), IncomingOutcome::ControlMessage);
+
+        // Expire the first room.
+        {
+            let dir = service.room_directory();
+            let mut dir = dir.lock().unwrap();
+            dir.evict_expired_at(std::time::Instant::now() + Duration::from_secs(61));
+        }
+
+        let snap = directory_counters.snapshot();
+        let dir = service.room_directory();
+        let guard = dir.lock().unwrap();
+        let rows = guard.diagnostics_snapshot();
+        let short_ids: Vec<&str> = rows.iter().map(|r| r.room_id_short.as_str()).collect();
+
+        // Expired room: was advertised+accepted, now gone, expired counter
+        // incremented — distinguishable from "never advertised".
+        assert!(snap.advertisements_expired >= 1);
+        assert!(!short_ids
+            .iter()
+            .any(|s| *s == crate::room_directory::short_room_id(&expired_room_id)));
+        // Rejected room: never entered the cache, rejected counter non-zero.
+        assert!(snap.advertisements_rejected >= 1);
+        assert!(!short_ids
+            .iter()
+            .any(|s| *s == crate::room_directory::short_room_id(&bad_room_id)));
+        // Live room: still cached, NotJoined — "failed to join" (or never
+        // attempted) is visible in the diagnostics view.
+        assert!(short_ids
+            .iter()
+            .any(|s| *s == crate::room_directory::short_room_id(&live_room_id)));
+        let live_row = rows
+            .iter()
+            .find(|r| r.room_id_short == crate::room_directory::short_room_id(&live_room_id))
+            .expect("live room in diagnostics");
+        assert_eq!(live_row.local_join_state, LocalJoinState::NotJoined);
     }
 
     /// `send_control` serialises a control-plane envelope (magic `BC`) and
