@@ -676,6 +676,12 @@ pub struct UiThemeConfig {
 /// line/column from the TOML parser.
 #[derive(Debug)]
 pub enum UiThemeConfigError {
+    /// The file does not exist. Only the inspector's explicit "Reload From
+    /// Disk" action treats this as an error (there is nothing to reload);
+    /// the startup/watcher load path treats a missing file as "no
+    /// overrides" and returns an empty config instead.
+    #[cfg(feature = "dev-ui")]
+    NotFound { path: PathBuf },
     /// The file exists but could not be read (permissions, I/O, …).
     Io {
         path: PathBuf,
@@ -691,6 +697,10 @@ pub enum UiThemeConfigError {
 impl std::fmt::Display for UiThemeConfigError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            #[cfg(feature = "dev-ui")]
+            UiThemeConfigError::NotFound { path } => {
+                write!(f, "dev theme override {} not found", path.display())
+            }
             UiThemeConfigError::Io { path, source } => write!(
                 f,
                 "cannot read dev theme override {}: {source}",
@@ -709,6 +719,8 @@ impl std::fmt::Display for UiThemeConfigError {
 impl std::error::Error for UiThemeConfigError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            #[cfg(feature = "dev-ui")]
+            UiThemeConfigError::NotFound { .. } => None,
             UiThemeConfigError::Io { source, .. } => Some(source),
             UiThemeConfigError::Parse { source, .. } => Some(source),
         }
@@ -737,6 +749,28 @@ pub fn load_ui_theme_config(data_dir: &Path) -> Result<UiThemeConfig, UiThemeCon
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Ok(UiThemeConfig::default());
+        }
+        Err(source) => return Err(UiThemeConfigError::Io { path, source }),
+    };
+    parse_ui_theme_config(&text).map_err(|source| UiThemeConfigError::Parse { path, source })
+}
+
+/// Reload theme overrides from `<data_dir>/boru-ui.toml` for the
+/// inspector's "Reload From Disk" action (PDF Task 13 / BORU-UI-13).
+///
+/// Unlike [`load_ui_theme_config`] — which treats a **missing** file as
+/// "no overrides" so startup never fails — an explicit reload from disk
+/// treats a missing file as an error: there is nothing to reload, so the
+/// caller keeps the current theme and reports the error (BORU-UI-18).
+/// Malformed files keep the current theme too; the parse error carries
+/// the path and (where available) line/column.
+#[cfg(feature = "dev-ui")]
+pub fn reload_ui_theme_config(data_dir: &Path) -> Result<UiThemeConfig, UiThemeConfigError> {
+    let path = data_dir.join(UI_CONFIG_FILE_NAME);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(UiThemeConfigError::NotFound { path });
         }
         Err(source) => return Err(UiThemeConfigError::Io { path, source }),
     };
@@ -1131,6 +1165,63 @@ play_overlay_size = 70.0
                 assert!(path.ends_with(UI_CONFIG_FILE_NAME));
             }
             Err(other) => panic!("expected Io error, got {other:?}"),
+        }
+    }
+
+    // ── Reload path (BORU-UI-13 / PDF Task 13) — dev-ui feature only ──
+
+    /// Reload From Disk on a missing file must error (unlike the startup
+    /// load path which returns an empty config) so the app keeps the
+    /// current theme and reports the error (BORU-UI-18).
+    #[cfg(feature = "dev-ui")]
+    #[test]
+    fn reload_missing_file_is_an_error() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        assert!(!dir.path().join(UI_CONFIG_FILE_NAME).exists());
+        match reload_ui_theme_config(dir.path()) {
+            Err(UiThemeConfigError::NotFound { path }) => {
+                assert!(path.ends_with(UI_CONFIG_FILE_NAME));
+            }
+            other => panic!("expected NotFound error, got {other:?}"),
+        }
+    }
+
+    /// Reload From Disk on a valid file returns exactly the overrides.
+    #[cfg(feature = "dev-ui")]
+    #[test]
+    fn reload_valid_file_returns_overrides() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join(UI_CONFIG_FILE_NAME),
+            "[sidebar]\nwidth = 280.0\n",
+        )
+        .expect("write theme file");
+        let cfg = reload_ui_theme_config(dir.path()).expect("reloads");
+        assert_eq!(
+            cfg.sidebar.expect("sidebar group").width,
+            Some(280.0),
+            "reload parses the overrides"
+        );
+    }
+
+    /// Reload From Disk on a malformed file errors with the path + parser
+    /// detail, so the app keeps the current theme and reports the error.
+    #[cfg(feature = "dev-ui")]
+    #[test]
+    fn reload_malformed_file_is_an_error() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join(UI_CONFIG_FILE_NAME), "[sidebar\nwidth =")
+            .expect("write malformed theme file");
+        match reload_ui_theme_config(dir.path()) {
+            Err(UiThemeConfigError::Parse { path, source }) => {
+                assert!(path.ends_with(UI_CONFIG_FILE_NAME));
+                let msg = source.to_string();
+                assert!(
+                    !msg.is_empty(),
+                    "parser detail is included for the developer"
+                );
+            }
+            other => panic!("expected Parse error, got {other:?}"),
         }
     }
 

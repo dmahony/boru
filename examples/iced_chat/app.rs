@@ -19103,6 +19103,42 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
+            InspectorMsg::ReloadFromDisk => {
+                // BORU-UI-13: discard unsaved inspector changes and reload
+                // boru-ui.toml from disk through the same merge seam as the
+                // watcher (set_ui_theme_config). On success the loaded
+                // overrides REPLACE the in-memory edits; on a missing or
+                // invalid file the current theme is kept and the error is
+                // reported per BORU-UI-18 (path + parser detail in the
+                // panel status line, full detail in logs).
+                match crate::theme_config::reload_ui_theme_config(&self.data_dir) {
+                    Ok(config) => {
+                        // Discard unsaved edits: replace the stored config
+                        // with the on-disk one and clear any draft text so
+                        // stale half-typed inputs cannot outlive reloads.
+                        self.inspector_draft.float_text.clear();
+                        self.inspector_draft.color_text.clear();
+                        self.inspector_draft.reload_status =
+                            crate::inspector::ThemeReloadStatus::Reloaded;
+                        self.set_ui_theme_config(config);
+                        tracing::info!(
+                            path = %self.data_dir.join(crate::theme_config::UI_CONFIG_FILE_NAME).display(),
+                            "UI Inspector: reloaded boru-ui.toml from disk"
+                        );
+                    }
+                    Err(e) => {
+                        // Keep the last known-good theme; only the panel
+                        // status line changes.
+                        self.inspector_draft.reload_status =
+                            crate::inspector::ThemeReloadStatus::Failed(e.to_string());
+                        tracing::warn!(
+                            error = %e,
+                            "UI Inspector: reload from disk failed; keeping current theme"
+                        );
+                    }
+                }
+                iced::Task::none()
+            }
             InspectorMsg::SetFloat { field, value } => {
                 // Slider edit: apply immediately and clear any stale draft so
                 // the numeric field shows the live value.
@@ -35954,6 +35990,119 @@ fn inspector_save_theme_failure_sets_failed_status() {
 
     // Restore so the app's Drop path (if any) still works.
     app.data_dir = original_data_dir;
+}
+
+#[cfg(feature = "dev-ui")]
+#[test]
+fn inspector_reload_from_disk_discards_unsaved_changes_and_applies_disk_config() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    // Apply an in-memory edit that is NOT saved to disk (unsaved change).
+    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetFloat {
+        field: crate::inspector::ThemeField::SidebarWidth,
+        value: 270.0,
+    }));
+    drop(task);
+    assert_eq!(app.active_theme.sidebar.width, 270.0);
+
+    // Put a DIFFERENT config on disk than the unsaved edit.
+    let path = app.data_dir.join(crate::theme_config::UI_CONFIG_FILE_NAME);
+    std::fs::write(
+        &path,
+        "[sidebar]\nwidth = 250.0\n[chat]\nbubble_max_width = 600.0\n",
+    )
+    .expect("write on-disk theme");
+
+    // Reload From Disk discards the unsaved edit and applies the file.
+    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::ReloadFromDisk));
+    drop(task);
+
+    assert_eq!(
+        app.active_theme.sidebar.width, 250.0,
+        "reload applied the on-disk sidebar value, not the unsaved edit"
+    );
+    assert_eq!(
+        app.active_theme.chat.bubble_max_width, 600.0,
+        "reload applied the on-disk chat value"
+    );
+    assert_eq!(
+        app.inspector_draft.reload_status,
+        crate::inspector::ThemeReloadStatus::Reloaded,
+        "reload success shown in the panel status line"
+    );
+    // The stored overrides now match the file, not the discarded edit.
+    assert_eq!(
+        app.ui_theme_config.sidebar.as_ref().expect("sidebar group").width,
+        Some(250.0),
+        "in-memory overrides replaced by the on-disk config"
+    );
+}
+
+#[cfg(feature = "dev-ui")]
+#[test]
+fn inspector_reload_from_disk_missing_file_keeps_current_theme_and_reports_error() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    // Make an in-memory edit, then ensure NO boru-ui.toml exists on disk.
+    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetFloat {
+        field: crate::inspector::ThemeField::SidebarWidth,
+        value: 270.0,
+    }));
+    drop(task);
+    let path = app.data_dir.join(crate::theme_config::UI_CONFIG_FILE_NAME);
+    let _ = std::fs::remove_file(&path);
+    assert!(!path.exists(), "no theme file on disk");
+
+    let before = app.active_theme;
+    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::ReloadFromDisk));
+    drop(task);
+
+    assert_eq!(
+        app.active_theme, before,
+        "missing file keeps the current theme (BORU-UI-18)"
+    );
+    match &app.inspector_draft.reload_status {
+        crate::inspector::ThemeReloadStatus::Failed(msg) => {
+            assert!(
+                msg.contains("boru-ui.toml"),
+                "failure names the dev theme file: {msg}"
+            );
+        }
+        other => panic!("expected Failed status, got {other:?}"),
+    }
+}
+
+#[cfg(feature = "dev-ui")]
+#[test]
+fn inspector_reload_from_disk_malformed_file_keeps_current_theme_and_reports_error() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    // Make an in-memory edit, then write a MALFORMED file on disk.
+    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetFloat {
+        field: crate::inspector::ThemeField::SidebarWidth,
+        value: 270.0,
+    }));
+    drop(task);
+    let path = app.data_dir.join(crate::theme_config::UI_CONFIG_FILE_NAME);
+    std::fs::write(&path, "[sidebar\nwidth =").expect("write malformed theme file");
+
+    let before = app.active_theme;
+    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::ReloadFromDisk));
+    drop(task);
+
+    assert_eq!(
+        app.active_theme, before,
+        "malformed file keeps the current theme (BORU-UI-18)"
+    );
+    match &app.inspector_draft.reload_status {
+        crate::inspector::ThemeReloadStatus::Failed(msg) => {
+            assert!(
+                msg.contains("boru-ui.toml"),
+                "failure names the dev theme file: {msg}"
+            );
+        }
+        other => panic!("expected Failed status, got {other:?}"),
+    }
 }
 
 #[cfg(feature = "dev-ui")]
