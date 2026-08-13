@@ -50,6 +50,31 @@
 //!    lexicographically larger publisher key. Deterministic — no
 //!    HashMap-order dependence, no oscillation on stale replays.
 //!
+//! # Deduplication and conflicts (PDF Task 4.2, BORU-DIR-11)
+//!
+//! Directory results stay stable when the P2P network delivers repeated or
+//! conflicting information:
+//!
+//! 1. **Identical duplicates** — an advertisement with the same room_id
+//!    (map key), advert version, envelope sequence and content digest is a
+//!    pure liveness refresh: [`AdvertiseOutcome::Duplicate`], no content
+//!    change, no subscriber event. Repeated gossip can never churn the UI
+//!    or create a second card.
+//! 2. **Authentication gates replacement** — a verified (signed)
+//!    advertisement always beats an unverified one, so an unauthenticated
+//!    peer cannot trivially rename a room that a verified peer has already
+//!    identified. A verified **authority** (publisher == `owner_peer_id`)
+//!    is canonical and clears any conflict.
+//! 3. **Conflict state** — when two different non-authority sources claim
+//!    different metadata and Boru cannot prove a canonical authority, the
+//!    deterministic winner is retained but the entry is flagged
+//!    [`DirectoryEntry::conflict`]; the UI must show it as unverified
+//!    rather than silently trusting arbitrary metadata.
+//! 4. **Anti-oscillation** — once an entry is conflicted, only the winning
+//!    publisher's own refresh or a verified authority may change it; a
+//!    different non-authority source can no longer flip the metadata back
+//!    and forth.
+//!
 //! # Withdrawal (BORU-DIR-09 / PDF Task 3.3)
 //!
 //! [`apply_withdrawal`](Self::apply_withdrawal) removes the matching entry
@@ -161,9 +186,9 @@ pub enum LocalJoinState {
 /// One cached discovered room (PDF Task 4.1 step 2/3).
 ///
 /// Fields are public read-only metadata for subscribers (the Phase 5
-/// Discover Rooms UI); the private `bytes` field is internal accounting
-/// for the aggregate size bound, which is why external code can read but
-/// not construct an entry.
+/// Discover Rooms UI); the private `bytes`/`digest` fields are internal
+/// accounting for the aggregate size bound and deduplication, which is why
+/// external code can read but not construct an entry.
 #[derive(Debug, Clone)]
 pub struct DirectoryEntry {
     /// The latest valid advertisement for the room.
@@ -193,8 +218,19 @@ pub struct DirectoryEntry {
     pub compatibility: RoomCompatibility,
     /// Local relationship state (NotJoined by default; BORU-DIR-12).
     pub local_join_state: LocalJoinState,
+    /// Conflict state (BORU-DIR-11, PDF Task 4.2): `true` when different
+    /// non-authority sources advertised **conflicting metadata** for this
+    /// room and Boru could not prove a canonical authority. The stored
+    /// `advert` is the deterministic winner, but it is contested — the UI
+    /// must show the listing as unverified rather than silently trusting
+    /// it. Cleared only when a verified authority advertisement replaces
+    /// the entry.
+    pub conflict: bool,
     /// Encoded size of `advert` (bytes), used for the aggregate size bound.
     bytes: usize,
+    /// Content digest of `advert` (blake3 over the signature-stripped
+    /// postcard payload) — the dedup identity (BORU-DIR-11).
+    digest: [u8; 32],
 }
 
 /// Outcome of applying an advertisement to the directory.
@@ -203,10 +239,23 @@ pub enum AdvertiseOutcome {
     /// A genuinely new room was added to the directory.
     Added,
     /// An existing entry was refreshed or replaced — the room was already
-    /// cached, so this is a merge, never a second card.
+    /// cached, so this is a merge, never a second card. The stored content
+    /// (or its trust tier) changed; the entry may carry a conflict flag.
     Refreshed,
-    /// The advertisement was a deterministic no-op (an older or less
-    /// authoritative advertisement for a cached room) — nothing changed.
+    /// The advertisement was byte-identical to the cached one (same room_id
+    /// + advert version + envelope sequence + content digest) — a pure
+    /// liveness refresh with no content change and no subscriber event
+    /// (PDF Task 4.2: repeated gossip must not churn the UI).
+    Duplicate,
+    /// Conflicting metadata from a different non-authority source was
+    /// received for a room whose canonical authority is unproven. The
+    /// deterministic winner is retained (existing content kept) and the
+    /// entry is flagged [`DirectoryEntry::conflict`]; the incoming
+    /// advertisement is **not** stored.
+    Conflict,
+    /// The advertisement was a deterministic no-op (an older, less
+    /// authoritative, or anti-oscillation-rejected advertisement for a
+    /// cached room) — nothing changed.
     Unchanged,
 }
 
@@ -299,34 +348,65 @@ impl RoomDirectory {
 
         match self.entries.get_mut(&room_id) {
             Some(existing) => {
-                if !should_replace(
+                let incoming_digest = content_digest(&advert);
+                match decide_update(
                     existing,
                     &advert,
                     &publisher,
                     &auth,
                     sequence,
                     timestamp_secs,
+                    &incoming_digest,
                 ) {
-                    return AdvertiseOutcome::Unchanged;
+                    UpdateDecision::Duplicate => {
+                        // Identical advertisement (same room_id + advert
+                        // version + envelope sequence + content digest) —
+                        // a pure liveness refresh (the advertiser is alive)
+                        // with no content change and no subscriber event.
+                        existing.last_seen = now;
+                        existing.expires_at = now + ttl;
+                        AdvertiseOutcome::Duplicate
+                    }
+                    UpdateDecision::Keep { conflict } => {
+                        if conflict && !existing.conflict {
+                            // A different non-authority source claimed
+                            // conflicting metadata and the deterministic
+                            // winner (the existing content) was retained:
+                            // flag the entry as conflicted. The incoming
+                            // advertisement is NOT stored (PDF Task 4.2
+                            // step 3 — do not silently trust it).
+                            existing.conflict = true;
+                            existing.last_seen = now;
+                            existing.expires_at = now + ttl;
+                            AdvertiseOutcome::Conflict
+                        } else {
+                            AdvertiseOutcome::Unchanged
+                        }
+                    }
+                    UpdateDecision::Replace { conflict } => {
+                        let old_bytes = existing.bytes;
+                        existing.advert = advert;
+                        existing.publisher = publisher;
+                        existing.auth = auth;
+                        existing.sequence = sequence;
+                        existing.advertised_at_secs = timestamp_secs;
+                        existing.last_seen = now;
+                        existing.expires_at = now + ttl;
+                        existing.compatibility = compatibility;
+                        existing.conflict = conflict;
+                        existing.digest = incoming_digest;
+                        existing.bytes = bytes;
+                        self.total_bytes = self
+                            .total_bytes
+                            .saturating_sub(old_bytes)
+                            .saturating_add(bytes);
+                        AdvertiseOutcome::Refreshed
+                    }
                 }
-                let old_bytes = existing.bytes;
-                existing.advert = advert;
-                existing.publisher = publisher;
-                existing.auth = auth;
-                existing.sequence = sequence;
-                existing.advertised_at_secs = timestamp_secs;
-                existing.last_seen = now;
-                existing.expires_at = now + ttl;
-                existing.compatibility = compatibility;
-                existing.bytes = bytes;
-                self.total_bytes = self
-                    .total_bytes
-                    .saturating_sub(old_bytes)
-                    .saturating_add(bytes);
-                AdvertiseOutcome::Refreshed
             }
             None => {
                 // New room: enforce the bounds before inserting.
+                let digest = content_digest(&advert);
                 self.evict_expired_at(now);
                 while self.entries.len() >= self.max_entries
                     || self.total_bytes.saturating_add(bytes) > self.max_bytes
@@ -355,7 +435,9 @@ impl RoomDirectory {
                     expires_at: now + ttl,
                     compatibility,
                     local_join_state: LocalJoinState::NotJoined,
+                    conflict: false,
                     bytes,
+                    digest,
                 };
                 self.entries.insert(room_id, entry);
                 self.total_bytes = self.total_bytes.saturating_add(bytes);
@@ -469,46 +551,173 @@ fn encoded_size(advert: &PublicRoomAdvertisement) -> usize {
         .unwrap_or(0)
 }
 
-/// Deterministic replacement rule for multiple advertisements of the same
-/// room (PDF Task 4.1 step 6). See the module docs for the full ordering.
-fn should_replace(
+/// Content digest of an advertisement — the dedup identity for BORU-DIR-11
+/// (PDF Task 4.2 step 1).
+///
+/// blake3 over the postcard encoding of the advertisement with the
+/// publisher signature stripped. The signature is publisher-specific
+/// (provenance, not content), so two members endorsing the *same* room
+/// metadata produce the same digest and are deduplicated rather than
+/// treated as conflicting claims.
+fn content_digest(advert: &PublicRoomAdvertisement) -> [u8; 32] {
+    let mut stripped = advert.clone();
+    stripped.signature = None;
+    let bytes = postcard::to_stdvec(&stripped).unwrap_or_default();
+    *blake3::hash(&bytes).as_bytes()
+}
+
+/// What to do with an incoming advertisement for an already-cached room.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpdateDecision {
+    /// The advertisement is an exact duplicate (same room_id + advert
+    /// version + envelope sequence + content digest) — nothing changes
+    /// except liveness timestamps; no subscriber event.
+    Duplicate,
+    /// Keep the existing entry. `conflict` is the *desired* conflict flag:
+    /// when `true` and the entry is not already flagged, the caller marks
+    /// it conflicted (a conflicting non-authority claim was seen but the
+    /// deterministic winner was retained).
+    Keep { conflict: bool },
+    /// Replace the existing entry with the incoming advertisement; the
+    /// stored entry carries `conflict` as the new conflict flag.
+    Replace { conflict: bool },
+}
+
+/// Deterministic update decision for multiple advertisements of the same
+/// room (PDF Task 4.1 step 6 + Task 4.2). See the module docs for the full
+/// ordering: deduplicate identical ads → prefer a verified authority →
+/// authentication-gate replacements (verified beats unverified) → retain a
+/// conflict state when non-authority sources disagree → anti-oscillation
+/// once conflicted.
+fn decide_update(
     existing: &DirectoryEntry,
     incoming: &PublicRoomAdvertisement,
     incoming_publisher: &PublicKey,
     incoming_auth: &AdvertisementAuth,
     incoming_sequence: u64,
     incoming_timestamp_secs: u64,
-) -> bool {
-    if existing.publisher == *incoming_publisher {
-        // Same advertiser: the later envelope wins (a DIR-08 refresh or a
-        // metadata update). An older replayed envelope (lower sequence)
-        // cannot downgrade the cached metadata.
-        return incoming_sequence >= existing.sequence;
+    incoming_digest: &[u8; 32],
+) -> UpdateDecision {
+    // ── 1. Identical advertisement (PDF Task 4.2 step 1) ────────────────
+    // Same publisher, same envelope sequence, same advert version, same
+    // content digest → a pure replay of the same gossip. Never a change,
+    // never a conflict, never a UI event.
+    if existing.publisher == *incoming_publisher
+        && existing.sequence == incoming_sequence
+        && existing.advert.advert_version == incoming.advert_version
+        && existing.digest == *incoming_digest
+    {
+        return UpdateDecision::Duplicate;
     }
 
-    // Different advertiser. A verified authoritative publisher (the
-    // advertisement verifies AND the publisher equals owner_peer_id) beats
-    // a non-authority publisher — a random peer cannot silently overwrite
-    // another room's canonical metadata (PDF Task 1.3).
+    // ── 2. Authority classification (PDF Task 4.2 step 2) ───────────────
+    // A verified authority (publisher == owner_peer_id) beats a
+    // non-authority listing: it establishes canonical metadata and clears
+    // any conflict state. The reverse is never allowed — a random peer
+    // cannot silently overwrite another room's canonical metadata.
+    let incoming_is_authority =
+        incoming_auth.is_verified() && incoming.is_authoritative_publisher(incoming_publisher);
     let existing_is_authority = existing.auth.is_verified()
         && existing
             .advert
             .is_authoritative_publisher(&existing.publisher);
-    let incoming_is_authority =
-        incoming_auth.is_verified() && incoming.is_authoritative_publisher(incoming_publisher);
     match (incoming_is_authority, existing_is_authority) {
-        (true, false) => return true,
-        (false, true) => return false,
+        (true, false) => return UpdateDecision::Replace { conflict: false },
+        (false, true) => {
+            return UpdateDecision::Keep {
+                conflict: existing.conflict,
+            };
+        }
         _ => {}
     }
 
-    // Both authoritative or both non-authoritative: prefer the newer
-    // advertisement (by envelope creation timestamp), then a deterministic
-    // lexicographic tiebreak on the publisher key.
-    if incoming_timestamp_secs != existing.advertised_at_secs {
-        return incoming_timestamp_secs > existing.advertised_at_secs;
+    // ── 3. Same advertiser refresh (BORU-DIR-08) ────────────────────────
+    // The same publisher re-broadcasts with a higher sequence: a refresh.
+    // A same-source update is never a *new* conflict — it keeps whatever
+    // conflict state the entry already has.
+    if existing.publisher == *incoming_publisher {
+        if incoming_sequence < existing.sequence {
+            // Stale replay: cannot downgrade the cached metadata.
+            return UpdateDecision::Keep {
+                conflict: existing.conflict,
+            };
+        }
+        return UpdateDecision::Replace {
+            conflict: existing.conflict,
+        };
     }
-    incoming_publisher.as_bytes() > existing.publisher.as_bytes()
+
+    // ── 4. Authentication gate (PDF Task 4.2 step 4) ────────────────────
+    // An untrusted (missing-signature) advertisement can never replace a
+    // verified one: an unauthenticated peer cannot rename a room that a
+    // verified peer has identified.
+    if existing.auth.is_verified() && !incoming_auth.is_verified() {
+        return UpdateDecision::Keep {
+            conflict: existing.conflict,
+        };
+    }
+    // A verified advertisement may replace an unverified one (trust
+    // upgrade). If the metadata differs and no authority is proven, this is
+    // still a conflict — two sources disagree about the room.
+    if !existing.auth.is_verified() && incoming_auth.is_verified() {
+        let conflict = existing.digest != *incoming_digest;
+        return UpdateDecision::Replace { conflict };
+    }
+
+    // ── 5. Same authority class, different advertisers ──────────────────
+    // Identical content from a different publisher is an endorsement of the
+    // same metadata — deduplicate, not a conflict.
+    if existing.digest == *incoming_digest {
+        return UpdateDecision::Duplicate;
+    }
+
+    // Conflicting metadata. When BOTH are verified authorities (two owners
+    // claiming the same room_id), each claim is canonical for its own
+    // publisher: the newer envelope wins deterministically (DIR-10 rule)
+    // without a conflict flag — matches the pre-existing replacement
+    // semantics.
+    if incoming_is_authority && existing_is_authority {
+        if incoming_timestamp_secs != existing.advertised_at_secs {
+            if incoming_timestamp_secs > existing.advertised_at_secs {
+                return UpdateDecision::Replace { conflict: false };
+            }
+            return UpdateDecision::Keep {
+                conflict: existing.conflict,
+            };
+        }
+        if incoming_publisher.as_bytes() > existing.publisher.as_bytes() {
+            return UpdateDecision::Replace { conflict: false };
+        }
+        return UpdateDecision::Keep {
+            conflict: existing.conflict,
+        };
+    }
+
+    // Both non-authority: conflicting metadata with no canonical authority
+    // (PDF Task 4.2 step 3). If the entry is already conflicted, a different
+    // non-authority source cannot flip-flop it (anti-oscillation, step 4):
+    // only the winning publisher's own refresh (handled above) or a verified
+    // authority (handled above) may change it.
+    if existing.conflict {
+        return UpdateDecision::Keep {
+            conflict: existing.conflict,
+        };
+    }
+
+    // First disagreement: deterministic winner — newer envelope timestamp
+    // wins, then the lexicographically larger publisher key. Whichever
+    // wins, the entry is now conflicted because Boru cannot prove which
+    // non-authority claim is canonical.
+    if incoming_timestamp_secs != existing.advertised_at_secs {
+        if incoming_timestamp_secs > existing.advertised_at_secs {
+            return UpdateDecision::Replace { conflict: true };
+        }
+        return UpdateDecision::Keep { conflict: true };
+    }
+    if incoming_publisher.as_bytes() > existing.publisher.as_bytes() {
+        return UpdateDecision::Replace { conflict: true };
+    }
+    UpdateDecision::Keep { conflict: true }
 }
 
 #[cfg(test)]
@@ -972,6 +1181,226 @@ mod tests {
         assert!(dir.contains(&room));
         // Only after the refresh TTL also elapses does it expire.
         assert_eq!(dir.evict_expired_at(now + Duration::from_secs(9)).len(), 1);
+    }
+
+    // ── Deduplication + conflicts (PDF Task 4.2, BORU-DIR-11) ─────────
+
+    /// An identical advertisement (same publisher + envelope sequence +
+    /// advert version + content digest) is a pure liveness refresh —
+    /// `Duplicate`, single entry, no content change, no conflict flag.
+    #[test]
+    fn identical_advertisement_is_deduped_no_ui_churn() {
+        let mut dir = RoomDirectory::new();
+        let room = topic(1);
+        let owner = key(0x42);
+        let advert = ad(room, 0x42, "room");
+
+        assert_eq!(
+            dir.apply_advertisement(advert.clone(), owner, verified_auth(owner), 7, 1000),
+            AdvertiseOutcome::Added
+        );
+        assert_eq!(dir.len(), 1);
+
+        // Exact re-broadcast: same publisher, same sequence, same digest.
+        let dup = dir.apply_advertisement(advert, owner, verified_auth(owner), 7, 1000);
+        assert_eq!(dup, AdvertiseOutcome::Duplicate, "identical replay deduped");
+        assert_eq!(dir.len(), 1, "no second card from repeated gossip");
+        let entry = dir.get(&room).unwrap();
+        assert_eq!(entry.sequence, 7, "content unchanged");
+        assert!(!entry.conflict, "a duplicate is not a conflict");
+    }
+
+    /// Two different non-authority sources advertising conflicting metadata
+    /// for the same room produce a deterministic winner that is flagged as
+    /// conflicted (Boru cannot prove a canonical authority).
+    #[test]
+    fn conflicting_non_authority_metadata_marks_conflict() {
+        let mut dir = RoomDirectory::new();
+        let room = topic(1);
+        let member_a = key(0x41);
+        let member_b = key(0x42);
+        let owner = key(0x55); // neither member is the room authority
+
+        let first = dir.apply_advertisement(
+            ad(room, 0x55, "Room A"),
+            member_a,
+            verified_auth(member_a),
+            1,
+            1000,
+        );
+        assert_eq!(first, AdvertiseOutcome::Added);
+        assert!(!dir.get(&room).unwrap().conflict);
+
+        // A different member claims different metadata, newer envelope.
+        let second = dir.apply_advertisement(
+            ad(room, 0x55, "Room B"),
+            member_b,
+            verified_auth(member_b),
+            1,
+            2000,
+        );
+        assert_eq!(second, AdvertiseOutcome::Refreshed, "newer winner stored");
+        let entry = dir.get(&room).unwrap();
+        assert_eq!(entry.advert.room_name, "Room B");
+        assert!(entry.conflict, "conflicting metadata is flagged");
+
+        let _ = owner;
+    }
+
+    /// Once an entry is conflicted, a different non-authority source cannot
+    /// flip the metadata back and forth (anti-oscillation) — only the
+    /// winning publisher's own refresh or a verified authority may change it.
+    #[test]
+    fn conflict_state_rejects_rapid_oscillation() {
+        let mut dir = RoomDirectory::new();
+        let room = topic(1);
+        let member_a = key(0x41);
+        let member_b = key(0x42);
+        let member_c = key(0x43);
+
+        dir.apply_advertisement(
+            ad(room, 0x55, "Room A"),
+            member_a,
+            verified_auth(member_a),
+            1,
+            1000,
+        );
+        dir.apply_advertisement(
+            ad(room, 0x55, "Room B"),
+            member_b,
+            verified_auth(member_b),
+            1,
+            2000,
+        );
+        assert!(dir.get(&room).unwrap().conflict);
+
+        // A third member (newer envelope) cannot oscillate the metadata.
+        let third = dir.apply_advertisement(
+            ad(room, 0x55, "Room C"),
+            member_c,
+            verified_auth(member_c),
+            1,
+            3000,
+        );
+        assert_eq!(
+            third,
+            AdvertiseOutcome::Unchanged,
+            "conflicted entry rejects further non-authority flips"
+        );
+        assert_eq!(dir.get(&room).unwrap().advert.room_name, "Room B");
+
+        // The winning publisher refreshing its own claim is still allowed.
+        let refresh = dir.apply_advertisement(
+            ad(room, 0x55, "Room B"),
+            member_b,
+            verified_auth(member_b),
+            2,
+            4000,
+        );
+        assert_eq!(refresh, AdvertiseOutcome::Refreshed);
+        assert!(dir.get(&room).unwrap().conflict, "conflict persists");
+    }
+
+    /// A verified authority advertisement resolves the conflict: it
+    /// replaces the contested metadata and clears the conflict flag.
+    #[test]
+    fn verified_authority_resolves_conflict() {
+        let mut dir = RoomDirectory::new();
+        let room = topic(1);
+        let member_a = key(0x41);
+        let owner = key(0x55);
+
+        dir.apply_advertisement(
+            ad(room, 0x55, "Room A"),
+            member_a,
+            verified_auth(member_a),
+            1,
+            1000,
+        );
+        dir.apply_advertisement(
+            ad(room, 0x55, "Room B"),
+            key(0x42),
+            verified_auth(key(0x42)),
+            1,
+            2000,
+        );
+        assert!(dir.get(&room).unwrap().conflict);
+
+        // The room's real owner advertises canonical metadata.
+        let mut canonical = ad(room, 0x55, "Canonical Room");
+        canonical.sign(&secret_key(0x55));
+        let resolved = dir.apply_advertisement(canonical, owner, verified_auth(owner), 9, 3000);
+        assert_eq!(resolved, AdvertiseOutcome::Refreshed);
+        let entry = dir.get(&room).unwrap();
+        assert_eq!(entry.advert.room_name, "Canonical Room");
+        assert!(!entry.conflict, "canonical authority clears the conflict");
+        assert_eq!(entry.publisher, owner);
+    }
+
+    /// An untrusted (missing-signature) advertisement can never rename a
+    /// room that a verified peer has identified — authentication gates the
+    /// replacement regardless of envelope freshness.
+    #[test]
+    fn untrusted_update_cannot_rename_verified_room() {
+        let mut dir = RoomDirectory::new();
+        let room = topic(1);
+        let member = key(0x41);
+
+        dir.apply_advertisement(
+            ad(room, 0x55, "Verified Room"),
+            member,
+            verified_auth(member),
+            1,
+            1000,
+        );
+
+        // Newer, but unsigned: the stranger's claim cannot overwrite the
+        // verified listing (PDF Task 4.2 acceptance).
+        let spoof = dir.apply_advertisement(
+            ad(room, 0x55, "Hacked Room"),
+            key(0x66),
+            AdvertisementAuth::MissingSignature,
+            99,
+            9999,
+        );
+        assert_eq!(spoof, AdvertiseOutcome::Unchanged);
+        assert_eq!(dir.get(&room).unwrap().advert.room_name, "Verified Room");
+        assert!(!dir.get(&room).unwrap().conflict);
+    }
+
+    /// When a conflicting advertisement loses the deterministic tie, the
+    /// existing winner is kept and the entry is marked conflicted — Boru
+    /// retains a conflict state rather than silently trusting either claim.
+    #[test]
+    fn older_conflicting_advertisement_keeps_winner_marks_conflict() {
+        let mut dir = RoomDirectory::new();
+        let room = topic(1);
+        let member_a = key(0x41);
+        let member_b = key(0x42);
+
+        // Winner: newer envelope from member A.
+        dir.apply_advertisement(
+            ad(room, 0x55, "Room A"),
+            member_a,
+            verified_auth(member_a),
+            1,
+            2000,
+        );
+        assert!(!dir.get(&room).unwrap().conflict);
+
+        // Older conflicting claim from member B loses the tie but reveals
+        // the disagreement: entry stays Room A, now flagged conflicted.
+        let conflict = dir.apply_advertisement(
+            ad(room, 0x55, "Room B"),
+            member_b,
+            verified_auth(member_b),
+            1,
+            1000,
+        );
+        assert_eq!(conflict, AdvertiseOutcome::Conflict);
+        let entry = dir.get(&room).unwrap();
+        assert_eq!(entry.advert.room_name, "Room A", "winner retained");
+        assert!(entry.conflict, "disagreement retained as conflict state");
     }
 
     // ── Snapshot ──────────────────────────────────────────────────────

@@ -156,7 +156,7 @@ use crate::control_plane::reconnect::{ReconnectHandle, ReconnectScheduler, Recon
 use crate::diagnostics::{DiagnosticCounters, DIAGNOSTIC_COUNTERS};
 use crate::discovery_message::{check_discovery_version, DiscoveryMessage, DiscoveryVersionCheck};
 use crate::proto::TopicId;
-use crate::room_directory::RoomDirectory;
+use crate::room_directory::{AdvertiseOutcome, RoomDirectory};
 
 /// Capacity of the peer-update broadcast channel.
 const PEER_UPDATES_CAPACITY: usize = 256;
@@ -1530,7 +1530,17 @@ impl ReceiveCore {
                             // topic, downloads history, or grants permission
                             // (PDF Core rule) — pure cached discovery
                             // metadata.
-                            self.room_directory
+                            // BORU-DIR-11 (PDF Task 4.2): the directory
+                            // deduplicates identical advertisements and
+                            // detects conflicting metadata. Only a real
+                            // cache change (Added/Refreshed) emits the
+                            // typed UI event — repeated gossip and
+                            // deterministic no-ops must not churn
+                            // subscribers. Conflicts are logged at debug
+                            // level (short identities only), never surfaced
+                            // as normal UI events.
+                            let outcome = self
+                                .room_directory
                                 .lock()
                                 .expect("room directory lock poisoned")
                                 .apply_advertisement(
@@ -1540,15 +1550,43 @@ impl ReceiveCore {
                                     envelope.sequence,
                                     envelope.timestamp_secs,
                                 );
-                            let _ = self.control_events_tx.send(ControlEvent::RoomAdvertisement(
-                                RoomAdvertisementEvent {
-                                    sender_node_id: envelope.sender_node_id,
-                                    sequence: envelope.sequence,
-                                    timestamp_secs: envelope.timestamp_secs,
-                                    auth,
-                                    advert: advert.clone(),
-                                },
-                            ));
+                            match outcome {
+                                AdvertiseOutcome::Added | AdvertiseOutcome::Refreshed => {
+                                    let _ = self
+                                        .control_events_tx
+                                        .send(ControlEvent::RoomAdvertisement(
+                                            RoomAdvertisementEvent {
+                                                sender_node_id: envelope.sender_node_id,
+                                                sequence: envelope.sequence,
+                                                timestamp_secs: envelope.timestamp_secs,
+                                                auth,
+                                                advert: advert.clone(),
+                                            },
+                                        ));
+                                }
+                                AdvertiseOutcome::Duplicate => {
+                                    trace!(
+                                        sender = %envelope.sender_node_id.fmt_short(),
+                                        sequence = envelope.sequence,
+                                        "discovery: duplicate room advertisement deduplicated; no UI churn",
+                                    );
+                                }
+                                AdvertiseOutcome::Conflict => {
+                                    debug!(
+                                        sender = %envelope.sender_node_id.fmt_short(),
+                                        sequence = envelope.sequence,
+                                        room = %advert.room_id,
+                                        "discovery: conflicting room advertisement; deterministic winner retained, entry marked conflicted",
+                                    );
+                                }
+                                AdvertiseOutcome::Unchanged => {
+                                    trace!(
+                                        sender = %envelope.sender_node_id.fmt_short(),
+                                        sequence = envelope.sequence,
+                                        "discovery: room advertisement was a deterministic no-op",
+                                    );
+                                }
+                            }
                             return IncomingOutcome::ControlMessage;
                         }
                     }
@@ -6496,6 +6534,100 @@ mod tests {
         assert_eq!(guard.len(), 1, "duplicates merge into a single card");
         assert_eq!(guard.get(&advert.room_id).unwrap().sequence, 8);
         assert_eq!(service.peer_count(), 0);
+    }
+
+    /// Identical content re-advertised by a DIFFERENT publisher is a
+    /// directory-level dedup (same room_id + advert version + content
+    /// digest): it does NOT emit a second `ControlEvent::RoomAdvertisement`
+    /// (PDF Task 4.2 — repeated gossip must not cause UI churn).
+    #[tokio::test]
+    async fn handle_incoming_identical_content_different_publisher_no_second_event() {
+        let local = test_key(0xAA);
+        let peer_a = test_key(0xBB);
+        let peer_b = test_key(0xCC);
+        let service = test_service(local);
+        let mut events = service.control_events();
+
+        let mut advert = test_advert();
+        advert.sign(&test_secret_key(0xBB));
+
+        // First publisher announces → Added → one event.
+        let first =
+            ControlEnvelope::public_room_advertisement(peer_a, 7, 1_700_000_000, advert.clone())
+                .encode();
+        assert_eq!(service.handle_incoming(&first, peer_a), IncomingOutcome::ControlMessage);
+        let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("timed out waiting for first room advertisement event")
+            .expect("control event channel closed");
+        assert!(matches!(event, ControlEvent::RoomAdvertisement(_)));
+
+        // A second publisher re-advertises byte-identical content (same
+        // room_id + advert version + content digest) — directory dedup:
+        // no second event, no UI churn.
+        let mut same_content = test_advert();
+        same_content.sign(&test_secret_key(0xCC));
+        let second =
+            ControlEnvelope::public_room_advertisement(peer_b, 1, 1_700_000_100, same_content)
+                .encode();
+        assert_eq!(
+            service.handle_incoming(&second, peer_b),
+            IncomingOutcome::ControlMessage
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), events.recv())
+                .await
+                .is_err(),
+            "identical-content advertisement must not emit a UI event"
+        );
+
+        // Single directory entry, no conflict.
+        let dir = service.room_directory();
+        let guard = dir.lock().unwrap();
+        assert_eq!(guard.len(), 1);
+        assert!(!guard.get(&test_advert().room_id).unwrap().conflict);
+    }
+
+    /// A conflicting advertisement from a different non-authority source is
+    /// applied deterministically: the directory retains a single entry with
+    /// the deterministic winner flagged as conflicted, and no extra identity
+    /// leaks into the normal event stream.
+    #[tokio::test]
+    async fn handle_incoming_conflicting_advertisements_merge_with_conflict_flag() {
+        let local = test_key(0xAA);
+        let peer_a = test_key(0xBB);
+        let peer_b = test_key(0xCC);
+        let service = test_service(local);
+
+        let mut advert_a = test_advert();
+        advert_a.sign(&test_secret_key(0xBB));
+        let mut advert_b = test_advert();
+        advert_b.room_name = "Other Name".into();
+        advert_b.sign(&test_secret_key(0xCC));
+
+        // Two DIFFERENT verified members advertise conflicting metadata.
+        let first =
+            ControlEnvelope::public_room_advertisement(peer_a, 7, 1_700_000_000, advert_a.clone())
+                .encode();
+        assert_eq!(service.handle_incoming(&first, peer_a), IncomingOutcome::ControlMessage);
+
+        let second =
+            ControlEnvelope::public_room_advertisement(peer_b, 9, 1_700_000_100, advert_b.clone())
+                .encode();
+        assert_eq!(service.handle_incoming(&second, peer_b), IncomingOutcome::ControlMessage);
+
+        let dir = service.room_directory();
+        let guard = dir.lock().unwrap();
+        assert_eq!(guard.len(), 1, "conflicting ads still collapse to one entry");
+        let entry = guard.get(&advert_a.room_id).expect("room cached");
+        assert!(
+            entry.conflict,
+            "conflicting metadata with no canonical authority is flagged"
+        );
+        assert_eq!(
+            entry.advert.room_name, "Other Name",
+            "newer envelope is the deterministic winner"
+        );
     }
 
     /// A verified, authoritative PUBLIC_ROOM_WITHDRAWAL removes the room
