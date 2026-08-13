@@ -225,6 +225,83 @@ impl RoomVisibility {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Directory visibility switching (BORU-DIR-06, PDF Phase 2 Task 2.3)
+// ---------------------------------------------------------------------------
+
+/// Outcome of an owner/admin request to change a room's directory visibility
+/// (BORU-DIR-06, PDF Task 2.3).
+///
+/// Produced by [`plan_visibility_switch`] from the room's current visibility,
+/// the requested visibility, and the existing room permission model
+/// (`is_owner`). The caller performs the side effects the outcome names:
+///
+/// * [`Published`](Self::Published) — the room is now `PublicDiscoverable`;
+///   publish a fresh advertisement immediately and keep refreshing.
+/// * [`Unlisted`](Self::Unlisted) — the room is now `PublicUnlisted`; stop
+///   refreshing. If the protocol has a withdrawal/tombstone message it should
+///   be sent; otherwise remote directories drop the advertisement on TTL
+///   expiry (BORU-DIR-09 adds the explicit tombstone later).
+/// * [`NoChange`](Self::NoChange) — the room is already in the requested
+///   state; no side effects.
+/// * [`Forbidden`](Self::Forbidden) — the requester is not authorized to
+///   change directory visibility; nothing changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VisibilitySwitchOutcome {
+    /// The room is now `PublicDiscoverable` — publish a fresh advertisement.
+    Published,
+    /// The room is now `PublicUnlisted` — stop refreshing (withdrawal /
+    /// TTL expiry applies; no tombstone message exists yet).
+    Unlisted,
+    /// The room is already in the requested state.
+    NoChange,
+    /// The requester is not the room owner/admin — nothing changes.
+    Forbidden,
+}
+
+/// Plan a directory-visibility switch for a room (BORU-DIR-06, PDF Task 2.3
+/// step 1).
+///
+/// The switch is a pure decision: it never touches the store or the network.
+/// The caller applies the returned [`VisibilitySwitchOutcome`].
+///
+/// # Permission model
+///
+/// Only the room **owner/admin** may change directory visibility (PDF Task
+/// 2.3: "Do not: let non-authorized users change directory visibility"). The
+/// caller decides `is_owner` using the existing room permission model — e.g.
+/// the local user created the room as a public room, or already advertises
+/// it (see the app's `is_room_directory_owner`).
+///
+/// # Scope
+///
+/// Only the `PublicDiscoverable <-> PublicUnlisted` transition is a
+/// directory switch. `Private` rooms are never advertised (PDF visibility
+/// model); switching a room into or out of `Private` is out of scope for the
+/// directory controls and is rejected as [`Forbidden`](Self::Forbidden).
+pub fn plan_visibility_switch(
+    current: RoomVisibility,
+    requested: RoomVisibility,
+    is_owner: bool,
+) -> VisibilitySwitchOutcome {
+    if !is_owner {
+        return VisibilitySwitchOutcome::Forbidden;
+    }
+    if current == requested {
+        return VisibilitySwitchOutcome::NoChange;
+    }
+    match (current, requested) {
+        (RoomVisibility::PublicUnlisted, RoomVisibility::PublicDiscoverable) => {
+            VisibilitySwitchOutcome::Published
+        }
+        (RoomVisibility::PublicDiscoverable, RoomVisibility::PublicUnlisted) => {
+            VisibilitySwitchOutcome::Unlisted
+        }
+        // Anything involving Private is not a directory switch.
+        _ => VisibilitySwitchOutcome::Forbidden,
+    }
+}
+
 impl Default for RoomVisibility {
     fn default() -> Self {
         // Conservative default: a room is private unless the creator
@@ -1700,5 +1777,109 @@ mod tests {
         advert.short_description = out.short_description.clone();
         advert.tags = out.tags.clone();
         assert!(advert.validate(&bounds).is_ok());
+    }
+
+    // ── BORU-DIR-06: directory-visibility switch planning ────────────────
+
+    /// An authorized owner switching an unlisted room to discoverable must
+    /// get `Published` — the caller publishes a fresh advertisement.
+    #[test]
+    fn switch_unlisted_to_discoverable_publishes() {
+        assert_eq!(
+            plan_visibility_switch(
+                RoomVisibility::PublicUnlisted,
+                RoomVisibility::PublicDiscoverable,
+                true,
+            ),
+            VisibilitySwitchOutcome::Published
+        );
+    }
+
+    /// An authorized owner switching a discoverable room to unlisted must
+    /// get `Unlisted` — the caller stops refreshing (TTL expiry applies).
+    #[test]
+    fn switch_discoverable_to_unlisted_unlists() {
+        assert_eq!(
+            plan_visibility_switch(
+                RoomVisibility::PublicDiscoverable,
+                RoomVisibility::PublicUnlisted,
+                true,
+            ),
+            VisibilitySwitchOutcome::Unlisted
+        );
+    }
+
+    /// Requesting the same visibility is a no-op.
+    #[test]
+    fn switch_to_same_visibility_is_no_change() {
+        assert_eq!(
+            plan_visibility_switch(
+                RoomVisibility::PublicDiscoverable,
+                RoomVisibility::PublicDiscoverable,
+                true,
+            ),
+            VisibilitySwitchOutcome::NoChange
+        );
+        assert_eq!(
+            plan_visibility_switch(
+                RoomVisibility::PublicUnlisted,
+                RoomVisibility::PublicUnlisted,
+                true,
+            ),
+            VisibilitySwitchOutcome::NoChange
+        );
+    }
+
+    /// A non-authorized user cannot change directory visibility (PDF Task
+    /// 2.3: "Do not: let non-authorized users change directory visibility").
+    #[test]
+    fn switch_forbidden_for_non_owner() {
+        for current in [
+            RoomVisibility::Private,
+            RoomVisibility::PublicUnlisted,
+            RoomVisibility::PublicDiscoverable,
+        ] {
+            for requested in [
+                RoomVisibility::Private,
+                RoomVisibility::PublicUnlisted,
+                RoomVisibility::PublicDiscoverable,
+            ] {
+                assert_eq!(
+                    plan_visibility_switch(current, requested, false),
+                    VisibilitySwitchOutcome::Forbidden,
+                    "non-owner must never change visibility {current:?} -> {requested:?}",
+                );
+            }
+        }
+    }
+
+    /// Private rooms are never part of the directory; switching into or out
+    /// of Private is out of scope and rejected even for the owner.
+    #[test]
+    fn switch_involving_private_is_forbidden() {
+        assert_eq!(
+            plan_visibility_switch(
+                RoomVisibility::Private,
+                RoomVisibility::PublicDiscoverable,
+                true,
+            ),
+            VisibilitySwitchOutcome::Forbidden
+        );
+        assert_eq!(
+            plan_visibility_switch(
+                RoomVisibility::PublicDiscoverable,
+                RoomVisibility::Private,
+                true,
+            ),
+            VisibilitySwitchOutcome::Forbidden
+        );
+        assert_eq!(
+            plan_visibility_switch(
+                RoomVisibility::PublicUnlisted,
+                RoomVisibility::Private,
+                true,
+            ),
+            VisibilitySwitchOutcome::Forbidden
+        );
     }
 }

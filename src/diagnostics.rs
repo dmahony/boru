@@ -3224,6 +3224,41 @@ pub enum GuiTestCommand {
         /// Comma-separated tag text (max [`GUI_TEST_COMMAND_MAX_STRING_LEN`] chars).
         tags: String,
     },
+    /// Open the room-settings dialog for an existing room (BORU-DIR-06).
+    OpenRoomSettings {
+        /// Room topic ID as a hex string.
+        room_id: String,
+    },
+    /// Set the room name in the room-settings dialog (BORU-DIR-06).
+    SetRoomSettingsName {
+        /// Room name text (max [`GUI_TEST_COMMAND_MAX_STRING_LEN`] chars).
+        name: String,
+    },
+    /// Set the description in the room-settings dialog (BORU-DIR-06).
+    SetRoomSettingsDescription {
+        /// Description text (max [`GUI_TEST_COMMAND_MAX_STRING_LEN`] chars).
+        description: String,
+    },
+    /// Set the comma-separated tags in the room-settings dialog (BORU-DIR-06).
+    SetRoomSettingsTags {
+        /// Comma-separated tag text (max [`GUI_TEST_COMMAND_MAX_STRING_LEN`] chars).
+        tags: String,
+    },
+    /// Set the visibility in the room-settings dialog (BORU-DIR-06).
+    SetRoomSettingsVisibility {
+        /// The visibility to select.
+        visibility: RoomVisibility,
+    },
+    /// Apply the room-settings dialog (BORU-DIR-06).
+    ConfirmRoomSettings,
+    /// Direct owner/admin switch of an existing room's directory visibility
+    /// (BORU-DIR-06, PDF Task 2.3): PublicDiscoverable <-> PublicUnlisted.
+    SetRoomDirectoryVisibility {
+        /// Room topic ID as a hex string.
+        room_id: String,
+        /// The visibility to switch to.
+        visibility: RoomVisibility,
+    },
     /// Confirm and create the room from the dialog's current settings.
     ConfirmCreateNewRoom,
     /// Switch the File Sharing dashboard to a specific tab.
@@ -3323,6 +3358,19 @@ impl GuiTestCommand {
                 validate_gui_text(description, "Room description")
             }
             GuiTestCommand::SetCreateRoomTags { tags } => validate_gui_text(tags, "Room tags"),
+            GuiTestCommand::OpenRoomSettings { room_id } => {
+                validate_gui_identifier(room_id, "room_id")
+            }
+            GuiTestCommand::SetRoomSettingsName { name } => validate_gui_text(name, "Room name"),
+            GuiTestCommand::SetRoomSettingsDescription { description } => {
+                validate_gui_text(description, "Room description")
+            }
+            GuiTestCommand::SetRoomSettingsTags { tags } => validate_gui_text(tags, "Room tags"),
+            GuiTestCommand::SetRoomSettingsVisibility { .. } => Ok(()),
+            GuiTestCommand::ConfirmRoomSettings => Ok(()),
+            GuiTestCommand::SetRoomDirectoryVisibility { room_id, .. } => {
+                validate_gui_identifier(room_id, "room_id")
+            }
             GuiTestCommand::ConfirmCreateNewRoom => Ok(()),
             GuiTestCommand::BrowseCatalogue { peer_id } => {
                 validate_gui_identifier(peer_id, "peer_id")
@@ -3461,6 +3509,19 @@ impl GuiTestCommand {
             GuiTestCommand::SetCreateRoomVisibility { .. } => None,
             GuiTestCommand::SetCreateRoomDescription { .. } => None,
             GuiTestCommand::SetCreateRoomTags { .. } => None,
+            GuiTestCommand::OpenRoomSettings { .. } => {
+                Some(ExpectedState::Generic("room_settings_dialog_open".into()))
+            }
+            GuiTestCommand::SetRoomSettingsName { .. } => None,
+            GuiTestCommand::SetRoomSettingsDescription { .. } => None,
+            GuiTestCommand::SetRoomSettingsTags { .. } => None,
+            GuiTestCommand::SetRoomSettingsVisibility { .. } => None,
+            GuiTestCommand::ConfirmRoomSettings => {
+                Some(ExpectedState::Generic("room_settings_saved".into()))
+            }
+            GuiTestCommand::SetRoomDirectoryVisibility { .. } => {
+                Some(ExpectedState::Generic("room_directory_visibility_switched".into()))
+            }
             GuiTestCommand::ConfirmCreateNewRoom => Some(ExpectedState::MessageSent),
             // OpenDashboardTab: opens the File Sharing screen and selects the
             // tab. The post-condition is tracked via the generic

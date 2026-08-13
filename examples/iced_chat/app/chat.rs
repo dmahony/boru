@@ -1892,21 +1892,58 @@ impl IcedChat {
                 ),
             ]
             .spacing(SPACE_4),
-            // ── Advertise toggle ──
-            button(
+            // ── Directory visibility (BORU-DIR-06, PDF 2.3) ──
+            // Only the room owner/admin may change directory visibility;
+            // non-authorized users get a muted note and no control.
+            if self.is_room_directory_owner(self.topic) {
+                let visibility_label = match self
+                    .conversation_store
+                    .find(&self.topic)
+                    .map(|e| e.visibility)
+                    .unwrap_or(RoomVisibility::Private)
+                {
+                    RoomVisibility::PublicDiscoverable => "Public — Discoverable",
+                    RoomVisibility::PublicUnlisted => "Public — Unlisted",
+                    RoomVisibility::Private => "Private",
+                };
+                let column = column![
+                    row![
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::Metadata,
+                            "Directory:",
+                        )
+                        .color(self.color_muted()),
+                        crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::Metadata,
+                            visibility_label,
+                        ),
+                    ]
+                    .spacing(SPACE_4)
+                    .align_y(Alignment::Center),
+                    button(crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::ButtonLabel,
+                        if is_advertised {
+                            "✓ Advertised — Change visibility"
+                        } else {
+                            "Change directory visibility…"
+                        },
+                    ))
+                    .on_press(AppMessage::OpenRoomSettings(self.topic))
+                    .style(BUTTON_GHOST_BG)
+                    .padding([SPACE_4, SPACE_10])
+                    .width(Length::Fill),
+                ]
+                .spacing(SPACE_4);
+                let element: iced::Element<'_, AppMessage> = column.into();
+                element
+            } else {
                 crate::fonts::type_role_text(
-                    crate::fonts::TypeRole::ButtonLabel,
-                    if is_advertised {
-                        "✓ Advertised"
-                    } else {
-                        "Advertise in Directory"
-                    },
+                    crate::fonts::TypeRole::SupportingText,
+                    "Only the room owner can change directory visibility.",
                 )
-            )
-            .on_press(AppMessage::ToggleAdvertiseRoom(self.topic))
-            .style(BUTTON_GHOST_BG)
-            .padding([SPACE_4, SPACE_10])
-            .width(Length::Fill),
+                .color(self.color_muted())
+                .into()
+            },
             // ── Separator ──
             crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, "───")
                 .color(self.color_muted()),

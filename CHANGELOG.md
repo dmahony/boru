@@ -12,7 +12,20 @@ see the [git log](https://github.com/dmahony/boru/commits/main/).
 
 ### Added
 
-- Public room directory (BORU-DIR chain): room visibility model with
+- Owner/admin directory-visibility controls (BORU-DIR-06): a room-settings
+  dialog lets the room owner switch a public room between
+  Public-Discoverable and Public-Unlisted and edit the advertised metadata
+  (name / description / tags). Switching to Discoverable immediately
+  publishes a fresh signed advertisement and marks the room for periodic
+  refresh; switching to Unlisted stops refreshing, stops any DHT tracker,
+  and removes the room from the local directory immediately (remote
+  directories drop it after the advertisement TTL — no withdrawal message
+  yet, BORU-DIR-09). Metadata edits republish without changing room
+  identity. Non-authorized users (rooms merely joined from the directory)
+  cannot change directory visibility — the UI, the dialog, and the switch
+  handler all reject them. See
+  `docs/public-room-directory/visibility-switching.md`.
+- Room directory visibility (BORU-DIR chain): room visibility model with
   `Private`, `PublicUnlisted`, and `PublicDiscoverable` states, persisted on
   room metadata (`ConversationEntry.visibility`). Only `PublicDiscoverable`
   rooms emit directory advertisements — the emit site refuses

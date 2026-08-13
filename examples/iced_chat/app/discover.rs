@@ -1527,129 +1527,18 @@ impl IcedChat {
 
 
             AppMessage::ToggleAdvertiseRoom(topic) => {
-                // Toggle advertising for this room.
-                if self.advertised_rooms.contains(&topic) {
-                    self.advertised_rooms.remove(&topic);
-                    // BORU-DIR-04 (PDF 2.1): disabling advertising moves the
-                    // room to PublicUnlisted — shareable but not browsable.
-                    let changed = {
-                        let changed = self
-                            .conversation_store
-                            .find_mut(&topic)
-                            .map(|entry| {
-                                if entry.visibility == RoomVisibility::PublicDiscoverable {
-                                    entry.visibility = RoomVisibility::PublicUnlisted;
-                                    true
-                                } else {
-                                    false
-                                }
-                            })
-                            .unwrap_or(false);
-                        changed
-                    };
-                    if changed {
-                        let _ = self.conversation_store.save();
-                        if let Some(ref st) = self.storage {
-                            let _ = self.conversation_store.save_to_sqlite(st);
-                        }
-                    }
-                    info!(%topic, "room advertising disabled");
-                    iced::Task::none()
+                // BORU-DIR-06: the advertise toggle is now an owner/admin
+                // directory-visibility switch. Compute the target visibility
+                // from the current state and delegate to the gated switch
+                // (which publishes immediately on discoverable, and stops
+                // refreshing on unlisted — TTL expiry applies, no withdrawal
+                // message yet).
+                let target = if self.advertised_rooms.contains(&topic) {
+                    RoomVisibility::PublicUnlisted
                 } else {
-                    self.advertised_rooms.insert(topic);
-                    // BORU-DIR-04 (PDF 2.1): enabling advertising makes the
-                    // room PublicDiscoverable — the only visibility allowed
-                    // to emit directory advertisements.
-                    let changed = {
-                        let changed = self
-                            .conversation_store
-                            .find_mut(&topic)
-                            .map(|entry| {
-                                if entry.visibility != RoomVisibility::PublicDiscoverable {
-                                    entry.visibility = RoomVisibility::PublicDiscoverable;
-                                    true
-                                } else {
-                                    false
-                                }
-                            })
-                            .unwrap_or(false);
-                        changed
-                    };
-                    if changed {
-                        let _ = self.conversation_store.save();
-                        if let Some(ref st) = self.storage {
-                            let _ = self.conversation_store.save_to_sqlite(st);
-                        }
-                    }
-                    info!(%topic, "room advertising enabled");
-                    let room_name = self
-                        .conversation_store
-                        .find(&topic)
-                        .map(|e| {
-                            if e.name.is_empty() {
-                                topic.to_string()
-                            } else {
-                                e.name.clone()
-                            }
-                        })
-                        .unwrap_or_else(|| topic.to_string());
-                    // PUBLIC-02: making a room public is a local
-                    // announcement — surface it in the Recent Activity feed.
-                    self.push_activity(
-                        format!("You announced public room \"{room_name}\""),
-                        ActivityKind::Generic,
-                    );
-                    // Broadcast an immediate RoomAdvertisement so the room
-                    // appears in the directory without waiting for the next
-                    // ~60s periodic tick.
-                    if let Some(ref dir_sender) = self.directory_sender {
-                        let sk = self.secret_key.clone();
-                        let s = dir_sender.clone();
-                        let neighbor_count = self
-                            .room_neighbor_counts
-                            .get(&topic)
-                            .copied()
-                            .unwrap_or_default();
-                        let ticket = self.room_ticket(topic, &[]).to_string();
-                        iced::Task::perform(
-                            async move {
-                                let ad = boru_core::chat_core::RoomAdvertisement {
-                                    room_name,
-                                    description: String::new(),
-                                    topic,
-                                    ticket,
-                                    member_count: neighbor_count,
-                                    last_activity: std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .unwrap_or_default()
-                                        .as_millis()
-                                        as u64,
-                                };
-                                let ad_bytes = postcard::to_stdvec(&ad).unwrap_or_default();
-                                let signature = sk.sign(&ad_bytes);
-                                let msg = crate::Message::RoomAdvertisement {
-                                    ad,
-                                    signature: signature.to_bytes().to_vec(),
-                                };
-                                let ok = match SignedMessage::sign_and_encode(&sk, &msg) {
-                                    Ok(encoded) => s.broadcast(encoded).await.is_ok(),
-                                    Err(_) => false,
-                                };
-                                ok
-                            },
-                            |ok| {
-                                if ok {
-                                    tracing::debug!("immediate room advertisement broadcast");
-                                } else {
-                                    tracing::warn!("immediate room advertisement broadcast failed");
-                                }
-                                AppMessage::Noop
-                            },
-                        )
-                    } else {
-                        iced::Task::done(AppMessage::SubscribeDirectoryTopic)
-                    }
-                }
+                    RoomVisibility::PublicDiscoverable
+                };
+                self.apply_room_directory_visibility(topic, target)
             }
             AppMessage::SubscribeDirectoryTopic => {
                 let gossip = self.gossip.clone();

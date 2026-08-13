@@ -4235,6 +4235,22 @@ pub struct IcedChat {
     /// Started when creating/joining a DHT-enabled room; shut down when
     /// leaving or deleting the room.
     room_trackers: HashMap<TopicId, SharedTracker>,
+    /// Whether the room-settings dialog is currently shown (BORU-DIR-06).
+    /// Owner/admin-only: lets the owner switch directory visibility and edit
+    /// advertised metadata (name / description / tags) for a public room.
+    show_room_settings_dialog: bool,
+    /// Topic of the room being edited in the room-settings dialog.
+    room_settings_topic: Option<TopicId>,
+    /// Pre-filled room name in the room-settings dialog.
+    room_settings_name: String,
+    /// Pre-filled description in the room-settings dialog.
+    room_settings_description: String,
+    /// Pre-filled comma-separated tags in the room-settings dialog.
+    room_settings_tags: String,
+    /// Visibility selected in the room-settings dialog (BORU-DIR-06).
+    room_settings_visibility: RoomVisibility,
+    /// Inline error shown inside the room-settings dialog.
+    room_settings_error: Option<String>,
     /// Whether the create-room dialog is currently shown.
     show_create_room_dialog: bool,
     /// Whether the create-room submit is in flight (async subscribe).
@@ -5177,6 +5193,34 @@ pub enum AppMessage {
     CreateNewRoomDescriptionChanged(String),
     /// Update the optional tags input in the create-room dialog.
     CreateNewRoomTagsChanged(String),
+    /// Open the room-settings dialog for an existing room (BORU-DIR-06).
+    /// Owner/admin-only; lets the owner switch directory visibility and edit
+    /// advertised metadata (name / description / tags) after creation.
+    OpenRoomSettings(TopicId),
+    /// Update the room name in the room-settings dialog.
+    RoomSettingsNameChanged(String),
+    /// Update the description in the room-settings dialog.
+    RoomSettingsDescriptionChanged(String),
+    /// Update the tags in the room-settings dialog.
+    RoomSettingsTagsChanged(String),
+    /// Change the visibility selected in the room-settings dialog.
+    RoomSettingsVisibilityChanged(RoomVisibility),
+    /// Apply the room-settings dialog: persist metadata + visibility and
+    /// republish / unlist the advertisement (BORU-DIR-06).
+    ConfirmRoomSettings,
+    /// Cancel the room-settings dialog.
+    CancelRoomSettings,
+    /// Owner/admin switch of an existing room's directory visibility
+    /// (BORU-DIR-06, PDF Task 2.3): PublicDiscoverable <-> PublicUnlisted.
+    /// When switching to discoverable the handler immediately publishes a
+    /// fresh advertisement; when switching to unlisted it stops refreshing
+    /// (TTL expiry applies — no withdrawal message yet, BORU-DIR-09).
+    SetRoomDirectoryVisibility {
+        /// The room to switch.
+        topic: TopicId,
+        /// The visibility to switch to.
+        visibility: RoomVisibility,
+    },
     /// Join a room from a ticket string.
     JoinFromTicket,
     /// The room switch / join failed.
@@ -7857,6 +7901,13 @@ impl IcedChat {
             create_room_dht_enabled: true,
             create_room_name: String::new(),
             room_trackers: HashMap::new(),
+            show_room_settings_dialog: false,
+            room_settings_topic: None,
+            room_settings_name: String::new(),
+            room_settings_description: String::new(),
+            room_settings_tags: String::new(),
+            room_settings_visibility: RoomVisibility::PublicUnlisted,
+            room_settings_error: None,
             show_create_room_dialog: false,
             create_room_submitting: false,
             create_room_error: None,
@@ -9556,6 +9607,14 @@ impl IcedChat {
             AppMessage::CreateNewRoomVisibilityChanged(..) => "CreateNewRoomVisibilityChanged",
             AppMessage::CreateNewRoomDescriptionChanged(..) => "CreateNewRoomDescriptionChanged",
             AppMessage::CreateNewRoomTagsChanged(..) => "CreateNewRoomTagsChanged",
+            AppMessage::OpenRoomSettings(_) => "OpenRoomSettings",
+            AppMessage::RoomSettingsNameChanged(..) => "RoomSettingsNameChanged",
+            AppMessage::RoomSettingsDescriptionChanged(..) => "RoomSettingsDescriptionChanged",
+            AppMessage::RoomSettingsTagsChanged(..) => "RoomSettingsTagsChanged",
+            AppMessage::RoomSettingsVisibilityChanged(..) => "RoomSettingsVisibilityChanged",
+            AppMessage::ConfirmRoomSettings => "ConfirmRoomSettings",
+            AppMessage::CancelRoomSettings => "CancelRoomSettings",
+            AppMessage::SetRoomDirectoryVisibility { .. } => "SetRoomDirectoryVisibility",
             AppMessage::JoinFromTicket => "JoinFromTicket",
             AppMessage::RoomJoinFailed { .. } => "RoomJoinFailed",
             AppMessage::JoinTicketInputChanged(_) => "JoinTicketInputChanged",
@@ -10794,6 +10853,7 @@ impl IcedChat {
     /// Cancel buttons rather than mutating dialog state directly.
     fn close_dialog_message(
         image_lightbox: bool,
+        show_room_settings_dialog: bool,
         show_create_room_dialog: bool,
         connection_details_dialog: bool,
         history_confirm_clear: bool,
@@ -10804,6 +10864,9 @@ impl IcedChat {
         }
         if connection_details_dialog {
             return Ok(AppMessage::CloseConnectionDetails);
+        }
+        if show_room_settings_dialog {
+            return Ok(AppMessage::CancelRoomSettings);
         }
         if show_create_room_dialog {
             return Ok(AppMessage::CancelCreateRoom);
@@ -10823,11 +10886,283 @@ impl IcedChat {
     fn close_current_dialog(&self) -> Result<AppMessage, GuiActionError> {
         Self::close_dialog_message(
             self.lightbox_image.is_some(),
+            self.show_room_settings_dialog,
             self.show_create_room_dialog,
             self.connection_details_dialog.is_some(),
             self.history_confirm_clear,
             self.room_delete_confirm_topic,
         )
+    }
+
+    /// Whether the local user owns `topic`'s room for directory-visibility
+    /// purposes (BORU-DIR-06, PDF Task 2.3).
+    ///
+    /// The existing room permission model: the local user owns rooms they
+    /// created as public rooms (persisted visibility != `Private` — only the
+    /// create-public-room flow sets a non-Private visibility) and rooms they
+    /// already advertise (in [`Self::advertised_rooms`]). Rooms merely joined
+    /// from the directory keep the `Private` default and are **not** locally
+    /// owned, so a non-authorized user cannot change their directory
+    /// visibility (PDF Task 2.3: "Do not: let non-authorized users change
+    /// directory visibility").
+    fn is_room_directory_owner(&self, topic: TopicId) -> bool {
+        if self.advertised_rooms.contains(&topic) {
+            return true;
+        }
+        self.conversation_store
+            .find(&topic)
+            .map(|entry| entry.visibility != RoomVisibility::Private)
+            .unwrap_or(false)
+    }
+
+    /// Apply an owner/admin directory-visibility switch for `topic`
+    /// (BORU-DIR-06, PDF Task 2.3).
+    ///
+    /// * **Switch to `PublicDiscoverable`** — persists the visibility,
+    ///   marks the room for periodic re-advertisement, and immediately
+    ///   publishes a fresh advertisement (the local directory upsert is done
+    ///   by [`immediate_room_advertisement_task`](Self::immediate_room_advertisement_task)
+    ///   callers; the periodic tick re-broadcasts on the ~60 s cadence).
+    /// * **Switch to `PublicUnlisted`** — persists the visibility, removes
+    ///   the room from the advertised set so refreshes stop, and removes the
+    ///   local directory entry so the room disappears from the PUBLIC ROOMS
+    ///   sidebar immediately. There is **no withdrawal/tombstone message
+    ///   yet** (BORU-DIR-09); remote directories drop the advertisement on
+    ///   TTL expiry — documented under
+    ///   `docs/public-room-directory/visibility-switching.md`.
+    /// * **Non-owner** — rejected with a system message and no side effects.
+    ///
+    /// Returns the immediate-advertisement task when the room is now
+    /// discoverable, or `Task::none()` otherwise.
+    fn apply_room_directory_visibility(
+        &mut self,
+        topic: TopicId,
+        requested: RoomVisibility,
+    ) -> iced::Task<AppMessage> {
+        // Permission gate — existing room permission model.
+        if !self.is_room_directory_owner(topic) {
+            self.push_system("Only the room owner can change directory visibility.");
+            return iced::Task::none();
+        }
+        let current = self
+            .conversation_store
+            .find(&topic)
+            .map(|entry| entry.visibility)
+            .unwrap_or(RoomVisibility::Private);
+        let outcome = boru_core::control_plane::advertisement::plan_visibility_switch(
+            current,
+            requested,
+            true,
+        );
+        match outcome {
+            boru_core::control_plane::advertisement::VisibilitySwitchOutcome::Published => {
+                // Persist discoverable visibility.
+                let changed = self
+                    .conversation_store
+                    .find_mut(&topic)
+                    .map(|entry| {
+                        if entry.visibility != RoomVisibility::PublicDiscoverable {
+                            entry.visibility = RoomVisibility::PublicDiscoverable;
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .unwrap_or(false);
+                if changed {
+                    let _ = self.conversation_store.save();
+                    if let Some(ref st) = self.storage {
+                        let _ = self.conversation_store.save_to_sqlite(st);
+                    }
+                }
+                // Mark for periodic refresh + surface in Recent Activity.
+                self.advertised_rooms.insert(topic);
+                let name = self
+                    .conversation_store
+                    .find(&topic)
+                    .map(|e| {
+                        if e.name.is_empty() {
+                            topic.to_string()
+                        } else {
+                            e.name.clone()
+                        }
+                    })
+                    .unwrap_or_else(|| topic.to_string());
+                self.push_activity(
+                    format!("You announced public room \"{name}\""),
+                    ActivityKind::Generic,
+                );
+                // Upsert into the local directory store so the creator sees
+                // their own room in the PUBLIC ROOMS sidebar immediately
+                // (the gossip mesh does not echo our own broadcasts back).
+                {
+                    let local_pk = self.local_public;
+                    let ticket = self.room_ticket(topic, &[]).to_string();
+                    let member_count = self
+                        .room_neighbor_counts
+                        .get(&topic)
+                        .copied()
+                        .unwrap_or_default();
+                    let description = self
+                        .conversation_store
+                        .find(&topic)
+                        .map(|e| e.description.clone())
+                        .unwrap_or_default();
+                    if let Ok(mut store) = self.directory_store.lock() {
+                        let ad = RoomAdvertisement {
+                            room_name: name.clone(),
+                            description,
+                            topic,
+                            ticket,
+                            member_count,
+                            last_activity: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as u64,
+                        };
+                        store.upsert(ad, local_pk);
+                    }
+                    self.save_directory_store();
+                }
+                self.public_rooms_sidebar_revision =
+                    self.public_rooms_sidebar_revision.wrapping_add(1);
+                self.refresh_sidebar_counts();
+                // Immediately publish a fresh advertisement.
+                if let Some(task) = self.immediate_room_advertisement_task(topic) {
+                    task
+                } else if self.directory_sender.is_none() {
+                    // No directory sender yet — subscribe so the periodic
+                    // tick can broadcast the fresh advertisement.
+                    iced::Task::done(AppMessage::SubscribeDirectoryTopic)
+                } else {
+                    iced::Task::none()
+                }
+            }
+            boru_core::control_plane::advertisement::VisibilitySwitchOutcome::Unlisted => {
+                // Persist unlisted visibility.
+                let changed = self
+                    .conversation_store
+                    .find_mut(&topic)
+                    .map(|entry| {
+                        if entry.visibility != RoomVisibility::PublicUnlisted {
+                            entry.visibility = RoomVisibility::PublicUnlisted;
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .unwrap_or(false);
+                if changed {
+                    let _ = self.conversation_store.save();
+                    if let Some(ref st) = self.storage {
+                        let _ = self.conversation_store.save_to_sqlite(st);
+                    }
+                }
+                // Stop refreshing: remove from the advertised set and stop the
+                // DHT tracker (if any) so no advertisement is re-published.
+                self.advertised_rooms.remove(&topic);
+                if let Some(tracker) = self.room_trackers.remove(&topic) {
+                    tracker.shutdown_shared();
+                }
+                // Remove the local directory entry so the room disappears
+                // from the PUBLIC ROOMS sidebar immediately. There is no
+                // withdrawal/tombstone message yet (BORU-DIR-09); remote
+                // directories drop the advertisement after TTL expiry.
+                let local_author = self.local_public;
+                let _ = self
+                    .directory_store
+                    .lock()
+                    .map(|mut store| store.remove(topic, local_author));
+                if let Some(storage) = self.storage.as_ref() {
+                    if let Err(err) = storage.with_conn(|conn| {
+                        conn.execute(
+                            "DELETE FROM directory_ads WHERE topic = ?1 AND author = ?2",
+                            rusqlite::params![topic.as_bytes(), local_author.as_bytes()],
+                        )
+                        .map_err(n0_error::AnyError::from_std)?;
+                        Ok(())
+                    }) {
+                        warn!("failed to delete directory advertisement: {err}");
+                    }
+                }
+                self.public_rooms_sidebar_revision =
+                    self.public_rooms_sidebar_revision.wrapping_add(1);
+                self.refresh_sidebar_counts();
+                self.push_activity(
+                    "You unlisted a public room — it will leave other directories after the advertisement TTL (no withdrawal message yet).",
+                    ActivityKind::Generic,
+                );
+                iced::Task::none()
+            }
+            boru_core::control_plane::advertisement::VisibilitySwitchOutcome::NoChange => {
+                iced::Task::none()
+            }
+            boru_core::control_plane::advertisement::VisibilitySwitchOutcome::Forbidden => {
+                self.push_system(
+                    "Only Public-Unlisted and Public-Discoverable rooms can be switched.",
+                );
+                iced::Task::none()
+            }
+        }
+    }
+
+    /// Build the immediate-broadcast task for a discoverable room's fresh
+    /// advertisement (BORU-DIR-06 / DIR-05 immediate-publish path).
+    ///
+    /// Returns `None` when the room is not discoverable or the directory
+    /// sender is unavailable (the periodic tick will pick the room up).
+    fn immediate_room_advertisement_task(&self, topic: TopicId) -> Option<iced::Task<AppMessage>> {
+        let entry = self.conversation_store.find(&topic)?;
+        if !entry.visibility.is_discoverable() {
+            return None;
+        }
+        let room_name = if entry.name.is_empty() {
+            topic.to_string()
+        } else {
+            entry.name.clone()
+        };
+        let description = entry.description.clone();
+        let dir_sender = self.directory_sender.clone()?;
+        let sk = self.secret_key.clone();
+        let neighbor_count = self
+            .room_neighbor_counts
+            .get(&topic)
+            .copied()
+            .unwrap_or_default();
+        let ticket = self.room_ticket(topic, &[]).to_string();
+        Some(iced::Task::perform(
+            async move {
+                let ad = boru_core::chat_core::RoomAdvertisement {
+                    room_name,
+                    description,
+                    topic,
+                    ticket,
+                    member_count: neighbor_count,
+                    last_activity: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64,
+                };
+                let ad_bytes = postcard::to_stdvec(&ad).unwrap_or_default();
+                let signature = sk.sign(&ad_bytes);
+                let msg = crate::Message::RoomAdvertisement {
+                    ad,
+                    signature: signature.to_bytes().to_vec(),
+                };
+                match SignedMessage::sign_and_encode(&sk, &msg) {
+                    Ok(encoded) => dir_sender.broadcast(encoded).await.is_ok(),
+                    Err(_) => false,
+                }
+            },
+            |ok| {
+                if ok {
+                    tracing::debug!("immediate room advertisement broadcast");
+                } else {
+                    tracing::warn!("immediate room advertisement broadcast failed");
+                }
+                AppMessage::Noop
+            },
+        ))
     }
 
     fn current_connection_details_dialog(&self) -> ConnectionDetailsDialogState {
@@ -11373,6 +11708,159 @@ impl IcedChat {
                 iced::Task::none()
             }
 
+            // ── Room directory visibility (BORU-DIR-06, PDF 2.3) ────────
+            AppMessage::OpenRoomSettings(topic) => {
+                // Owner/admin-only: only rooms the local user owns (created
+                // as a public room, or already advertised) get the settings
+                // dialog. Non-authorized users cannot change directory
+                // visibility (PDF Task 2.3).
+                if !self.is_room_directory_owner(topic) {
+                    self.push_system(
+                        "Only the room owner can change directory visibility.",
+                    );
+                    return iced::Task::none();
+                }
+                let (name, description, tags, visibility) = self
+                    .conversation_store
+                    .find(&topic)
+                    .map(|e| {
+                        (
+                            e.name.clone(),
+                            e.description.clone(),
+                            e.tags.join(","),
+                            e.visibility,
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        (topic.to_string(), String::new(), String::new(), RoomVisibility::PublicUnlisted)
+                    });
+                self.room_settings_topic = Some(topic);
+                self.room_settings_name = name;
+                self.room_settings_description = description;
+                self.room_settings_tags = tags;
+                self.room_settings_visibility = visibility;
+                self.room_settings_error = None;
+                self.show_room_settings_dialog = true;
+                iced::Task::none()
+            }
+
+            AppMessage::RoomSettingsNameChanged(name) => {
+                self.room_settings_name = name;
+                self.room_settings_error = None;
+                iced::Task::none()
+            }
+
+            AppMessage::RoomSettingsDescriptionChanged(description) => {
+                self.room_settings_description = description;
+                self.room_settings_error = None;
+                iced::Task::none()
+            }
+
+            AppMessage::RoomSettingsTagsChanged(tags) => {
+                self.room_settings_tags = tags;
+                self.room_settings_error = None;
+                iced::Task::none()
+            }
+
+            AppMessage::RoomSettingsVisibilityChanged(visibility) => {
+                self.room_settings_visibility = visibility;
+                self.room_settings_error = None;
+                iced::Task::none()
+            }
+
+            AppMessage::CancelRoomSettings => {
+                self.show_room_settings_dialog = false;
+                self.room_settings_topic = None;
+                self.room_settings_error = None;
+                self.complete_close_dialog_action();
+                iced::Task::none()
+            }
+
+            AppMessage::ConfirmRoomSettings => {
+                let Some(topic) = self.room_settings_topic else {
+                    return iced::Task::none();
+                };
+                // Owner gate (defence in depth — the dialog is only opened
+                // for owners, but never trust the stored topic blindly).
+                if !self.is_room_directory_owner(topic) {
+                    self.push_system(
+                        "Only the room owner can change directory visibility.",
+                    );
+                    self.show_room_settings_dialog = false;
+                    self.room_settings_topic = None;
+                    return iced::Task::none();
+                }
+                // Validate + normalize the edited metadata before persisting
+                // or republishing (same bounds as the create flow).
+                let raw_name = std::mem::take(&mut self.room_settings_name);
+                let raw_description =
+                    std::mem::take(&mut self.room_settings_description);
+                let raw_tags = std::mem::take(&mut self.room_settings_tags);
+                let requested_visibility = self.room_settings_visibility;
+                let bounds = AdvertisementBounds::default();
+                let normalized = match normalize_room_metadata(
+                    &raw_name,
+                    &raw_description,
+                    &raw_tags,
+                    &bounds,
+                ) {
+                    Ok(n) => n,
+                    Err(violation) => {
+                        // Restore the fields so the owner can fix the input.
+                        self.room_settings_name = raw_name;
+                        self.room_settings_description = raw_description;
+                        self.room_settings_tags = raw_tags;
+                        self.room_settings_error = Some(violation.to_string());
+                        return iced::Task::none();
+                    }
+                };
+                // Persist the edited metadata (name / description / tags)
+                // and the new visibility on the room entry. Room identity
+                // (topic) is unchanged — metadata edits never change it.
+                {
+                    let changed = self
+                        .conversation_store
+                        .find_mut(&topic)
+                        .map(|entry| {
+                            entry.name = normalized.room_name.clone();
+                            entry.description = normalized.short_description.clone();
+                            entry.tags = normalized.tags.clone();
+                            entry.visibility = requested_visibility;
+                            true
+                        })
+                        .unwrap_or(false);
+                    if changed {
+                        let _ = self.conversation_store.save();
+                        if let Some(ref st) = self.storage {
+                            let _ = self.conversation_store.save_to_sqlite(st);
+                        }
+                    }
+                }
+                self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
+                // Close the dialog, then apply the visibility switch + publish.
+                self.show_room_settings_dialog = false;
+                self.room_settings_topic = None;
+                self.room_settings_error = None;
+                let task = self.apply_room_directory_visibility(topic, requested_visibility);
+                // A discoverable room whose metadata changed must also
+                // republish immediately, even when the visibility did not
+                // change (PDF Task 2.3 step 5).
+                if self
+                    .conversation_store
+                    .find(&topic)
+                    .map(|e| e.visibility.is_discoverable())
+                    .unwrap_or(false)
+                {
+                    if let Some(republish) = self.immediate_room_advertisement_task(topic) {
+                        return iced::Task::batch(vec![task, republish]);
+                    }
+                }
+                task
+            }
+
+            AppMessage::SetRoomDirectoryVisibility { topic, visibility } => {
+                self.apply_room_directory_visibility(topic, visibility)
+            }
 
             // ── Groups (state layer) ───────────────────────────────
             AppMessage::ShowCreateGroupDialog
@@ -14092,6 +14580,90 @@ impl IcedChat {
                         .gui_action_history
                         .set_state(&action_id, GuiActionState::Completed);
                     return iced::Task::done(AppMessage::CreateNewRoomTagsChanged(tags.clone()));
+                }
+
+                // ── Room directory visibility (BORU-DIR-06) ──────────────
+                if let GuiTestCommand::OpenRoomSettings { room_id } = &command {
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageQueued);
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::Completed);
+                    if let Ok(topic) = TopicId::from_str(room_id) {
+                        return iced::Task::done(AppMessage::OpenRoomSettings(topic));
+                    }
+                    return iced::Task::none();
+                }
+
+                if let GuiTestCommand::SetRoomSettingsName { name } = &command {
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageQueued);
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::Completed);
+                    return iced::Task::done(AppMessage::RoomSettingsNameChanged(name.clone()));
+                }
+
+                if let GuiTestCommand::SetRoomSettingsDescription { description } = &command {
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageQueued);
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::Completed);
+                    return iced::Task::done(AppMessage::RoomSettingsDescriptionChanged(
+                        description.clone(),
+                    ));
+                }
+
+                if let GuiTestCommand::SetRoomSettingsTags { tags } = &command {
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageQueued);
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::Completed);
+                    return iced::Task::done(AppMessage::RoomSettingsTagsChanged(tags.clone()));
+                }
+
+                if let GuiTestCommand::SetRoomSettingsVisibility { visibility } = &command {
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageQueued);
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::Completed);
+                    return iced::Task::done(AppMessage::RoomSettingsVisibilityChanged(*visibility));
+                }
+
+                if matches!(command, GuiTestCommand::ConfirmRoomSettings) {
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageQueued);
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::Completed);
+                    return iced::Task::done(AppMessage::ConfirmRoomSettings);
+                }
+
+                if let GuiTestCommand::SetRoomDirectoryVisibility { room_id, visibility } =
+                    &command
+                {
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageQueued);
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::Completed);
+                    if let Ok(topic) = TopicId::from_str(room_id) {
+                        return iced::Task::done(AppMessage::SetRoomDirectoryVisibility {
+                            topic,
+                            visibility: *visibility,
+                        });
+                    }
+                    return iced::Task::none();
                 }
 
                 if matches!(command, GuiTestCommand::ConfirmCreateNewRoom) {
@@ -17816,6 +18388,8 @@ impl IcedChat {
             self.view_incoming_call_overlay(base)
         } else if self.connection_details_dialog.is_some() {
             self.view_connection_details_dialog(base)
+        } else if self.show_room_settings_dialog {
+            self.view_room_settings_dialog(base)
         } else if self.show_create_room_dialog {
             self.view_create_room_dialog(base)
         } else if self.show_create_group_dialog {
@@ -19837,31 +20411,35 @@ mod tests {
     fn close_dialog_uses_the_normal_cancel_message_in_priority_order() {
         // Image lightbox has highest priority
         assert!(matches!(
-            IcedChat::close_dialog_message(true, true, true, true, None),
+            IcedChat::close_dialog_message(true, true, true, true, true, None),
             Ok(AppMessage::CloseImageLightbox)
         ));
         assert!(matches!(
-            IcedChat::close_dialog_message(false, true, false, true, None),
+            IcedChat::close_dialog_message(false, true, false, false, true, None),
+            Ok(AppMessage::CancelRoomSettings)
+        ));
+        assert!(matches!(
+            IcedChat::close_dialog_message(false, false, true, false, true, None),
             Ok(AppMessage::CancelCreateRoom)
         ));
         assert!(matches!(
-            IcedChat::close_dialog_message(false, false, true, true, None),
+            IcedChat::close_dialog_message(false, false, false, true, true, None),
             Ok(AppMessage::CloseConnectionDetails)
         ));
         assert!(matches!(
-            IcedChat::close_dialog_message(false, false, false, true, None),
+            IcedChat::close_dialog_message(false, false, false, false, true, None),
             Ok(AppMessage::ClearHistoryRequested)
         ));
         let topic = TopicId::from_bytes([9; 32]);
         assert!(matches!(
-            IcedChat::close_dialog_message(false, false, false, false, Some(topic)),
+            IcedChat::close_dialog_message(false, false, false, false, false, Some(topic)),
             Ok(AppMessage::DeleteRoomRequested(actual)) if actual == topic
         ));
     }
 
     #[test]
     fn close_dialog_without_an_open_dialog_returns_structured_error() {
-        let error = IcedChat::close_dialog_message(false, false, false, false, None)
+        let error = IcedChat::close_dialog_message(false, false, false, false, false, None)
             .expect_err("CloseDialog must reject when no dialog is open");
         assert_eq!(error.code, GuiActionErrorCode::NoDialog);
         assert_eq!(error.message, "No application dialog is currently open");
@@ -30619,6 +31197,259 @@ fn vr_created_public_room_is_conversation_never_discovery_topic() {
         !matches!(app.screen, Screen::Chat { topic } if topic == disc),
         "OpenRoom must refuse the discovery topic"
     );
+}
+
+#[test]
+fn vr_owner_can_switch_room_to_discoverable() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    // BORU-DIR-06 (PDF Task 2.3): an owner-created PublicUnlisted room can
+    // be switched to PublicDiscoverable. The room is persisted with the new
+    // visibility and marked for advertising (periodic refresh + immediate
+    // publish).
+    let _ = app.update(AppMessage::CreateNewRoom);
+    let _ = app.update(AppMessage::CreateNewRoomNameChanged("Owner Room".into()));
+    let _ = app.update(AppMessage::ConfirmCreateNewRoom);
+    let entry = app
+        .conversation_store
+        .iter()
+        .find(|e| e.name == "Owner Room")
+        .expect("created room must exist in the conversation store");
+    let topic = entry.topic;
+    assert_eq!(entry.visibility, RoomVisibility::PublicUnlisted);
+
+    // Non-owner attempt is rejected before the owner path is exercised.
+    let _ = app.update(AppMessage::SetRoomDirectoryVisibility {
+        topic,
+        visibility: RoomVisibility::PublicDiscoverable,
+    });
+    assert!(
+        app.advertised_rooms.contains(&topic),
+        "owner switch to Discoverable marks the room for advertising"
+    );
+    assert_eq!(
+        app.conversation_store
+            .find(&topic)
+            .map(|e| e.visibility)
+            .unwrap_or(RoomVisibility::Private),
+        RoomVisibility::PublicDiscoverable,
+        "owner switch to Discoverable persists the new visibility"
+    );
+    let _ = app.view();
+}
+
+#[test]
+fn vr_non_owner_cannot_change_directory_visibility() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    // BORU-DIR-06 (PDF Task 2.3): a room joined from the directory keeps the
+    // `Private` visibility default and is not advertised — the local user is
+    // NOT its owner and must not be able to change its directory visibility.
+    // The switch is rejected with no side effects.
+    let topic = TopicId::from_bytes([7; 32]);
+    let entry = boru_core::conversations::ConversationEntry::new(
+        topic,
+        "",
+        "Someone Else's Room".to_string(),
+    );
+    // Joined rooms keep the `Private` default (only the create-public-room
+    // flow sets a non-Private visibility).
+    assert_eq!(entry.visibility, RoomVisibility::Private);
+    app.conversation_store.upsert(entry);
+    assert!(
+        !app.is_room_directory_owner(topic),
+        "a joined (not created, not advertised) room is not locally owned"
+    );
+
+    let _ = app.update(AppMessage::SetRoomDirectoryVisibility {
+        topic,
+        visibility: RoomVisibility::PublicDiscoverable,
+    });
+    assert!(
+        !app.advertised_rooms.contains(&topic),
+        "non-owner switch must not mark the room for advertising"
+    );
+    assert_eq!(
+        app.conversation_store
+            .find(&topic)
+            .map(|e| e.visibility)
+            .unwrap_or(RoomVisibility::Private),
+        RoomVisibility::Private,
+        "non-owner switch must not change the room's visibility"
+    );
+
+    // The room-settings dialog must not open either.
+    let _ = app.update(AppMessage::OpenRoomSettings(topic));
+    assert!(
+        !app.show_room_settings_dialog,
+        "non-owner cannot open the room-settings dialog"
+    );
+    let _ = app.view();
+}
+
+#[test]
+fn vr_switch_to_unlisted_stops_advertising() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    // BORU-DIR-06 (PDF Task 2.3): switching a discoverable room back to
+    // PublicUnlisted stops refreshing (removes from advertised_rooms) and
+    // removes the local directory entry. There is no withdrawal message yet
+    // (BORU-DIR-09) — remote directories drop the advertisement on TTL
+    // expiry.
+    let _ = app.update(AppMessage::CreateNewRoom);
+    let _ = app.update(AppMessage::CreateNewRoomNameChanged("Advertised Room".into()));
+    let _ = app.update(AppMessage::CreateNewRoomVisibilityChanged(RoomVisibility::PublicDiscoverable));
+    let _ = app.update(AppMessage::ConfirmCreateNewRoom);
+    let entry = app
+        .conversation_store
+        .iter()
+        .find(|e| e.name == "Advertised Room")
+        .expect("created room must exist in the conversation store");
+    let topic = entry.topic;
+    assert!(
+        app.advertised_rooms.contains(&topic),
+        "discoverable room starts advertised"
+    );
+
+    let _ = app.update(AppMessage::SetRoomDirectoryVisibility {
+        topic,
+        visibility: RoomVisibility::PublicUnlisted,
+    });
+    assert!(
+        !app.advertised_rooms.contains(&topic),
+        "unlisting removes the room from the advertised set (refresh stops)"
+    );
+    assert_eq!(
+        app.conversation_store
+            .find(&topic)
+            .map(|e| e.visibility)
+            .unwrap_or(RoomVisibility::Private),
+        RoomVisibility::PublicUnlisted,
+        "unlisting persists PublicUnlisted visibility"
+    );
+    // The local directory entry is removed so the room disappears from the
+    // PUBLIC ROOMS sidebar immediately.
+    let dir_has_topic = app
+        .directory_store
+        .lock()
+        .map(|store| store.contains(topic, app.local_public))
+        .unwrap_or(false);
+    assert!(
+        !dir_has_topic,
+        "unlisting removes the local directory advertisement"
+    );
+    let _ = app.view();
+}
+
+#[test]
+fn vr_room_settings_dialog_edits_metadata_and_republishes() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    // BORU-DIR-06 (PDF Task 2.3): the room-settings dialog lets the owner
+    // edit advertised metadata (name / description / tags) and the
+    // visibility. On save the metadata is normalized + persisted and the
+    // room is republished (visibility unchanged, still discoverable).
+    let _ = app.update(AppMessage::CreateNewRoom);
+    let _ = app.update(AppMessage::CreateNewRoomNameChanged("Original Name".into()));
+    let _ = app.update(AppMessage::CreateNewRoomDescriptionChanged("Original description".into()));
+    let _ = app.update(AppMessage::CreateNewRoomVisibilityChanged(RoomVisibility::PublicDiscoverable));
+    let _ = app.update(AppMessage::ConfirmCreateNewRoom);
+    let entry = app
+        .conversation_store
+        .iter()
+        .find(|e| e.name == "Original Name")
+        .expect("created room must exist in the conversation store");
+    let topic = entry.topic;
+    assert!(app.advertised_rooms.contains(&topic));
+
+    // Open the room-settings dialog: pre-filled from the entry.
+    let _ = app.update(AppMessage::OpenRoomSettings(topic));
+    assert!(app.show_room_settings_dialog, "owner opens room settings");
+    assert_eq!(app.room_settings_name, "Original Name");
+    assert_eq!(app.room_settings_description, "Original description");
+    assert_eq!(
+        app.room_settings_visibility,
+        RoomVisibility::PublicDiscoverable
+    );
+
+    // Edit metadata + visibility and save.
+    let _ = app.update(AppMessage::RoomSettingsNameChanged("Renamed Room".into()));
+    let _ = app.update(AppMessage::RoomSettingsDescriptionChanged("Renamed description".into()));
+    let _ = app.update(AppMessage::RoomSettingsTagsChanged("rust, chat".into()));
+    let _ = app.update(AppMessage::ConfirmRoomSettings);
+    assert!(
+        !app.show_room_settings_dialog,
+        "saving closes the room-settings dialog"
+    );
+
+    // Metadata edits propagate without changing room identity (topic).
+    let updated = app
+        .conversation_store
+        .find(&topic)
+        .expect("room entry still exists after edit");
+    assert_eq!(updated.name, "Renamed Room", "name edit persisted");
+    assert_eq!(
+        updated.description, "Renamed description",
+        "description edit persisted"
+    );
+    assert_eq!(
+        updated.tags,
+        vec!["rust".to_string(), "chat".to_string()],
+        "tags edit persisted (normalized)"
+    );
+    assert_eq!(
+        updated.visibility,
+        RoomVisibility::PublicDiscoverable,
+        "visibility unchanged"
+    );
+    assert!(
+        app.advertised_rooms.contains(&topic),
+        "room is still advertised after a metadata-only edit (republish path)"
+    );
+    let _ = app.view();
+}
+
+#[test]
+fn vr_room_settings_dialog_rejects_oversized_metadata() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    // BORU-DIR-06 (PDF Task 2.3): oversized edits are rejected by the same
+    // bounds as the create flow; the dialog stays open and no metadata
+    // change is persisted.
+    let _ = app.update(AppMessage::CreateNewRoom);
+    let _ = app.update(AppMessage::CreateNewRoomNameChanged("Valid Room".into()));
+    let _ = app.update(AppMessage::CreateNewRoomVisibilityChanged(RoomVisibility::PublicUnlisted));
+    let _ = app.update(AppMessage::ConfirmCreateNewRoom);
+    let entry = app
+        .conversation_store
+        .iter()
+        .find(|e| e.name == "Valid Room")
+        .expect("created room must exist in the conversation store");
+    let topic = entry.topic;
+
+    let _ = app.update(AppMessage::OpenRoomSettings(topic));
+    assert!(app.show_room_settings_dialog);
+    let _ = app.update(AppMessage::RoomSettingsNameChanged(
+        "x".repeat(boru_core::control_plane::advertisement::DEFAULT_MAX_ROOM_NAME_LEN + 1),
+    ));
+    let _ = app.update(AppMessage::ConfirmRoomSettings);
+    assert!(
+        app.show_room_settings_dialog,
+        "dialog stays open so the owner can fix the rejected input"
+    );
+    assert!(
+        app.room_settings_error.is_some(),
+        "oversized name surfaces a validation error in the dialog"
+    );
+    assert_eq!(
+        app.conversation_store
+            .find(&topic)
+            .map(|e| e.name.as_str())
+            .unwrap_or(""),
+        "Valid Room",
+        "rejected edit does not change the persisted name"
+    );
+    let _ = app.view();
 }
 
 #[test]
