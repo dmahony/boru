@@ -92,11 +92,13 @@ impl ChatCallbacks for TestPeer {
 
 async fn spawn_peer(
     rng: &mut impl rand::Rng,
+    relay_map: iroh::RelayMap,
 ) -> Result<(Router, iroh::Endpoint, SecretKey, Gossip, PublicKey)> {
-    let ep = iroh::Endpoint::builder(presets::N0)
+    let ep = iroh::Endpoint::builder(presets::Minimal)
         .secret_key(SecretKey::from_bytes(&rng.random()))
         .address_lookup(MemoryLookup::new())
-        .relay_mode(RelayMode::Default)
+        .relay_mode(RelayMode::Custom(relay_map.clone()))
+        .ca_tls_config(iroh::tls::CaTlsConfig::insecure_skip_verify())
         .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())?
         .bind()
         .await?;
@@ -124,9 +126,11 @@ fn drain_net(rx: &Arc<Mutex<tokio::sync::mpsc::Receiver<NetEvent>>>, sim: &mut T
 async fn repro_two_peers_different_keys() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let mut rng = rand::rngs::ChaCha12Rng::seed_from_u64(42);
+    // Local in-process relay: deterministic probes/`online()`, no external network.
+    let (relay_map, relay_url, _relay_guard) = iroh::test_utils::run_relay_server().await?;
 
-    let (router_a, ep_a, sk_a, gossip_a, pk_a) = spawn_peer(&mut rng).await?;
-    let (router_b, ep_b, sk_b, gossip_b, pk_b) = spawn_peer(&mut rng).await?;
+    let (router_a, ep_a, sk_a, gossip_a, pk_a) = spawn_peer(&mut rng, relay_map.clone()).await?;
+    let (router_b, ep_b, sk_b, gossip_b, pk_b) = spawn_peer(&mut rng, relay_map.clone()).await?;
 
     println!("A sk: {}", hex::encode(sk_a.to_bytes()));
     println!("B sk: {}", hex::encode(sk_b.to_bytes()));
@@ -286,6 +290,8 @@ async fn repro_two_peers_different_keys() -> Result<()> {
 async fn repro_two_peers_same_key() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let mut rng = rand::rngs::ChaCha12Rng::seed_from_u64(42);
+    // Local in-process relay: deterministic probes/`online()`, no external network.
+    let (relay_map, relay_url, _relay_guard) = iroh::test_utils::run_relay_server().await?;
     let shared_sk = SecretKey::from_bytes(&rng.random());
     let shared_pk = shared_sk.public();
 
@@ -293,24 +299,38 @@ async fn repro_two_peers_same_key() -> Result<()> {
     println!("Shared pk: {}", shared_pk.fmt_short());
 
     // Create two endpoints with the SAME secret key
-    let ep_a = iroh::Endpoint::builder(presets::N0)
+    let ep_a = iroh::Endpoint::builder(presets::Minimal)
         .secret_key(shared_sk.clone())
         .address_lookup(MemoryLookup::new())
-        .relay_mode(RelayMode::Default)
+        .relay_mode(RelayMode::Custom(relay_map.clone()))
+        .ca_tls_config(iroh::tls::CaTlsConfig::insecure_skip_verify())
         .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())?
         .bind()
         .await?;
     ep_a.online().await;
 
     // Force port binding for B
-    let ep_b = iroh::Endpoint::builder(presets::N0)
+    let ep_b = iroh::Endpoint::builder(presets::Minimal)
         .secret_key(shared_sk.clone())
         .address_lookup(MemoryLookup::new())
-        .relay_mode(RelayMode::Default)
+        .relay_mode(RelayMode::Custom(relay_map.clone()))
+        .ca_tls_config(iroh::tls::CaTlsConfig::insecure_skip_verify())
         .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())?
         .bind()
         .await?;
     ep_b.online().await;
+
+    // Rendezvous via a shared lookup (same-key peers): publish A's addr with
+    // the local relay URL so B can resolve a path, mirroring the DNS/pkarr
+    // discovery the old default-relay setup provided.
+    let shared = MemoryLookup::new();
+    if let Ok(al) = ep_a.address_lookup() {
+        al.add(shared.clone());
+    }
+    if let Ok(al) = ep_b.address_lookup() {
+        al.add(shared.clone());
+    }
+    shared.set_endpoint_info(ep_a.addr().with_relay_url(relay_url.clone()));
 
     println!("Ep A id: {}", ep_a.id().fmt_short());
     println!("Ep B id: {}", ep_b.id().fmt_short());

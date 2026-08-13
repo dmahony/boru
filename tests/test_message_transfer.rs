@@ -89,11 +89,13 @@ impl ChatCallbacks for TestChat {
 
 async fn spawn_peer(
     rng: &mut impl rand::Rng,
+    relay_map: iroh::RelayMap,
 ) -> Result<(Router, iroh::Endpoint, SecretKey, Gossip, PublicKey)> {
-    let ep = iroh::Endpoint::builder(presets::N0)
+    let ep = iroh::Endpoint::builder(presets::Minimal)
         .secret_key(SecretKey::from_bytes(&rng.random()))
         .address_lookup(MemoryLookup::new())
-        .relay_mode(RelayMode::Default)
+        .relay_mode(RelayMode::Custom(relay_map))
+        .ca_tls_config(iroh::tls::CaTlsConfig::insecure_skip_verify())
         .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())?
         .bind()
         .await?;
@@ -120,8 +122,13 @@ async fn test_two_peers_transfer_messages_iced_style() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let mut rng = rand::rngs::ChaCha12Rng::seed_from_u64(42);
 
-    let (router_a, ep_a, sk_a, gossip_a, pk_a) = spawn_peer(&mut rng).await?;
-    let (router_b, ep_b, sk_b, gossip_b, pk_b) = spawn_peer(&mut rng).await?;
+    // Local in-process relay: keeps probes/`online()` deterministic and off the
+    // public n0 relays (the loopback-bound endpoints below cannot send UDP to
+    // external addresses — see skill note "debsrv relay hang is NOT IPv6").
+    let (relay_map, _relay_url, _relay_guard) = iroh::test_utils::run_relay_server().await?;
+
+    let (router_a, ep_a, sk_a, gossip_a, pk_a) = spawn_peer(&mut rng, relay_map.clone()).await?;
+    let (router_b, ep_b, sk_b, gossip_b, pk_b) = spawn_peer(&mut rng, relay_map.clone()).await?;
 
     println!("A: {}", pk_a.fmt_short());
     println!("B: {}", pk_b.fmt_short());

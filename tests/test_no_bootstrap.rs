@@ -26,11 +26,12 @@ fn make_sk(rng: &mut impl rand::Rng) -> SecretKey {
     SecretKey::from_bytes(&rng.random())
 }
 
-async fn spawn_relay(rng: &mut impl rand::Rng) -> Result<(Router, Endpoint, SecretKey, Gossip)> {
-    let ep = Endpoint::builder(presets::N0)
+async fn spawn_relay(rng: &mut impl rand::Rng, relay_map: iroh::RelayMap) -> Result<(Router, Endpoint, SecretKey, Gossip)> {
+    let ep = Endpoint::builder(presets::Minimal)
         .secret_key(make_sk(rng))
         .address_lookup(MemoryLookup::new())
-        .relay_mode(RelayMode::Default)
+        .relay_mode(RelayMode::Custom(relay_map))
+        .ca_tls_config(iroh::tls::CaTlsConfig::insecure_skip_verify())
         .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())?
         .bind()
         .await?;
@@ -62,10 +63,12 @@ async fn drain_events(sub: &mut GossipTopic, timeout: Duration) -> Vec<GossipEve
 async fn test_no_bootstrap_peer_still_receives() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let mut rng = rand::rngs::ChaCha12Rng::seed_from_u64(42);
+    // Local in-process relay: deterministic probes/`online()`, no external network.
+    let (relay_map, _relay_url, _relay_guard) = iroh::test_utils::run_relay_server().await?;
 
     // Spawn two peers
-    let (router_a, ep_a, sk_a, gossip_a) = spawn_relay(&mut rng).await?;
-    let (router_b, ep_b, sk_b, gossip_b) = spawn_relay(&mut rng).await?;
+    let (router_a, ep_a, sk_a, gossip_a) = spawn_relay(&mut rng, relay_map.clone()).await?;
+    let (router_b, ep_b, sk_b, gossip_b) = spawn_relay(&mut rng, relay_map.clone()).await?;
 
     println!("Peer A: {}", ep_a.id().fmt_short());
     println!("Peer B: {}", ep_b.id().fmt_short());

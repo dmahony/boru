@@ -165,16 +165,17 @@ struct Peer {
     _dht: Dht,
 }
 
-async fn spawn_peer(secret_key: SecretKey) -> Result<Peer> {
+async fn spawn_peer(secret_key: SecretKey, relay_map: iroh::RelayMap) -> Result<Peer> {
     // DHT is intentionally constructed for each instance, matching the GUI
     // startup path.  The gossip transport remains relay-capable and uses no
     // direct address injection other than the explicit bootstrap record.
     let dht = Dht::new(&DhtConfig::default());
     let memory_lookup = MemoryLookup::new();
-    let endpoint = Endpoint::builder(presets::N0)
+    let endpoint = Endpoint::builder(presets::Minimal)
         .secret_key(secret_key.clone())
         .address_lookup(memory_lookup.clone())
-        .relay_mode(RelayMode::Default)
+        .relay_mode(RelayMode::Custom(relay_map))
+        .ca_tls_config(iroh::tls::CaTlsConfig::insecure_skip_verify())
         .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())?
         .bind()
         .await?;
@@ -316,14 +317,16 @@ async fn send_and_verify(
 async fn two_instance_dht_normal_chat_survives_reopen_and_restart() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let mut rng = rand::rngs::ChaCha12Rng::seed_from_u64(0xD17C_2026);
+    // Local in-process relay: deterministic probes/`online()`, no external network.
+    let (relay_map, _relay_url, _relay_guard) = iroh::test_utils::run_relay_server().await?;
     let dir_a = TempDir::with_prefix("boru-dht-chat-a-")?;
     let dir_b = TempDir::with_prefix("boru-dht-chat-b-")?;
     let sk_a = SecretKey::from_bytes(&rng.random());
     let sk_b = SecretKey::from_bytes(&rng.random());
     let topic = TopicId::from_bytes(rng.random());
 
-    let peer_a = spawn_peer(sk_a.clone()).await?;
-    let peer_b = spawn_peer(sk_b.clone()).await?;
+    let peer_a = spawn_peer(sk_a.clone(), relay_map.clone()).await?;
+    let peer_b = spawn_peer(sk_b.clone(), relay_map.clone()).await?;
     assert_ne!(peer_a.public_key, peer_b.public_key);
     eprintln!(
         "normal-chat setup room={} peers={}↔{} dht=enabled relay=default",
@@ -388,7 +391,7 @@ async fn two_instance_dht_normal_chat_survives_reopen_and_restart() -> Result<()
     drop(room_b);
     peer_b.endpoint.close().await;
     drop(peer_b);
-    let peer_b = spawn_peer(sk_b).await?;
+    let peer_b = spawn_peer(sk_b, relay_map.clone()).await?;
     drop(room_a);
     add_bootstrap_address(&peer_a, &peer_b);
     add_bootstrap_address(&peer_b, &peer_a);
