@@ -156,6 +156,7 @@ use crate::control_plane::reconnect::{ReconnectHandle, ReconnectScheduler, Recon
 use crate::diagnostics::{DiagnosticCounters, DIAGNOSTIC_COUNTERS};
 use crate::discovery_message::{check_discovery_version, DiscoveryMessage, DiscoveryVersionCheck};
 use crate::proto::TopicId;
+use crate::room_directory::RoomDirectory;
 
 /// Capacity of the peer-update broadcast channel.
 const PEER_UPDATES_CAPACITY: usize = 256;
@@ -1216,6 +1217,17 @@ struct ReceiveCore {
     /// [`DIAGNOSTIC_COUNTERS`] by default so the frontend/MCP can read the
     /// same values; tests inject an isolated instance.
     counters: DiagnosticCounters,
+    /// Bounded local room-directory cache (BORU-DIR-10 / PDF Phase 4 Task
+    /// 4.1): keyed by stable room_id, stores the latest valid advertisement
+    /// plus provenance (publisher, auth verdict, first/last seen, expiry,
+    /// compatibility, local join state), enforces entry-count +
+    /// metadata-size bounds, and merges duplicate/refresh advertisements
+    /// deterministically. Maintained by the control-plane receive path;
+    /// subscribers read snapshots via
+    /// [`DiscoveryService::room_directory`](crate::discovery_service::DiscoveryService::room_directory).
+    /// Never creates conversation records or subscribes to room topics
+    /// (PDF Core rule).
+    room_directory: Arc<Mutex<RoomDirectory>>,
 }
 
 impl ReceiveCore {
@@ -1503,6 +1515,31 @@ impl ReceiveCore {
                                 auth = ?auth,
                                 "discovery: public-room advertisement received",
                             );
+                            // BORU-DIR-10 (PDF Phase 4, Task 4.1): maintain
+                            // the bounded local room-directory cache at the
+                            // discovery/control-plane service boundary — the
+                            // same place advertisements are decoded. The
+                            // cache is keyed by stable room_id, stores the
+                            // latest valid advertisement plus provenance
+                            // (publisher, auth verdict, first/last seen,
+                            // expiry, compatibility, local join state), is
+                            // bounded (entry count + metadata bytes), and
+                            // merges duplicate/refresh advertisements
+                            // deterministically. It NEVER creates a
+                            // Conversation record, subscribes to a room
+                            // topic, downloads history, or grants permission
+                            // (PDF Core rule) — pure cached discovery
+                            // metadata.
+                            self.room_directory
+                                .lock()
+                                .expect("room directory lock poisoned")
+                                .apply_advertisement(
+                                    advert.clone(),
+                                    envelope.sender_node_id,
+                                    auth,
+                                    envelope.sequence,
+                                    envelope.timestamp_secs,
+                                );
                             let _ = self.control_events_tx.send(ControlEvent::RoomAdvertisement(
                                 RoomAdvertisementEvent {
                                     sender_node_id: envelope.sender_node_id,
@@ -1560,6 +1597,16 @@ impl ReceiveCore {
                                 room = %withdrawal.room_id,
                                 "discovery: public-room withdrawal received and verified",
                             );
+                            // BORU-DIR-10: apply the verified, authoritative
+                            // withdrawal to the bounded directory cache
+                            // immediately — the directory removes the room's
+                            // entry when the withdrawing authority matches
+                            // the stored owner. TTL expiry remains the
+                            // safety net if a withdrawal is missed.
+                            self.room_directory
+                                .lock()
+                                .expect("room directory lock poisoned")
+                                .apply_withdrawal(withdrawal.room_id, withdrawal.owner_peer_id);
                             let _ = self
                                 .control_events_tx
                                 .send(ControlEvent::RoomWithdrawal(RoomWithdrawalEvent {
@@ -1978,6 +2025,9 @@ impl DiscoveryService {
         // BORU-CP-07: per-peer reconnect scheduler (exponential backoff +
         // maximum retry cadence, one active attempt per peer).
         let reconnect = Arc::new(Mutex::new(ReconnectScheduler::new()));
+        // BORU-DIR-10: the bounded local room-directory cache, owned by the
+        // discovery/control-plane layer (PDF Phase 4 Task 4.1).
+        let room_directory = Arc::new(Mutex::new(RoomDirectory::new()));
         let core = ReceiveCore {
             local_node,
             topic,
@@ -1989,6 +2039,7 @@ impl DiscoveryService {
             reconnect,
             reconnect_tx,
             counters,
+            room_directory,
         };
         let announce = AnnounceHandle::new(sender.clone(), local_node);
         let control_announce = ControlAnnounceHandle::new(sender, local_node);
@@ -2538,6 +2589,19 @@ impl DiscoveryService {
     /// are dropped at the receive gate (logged, never emitted).
     pub fn control_events(&self) -> broadcast::Receiver<ControlEvent> {
         self.core.control_events_tx.subscribe()
+    }
+
+    /// Shared handle to the bounded room-directory cache (BORU-DIR-10, PDF
+    /// Phase 4 Task 4.1).
+    ///
+    /// The control-plane receive path maintains this cache as room
+    /// advertisements/withdrawals arrive; subscribers (e.g. the Phase 5
+    /// Discover Rooms UI) read deterministic snapshots through it. The
+    /// cache is pure discovery metadata — keyed by stable room_id, bounded,
+    /// and never conversation state (no [`ConversationEntry`](crate::conversations::ConversationEntry)
+    /// is ever created and no room gossip topic is ever subscribed).
+    pub fn room_directory(&self) -> Arc<Mutex<RoomDirectory>> {
+        self.core.room_directory.clone()
     }
 
     /// Send a control-plane envelope on the discovery topic (BORU-CP-02).
@@ -6353,6 +6417,192 @@ mod tests {
             }
             other => panic!("expected decoded envelope, got {other:?}"),
         }
+    }
+
+    // ── BORU-DIR-10 (PDF Phase 4, Task 4.1): bounded room directory ─────
+
+    /// A decoded PUBLIC_ROOM_ADVERTISEMENT populates the bounded
+    /// room-directory cache at the service boundary — keyed by stable
+    /// room_id, carrying publisher + auth verdict + compatibility, with no
+    /// peer-registry side effect.
+    #[tokio::test]
+    async fn handle_incoming_room_advertisement_populates_directory() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let service = test_service(local);
+
+        let mut advert = test_advert();
+        advert.sign(&test_secret_key(0xBB)); // verified for `peer`
+        let bytes =
+            ControlEnvelope::public_room_advertisement(peer, 7, 1_700_000_000, advert.clone())
+                .encode();
+        let outcome = service.handle_incoming(&bytes, peer);
+        assert_eq!(outcome, IncomingOutcome::ControlMessage);
+
+        let dir = service.room_directory();
+        let guard = dir.lock().unwrap();
+        assert_eq!(guard.len(), 1, "advertisement cached");
+        let entry = guard.get(&advert.room_id).expect("room cached by stable room_id");
+        assert_eq!(entry.advert, advert, "latest valid advertisement stored");
+        assert_eq!(entry.publisher, peer, "advertiser identity stored");
+        assert_eq!(
+            entry.auth,
+            AdvertisementAuth::Verified { publisher: peer },
+            "auth verdict stored"
+        );
+        assert_eq!(
+            entry.compatibility,
+            crate::room_directory::RoomCompatibility::Compatible
+        );
+        assert_eq!(
+            entry.local_join_state,
+            crate::room_directory::LocalJoinState::NotJoined,
+            "local join state defaults to NotJoined"
+        );
+        drop(guard);
+
+        // The peer registry is NOT touched by room advertisements.
+        assert_eq!(service.peer_count(), 0);
+    }
+
+    /// Duplicate advertisements for the same room merge into ONE directory
+    /// entry: an exact duplicate (same sender + sequence) is dropped by the
+    /// control-plane guard, and a refresh (new sequence, same publisher)
+    /// updates the existing entry without growing the cache.
+    #[tokio::test]
+    async fn handle_incoming_duplicate_advertisements_merge() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let service = test_service(local);
+
+        let mut advert = test_advert();
+        advert.sign(&test_secret_key(0xBB));
+
+        // First announcement.
+        let bytes =
+            ControlEnvelope::public_room_advertisement(peer, 7, 1_700_000_000, advert.clone())
+                .encode();
+        assert_eq!(service.handle_incoming(&bytes, peer), IncomingOutcome::ControlMessage);
+        // Exact duplicate (same sender + sequence) — guard dedup.
+        assert_eq!(service.handle_incoming(&bytes, peer), IncomingOutcome::Duplicate);
+        // Refresh (new sequence, same content) — merges into the one entry.
+        let refresh =
+            ControlEnvelope::public_room_advertisement(peer, 8, 1_700_000_060, advert.clone())
+                .encode();
+        assert_eq!(service.handle_incoming(&refresh, peer), IncomingOutcome::ControlMessage);
+
+        let dir = service.room_directory();
+        let guard = dir.lock().unwrap();
+        assert_eq!(guard.len(), 1, "duplicates merge into a single card");
+        assert_eq!(guard.get(&advert.room_id).unwrap().sequence, 8);
+        assert_eq!(service.peer_count(), 0);
+    }
+
+    /// A verified, authoritative PUBLIC_ROOM_WITHDRAWAL removes the room
+    /// from the bounded directory cache immediately (TTL remains the
+    /// safety net if a withdrawal is missed).
+    #[tokio::test]
+    async fn handle_incoming_verified_withdrawal_removes_directory_entry() {
+        let local = test_key(0xAA);
+        let owner = test_key(0xBB);
+        let service = test_service(local);
+
+        // Advertisement signed by the room authority (owner == publisher).
+        let advert = test_advert_signed(0xBB);
+        let bytes =
+            ControlEnvelope::public_room_advertisement(owner, 7, 1_700_000_000, advert.clone())
+                .encode();
+        assert_eq!(service.handle_incoming(&bytes, owner), IncomingOutcome::ControlMessage);
+        assert_eq!(service.room_directory().lock().unwrap().len(), 1);
+
+        // Withdrawal signed by the authority.
+        let mut withdrawal = crate::control_plane::advertisement::PublicRoomWithdrawal::minimal(
+            advert.room_id,
+            owner.as_bytes().to_owned(),
+        );
+        withdrawal.sign(&test_secret_key(0xBB));
+        let bytes =
+            ControlEnvelope::public_room_withdrawal(owner, 21, 1_700_000_100, withdrawal).encode();
+        assert_eq!(service.handle_incoming(&bytes, owner), IncomingOutcome::ControlMessage);
+
+        let dir = service.room_directory();
+        let guard = dir.lock().unwrap();
+        assert!(guard.is_empty(), "withdrawal removed the directory entry");
+        assert_eq!(service.peer_count(), 0);
+    }
+
+    /// A withdrawal signed by a NON-authority never reaches the directory
+    /// (the receive gate discards it) — the cached entry survives.
+    #[tokio::test]
+    async fn handle_incoming_non_authoritative_withdrawal_keeps_directory_entry() {
+        let local = test_key(0xAA);
+        let owner = test_key(0xBB);
+        let member = test_key(0xCC);
+        let service = test_service(local);
+
+        let advert = test_advert_signed(0xBB);
+        let bytes =
+            ControlEnvelope::public_room_advertisement(owner, 7, 1_700_000_000, advert.clone())
+                .encode();
+        assert_eq!(service.handle_incoming(&bytes, owner), IncomingOutcome::ControlMessage);
+        assert_eq!(service.room_directory().lock().unwrap().len(), 1);
+
+        // A member signs a withdrawal claiming the room's authority.
+        let mut withdrawal = crate::control_plane::advertisement::PublicRoomWithdrawal::minimal(
+            advert.room_id,
+            owner.as_bytes().to_owned(),
+        );
+        withdrawal.sign(&test_secret_key(0xCC));
+        let bytes =
+            ControlEnvelope::public_room_withdrawal(member, 24, 1_700_000_100, withdrawal).encode();
+        assert_eq!(
+            service.handle_incoming(&bytes, member),
+            IncomingOutcome::WithdrawalNotAuthoritative
+        );
+
+        let dir = service.room_directory();
+        let guard = dir.lock().unwrap();
+        assert_eq!(guard.len(), 1, "non-authoritative withdrawal cannot remove the room");
+        assert_eq!(service.peer_count(), 0);
+    }
+
+    /// Discovering a room never subscribes to its gossip topic and never
+    /// creates a conversation (PDF Core rule / Task 4.1 acceptance). The
+    /// advertisement is decoded into the directory cache only: the
+    /// service's own subscription stays exactly the discovery topic, the
+    /// peer registry is untouched, and the cached entry is metadata-only
+    /// (NotJoined, no conversation handle).
+    #[tokio::test]
+    async fn handle_incoming_room_advertisement_never_subscribes_or_creates_conversations() {
+        let local = test_key(0xAA);
+        let peer = test_key(0xBB);
+        let service = test_service(local);
+
+        let mut advert = test_advert();
+        advert.sign(&test_secret_key(0xBB));
+        let bytes =
+            ControlEnvelope::public_room_advertisement(peer, 7, 1_700_000_000, advert.clone())
+                .encode();
+        assert_eq!(service.handle_incoming(&bytes, peer), IncomingOutcome::ControlMessage);
+
+        let dir = service.room_directory();
+        let guard = dir.lock().unwrap();
+        assert_eq!(guard.len(), 1, "room cached");
+        // The room's gossip topic is NOT subscribed: the only topic the
+        // service ever joins is the discovery topic.
+        assert_eq!(service.topic(), test_topic());
+        assert_ne!(
+            service.topic(),
+            advert.room_id,
+            "the advertised room topic is never a service subscription"
+        );
+        // No peer-registry entry and no conversation record is created.
+        assert_eq!(service.peer_count(), 0);
+        // The cached entry is pure discovery metadata.
+        assert_eq!(
+            guard.get(&advert.room_id).unwrap().local_join_state,
+            crate::room_directory::LocalJoinState::NotJoined
+        );
     }
 
     /// `send_control` serialises a control-plane envelope (magic `BC`) and

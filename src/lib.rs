@@ -80,6 +80,17 @@ pub mod vnc_tunnel;
 #[cfg(feature = "net")]
 pub mod directory;
 
+/// Bounded local cache of discovered public rooms (PDF Phase 4, Task 4.1).
+///
+/// Keyed by stable room_id; stores the latest valid advertisement plus
+/// provenance (publisher, auth verdict, first/last seen, expiry,
+/// compatibility, local join state); enforces entry-count + metadata-size
+/// bounds with deterministic replacement and withdrawal handling. Owned by
+/// the discovery/control-plane layer — never creates conversation records
+/// or subscribes to room topics.
+#[cfg(feature = "net")]
+pub mod room_directory;
+
 /// Bounded dynamic peer joiner — joins discovered peers into the gossip mesh
 /// with dedup, backoff, retries, and concurrency limits.
 #[cfg(feature = "net")]

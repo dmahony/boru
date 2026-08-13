@@ -1,0 +1,1065 @@
+//! Bounded local cache of discovered public rooms (PDF Phase 4, Task 4.1).
+//!
+//! The **room directory** is the client-side cache of room-discovery
+//! metadata maintained by the discovery/control-plane layer. It is
+//! deliberately **not** conversation state: discovering a room never
+//! creates a [`ConversationEntry`](crate::conversations::ConversationEntry),
+//! subscribes to the room's gossip topic, downloads history, or grants any
+//! permission (PDF Core rule). This module has no reference to
+//! `crate::conversations` at all — the guarantee is structural.
+//!
+//! # What is stored
+//!
+//! Entries are keyed by the **stable `room_id`** (the room's gossip
+//! [`TopicId`], PDF Task 4.1 step 2). Each entry holds:
+//!
+//! * the **latest valid advertisement** ([`PublicRoomAdvertisement`]),
+//! * the **advertiser/authority identity** — the publishing node
+//!   ([`DirectoryEntry::publisher`]) and the publisher-authentication
+//!   verdict at receipt ([`DirectoryEntry::auth`], BORU-DIR-03),
+//! * `first_seen` / `last_seen` / `expires_at` (DIR-08 TTL policy),
+//! * **compatibility state** ([`DirectoryEntry::compatibility`],
+//!   room protocol vs this client, refined by Phase 6 Task 6.2),
+//! * **local join state** ([`DirectoryEntry::local_join_state`];
+//!   defaults to [`LocalJoinState::NotJoined`] — BORU-DIR-12 derives
+//!   Joined/Blocked from the real room database, never from the
+//!   directory itself).
+//!
+//! # Bounds (PDF Task 4.1 step 5)
+//!
+//! The cache enforces a maximum entry count
+//! ([`MAX_DIRECTORY_ENTRIES`]) and an aggregate metadata-size budget
+//! ([`MAX_DIRECTORY_TOTAL_BYTES`]). When full, expired entries are
+//! evicted first, then the least-recently-seen entry — thousands of
+//! advertisements cannot grow memory without bound.
+//!
+//! # Deterministic replacement (PDF Task 4.1 step 6)
+//!
+//! Multiple advertisements for the same `room_id` collapse into **one**
+//! entry (duplicates merge, never duplicate cards):
+//!
+//! 1. Same publisher → the later envelope (higher control-plane
+//!    `sequence`) replaces the earlier one; `first_seen` is preserved and
+//!    `last_seen`/`expires_at` advance (a DIR-08 refresh).
+//! 2. Different publisher → a **verified authoritative** publisher (the
+//!    advertisement verifies and the publisher equals `owner_peer_id`)
+//!    beats a non-authority publisher, so a random peer cannot silently
+//!    overwrite another room's canonical metadata (PDF Task 1.3).
+//! 3. Both authoritative or both non-authoritative → the advertisement
+//!    with the later envelope creation timestamp wins; ties break on the
+//!    lexicographically larger publisher key. Deterministic — no
+//!    HashMap-order dependence, no oscillation on stale replays.
+//!
+//! # Withdrawal (BORU-DIR-09 / PDF Task 3.3)
+//!
+//! [`apply_withdrawal`](Self::apply_withdrawal) removes the matching entry
+//! immediately. The control-plane receive gate has already verified the
+//! withdrawal is signed by its claimed authority; the directory adds one
+//! more guard: the withdrawal's `owner_peer_id` must match the **stored
+//! entry's** `owner_peer_id`, so a withdrawal cannot remove a listing
+//! owned by a different room authority. TTL expiry
+//! ([`evict_expired`](Self::evict_expired)) remains the safety net when a
+//! withdrawal is missed.
+
+use std::{
+    cmp::Ordering,
+    collections::HashMap,
+    time::{Duration, Instant},
+};
+
+use iroh_base::PublicKey;
+
+use crate::control_plane::advertisement::{AdvertisementAuth, PublicRoomAdvertisement};
+use crate::proto::TopicId;
+
+// ---------------------------------------------------------------------------
+// Bounds
+// ---------------------------------------------------------------------------
+
+/// Maximum number of cached room-directory entries (PDF Task 4.1 step 5).
+///
+/// The directory is a **bounded cache** of discovered metadata, not a
+/// database: 1024 live rooms is far beyond what any single user's
+/// discovery cohort produces, while still bounding memory for a hostile
+/// network that floods advertisements. When full, entries are evicted by
+/// expiry first, then by least-recently-seen.
+pub const MAX_DIRECTORY_ENTRIES: usize = 1024;
+
+/// Aggregate metadata-size budget for the cache, in encoded advertisement
+/// bytes (PDF Task 4.1 step 5).
+///
+/// Each advertisement is already bounded by the privacy layer (name,
+/// description, tags, flags, TTL limits), but the aggregate cap makes the
+/// total footprint explicit and testable. A single advertisement larger
+/// than this budget is still cached (one room is worth one entry; the cap
+/// is on aggregate growth).
+pub const MAX_DIRECTORY_TOTAL_BYTES: usize = 1024 * 1024;
+
+// ---------------------------------------------------------------------------
+// Compatibility and local relationship (stored per entry)
+// ---------------------------------------------------------------------------
+
+/// Compatibility of a discovered room's chat protocol with this client
+/// (PDF Task 6.2; stored per entry by BORU-DIR-10, refined by the Phase 6
+/// join-flow task).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoomCompatibility {
+    /// No advertisement seen yet for the room (only used for empty
+    /// placeholders; every cached entry has a concrete verdict).
+    Unknown,
+    /// The local client can join the room (same or older room protocol).
+    Compatible,
+    /// The room speaks a newer protocol than this client — joining would
+    /// require a client upgrade.
+    UpgradeRequired,
+    /// The room's protocol is not supported by this client at all.
+    Unsupported,
+}
+
+impl RoomCompatibility {
+    /// Deterministic compatibility verdict from the room's advertised
+    /// chat protocol version.
+    ///
+    /// A room speaking the same protocol version as this client, or an
+    /// older one, is joinable; a room speaking a newer protocol requires
+    /// an upgrade. Phase 6 (PDF Task 6.2) may refine this with capability
+    /// negotiation for optional features — the stored value here is the
+    /// base-room-protocol verdict.
+    pub fn for_room_protocol(room_protocol_version: u8) -> Self {
+        match room_protocol_version.cmp(&crate::public_room::PROTOCOL_VERSION) {
+            Ordering::Equal | Ordering::Less => RoomCompatibility::Compatible,
+            Ordering::Greater => RoomCompatibility::UpgradeRequired,
+        }
+    }
+}
+
+/// Local relationship to a discovered room (PDF Task 4.3 field; the
+/// derivation is BORU-DIR-12, out of scope for DIR-10).
+///
+/// The directory only **stores** this state — it never decides it. The
+/// source of truth for `Joined`/`Blocked` is the real local room database;
+/// the directory defaults every entry to [`LocalJoinState::NotJoined`] and
+/// never duplicates local membership records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalJoinState {
+    /// The user has not joined this room (default for every cached entry).
+    NotJoined,
+    /// The user has joined the room (derived from the room database).
+    Joined,
+    /// A join attempt is in flight.
+    JoinPending,
+    /// The user has hidden/blocked the room locally.
+    Blocked,
+    /// The room is incompatible with this client.
+    Incompatible,
+}
+
+// ---------------------------------------------------------------------------
+// Entry + outcome
+// ---------------------------------------------------------------------------
+
+/// One cached discovered room (PDF Task 4.1 step 2/3).
+///
+/// Fields are public read-only metadata for subscribers (the Phase 5
+/// Discover Rooms UI); the private `bytes` field is internal accounting
+/// for the aggregate size bound, which is why external code can read but
+/// not construct an entry.
+#[derive(Debug, Clone)]
+pub struct DirectoryEntry {
+    /// The latest valid advertisement for the room.
+    pub advert: PublicRoomAdvertisement,
+    /// The node that published the stored advertisement (advertiser /
+    /// authority identity).
+    pub publisher: PublicKey,
+    /// Publisher-authentication verdict at receipt (BORU-DIR-03). Only
+    /// [`AdvertisementAuth::Verified`] entries are canonical metadata;
+    /// [`AdvertisementAuth::MissingSignature`] entries are listed as
+    /// clearly untrusted and never as canonical.
+    pub auth: AdvertisementAuth,
+    /// Control-plane sequence of the stored advertisement (per-publisher
+    /// monotonic; the same-publisher replacement tiebreak).
+    pub sequence: u64,
+    /// Envelope creation timestamp of the stored advertisement (unix
+    /// seconds; the cross-publisher freshness tiebreak).
+    pub advertised_at_secs: u64,
+    /// First time this `room_id` was seen — never reset by refreshes.
+    pub first_seen: Instant,
+    /// Last time a valid advertisement for this `room_id` was received.
+    pub last_seen: Instant,
+    /// Expiry instant: `last_seen` + the advertisement's TTL (DIR-08
+    /// policy — a refresh restarts the lifetime).
+    pub expires_at: Instant,
+    /// Room chat-protocol compatibility with this client.
+    pub compatibility: RoomCompatibility,
+    /// Local relationship state (NotJoined by default; BORU-DIR-12).
+    pub local_join_state: LocalJoinState,
+    /// Encoded size of `advert` (bytes), used for the aggregate size bound.
+    bytes: usize,
+}
+
+/// Outcome of applying an advertisement to the directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdvertiseOutcome {
+    /// A genuinely new room was added to the directory.
+    Added,
+    /// An existing entry was refreshed or replaced — the room was already
+    /// cached, so this is a merge, never a second card.
+    Refreshed,
+    /// The advertisement was a deterministic no-op (an older or less
+    /// authoritative advertisement for a cached room) — nothing changed.
+    Unchanged,
+}
+
+// ---------------------------------------------------------------------------
+// RoomDirectory
+// ---------------------------------------------------------------------------
+
+/// Bounded cache of discovered public rooms, keyed by stable `room_id`.
+///
+/// Owned by the discovery/control-plane layer: the receive path
+/// ([`crate::discovery_service::DiscoveryService`]) maintains it as
+/// PUBLIC_ROOM_ADVERTISEMENT / PUBLIC_ROOM_WITHDRAWAL envelopes arrive, and
+/// subscribers read snapshots. It never creates conversation records,
+/// subscribes to room topics, or grants permissions (PDF Core rule).
+#[derive(Debug)]
+pub struct RoomDirectory {
+    /// Entries keyed by stable room_id (the room's gossip topic bytes).
+    entries: HashMap<TopicId, DirectoryEntry>,
+    /// Sum of `bytes` over all entries (aggregate metadata-size bound).
+    total_bytes: usize,
+    /// Maximum entry count (injectable for tests).
+    max_entries: usize,
+    /// Maximum aggregate metadata bytes (injectable for tests).
+    max_bytes: usize,
+}
+
+impl RoomDirectory {
+    /// Create an empty directory with the default bounds.
+    pub fn new() -> Self {
+        Self::with_limits(MAX_DIRECTORY_ENTRIES, MAX_DIRECTORY_TOTAL_BYTES)
+    }
+
+    /// Create an empty directory with explicit bounds (tests use small
+    /// limits to exercise the eviction paths cheaply).
+    pub fn with_limits(max_entries: usize, max_bytes: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            total_bytes: 0,
+            max_entries,
+            max_bytes,
+        }
+    }
+
+    /// Apply a decoded, bounded room advertisement (BORU-DIR-01/02) to the
+    /// cache (PDF Task 4.1).
+    ///
+    /// `publisher` is the control-plane envelope's sender, `auth` the
+    /// publisher-authentication verdict (BORU-DIR-03), `sequence` the
+    /// envelope's per-publisher monotonic counter, and `timestamp_secs`
+    /// the envelope's creation time. The advertisement must already have
+    /// passed the receive gate (well-formed, bounded, attributed);
+    /// [`AdvertisementAuth::InvalidSignature`] advertisements never reach
+    /// this method.
+    ///
+    /// Returns [`AdvertiseOutcome`] describing whether the cache gained a
+    /// new room, refreshed an existing one, or left the entry unchanged.
+    pub fn apply_advertisement(
+        &mut self,
+        advert: PublicRoomAdvertisement,
+        publisher: PublicKey,
+        auth: AdvertisementAuth,
+        sequence: u64,
+        timestamp_secs: u64,
+    ) -> AdvertiseOutcome {
+        self.apply_advertisement_at(
+            advert,
+            publisher,
+            auth,
+            sequence,
+            timestamp_secs,
+            Instant::now(),
+        )
+    }
+
+    /// [`apply_advertisement`](Self::apply_advertisement) with an explicit
+    /// `now` — deterministic-time core used by tests.
+    pub fn apply_advertisement_at(
+        &mut self,
+        advert: PublicRoomAdvertisement,
+        publisher: PublicKey,
+        auth: AdvertisementAuth,
+        sequence: u64,
+        timestamp_secs: u64,
+        now: Instant,
+    ) -> AdvertiseOutcome {
+        let room_id = advert.room_id;
+        let bytes = encoded_size(&advert);
+        let ttl = Duration::from_secs(u64::from(advert.expires_after_secs.max(1)));
+        let compatibility = RoomCompatibility::for_room_protocol(advert.room_protocol_version);
+
+        match self.entries.get_mut(&room_id) {
+            Some(existing) => {
+                if !should_replace(
+                    existing,
+                    &advert,
+                    &publisher,
+                    &auth,
+                    sequence,
+                    timestamp_secs,
+                ) {
+                    return AdvertiseOutcome::Unchanged;
+                }
+                let old_bytes = existing.bytes;
+                existing.advert = advert;
+                existing.publisher = publisher;
+                existing.auth = auth;
+                existing.sequence = sequence;
+                existing.advertised_at_secs = timestamp_secs;
+                existing.last_seen = now;
+                existing.expires_at = now + ttl;
+                existing.compatibility = compatibility;
+                existing.bytes = bytes;
+                self.total_bytes = self
+                    .total_bytes
+                    .saturating_sub(old_bytes)
+                    .saturating_add(bytes);
+                AdvertiseOutcome::Refreshed
+            }
+            None => {
+                // New room: enforce the bounds before inserting.
+                self.evict_expired_at(now);
+                while self.entries.len() >= self.max_entries
+                    || self.total_bytes.saturating_add(bytes) > self.max_bytes
+                {
+                    // Deterministic victim: earliest expiry, then oldest
+                    // last_seen (least-recently-seen eviction).
+                    let victim = self
+                        .entries
+                        .iter()
+                        .min_by_key(|(_, entry)| (entry.expires_at, entry.last_seen))
+                        .map(|(room_id, _)| *room_id);
+                    let Some(victim) = victim else { break };
+                    let removed = self.entries.remove(&victim);
+                    if let Some(entry) = removed {
+                        self.total_bytes = self.total_bytes.saturating_sub(entry.bytes);
+                    }
+                }
+                let entry = DirectoryEntry {
+                    advert,
+                    publisher,
+                    auth,
+                    sequence,
+                    advertised_at_secs: timestamp_secs,
+                    first_seen: now,
+                    last_seen: now,
+                    expires_at: now + ttl,
+                    compatibility,
+                    local_join_state: LocalJoinState::NotJoined,
+                    bytes,
+                };
+                self.entries.insert(room_id, entry);
+                self.total_bytes = self.total_bytes.saturating_add(bytes);
+                AdvertiseOutcome::Added
+            }
+        }
+    }
+
+    /// Apply a verified, authoritative room withdrawal (BORU-DIR-09, PDF
+    /// Task 3.3) — remove the matching entry immediately.
+    ///
+    /// The control-plane receive gate has already verified the withdrawal
+    /// is signed by its claimed authority (`sender_node_id ==
+    /// owner_peer_id`). The directory adds one more guard: the withdrawal's
+    /// `authority` must match the **stored entry's** `owner_peer_id`, so a
+    /// withdrawal claimed by a different room authority can never remove an
+    /// unrelated listing (PDF test matrix: "Spoofed withdrawals cannot
+    /// remove unrelated rooms"). TTL expiry
+    /// ([`evict_expired`](Self::evict_expired)) remains the safety net if a
+    /// withdrawal is missed.
+    ///
+    /// Returns `true` when an entry was actually removed.
+    pub fn apply_withdrawal(&mut self, room_id: TopicId, authority: [u8; 32]) -> bool {
+        let matches = self
+            .entries
+            .get(&room_id)
+            .is_some_and(|entry| entry.advert.owner_peer_id == authority);
+        if matches {
+            if let Some(entry) = self.entries.remove(&room_id) {
+                self.total_bytes = self.total_bytes.saturating_sub(entry.bytes);
+            }
+        }
+        matches
+    }
+
+    /// Remove entries whose TTL has elapsed since the last valid refresh
+    /// (DIR-08 policy; PDF Task 3.2 step 4). Returns the evicted room ids.
+    pub fn evict_expired(&mut self) -> Vec<TopicId> {
+        self.evict_expired_at(Instant::now())
+    }
+
+    /// [`evict_expired`](Self::evict_expired) with an explicit `now` —
+    /// deterministic-time core used by tests.
+    pub fn evict_expired_at(&mut self, now: Instant) -> Vec<TopicId> {
+        let expired: Vec<TopicId> = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| now >= entry.expires_at)
+            .map(|(room_id, _)| *room_id)
+            .collect();
+        for room_id in &expired {
+            if let Some(entry) = self.entries.remove(room_id) {
+                self.total_bytes = self.total_bytes.saturating_sub(entry.bytes);
+            }
+        }
+        expired
+    }
+
+    /// Read one cached room.
+    pub fn get(&self, room_id: &TopicId) -> Option<&DirectoryEntry> {
+        self.entries.get(room_id)
+    }
+
+    /// Whether a room is currently cached.
+    pub fn contains(&self, room_id: &TopicId) -> bool {
+        self.entries.contains_key(room_id)
+    }
+
+    /// Deterministic snapshot of all cached entries, sorted by room_id.
+    ///
+    /// Subscribers (Phase 5 Discover Rooms UI, diagnostics) read through
+    /// this; ordering is deterministic so the UI never churns on map
+    /// iteration order.
+    pub fn snapshot(&self) -> Vec<DirectoryEntry> {
+        let mut rooms: Vec<DirectoryEntry> = self.entries.values().cloned().collect();
+        rooms.sort_by(|a, b| a.advert.room_id.as_bytes().cmp(b.advert.room_id.as_bytes()));
+        rooms
+    }
+
+    /// Number of cached rooms.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the cache is empty.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Aggregate encoded metadata size in bytes (for the size bound).
+    pub fn total_bytes(&self) -> usize {
+        self.total_bytes
+    }
+
+    /// The maximum entry count this cache enforces.
+    pub fn max_entries(&self) -> usize {
+        self.max_entries
+    }
+}
+
+impl Default for RoomDirectory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Encoded size of an advertisement (infallible for in-memory values).
+fn encoded_size(advert: &PublicRoomAdvertisement) -> usize {
+    postcard::to_stdvec(advert)
+        .map(|bytes| bytes.len())
+        .unwrap_or(0)
+}
+
+/// Deterministic replacement rule for multiple advertisements of the same
+/// room (PDF Task 4.1 step 6). See the module docs for the full ordering.
+fn should_replace(
+    existing: &DirectoryEntry,
+    incoming: &PublicRoomAdvertisement,
+    incoming_publisher: &PublicKey,
+    incoming_auth: &AdvertisementAuth,
+    incoming_sequence: u64,
+    incoming_timestamp_secs: u64,
+) -> bool {
+    if existing.publisher == *incoming_publisher {
+        // Same advertiser: the later envelope wins (a DIR-08 refresh or a
+        // metadata update). An older replayed envelope (lower sequence)
+        // cannot downgrade the cached metadata.
+        return incoming_sequence >= existing.sequence;
+    }
+
+    // Different advertiser. A verified authoritative publisher (the
+    // advertisement verifies AND the publisher equals owner_peer_id) beats
+    // a non-authority publisher — a random peer cannot silently overwrite
+    // another room's canonical metadata (PDF Task 1.3).
+    let existing_is_authority = existing.auth.is_verified()
+        && existing
+            .advert
+            .is_authoritative_publisher(&existing.publisher);
+    let incoming_is_authority =
+        incoming_auth.is_verified() && incoming.is_authoritative_publisher(incoming_publisher);
+    match (incoming_is_authority, existing_is_authority) {
+        (true, false) => return true,
+        (false, true) => return false,
+        _ => {}
+    }
+
+    // Both authoritative or both non-authoritative: prefer the newer
+    // advertisement (by envelope creation timestamp), then a deterministic
+    // lexicographic tiebreak on the publisher key.
+    if incoming_timestamp_secs != existing.advertised_at_secs {
+        return incoming_timestamp_secs > existing.advertised_at_secs;
+    }
+    incoming_publisher.as_bytes() > existing.publisher.as_bytes()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn topic(byte: u8) -> TopicId {
+        TopicId::from_bytes([byte; 32])
+    }
+
+    fn key(byte: u8) -> PublicKey {
+        let mut seed = [0u8; 32];
+        seed[0] = byte;
+        iroh_base::SecretKey::from_bytes(&seed).public()
+    }
+
+    fn secret_key(byte: u8) -> iroh_base::SecretKey {
+        let mut seed = [0u8; 32];
+        seed[0] = byte;
+        iroh_base::SecretKey::from_bytes(&seed)
+    }
+
+    fn ad(room_id: TopicId, owner_byte: u8, name: &str) -> PublicRoomAdvertisement {
+        PublicRoomAdvertisement::minimal(
+            room_id,
+            name.to_string(),
+            key(owner_byte).as_bytes().to_owned(),
+        )
+    }
+
+    fn ad_named(room_id: TopicId, owner_byte: u8, name: &str, ttl: u32) -> PublicRoomAdvertisement {
+        let mut a = ad(room_id, owner_byte, name);
+        a.expires_after_secs = ttl;
+        a
+    }
+
+    fn verified_auth(publisher: PublicKey) -> AdvertisementAuth {
+        AdvertisementAuth::Verified { publisher }
+    }
+
+    fn t0() -> Instant {
+        Instant::now()
+    }
+
+    // ── Basics + duplicate merge (PDF Task 4.1 acceptance) ────────────
+
+    #[test]
+    fn new_directory_is_empty() {
+        let dir = RoomDirectory::new();
+        assert!(dir.is_empty());
+        assert_eq!(dir.len(), 0);
+        assert_eq!(dir.total_bytes(), 0);
+    }
+
+    /// Duplicate advertisements merge rather than create duplicate cards:
+    /// the same room advertised twice (refresh) yields one entry.
+    #[test]
+    fn duplicate_advertisements_merge_into_one_entry() {
+        let mut dir = RoomDirectory::new();
+        let room = topic(1);
+        let owner = key(0x42);
+
+        let first =
+            dir.apply_advertisement(ad(room, 0x42, "room"), owner, verified_auth(owner), 1, 1000);
+        assert_eq!(first, AdvertiseOutcome::Added);
+        assert_eq!(dir.len(), 1);
+
+        // Same publisher re-broadcasts with a higher sequence (refresh).
+        let second =
+            dir.apply_advertisement(ad(room, 0x42, "room"), owner, verified_auth(owner), 2, 1060);
+        assert_eq!(second, AdvertiseOutcome::Refreshed);
+        assert_eq!(dir.len(), 1, "refresh must not create a second card");
+
+        // A stale replay (lower sequence) is a deterministic no-op.
+        let stale =
+            dir.apply_advertisement(ad(room, 0x42, "room"), owner, verified_auth(owner), 1, 900);
+        assert_eq!(stale, AdvertiseOutcome::Unchanged);
+        assert_eq!(dir.len(), 1);
+        assert_eq!(
+            dir.get(&room).unwrap().sequence,
+            2,
+            "stale replay cannot downgrade"
+        );
+    }
+
+    /// A refresh updates last_seen/expiry but preserves first_seen.
+    #[test]
+    fn refresh_preserves_first_seen_updates_last_seen() {
+        let mut dir = RoomDirectory::new();
+        let room = topic(1);
+        let owner = key(0x42);
+        let now = t0();
+
+        dir.apply_advertisement_at(
+            ad_named(room, 0x42, "room", 300),
+            owner,
+            verified_auth(owner),
+            1,
+            1000,
+            now,
+        );
+        let entry = dir.get(&room).unwrap();
+        let first_seen = entry.first_seen;
+        let expires_at = entry.expires_at;
+
+        dir.apply_advertisement_at(
+            ad_named(room, 0x42, "room", 300),
+            owner,
+            verified_auth(owner),
+            2,
+            1060,
+            now + Duration::from_secs(10),
+        );
+        let entry = dir.get(&room).unwrap();
+        assert_eq!(entry.first_seen, first_seen, "first_seen is sticky");
+        assert_eq!(entry.last_seen, now + Duration::from_secs(10));
+        assert!(entry.expires_at > expires_at, "expiry restarts on refresh");
+        assert_eq!(dir.len(), 1);
+    }
+
+    // ── Deterministic replacement (PDF Task 4.1 step 6) ───────────────
+
+    /// A verified authoritative publisher replaces a non-authority
+    /// listing; the non-authority cannot bounce the authority back.
+    #[test]
+    fn authority_publisher_wins_over_endorsement() {
+        let mut dir = RoomDirectory::new();
+        let room = topic(1);
+        let owner = key(0x42);
+        let endorser = key(0x43);
+
+        // A member endorses the room (ad claims owner 0x42, signed by the
+        // member → non-authority, but verified for the publisher).
+        let mut endorsement = ad(room, 0x42, "room");
+        endorsement.sign(&secret_key(0x43));
+        let first =
+            dir.apply_advertisement(endorsement, endorser, verified_auth(endorser), 1, 1000);
+        assert_eq!(first, AdvertiseOutcome::Added);
+        assert_eq!(dir.get(&room).unwrap().publisher, endorser);
+
+        // The authority publishes the canonical advertisement — replaces
+        // the endorsement.
+        let mut canonical = ad(room, 0x42, "room");
+        canonical.sign(&secret_key(0x42));
+        let second = dir.apply_advertisement(canonical, owner, verified_auth(owner), 5, 1100);
+        assert_eq!(second, AdvertiseOutcome::Refreshed);
+        assert_eq!(dir.get(&room).unwrap().publisher, owner);
+        assert_eq!(dir.len(), 1);
+
+        // A later non-authority endorsement cannot overwrite canonical.
+        let mut late_endorsement = ad(room, 0x42, "room");
+        late_endorsement.sign(&secret_key(0x44));
+        let third = dir.apply_advertisement(
+            late_endorsement,
+            key(0x44),
+            verified_auth(key(0x44)),
+            9,
+            2000,
+        );
+        assert_eq!(
+            third,
+            AdvertiseOutcome::Unchanged,
+            "non-authority cannot overwrite canonical"
+        );
+        assert_eq!(dir.get(&room).unwrap().publisher, owner);
+    }
+
+    /// Between two non-authority advertisements the newer envelope wins,
+    /// and an older replay cannot bounce the entry back.
+    #[test]
+    fn newer_non_authority_replaces_older_deterministically() {
+        let mut dir = RoomDirectory::new();
+        let room = topic(1);
+        let a = key(0x41);
+        let b = key(0x42);
+
+        let first = dir.apply_advertisement(ad(room, 0x41, "room-a"), a, verified_auth(a), 1, 1000);
+        assert_eq!(first, AdvertiseOutcome::Added);
+        assert_eq!(dir.get(&room).unwrap().publisher, a);
+
+        let second =
+            dir.apply_advertisement(ad(room, 0x42, "room-b"), b, verified_auth(b), 1, 2000);
+        assert_eq!(second, AdvertiseOutcome::Refreshed, "newer envelope wins");
+        assert_eq!(dir.get(&room).unwrap().publisher, b);
+        assert_eq!(dir.len(), 1);
+
+        let stale =
+            dir.apply_advertisement(ad(room, 0x41, "room-a-old"), a, verified_auth(a), 2, 1500);
+        assert_eq!(
+            stale,
+            AdvertiseOutcome::Unchanged,
+            "older replay cannot bounce back"
+        );
+        assert_eq!(dir.get(&room).unwrap().publisher, b);
+    }
+
+    /// An untrusted (missing-signature) advertisement is cached but never
+    /// treated as canonical: a verified authority still wins over it.
+    #[test]
+    fn missing_signature_is_untrusted_not_canonical() {
+        let mut dir = RoomDirectory::new();
+        let room = topic(1);
+        let stranger = key(0x55);
+
+        let first = dir.apply_advertisement(
+            ad(room, 0x55, "spoof"),
+            stranger,
+            AdvertisementAuth::MissingSignature,
+            1,
+            1000,
+        );
+        assert_eq!(first, AdvertiseOutcome::Added);
+        assert_eq!(
+            dir.get(&room).unwrap().auth,
+            AdvertisementAuth::MissingSignature,
+            "untrusted ad stored as untrusted"
+        );
+
+        // The room's real owner (verified) replaces it.
+        let owner = key(0x42);
+        let mut canonical = ad(room, 0x42, "real-room");
+        canonical.sign(&secret_key(0x42));
+        let second = dir.apply_advertisement(canonical, owner, verified_auth(owner), 1, 1500);
+        assert_eq!(second, AdvertiseOutcome::Refreshed);
+        assert_eq!(dir.get(&room).unwrap().publisher, owner);
+    }
+
+    // ── Bounds (PDF Task 4.1 step 5) ──────────────────────────────────
+
+    /// Thousands of advertisements cannot grow memory without bound: the
+    /// entry count is capped at `max_entries`, and re-advertising the same
+    /// rooms never grows the cache.
+    #[test]
+    fn thousands_of_advertisements_are_bounded() {
+        let mut dir = RoomDirectory::with_limits(64, usize::MAX);
+
+        // 10,000 distinct rooms → capped at 64 entries.
+        for i in 0..10_000u16 {
+            let room = TopicId::from_bytes(i.to_le_bytes().repeat(16).try_into().unwrap());
+            let owner = key((i % 250) as u8);
+            dir.apply_advertisement(
+                ad(room, (i % 250) as u8, "room"),
+                owner,
+                verified_auth(owner),
+                1,
+                1000,
+            );
+        }
+        assert_eq!(dir.len(), 64, "entry count is bounded");
+        assert!(
+            dir.total_bytes() < usize::MAX,
+            "aggregate metadata stays bounded"
+        );
+
+        // Re-advertising the same 10,000 rooms cannot grow the cache either.
+        for i in 0..10_000u16 {
+            let room = TopicId::from_bytes(i.to_le_bytes().repeat(16).try_into().unwrap());
+            let owner = key((i % 250) as u8);
+            dir.apply_advertisement(
+                ad(room, (i % 250) as u8, "room"),
+                owner,
+                verified_auth(owner),
+                2,
+                2000,
+            );
+        }
+        assert_eq!(dir.len(), 64);
+    }
+
+    /// The aggregate metadata-size budget is enforced: when the cache would
+    /// exceed `max_bytes`, entries are evicted (expired first, then
+    /// least-recently-seen) until the budget fits.
+    #[test]
+    fn aggregate_metadata_size_is_bounded() {
+        // Each minimal ad encodes to ~50-90 bytes; a 300-byte budget fits
+        // only a handful of entries.
+        let mut dir = RoomDirectory::with_limits(usize::MAX, 300);
+        let owner = key(0x42);
+
+        for i in 0..50u8 {
+            let room = TopicId::from_bytes([i; 32]);
+            dir.apply_advertisement(
+                ad(room, 0x42, "room"),
+                owner,
+                verified_auth(owner),
+                u64::from(i),
+                1000,
+            );
+        }
+        assert!(
+            dir.len() < 50,
+            "byte budget caps the cache before entry count does"
+        );
+        assert!(
+            dir.total_bytes() <= 300 + 200,
+            "aggregate stays near the budget (one-entry overshoot allowed)"
+        );
+    }
+
+    /// Eviction prefers expired entries first, then the least-recently-seen
+    /// entry.
+    #[test]
+    fn eviction_prefers_expired_then_least_recently_seen() {
+        let mut dir = RoomDirectory::with_limits(2, usize::MAX);
+        let now = t0();
+        let owner = key(0x42);
+
+        // Room A: 1-second TTL, seen at t0.
+        dir.apply_advertisement_at(
+            ad_named(topic(1), 0x42, "a", 1),
+            owner,
+            verified_auth(owner),
+            1,
+            1000,
+            now,
+        );
+        // Room B: long TTL, seen at t0 + 1s.
+        dir.apply_advertisement_at(
+            ad_named(topic(2), 0x42, "b", 300),
+            owner,
+            verified_auth(owner),
+            1,
+            1000,
+            now + Duration::from_secs(1),
+        );
+
+        // A third room arrives at t0 + 2s: A has expired → evicted first,
+        // making room without touching B (which is older last_seen).
+        dir.apply_advertisement_at(
+            ad_named(topic(3), 0x42, "c", 300),
+            owner,
+            verified_auth(owner),
+            1,
+            1000,
+            now + Duration::from_secs(2),
+        );
+        assert_eq!(dir.len(), 2);
+        assert!(dir.contains(&topic(2)), "B survives (A was expired)");
+        assert!(dir.contains(&topic(3)));
+        assert!(!dir.contains(&topic(1)), "expired A evicted");
+
+        // Fill to capacity again: the next insert evicts the least-recently-
+        // seen live entry (B, seen earlier than C).
+        dir.apply_advertisement_at(
+            ad_named(topic(4), 0x42, "d", 300),
+            owner,
+            verified_auth(owner),
+            1,
+            1000,
+            now + Duration::from_secs(3),
+        );
+        assert_eq!(dir.len(), 2);
+        assert!(dir.contains(&topic(3)), "C survives (more recently seen)");
+        assert!(dir.contains(&topic(4)));
+        assert!(!dir.contains(&topic(2)), "least-recently-seen B evicted");
+    }
+
+    // ── Withdrawal (BORU-DIR-09 / PDF Task 3.3) ───────────────────────
+
+    /// A verified withdrawal removes the matching entry immediately.
+    #[test]
+    fn withdrawal_removes_matching_entry() {
+        let mut dir = RoomDirectory::new();
+        let room = topic(1);
+        let owner = key(0x42);
+
+        dir.apply_advertisement(ad(room, 0x42, "room"), owner, verified_auth(owner), 1, 1000);
+        assert!(dir.contains(&room));
+
+        assert!(dir.apply_withdrawal(room, owner.as_bytes().to_owned()));
+        assert!(!dir.contains(&room));
+        assert!(dir.is_empty());
+        // Idempotent: a second withdrawal is a no-op.
+        assert!(!dir.apply_withdrawal(room, owner.as_bytes().to_owned()));
+    }
+
+    /// A withdrawal claimed by a different authority cannot remove an
+    /// unrelated listing (PDF test matrix: spoofed withdrawals).
+    #[test]
+    fn withdrawal_from_different_authority_does_not_remove() {
+        let mut dir = RoomDirectory::new();
+        let room = topic(1);
+        let owner = key(0x42);
+        let other_owner = key(0x43);
+
+        dir.apply_advertisement(ad(room, 0x42, "room"), owner, verified_auth(owner), 1, 1000);
+        assert!(!dir.apply_withdrawal(room, other_owner.as_bytes().to_owned()));
+        assert!(
+            dir.contains(&room),
+            "unrelated authority cannot remove the listing"
+        );
+    }
+
+    /// Withdrawing an unknown room is a no-op.
+    #[test]
+    fn withdrawal_of_unknown_room_is_noop() {
+        let mut dir = RoomDirectory::new();
+        let owner = key(0x42);
+        assert!(!dir.apply_withdrawal(topic(9), owner.as_bytes().to_owned()));
+    }
+
+    // ── TTL expiry (DIR-08 safety net) ────────────────────────────────
+
+    /// An advertisement whose TTL elapses without a refresh is evicted —
+    /// a room whose advertiser disappears eventually leaves the directory
+    /// even if no withdrawal ever arrives.
+    #[test]
+    fn ttl_expiry_evicts_stale_room() {
+        let mut dir = RoomDirectory::new();
+        let room = topic(1);
+        let owner = key(0x42);
+        let now = t0();
+
+        dir.apply_advertisement_at(
+            ad_named(room, 0x42, "stale", 1),
+            owner,
+            verified_auth(owner),
+            1,
+            1000,
+            now,
+        );
+        assert!(dir.contains(&room));
+
+        let evicted = dir.evict_expired_at(now + Duration::from_secs(2));
+        assert_eq!(evicted, vec![room], "TTL expiry removes the stale room");
+        assert!(dir.is_empty());
+    }
+
+    /// A refresh within the TTL keeps the room alive (temporary packet
+    /// loss shorter than the TTL never flickers the room out).
+    #[test]
+    fn refresh_within_ttl_keeps_room_active() {
+        let mut dir = RoomDirectory::new();
+        let room = topic(1);
+        let owner = key(0x42);
+        let now = t0();
+
+        dir.apply_advertisement_at(
+            ad_named(room, 0x42, "steady", 5),
+            owner,
+            verified_auth(owner),
+            1,
+            1000,
+            now,
+        );
+        // Refresh 3 s in (within the 5 s TTL).
+        dir.apply_advertisement_at(
+            ad_named(room, 0x42, "steady", 5),
+            owner,
+            verified_auth(owner),
+            2,
+            1300,
+            now + Duration::from_secs(3),
+        );
+        // 6 s after first seen, 3 s after refresh: still active.
+        assert!(
+            dir.evict_expired_at(now + Duration::from_secs(6))
+                .is_empty(),
+            "refresh restarts the lifetime"
+        );
+        assert!(dir.contains(&room));
+        // Only after the refresh TTL also elapses does it expire.
+        assert_eq!(dir.evict_expired_at(now + Duration::from_secs(9)).len(), 1);
+    }
+
+    // ── Snapshot ──────────────────────────────────────────────────────
+
+    /// `snapshot` is deterministic: entries sorted by room_id regardless
+    /// of insertion order.
+    #[test]
+    fn snapshot_is_deterministic() {
+        let mut dir = RoomDirectory::new();
+        let owner = key(0x42);
+        // Insert out of order.
+        dir.apply_advertisement(
+            ad(topic(3), 0x42, "c"),
+            owner,
+            verified_auth(owner),
+            1,
+            1000,
+        );
+        dir.apply_advertisement(
+            ad(topic(1), 0x42, "a"),
+            owner,
+            verified_auth(owner),
+            1,
+            1000,
+        );
+        dir.apply_advertisement(
+            ad(topic(2), 0x42, "b"),
+            owner,
+            verified_auth(owner),
+            1,
+            1000,
+        );
+
+        let snap = dir.snapshot();
+        assert_eq!(snap.len(), 3);
+        let names: Vec<&str> = snap.iter().map(|e| e.advert.room_name.as_str()).collect();
+        assert_eq!(names, vec!["a", "b", "c"], "sorted by room_id");
+    }
+
+    /// Every cached entry carries the DIR-10 required fields: latest valid
+    /// advertisement, advertiser identity, first/last seen, expiry,
+    /// compatibility state, and local join state.
+    #[test]
+    fn entry_carries_required_directory_metadata() {
+        let mut dir = RoomDirectory::new();
+        let room = topic(1);
+        let owner = key(0x42);
+        let mut advert = ad(room, 0x42, "room");
+        advert.room_protocol_version = crate::public_room::PROTOCOL_VERSION;
+
+        dir.apply_advertisement(advert.clone(), owner, verified_auth(owner), 1, 1000);
+        let entry = dir.get(&room).unwrap();
+
+        assert_eq!(entry.advert, advert, "latest valid advertisement");
+        assert_eq!(entry.publisher, owner, "advertiser identity");
+        assert_eq!(
+            entry.auth,
+            verified_auth(owner),
+            "authority/authentication state"
+        );
+        assert!(entry.first_seen <= entry.last_seen);
+        assert!(entry.expires_at > entry.last_seen, "expiry from TTL");
+        assert_eq!(
+            entry.compatibility,
+            RoomCompatibility::Compatible,
+            "compatible room protocol"
+        );
+        assert_eq!(
+            entry.local_join_state,
+            LocalJoinState::NotJoined,
+            "local join state defaults to NotJoined"
+        );
+    }
+
+    /// A room advertising a newer protocol version than this client is
+    /// stored as UpgradeRequired (Phase 6 Task 6.2 consumes this).
+    #[test]
+    fn newer_room_protocol_is_upgrade_required() {
+        let mut dir = RoomDirectory::new();
+        let room = topic(1);
+        let owner = key(0x42);
+        let mut advert = ad(room, 0x42, "future-room");
+        advert.room_protocol_version = crate::public_room::PROTOCOL_VERSION + 1;
+
+        dir.apply_advertisement(advert, owner, verified_auth(owner), 1, 1000);
+        assert_eq!(
+            dir.get(&room).unwrap().compatibility,
+            RoomCompatibility::UpgradeRequired
+        );
+    }
+}
