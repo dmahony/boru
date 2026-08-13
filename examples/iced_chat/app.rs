@@ -4002,6 +4002,10 @@ pub struct IcedChat {
     /// (scroll + expand + highlight).
     #[cfg(feature = "dev-ui")]
     inspect_selected: Option<crate::inspector::ComponentId>,
+    /// BORU-UI-15: interactive responsive-preview state for the component
+    /// gallery (preset selection + custom-width slider). Dev-ui only.
+    #[cfg(feature = "dev-ui")]
+    gallery_state: crate::component_gallery::GalleryState,
     /// Whether notification sounds are enabled.
     sound_enabled: bool,
     /// Whether room invitations may include direct endpoint addresses.
@@ -6104,6 +6108,12 @@ pub enum AppMessage {
     /// Toggle the developer component gallery screen (dev-ui builds only).
     #[cfg(feature = "dev-ui")]
     ToggleGallery,
+    /// BORU-UI-15: select a gallery responsive-preview preset (dev-ui only).
+    #[cfg(feature = "dev-ui")]
+    GalleryPreset(crate::component_gallery::GalleryWidthPreset),
+    /// BORU-UI-15: the gallery's custom-width slider moved (dev-ui only).
+    #[cfg(feature = "dev-ui")]
+    GalleryCustomWidth(f32),
 
     // ── Shared file catalogue management ──
     /// Open the file picker to select a file for sharing.
@@ -8351,6 +8361,10 @@ impl IcedChat {
             inspect_hover: None,
             #[cfg(feature = "dev-ui")]
             inspect_selected: None,
+            // BORU-UI-15: gallery starts at the typical-desktop preset; the
+            // custom slider keeps its default midpoint until dragged.
+            #[cfg(feature = "dev-ui")]
+            gallery_state: crate::component_gallery::GalleryState::default(),
             // ── Notification system ──
             notification_service: NotificationService::new(),
             window_focus_tracker: WindowFocusTracker::new(),
@@ -10213,6 +10227,10 @@ impl IcedChat {
             AppMessage::Noop => "Noop",
             #[cfg(feature = "dev-ui")]
             AppMessage::ToggleGallery => "ToggleGallery",
+            #[cfg(feature = "dev-ui")]
+            AppMessage::GalleryPreset(_) => "GalleryPreset",
+            #[cfg(feature = "dev-ui")]
+            AppMessage::GalleryCustomWidth(_) => "GalleryCustomWidth",
             AppMessage::AddSharedFile => "AddSharedFile",
             AppMessage::AddSharedFolder => "AddSharedFolder",
             AppMessage::SharedFolderPicked(_) => "SharedFolderPicked",
@@ -16861,6 +16879,19 @@ impl IcedChat {
                 iced::Task::none()
             }
 
+            #[cfg(feature = "dev-ui")]
+            AppMessage::GalleryPreset(preset) => {
+                self.gallery_state.preset = preset;
+                iced::Task::none()
+            }
+
+            #[cfg(feature = "dev-ui")]
+            AppMessage::GalleryCustomWidth(width) => {
+                self.gallery_state.preset = crate::component_gallery::GalleryWidthPreset::Custom;
+                self.gallery_state.custom_width = width;
+                iced::Task::none()
+            }
+
             // ── Shared file catalogue management ──
             // ── Shared file catalogue management (state layer) ──
             AppMessage::SharedByMeToggleShareMenu
@@ -19501,7 +19532,10 @@ impl IcedChat {
                 .into(),
             },
             #[cfg(feature = "dev-ui")]
-            Screen::Gallery => crate::component_gallery::view_gallery(),
+            Screen::Gallery => crate::component_gallery::view_gallery(
+                &self.gallery_state,
+                self.window_width,
+            ),
         };
         // BORU-UI-11: when inspection mode is enabled, tag the sidebar and
         // main panel with their component IDs so hovering/clicking them shows
@@ -35916,6 +35950,59 @@ fn inspector_reset_section_and_reset_all_via_messages() {
         app.inspector_draft.float_text.is_empty() && app.inspector_draft.color_text.is_empty(),
         "Reset All cleared all drafts"
     );
+}
+
+#[cfg(feature = "dev-ui")]
+#[test]
+fn gallery_responsive_preview_messages_update_state() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    // BORU-UI-15: gallery starts at the typical-desktop preset.
+    assert_eq!(
+        app.gallery_state.preset,
+        crate::component_gallery::GalleryWidthPreset::Desktop,
+        "gallery defaults to the desktop preset"
+    );
+
+    // Preset buttons switch the simulated width.
+    let task = app.update(AppMessage::GalleryPreset(
+        crate::component_gallery::GalleryWidthPreset::Narrow,
+    ));
+    drop(task);
+    assert_eq!(
+        app.gallery_state.preset,
+        crate::component_gallery::GalleryWidthPreset::Narrow,
+        "Narrow preset applied via message"
+    );
+
+    // Dragging the custom slider both stores the width AND selects the
+    // Custom preset so the preview follows the slider immediately.
+    let task = app.update(AppMessage::GalleryCustomWidth(777.0));
+    drop(task);
+    assert_eq!(
+        app.gallery_state.preset,
+        crate::component_gallery::GalleryWidthPreset::Custom,
+        "slider drag selects the Custom preset"
+    );
+    assert_eq!(app.gallery_state.custom_width, 777.0);
+    assert_eq!(
+        app.gallery_state.width(),
+        777.0,
+        "simulated width follows the slider"
+    );
+
+    // Clicking a preset after a custom drag keeps the remembered slider
+    // value, so switching back to Custom restores the last dragged width.
+    let task = app.update(AppMessage::GalleryPreset(
+        crate::component_gallery::GalleryWidthPreset::Maximized,
+    ));
+    drop(task);
+    assert_eq!(
+        app.gallery_state.preset,
+        crate::component_gallery::GalleryWidthPreset::Maximized,
+        "Maximized preset applied after custom drag"
+    );
+    assert_eq!(app.gallery_state.custom_width, 777.0);
 }
 
 #[cfg(feature = "dev-ui")]

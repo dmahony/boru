@@ -5,8 +5,15 @@
 //! cards rendered through the EXACT production components (never duplicated
 //! mocks). Accessible only via `Screen::Gallery` (Ctrl+Shift+G or the
 //! "Component Gallery" button in the dev UI Inspector) in dev-ui builds.
+//!
+//! PDF Task 15 (BORU-UI-15): a responsive-preview control bar sits above the
+//! gallery content. It can simulate a narrow panel / small-window column, a
+//! typical desktop column, a maximized / wide-screen column, or an arbitrary
+//! width via the custom slider. The whole gallery content below the bar is
+//! re-laid out inside a fixed-width frame (container width constraint), so
+//! every production component shown here can be inspected at every size.
 
-use iced::widget::{container, rule::horizontal, text, Column, Row, Space};
+use iced::widget::{container, rule::horizontal, slider, text, Column, Row, Space};
 use iced::{Alignment, Element, Length, Theme};
 
 use crate::app::{
@@ -26,9 +33,190 @@ use crate::ui_components::{
     PeerChipStack, ProgressBar, ProgressKind, StatusDotKind, TabStrip, TableHeaderRow,
 };
 
-/// Build the complete component gallery view.
-pub fn view_gallery() -> Element<'static, AppMessage> {
-    let content = Column::new()
+/// Minimum width the custom-width slider accepts.
+pub const CUSTOM_WIDTH_MIN: f32 = 240.0;
+/// Maximum width the custom-width slider accepts.
+pub const CUSTOM_WIDTH_MAX: f32 = 1920.0;
+
+/// Preset content widths the gallery can simulate (PDF Task 15).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GalleryWidthPreset {
+    /// Narrow panel / small-window content column.
+    Narrow,
+    /// Typical desktop window content column.
+    Desktop,
+    /// Maximized / wide-screen content column.
+    Maximized,
+    /// Width driven by the custom slider.
+    Custom,
+}
+
+impl GalleryWidthPreset {
+    /// The simulated content-column width in pixels for this preset.
+    pub const fn width(self) -> f32 {
+        match self {
+            GalleryWidthPreset::Narrow => 360.0,
+            GalleryWidthPreset::Desktop => 960.0,
+            GalleryWidthPreset::Maximized => 1440.0,
+            GalleryWidthPreset::Custom => CUSTOM_WIDTH_MIN + (CUSTOM_WIDTH_MAX - CUSTOM_WIDTH_MIN) / 2.0,
+        }
+    }
+
+    /// Short label shown on the preset button.
+    pub const fn label(self) -> &'static str {
+        match self {
+            GalleryWidthPreset::Narrow => "Narrow",
+            GalleryWidthPreset::Desktop => "Desktop",
+            GalleryWidthPreset::Maximized => "Maximized",
+            GalleryWidthPreset::Custom => "Custom",
+        }
+    }
+}
+
+/// Interactive state behind the gallery's responsive preview controls
+/// (preset selection + custom-width slider). Owned by `IcedChat`, dev-ui
+/// only.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GalleryState {
+    /// The active preset (falls back to `Custom` while the slider is used).
+    pub preset: GalleryWidthPreset,
+    /// The slider value; retained so switching back to Custom keeps the
+    /// last dragged width.
+    pub custom_width: f32,
+}
+
+impl Default for GalleryState {
+    fn default() -> Self {
+        Self {
+            preset: GalleryWidthPreset::Desktop,
+            custom_width: GalleryWidthPreset::Custom.width(),
+        }
+    }
+}
+
+impl GalleryState {
+    /// The simulated content width for the current preset, clamped into the
+    /// slider range so out-of-range values can never reach layout.
+    pub fn width(&self) -> f32 {
+        match self.preset {
+            GalleryWidthPreset::Custom => {
+                self.custom_width.clamp(CUSTOM_WIDTH_MIN, CUSTOM_WIDTH_MAX)
+            }
+            preset => preset.width(),
+        }
+    }
+}
+
+/// Effective simulated preview width: the selected width bounded by the
+/// available window so wide presets never overflow horizontally, and never
+/// below the slider minimum. A small gutter keeps the frame's border
+/// visible inside the scrollable even at maximized widths.
+fn effective_preview_width(state: &GalleryState, window_width: f32) -> f32 {
+    let available = if window_width > 0.0 { window_width } else { 1280.0 };
+    let bounded = available - 96.0;
+    if bounded < CUSTOM_WIDTH_MIN {
+        state.width().min(available)
+    } else {
+        state.width().min(bounded)
+    }
+}
+
+/// Build the complete component gallery view with responsive preview
+/// controls (PDF Task 15). `window_width` bounds the simulated width so
+/// wide presets degrade gracefully on small windows.
+pub fn view_gallery(state: &GalleryState, window_width: f32) -> Element<'static, AppMessage> {
+    let preview_width = effective_preview_width(state, window_width);
+
+    // Full-width control bar, then the whole gallery re-laid out inside a
+    // fixed-width frame so every production component responds to the
+    // simulated content width (container width constraint).
+    let page = Column::new()
+        .push(responsive_preview_controls(state, preview_width))
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_16)))
+        .push(
+            container(gallery_sections())
+                .padding(design_tokens::SPACE_24)
+                .width(Length::Fixed(preview_width))
+                .style(design_tokens::card_style),
+        )
+        .spacing(0)
+        .align_x(Alignment::Center)
+        .width(Length::Fill);
+
+    crate::ui_components::gutter_scrollable(
+        container(page)
+            .padding(design_tokens::SPACE_24)
+            .width(Length::Fill),
+    )
+    .into()
+}
+
+/// BORU-UI-15: the responsive-preview control bar — preset buttons for
+/// narrow / desktop / maximized widths plus the custom-width slider. Always
+/// full width (outside the simulated frame) so the controls stay usable
+/// while the preview below is width-constrained. The readout shows the
+/// effective simulated width, including any window clamping.
+fn responsive_preview_controls(
+    state: &GalleryState,
+    preview_width: f32,
+) -> Element<'static, AppMessage> {
+    let label = text("Preview width:")
+        .font(TypeRole::Metadata.font())
+        .size(TypeRole::Metadata.size_px())
+        .color(design_tokens::text_muted(&Theme::Light));
+
+    let preset_button = |preset: GalleryWidthPreset| {
+        if state.preset == preset {
+            primary_button(preset.label(), None, false)
+        } else {
+            secondary_button(
+                preset.label(),
+                Some(AppMessage::GalleryPreset(preset)),
+                false,
+            )
+        }
+    };
+
+    let custom_label = text("Custom:")
+        .font(TypeRole::Metadata.font())
+        .size(TypeRole::Metadata.size_px())
+        .color(design_tokens::text_muted(&Theme::Light));
+
+    let width_slider = slider(
+        CUSTOM_WIDTH_MIN..=CUSTOM_WIDTH_MAX,
+        state.custom_width.clamp(CUSTOM_WIDTH_MIN, CUSTOM_WIDTH_MAX),
+        move |v| AppMessage::GalleryCustomWidth(v),
+    )
+    .width(Length::Fixed(220.0));
+
+    let readout = text(format!("{} px", preview_width as u32))
+        .font(TypeRole::Metadata.font())
+        .size(TypeRole::Metadata.size_px())
+        .color(design_tokens::text_primary(&Theme::Light));
+
+    Row::new()
+        .push(label)
+        .push(Space::new().width(Length::Fixed(design_tokens::SPACE_8)))
+        .push(preset_button(GalleryWidthPreset::Narrow))
+        .push(Space::new().width(Length::Fixed(design_tokens::SPACE_4)))
+        .push(preset_button(GalleryWidthPreset::Desktop))
+        .push(Space::new().width(Length::Fixed(design_tokens::SPACE_4)))
+        .push(preset_button(GalleryWidthPreset::Maximized))
+        .push(Space::new().width(Length::Fixed(design_tokens::SPACE_16)))
+        .push(custom_label)
+        .push(Space::new().width(Length::Fixed(design_tokens::SPACE_4)))
+        .push(width_slider)
+        .push(Space::new().width(Length::Fixed(design_tokens::SPACE_4)))
+        .push(readout)
+        .spacing(0)
+        .align_y(Alignment::Center)
+        .wrap()
+        .into()
+}
+
+/// The static gallery sections (buttons, cards, bubbles, attachments, …).
+fn gallery_sections() -> Element<'static, AppMessage> {
+    Column::new()
         .push(gallery_heading("Component Gallery"))
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_16)))
         .push(gallery_section("Buttons"))
@@ -121,14 +309,8 @@ pub fn view_gallery() -> Element<'static, AppMessage> {
         .push(gallery_section("Typography (UI-HOME-11)"))
         .push(typography_gallery())
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_32)))
-        .spacing(0);
-
-    crate::ui_components::gutter_scrollable(
-        container(content)
-            .padding(design_tokens::SPACE_24)
-            .width(Length::Fill),
-    )
-    .into()
+        .spacing(0)
+        .into()
 }
 
 fn gallery_heading(label: &str) -> Element<'static, AppMessage> {
@@ -2376,13 +2558,73 @@ mod tests {
     /// the fixture builders and production-component wiring.
     #[test]
     fn all_gallery_sections_build() {
-        let _ = view_gallery();
+        let _ = view_gallery(&GalleryState::default(), 1280.0);
+        let _ = gallery_sections();
         let _ = name_variants_gallery();
         let _ = message_bubble_gallery();
         let _ = attachment_states_gallery();
         let _ = video_card_gallery();
         let _ = width_variants_gallery();
         let _ = state_variants_gallery();
+    }
+
+    /// BORU-UI-15: the responsive preview presets map to the three required
+    /// simulated widths — narrow panel, typical desktop, maximized/wide.
+    #[test]
+    fn gallery_presets_map_to_required_widths() {
+        let mut state = GalleryState::default();
+        state.preset = GalleryWidthPreset::Narrow;
+        assert_eq!(state.width(), 360.0);
+        state.preset = GalleryWidthPreset::Desktop;
+        assert_eq!(state.width(), 960.0);
+        state.preset = GalleryWidthPreset::Maximized;
+        assert_eq!(state.width(), 1440.0);
+    }
+
+    /// BORU-UI-15: the custom slider drives the width and out-of-range
+    /// values are clamped to the slider range so layout never sees a
+    /// nonsense width.
+    #[test]
+    fn gallery_custom_width_clamps_to_slider_range() {
+        let state = GalleryState {
+            preset: GalleryWidthPreset::Custom,
+            custom_width: 5000.0,
+        };
+        assert_eq!(state.width(), CUSTOM_WIDTH_MAX);
+
+        let state = GalleryState {
+            preset: GalleryWidthPreset::Custom,
+            custom_width: 1.0,
+        };
+        assert_eq!(state.width(), CUSTOM_WIDTH_MIN);
+
+        let state = GalleryState {
+            preset: GalleryWidthPreset::Custom,
+            custom_width: 777.0,
+        };
+        assert_eq!(state.width(), 777.0);
+    }
+
+    /// BORU-UI-15: wide presets are bounded by the available window so the
+    /// simulated frame never overflows horizontally, while narrow widths
+    /// pass through untouched.
+    #[test]
+    fn gallery_effective_width_bounds_to_window() {
+        // Desktop (960) on a 1200 px window: fits, minus the frame gutter.
+        let state = GalleryState::default();
+        assert_eq!(effective_preview_width(&state, 1200.0), 960.0);
+
+        // Maximized (1440) on a 1200 px window: clamped below the window.
+        let state = GalleryState {
+            preset: GalleryWidthPreset::Maximized,
+            custom_width: 0.0,
+        };
+        assert!(effective_preview_width(&state, 1200.0) < 1200.0);
+        assert_eq!(effective_preview_width(&state, 1200.0), 1104.0);
+
+        // A zero/unknown window width falls back to a sane default.
+        let state = GalleryState::default();
+        assert_eq!(effective_preview_width(&state, 0.0), 960.0);
     }
 
     /// The attachment fixtures map to the production `DownloadState` variants
