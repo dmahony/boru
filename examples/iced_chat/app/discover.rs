@@ -2323,11 +2323,27 @@ impl IcedChat {
 
             AppMessage::DirectoryRoomJoin(ad) => {
                 // Parse the ticket from the advertisement and open the room.
+                // BORU-DIR-18 (PDF Task 6.3): this legacy path must obey the
+                // SAME join gate as DirectoryRoomJoinById — protocol
+                // compatibility AND the live local permission state are
+                // re-validated before any subscription, so discovery can
+                // never bypass room-level security (bans / local hide-block /
+                // incompatible protocol) no matter which entry point the
+                // join came through.
                 match Ticket::from_str(&ad.ticket) {
                     Ok(ticket) => {
                         let topic = ticket.topic;
-                        info!(topic = %topic, "joining room from directory");
-                        iced::Task::done(AppMessage::OpenRoom(topic))
+                        match self.directory_join_target(*topic.as_bytes()) {
+                            Ok(_) => {
+                                info!(topic = %topic, "joining room from directory");
+                                iced::Task::done(AppMessage::OpenRoom(topic))
+                            }
+                            Err(reason) => {
+                                warn!(reason = %reason, "directory join blocked");
+                                self.push_system(reason);
+                                iced::Task::none()
+                            }
+                        }
                     }
                     Err(e) => {
                         warn!("failed to parse directory room ticket: {e}");
@@ -2837,7 +2853,7 @@ impl IcedChat {
     /// Returns `Ok(topic)` when the join may proceed, or `Err(reason)`
     /// with a user-facing explanation when it must be blocked.
     pub(crate) fn directory_join_target(&self, room_id: [u8; 32]) -> Result<TopicId, String> {
-        use boru_core::room_directory::RoomCompatibility;
+        use boru_core::room_directory::{LocalJoinState, RoomCompatibility};
 
         let topic = TopicId::from_bytes(room_id);
 
@@ -2845,28 +2861,48 @@ impl IcedChat {
         // truth). The legacy directory-store fallback (tests / discovery
         // service unavailable) carries no compatibility metadata — the
         // browse surface treats those rows as compatible.
-        let compat = match &self.room_directory {
-            Some(dir) => dir.lock().unwrap().get(&topic).map(|e| {
-                (
-                    e.compatibility,
-                    e.advert.room_protocol_version,
-                    boru_core::public_room::PROTOCOL_VERSION,
-                )
-            }),
+        let entry = match &self.room_directory {
+            Some(dir) => dir.lock().unwrap().get(&topic).cloned(),
             None => None,
         };
 
-        match compat {
-            Some((RoomCompatibility::UpgradeRequired, room_v, local_v)) => Err(format!(
-                "Cannot join room: this room requires a newer protocol version (v{room_v}), but this Boru build only supports v{local_v}. Please upgrade Boru to join.",
-            )),
-            Some((RoomCompatibility::Unsupported, room_v, local_v)) => Err(format!(
-                "Cannot join room: this room uses protocol v{room_v}, which this Boru build (v{local_v}) does not support.",
-            )),
-            // Compatible, Unknown, or legacy fallback: proceed to the
-            // normal join path. Optional-feature differences never block
-            // basic room access (PDF Task 6.2 acceptance).
-            _ => Ok(topic),
+        // BORU-DIR-18 (PDF Task 6.3): room-level permissions are
+        // authoritative over the directory. A locally hidden/blocked room
+        // (the local "ban" analog, derived from the real room database via
+        // LocalRoomFacts.hidden) must never be joinable through discovery —
+        // the handler re-validates against the live cache so discovery can
+        // never bypass the block, even from a stale render or a direct
+        // message. This keeps "directory visibility" and "join
+        // authorization" independent: the advertisement may still exist
+        // (TTL/refresh continue), but joining is refused until the user
+        // unhides the room.
+        if let Some(e) = &entry {
+            if e.local_join_state == LocalJoinState::Blocked {
+                return Err(
+                    "Cannot join room: this room is hidden or blocked locally. Unhide it in room settings to join."
+                        .to_string(),
+                );
+            }
+        }
+
+        match entry.as_ref() {
+            Some(e) => match e.compatibility {
+                RoomCompatibility::UpgradeRequired => Err(format!(
+                    "Cannot join room: this room requires a newer protocol version (v{}), but this Boru build only supports v{}. Please upgrade Boru to join.",
+                    e.advert.room_protocol_version,
+                    boru_core::public_room::PROTOCOL_VERSION,
+                )),
+                RoomCompatibility::Unsupported => Err(format!(
+                    "Cannot join room: this room uses protocol v{}, which this Boru build (v{}) does not support.",
+                    e.advert.room_protocol_version,
+                    boru_core::public_room::PROTOCOL_VERSION,
+                )),
+                // Compatible, Unknown, or legacy fallback: proceed to the
+                // normal join path. Optional-feature differences never block
+                // basic room access (PDF Task 6.2 acceptance).
+                _ => Ok(topic),
+            },
+            None => Ok(topic),
         }
     }
 

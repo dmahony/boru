@@ -2183,6 +2183,40 @@ mod tests {
         );
     }
 
+    /// BORU-DIR-18 (PDF Task 6.3): a locally blocked room (banned /
+    /// hidden via `LocalRoomFacts.hidden`) is never offered as Join — the
+    /// directory derives `Blocked` and the offered action is `Hidden`,
+    /// even though the room is protocol-compatible and the advertisement
+    /// itself remains valid (visibility and join authorization stay
+    /// independent).
+    #[test]
+    fn blocked_room_never_offers_join_and_advertisement_survives() {
+        let mut dir = RoomDirectory::new();
+        let room = topic(1);
+        let owner = key(0x42);
+        dir.apply_advertisement(ad(room, 0x42, "room"), owner, verified_auth(owner), 1, 1000);
+
+        dir.sync_local_states(facts(&[], &[], &[room]));
+        assert_eq!(
+            dir.get(&room).unwrap().local_join_state,
+            LocalJoinState::Blocked,
+            "hidden preference derives Blocked"
+        );
+        assert_eq!(
+            dir.get(&room).unwrap().offered_action(),
+            RoomAction::Hidden,
+            "a blocked room is never offered as Join"
+        );
+        assert!(
+            dir.get(&room).is_some(),
+            "the advertisement itself is not deleted by a local block"
+        );
+        // The browse surface hides it, but diagnostics still see the entry
+        // (the ad is intact, just not joinable).
+        assert!(dir.snapshot().is_empty());
+        assert_eq!(dir.snapshot_all().len(), 1);
+    }
+
     /// Precedence: hidden beats joined; joined beats pending;
     /// pending beats incompatible; incompatible beats NotJoined.
     #[test]

@@ -31509,6 +31509,142 @@ mod tests {
         assert!(app.conversation_store.find(&room_id).is_none());
     }
 
+    /// BORU-DIR-18 (PDF Task 6.3): a room the user has hidden/blocked
+    /// locally cannot be joined through discovery. The join gate
+    /// re-validates the live cache's local permission state (derived from
+    /// the real room database via `LocalRoomFacts.hidden`), so discovery
+    /// can never bypass the local ban — even though the room is
+    /// protocol-compatible and its advertisement is still cached. The
+    /// advertisement is NOT deleted: visibility and join authorization
+    /// remain independent.
+    #[test]
+    fn directory_join_target_blocks_locally_blocked_room() {
+        let (_runtime, mut app) = build_prewarm_test_app();
+        let room_id = TopicId::from_bytes([0x6B; 32]);
+        let mut dir = directory_with_compatible_room(room_id, "Lounge");
+        // The user has hidden/blocked the room locally (persisted
+        // preference fed into the cache by sync_directory_local_states).
+        dir.sync_local_states(boru_core::room_directory::LocalRoomFacts {
+            joined: std::collections::BTreeSet::new(),
+            pending: std::collections::BTreeSet::new(),
+            hidden: std::collections::BTreeSet::from([room_id]),
+        });
+        assert_eq!(
+            dir.get(&room_id).unwrap().local_join_state,
+            boru_core::room_directory::LocalJoinState::Blocked,
+            "hidden preference derives Blocked"
+        );
+        app.room_directory = Some(Arc::new(StdMutex::new(dir)));
+
+        let err = app
+            .directory_join_target(*room_id.as_bytes())
+            .expect_err("a locally blocked room must not be joinable via discovery");
+        assert!(
+            err.contains("hidden") || err.contains("blocked"),
+            "block reason explains the local permission state: {err}"
+        );
+
+        // The directory entry is NOT deleted — visibility and join
+        // authorization remain independent (PDF Task 6.3 acceptance).
+        let dir = app.room_directory.as_ref().unwrap().lock().unwrap();
+        assert!(
+            dir.get(&room_id).is_some(),
+            "a join refusal must not delete the directory advertisement"
+        );
+        assert_eq!(dir.snapshot_all().len(), 1);
+    }
+
+    /// BORU-DIR-18 (PDF Task 6.3): the legacy ticket-based join path
+    /// (`DirectoryRoomJoin`) obeys the same join gate as the ById path — a
+    /// locally blocked room is refused before any subscription, with a
+    /// useful error, and the advertisement survives.
+    #[test]
+    fn directory_join_legacy_path_obeys_join_gate() {
+        let (_runtime, mut app) = build_prewarm_test_app();
+        let room_id = TopicId::from_bytes([0x6C; 32]);
+        let mut dir = directory_with_compatible_room(room_id, "Lounge");
+        dir.sync_local_states(boru_core::room_directory::LocalRoomFacts {
+            joined: std::collections::BTreeSet::new(),
+            pending: std::collections::BTreeSet::new(),
+            hidden: std::collections::BTreeSet::from([room_id]),
+        });
+        app.room_directory = Some(Arc::new(StdMutex::new(dir)));
+
+        let ad = RoomAdvertisement {
+            room_name: "Lounge".to_string(),
+            description: String::new(),
+            topic: room_id,
+            ticket: boru_core::chat_core::Ticket::new(room_id, vec![]).to_string(),
+            member_count: 0,
+            last_activity: 0,
+            expires_after_secs: ADVERT_TTL_SECS,
+        };
+        let task = app.update(AppMessage::DirectoryRoomJoin(ad));
+        drop(task);
+
+        assert!(
+            app.entries
+                .iter()
+                .any(|e| e.body.contains("Cannot join room") && (e.body.contains("hidden") || e.body.contains("blocked"))),
+            "legacy join path surfaces the block reason"
+        );
+        let dir = app.room_directory.as_ref().unwrap().lock().unwrap();
+        assert!(
+            dir.get(&room_id).is_some(),
+            "legacy join refusal must not delete the advertisement"
+        );
+    }
+
+    /// BORU-DIR-18 (PDF Task 6.3): a successful directory join creates the
+    /// local conversation record from advertised metadata WITHOUT granting
+    /// moderator/admin privileges. `owner_peer_id` is descriptive metadata
+    /// only (BORU-DIR-03) — it must never be copied into the local record's
+    /// peer/owner field or any role/privilege state.
+    #[test]
+    fn directory_join_record_never_grants_privileges_from_metadata() {
+        let (_runtime, mut app) = build_prewarm_test_app();
+        let room_id = TopicId::from_bytes([0x6D; 32]);
+        let owner = SecretKey::generate().public();
+        let mut dir = boru_core::room_directory::RoomDirectory::new();
+        let mut advert =
+            boru_core::control_plane::advertisement::PublicRoomAdvertisement::minimal(
+                room_id,
+                "Owner's Room".to_string(),
+                *owner.as_bytes(),
+            );
+        advert.room_protocol_version = boru_core::public_room::PROTOCOL_VERSION;
+        dir.apply_advertisement(
+            advert,
+            owner,
+            boru_core::control_plane::advertisement::AdvertisementAuth::Verified {
+                publisher: owner,
+            },
+            1,
+            1000,
+        );
+        app.room_directory = Some(Arc::new(StdMutex::new(dir)));
+
+        assert!(app.ensure_directory_joined_record(room_id));
+        let entry = app.conversation_store.find(&room_id).expect("record created");
+        // The advertised owner must not become the local peer/owner of the
+        // conversation record.
+        assert_ne!(
+            entry.peer_id,
+            owner.to_string(),
+            "advertised owner_peer_id must never grant local ownership"
+        );
+        assert!(
+            entry.peer_id.is_empty(),
+            "no peer identity is derived from advertised metadata"
+        );
+        // The record carries only the advertised non-privileged metadata.
+        assert_eq!(entry.name, "Owner's Room");
+        assert_eq!(
+            entry.visibility,
+            boru_core::control_plane::advertisement::RoomVisibility::PublicDiscoverable
+        );
+    }
+
     /// A successful join creates the local conversation record exactly
     /// once from the advertised metadata; a second call (re-open) is a
     /// no-op — never a duplicate.
