@@ -67,6 +67,178 @@ pub(crate) fn discover_member_count_text(count: Option<u32>) -> Option<String> {
     count.filter(|&c| c > 0).map(|c| format!("~{c} members"))
 }
 
+// ── Search / filter / sort (PDF Task 5.3) ─────────────────────────────
+//
+// BORU-DIR-15: the Discover browse surface supports client-side search
+// (room name, description, tags), simple filters (Compatible, Not
+// Joined, Recently Seen, tags/categories), and sorting — ALL from the
+// local RoomDirectory cache snapshot. Nothing here touches the network:
+// search queries are never broadcast onto the discovery network (PDF
+// Core rule / Task 5.3 acceptance "Search does not leak queries").
+
+/// Sort order for the Discover browse surface (local cached metadata
+/// only — never a global or popularity ranking).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub(crate) enum DiscoverSort {
+    /// Most recently seen first (by the cache's per-entry `last_seen`).
+    #[default]
+    RecentlySeen,
+    /// Joinable rooms first: Compatible, then UpgradeRequired, Unknown,
+    /// Unsupported.
+    Compatibility,
+    /// Alphabetical by room name (case-insensitive).
+    Name,
+}
+
+/// The simple filter toggles on the Discover browse surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum DiscoverFilter {
+    Compatible,
+    NotJoined,
+    RecentlySeen,
+}
+
+/// Combined filter-toggle state for [`discover_filter_sort`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub(crate) struct DiscoverFilterState {
+    pub(crate) compatible: bool,
+    pub(crate) not_joined: bool,
+    pub(crate) recently_seen: bool,
+}
+
+/// Window for the "Recently Seen" filter: an advertisement must have
+/// been received within the last 24h to count as recent.
+pub(crate) const DISCOVER_RECENTLY_SEEN_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// The tag filter matches a room when ANY selected tag is present in its
+/// tags (OR semantics within the tag/category filter).
+fn discover_row_matches_selected_tags(
+    tags: &[String],
+    selected_tags: &[String],
+) -> bool {
+    if selected_tags.is_empty() {
+        return true;
+    }
+    tags.iter().any(|tag| selected_tags.iter().any(|s| s == tag))
+}
+
+/// Case-insensitive search across room name, description, and tags.
+/// Empty query matches everything.
+fn discover_row_matches_query(row: &DiscoverRoomRow, query: &str) -> bool {
+    let query = query.trim();
+    if query.is_empty() {
+        return true;
+    }
+    let q = query.to_lowercase();
+    let name = row.room_name.to_lowercase();
+    let desc = row.short_description.to_lowercase();
+    let tag_blob = row
+        .tags
+        .iter()
+        .map(|t| t.to_lowercase())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let haystack = format!("{name} {desc} {tag_blob}");
+    haystack.contains(&q)
+}
+
+/// Sort rank for the Compatibility order (lower = more joinable).
+fn discover_compat_rank(compat: boru_core::room_directory::RoomCompatibility) -> u8 {
+    match compat {
+        boru_core::room_directory::RoomCompatibility::Compatible => 0,
+        boru_core::room_directory::RoomCompatibility::UpgradeRequired => 1,
+        boru_core::room_directory::RoomCompatibility::Unknown => 2,
+        boru_core::room_directory::RoomCompatibility::Unsupported => 3,
+    }
+}
+
+/// Filter + sort local directory rows. Purely functional over the input
+/// rows — no cache access, no network, no state. Used by
+/// [`IcedChat::discover_dependency`] and by unit tests.
+///
+/// Each input is `(renderable_row, recency)`; `recency` is `None` when
+/// the row came from the legacy directory store (no per-entry `Instant`),
+/// in which case the Recently-Seen filter passes it (unknown ≠ stale)
+/// and the Recently-Seen sort places it last.
+pub(crate) fn discover_filter_sort(
+    rows: Vec<(DiscoverRoomRow, Option<Instant>)>,
+    query: &str,
+    filters: DiscoverFilterState,
+    selected_tags: &[String],
+    sort: DiscoverSort,
+    now: Instant,
+) -> Vec<DiscoverRoomRow> {
+    let mut out = Vec::with_capacity(rows.len());
+    for (row, last_seen) in rows {
+        if !discover_row_matches_query(&row, query) {
+            continue;
+        }
+        if filters.compatible
+            && row.compatibility != boru_core::room_directory::RoomCompatibility::Compatible
+        {
+            continue;
+        }
+        if filters.not_joined
+            && row.local_join_state != boru_core::room_directory::LocalJoinState::NotJoined
+        {
+            continue;
+        }
+        if filters.recently_seen {
+            let recent = match last_seen {
+                Some(seen) => now.duration_since(seen) <= DISCOVER_RECENTLY_SEEN_WINDOW,
+                None => true,
+            };
+            if !recent {
+                continue;
+            }
+        }
+        if !discover_row_matches_selected_tags(&row.tags, selected_tags) {
+            continue;
+        }
+        out.push((row, last_seen));
+    }
+
+    match sort {
+        DiscoverSort::RecentlySeen => {
+            out.sort_by(|a, b| match (a.1, b.1) {
+                (Some(x), Some(y)) => y.cmp(&x),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => a.0.room_name.cmp(&b.0.room_name),
+            });
+        }
+        DiscoverSort::Compatibility => {
+            out.sort_by(|a, b| {
+                discover_compat_rank(a.0.compatibility)
+                    .cmp(&discover_compat_rank(b.0.compatibility))
+                    .then_with(|| {
+                        a.0.room_name
+                            .to_lowercase()
+                            .cmp(&b.0.room_name.to_lowercase())
+                    })
+            });
+        }
+        DiscoverSort::Name => {
+            out.sort_by(|a, b| a.0.room_name.to_lowercase().cmp(&b.0.room_name.to_lowercase()));
+        }
+    }
+
+    out.into_iter().map(|(row, _)| row).collect()
+}
+
+/// Sorted unique tags across all cached rows — the tag/category filter
+/// chips. Computed from the FULL cache (before search/filter), so a
+/// search that empties the list never hides the category chips.
+pub(crate) fn discover_available_tags(rows: &[DiscoverRoomRow]) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    for row in rows {
+        for tag in &row.tags {
+            seen.insert(tag.clone());
+        }
+    }
+    seen.into_iter().collect()
+}
+
 impl IcedChat {
     pub(crate) fn view_peer_profile(&self, peer: PublicKey) -> iced::Element<'_, AppMessage> {
         let profile_data = self.profile_cache.get(&peer);
@@ -640,51 +812,106 @@ impl IcedChat {
     /// browse surface: rows are snapshots of cached metadata plus the local
     /// relationship verdict — no subscription, no membership mutation.
     pub(crate) fn discover_dependency(&self) -> DiscoverDependency {
-        let rooms: Vec<DiscoverRoomRow> = if let Some(dir) = &self.room_directory {
+        // BORU-DIR-15 (PDF Task 5.3): everything below is a pure function
+        // of the LOCAL cache snapshot + local UI state. No network call is
+        // made here: the search query, filters, and sort only ever read
+        // the bounded RoomDirectory cache, and the query string is never
+        // broadcast onto the discovery network.
+        let now = Instant::now();
+
+        // Build rows with recency from the cache (or the legacy store).
+        let rows: Vec<(DiscoverRoomRow, Option<Instant>)> = if let Some(dir) = &self.room_directory {
             let guard = dir.lock().unwrap();
             guard
                 .snapshot()
                 .into_iter()
-                .map(|entry| DiscoverRoomRow {
-                    room_id: *entry.advert.room_id.as_bytes(),
-                    room_name: entry.advert.room_name.clone(),
-                    short_description: entry.advert.short_description.clone(),
-                    tags: entry.advert.tags.clone(),
-                    room_protocol_version: entry.advert.room_protocol_version,
-                    owner_peer_id: entry.advert.owner_peer_id,
-                    member_count: entry.advert.approximate_member_count,
-                    compatibility: entry.compatibility,
-                    local_join_state: entry.local_join_state,
-                    offered_action: entry.offered_action(),
-                    conflict: entry.conflict,
+                .map(|entry| {
+                    let row = DiscoverRoomRow {
+                        room_id: *entry.advert.room_id.as_bytes(),
+                        room_name: entry.advert.room_name.clone(),
+                        short_description: entry.advert.short_description.clone(),
+                        tags: entry.advert.tags.clone(),
+                        room_protocol_version: entry.advert.room_protocol_version,
+                        owner_peer_id: entry.advert.owner_peer_id,
+                        member_count: entry.advert.approximate_member_count,
+                        compatibility: entry.compatibility,
+                        local_join_state: entry.local_join_state,
+                        offered_action: entry.offered_action(),
+                        conflict: entry.conflict,
+                    };
+                    (row, Some(entry.last_seen))
                 })
                 .collect()
         } else {
             // Legacy fallback: the old directory-store advertisements
             // (relay-scoped directory gossip topic). Same row shape so the
-            // browse surface renders identically.
+            // browse surface renders identically. Recency is unknown for
+            // these rows (the legacy store has no per-entry Instant).
             let store = self.directory_store.lock().unwrap();
             store
                 .list_active()
                 .into_iter()
-                .map(|(ad, _author)| DiscoverRoomRow {
-                    room_id: *ad.topic.as_bytes(),
-                    room_name: ad.room_name.clone(),
-                    short_description: ad.description.clone(),
-                    tags: Vec::new(),
-                    room_protocol_version: 0,
-                    owner_peer_id: [0u8; 32],
-                    member_count: Some(ad.member_count),
-                    compatibility: boru_core::room_directory::RoomCompatibility::Compatible,
-                    local_join_state: boru_core::room_directory::LocalJoinState::NotJoined,
-                    offered_action: boru_core::room_directory::RoomAction::Join,
-                    conflict: false,
+                .map(|(ad, _author)| {
+                    let row = DiscoverRoomRow {
+                        room_id: *ad.topic.as_bytes(),
+                        room_name: ad.room_name.clone(),
+                        short_description: ad.description.clone(),
+                        tags: Vec::new(),
+                        room_protocol_version: 0,
+                        owner_peer_id: [0u8; 32],
+                        member_count: Some(ad.member_count),
+                        compatibility: boru_core::room_directory::RoomCompatibility::Compatible,
+                        local_join_state: boru_core::room_directory::LocalJoinState::NotJoined,
+                        offered_action: boru_core::room_directory::RoomAction::Join,
+                        conflict: false,
+                    };
+                    (row, None)
                 })
                 .collect()
         };
+
+        let total_count = rows.len();
+
+        // Tag chips come from the FULL cache (before search/filter), so a
+        // query that empties the list never hides the category chips.
+        let available_tags = discover_available_tags(
+            &rows.iter().map(|(row, _)| row.clone()).collect::<Vec<_>>(),
+        );
+
+        // Drop selected tags that no longer exist in the cache (e.g. after
+        // an advertisement expires) so a stale selection can't silently
+        // empty the list with no visible way to clear it.
+        let selected_tags: Vec<String> = self
+            .discover_selected_tags
+            .iter()
+            .filter(|tag| available_tags.iter().any(|t| t == *tag))
+            .cloned()
+            .collect();
+
+        let rooms = discover_filter_sort(
+            rows,
+            &self.discover_search_query,
+            DiscoverFilterState {
+                compatible: self.discover_filter_compatible,
+                not_joined: self.discover_filter_not_joined,
+                recently_seen: self.discover_filter_recently_seen,
+            },
+            &selected_tags,
+            self.discover_sort,
+            now,
+        );
+
         DiscoverDependency {
             dark_mode: self.dark_mode,
             rooms,
+            search_query: self.discover_search_query.clone(),
+            filter_compatible: self.discover_filter_compatible,
+            filter_not_joined: self.discover_filter_not_joined,
+            filter_recently_seen: self.discover_filter_recently_seen,
+            selected_tags,
+            available_tags,
+            sort: self.discover_sort,
+            total_count,
         }
     }
 
@@ -717,11 +944,16 @@ impl IcedChat {
             .spacing(SPACE_8)
             .align_y(Alignment::Center);
 
+        // ── BORU-DIR-15 (PDF Task 5.3): search / filter / sort controls ──
+        // All controls mutate local UI state only; the search query is
+        // applied to the LOCAL RoomDirectory cache and never broadcast.
+        let controls = Self::discover_controls(dep);
+
         let mut main_content = Column::new().spacing(SPACE_8).padding(SPACE_16);
 
         let rooms = &dep.rooms;
 
-        if rooms.is_empty() {
+        if dep.total_count == 0 {
             main_content = main_content.push(
                 container(
                     Column::new()
@@ -743,6 +975,31 @@ impl IcedChat {
                 .center_x(Length::Fill)
                 .padding(SPACE_16),
             );
+        } else if rooms.is_empty() {
+            // The directory has rooms, but search/filters matched none.
+            // Deliberately does NOT claim global completeness: this only
+            // says the local cache has no match right now.
+            main_content = main_content.push(
+                container(
+                    Column::new()
+                        .push(
+                            text("No rooms match your search or filters.")
+                                .size(TYPO_MD)
+                                .style(text_muted_style),
+                        )
+                        .push(Space::new().height(SPACE_8))
+                        .push(
+                            text("Try clearing the search or filters to see more of your local directory.")
+                                .size(TYPO_SM)
+                                .style(text_muted_style),
+                        )
+                        .spacing(SPACE_4)
+                        .align_x(Alignment::Center),
+                )
+                .width(Length::Fill)
+                .center_x(Length::Fill)
+                .padding(SPACE_16),
+            );
         } else {
             for room in rooms {
                 main_content =
@@ -752,6 +1009,7 @@ impl IcedChat {
 
         let body = Column::new()
             .push(header)
+            .push(controls)
             .push(
                 crate::ui_components::gutter_scrollable(main_content)
                     .height(Length::Fill)
@@ -764,6 +1022,182 @@ impl IcedChat {
             .height(Length::Fill)
             .style(container_primary)
             .into()
+    }
+
+    /// BORU-DIR-15 (PDF Task 5.3): the search box, filter chips, tag
+    /// chips, sort selector, and result-count line for the Discover
+    /// browse surface. Pure render over [`DiscoverDependency`]; every
+    /// control emits a local-only `AppMessage` that `update_discover`
+    /// turns into UI state — never a network op.
+    fn discover_controls(dep: &DiscoverDependency) -> iced::Element<'static, AppMessage> {
+        use iced::widget::{button, container, text, text_input, Column, Row, Space};
+        use iced::{Alignment, Background, Length};
+
+        let theme = Self::theme_from_dark(dep.dark_mode);
+        let accent = accent_primary(&theme);
+        let muted = text_muted(&theme);
+        let border = border_muted(&theme);
+
+        // Active chip style: accent fill for an engaged filter/sort, ghost
+        // otherwise. Active = on-press toggles it OFF, so the chip must
+        // clearly read as selected. Only Copy values are captured, so the
+        // style closure can be `move` (the rendered element is 'static).
+        let chip = |label: String, active: bool, msg: AppMessage| -> iced::Element<'static, AppMessage> {
+            button(text(label).size(TYPO_XS).color(if active { Color::WHITE } else { muted }))
+                .on_press(msg)
+                .padding([SPACE_4, SPACE_8])
+                .style(move |_t: &iced::Theme, _status| {
+                    if active {
+                        iced::widget::button::Style {
+                            background: Some(Background::Color(accent)),
+                            text_color: Color::WHITE,
+                            border: iced::Border {
+                                radius: SPACE_6.into(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }
+                    } else {
+                        iced::widget::button::Style {
+                            background: None,
+                            text_color: muted,
+                            border: iced::Border {
+                                color: border,
+                                width: 1.0,
+                                radius: SPACE_6.into(),
+                            },
+                            ..Default::default()
+                        }
+                    }
+                })
+                .into()
+        };
+
+        // Search row: input + clear button when non-empty.
+        let clear: iced::Element<'static, AppMessage> = if dep.search_query.is_empty() {
+            Space::new().width(Length::Fixed(0.0)).into()
+        } else {
+            button(text("✕").size(TYPO_XS).color(muted))
+                .on_press(AppMessage::DiscoverSearchChanged(String::new()))
+                .padding([SPACE_4, SPACE_6])
+                .style(BUTTON_GHOST_BG)
+                .into()
+        };
+        let search_row = Row::new()
+            .push(
+                text_input("Search rooms…", &dep.search_query)
+                    .on_input(AppMessage::DiscoverSearchChanged)
+                    .padding([SPACE_6, SPACE_10])
+                    .size(TYPO_SM)
+                    .width(Length::Fill),
+            )
+            .push(clear)
+            .spacing(SPACE_4)
+            .align_y(Alignment::Center);
+
+        // Filter chips.
+        let filter_row = Row::new()
+            .push(chip(
+                "Compatible".to_string(),
+                dep.filter_compatible,
+                AppMessage::DiscoverFilterToggled(DiscoverFilter::Compatible),
+            ))
+            .push(chip(
+                "Not joined".to_string(),
+                dep.filter_not_joined,
+                AppMessage::DiscoverFilterToggled(DiscoverFilter::NotJoined),
+            ))
+            .push(chip(
+                "Recently seen".to_string(),
+                dep.filter_recently_seen,
+                AppMessage::DiscoverFilterToggled(DiscoverFilter::RecentlySeen),
+            ))
+            .spacing(SPACE_4)
+            .align_y(Alignment::Center);
+
+        let mut controls = Column::new().spacing(SPACE_6).padding(iced::Padding {
+            top: 0.0,
+            right: SPACE_16,
+            bottom: 0.0,
+            left: SPACE_16,
+        });
+
+        controls = controls.push(search_row);
+        controls = controls.push(filter_row);
+
+        // Tag/category chips (only when the cache has any tags).
+        if !dep.available_tags.is_empty() {
+            let mut tag_row = Row::new().spacing(SPACE_4).align_y(Alignment::Center);
+            for tag in dep.available_tags.iter().take(12) {
+                let selected = dep.selected_tags.contains(tag);
+                tag_row = tag_row.push(chip(
+                    format!("#{tag}"),
+                    selected,
+                    AppMessage::DiscoverTagToggled(tag.clone()),
+                ));
+            }
+            if dep.available_tags.len() > 12 {
+                tag_row = tag_row.push(
+                    text(format!("+{}", dep.available_tags.len() - 12))
+                        .size(TYPO_XS)
+                        .style(text_muted_style),
+                );
+            }
+            controls = controls.push(tag_row);
+        }
+
+        // Sort selector.
+        let sort_row = Row::new()
+            .push(text("Sort:").size(TYPO_XS).style(text_muted_style))
+            .push(chip(
+                "Recently seen".to_string(),
+                matches!(dep.sort, DiscoverSort::RecentlySeen),
+                AppMessage::DiscoverSortChanged(DiscoverSort::RecentlySeen),
+            ))
+            .push(chip(
+                "Compatibility".to_string(),
+                matches!(dep.sort, DiscoverSort::Compatibility),
+                AppMessage::DiscoverSortChanged(DiscoverSort::Compatibility),
+            ))
+            .push(chip(
+                "Name".to_string(),
+                matches!(dep.sort, DiscoverSort::Name),
+                AppMessage::DiscoverSortChanged(DiscoverSort::Name),
+            ))
+            .spacing(SPACE_4)
+            .align_y(Alignment::Center);
+        controls = controls.push(sort_row);
+
+        // Result count — "N of M" against the LOCAL cache, never a claim
+        // about the whole network (PDF Task 5.3 guardrail: "Do not imply
+        // the directory contains every Boru room").
+        if dep.total_count > 0 {
+            let shown = dep.rooms.len();
+            let count_text = if shown == dep.total_count {
+                format!("{shown} locally discovered room{}", if shown == 1 { "" } else { "s" })
+            } else {
+                format!(
+                    "Showing {shown} of {} locally discovered rooms",
+                    dep.total_count
+                )
+            };
+            controls = controls.push(
+                container(
+                    text(count_text)
+                        .size(TYPO_XS)
+                        .style(text_muted_style)
+                        .width(Length::Fill),
+                )
+                .padding(iced::Padding {
+                    top: SPACE_2,
+                    right: 0.0,
+                    bottom: 0.0,
+                    left: 0.0,
+                }),
+            );
+        }
+
+        controls.into()
     }
 
     // ── Room card (PDF Task 5.2) ─────────────────────────────────────
@@ -1786,6 +2220,53 @@ impl IcedChat {
             }
             AppMessage::CloseDiscover => {
                 self.screen = self.discover_return_to.take().unwrap_or(Screen::ChatList);
+                iced::Task::none()
+            }
+
+            // ── BORU-DIR-15 (PDF Task 5.3): search / filter / sort ────
+            // All local-only state mutations. The search query is stored
+            // in `discover_search_query` and applied in
+            // `discover_dependency()` against the local RoomDirectory
+            // snapshot — it is NEVER broadcast onto the discovery network
+            // (PDF Core rule; Task 5.3 acceptance "Search does not leak
+            // queries to other peers").
+            AppMessage::DiscoverSearchChanged(query) => {
+                self.discover_search_query = query;
+                iced::Task::none()
+            }
+            AppMessage::DiscoverFilterToggled(filter) => {
+                match filter {
+                    DiscoverFilter::Compatible => {
+                        self.discover_filter_compatible = !self.discover_filter_compatible;
+                    }
+                    DiscoverFilter::NotJoined => {
+                        self.discover_filter_not_joined = !self.discover_filter_not_joined;
+                    }
+                    DiscoverFilter::RecentlySeen => {
+                        self.discover_filter_recently_seen =
+                            !self.discover_filter_recently_seen;
+                    }
+                }
+                iced::Task::none()
+            }
+            AppMessage::DiscoverTagToggled(tag) => {
+                if let Some(pos) = self.discover_selected_tags.iter().position(|t| t == &tag) {
+                    self.discover_selected_tags.remove(pos);
+                } else {
+                    self.discover_selected_tags.push(tag);
+                }
+                iced::Task::none()
+            }
+            AppMessage::DiscoverSortChanged(sort) => {
+                self.discover_sort = sort;
+                iced::Task::none()
+            }
+            AppMessage::DiscoverClearFilters => {
+                self.discover_search_query.clear();
+                self.discover_filter_compatible = false;
+                self.discover_filter_not_joined = false;
+                self.discover_filter_recently_seen = false;
+                self.discover_selected_tags.clear();
                 iced::Task::none()
             }
 

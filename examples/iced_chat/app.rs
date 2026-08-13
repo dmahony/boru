@@ -3692,6 +3692,18 @@ pub struct IcedChat {
     friend_profile_return_to: Option<Screen>,
     /// Screen to return to when closing the Discover (public rooms) page.
     discover_return_to: Option<Screen>,
+    /// BORU-DIR-15 (PDF Task 5.3): Discover browse-surface search query.
+    /// Local-only — never broadcast onto the discovery network.
+    discover_search_query: String,
+    /// BORU-DIR-15: filter toggles (Compatible / Not Joined / Recently
+    /// Seen). All applied against the local cache snapshot only.
+    discover_filter_compatible: bool,
+    discover_filter_not_joined: bool,
+    discover_filter_recently_seen: bool,
+    /// BORU-DIR-15: selected tag/category filters (OR semantics).
+    discover_selected_tags: Vec<String>,
+    /// BORU-DIR-15: sort order for the browse surface.
+    discover_sort: DiscoverSort,
     /// Screen to return to when closing the Groups page.
     groups_return_to: Option<Screen>,
     /// Screen to return to when closing the Download Manager page.
@@ -5064,10 +5076,32 @@ pub(crate) struct DiscoverRoomRow {
 /// Dependency for the Discover screen. Holds the full renderable room
 /// browse rows plus the theme flag, so the static content renderer can
 /// rebuild the whole screen from this snapshot.
+///
+/// BORU-DIR-15 (PDF Task 5.3): also carries the local search query,
+/// filter toggles, selected tags, available tag chips, sort order, and
+/// the pre-filter total, so the renderer can draw the search box /
+/// filter chips / sort selector AND the lazy cache invalidates whenever
+/// any of them changes.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct DiscoverDependency {
     pub(crate) dark_mode: bool,
+    /// Filtered + sorted rows (already limited to what passes the query,
+    /// filters, selected tags, and sort order).
     pub(crate) rooms: Vec<DiscoverRoomRow>,
+    /// Local search query (never broadcast onto the discovery network).
+    pub(crate) search_query: String,
+    /// Filter toggles (Compatible / Not Joined / Recently Seen).
+    pub(crate) filter_compatible: bool,
+    pub(crate) filter_not_joined: bool,
+    pub(crate) filter_recently_seen: bool,
+    /// Selected tag/category filters (OR semantics).
+    pub(crate) selected_tags: Vec<String>,
+    /// All tags present in the cache — the available tag chips.
+    pub(crate) available_tags: Vec<String>,
+    /// Current sort order.
+    pub(crate) sort: DiscoverSort,
+    /// Rooms in the cache BEFORE search/filtering (for "N of M" copy).
+    pub(crate) total_count: usize,
 }
 
 /// Dependency for the Groups screen.
@@ -6355,6 +6389,19 @@ pub enum AppMessage {
     /// Close the Discover (public rooms) screen and return to the previous
     /// screen (the one the user came from, e.g. the File Sharing dashboard).
     CloseDiscover,
+    /// BORU-DIR-15 (PDF Task 5.3): the local Discover search box changed.
+    /// The query is stored locally and NEVER broadcast onto the discovery
+    /// network — filtering runs entirely against the local cache.
+    DiscoverSearchChanged(String),
+    /// BORU-DIR-15: toggle one of the simple Discover filters
+    /// (Compatible / Not Joined / Recently Seen). Local-only.
+    DiscoverFilterToggled(DiscoverFilter),
+    /// BORU-DIR-15: toggle a tag/category filter chip. Local-only.
+    DiscoverTagToggled(String),
+    /// BORU-DIR-15: change the Discover sort order. Local-only.
+    DiscoverSortChanged(DiscoverSort),
+    /// BORU-DIR-15: reset the Discover search query and all filters.
+    DiscoverClearFilters,
     /// Open the full Groups screen.
     OpenGroups,
     /// Close the Groups screen and return to the previous screen.
@@ -7870,6 +7917,12 @@ impl IcedChat {
             peer_profile_return_to: None,
             friend_profile_return_to: None,
             discover_return_to: None,
+            discover_search_query: String::new(),
+            discover_filter_compatible: false,
+            discover_filter_not_joined: false,
+            discover_filter_recently_seen: false,
+            discover_selected_tags: Vec::new(),
+            discover_sort: DiscoverSort::RecentlySeen,
             groups_return_to: None,
             download_manager_return_to: None,
             paused_inbound_transfer_ids: std::collections::HashSet::new(),
@@ -10163,6 +10216,11 @@ impl IcedChat {
             AppMessage::DirectorySubscribed(..) => "DirectorySubscribed",
             AppMessage::OpenDirectory => "OpenDirectory",
             AppMessage::CloseDiscover => "CloseDiscover",
+            AppMessage::DiscoverSearchChanged(_) => "DiscoverSearchChanged",
+            AppMessage::DiscoverFilterToggled(_) => "DiscoverFilterToggled",
+            AppMessage::DiscoverTagToggled(_) => "DiscoverTagToggled",
+            AppMessage::DiscoverSortChanged(_) => "DiscoverSortChanged",
+            AppMessage::DiscoverClearFilters => "DiscoverClearFilters",
             AppMessage::OpenGroups => "OpenGroups",
             AppMessage::CloseGroups => "CloseGroups",
             AppMessage::DirectoryRoomJoin(..) => "DirectoryRoomJoin",
@@ -14536,6 +14594,11 @@ impl IcedChat {
             | AppMessage::DirectorySubscribed(_)
             | AppMessage::OpenDirectory
             | AppMessage::CloseDiscover
+            | AppMessage::DiscoverSearchChanged(_)
+            | AppMessage::DiscoverFilterToggled(_)
+            | AppMessage::DiscoverTagToggled(_)
+            | AppMessage::DiscoverSortChanged(_)
+            | AppMessage::DiscoverClearFilters
             | AppMessage::DirectoryRoomJoin(_)
             | AppMessage::DeleteDirectoryRoom(_)
             | AppMessage::DirectoryRoomUpdate(..) => self.update_discover(message),
@@ -30390,6 +30453,14 @@ mod tests {
         let dep = DiscoverDependency {
             dark_mode: false,
             rooms: vec![row],
+            search_query: String::new(),
+            filter_compatible: false,
+            filter_not_joined: false,
+            filter_recently_seen: false,
+            selected_tags: Vec::new(),
+            available_tags: Vec::new(),
+            sort: DiscoverSort::RecentlySeen,
+            total_count: 1,
         };
         let _screen = IcedChat::view_discover_content(&dep);
     }
@@ -30520,6 +30591,602 @@ mod tests {
             conflict: true,
         };
         let _element = IcedChat::render_discover_room_card(&row, false);
+    }
+
+    // ── BORU-DIR-15 (PDF Task 5.3): local search / filter / sort ────
+    // Search, filters, and sorting are pure functions over the LOCAL
+    // cache snapshot (discover_filter_sort) — the acceptance criteria
+    // require search not to leak queries to other peers and filtering to
+    // work entirely from the local directory cache.
+
+    /// A helper row for the pure filter/sort tests.
+    fn discover_test_row(
+        room_name: &str,
+        description: &str,
+        tags: &[&str],
+        compatibility: boru_core::room_directory::RoomCompatibility,
+        local_join_state: boru_core::room_directory::LocalJoinState,
+    ) -> DiscoverRoomRow {
+        DiscoverRoomRow {
+            room_id: [0x55; 32],
+            room_name: room_name.to_string(),
+            short_description: description.to_string(),
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+            room_protocol_version: 1,
+            owner_peer_id: [0u8; 32],
+            member_count: None,
+            compatibility,
+            local_join_state,
+            offered_action: boru_core::room_directory::RoomAction::Join,
+            conflict: false,
+        }
+    }
+
+    fn discover_default_filters() -> DiscoverFilterState {
+        DiscoverFilterState::default()
+    }
+
+    /// Search matches room name, description, AND tags (case-insensitive).
+    #[test]
+    fn discover_search_matches_name_description_and_tags() {
+        let rust = discover_test_row(
+            "Rust Lounge",
+            "Talk about the Rust programming language",
+            &["tech", "programming"],
+            boru_core::room_directory::RoomCompatibility::Compatible,
+            boru_core::room_directory::LocalJoinState::NotJoined,
+        );
+        let cooking = discover_test_row(
+            "Cooking Club",
+            "Recipes and food talk",
+            &["food"],
+            boru_core::room_directory::RoomCompatibility::Compatible,
+            boru_core::room_directory::LocalJoinState::NotJoined,
+        );
+        let rows = vec![
+            (rust, Some(Instant::now())),
+            (cooking, Some(Instant::now())),
+        ];
+
+        let filtered = discover_filter_sort(
+            rows,
+            "rust",
+            discover_default_filters(),
+            &[],
+            DiscoverSort::RecentlySeen,
+            Instant::now(),
+        );
+        assert_eq!(filtered.len(), 1, "name match");
+        assert_eq!(filtered[0].room_name, "Rust Lounge");
+
+        let filtered = discover_filter_sort(
+            vec![
+                (
+                    discover_test_row(
+                        "Rust Lounge",
+                        "Talk about the Rust programming language",
+                        &["tech", "programming"],
+                        boru_core::room_directory::RoomCompatibility::Compatible,
+                        boru_core::room_directory::LocalJoinState::NotJoined,
+                    ),
+                    Some(Instant::now()),
+                ),
+                (
+                    discover_test_row(
+                        "Cooking Club",
+                        "Recipes and food talk",
+                        &["food"],
+                        boru_core::room_directory::RoomCompatibility::Compatible,
+                        boru_core::room_directory::LocalJoinState::NotJoined,
+                    ),
+                    Some(Instant::now()),
+                ),
+            ],
+            "recipes",
+            discover_default_filters(),
+            &[],
+            DiscoverSort::RecentlySeen,
+            Instant::now(),
+        );
+        assert_eq!(filtered.len(), 1, "description match");
+        assert_eq!(filtered[0].room_name, "Cooking Club");
+
+        let filtered = discover_filter_sort(
+            vec![
+                (
+                    discover_test_row(
+                        "Rust Lounge",
+                        "Talk about the Rust programming language",
+                        &["tech", "programming"],
+                        boru_core::room_directory::RoomCompatibility::Compatible,
+                        boru_core::room_directory::LocalJoinState::NotJoined,
+                    ),
+                    Some(Instant::now()),
+                ),
+                (
+                    discover_test_row(
+                        "Cooking Club",
+                        "Recipes and food talk",
+                        &["food"],
+                        boru_core::room_directory::RoomCompatibility::Compatible,
+                        boru_core::room_directory::LocalJoinState::NotJoined,
+                    ),
+                    Some(Instant::now()),
+                ),
+            ],
+            "FOOD",
+            discover_default_filters(),
+            &[],
+            DiscoverSort::RecentlySeen,
+            Instant::now(),
+        );
+        assert_eq!(filtered.len(), 1, "tag match, case-insensitive");
+        assert_eq!(filtered[0].room_name, "Cooking Club");
+    }
+
+    /// The pure filter function operates ONLY on the rows it is given —
+    /// there is no transport handle anywhere in its signature, so a
+    /// search can never reach the network (Task 5.3 acceptance).
+    #[test]
+    fn discover_search_is_local_only() {
+        let rows = vec![
+            (
+                discover_test_row(
+                    "Alpha",
+                    "first",
+                    &[],
+                    boru_core::room_directory::RoomCompatibility::Compatible,
+                    boru_core::room_directory::LocalJoinState::NotJoined,
+                ),
+                Some(Instant::now()),
+            ),
+            (
+                discover_test_row(
+                    "Beta",
+                    "second",
+                    &[],
+                    boru_core::room_directory::RoomCompatibility::Compatible,
+                    boru_core::room_directory::LocalJoinState::NotJoined,
+                ),
+                Some(Instant::now()),
+            ),
+        ];
+        // A non-matching query returns nothing; the input rows are never
+        // mutated and nothing outside `rows` is consulted.
+        let filtered = discover_filter_sort(
+            rows.clone(),
+            "zzz-no-such-room",
+            discover_default_filters(),
+            &[],
+            DiscoverSort::RecentlySeen,
+            Instant::now(),
+        );
+        assert!(filtered.is_empty());
+        assert_eq!(rows.len(), 2, "input rows are untouched (pure function)");
+    }
+
+    /// Compatible filter keeps only Compatible rooms.
+    #[test]
+    fn discover_filter_compatible_only() {
+        let rows = vec![
+            (
+                discover_test_row(
+                    "Good",
+                    "",
+                    &[],
+                    boru_core::room_directory::RoomCompatibility::Compatible,
+                    boru_core::room_directory::LocalJoinState::NotJoined,
+                ),
+                Some(Instant::now()),
+            ),
+            (
+                discover_test_row(
+                    "Needs Upgrade",
+                    "",
+                    &[],
+                    boru_core::room_directory::RoomCompatibility::UpgradeRequired,
+                    boru_core::room_directory::LocalJoinState::Incompatible,
+                ),
+                Some(Instant::now()),
+            ),
+            (
+                discover_test_row(
+                    "Unsupported",
+                    "",
+                    &[],
+                    boru_core::room_directory::RoomCompatibility::Unsupported,
+                    boru_core::room_directory::LocalJoinState::Incompatible,
+                ),
+                Some(Instant::now()),
+            ),
+        ];
+        let filtered = discover_filter_sort(
+            rows,
+            "",
+            DiscoverFilterState {
+                compatible: true,
+                ..discover_default_filters()
+            },
+            &[],
+            DiscoverSort::RecentlySeen,
+            Instant::now(),
+        );
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].room_name, "Good");
+    }
+
+    /// Not-Joined filter keeps only rooms the user has not joined.
+    #[test]
+    fn discover_filter_not_joined_only() {
+        let rows = vec![
+            (
+                discover_test_row(
+                    "New Room",
+                    "",
+                    &[],
+                    boru_core::room_directory::RoomCompatibility::Compatible,
+                    boru_core::room_directory::LocalJoinState::NotJoined,
+                ),
+                Some(Instant::now()),
+            ),
+            (
+                discover_test_row(
+                    "Already Joined",
+                    "",
+                    &[],
+                    boru_core::room_directory::RoomCompatibility::Compatible,
+                    boru_core::room_directory::LocalJoinState::Joined,
+                ),
+                Some(Instant::now()),
+            ),
+        ];
+        let filtered = discover_filter_sort(
+            rows,
+            "",
+            DiscoverFilterState {
+                not_joined: true,
+                ..discover_default_filters()
+            },
+            &[],
+            DiscoverSort::RecentlySeen,
+            Instant::now(),
+        );
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].room_name, "New Room");
+    }
+
+    /// Recently-Seen filter keeps only rooms whose last_seen is within
+    /// the window; unknown recency (legacy path) passes.
+    #[test]
+    fn discover_filter_recently_seen_only() {
+        let now = Instant::now();
+        let rows = vec![
+            (
+                discover_test_row(
+                    "Fresh",
+                    "",
+                    &[],
+                    boru_core::room_directory::RoomCompatibility::Compatible,
+                    boru_core::room_directory::LocalJoinState::NotJoined,
+                ),
+                Some(now),
+            ),
+            (
+                discover_test_row(
+                    "Stale",
+                    "",
+                    &[],
+                    boru_core::room_directory::RoomCompatibility::Compatible,
+                    boru_core::room_directory::LocalJoinState::NotJoined,
+                ),
+                Some(now - Duration::from_secs(2 * 24 * 60 * 60)),
+            ),
+            (
+                discover_test_row(
+                    "Legacy unknown",
+                    "",
+                    &[],
+                    boru_core::room_directory::RoomCompatibility::Compatible,
+                    boru_core::room_directory::LocalJoinState::NotJoined,
+                ),
+                None,
+            ),
+        ];
+        let filtered = discover_filter_sort(
+            rows,
+            "",
+            DiscoverFilterState {
+                recently_seen: true,
+                ..discover_default_filters()
+            },
+            &[],
+            DiscoverSort::RecentlySeen,
+            now,
+        );
+        let names: Vec<&str> = filtered.iter().map(|r| r.room_name.as_str()).collect();
+        assert!(
+            names.contains(&"Fresh"),
+            "recently seen room passes the filter"
+        );
+        assert!(
+            !names.contains(&"Stale"),
+            "stale room is filtered out"
+        );
+        assert!(
+            names.contains(&"Legacy unknown"),
+            "unknown recency passes (legacy store has no Instant)"
+        );
+    }
+
+    /// Tag filter matches rooms carrying ANY selected tag (OR semantics).
+    #[test]
+    fn discover_filter_tags_any_selected() {
+        let rows = vec![
+            (
+                discover_test_row(
+                    "Music Room",
+                    "",
+                    &["music", "live"],
+                    boru_core::room_directory::RoomCompatibility::Compatible,
+                    boru_core::room_directory::LocalJoinState::NotJoined,
+                ),
+                Some(Instant::now()),
+            ),
+            (
+                discover_test_row(
+                    "Gaming Room",
+                    "",
+                    &["gaming"],
+                    boru_core::room_directory::RoomCompatibility::Compatible,
+                    boru_core::room_directory::LocalJoinState::NotJoined,
+                ),
+                Some(Instant::now()),
+            ),
+            (
+                discover_test_row(
+                    "Untagged",
+                    "",
+                    &[],
+                    boru_core::room_directory::RoomCompatibility::Compatible,
+                    boru_core::room_directory::LocalJoinState::NotJoined,
+                ),
+                Some(Instant::now()),
+            ),
+        ];
+        let filtered = discover_filter_sort(
+            rows,
+            "",
+            discover_default_filters(),
+            &["gaming".to_string()],
+            DiscoverSort::RecentlySeen,
+            Instant::now(),
+        );
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].room_name, "Gaming Room");
+
+        let filtered = discover_filter_sort(
+            vec![
+                (
+                    discover_test_row(
+                        "Music Room",
+                        "",
+                        &["music", "live"],
+                        boru_core::room_directory::RoomCompatibility::Compatible,
+                        boru_core::room_directory::LocalJoinState::NotJoined,
+                    ),
+                    Some(Instant::now()),
+                ),
+                (
+                    discover_test_row(
+                        "Gaming Room",
+                        "",
+                        &["gaming"],
+                        boru_core::room_directory::RoomCompatibility::Compatible,
+                        boru_core::room_directory::LocalJoinState::NotJoined,
+                    ),
+                    Some(Instant::now()),
+                ),
+                (
+                    discover_test_row(
+                        "Untagged",
+                        "",
+                        &[],
+                        boru_core::room_directory::RoomCompatibility::Compatible,
+                        boru_core::room_directory::LocalJoinState::NotJoined,
+                    ),
+                    Some(Instant::now()),
+                ),
+            ],
+            "",
+            discover_default_filters(),
+            &["music".to_string(), "gaming".to_string()],
+            DiscoverSort::RecentlySeen,
+            Instant::now(),
+        );
+        assert_eq!(filtered.len(), 2, "any selected tag matches");
+    }
+
+    /// Recently-Seen sort places most recent first; unknown recency last.
+    #[test]
+    fn discover_sort_recently_seen() {
+        let now = Instant::now();
+        let rows = vec![
+            (
+                discover_test_row(
+                    "Old",
+                    "",
+                    &[],
+                    boru_core::room_directory::RoomCompatibility::Compatible,
+                    boru_core::room_directory::LocalJoinState::NotJoined,
+                ),
+                Some(now - Duration::from_secs(3600)),
+            ),
+            (
+                discover_test_row(
+                    "New",
+                    "",
+                    &[],
+                    boru_core::room_directory::RoomCompatibility::Compatible,
+                    boru_core::room_directory::LocalJoinState::NotJoined,
+                ),
+                Some(now),
+            ),
+            (
+                discover_test_row(
+                    "Unknown",
+                    "",
+                    &[],
+                    boru_core::room_directory::RoomCompatibility::Compatible,
+                    boru_core::room_directory::LocalJoinState::NotJoined,
+                ),
+                None,
+            ),
+        ];
+        let sorted = discover_filter_sort(
+            rows,
+            "",
+            discover_default_filters(),
+            &[],
+            DiscoverSort::RecentlySeen,
+            now,
+        );
+        let names: Vec<&str> = sorted.iter().map(|r| r.room_name.as_str()).collect();
+        assert_eq!(names, vec!["New", "Old", "Unknown"]);
+    }
+
+    /// Compatibility sort puts joinable rooms first.
+    #[test]
+    fn discover_sort_compatibility() {
+        let rows = vec![
+            (
+                discover_test_row(
+                    "Unsupported",
+                    "",
+                    &[],
+                    boru_core::room_directory::RoomCompatibility::Unsupported,
+                    boru_core::room_directory::LocalJoinState::Incompatible,
+                ),
+                Some(Instant::now()),
+            ),
+            (
+                discover_test_row(
+                    "Compatible B",
+                    "",
+                    &[],
+                    boru_core::room_directory::RoomCompatibility::Compatible,
+                    boru_core::room_directory::LocalJoinState::NotJoined,
+                ),
+                Some(Instant::now()),
+            ),
+            (
+                discover_test_row(
+                    "Compatible A",
+                    "",
+                    &[],
+                    boru_core::room_directory::RoomCompatibility::Compatible,
+                    boru_core::room_directory::LocalJoinState::NotJoined,
+                ),
+                Some(Instant::now()),
+            ),
+            (
+                discover_test_row(
+                    "Upgrade",
+                    "",
+                    &[],
+                    boru_core::room_directory::RoomCompatibility::UpgradeRequired,
+                    boru_core::room_directory::LocalJoinState::Incompatible,
+                ),
+                Some(Instant::now()),
+            ),
+        ];
+        let sorted = discover_filter_sort(
+            rows,
+            "",
+            discover_default_filters(),
+            &[],
+            DiscoverSort::Compatibility,
+            Instant::now(),
+        );
+        let names: Vec<&str> = sorted.iter().map(|r| r.room_name.as_str()).collect();
+        assert_eq!(names, vec!["Compatible A", "Compatible B", "Upgrade", "Unsupported"]);
+    }
+
+    /// Name sort is alphabetical and case-insensitive.
+    #[test]
+    fn discover_sort_name() {
+        let rows = vec![
+            (
+                discover_test_row(
+                    "zeta",
+                    "",
+                    &[],
+                    boru_core::room_directory::RoomCompatibility::Compatible,
+                    boru_core::room_directory::LocalJoinState::NotJoined,
+                ),
+                Some(Instant::now()),
+            ),
+            (
+                discover_test_row(
+                    "Alpha",
+                    "",
+                    &[],
+                    boru_core::room_directory::RoomCompatibility::Compatible,
+                    boru_core::room_directory::LocalJoinState::NotJoined,
+                ),
+                Some(Instant::now()),
+            ),
+            (
+                discover_test_row(
+                    "bravo",
+                    "",
+                    &[],
+                    boru_core::room_directory::RoomCompatibility::Compatible,
+                    boru_core::room_directory::LocalJoinState::NotJoined,
+                ),
+                Some(Instant::now()),
+            ),
+        ];
+        let sorted = discover_filter_sort(
+            rows,
+            "",
+            discover_default_filters(),
+            &[],
+            DiscoverSort::Name,
+            Instant::now(),
+        );
+        let names: Vec<&str> = sorted.iter().map(|r| r.room_name.as_str()).collect();
+        assert_eq!(names, vec!["Alpha", "bravo", "zeta"]);
+    }
+
+    /// The filter/search handlers in `update_discover` are pure local
+    /// state mutations — the search query is never broadcast (Task 5.3
+    /// acceptance: search must not leak queries to other peers).
+    #[test]
+    fn discover_search_update_is_local_only() {
+        let (_runtime, mut app) = build_prewarm_test_app();
+
+        let task = app.update(AppMessage::DiscoverSearchChanged("rust".to_string()));
+        assert_eq!(app.discover_search_query, "rust");
+        assert!(!app.discover_filter_compatible);
+        drop(task);
+
+        let task = app.update(AppMessage::DiscoverFilterToggled(DiscoverFilter::Compatible));
+        assert!(app.discover_filter_compatible);
+        drop(task);
+
+        let task = app.update(AppMessage::DiscoverTagToggled("tech".to_string()));
+        assert_eq!(app.discover_selected_tags, vec!["tech".to_string()]);
+        drop(task);
+
+        let task = app.update(AppMessage::DiscoverSortChanged(DiscoverSort::Name));
+        assert_eq!(app.discover_sort, DiscoverSort::Name);
+        drop(task);
+
+        // Clear resets everything.
+        let _ = app.update(AppMessage::DiscoverClearFilters);
+        assert!(app.discover_search_query.is_empty());
+        assert!(!app.discover_filter_compatible);
+        assert!(app.discover_selected_tags.is_empty());
     }
 
     // ── BORU-DIR-09 (PDF Task 3.3): room withdrawals ─────────────────
