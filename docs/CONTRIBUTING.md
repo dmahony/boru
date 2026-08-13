@@ -138,6 +138,20 @@ Before opening a PR, confirm:
 - [ ] Exact, volatile metrics (file/line counts, byte sizes) are not added
       to long-lived docs — use qualitative descriptions or generated output.
 
+## What to commit
+
+Agent-generated kanban artifacts (task audits, reports, closeouts, evidence
+screenshots/logs under `docs/**/evidence/`, task-token docs like
+`CONN-*`/`EPIC-*`/`UI-HOME-*`/`PAPIRUS-*`/`KLIPY-*`/`FS-*`, `WORKSPACES.md`,
+`*.log`, `*.patch`, helper scripts, `report.html`) are **not** committed to
+this repository. They stay in the working tree/kanban workspace and are
+gitignored (see the "Agent-generated kanban artifacts" block in `.gitignore`).
+
+Commit only the actual deliverable: source, config, tests, and real project
+documentation under `docs/`. If a piece of agent documentation genuinely
+belongs in the repo, it must be a polished project doc under `docs/` — not a
+task artifact at the repo root.
+
 ## Squash merging
 
 Boru uses squash merging to keep the git history linear.
