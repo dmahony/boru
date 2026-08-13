@@ -242,20 +242,23 @@ impl IcedChat {
             .collect()
     }
 
-    /// Boru-styled dialog for creating a new public room (discoverable in the
-    /// directory and over DHT).
+    /// Boru-styled dialog for creating a new room.
     ///
-    /// Restyled per UI-RESTYLE-05. Only real, backend-backed options are
-    /// exposed: room name, directory advertisement, and DHT discovery. The
-    /// public-room flow has no description/limits/access-control fields in the
-    /// backend, so those sections carry helper text only — no invented
-    /// controls. Creation logic, messages, and validation are unchanged.
+    /// Restyled per UI-RESTYLE-05 and extended per BORU-DIR-05 (PDF Task
+    /// 2.2): the creator explicitly chooses the room's visibility
+    /// (Private / Public-Unlisted / Public-Discoverable) and can add an
+    /// optional description and tags that are validated and normalized
+    /// against the advertisement bounds before broadcast.
     pub(crate) fn view_create_room_dialog<'a>(
         &self,
         base: iced::widget::Container<'a, AppMessage>,
     ) -> iced::Element<'a, AppMessage> {
         use crate::boru_dialog::{BoruDialog, BORU_DIALOG_WIDTH_STANDARD};
-        use crate::form_components::{FormSection, TextInput, checkbox_field, helper_text};
+        use crate::form_components::{FormSection, TextInput, checkbox_field, helper_text, radio_field};
+        use boru_core::control_plane::advertisement::{
+            DEFAULT_MAX_DESCRIPTION_LEN, DEFAULT_MAX_ROOM_NAME_LEN, DEFAULT_MAX_TAG_LEN,
+            DEFAULT_MAX_TAGS, RoomVisibility,
+        };
 
         let theme = Self::theme_from_dark(self.dark_mode);
 
@@ -269,7 +272,9 @@ impl IcedChat {
             AppMessage::CreateNewRoomNameChanged,
         )
         .id(CREATE_ROOM_NAME_INPUT)
-        .helper("A short name others will see in the directory.");
+        .helper(format!(
+            "A short name others will see in the directory (max {DEFAULT_MAX_ROOM_NAME_LEN} characters)."
+        ));
         if let Some(error) = &self.create_room_error {
             name_field = name_field.error(error.clone());
         }
@@ -277,16 +282,52 @@ impl IcedChat {
         if name_valid && !submitting {
             name_field = name_field.on_submit(AppMessage::ConfirmCreateNewRoom);
         }
-        let room_details = FormSection::new("Room Details").push(name_field.build());
+        let description_field = TextInput::new(
+            "Description",
+            "Optional — what is this room about?",
+            &self.create_room_description,
+            AppMessage::CreateNewRoomDescriptionChanged,
+        )
+        .helper(format!(
+            "Optional short description shown in the directory (max {DEFAULT_MAX_DESCRIPTION_LEN} characters)."
+        ));
+        let tags_field = TextInput::new(
+            "Tags",
+            "Optional — e.g. rust, gaming",
+            &self.create_room_tags,
+            AppMessage::CreateNewRoomTagsChanged,
+        )
+        .helper(format!(
+            "Optional comma-separated tags used to find the room (up to {DEFAULT_MAX_TAGS} tags, {DEFAULT_MAX_TAG_LEN} characters each)."
+        ));
+        let room_details = FormSection::new("Room Details")
+            .push(name_field.build())
+            .push(description_field.build())
+            .push(tags_field.build());
 
         // ── Visibility / Discovery ──────────────────────────────────────
         let visibility = FormSection::new("Visibility / Discovery")
             .helper("Choose how other Boru users can find this room.")
-            .push(checkbox_field(
-                "Advertise in Directory",
-                self.create_room_advertise,
-                AppMessage::CreateNewRoomAdvertiseToggled,
-                Some("List the room in the directory so others can discover and join it."),
+            .push(radio_field(
+                "Private",
+                RoomVisibility::Private,
+                Some(self.create_room_visibility),
+                AppMessage::CreateNewRoomVisibilityChanged,
+                Some("Invite-only. No directory listing; join by invitation or authorization."),
+            ))
+            .push(radio_field(
+                "Public — Unlisted",
+                RoomVisibility::PublicUnlisted,
+                Some(self.create_room_visibility),
+                AppMessage::CreateNewRoomVisibilityChanged,
+                Some("Not listed in the directory. Others can join with the room ID, invite, or link."),
+            ))
+            .push(radio_field(
+                "Public — Discoverable",
+                RoomVisibility::PublicDiscoverable,
+                Some(self.create_room_visibility),
+                AppMessage::CreateNewRoomVisibilityChanged,
+                Some("Listed in the directory. Other Boru users can find and join it."),
             ))
             .push(checkbox_field(
                 "Enable DHT discovery",
@@ -305,7 +346,7 @@ impl IcedChat {
 
         // ── Preview / Info ──────────────────────────────────────────────
         let info = FormSection::new("Preview / Info").push(helper_text(
-            "A public room is advertised in the directory and discoverable over DHT. Other Boru users can find and join it while it stays online.",
+            "Discoverable rooms are advertised to Boru users and appear in the directory. Unlisted rooms are not advertised — share the room ID or an invite link instead. Only discoverable rooms are broadcast to the network.",
         ));
 
         let overlay = BoruDialog::new("Create Public Room")

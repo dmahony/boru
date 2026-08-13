@@ -103,7 +103,9 @@ use boru_core::conversations::{
 };
 use boru_core::discovery_backend::MainlineDhtBackend;
 use boru_core::discovery_secret::DiscoverySecret;
-use boru_core::control_plane::advertisement::RoomVisibility;
+use boru_core::control_plane::advertisement::{
+    normalize_room_metadata, AdvertisementBounds, RoomVisibility,
+};
 use boru_core::control_plane::connectivity::{
     ConnectivityEvent, PeerConnectivityState, PeerConnectivityStore,
 };
@@ -4215,11 +4217,20 @@ pub struct IcedChat {
     dht: Option<distributed_topic_tracker::Dht>,
     /// Disable private-room DHT discovery from the command line.
     private_dht_disabled: bool,
-    /// Whether the \"Enable DHT discovery\" checkbox is checked in the
+    /// Whether the "Enable DHT discovery" checkbox is checked in the
     /// create-room dialog.  Default: on (DHT discovery enabled).
     create_room_dht_enabled: bool,
     /// Name for the new room entered in the create-room dialog.
     create_room_name: String,
+    /// Visibility selected for the new room in the create-room dialog
+    /// (BORU-DIR-05, PDF Task 2.2). Conservative default: PublicUnlisted.
+    create_room_visibility: RoomVisibility,
+    /// Optional description entered in the create-room dialog
+    /// (BORU-DIR-05, PDF Task 2.2).
+    create_room_description: String,
+    /// Optional comma-separated tags entered in the create-room dialog
+    /// (BORU-DIR-05, PDF Task 2.2).
+    create_room_tags: String,
     /// Per-room continuous DHT trackers for private rooms with discovery enabled.
     /// Started when creating/joining a DHT-enabled room; shut down when
     /// leaving or deleting the room.
@@ -4671,9 +4682,6 @@ pub struct IcedChat {
     /// Gossip sender for the directory topic (subscribed lazily when the
     /// first room is enabled for advertising).
     directory_sender: Option<GossipSender>,
-    /// Whether the \"Advertise in Directory\" checkbox is checked in the
-    /// create-room dialog.
-    create_room_advertise: bool,
     /// Received room advertisements from the directory gossip topic.
     pub(crate) directory_store: Arc<StdMutex<DirectoryStore>>,
     /// Channel for receiving room advertisements from the background directory
@@ -5163,8 +5171,12 @@ pub enum AppMessage {
     CreateNewRoomDhtToggled(bool),
     /// Update the room name text input in the create-room dialog.
     CreateNewRoomNameChanged(String),
-    /// Toggle whether the new room is advertised in the directory.
-    CreateNewRoomAdvertiseToggled(bool),
+    /// Change the visibility selected for the new room (BORU-DIR-05).
+    CreateNewRoomVisibilityChanged(RoomVisibility),
+    /// Update the optional description input in the create-room dialog.
+    CreateNewRoomDescriptionChanged(String),
+    /// Update the optional tags input in the create-room dialog.
+    CreateNewRoomTagsChanged(String),
     /// Join a room from a ticket string.
     JoinFromTicket,
     /// The room switch / join failed.
@@ -7976,7 +7988,9 @@ impl IcedChat {
                 fmt_relay_mode(&relay_mode).as_str(),
             ),
             directory_sender: None,
-            create_room_advertise: false,
+            create_room_visibility: RoomVisibility::PublicUnlisted,
+            create_room_description: String::new(),
+            create_room_tags: String::new(),
             directory_store,
             directory_room_rx,
             auto_subscribed_rooms: HashSet::new(),
@@ -9539,7 +9553,9 @@ impl IcedChat {
             AppMessage::CancelCreateRoom => "CancelCreateRoom",
             AppMessage::CreateNewRoomDhtToggled(..) => "CreateNewRoomDhtToggled",
             AppMessage::CreateNewRoomNameChanged(..) => "CreateNewRoomNameChanged",
-            AppMessage::CreateNewRoomAdvertiseToggled(..) => "CreateNewRoomAdvertiseToggled",
+            AppMessage::CreateNewRoomVisibilityChanged(..) => "CreateNewRoomVisibilityChanged",
+            AppMessage::CreateNewRoomDescriptionChanged(..) => "CreateNewRoomDescriptionChanged",
+            AppMessage::CreateNewRoomTagsChanged(..) => "CreateNewRoomTagsChanged",
             AppMessage::JoinFromTicket => "JoinFromTicket",
             AppMessage::RoomJoinFailed { .. } => "RoomJoinFailed",
             AppMessage::JoinTicketInputChanged(_) => "JoinTicketInputChanged",
@@ -11324,7 +11340,12 @@ impl IcedChat {
                 self.show_create_room_dialog = true;
                 self.create_room_dht_enabled = true;
                 self.create_room_name = String::new();
-                self.create_room_advertise = true;
+                // BORU-DIR-05 (PDF Task 2.2): conservative default — a new
+                // public room is unlisted unless the creator explicitly opts
+                // into discoverability.
+                self.create_room_visibility = RoomVisibility::PublicUnlisted;
+                self.create_room_description = String::new();
+                self.create_room_tags = String::new();
                 self.create_room_submitting = false;
                 self.create_room_error = None;
                 if let Some(action_id) = self.pending_create_room_action.take() {
@@ -11385,8 +11406,18 @@ impl IcedChat {
                 iced::Task::none()
             }
 
-            AppMessage::CreateNewRoomAdvertiseToggled(enabled) => {
-                self.create_room_advertise = enabled;
+            AppMessage::CreateNewRoomVisibilityChanged(visibility) => {
+                self.create_room_visibility = visibility;
+                iced::Task::none()
+            }
+
+            AppMessage::CreateNewRoomDescriptionChanged(description) => {
+                self.create_room_description = description;
+                iced::Task::none()
+            }
+
+            AppMessage::CreateNewRoomTagsChanged(tags) => {
+                self.create_room_tags = tags;
                 iced::Task::none()
             }
 
@@ -11402,17 +11433,50 @@ impl IcedChat {
                 self.create_room_error = None;
                 let dht_enabled = self.create_room_dht_enabled && !self.private_dht_disabled;
                 let room_name = std::mem::take(&mut self.create_room_name);
-                let advertise = self.create_room_advertise;
+                let description = std::mem::take(&mut self.create_room_description);
+                let tags = std::mem::take(&mut self.create_room_tags);
+                let visibility = self.create_room_visibility;
 
                 // ── Public room: advertise without auto-joining ──────
-                if advertise {
+                if visibility != RoomVisibility::Private {
                     let topic = TopicId::from_bytes(rand::random());
                     // Brand-new room: no mesh neighbors are subscribed to
                     // this topic yet, so no extra bootstrap peers apply.
                     let ticket = self.room_ticket(topic, &[]);
                     let ticket_str = ticket.to_string();
+                    // Empty names fall back to the topic id (existing
+                    // behaviour), so the advertisement always has a
+                    // non-empty name.
+                    let display_name = if room_name.trim().is_empty() {
+                        topic.to_string()
+                    } else {
+                        room_name
+                    };
+                    // BORU-DIR-05 (PDF Task 2.2): validate and normalize
+                    // creator metadata BEFORE any side effect or broadcast.
+                    // Invalid/oversized metadata is rejected here — the
+                    // dialog stays open and no advertisement is emitted.
+                    let bounds = AdvertisementBounds::default();
+                    let normalized =
+                        match normalize_room_metadata(&display_name, &description, &tags, &bounds)
+                        {
+                            Ok(n) => n,
+                            Err(violation) => {
+                                self.create_room_submitting = false;
+                                self.create_room_error = Some(violation.to_string());
+                                // Restore the form fields so the creator can
+                                // correct the rejected input.
+                                self.create_room_name = display_name;
+                                self.create_room_description = description;
+                                self.create_room_tags = tags;
+                                return iced::Task::none();
+                            }
+                        };
+                    let display_name = normalized.room_name.clone();
+                    let is_discoverable = visibility == RoomVisibility::PublicDiscoverable;
                     // Persist a minimal RoomStore entry so the room and its
-                    // ticket survive restarts (needed for periodic re-advertise).
+                    // ticket survive restarts (needed for periodic re-advertise
+                    // and for sharing the room ID/link of unlisted rooms).
                     let _room = RoomStore::with_peers(
                         &self.data_dir,
                         topic,
@@ -11421,46 +11485,46 @@ impl IcedChat {
                             self.share_direct_addresses,
                         )],
                     );
-                    // Mark as advertised so the periodic tick broadcasts it.
-                    self.advertised_rooms.insert(topic);
-                    let display_name = if room_name.is_empty() {
-                        topic.to_string()
-                    } else {
-                        room_name
-                    };
+                    // Only discoverable rooms are marked for advertising.
+                    if is_discoverable {
+                        self.advertised_rooms.insert(topic);
+                    }
                     // Create an archived conversation entry so the room name
                     // is available for the periodic advertisement tick and
                     // the room can be unarchived into the CHATS sidebar later.
                     let mut entry = ConversationEntry::new(topic, "", &display_name);
                     entry.archived = true;
-                    // BORU-DIR-04 (PDF 2.1): the "Advertise in Directory"
-                    // checkbox is an explicit discoverability choice — the
-                    // room is PublicDiscoverable, so it is the only kind of
-                    // room allowed to emit directory advertisements.
-                    entry.visibility = RoomVisibility::PublicDiscoverable;
+                    // BORU-DIR-04/05: the visibility picked in the dialog is
+                    // the room's persisted visibility. Only PublicDiscoverable
+                    // rooms are allowed to emit directory advertisements.
+                    entry.visibility = visibility;
+                    entry.description = normalized.short_description.clone();
+                    entry.tags = normalized.tags.clone();
                     self.conversation_store.upsert(entry);
                     self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
                     // Upsert into the local directory store so the creator
                     // sees their own room in the PUBLIC ROOMS sidebar.
-                    {
-                        let local_pk = self.endpoint.id();
-                        let mut store = self.directory_store.lock().unwrap();
-                        let ad = RoomAdvertisement {
-                            room_name: display_name.clone(),
-                            description: String::new(),
-                            topic,
-                            ticket: ticket_str.clone(),
-                            member_count: 0,
-                            last_activity: std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_millis() as u64,
-                        };
-                        store.upsert(ad, local_pk);
+                    if is_discoverable {
+                        {
+                            let local_pk = self.endpoint.id();
+                            let mut store = self.directory_store.lock().unwrap();
+                            let ad = RoomAdvertisement {
+                                room_name: display_name.clone(),
+                                description: normalized.short_description.clone(),
+                                topic,
+                                ticket: ticket_str.clone(),
+                                member_count: 0,
+                                last_activity: std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis() as u64,
+                            };
+                            store.upsert(ad, local_pk);
+                        }
+                        self.save_directory_store();
+                        self.public_rooms_sidebar_revision =
+                            self.public_rooms_sidebar_revision.wrapping_add(1);
                     }
-                    self.save_directory_store();
-                    self.public_rooms_sidebar_revision =
-                        self.public_rooms_sidebar_revision.wrapping_add(1);
 
                     // PUBLIC-02: surface the local creation in the home
                     // screen's Recent Activity feed.
@@ -11472,77 +11536,88 @@ impl IcedChat {
                     // Keep publishing this user-created public room after the
                     // initial directory advertisement.  The DHT record carries
                     // the room metadata so later discovery can present a
-                    // directly joinable room.
-                    if let Some(dht) = self.dht.clone() {
-                        let identity = PublicRoomIdentity::new(
-                            topic,
-                            public_discovery_key(
-                                PublicNetwork::Mainnet,
-                                &display_name,
-                                boru_core::public_room::PROTOCOL_VERSION,
-                            ),
-                        );
-                        let tracker = PublicRoomTracker::new_with_metadata(
-                            Box::new(MainlineDhtBackend::new(dht)),
-                            identity,
-                            self.endpoint.id(),
-                            self.endpoint.secret_key().clone(),
-                            Some(display_name.clone()),
-                            Some(ticket_str.clone()),
-                        );
-                        let (new_peers_tx, mut new_peers_rx) =
-                            tokio::sync::mpsc::channel::<Vec<iroh::EndpointId>>(64);
-                        // Public rooms are not subscribed by the creator here;
-                        // drain the discovery channel until the tracker is
-                        // shut down rather than allowing it to back up.
-                        tokio::spawn(async move { while new_peers_rx.recv().await.is_some() {} });
-                        self.room_trackers.insert(
-                            topic,
-                            SharedTracker::new_public(PublicContinuousTracker::start(
-                                tracker,
-                                ContinuousTrackerConfig::default(),
-                                new_peers_tx,
-                            )),
-                        );
+                    // directly joinable room. Unlisted rooms are not
+                    // discoverable, so they get no DHT record.
+                    if is_discoverable {
+                        if let Some(dht) = self.dht.clone() {
+                            let identity = PublicRoomIdentity::new(
+                                topic,
+                                public_discovery_key(
+                                    PublicNetwork::Mainnet,
+                                    &display_name,
+                                    boru_core::public_room::PROTOCOL_VERSION,
+                                ),
+                            );
+                            let tracker = PublicRoomTracker::new_with_metadata(
+                                Box::new(MainlineDhtBackend::new(dht)),
+                                identity,
+                                self.endpoint.id(),
+                                self.endpoint.secret_key().clone(),
+                                Some(display_name.clone()),
+                                Some(ticket_str.clone()),
+                            );
+                            let (new_peers_tx, mut new_peers_rx) =
+                                tokio::sync::mpsc::channel::<Vec<iroh::EndpointId>>(64);
+                            // Public rooms are not subscribed by the creator here;
+                            // drain the discovery channel until the tracker is
+                            // shut down rather than allowing it to back up.
+                            tokio::spawn(async move {
+                                while new_peers_rx.recv().await.is_some() {}
+                            });
+                            self.room_trackers.insert(
+                                topic,
+                                SharedTracker::new_public(PublicContinuousTracker::start(
+                                    tracker,
+                                    ContinuousTrackerConfig::default(),
+                                    new_peers_tx,
+                                )),
+                            );
+                        }
                     }
 
                     // Broadcast an immediate advertisement on the directory
                     // topic so other peers see it without waiting for the
                     // ~60 s periodic tick.  If the directory sender is not
                     // yet available the periodic tick will pick it up.
-                    let advert_task = if let Some(ref dir_sender) = self.directory_sender {
-                        let sk = self.secret_key.clone();
-                        let s = dir_sender.clone();
-                        let ad_ticket = ticket_str.clone();
-                        Some(iced::Task::perform(
-                            async move {
-                                let ad = RoomAdvertisement {
-                                    room_name: display_name,
-                                    description: String::new(),
-                                    topic,
-                                    ticket: ad_ticket,
-                                    member_count: 0,
-                                    last_activity: std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .unwrap_or_default()
-                                        .as_millis()
-                                        as u64,
-                                };
-                                let ad_bytes = postcard::to_stdvec(&ad).unwrap_or_default();
-                                let signature = sk.sign(&ad_bytes);
-                                let msg = crate::Message::RoomAdvertisement {
-                                    ad,
-                                    signature: signature.to_bytes().to_vec(),
-                                };
-                                match SignedMessage::sign_and_encode(&sk, &msg) {
-                                    Ok(encoded) => {
-                                        let _ = s.broadcast(encoded).await;
+                    // Unlisted rooms are never broadcast.
+                    let advert_task = if is_discoverable {
+                        if let Some(ref dir_sender) = self.directory_sender {
+                            let sk = self.secret_key.clone();
+                            let s = dir_sender.clone();
+                            let ad_ticket = ticket_str.clone();
+                            let ad_description = normalized.short_description.clone();
+                            Some(iced::Task::perform(
+                                async move {
+                                    let ad = RoomAdvertisement {
+                                        room_name: display_name,
+                                        description: ad_description,
+                                        topic,
+                                        ticket: ad_ticket,
+                                        member_count: 0,
+                                        last_activity: std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .as_millis()
+                                            as u64,
+                                    };
+                                    let ad_bytes = postcard::to_stdvec(&ad).unwrap_or_default();
+                                    let signature = sk.sign(&ad_bytes);
+                                    let msg = crate::Message::RoomAdvertisement {
+                                        ad,
+                                        signature: signature.to_bytes().to_vec(),
+                                    };
+                                    match SignedMessage::sign_and_encode(&sk, &msg) {
+                                        Ok(encoded) => {
+                                            let _ = s.broadcast(encoded).await;
+                                        }
+                                        Err(_) => {}
                                     }
-                                    Err(_) => {}
-                                }
-                            },
-                            |_| AppMessage::Noop,
-                        ))
+                                },
+                                |_| AppMessage::Noop,
+                            ))
+                        } else {
+                            None
+                        }
                     } else {
                         None
                     };
@@ -12343,14 +12418,16 @@ impl IcedChat {
                     self.room_trackers.insert(topic, tracker);
                 }
 
-                // Auto-advertise the room if the "Advertise in Directory" checkbox
-                // was checked in the create-room dialog.  This path is only
-                // reached for *private* rooms; public rooms are handled in the
-                // ConfirmCreateNewRoom advertise branch.
-                if self.create_room_advertise {
+                // Auto-advertise a discoverable room opened right after
+                // creation.  This path is reached from RoomOpened for both
+                // private and public rooms; the ConfirmCreateNewRoom public
+                // branch has already inserted the room into advertised_rooms,
+                // so this re-insert is idempotent.  It also lazily subscribes
+                // the directory topic so periodic advertisements flow.
+                if self.create_room_visibility == RoomVisibility::PublicDiscoverable {
                     self.advertised_rooms.insert(topic);
                     info!(%topic, "auto-advertising new room in directory");
-                    self.create_room_advertise = false;
+                    self.create_room_visibility = RoomVisibility::Private;
                     if self.directory_sender.is_none() {
                         return iced::Task::done(AppMessage::SubscribeDirectoryTopic);
                     }
@@ -13963,13 +14040,58 @@ impl IcedChat {
                 }
 
                 if let GuiTestCommand::SetCreateRoomAdvertise { enabled } = &command {
+                    // Backward-compatible alias: the old boolean checkbox
+                    // mapped to discoverability.  `true` → PublicDiscoverable,
+                    // `false` → Private (the old "unchecked = private room"
+                    // behaviour).
                     let _ = self
                         .gui_action_history
                         .set_state(&action_id, GuiActionState::AppMessageQueued);
                     let _ = self
                         .gui_action_history
                         .set_state(&action_id, GuiActionState::Completed);
-                    return iced::Task::done(AppMessage::CreateNewRoomAdvertiseToggled(*enabled));
+                    let visibility = if *enabled {
+                        RoomVisibility::PublicDiscoverable
+                    } else {
+                        RoomVisibility::Private
+                    };
+                    return iced::Task::done(AppMessage::CreateNewRoomVisibilityChanged(
+                        visibility,
+                    ));
+                }
+
+                if let GuiTestCommand::SetCreateRoomVisibility { visibility } = &command {
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageQueued);
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::Completed);
+                    return iced::Task::done(AppMessage::CreateNewRoomVisibilityChanged(
+                        *visibility,
+                    ));
+                }
+
+                if let GuiTestCommand::SetCreateRoomDescription { description } = &command {
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageQueued);
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::Completed);
+                    return iced::Task::done(AppMessage::CreateNewRoomDescriptionChanged(
+                        description.clone(),
+                    ));
+                }
+
+                if let GuiTestCommand::SetCreateRoomTags { tags } = &command {
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::AppMessageQueued);
+                    let _ = self
+                        .gui_action_history
+                        .set_state(&action_id, GuiActionState::Completed);
+                    return iced::Task::done(AppMessage::CreateNewRoomTagsChanged(tags.clone()));
                 }
 
                 if matches!(command, GuiTestCommand::ConfirmCreateNewRoom) {
@@ -30270,10 +30392,14 @@ fn vr_create_public_room_opens_renders_and_accepts_input() {
     // Intentional state: name text and toggle switches; no observable
     // proxy in a headless test.
     let _ = app.update(AppMessage::CreateNewRoomNameChanged("Lobby".into()));
-    let _ = app.update(AppMessage::CreateNewRoomAdvertiseToggled(true));
+    let _ = app.update(AppMessage::CreateNewRoomVisibilityChanged(RoomVisibility::PublicDiscoverable));
     let _ = app.update(AppMessage::CreateNewRoomDhtToggled(false));
     assert_eq!(app.create_room_name, "Lobby");
-    assert!(app.create_room_advertise, "advertise toggle accepted");
+    assert_eq!(
+        app.create_room_visibility,
+        RoomVisibility::PublicDiscoverable,
+        "visibility picker accepted"
+    );
     assert!(!app.create_room_dht_enabled, "DHT toggle accepted");
     let _ = app.view();
 }
@@ -30294,7 +30420,7 @@ fn vr_create_public_room_confirm_cancel_and_validation() {
     // create runs instead of closing immediately.
     let _ = app.update(AppMessage::CreateNewRoom);
     let _ = app.update(AppMessage::CreateNewRoomNameChanged("Beach House".into()));
-    let _ = app.update(AppMessage::CreateNewRoomAdvertiseToggled(true));
+    let _ = app.update(AppMessage::CreateNewRoomVisibilityChanged(RoomVisibility::PublicDiscoverable));
     let _ = app.update(AppMessage::ConfirmCreateNewRoom);
     assert!(
         app.create_room_submitting,
@@ -30315,7 +30441,7 @@ fn vr_create_public_room_confirm_cancel_and_validation() {
     // the submit loading flag is raised.
     let _ = app.update(AppMessage::CreateNewRoom);
     let _ = app.update(AppMessage::CreateNewRoomNameChanged(String::new()));
-    let _ = app.update(AppMessage::CreateNewRoomAdvertiseToggled(true));
+    let _ = app.update(AppMessage::CreateNewRoomVisibilityChanged(RoomVisibility::PublicDiscoverable));
     let _ = app.update(AppMessage::ConfirmCreateNewRoom);
     assert!(
         app.create_room_submitting,
@@ -30330,13 +30456,131 @@ fn vr_create_public_room_confirm_cancel_and_validation() {
 }
 
 #[test]
+fn vr_create_public_unlisted_room_does_not_advertise() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    // BORU-DIR-05: PublicUnlisted is the conservative default — the room is
+    // created and persisted, but it is never advertised, upserted into the
+    // directory, or broadcast.
+    let _ = app.update(AppMessage::CreateNewRoom);
+    assert_eq!(
+        app.create_room_visibility,
+        RoomVisibility::PublicUnlisted,
+        "new-room dialog defaults to the conservative PublicUnlisted visibility"
+    );
+    let _ = app.update(AppMessage::CreateNewRoomNameChanged("Quiet Corner".into()));
+    let _ = app.update(AppMessage::ConfirmCreateNewRoom);
+    assert!(
+        app.create_room_submitting,
+        "submit loading flag raised on create"
+    );
+    assert!(
+        app.conversation_store
+            .iter()
+            .any(|e| e.name == "Quiet Corner"
+                && e.visibility == RoomVisibility::PublicUnlisted),
+        "unlisted room persists an archived entry with PublicUnlisted visibility"
+    );
+    assert!(
+        app.advertised_rooms.is_empty(),
+        "unlisted room must not be marked for advertising"
+    );
+    let _ = app.view();
+}
+
+#[test]
+fn vr_create_public_room_rejects_oversized_metadata_before_broadcast() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    // BORU-DIR-05: oversized metadata is rejected BEFORE any side effect or
+    // broadcast — an error surfaces, the dialog stays open, and no
+    // conversation entry is persisted.
+    let _ = app.update(AppMessage::CreateNewRoom);
+    let _ = app.update(AppMessage::CreateNewRoomNameChanged(
+        "x".repeat(boru_core::control_plane::advertisement::DEFAULT_MAX_ROOM_NAME_LEN + 1),
+    ));
+    let _ = app.update(AppMessage::CreateNewRoomVisibilityChanged(RoomVisibility::PublicDiscoverable));
+    let _ = app.update(AppMessage::ConfirmCreateNewRoom);
+    assert!(
+        app.create_room_error.is_some(),
+        "oversized room name surfaces a validation error"
+    );
+    assert!(
+        app.show_create_room_dialog,
+        "dialog stays open so the creator can fix the rejected input"
+    );
+    assert!(
+        !app.create_room_submitting,
+        "submit flag resets after rejected validation"
+    );
+    assert!(
+        app.conversation_store.iter().all(|e| e.name.is_empty()),
+        "no conversation entry is persisted for rejected metadata"
+    );
+    assert!(
+        app.advertised_rooms.is_empty(),
+        "no advertisement is emitted for rejected metadata"
+    );
+
+    // Oversized description is rejected the same way.
+    let _ = app.update(AppMessage::CreateNewRoom);
+    let _ = app.update(AppMessage::CreateNewRoomNameChanged("Valid Name".into()));
+    let _ = app.update(AppMessage::CreateNewRoomDescriptionChanged(
+        "y".repeat(boru_core::control_plane::advertisement::DEFAULT_MAX_DESCRIPTION_LEN + 1),
+    ));
+    let _ = app.update(AppMessage::CreateNewRoomVisibilityChanged(RoomVisibility::PublicDiscoverable));
+    let _ = app.update(AppMessage::ConfirmCreateNewRoom);
+    assert!(
+        app.create_room_error.is_some(),
+        "oversized description surfaces a validation error"
+    );
+    assert!(
+        app.conversation_store.iter().all(|e| e.name.is_empty()),
+        "no conversation entry is persisted for rejected description"
+    );
+
+    // Too many tags are rejected the same way.
+    let _ = app.update(AppMessage::CreateNewRoom);
+    let _ = app.update(AppMessage::CreateNewRoomNameChanged("Valid Name".into()));
+    let tags = (0..=boru_core::control_plane::advertisement::DEFAULT_MAX_TAGS)
+        .map(|i| format!("tag{i}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let _ = app.update(AppMessage::CreateNewRoomTagsChanged(tags));
+    let _ = app.update(AppMessage::CreateNewRoomVisibilityChanged(RoomVisibility::PublicDiscoverable));
+    let _ = app.update(AppMessage::ConfirmCreateNewRoom);
+    assert!(
+        app.create_room_error.is_some(),
+        "excess tags surface a validation error"
+    );
+
+    // After fixing the metadata, creation succeeds and the room is advertised.
+    let _ = app.update(AppMessage::CreateNewRoom);
+    let _ = app.update(AppMessage::CreateNewRoomNameChanged("Valid Name".into()));
+    let _ = app.update(AppMessage::CreateNewRoomDescriptionChanged("A short description".into()));
+    let _ = app.update(AppMessage::CreateNewRoomTagsChanged("rust,chat".into()));
+    let _ = app.update(AppMessage::CreateNewRoomVisibilityChanged(RoomVisibility::PublicDiscoverable));
+    let _ = app.update(AppMessage::ConfirmCreateNewRoom);
+    assert!(app.create_room_error.is_none(), "valid metadata passes");
+    assert!(
+        app.conversation_store
+            .iter()
+            .any(|e| e.name == "Valid Name"
+                && e.description == "A short description"
+                && e.tags == vec!["rust".to_string(), "chat".to_string()]),
+        "validated + normalized metadata persists on the room entry"
+    );
+    let _ = app.view();
+}
+
+#[test]
 fn vr_created_public_room_is_conversation_never_discovery_topic() {
     let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
 
     // Create an advertised public room via the explicit user flow.
     let _ = app.update(AppMessage::CreateNewRoom);
     let _ = app.update(AppMessage::CreateNewRoomNameChanged("Beach House".into()));
-    let _ = app.update(AppMessage::CreateNewRoomAdvertiseToggled(true));
+    let _ = app.update(AppMessage::CreateNewRoomVisibilityChanged(RoomVisibility::PublicDiscoverable));
     let _ = app.update(AppMessage::ConfirmCreateNewRoom);
 
     // The public room is an ordinary conversation: a conversation-store
@@ -30857,7 +31101,7 @@ fn vr_create_tunnel_picker_port_validation() {
             let (_rt, mut app) = seed_app("6c0f88fe9f", &peer, false);
             app.show_create_room_dialog = true;
             app.create_room_name = "General".to_string();
-            app.create_room_advertise = true;
+            app.create_room_visibility = RoomVisibility::PublicUnlisted;
             let mut element = app.view();
             render_element(&mut element, "create_room_dialog_light", 1200, 800, false);
         }

@@ -20,6 +20,15 @@ see the [git log](https://github.com/dmahony/boru/commits/main/).
   public rooms are conservatively migrated to `PublicUnlisted` on startup so
   no existing room is unexpectedly exposed. See
   `docs/public-room-directory/room-visibility-state.md`.
+- Create-room dialog (BORU-DIR-05): an explicit visibility picker
+  (Private / Public-Unlisted / Public-Discoverable, defaulting to the
+  conservative Public-Unlisted) plus optional description and tags fields
+  with clear limits. Creator metadata is validated and normalized
+  (`normalize_room_metadata`, reusing the BORU-DIR-02 bounds) before any
+  broadcast; invalid/oversized input is rejected inline and never
+  advertised. Unlisted rooms are created without any directory/DHT/broadcast
+  side effects, and validated description/tags persist on the room entry for
+  the later control-plane advertisement phase.
 - File Sharing dashboard screen with five tabs — Shared by Me, Downloading,
   Downloaded, Shared with Me, and Activity Log — backed by live transfer
   projections and durable SQLite projections. Includes a per-tab search,

@@ -142,6 +142,18 @@ pub struct ConversationEntry {
     /// conservatively to [`RoomVisibility::PublicUnlisted`].
     #[serde(default)]
     pub visibility: RoomVisibility,
+    /// Optional short description shown in the directory advertisement
+    /// (BORU-DIR-05, PDF Task 2.2). Bounded by
+    /// [`AdvertisementBounds::max_description_len`]; validated and
+    /// normalized before broadcast.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// Optional category tags shown in the directory advertisement
+    /// (BORU-DIR-05, PDF Task 2.2). Bounded by
+    /// [`AdvertisementBounds::max_tags`] / [`AdvertisementBounds::max_tag_len`];
+    /// validated and normalized before broadcast.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 impl ConversationEntry {
@@ -162,6 +174,8 @@ impl ConversationEntry {
             unread_count: 0,
             archived: false,
             visibility: RoomVisibility::Private,
+            description: String::new(),
+            tags: Vec::new(),
         }
     }
 
@@ -192,6 +206,8 @@ impl ConversationEntry {
             unread_count: 0,
             archived: false,
             visibility: RoomVisibility::Private,
+            description: String::new(),
+            tags: Vec::new(),
         }
     }
 
@@ -1473,5 +1489,55 @@ mod tests {
         // Visibility is metadata only — it never participates in topic
         // identity or group history, so the entry was updated in place.
         assert_eq!(store.len(), 1, "no duplicate entry created");
+    }
+
+    // ── Room advertisement metadata (BORU-DIR-05, PDF Task 2.2) ────────
+
+    #[test]
+    fn description_and_tags_default_to_empty() {
+        let direct = ConversationEntry::new(make_topic(0x01), "peer", "Direct");
+        assert_eq!(direct.description, "");
+        assert!(direct.tags.is_empty());
+        let group = ConversationEntry::new_group(make_topic(0x02), "Group");
+        assert_eq!(group.description, "");
+        assert!(group.tags.is_empty());
+    }
+
+    #[test]
+    fn description_and_tags_round_trip_json_persistence() {
+        let dir = temp_dir("advert-meta-json");
+        let mut store = ConversationStore::empty_at(&dir);
+        let mut entry = ConversationEntry::new_group(make_topic(0xBB), "Discoverable");
+        entry.visibility = RoomVisibility::PublicDiscoverable;
+        entry.description = "A friendly Rust community.".to_string();
+        entry.tags = vec!["rust".to_string(), "open-source".to_string()];
+        store.upsert(entry);
+        store.save().expect("save store");
+
+        let loaded = ConversationStore::load(&dir).expect("load store");
+        let restored = loaded.find(&make_topic(0xBB)).expect("entry restored");
+        assert_eq!(restored.description, "A friendly Rust community.");
+        assert_eq!(
+            restored.tags,
+            vec!["rust".to_string(), "open-source".to_string()]
+        );
+        assert_eq!(restored.visibility, RoomVisibility::PublicDiscoverable);
+    }
+
+    #[test]
+    fn legacy_json_without_advert_metadata_defaults_empty() {
+        // Old persisted entries (pre-BORU-DIR-05) have no description/tags;
+        // serde default must yield empty values so nothing is invented.
+        let json = r#"{
+            "topic": [170,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            "peer_id": "",
+            "name": "Legacy Room",
+            "kind": "Group",
+            "created_at_unix_ms": 1700000000000,
+            "archived": false
+        }"#;
+        let restored: ConversationEntry = serde_json::from_str(json).expect("parse legacy json");
+        assert_eq!(restored.description, "");
+        assert!(restored.tags.is_empty());
     }
 }

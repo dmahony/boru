@@ -58,7 +58,7 @@
 //! ```
 
 use iced::widget::{
-    button, checkbox, combo_box, container, pick_list, text, text_editor, toggler,
+    button, checkbox, combo_box, container, pick_list, radio, text, text_editor, toggler,
     Column, Row, Space,
 };
 use iced::{Alignment, Background, Border, Color, Element, Length, Theme};
@@ -669,6 +669,60 @@ pub fn checkbox_field<'a>(
             .width(Length::Fill)
             .into(),
         None => cb.into(),
+    }
+}
+
+/// Style for a Boru radio button — primary ring + white dot when selected,
+/// soft surface with muted border when not.
+fn radio_style(theme: &Theme, status: radio::Status) -> radio::Style {
+    let is_selected = match status {
+        radio::Status::Active { is_selected } | radio::Status::Hovered { is_selected } => {
+            is_selected
+        }
+    };
+
+    radio::Style {
+        background: Background::Color(if is_selected {
+            design_tokens::primary(theme)
+        } else {
+            design_tokens::surface(theme)
+        }),
+        dot_color: Color::WHITE,
+        border_width: design_tokens::BORDER_WIDTH,
+        border_color: if is_selected {
+            design_tokens::primary(theme)
+        } else {
+            design_tokens::border_muted(theme)
+        },
+        text_color: Some(design_tokens::text_primary(theme)),
+    }
+}
+
+/// A styled radio button with an optional helper line.
+pub fn radio_field<'a, V>(
+    label: &'a str,
+    value: V,
+    selected: Option<V>,
+    on_selected: impl Fn(V) -> AppMessage + 'a,
+    helper: Option<&'a str>,
+) -> Element<'a, AppMessage>
+where
+    V: Copy + Eq + 'a,
+{
+    let rb = radio(label, value, selected, on_selected)
+        .text_size(TypeRole::Body.size_px())
+        // FONTS Task 11: radio label is IBM Plex Sans Regular (Body role).
+        .font(TypeRole::Body.font())
+        .style(radio_style);
+
+    match helper {
+        Some(h) => Column::new()
+            .push(rb)
+            .push(helper_text(h))
+            .spacing(design_tokens::SPACE_2)
+            .width(Length::Fill)
+            .into(),
+        None => rb.into(),
     }
 }
 

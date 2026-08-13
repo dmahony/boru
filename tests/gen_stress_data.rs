@@ -1,5 +1,6 @@
 //! Generate stress test data on disk for the startup loading test.
 //! Run: STRESS_DATA_DIR=/tmp/iroh-stress-test-data cargo test --test gen_stress_data --features net,test-utils -- --nocapture
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use boru_core::chat_history::{ChatHistoryStore, HistoryEntry};
@@ -68,10 +69,17 @@ fn generate_stress_data() {
             peer_id: String::new(),
             name: format!("Conversation_{i}"),
             kind: ConversationKind::Group,
+            group_id: None,
+            current_epoch: None,
+            epoch_topics: BTreeMap::new(),
             created_at_unix_ms: 1700000000000u64,
             last_seen_at_unix_ms: 1700000000000u64,
+            last_message_preview: String::new(),
+            unread_count: 0,
             archived: false,
             visibility: boru_core::control_plane::advertisement::RoomVisibility::Private,
+            description: String::new(),
+            tags: Vec::new(),
         });
     }
     conv_store.save().unwrap();
@@ -100,6 +108,7 @@ fn generate_stress_data() {
             delivery_state: boru_core::chat_history::DeliveryState::Sent,
             image_bytes: None,
             image_identifier: None,
+            media_metadata: None,
         });
     }
     // Chat history is SQLite-only in the running app; `save()` is a

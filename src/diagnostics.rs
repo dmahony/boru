@@ -50,6 +50,7 @@ use chrono::{DateTime, Utc};
 use iroh_base::PublicKey;
 use serde::{Deserialize, Serialize};
 
+use crate::control_plane::advertisement::RoomVisibility;
 use crate::TopicId;
 
 // =============================================================================
@@ -3199,9 +3200,29 @@ pub enum GuiTestCommand {
         name: String,
     },
     /// Toggle the "Advertise in Directory" checkbox in the create-room dialog.
+    ///
+    /// Backward-compatible alias for [`GuiTestCommand::SetCreateRoomVisibility`]:
+    /// `true` → [`RoomVisibility::PublicDiscoverable`], `false` →
+    /// [`RoomVisibility::Private`] (the pre-BORU-DIR-05 behaviour where an
+    /// unchecked checkbox created a private room).
     SetCreateRoomAdvertise {
-        /// `true` to check (public), `false` to uncheck (private).
+        /// `true` to check (discoverable public), `false` to uncheck (private).
         enabled: bool,
+    },
+    /// Set the room visibility in the create-room dialog (BORU-DIR-05).
+    SetCreateRoomVisibility {
+        /// The visibility to select.
+        visibility: RoomVisibility,
+    },
+    /// Set the optional description in the create-room dialog (BORU-DIR-05).
+    SetCreateRoomDescription {
+        /// Description text (max [`GUI_TEST_COMMAND_MAX_STRING_LEN`] chars).
+        description: String,
+    },
+    /// Set the optional comma-separated tags in the create-room dialog (BORU-DIR-05).
+    SetCreateRoomTags {
+        /// Comma-separated tag text (max [`GUI_TEST_COMMAND_MAX_STRING_LEN`] chars).
+        tags: String,
     },
     /// Confirm and create the room from the dialog's current settings.
     ConfirmCreateNewRoom,
@@ -3297,6 +3318,11 @@ impl GuiTestCommand {
             GuiTestCommand::CreateNewRoom => Ok(()),
             GuiTestCommand::SetCreateRoomName { name } => validate_gui_text(name, "Room name"),
             GuiTestCommand::SetCreateRoomAdvertise { .. } => Ok(()),
+            GuiTestCommand::SetCreateRoomVisibility { .. } => Ok(()),
+            GuiTestCommand::SetCreateRoomDescription { description } => {
+                validate_gui_text(description, "Room description")
+            }
+            GuiTestCommand::SetCreateRoomTags { tags } => validate_gui_text(tags, "Room tags"),
             GuiTestCommand::ConfirmCreateNewRoom => Ok(()),
             GuiTestCommand::BrowseCatalogue { peer_id } => {
                 validate_gui_identifier(peer_id, "peer_id")
@@ -3432,6 +3458,9 @@ impl GuiTestCommand {
             }
             GuiTestCommand::SetCreateRoomName { .. } => None,
             GuiTestCommand::SetCreateRoomAdvertise { .. } => None,
+            GuiTestCommand::SetCreateRoomVisibility { .. } => None,
+            GuiTestCommand::SetCreateRoomDescription { .. } => None,
+            GuiTestCommand::SetCreateRoomTags { .. } => None,
             GuiTestCommand::ConfirmCreateNewRoom => Some(ExpectedState::MessageSent),
             // OpenDashboardTab: opens the File Sharing screen and selects the
             // tab. The post-condition is tracked via the generic

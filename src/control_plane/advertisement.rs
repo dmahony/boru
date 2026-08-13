@@ -771,6 +771,183 @@ impl PublicRoomAdvertisement {
     }
 }
 
+/// Normalized, validated room metadata entered by a creator in the UI
+/// (BORU-DIR-05, PDF Task 2.2).
+///
+/// Produced by [`normalize_room_metadata`] from raw form input. Every value
+/// is bounded by the same [`AdvertisementBounds`] that [`PublicRoomAdvertisement::validate`]
+/// enforces on the wire, so a normalized value can always be placed into an
+/// advertisement without a second rejection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NormalizedRoomMetadata {
+    /// Sanitized, trimmed room name (non-empty, ≤ `max_room_name_len`).
+    pub room_name: String,
+    /// Sanitized short description (may be empty, ≤ `max_description_len`).
+    pub short_description: String,
+    /// Sanitized, de-duplicated-in-input tags (≤ `max_tags`, each ≤ `max_tag_len`).
+    pub tags: Vec<String>,
+}
+
+/// Normalize and validate creator-supplied room metadata before it is stored
+/// or advertised (PDF Task 2.2 step 5: "Validate and normalize room names /
+/// tags before creating the advertisement; reject invalid/oversized metadata
+/// before broadcast").
+///
+/// # Normalization
+///
+/// * Name and tags are sanitized single-line (NFC-normalized, invisible
+///   format characters stripped, control characters replaced with spaces,
+///   whitespace collapsed) and trimmed.
+/// * Description is sanitized the same way but may contain spaces; it is
+///   trimmed.
+/// * Tags are split on `,`; empty segments are dropped (a trailing or
+///   doubled comma is treated as a formatting artifact, not a tag).
+///
+/// # Validation
+///
+/// The normalized values must satisfy the same bounds as the wire
+/// [`PublicRoomAdvertisement::validate`]: non-empty bounded room name,
+/// bounded description, bounded tag count + per-tag length. Returns the
+/// specific [`AdvertisementViolation`] (with accurate input lengths) when a
+/// bound is exceeded.
+pub fn normalize_room_metadata(
+    raw_name: &str,
+    raw_description: &str,
+    raw_tags: &str,
+    bounds: &AdvertisementBounds,
+) -> Result<NormalizedRoomMetadata, AdvertisementViolation> {
+    // 1. Room name: trimmed length is checked on the raw input so oversized
+    //    input is rejected with its true length; then sanitize for control /
+    //    format characters and collapse whitespace.
+    let name_trimmed = raw_name.trim();
+    let name_len = name_trimmed.chars().count();
+    if name_len > bounds.max_room_name_len {
+        return Err(AdvertisementViolation::RoomNameTooLong {
+            len: name_len,
+            max: bounds.max_room_name_len,
+        });
+    }
+    let name = crate::abuse_controls::sanitize_single_line_with_max(
+        name_trimmed,
+        bounds.max_room_name_len,
+    );
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(AdvertisementViolation::RoomNameEmpty);
+    }
+
+    // 2. Short description: bounded on the raw trimmed input, then sanitized.
+    let desc_trimmed = raw_description.trim();
+    let desc_len = desc_trimmed.chars().count();
+    if desc_len > bounds.max_description_len {
+        return Err(AdvertisementViolation::DescriptionTooLong {
+            len: desc_len,
+            max: bounds.max_description_len,
+        });
+    }
+    let short_description =
+        crate::abuse_controls::sanitize_display_text(desc_trimmed, bounds.max_description_len);
+    let short_description = short_description.trim().to_string();
+
+    // 3. Tags: split, trim, sanitize, drop empties, then enforce bounds.
+    let mut tags = Vec::new();
+    for raw_tag in raw_tags.split(',') {
+        let tag_trimmed = raw_tag.trim();
+        if tag_trimmed.is_empty() {
+            continue;
+        }
+        let tag_len = tag_trimmed.chars().count();
+        if tag_len > bounds.max_tag_len {
+            return Err(AdvertisementViolation::TagTooLong {
+                index: tags.len(),
+                len: tag_len,
+                max: bounds.max_tag_len,
+            });
+        }
+        let tag = crate::abuse_controls::sanitize_single_line_with_max(
+            tag_trimmed,
+            bounds.max_tag_len,
+        );
+        let tag = tag.trim();
+        if tag.is_empty() {
+            continue;
+        }
+        tags.push(tag.to_string());
+    }
+    if tags.len() > bounds.max_tags {
+        return Err(AdvertisementViolation::TooManyTags {
+            count: tags.len(),
+            max: bounds.max_tags,
+        });
+    }
+
+    Ok(NormalizedRoomMetadata {
+        room_name: name.to_string(),
+        short_description,
+        tags,
+    })
+}
+
+impl std::fmt::Display for AdvertisementViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AdvertisementViolation::RoomNameEmpty => write!(f, "Room name is required"),
+            AdvertisementViolation::RoomNameTooLong { len, max } => {
+                write!(f, "Room name is too long ({len} characters, max {max})")
+            }
+            AdvertisementViolation::DescriptionTooLong { len, max } => {
+                write!(f, "Description is too long ({len} characters, max {max})")
+            }
+            AdvertisementViolation::TooManyTags { count, max } => {
+                write!(f, "Too many tags ({count}, max {max})")
+            }
+            AdvertisementViolation::TagTooLong { index, len, max } => write!(
+                f,
+                "Tag {} is too long ({len} characters, max {max})",
+                index + 1
+            ),
+            AdvertisementViolation::TagEmpty { index } => {
+                write!(f, "Tag {} is empty", index + 1)
+            }
+            AdvertisementViolation::TooManyFeatureFlags { count, max } => write!(
+                f,
+                "Too many feature flags ({count}, max {max})"
+            ),
+            AdvertisementViolation::FeatureFlagTooLong { index, len, max } => write!(
+                f,
+                "Feature flag {} is too long ({len} characters, max {max})",
+                index + 1
+            ),
+            AdvertisementViolation::FeatureFlagInvalid { index } => write!(
+                f,
+                "Feature flag {} contains invalid characters",
+                index + 1
+            ),
+            AdvertisementViolation::TtlTooSmall { ttl, min } => write!(
+                f,
+                "Advertisement lifetime {ttl}s is below the minimum {min}s"
+            ),
+            AdvertisementViolation::TtlTooLarge { ttl, max } => write!(
+                f,
+                "Advertisement lifetime {ttl}s exceeds the maximum {max}s"
+            ),
+            AdvertisementViolation::NotDiscoverable => {
+                write!(f, "Only discoverable rooms can be advertised")
+            }
+            AdvertisementViolation::InvalidOwnerPeerId => {
+                write!(f, "Invalid room owner identity")
+            }
+            AdvertisementViolation::ControlChar { .. } => {
+                write!(f, "Metadata contains invalid control characters")
+            }
+            AdvertisementViolation::EncodedTooLarge { len, max } => write!(
+                f,
+                "Advertisement is too large ({len} bytes, max {max})"
+            ),
+        }
+    }
+}
+
 /// Whether `text` contains an ASCII control character (0x00–0x1F or 0x7F).
 ///
 /// Used to reject free-form metadata that could inject log lines or corrupt
@@ -1395,5 +1572,133 @@ mod tests {
         assert!(!may_replace_canonical(&spoofed, &attacker.public()));
         assert!(!may_replace_canonical(&forged, &owner.public()));
         assert!(!may_replace_canonical(&tampered, &owner.public()));
+    }
+
+    // ── BORU-DIR-05: creator metadata normalization ──────────────────
+
+    /// Basic valid input: trims whitespace, parses comma-separated tags.
+    #[test]
+    fn normalize_basic_valid_input() {
+        let bounds = AdvertisementBounds::default();
+        let out = normalize_room_metadata(
+            "  Rust Community  ",
+            "  A friendly place to discuss Rust.  ",
+            "rust, programming, community",
+            &bounds,
+        )
+        .unwrap();
+        assert_eq!(out.room_name, "Rust Community");
+        assert_eq!(out.short_description, "A friendly place to discuss Rust.");
+        assert_eq!(
+            out.tags,
+            vec!["rust".to_string(), "programming".to_string(), "community".to_string()]
+        );
+    }
+
+    /// Optional fields can be empty: no description, no tags.
+    #[test]
+    fn normalize_optional_fields_empty() {
+        let bounds = AdvertisementBounds::default();
+        let out = normalize_room_metadata("Lobby", "", "", &bounds).unwrap();
+        assert_eq!(out.room_name, "Lobby");
+        assert_eq!(out.short_description, "");
+        assert!(out.tags.is_empty());
+    }
+
+    /// An empty room name is rejected before broadcast.
+    #[test]
+    fn normalize_rejects_empty_name() {
+        let bounds = AdvertisementBounds::default();
+        let err = normalize_room_metadata("   ", "desc", "", &bounds).unwrap_err();
+        assert!(matches!(err, AdvertisementViolation::RoomNameEmpty));
+    }
+
+    /// An oversized room name is rejected with its true length.
+    #[test]
+    fn normalize_rejects_oversized_name() {
+        let bounds = AdvertisementBounds::default();
+        let long = "x".repeat(DEFAULT_MAX_ROOM_NAME_LEN + 1);
+        let err = normalize_room_metadata(&long, "", "", &bounds).unwrap_err();
+        assert!(matches!(
+            err,
+            AdvertisementViolation::RoomNameTooLong { len, max }
+                if len == DEFAULT_MAX_ROOM_NAME_LEN + 1 && max == DEFAULT_MAX_ROOM_NAME_LEN
+        ));
+    }
+
+    /// An oversized description is rejected before broadcast.
+    #[test]
+    fn normalize_rejects_oversized_description() {
+        let bounds = AdvertisementBounds::default();
+        let long = "y".repeat(DEFAULT_MAX_DESCRIPTION_LEN + 1);
+        let err = normalize_room_metadata("Lobby", &long, "", &bounds).unwrap_err();
+        assert!(matches!(
+            err,
+            AdvertisementViolation::DescriptionTooLong { len, max }
+                if len == DEFAULT_MAX_DESCRIPTION_LEN + 1 && max == DEFAULT_MAX_DESCRIPTION_LEN
+        ));
+    }
+
+    /// More tags than the protocol allows are rejected.
+    #[test]
+    fn normalize_rejects_too_many_tags() {
+        let bounds = AdvertisementBounds::default();
+        let tags = (0..=DEFAULT_MAX_TAGS).map(|i| format!("tag{i}")).collect::<Vec<_>>().join(",");
+        let err = normalize_room_metadata("Lobby", "", &tags, &bounds).unwrap_err();
+        assert!(matches!(
+            err,
+            AdvertisementViolation::TooManyTags { count, max }
+                if count == DEFAULT_MAX_TAGS + 1 && max == DEFAULT_MAX_TAGS
+        ));
+    }
+
+    /// A single oversized tag is rejected with its index.
+    #[test]
+    fn normalize_rejects_oversized_tag() {
+        let bounds = AdvertisementBounds::default();
+        let long = "z".repeat(DEFAULT_MAX_TAG_LEN + 1);
+        let err = normalize_room_metadata("Lobby", "", &format!("ok,{long}"), &bounds).unwrap_err();
+        assert!(matches!(
+            err,
+            AdvertisementViolation::TagTooLong { index, len, max }
+                if index == 1 && len == DEFAULT_MAX_TAG_LEN + 1 && max == DEFAULT_MAX_TAG_LEN
+        ));
+    }
+
+    /// Empty tag segments (trailing/doubled commas) are dropped, not errors.
+    #[test]
+    fn normalize_drops_empty_tag_segments() {
+        let bounds = AdvertisementBounds::default();
+        let out = normalize_room_metadata("Lobby", "", "rust,,dev,", &bounds).unwrap();
+        assert_eq!(out.tags, vec!["rust".to_string(), "dev".to_string()]);
+    }
+
+    /// Control characters are sanitized away (replaced), never broadcast.
+    #[test]
+    fn normalize_sanitizes_control_characters() {
+        let bounds = AdvertisementBounds::default();
+        let out = normalize_room_metadata("bad\u{0000}name", "line1\u{0008}line2", "ta\u{0000}g", &bounds)
+            .unwrap();
+        assert!(!out.room_name.contains('\u{0000}'));
+        assert!(!out.short_description.contains('\u{0008}'));
+        assert!(!out.tags[0].contains('\u{0000}'));
+        // The sanitized output must also pass the wire validate().
+        let mut advert = PublicRoomAdvertisement::minimal(topic(0xAB), out.room_name.clone(), key(0xCD));
+        advert.short_description = out.short_description.clone();
+        advert.tags = out.tags.clone();
+        assert!(advert.validate(&bounds).is_ok());
+    }
+
+    /// Normalized output always satisfies the wire validation bounds.
+    #[test]
+    fn normalize_output_passes_wire_validation() {
+        let bounds = AdvertisementBounds::default();
+        let name = "Community".to_string();
+        let desc = "A place for everyone.".to_string();
+        let out = normalize_room_metadata(&name, &desc, "rust, open-source", &bounds).unwrap();
+        let mut advert = PublicRoomAdvertisement::minimal(topic(0xEF), out.room_name.clone(), key(0x01));
+        advert.short_description = out.short_description.clone();
+        advert.tags = out.tags.clone();
+        assert!(advert.validate(&bounds).is_ok());
     }
 }
