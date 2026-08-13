@@ -22965,20 +22965,20 @@ mod tests {
         let home_src = include_str!("app/home.rs");
         let peers = method_source(home_src, "fn view_online_peers_card(", "fn view_recent_activity_card(");
         assert!(
-            !peers.contains(".height(Length::Fixed(crate::card_shell::PEER_ROW_HEIGHT))\n"),
+            !peers.contains(".height(Length::Fixed(btheme.lists.peer_row_height))\n"),
             "online-peer rows must not force a fixed 60 px height (clips a wrapped display name)"
         );
         assert!(
-            peers.contains(".height(Length::Fixed(crate::card_shell::PEER_ROW_HEIGHT))"),
+            peers.contains(".height(Length::Fixed(btheme.lists.peer_row_height))"),
             "online-peer rows must keep the 60 px rhythm via a zero-width min-height spacer"
         );
         let activity = method_source(home_src, "fn view_recent_activity_card(", "fn view_tunnels_card(");
         assert!(
-            !activity.contains(".height(Length::Fixed(ACTIVITY_ROW_HEIGHT))\n"),
+            !activity.contains(".height(Length::Fixed(btheme.home.activity_row_height))\n"),
             "recent-activity rows must not force a fixed 32 px height (clips a wrapped description)"
         );
         assert!(
-            activity.contains(".height(Length::Fixed(ACTIVITY_ROW_HEIGHT))"),
+            activity.contains(".height(Length::Fixed(btheme.home.activity_row_height))"),
             "recent-activity rows must keep the 32 px rhythm via a zero-width min-height spacer"
         );
         let tunnels = method_source(home_src, "fn view_tunnels_card(", "fn view_main_empty_state(");

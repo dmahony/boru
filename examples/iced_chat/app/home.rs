@@ -136,6 +136,10 @@ const PEOPLE_ACTIVITY_MAX: usize = 4;
 /// Minimum Online Peers body height (px). A single 60 px peer row is
 /// floored to this so the card keeps a sensible ~220–280 px footprint
 /// instead of collapsing into a strip; short lists never stretch it.
+///
+/// BORU-UI-03: mirrored by `HomeTheme::peers_body_min` (128 px) in the typed
+/// theme — `theme.rs`'s `default_matches_audit_source_values` test pins the
+/// two sources equal so they cannot drift.
 pub(crate) const PEERS_BODY_MIN: f32 = 128.0;
 
 /// Maximum Online Peers body height (px): exactly five 60 px rows plus
@@ -360,12 +364,13 @@ impl IcedChat {
         use iced::{Alignment, Length};
 
         let theme = Self::theme_from_dark(dep.dark_mode);
+        let btheme = crate::theme::BoruTheme::for_theme(&theme);
         let peer_rows: Vec<iced::Element<'static, AppMessage>> = dep
             .rows
             .iter()
             .map(|row| {
                 let mut avatar = Avatar::new(row.name.clone())
-                    .size(crate::design_tokens::AVATAR_CHAT_LIST)
+                    .size(btheme.avatars.chat_list)
                     .dark_mode(dep.dark_mode)
                     .online_dot(true)
                     .fallback_icon(Icon::Friend);
@@ -383,7 +388,7 @@ impl IcedChat {
                             crate::fonts::TypeRole::Body,
                             row.name.clone(),
                         )
-                        .color(text_system(&theme))
+                        .color(btheme.colors.text_secondary)
                         .width(Length::Fill)
                         .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
                     )
@@ -394,23 +399,23 @@ impl IcedChat {
                         )
                         .color(presence_color),
                     )
-                    .spacing(crate::design_tokens::SPACE_2)
+                    .spacing(btheme.spacing.space_2)
                     .align_x(Alignment::Start)
                     .width(Length::Fill);
                 let row_el = Row::new()
                     // Zero-width spacer enforces the 60 px two-line row
                     // rhythm as a MINIMUM; a wrapped display name grows the
                     // row instead of being clipped (UI-HOME-10).
-                    .push(Space::new().width(Length::Fixed(0.0)).height(Length::Fixed(crate::card_shell::PEER_ROW_HEIGHT)))
+                    .push(Space::new().width(Length::Fixed(0.0)).height(Length::Fixed(btheme.lists.peer_row_height)))
                     .push(avatar.build())
-                    .push(Space::new().width(Length::Fixed(SPACE_8)))
+                    .push(Space::new().width(Length::Fixed(btheme.spacing.space_8)))
                     .push(text_col)
                     .spacing(0)
                     .align_y(Alignment::Center);
                 button(row_el)
                     .on_press(AppMessage::OpenConversation(row.pk))
                     .width(Length::Fill)
-                    .padding([0.0, SPACE_8])
+                    .padding([0.0, btheme.spacing.space_8])
                     .style(|t, status| iced::widget::button::Style {
                         // Three-tier interaction ramp (BORU-HOME-10):
                         // default (transparent) → hover → pressed.
@@ -471,7 +476,7 @@ impl IcedChat {
                     .width(Length::Fill),
             )
             .width(Length::Fill)
-            .height(Length::Fixed(PEERS_BODY_MIN))
+            .height(Length::Fixed(btheme.home.peers_body_min))
             .align_y(Alignment::Center)
             .into()
         } else {
@@ -501,12 +506,15 @@ impl IcedChat {
     /// the row content and the five-visible-rows cap, floored at
     /// [`PEERS_BODY_MIN`] so a one-peer card stays intentional.
     pub(crate) fn online_peers_body_height(rows: usize) -> f32 {
+        let btheme = crate::theme::BoruTheme::default();
         if rows == 0 {
-            return PEERS_BODY_MIN;
+            return btheme.home.peers_body_min;
         }
-        let content =
-            rows as f32 * crate::card_shell::PEER_ROW_HEIGHT + (rows as f32 - 1.0) * SPACE_2;
-        content.min(PEERS_BODY_MAX).max(PEERS_BODY_MIN)
+        let content = rows as f32 * btheme.lists.peer_row_height
+            + (rows as f32 - 1.0) * btheme.spacing.space_2;
+        content
+            .min(5.0 * btheme.lists.peer_row_height + 4.0 * btheme.spacing.space_2)
+            .max(btheme.home.peers_body_min)
     }
 
     /// Build the Recent Activity card subtree (memoized via lazy).
@@ -517,10 +525,11 @@ impl IcedChat {
         use iced::{Alignment, Length};
 
         let theme = Self::theme_from_dark(dep.dark_mode);
+        let btheme = crate::theme::BoruTheme::for_theme(&theme);
         // UI-29: recent activity rows are denser than the 48 px peer rows —
         // a compact 32 px row keeps the feed scannable without dead vertical
-        // space around the small icon + single-line title.
-        const ACTIVITY_ROW_HEIGHT: f32 = 32.0;
+        // space around the small icon + single-line title (BORU-UI-03: the
+        // row height now comes from `HomeTheme::activity_row_height`).
         let activity_rows: Vec<iced::Element<'static, AppMessage>> = dep
             .rows
             .iter()
@@ -551,7 +560,7 @@ impl IcedChat {
                 row![
                     Space::new()
                         .width(Length::Fixed(0.0))
-                        .height(Length::Fixed(ACTIVITY_ROW_HEIGHT)),
+                        .height(Length::Fixed(btheme.home.activity_row_height)),
                     icon_svg(activity_icon, TYPO_SM).style(move |t, _| {
                         iced::widget::svg::Style {
                             color: Some(if kind == ActivityKind::Online {
@@ -615,7 +624,7 @@ impl IcedChat {
         use iced::{Alignment, Length};
 
         let theme = Self::theme_from_dark(dep.online.dark_mode);
-        const ACTIVITY_ROW_HEIGHT: f32 = 32.0;
+        let btheme = crate::theme::BoruTheme::for_theme(&theme);
 
         // ── Peers section ──
         let peers_body: iced::Element<'static, AppMessage> = if dep.online.rows.is_empty() {
@@ -641,7 +650,7 @@ impl IcedChat {
                     .width(Length::Fill),
             )
             .width(Length::Fill)
-            .height(Length::Fixed(PEERS_BODY_MIN))
+            .height(Length::Fixed(btheme.home.peers_body_min))
             .align_y(Alignment::Center)
             .into()
         } else {
@@ -723,11 +732,11 @@ impl IcedChat {
                 .collect();
             let row_count = dep.online.rows.len().min(PEOPLE_PEERS_MAX);
             let body_height = if row_count == 0 {
-                PEERS_BODY_MIN
+                btheme.home.peers_body_min
             } else {
-                let content = row_count as f32 * crate::card_shell::PEER_ROW_HEIGHT
-                    + (row_count as f32 - 1.0) * SPACE_2;
-                content.max(PEERS_BODY_MIN)
+                let content = row_count as f32 * btheme.lists.peer_row_height
+                    + (row_count as f32 - 1.0) * btheme.spacing.space_2;
+                content.max(btheme.home.peers_body_min)
             };
             Column::with_children(peer_rows)
                 .spacing(SPACE_2)
@@ -737,7 +746,9 @@ impl IcedChat {
         };
 
         // ── Divider ──
-        let divider = container(Space::new().width(Length::Fill).height(Length::Fixed(1.0)))
+        let divider = container(Space::new().width(Length::Fill).height(Length::Fixed(
+            crate::theme::BoruTheme::for_theme(&theme).borders.hairline,
+        )))
             .style(move |t: &iced::Theme| {
                 container::Style {
                     background: Some(iced::Background::Color(
@@ -772,7 +783,7 @@ impl IcedChat {
                     .width(Length::Fill),
             )
             .width(Length::Fill)
-            .height(Length::Fixed(40.0))
+            .height(Length::Fixed(crate::theme::BoruTheme::for_theme(&theme).home.hero_gap))
             .align_y(Alignment::Center)
             .into()
         } else {
@@ -798,7 +809,7 @@ impl IcedChat {
                             .push(
                                 Space::new()
                                     .width(Length::Fixed(0.0))
-                                    .height(Length::Fixed(ACTIVITY_ROW_HEIGHT)),
+                                    .height(Length::Fixed(btheme.home.activity_row_height)),
                             )
                             .push(icon_svg(activity_icon, TYPO_SM).style(move |t, _| {
                                 iced::widget::svg::Style {
@@ -1136,7 +1147,7 @@ impl IcedChat {
             crate::fonts::TypeRole::Body,
             "Your Boru node is online and ready.",
         )
-        .size(crate::fonts::HOME_SUBTITLE)
+        .size(crate::theme::BoruTheme::for_theme(&theme).typography.home_subtitle)
         .color(text_secondary(&theme))
         .width(Length::Fill);
 
@@ -1425,7 +1436,7 @@ impl IcedChat {
         // sidebar never forces an early stack.
         let rail_stacked =
             content_width < crate::design_tokens::HOME_TWO_COL_CONTENT;
-        let card_gap = SPACE_20; // 20 px vertical card gap (plan: 20–24 px)
+        let card_gap = crate::theme::BoruTheme::for_theme(&theme).home.quick_action_gap; // 20 px vertical card gap (plan: 20–24 px)
 
         let left_col = Column::new()
             .push(hero_card)

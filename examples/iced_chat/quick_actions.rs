@@ -26,26 +26,6 @@ use crate::app::{AppMessage, SPACE_12, SPACE_16, SPACE_4, SPACE_8};
 use crate::design_tokens;
 use crate::icon_system::{Icon, IconSize};
 
-/// Diameter of the light-green quick-action icon container (HOME-02
-/// compact: 40 px — down from the 52–60 px band to make the four cards
-/// denser while the 24 px icon inside keeps an 8 px margin).
-const QUICK_ACTION_ICON_SIZE: f32 = 40.0;
-
-/// Quick-action card title size (FONTS-07: IBM Plex Sans SemiBold ~16–17 px).
-///
-/// `TypeRole::CardTitle` defaults to 18 px for dashboard cards app-wide; the
-/// approved quick-action mockup uses the tighter 16–17 px band, so the role's
-/// font/weight (IBM Plex Sans SemiBold) is kept and only the size is
-/// overridden locally for these cards. HOME-02 uses the bottom of the band
-/// (16 px) so the compact cards stay readable but denser.
-const QUICK_ACTION_TITLE_SIZE: f32 = 16.0;
-
-/// Quick-action card description size (FONTS-07: IBM Plex Sans Regular ~14 px).
-const QUICK_ACTION_DESCRIPTION_SIZE: f32 = 14.0;
-
-/// Quick-action card description line height (FONTS-07: 1.4–1.45).
-const QUICK_ACTION_DESCRIPTION_LINE_HEIGHT: f32 = 1.45;
-
 pub(crate) struct QuickAction {
     icon: Icon,
     label: &'static str,
@@ -85,7 +65,7 @@ const ACTIONS: &[QuickAction] = &[
 /// Mirrors the `icon_tile` look (soft brand-green background, centered
 /// icon) at the compact size the HOME-02 cards call for.
 fn quick_action_icon<'a>(icon: Icon) -> Element<'a, AppMessage> {
-    let tile = QUICK_ACTION_ICON_SIZE;
+    let tile = crate::theme::BoruTheme::default().home.quick_action_icon_size; // 40 px (HOME-02 compact)
     container(icon.build().size(IconSize::Lg).build())
         .width(Length::Fixed(tile))
         .height(Length::Fixed(tile))
@@ -141,7 +121,7 @@ pub fn quick_action_card<'a>(
             // SemiBold) at the FONTS-07 quick-action size (16 px; the role
             // default 18 px stays shared with other dashboard cards).
             crate::fonts::type_role_text(crate::fonts::TypeRole::CardTitle, action.label)
-                .size(QUICK_ACTION_TITLE_SIZE)
+                .size(crate::theme::BoruTheme::default().home.quick_action_title_size)
                 .width(Length::Fill),
         )
         // HOME-02: title→description gap tightened from SPACE_8 to SPACE_4.
@@ -157,9 +137,9 @@ pub fn quick_action_card<'a>(
             crate::fonts::type_role_text_lh(
                 crate::fonts::TypeRole::SupportingText,
                 action.description,
-                QUICK_ACTION_DESCRIPTION_LINE_HEIGHT,
+                crate::theme::BoruTheme::default().home.quick_action_desc_line_height,
             )
-            .size(QUICK_ACTION_DESCRIPTION_SIZE)
+            .size(crate::theme::BoruTheme::default().home.quick_action_desc_size)
             .color(design_tokens::text_muted(theme))
             .width(Length::Fill),
         )
@@ -424,8 +404,8 @@ mod tests {
             "quick-action cards must not hide overflow with clipping"
         );
         assert!(
-            prod.contains("QUICK_ACTION_ICON_SIZE: f32 = 40.0"),
-            "icon container must be 40 px (HOME-02 compact)"
+            prod.contains("quick_action_icon_size"),
+            "icon container must be 40 px via HomeTheme::quick_action_icon_size (HOME-02 compact)"
         );
         assert!(
             prod.contains(".padding([SPACE_16, SPACE_16])"),
@@ -447,16 +427,16 @@ mod tests {
         // title / 14 px description at 1.45) instead of the shared role
         // defaults (CardTitle 18 / SupportingText 13) used elsewhere.
         assert!(
-            prod.contains(".size(QUICK_ACTION_TITLE_SIZE)"),
+            prod.contains(".size(crate::theme::BoruTheme::default().home.quick_action_title_size)"),
             "quick-action titles must override the card-title size to the FONTS-07 16 px band"
         );
         assert!(
-            prod.contains(".size(QUICK_ACTION_DESCRIPTION_SIZE)"),
+            prod.contains(".size(crate::theme::BoruTheme::default().home.quick_action_desc_size)"),
             "quick-action descriptions must override the supporting-text size to the FONTS-07 14 px"
         );
         assert!(
-            prod.contains("QUICK_ACTION_DESCRIPTION_LINE_HEIGHT"),
-            "quick-action descriptions must use the FONTS-07 1.4–1.45 line-height constant"
+            prod.contains("quick_action_desc_line_height"),
+            "quick-action descriptions must use the FONTS-07 1.4–1.45 line-height theme token"
         );
     }
 
@@ -468,11 +448,11 @@ mod tests {
         // i.e. content-driven (full description visible) but denser.
         use crate::design_tokens::{SPACE_16, SPACE_4, SPACE_8};
 
-        let tile = super::QUICK_ACTION_ICON_SIZE;
-        let title = super::QUICK_ACTION_TITLE_SIZE * 1.3; // single-line heading
-        let description_two_lines = super::QUICK_ACTION_DESCRIPTION_SIZE
-            * super::QUICK_ACTION_DESCRIPTION_LINE_HEIGHT
-            * 2.0;
+        let qa = crate::theme::BoruTheme::default().home;
+        let tile = qa.quick_action_icon_size;
+        let title = qa.quick_action_title_size * 1.3; // single-line heading
+        let description_two_lines =
+            qa.quick_action_desc_size * qa.quick_action_desc_line_height * 2.0;
         let indicator = crate::icon_system::IconSize::Xs.px() + SPACE_8;
         let vertical_padding = 2.0 * SPACE_16;
         let gaps = SPACE_8 + SPACE_4;

@@ -504,13 +504,16 @@ fn status_heading(dep: &StatusCardDependency, size: f32) -> iced::Element<'stati
 /// column's left edge), while staying subordinate to the status message
 /// (spec §17 — decorative elements must not compete).
 fn status_divider(accent: Color) -> iced::Element<'static, AppMessage> {
+    // BORU-UI-03: divider geometry (44 × 3 px, 1.5 radius) comes from
+    // `HomeTheme::status_divider_*` in the typed theme.
+    let status = crate::theme::BoruTheme::default().home;
     container(Space::new().width(Length::Fill).height(Length::Fill))
-        .width(Length::Fixed(44.0))
-        .height(Length::Fixed(3.0))
+        .width(Length::Fixed(status.status_divider_width))
+        .height(Length::Fixed(status.status_divider_height))
         .style(move |_t| container::Style {
             background: Some(Background::Color(with_alpha(accent, 0.45))),
             border: Border {
-                radius: 1.5.into(),
+                radius: status.status_divider_radius.into(),
                 ..Default::default()
             },
             ..Default::default()
@@ -564,7 +567,11 @@ pub(crate) fn security_pill() -> iced::Element<'static, AppMessage> {
         border: Border {
             color: with_alpha(design_tokens::STATUS_CONNECTED, 0.25),
             width: 1.0,
-            radius: 14.0.into(),
+            // BORU-UI-03: pill radius from `HomeTheme::security_pill_radius`.
+            radius: crate::theme::BoruTheme::default()
+                .home
+                .security_pill_radius
+                .into(),
         },
         ..Default::default()
     })
