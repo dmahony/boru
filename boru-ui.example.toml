@@ -1,0 +1,392 @@
+# boru-ui.example.toml — Boru development theme overrides (BORU-UI-04)
+#
+# This file documents the `boru-ui.toml` dev theme override format. Copy it
+# to your data dir as `boru-ui.toml` to change Boru's appearance WITHOUT
+# rebuilding:
+#
+#   Linux/macOS:   ~/.local/share/boru/boru-ui.toml
+#   Windows:       %LOCALAPPDATA%\boru\boru-ui.toml
+#   (or the directory printed by `cargo run` at startup / --data-dir)
+#
+# Rules
+# -----
+# * ONLY visual values live here. Networking, chat, file transfer, video,
+#   tunnel, lobby, room and persistence behaviour are NEVER configured here.
+# * Every key is optional. Missing keys/groups fall back to
+#   `BoruTheme::default()` (BORU-UI-05). An empty file is valid.
+# * The file may be deleted at any time — startup never fails because of it.
+# * A malformed file is logged with a line/column error and the last
+#   known-good theme is kept.
+# * Field names mirror the `BoruTheme` token groups in
+#   `examples/iced_chat/theme.rs` (sidebar.width, chat.bubble_max_width, …).
+#
+# Units / ranges
+# --------------
+# * Lengths, sizes, padding, spacing, radii, widths, heights: pixels (px),
+#   positive floats. 0 is allowed (e.g. radii.none = 0.0). Values far
+#   outside the current defaults (e.g. negative padding, absurd sidebar
+#   widths) are developer-error candidates in BORU-UI-05 and should be
+#   avoided.
+# * `chat.bubble_width_ratio`: fraction 0..=1 of the timeline width.
+# * `home.quick_action_desc_line_height`: unitless line-height ratio.
+# * `motion.sidebar_fade_frames`: integer frame count (default 5).
+# * Colours: hex string "#RRGGBB" / "#RRGGBBAA" or an array of 0..=1 floats
+#   [r, g, b] / [r, g, b, a].
+#
+# The values below are the CURRENT BASELINE (they reproduce the default UI).
+# Override only what you want to change; leave the rest commented or absent.
+
+# ── Colors (BoruTheme.colors) ─────────────────────────────────────────
+# Light-mode baseline shown. Dark mode keeps its own palette; only the
+# theme-independent tokens (dialog_panel_bg, status_*, …) apply to both.
+# [colors]
+# canvas = "#F7F9F8"
+# sidebar = "#FCFDFC"
+# surface = "#FFFFFF"
+# surface_selected = "#ECEFED"
+# surface_hover = "#EFF3F1"
+# surface_pressed = "#E4E8E5"
+# surface_secondary = "#EEF1EE"
+# input_bg = "#F0F0F4"
+# border_muted = "#E8F0EB"
+# border_strong = "#C8D7CE"
+# text_primary = "#17211B"
+# text_secondary = "#5F6F66"
+# text_muted = "#64706A"
+# text_local_label = [0.0, 0.45, 0.0]
+# text_local_body = [0.0, 0.35, 0.0]
+# text_remote_label = [0.0, 0.33, 0.66]
+# text_remote_body = "#17211B"
+# primary = "#187F50"
+# primary_hover = "#147643"
+# primary_pressed = "#105F38"
+# primary_soft = "#EAF5EE"
+# success = "#1A7F48"
+# danger = "#C84E4E"
+# warning = "#704505"
+# focus = "#2B9B67"
+# soft_tint_alpha = 0.08            # 0..=1 — soft-status-tint alpha
+# dialog_backdrop = [0.0, 0.0, 0.0, 0.35]
+# incoming_call_backdrop = [0.0, 0.0, 0.0, 0.72]
+# chat_overlay_backdrop = [0.0, 0.0, 0.0, 0.25]
+# chat_search_backdrop = [0.0, 0.0, 0.0, 0.15]
+# panel_shadow = [0.0, 0.0, 0.0, 0.30]
+# dialog_panel_bg = [0.12, 0.13, 0.17]
+# dialog_panel_border = [0.35, 0.38, 0.45]
+# media_frame_bg = [0.055, 0.06, 0.07]
+# media_frame_border = [1.0, 1.0, 1.0, 0.10]
+# media_frame_overlay = [0.0, 0.0, 0.0, 0.62]
+# on_media_text = [0.78, 0.80, 0.82]
+# glyph_disabled = [0.5, 0.5, 0.5]
+# glyph_muted = [0.45, 0.45, 0.45]
+# glyph_muted_dark = [0.6, 0.6, 0.6]
+# avatar_fallback = [0.6, 0.6, 0.6]
+# tag_text = [0.4, 0.4, 0.4]
+# tag_bg = [0.3, 0.3, 0.3, 0.06]
+# tag_bg_pressed = [0.3, 0.3, 0.3, 0.12]
+# download_completed = [0.2, 0.7, 0.2]
+# download_temporary = [0.78, 0.58, 0.16]
+# download_terminal = [0.8, 0.22, 0.22]
+# download_cancelled = [0.55, 0.55, 0.55]
+# request_pending = [0.7, 0.6, 0.0]
+# request_accepted = [0.2, 0.7, 0.2]
+# request_declined = [0.8, 0.2, 0.2]
+# settings_success = [0.15, 0.55, 0.2]
+# settings_danger = [0.8, 0.2, 0.2]
+# settings_danger_strong = [0.9, 0.3, 0.3]
+# settings_heading_text = [0.15, 0.15, 0.15]
+# expanded_video_backdrop = [0.0, 0.0, 0.0, 0.82]
+# lightbox_backdrop = [0.0, 0.0, 0.0, 0.90]
+# status_card_bg_top = "#10201C"
+# status_card_bg_mid = "#091714"
+# status_card_bg_bottom = "#06100E"
+# status_card_border = [0.302, 0.898, 0.639, 0.22]
+# status_connected = "#4DE5A3"
+# status_primary_text = "#F3F7F5"
+# status_secondary_text = "#9FB3AA"
+# status_network_line = "#4DE5A3"
+# status_network_node = "#4DE5A3"
+# status_warning = "#E8A33D"
+# status_danger = "#E55B5B"
+
+# ── Typography (BoruTheme.typography) — sizes in px ────────────────────
+# [typography]
+# display_heading = 32.0
+# page_title = 28.0
+# section_title = 20.0
+# card_title = 18.0
+# body = 15.0
+# body_emphasised = 15.0
+# button_label = 14.0
+# supporting_text = 13.0
+# metadata = 12.0
+# chat_message = 15.0
+# chat_sender = 14.0
+# chat_metadata = 12.0
+# composer_text = 15.0
+# technical_value = 12.0
+# brand_wordmark = 28.0
+# home_subtitle = 16.0
+# dialog_title = 26.0
+# dialog_subtitle = 14.0
+# sidebar_name = 15.0
+# section_label = 11.0
+# badge = 10.0
+# call_name = 24.0
+# call_name_active = 26.0
+# call_remote_name = 18.0
+# call_status = 16.0
+# call_duration = 22.0
+# call_avatar_glyph = 36.0
+# call_avatar_glyph_large = 44.0
+# call_pip_label = 18.0
+
+# ── Spacing (BoruTheme.spacing) — px ──────────────────────────────────
+# [spacing]
+# space_2 = 2.0
+# space_4 = 4.0
+# space_6 = 6.0
+# space_8 = 8.0
+# space_10 = 10.0
+# space_12 = 12.0
+# space_16 = 16.0
+# space_18 = 18.0
+# space_20 = 20.0
+# space_24 = 24.0
+# space_28 = 28.0
+# space_32 = 32.0
+# space_40 = 40.0
+# control_height = 40.0
+# control_height_compact = 36.0
+
+# ── Radii (BoruTheme.radii) — px ──────────────────────────────────────
+# [radii]
+# none = 0.0
+# sm = 8.0
+# md = 10.0
+# lg = 12.0
+# xl = 16.0
+# card = 16.0
+# pill = 10.0
+# avatar_container = 12.0
+# call_avatar = 48.0
+# media_frame = 13.0
+# attachment = 10.0
+# dialog = 16.0
+# picker_cell = 8.0
+# control_sm = 4.0
+# status_divider = 1.5
+# security_pill = 14.0
+
+# ── Icons (BoruTheme.icons) — px ──────────────────────────────────────
+# [icons]
+# xs = 16.0
+# sm = 18.0
+# md = 20.0
+# lg = 24.0
+# xl = 28.0
+# sidebar_utility = 24.0
+
+# ── Avatars (BoruTheme.avatars) — px ──────────────────────────────────
+# [avatars]
+# sm = 36.0
+# md = 48.0
+# lg = 64.0
+# profile = 72.0
+# chat_list = 56.0
+# chat_header = 52.0
+# msg = 46.0
+# status_dot_sm = 10.0
+# status_dot_lg = 12.0
+
+# ── Lists / rows (BoruTheme.lists) — px ───────────────────────────────
+# [lists]
+# card_row_height = 48.0
+# peer_row_height = 60.0
+# default_list_max_height = 180.0
+# table_row_height = 56.0
+# table_row_height_compact = 48.0
+# chip_height = 28.0
+# peer_panel_max_height = 320.0
+# progress_bar_height = 4.0
+# progress_bar_height_bold = 6.0
+
+# ── Borders (BoruTheme.borders) — px ──────────────────────────────────
+# [borders]
+# hairline = 1.0
+# focus = 2.0
+# tab_active = 2.0
+# selected_row = 1.0
+# media_frame = 1.0
+
+# ── Responsive (BoruTheme.responsive) — px ────────────────────────────
+# [responsive]
+# viewport_ref_width = 1280.0
+# viewport_ref_height = 800.0
+# viewport_min_width = 1024.0
+# viewport_min_height = 720.0
+# viewport_lg_width = 1440.0
+# viewport_lg_height = 900.0
+# viewport_xl_width = 1920.0
+# viewport_xl_height = 1080.0
+# content_max_width = 720.0
+# dashboard_max_width = 1480.0
+# home_two_col_content = 720.0
+# home_quick_one_col_content = 520.0
+# home_quick_four_col_content = 1000.0
+# home_illustration_full_content = 720.0
+# home_illustration_hide_content = 520.0
+# home_compact_header_content = 560.0
+
+# ── Motion (BoruTheme.motion) — presentation frame counts ─────────────
+# [motion]
+# sidebar_fade_frames = 5        # integer ≥ 1
+
+# ── Sidebar (BoruTheme.sidebar) — px ──────────────────────────────────
+# [sidebar]
+# width = 304.0                  # reference width at 1280×800 viewport
+# width_min = 288.0              # responsive minimum
+# width_max = 320.0              # responsive maximum
+# inset = 24.0                   # horizontal inset to content
+# item_radius = 10.0
+# avatar_container_radius = 12.0
+# utility_icon_size = 24.0
+# name_size = 15.0
+# section_label_size = 11.0
+#
+# [sidebar.padding]
+# brand_top = 16.0
+# brand_bottom = 8.0
+# identity_top = 4.0
+# identity_bottom = 8.0
+# section_top = 4.0
+# utility_top = 8.0
+# utility_bottom = 12.0
+# row_x = 12.0
+# join_top = 8.0
+# join_bottom = 4.0
+
+# ── Home (BoruTheme.home) — px (line height is a ratio) ───────────────
+# [home]
+# peers_body_min = 128.0
+# activity_row_height = 32.0
+# hero_gap = 40.0
+# quick_action_gap = 20.0
+# quick_action_icon_size = 40.0
+# quick_action_title_size = 16.0
+# quick_action_desc_size = 14.0
+# quick_action_desc_line_height = 1.45
+# status_card_text_min_width_medium = 260.0
+# status_card_mesh_max_width = 170.0
+# status_card_padding_x = 24.0
+# status_icon_text_gap_full = 24.0
+# status_icon_text_gap_medium = 20.0
+# status_text_graph_gap_full = 24.0
+# status_text_graph_gap_medium = 24.0
+# status_divider_width = 44.0
+# status_divider_height = 3.0
+# status_divider_radius = 1.5
+# security_pill_radius = 14.0
+
+# ── Chat (BoruTheme.chat) — px (bubble_width_ratio is 0..1) ───────────
+# [chat]
+# spinner_size = 40.0
+# context_menu_width = 180.0
+# emoji_picker_width = 280.0
+# emoji_picker_scroll_height = 160.0
+# gif_picker_width = 320.0
+# gif_picker_scroll_height = 300.0
+# gif_thumbnail_width = 150.0
+# gif_thumbnail_height = 100.0
+# screen_share_w = 640.0
+# screen_share_h = 360.0
+# bubble_max_width = 560.0
+# bubble_width_ratio = 0.68
+# message_max_width = 480.0
+# image_preview_max_width = 360.0
+# image_preview_max_height = 400.0
+
+# ── Attachments (BoruTheme.attachments) — px ──────────────────────────
+# [attachments]
+# empty_state_height = 200.0
+# menu_width = 176.0
+# chip_avatar_size = 16.0
+# chip_label_size = 9.0
+# detail_label_width = 96.0
+# progress_bar_girth = 6.0
+# progress_pct_label_width = 44.0
+# progress_slot_height = 20.0
+# detail_slot_height = 18.0
+# policy_slot_height = 30.0
+# action_button_line = 30.0
+# search_width_medium = 240.0
+# search_width_full = 320.0
+#
+# [attachments.file_table]
+# size_col = 72.0
+# source_col = 120.0
+# ago_col = 120.0
+# peer_col = 140.0
+# started_col = 120.0
+# state_col = 110.0
+# direction_col = 90.0
+# event_col = 110.0
+# details_col = 80.0
+# download_started_col = 100.0
+# download_state_col = 100.0
+# activity_ago_col = 110.0
+#
+# [attachments.shared_table]
+# shared_with = 144.0
+# size = 64.0
+# shared_on = 122.0
+# downloads = 80.0
+# actions = 36.0
+#
+# [attachments.video]
+# narrow_breakpoint = 560.0      # below this width → 100%-width card
+# medium_breakpoint = 780.0      # below this width → scaled media caps
+# play_overlay_size = 64.0
+# header_filename_max_width = 420.0
+# controls_slider_width = 90.0
+
+# ── Rooms / Discover (BoruTheme.rooms) — px ───────────────────────────
+# [rooms]
+# catalogue_row_height = 52.0
+# overscan = 800.0
+# banner_width = 200.0
+# progress_length = 80.0
+# progress_girth = 6.0
+
+# ── Tunnels (BoruTheme.tunnels) — px ──────────────────────────────────
+# [tunnels]
+# chip_padding_x = 6.0
+# chip_padding_y = 2.0
+
+# ── Dialogs (BoruTheme.dialogs) — px ──────────────────────────────────
+# [dialogs]
+# avatar_size = 72.0
+# avatar_glyph_size = 48.0
+# title_size = 22.0
+# body_size = 15.0
+# spacing = 12.0
+# padding = 32.0
+# control_padding_x = 14.0
+# control_padding_y = 6.0
+# control_spacing = 12.0
+
+# ── Calls (BoruTheme.calls) — px ──────────────────────────────────────
+# [calls]
+# avatar_size = 96.0
+# avatar_glyph_size = 36.0
+# avatar_glyph_size_large = 44.0
+# pip_w = 220.0
+# pip_h = 150.0
+# controls_gap = 40.0
+
+# ── Controls / settings (BoruTheme.controls) — px ─────────────────────
+# [controls]
+# header_height = 52.0
+# slider_width = 160.0
+# color_picker_radius = 8.0
+# color_picker_bar_radius = 4.0

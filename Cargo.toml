@@ -288,7 +288,7 @@ simulator = [
 ]
 metrics = ["iroh-metrics/metrics"]
 examples = ["net"]
-gui = ["net", "dep:iced", "dep:iced_aw", "dep:iced_moving_picture", "dep:tokio", "dep:rfd", "dep:tracing-subscriber", "dep:tracing-appender", "dep:mimalloc", "dep:rayon", "dep:profiling", "dep:rustc-hash", "dep:regex", "dep:open", "dep:url", "dep:reqwest", "dep:netstat2", "dep:sysinfo", "dep:clap"]
+gui = ["net", "dep:iced", "dep:iced_aw", "dep:iced_moving_picture", "dep:tokio", "dep:rfd", "dep:tracing-subscriber", "dep:tracing-appender", "dep:mimalloc", "dep:rayon", "dep:profiling", "dep:rustc-hash", "dep:regex", "dep:open", "dep:url", "dep:reqwest", "dep:netstat2", "dep:sysinfo", "dep:clap", "dep:toml"]
 video-playback = ["gui", "dep:iced_video_player"]
 terminal = ["gui", "dep:iced_term"]
 # Screen sharing is deliberately opt-in while the subsystem is integrated.

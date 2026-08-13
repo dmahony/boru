@@ -3950,6 +3950,12 @@ pub struct IcedChat {
     /// Whether dark mode is enabled.  Kept alongside `settings` for fast access
     /// (lags one write behind `settings` during update; always read from here).
     pub dark_mode: bool,
+    /// Dev theme overrides loaded from `<data_dir>/boru-ui.toml` at startup
+    /// (BORU-UI-04). Empty config when the file is missing or malformed (the
+    /// error is logged and the last known-good theme is kept). BORU-UI-05
+    /// merges these overrides on top of `BoruTheme::default()`.
+    #[expect(dead_code)]
+    pub(crate) ui_theme_config: crate::theme_config::UiThemeConfig,
     /// Whether notification sounds are enabled.
     sound_enabled: bool,
     /// Whether room invitations may include direct endpoint addresses.
@@ -8234,6 +8240,8 @@ impl IcedChat {
             last_snapshot_at: std::time::Instant::now(),
             gui_snapshot_throttle_ms: 0, // no throttle by default; main.rs sets 125ms
             gui_snapshot_pending: false,
+            // BORU-UI-04: dev theme overrides; main.rs sets the loaded value.
+            ui_theme_config: crate::theme_config::UiThemeConfig::default(),
             // ── Notification system ──
             notification_service: NotificationService::new(),
             window_focus_tracker: WindowFocusTracker::new(),

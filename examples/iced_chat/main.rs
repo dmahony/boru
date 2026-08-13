@@ -37,6 +37,7 @@ mod recent_activity_view_model;
 mod shared_by_me_table;
 mod status_card;
 mod theme;
+mod theme_config;
 #[cfg(test)]
 mod offscreen_status_card;
 mod sharing_summary;
@@ -486,6 +487,18 @@ fn main() -> Result<()> {
 
     let _log_guard = init_logging(&data_dir)?;
     info!(data_dir = %data_dir.display(), "starting iced chat");
+
+    // BORU-UI-04: load dev theme overrides (boru-ui.toml) from the data dir.
+    // A missing file yields an empty config (defaults); a malformed file
+    // logs a developer error and keeps the last known-good theme — startup
+    // never fails because of the dev file.
+    let ui_theme_config = match theme_config::load_ui_theme_config(&data_dir) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            warn!(error = %e, "boru-ui.toml theme overrides ignored; using default theme");
+            theme_config::UiThemeConfig::default()
+        }
+    };
 
     // ── Panic hook: catch Rust panics and write crash info to instance.log
     //     (which the splash window is tailing) plus a crash report file.
@@ -1723,6 +1736,8 @@ fn main() -> Result<()> {
             // so rapidly changing GUI state (composer text, unread counts)
             // doesn't flood the watch channel and MCP consumers.
             app.gui_snapshot_throttle_ms = 125;
+            // BORU-UI-04: dev theme overrides loaded from <data_dir>/boru-ui.toml.
+            app.ui_theme_config = ui_theme_config;
             app.directory_store = shared_directory_store;
             // BORU-CP-06: give the UI a read handle to the backend
             // connectivity state machine (the discovery service handle
