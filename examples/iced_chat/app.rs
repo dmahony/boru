@@ -3960,6 +3960,15 @@ pub struct IcedChat {
     /// is unavailable — feature actions then keep the legacy un-gated
     /// behaviour so offline/test paths are unchanged.
     pub capability_gate: Option<Arc<dyn boru_core::discovery_service::CapabilityGate>>,
+    /// Read handle to the BORU-DIR-10 bounded room-directory cache (PDF
+    /// Phase 4 Task 4.1). Set from `main.rs` after construction (the
+    /// discovery service handle itself stays off the UI). The app feeds
+    /// the real local room database facts (joined room ids from the
+    /// conversation store + persisted hide preferences) into the cache
+    /// via `sync_directory_local_states` so every discovered room
+    /// carries a derived `local_join_state` (BORU-DIR-12, PDF Task 4.3).
+    /// `None` in unit tests / when discovery is unavailable.
+    pub room_directory: Option<Arc<StdMutex<boru_core::room_directory::RoomDirectory>>>,
     /// Font size for chat message body text (pixels).
     chat_text_size: f32,
     /// Whether the "clear history" confirmation is shown.
@@ -7841,6 +7850,7 @@ impl IcedChat {
             show_presence_indicator: app_settings.show_presence_indicator,
             connectivity_store: None,
             capability_gate: None,
+            room_directory: None,
             chat_text_size: app_settings.chat_text_size,
             room_delete_confirm_topic: None,
             notice,
@@ -11212,6 +11222,53 @@ impl IcedChat {
                 iced::Task::none()
             }
         }
+    }
+
+    /// Feed the real local relationship facts into the bounded
+    /// room-directory cache (BORU-DIR-12, PDF Task 4.3).
+    ///
+    /// The source of truth for `Joined` is the **local room database** —
+    /// the persisted conversation store — never the advertisement. The
+    /// persisted hide preference (BORU-DIR-20 controls write through
+    /// [`Storage::set_room_hidden`]; the preference itself survives
+    /// restarts) supplies `hidden`. The directory derives each cached
+    /// room's `local_join_state` from these facts and never shows a
+    /// joined room as Join (it shows Open) and never re-shows a hidden
+    /// room.
+    ///
+    /// Called on every `ConnMonitorTick` (1 Hz) so new joins / hides are
+    /// reflected promptly; the cache itself stores the facts so entries
+    /// added between ticks are derived immediately.
+    fn sync_directory_local_states(&mut self) {
+        let Some(directory) = self.room_directory.clone() else {
+            return;
+        };
+        // Joined = every topic with a local conversation record (the
+        // real local room database). Direct chats have derived topics
+        // that never collide with advertised room ids, so including all
+        // topics is both simple and correct.
+        let joined: std::collections::BTreeSet<TopicId> = self
+            .conversation_store
+            .iter()
+            .map(|entry| entry.topic)
+            .collect();
+        // Hidden = persisted hide preference.
+        let hidden: std::collections::BTreeSet<TopicId> = match self.storage.as_ref() {
+            Some(storage) => storage
+                .room_hidden_ids()
+                .unwrap_or_default()
+                .into_iter()
+                .map(TopicId::from_bytes)
+                .collect(),
+            None => std::collections::BTreeSet::new(),
+        };
+        let facts = boru_core::room_directory::LocalRoomFacts {
+            joined,
+            pending: std::collections::BTreeSet::new(),
+            hidden,
+        };
+        let mut guard = directory.lock().unwrap();
+        guard.sync_local_states(facts);
     }
 
     /// Broadcast a signed room withdrawal for `topic` over the directory
@@ -15386,6 +15443,11 @@ impl IcedChat {
             }
 
             AppMessage::ConnMonitorTick => {
+                // BORU-DIR-12 (PDF Task 4.3): keep the bounded
+                // room-directory cache's per-room local relationship state
+                // derived from the real local room database (joined rooms
+                // from the conversation store + persisted hide preference).
+                self.sync_directory_local_states();
                 // BORU-DIR-08 (PDF Task 3.2 step 4): evict advertisements
                 // whose TTL elapsed since the last valid refresh.  This
                 // replaces the old fixed 1-hour window with the

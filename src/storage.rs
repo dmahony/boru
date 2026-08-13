@@ -712,6 +712,61 @@ impl Storage {
         Ok(())
     }
 
+    // ── Room-directory hide preferences (BORU-DIR-12, PDF Task 4.3) ──
+
+    /// kv_store key holding the persisted set of room ids the user has
+    /// hidden/blocked from the room directory. Stored as a JSON array of
+    /// hex-encoded 32-byte room ids.
+    const ROOM_HIDDEN_IDS_KEY: &str = "room_hidden_ids";
+
+    /// Read the persisted set of room ids the user has hidden/blocked
+    /// from the public-room directory (BORU-DIR-12, PDF Task 4.3 step 3).
+    ///
+    /// The hide preference survives advertisement refreshes and
+    /// application restarts: the app layer loads it at startup and feeds
+    /// it into the directory via
+    /// [`crate::room_directory::RoomDirectory::sync_local_states`], so a
+    /// hidden room is never re-shown unless the user explicitly resets
+    /// the preference (BORU-DIR-20 adds the user-facing controls; this
+    /// is the persistence hook they write through).
+    pub fn room_hidden_ids(&self) -> Result<Vec<[u8; 32]>> {
+        let Some(raw) = self.kv_get(Self::ROOM_HIDDEN_IDS_KEY)? else {
+            return Ok(Vec::new());
+        };
+        let hex_ids: Vec<String> = serde_json::from_str(&raw)
+            .std_context("parse room_hidden_ids payload")?;
+        let mut out = Vec::with_capacity(hex_ids.len());
+        for hex_id in hex_ids {
+            if let Ok(bytes) = hex::decode(&hex_id) {
+                if let Ok(arr) = <[u8; 32]>::try_from(bytes) {
+                    out.push(arr);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Persist a hide/block preference for a room (BORU-DIR-12, PDF Task
+    /// 4.3 step 3). `hidden = true` adds the room id to the persisted
+    /// hidden set; `false` removes it (the explicit reset path).
+    ///
+    /// This is the persistence hook BORU-DIR-20's user-facing Hide/Block
+    /// controls write through; the directory cache reads the preference
+    /// via [`Self::room_hidden_ids`] + `sync_local_states`.
+    pub fn set_room_hidden(&self, room_id: &[u8; 32], hidden: bool) -> Result<()> {
+        let mut ids = self.room_hidden_ids()?;
+        let present = ids.iter().any(|id| id == room_id);
+        match (hidden, present) {
+            (true, false) => ids.push(*room_id),
+            (false, true) => ids.retain(|id| id != room_id),
+            _ => return Ok(()), // no-op: already in desired state
+        }
+        let hex_ids: Vec<String> = ids.iter().map(hex::encode).collect();
+        let raw = serde_json::to_string(&hex_ids)
+            .std_context("serialize room_hidden_ids payload")?;
+        self.kv_set(Self::ROOM_HIDDEN_IDS_KEY, &raw)
+    }
+
     // ── Open / init ───────────────────────────────────────────────────
 
     /// Open (or create) the database at `data_dir / `[`DB_FILE_NAME`]`.
@@ -6432,6 +6487,62 @@ impl<T> OptionalExt<T> for Result<T, rusqlite::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Room-directory hide preferences (BORU-DIR-12, PDF Task 4.3) ──
+
+    /// The hide preference persists across restarts: set → read →
+    /// reopen → still present, and removing works both directions.
+    #[test]
+    fn room_hidden_ids_roundtrip_and_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let id_a = [0xAAu8; 32];
+        let id_b = [0xBBu8; 32];
+
+        {
+            let storage = Storage::open(dir.path()).unwrap();
+            assert!(storage.room_hidden_ids().unwrap().is_empty());
+
+            storage.set_room_hidden(&id_a, true).unwrap();
+            storage.set_room_hidden(&id_b, true).unwrap();
+            let ids = storage.room_hidden_ids().unwrap();
+            assert_eq!(ids.len(), 2);
+            assert!(ids.contains(&id_a));
+            assert!(ids.contains(&id_b));
+
+            // Idempotent hide: setting true twice keeps one entry.
+            storage.set_room_hidden(&id_a, true).unwrap();
+            assert_eq!(storage.room_hidden_ids().unwrap().len(), 2);
+
+            // Un-hide one.
+            storage.set_room_hidden(&id_a, false).unwrap();
+            let ids = storage.room_hidden_ids().unwrap();
+            assert_eq!(ids, vec![id_b]);
+        }
+
+        // Reopen: the preference survived the restart.
+        let storage = Storage::open(dir.path()).unwrap();
+        assert_eq!(storage.room_hidden_ids().unwrap(), vec![id_b]);
+
+        // Un-hide the last one.
+        storage.set_room_hidden(&id_b, false).unwrap();
+        assert!(storage.room_hidden_ids().unwrap().is_empty());
+    }
+
+    /// Room ids are stored as exactly-32-byte identifiers; a malformed
+    /// payload is tolerated (bad entries skipped, valid ones returned).
+    #[test]
+    fn room_hidden_ids_skips_malformed_payloads() {
+        let storage = Storage::memory().unwrap();
+        // Corrupt the kv payload directly (bad hex / short id).
+        storage
+            .kv_set(Storage::ROOM_HIDDEN_IDS_KEY, "[\"zzzz\"]")
+            .unwrap();
+        assert!(storage.room_hidden_ids().unwrap().is_empty());
+
+        let id = [0x11u8; 32];
+        storage.set_room_hidden(&id, true).unwrap();
+        assert_eq!(storage.room_hidden_ids().unwrap(), vec![id]);
+    }
 
     // ── Documentation consistency ────────────────────────────────
     //

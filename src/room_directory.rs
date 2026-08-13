@@ -23,7 +23,16 @@
 //! * **local join state** ([`DirectoryEntry::local_join_state`];
 //!   defaults to [`LocalJoinState::NotJoined`] — BORU-DIR-12 derives
 //!   Joined/Blocked from the real room database, never from the
-//!   directory itself).
+//!   directory itself). The app layer feeds the facts
+//!   ([`LocalRoomFacts`]) via [`RoomDirectory::sync_local_states`]:
+//!   joined room ids come from the real local room database (the
+//!   source of truth for Joined, never the advertisement), hidden
+//!   room ids from the persisted hide preference. Hidden rooms are
+//!   derived [`LocalJoinState::Blocked`] and excluded from
+//!   [`RoomDirectory::snapshot`], so they stay hidden across
+//!   advertisement refreshes until the preference is explicitly reset
+//!   (PDF Task 4.3; BORU-DIR-20 adds the user-facing Hide/Block
+//!   controls, this module only stores the state).
 //!
 //! # Bounds (PDF Task 4.1 step 5)
 //!
@@ -88,7 +97,7 @@
 
 use std::{
     cmp::Ordering,
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     time::{Duration, Instant},
 };
 
@@ -179,6 +188,52 @@ pub enum LocalJoinState {
     Incompatible,
 }
 
+/// Facts about the local relationship to rooms, fed from the real local
+/// room database (BORU-DIR-12, PDF Task 4.3).
+///
+/// The directory itself never consults the room database — the app layer
+/// owns the source of truth (the persisted conversation store / room
+/// database plus the persisted hide preference) and pushes the facts in
+/// via [`RoomDirectory::sync_local_states`]. This keeps the directory a
+/// pure cache: it can derive `local_join_state` per entry, but it can
+/// never create, duplicate, or mutate local membership records (PDF Core
+/// rule).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LocalRoomFacts {
+    /// Room ids the user has joined, from the real local room database.
+    pub joined: BTreeSet<TopicId>,
+    /// Room ids with a join attempt in flight (Phase 6 join flow).
+    pub pending: BTreeSet<TopicId>,
+    /// Room ids the user has hidden/blocked locally (persisted
+    /// preference, BORU-DIR-20 adds the user-facing controls).
+    pub hidden: BTreeSet<TopicId>,
+}
+
+/// Deterministic derivation of a room's local relationship state
+/// (PDF Task 4.3).
+///
+/// Precedence: hidden/blocked wins (a hidden room is never re-shown),
+/// then joined (Open rather than Join), then a pending join, then
+/// incompatibility, and finally NotJoined.
+pub fn derive_local_state(
+    compatibility: RoomCompatibility,
+    is_joined: bool,
+    is_pending: bool,
+    is_hidden: bool,
+) -> LocalJoinState {
+    if is_hidden {
+        LocalJoinState::Blocked
+    } else if is_joined {
+        LocalJoinState::Joined
+    } else if is_pending {
+        LocalJoinState::JoinPending
+    } else if compatibility != RoomCompatibility::Compatible {
+        LocalJoinState::Incompatible
+    } else {
+        LocalJoinState::NotJoined
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Entry + outcome
 // ---------------------------------------------------------------------------
@@ -259,6 +314,39 @@ pub enum AdvertiseOutcome {
     Unchanged,
 }
 
+/// The action the Discover Rooms UI should offer for a cached room
+/// (PDF Task 5.2). Derived from the entry's [`LocalJoinState`] plus its
+/// [`RoomCompatibility`]; BORU-DIR-12 exposes this so the future UI
+/// layer shows **Open** for already-joined rooms instead of **Join**
+/// (PDF Task 4.3 step 4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoomAction {
+    /// Offer a Join button — the room is discoverable and the user has
+    /// not joined it.
+    Join,
+    /// Offer an Open button — the user has already joined this room.
+    Open,
+    /// Never render — the room is locally hidden/blocked (do not
+    /// re-show unless the preference is reset).
+    Hidden,
+    /// Render as incompatible — joining is blocked/explained (Phase 6
+    /// Task 6.2).
+    Incompatible,
+}
+
+impl DirectoryEntry {
+    /// The browse action for this room (PDF Task 4.3 step 4: a joined
+    /// room shows Open, never Join).
+    pub fn offered_action(&self) -> RoomAction {
+        match self.local_join_state {
+            LocalJoinState::Joined => RoomAction::Open,
+            LocalJoinState::Blocked => RoomAction::Hidden,
+            LocalJoinState::Incompatible => RoomAction::Incompatible,
+            LocalJoinState::NotJoined | LocalJoinState::JoinPending => RoomAction::Join,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // RoomDirectory
 // ---------------------------------------------------------------------------
@@ -280,6 +368,11 @@ pub struct RoomDirectory {
     max_entries: usize,
     /// Maximum aggregate metadata bytes (injectable for tests).
     max_bytes: usize,
+    /// Local relationship facts (BORU-DIR-12, PDF Task 4.3): joined /
+    /// pending / hidden room ids fed from the real local room database.
+    /// Used to derive each entry's `local_join_state`; the directory
+    /// never creates or duplicates membership records itself.
+    local_facts: LocalRoomFacts,
 }
 
 impl RoomDirectory {
@@ -296,7 +389,43 @@ impl RoomDirectory {
             total_bytes: 0,
             max_entries,
             max_bytes,
+            local_facts: LocalRoomFacts::default(),
         }
+    }
+
+    /// Replace the local relationship facts and re-derive every cached
+    /// entry's `local_join_state` (BORU-DIR-12, PDF Task 4.3).
+    ///
+    /// `facts.joined` must come from the real local room database (the
+    /// source of truth for `Joined` — never from the advertisement);
+    /// `facts.hidden` carries the persisted hide preference so hidden
+    /// rooms stay hidden across advertisement refreshes and restarts.
+    /// The directory stores the facts so entries added *after* this call
+    /// (e.g. a hidden room re-advertised later) are derived immediately.
+    pub fn sync_local_states(&mut self, facts: LocalRoomFacts) {
+        self.local_facts = facts;
+        for (room_id, entry) in self.entries.iter_mut() {
+            entry.local_join_state = derive_local_state(
+                entry.compatibility,
+                self.local_facts.joined.contains(room_id),
+                self.local_facts.pending.contains(room_id),
+                self.local_facts.hidden.contains(room_id),
+            );
+        }
+    }
+
+    /// The currently-known local relationship facts.
+    pub fn local_facts(&self) -> &LocalRoomFacts {
+        &self.local_facts
+    }
+
+    fn derive_for(&self, room_id: &TopicId, compatibility: RoomCompatibility) -> LocalJoinState {
+        derive_local_state(
+            compatibility,
+            self.local_facts.joined.contains(room_id),
+            self.local_facts.pending.contains(room_id),
+            self.local_facts.hidden.contains(room_id),
+        )
     }
 
     /// Apply a decoded, bounded room advertisement (BORU-DIR-01/02) to the
@@ -345,6 +474,10 @@ impl RoomDirectory {
         let bytes = encoded_size(&advert);
         let ttl = Duration::from_secs(u64::from(advert.expires_after_secs.max(1)));
         let compatibility = RoomCompatibility::for_room_protocol(advert.room_protocol_version);
+        // BORU-DIR-12: derive the local relationship state once, before
+        // the entries map is mutably borrowed (Joined/hidden come from
+        // the local room DB facts, never from the advertisement).
+        let derived_local_state = self.derive_for(&room_id, compatibility);
 
         match self.entries.get_mut(&room_id) {
             Some(existing) => {
@@ -396,6 +529,12 @@ impl RoomDirectory {
                         existing.conflict = conflict;
                         existing.digest = incoming_digest;
                         existing.bytes = bytes;
+                        // BORU-DIR-12: re-derive the local relationship
+                        // state — a refresh may change compatibility
+                        // (e.g. a newer protocol version) but never the
+                        // facts themselves (Joined/hidden come from the
+                        // local room DB, never the advertisement).
+                        existing.local_join_state = derived_local_state;
                         self.total_bytes = self
                             .total_bytes
                             .saturating_sub(old_bytes)
@@ -434,7 +573,11 @@ impl RoomDirectory {
                     last_seen: now,
                     expires_at: now + ttl,
                     compatibility,
-                    local_join_state: LocalJoinState::NotJoined,
+                    // BORU-DIR-12: derive the local relationship state at
+                    // insert from the stored facts — a hidden room that is
+                    // re-advertised after eviction stays hidden, a joined
+                    // room is never offered Join.
+                    local_join_state: derived_local_state,
                     conflict: false,
                     bytes,
                     digest,
@@ -506,12 +649,31 @@ impl RoomDirectory {
         self.entries.contains_key(room_id)
     }
 
-    /// Deterministic snapshot of all cached entries, sorted by room_id.
+    /// Deterministic snapshot of the **browse surface** — all cached
+    /// entries that should be offered to the user, sorted by room_id.
     ///
-    /// Subscribers (Phase 5 Discover Rooms UI, diagnostics) read through
-    /// this; ordering is deterministic so the UI never churns on map
-    /// iteration order.
+    /// Locally hidden/blocked rooms are excluded (BORU-DIR-12, PDF Task
+    /// 4.3: do not re-show hidden rooms unless the user explicitly resets
+    /// that preference). Diagnostics that need the full cache including
+    /// hidden rooms use [`snapshot_all`](Self::snapshot_all).
+    ///
+    /// Ordering is deterministic so the UI never churns on map iteration
+    /// order.
     pub fn snapshot(&self) -> Vec<DirectoryEntry> {
+        let mut rooms: Vec<DirectoryEntry> = self
+            .entries
+            .values()
+            .filter(|e| e.local_join_state != LocalJoinState::Blocked)
+            .cloned()
+            .collect();
+        rooms.sort_by(|a, b| a.advert.room_id.as_bytes().cmp(b.advert.room_id.as_bytes()));
+        rooms
+    }
+
+    /// Deterministic snapshot of **all** cached entries including
+    /// locally hidden/blocked rooms (for diagnostics / the Phase 8
+    /// directory view). Same ordering as [`snapshot`](Self::snapshot).
+    pub fn snapshot_all(&self) -> Vec<DirectoryEntry> {
         let mut rooms: Vec<DirectoryEntry> = self.entries.values().cloned().collect();
         rooms.sort_by(|a, b| a.advert.room_id.as_bytes().cmp(b.advert.room_id.as_bytes()));
         rooms
@@ -1489,6 +1651,273 @@ mod tests {
         assert_eq!(
             dir.get(&room).unwrap().compatibility,
             RoomCompatibility::UpgradeRequired
+        );
+    }
+
+    // ── Local relationship state (PDF Task 4.3, BORU-DIR-12) ─────────
+
+    fn facts(joined: &[TopicId], pending: &[TopicId], hidden: &[TopicId]) -> LocalRoomFacts {
+        LocalRoomFacts {
+            joined: joined.iter().copied().collect(),
+            pending: pending.iter().copied().collect(),
+            hidden: hidden.iter().copied().collect(),
+        }
+    }
+
+    /// The directory does not offer Join for an already joined room:
+    /// `sync_local_states` with the real room DB's joined set marks the
+    /// entry Joined and `offered_action` returns Open.
+    #[test]
+    fn joined_room_offers_open_not_join() {
+        let mut dir = RoomDirectory::new();
+        let room = topic(1);
+        let owner = key(0x42);
+        dir.apply_advertisement(ad(room, 0x42, "room"), owner, verified_auth(owner), 1, 1000);
+
+        dir.sync_local_states(facts(&[room], &[], &[]));
+
+        assert_eq!(
+            dir.get(&room).unwrap().local_join_state,
+            LocalJoinState::Joined,
+            "Joined derived from the real room database"
+        );
+        assert_eq!(
+            dir.get(&room).unwrap().offered_action(),
+            RoomAction::Open,
+            "already-joined room shows Open, never Join"
+        );
+    }
+
+    /// A joined room is still part of the browse surface (Open, not
+    /// hidden), and Join is only offered for genuinely unjoined rooms.
+    #[test]
+    fn join_offered_only_for_not_joined_room() {
+        let mut dir = RoomDirectory::new();
+        let joined_room = topic(1);
+        let discoverable_room = topic(2);
+        let owner = key(0x42);
+        dir.apply_advertisement(
+            ad(joined_room, 0x42, "joined"),
+            owner,
+            verified_auth(owner),
+            1,
+            1000,
+        );
+        dir.apply_advertisement(
+            ad(discoverable_room, 0x42, "discoverable"),
+            owner,
+            verified_auth(owner),
+            1,
+            1000,
+        );
+
+        dir.sync_local_states(facts(&[joined_room], &[], &[]));
+
+        assert_eq!(
+            dir.get(&joined_room).unwrap().offered_action(),
+            RoomAction::Open
+        );
+        assert_eq!(
+            dir.get(&discoverable_room).unwrap().offered_action(),
+            RoomAction::Join
+        );
+    }
+
+    /// Directory state cannot duplicate local membership records: syncing
+    /// facts never creates or inserts entries, and a joined room that is
+    /// not (or no longer) advertised does not appear in the directory.
+    #[test]
+    fn sync_local_states_never_duplicates_membership() {
+        let mut dir = RoomDirectory::new();
+        let advertised = topic(1);
+        let owner = key(0x42);
+        dir.apply_advertisement(
+            ad(advertised, 0x42, "room"),
+            owner,
+            verified_auth(owner),
+            1,
+            1000,
+        );
+        let before = dir.len();
+
+        // Facts include rooms that were never advertised (e.g. the local
+        // conversation store has a room this directory has never seen).
+        let local_only_room = topic(9);
+        dir.sync_local_states(facts(&[advertised, local_only_room], &[], &[]));
+
+        assert_eq!(dir.len(), before, "sync never inserts new entries");
+        assert!(
+            !dir.contains(&local_only_room),
+            "a local-only room is not materialised in the directory"
+        );
+        assert_eq!(
+            dir.get(&advertised).unwrap().local_join_state,
+            LocalJoinState::Joined
+        );
+    }
+
+    /// Hidden rooms are derived Blocked, excluded from the browse
+    /// snapshot, and stay hidden across advertisement refreshes when the
+    /// preference is persisted (fed back on every sync).
+    #[test]
+    fn hidden_room_stays_hidden_across_refreshes() {
+        let mut dir = RoomDirectory::new();
+        let room = topic(1);
+        let owner = key(0x42);
+
+        // First advertisement, then the user hides the room.
+        dir.apply_advertisement(ad(room, 0x42, "room"), owner, verified_auth(owner), 1, 1000);
+        dir.sync_local_states(facts(&[], &[], &[room]));
+
+        assert_eq!(
+            dir.get(&room).unwrap().local_join_state,
+            LocalJoinState::Blocked
+        );
+        assert!(
+            dir.snapshot().is_empty(),
+            "hidden room is not re-shown in the browse surface"
+        );
+        assert_eq!(
+            dir.snapshot_all().len(),
+            1,
+            "diagnostics still see the hidden entry"
+        );
+
+        // A refresh advertisement arrives: the persisted hide preference
+        // keeps the room hidden (no re-show).
+        let outcome =
+            dir.apply_advertisement(ad(room, 0x42, "room"), owner, verified_auth(owner), 2, 1060);
+        assert_eq!(outcome, AdvertiseOutcome::Refreshed);
+        assert_eq!(
+            dir.get(&room).unwrap().local_join_state,
+            LocalJoinState::Blocked,
+            "refresh must not un-hide the room"
+        );
+        assert!(dir.snapshot().is_empty());
+
+        // A second refresh (new publisher, verified) also keeps it hidden.
+        let endorser = key(0x43);
+        let mut endorsement = ad(room, 0x42, "room");
+        endorsement.sign(&secret_key(0x43));
+        dir.apply_advertisement(endorsement, endorser, verified_auth(endorser), 1, 2000);
+        assert_eq!(
+            dir.get(&room).unwrap().local_join_state,
+            LocalJoinState::Blocked
+        );
+        assert!(dir.snapshot().is_empty());
+    }
+
+    /// A hidden room that is later re-advertised from scratch (evicted /
+    /// expired meanwhile) stays hidden because the facts are stored.
+    #[test]
+    fn hidden_room_readded_after_eviction_stays_hidden() {
+        let mut dir = RoomDirectory::new();
+        let room = topic(1);
+        let owner = key(0x42);
+        let now = t0();
+
+        dir.apply_advertisement_at(
+            ad_named(room, 0x42, "room", 1),
+            owner,
+            verified_auth(owner),
+            1,
+            1000,
+            now,
+        );
+        dir.sync_local_states(facts(&[], &[], &[room]));
+
+        // TTL elapses → entry evicted.
+        assert_eq!(dir.evict_expired_at(now + Duration::from_secs(2)).len(), 1);
+        assert!(dir.is_empty());
+
+        // The advertiser re-publishes: hidden preference still applied.
+        dir.apply_advertisement_at(
+            ad_named(room, 0x42, "room", 300),
+            owner,
+            verified_auth(owner),
+            2,
+            3000,
+            now + Duration::from_secs(3),
+        );
+        assert_eq!(
+            dir.get(&room).unwrap().local_join_state,
+            LocalJoinState::Blocked,
+            "re-added hidden room stays hidden"
+        );
+        assert!(dir.snapshot().is_empty());
+    }
+
+    /// Explicitly resetting the preference (facts.hidden no longer
+    /// contains the room) restores the room to the browse surface.
+    #[test]
+    fn unhide_restores_room_to_browse_surface() {
+        let mut dir = RoomDirectory::new();
+        let room = topic(1);
+        let owner = key(0x42);
+        dir.apply_advertisement(ad(room, 0x42, "room"), owner, verified_auth(owner), 1, 1000);
+
+        dir.sync_local_states(facts(&[], &[], &[room]));
+        assert!(dir.snapshot().is_empty());
+
+        // The user explicitly resets the hide preference (BORU-DIR-20).
+        dir.sync_local_states(facts(&[], &[], &[]));
+        assert_eq!(
+            dir.get(&room).unwrap().local_join_state,
+            LocalJoinState::NotJoined
+        );
+        assert_eq!(dir.snapshot().len(), 1, "room is browseable again");
+    }
+
+    /// Incompatible rooms derive Incompatible local state: Join is
+    /// blocked (Phase 6 Task 6.2), and the directory never offers Join.
+    #[test]
+    fn incompatible_room_never_offers_join() {
+        let mut dir = RoomDirectory::new();
+        let room = topic(1);
+        let owner = key(0x42);
+        let mut advert = ad(room, 0x42, "future-room");
+        advert.room_protocol_version = crate::public_room::PROTOCOL_VERSION + 1;
+        dir.apply_advertisement(advert, owner, verified_auth(owner), 1, 1000);
+
+        dir.sync_local_states(facts(&[], &[], &[]));
+        assert_eq!(
+            dir.get(&room).unwrap().local_join_state,
+            LocalJoinState::Incompatible
+        );
+        assert_eq!(
+            dir.get(&room).unwrap().offered_action(),
+            RoomAction::Incompatible
+        );
+    }
+
+    /// Precedence: hidden beats joined; joined beats pending;
+    /// pending beats incompatible; incompatible beats NotJoined.
+    #[test]
+    fn derive_local_state_precedence() {
+        let compatible = RoomCompatibility::Compatible;
+        let incompatible = RoomCompatibility::UpgradeRequired;
+
+        assert_eq!(
+            derive_local_state(compatible, true, false, true),
+            LocalJoinState::Blocked,
+            "hidden wins over joined"
+        );
+        assert_eq!(
+            derive_local_state(compatible, true, true, false),
+            LocalJoinState::Joined,
+            "joined wins over pending"
+        );
+        assert_eq!(
+            derive_local_state(compatible, false, true, false),
+            LocalJoinState::JoinPending
+        );
+        assert_eq!(
+            derive_local_state(incompatible, false, false, false),
+            LocalJoinState::Incompatible
+        );
+        assert_eq!(
+            derive_local_state(compatible, false, false, false),
+            LocalJoinState::NotJoined
         );
     }
 }

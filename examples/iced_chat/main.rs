@@ -1723,6 +1723,16 @@ fn main() -> Result<()> {
             app.capability_gate = _discovery_service
                 .as_ref()
                 .map(|svc| svc.capability_gate());
+            // BORU-DIR-12 (PDF Task 4.3): give the UI a read handle to
+            // the bounded room-directory cache so the app can feed the
+            // real local relationship facts (joined rooms from the
+            // conversation store + persisted hide preference) into the
+            // per-room `local_join_state` derivation on each
+            // ConnMonitorTick. The discovery service handle itself stays
+            // off the UI.
+            app.room_directory = _discovery_service
+                .as_ref()
+                .map(|svc| svc.room_directory());
             #[cfg(feature = "screen-sharing")]
             {
                 // Wire the screen-share protocol channels and handle into the
