@@ -294,6 +294,13 @@ terminal = ["gui", "dep:iced_term"]
 # Screen sharing is deliberately opt-in while the subsystem is integrated.
 # Reuse the OpenH264 dependency already used by video-calls.
 screen-sharing = ["net", "dep:openh264", "dep:zbus", "dep:libloading", "dep:windows-sys", "dep:windows", "dep:x11rb"]
+# Developer-only live UI editor gate (BORU-UI-08). Enabling this feature
+# turns the live UI editor on in ANY build (including release): boru-ui.toml
+# is loaded, the file watcher runs and live theme redraw is active. It is
+# deliberately NOT in `default` — ordinary users get the production theme
+# path. Debug builds can also enable the editor at runtime without the
+# feature via `--dev-ui` or `BORU_DEV_UI=1`; release builds cannot.
+dev-ui = []
 # Developer-only fast screen-sharing prototype; reuses the existing tunnel.
 experimental-vnc = ["gui"]
 

@@ -167,6 +167,13 @@ struct Args {
     /// Enable performance instrumentation and print baseline report at exit.
     #[clap(long)]
     perf: bool,
+    /// Enable the live UI editor (boru-ui.toml overrides + file watcher +
+    /// live theme redraw). Only effective in debug builds unless the
+    /// `dev-ui` cargo feature is enabled (which turns it on in every
+    /// build); ignored in release builds without the feature. The
+    /// BORU_DEV_UI=1 environment variable is the equivalent.
+    #[clap(long)]
+    dev_ui: bool,
     /// Enable the MCP diagnostic server for AI-agent integration.
     #[clap(long)]
     mcp: bool,
@@ -189,6 +196,56 @@ enum Command {
     Join { ticket: String },
     /// Open the standalone log viewer for this profile.
     Logs,
+}
+
+// ── Developer-mode gate for the live UI editor (BORU-UI-08) ──────────
+
+/// Pure gate predicate for the live UI editor.
+///
+/// `feature_on` is `cfg!(feature = "dev-ui")` and `debug_build` is
+/// `cfg!(debug_assertions)`. The editor is enabled when:
+///
+/// 1. the `dev-ui` cargo feature is enabled — the deliberate opt-in that
+///    also works in release builds, or
+/// 2. the build is a debug build (`debug_assertions`) AND the operator
+///    passed `--dev-ui` on the command line or set `BORU_DEV_UI=1`
+///    (or `BORU_DEV_UI=true`, case-insensitive).
+///
+/// In every other case — most importantly release builds without the
+/// feature — the editor is off: `boru-ui.toml` is never read, no watcher
+/// thread is spawned, and the app uses `BoruTheme` defaults only.
+fn dev_ui_gate_on(
+    feature_on: bool,
+    debug_build: bool,
+    cli_flag: bool,
+    env_value: Option<&str>,
+) -> bool {
+    if feature_on {
+        return true;
+    }
+    if !debug_build {
+        return false;
+    }
+    let env_flag = matches!(
+        env_value.map(str::to_ascii_lowercase).as_deref(),
+        Some("1") | Some("true")
+    );
+    cli_flag || env_flag
+}
+
+/// Runtime gate for the live UI editor (BORU-UI-08).
+///
+/// Precedence (documented in `docs/live-ui-editor/dev-mode-gate.md`):
+/// cargo feature `dev-ui` wins in every build; otherwise (debug builds
+/// only) `--dev-ui` or `BORU_DEV_UI=1` enables it; release builds without
+/// the feature are always off.
+fn dev_ui_enabled(cli_flag: bool) -> bool {
+    dev_ui_gate_on(
+        cfg!(feature = "dev-ui"),
+        cfg!(debug_assertions),
+        cli_flag,
+        std::env::var("BORU_DEV_UI").ok().as_deref(),
+    )
 }
 
 // ── Message protocol ──────────────────────────────────────────────────
@@ -490,22 +547,31 @@ fn main() -> Result<()> {
     let _log_guard = init_logging(&data_dir)?;
     info!(data_dir = %data_dir.display(), "starting iced chat");
 
-    // BORU-UI-04: load dev theme overrides (boru-ui.toml) from the data dir.
-    // A missing file yields an empty config (defaults); a malformed file
-    // logs a developer error and keeps the last known-good theme — startup
-    // never fails because of the dev file.
-    let ui_theme_config = match theme_config::load_ui_theme_config(&data_dir) {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            warn!(error = %e, "boru-ui.toml theme overrides ignored; using default theme");
-            theme_config::UiThemeConfig::default()
+    // BORU-UI-04/08: load dev theme overrides (boru-ui.toml) from the data
+    // dir — but ONLY when the live UI editor gate is on (cargo feature
+    // `dev-ui`, or a debug build with `--dev-ui` / `BORU_DEV_UI=1`).
+    // Release builds without the feature never read the file; the app uses
+    // `BoruTheme` defaults only. A missing file still yields an empty
+    // config (defaults); a malformed file logs a developer error and keeps
+    // the last known-good theme — startup never fails because of the file.
+    let dev_ui = dev_ui_enabled(args.dev_ui);
+    let ui_theme_config = if dev_ui {
+        match theme_config::load_ui_theme_config(&data_dir) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                warn!(error = %e, "boru-ui.toml theme overrides ignored; using default theme");
+                theme_config::UiThemeConfig::default()
+            }
         }
+    } else {
+        debug!("live UI editor disabled (dev-ui gate off); boru-ui.toml not loaded");
+        theme_config::UiThemeConfig::default()
     };
     // BORU-UI-05: surface validation warnings for unsafe/nonsensical values
     // (negative padding, zero font size, absurd sidebar widths, …) exactly
     // once at startup. The merge itself is pure and runs on every
     // `IcedChat::boru_theme()` call; the warnings are reported here.
-    {
+    if dev_ui {
         let (_, theme_warnings) = theme_merge::merge_ui_theme(
             &crate::theme::BoruTheme::default(),
             &ui_theme_config,
@@ -1756,16 +1822,26 @@ fn main() -> Result<()> {
             // merged theme (`active_theme`) is computed from the startup
             // config and the theme revision is initialized — view functions
             // read `boru_theme()` from state from the very first frame.
+            // BORU-UI-08: when the dev-ui gate is off, `ui_theme_config` is
+            // the empty default, so this is the identity merge — the app
+            // uses `BoruTheme` defaults only.
             app.set_ui_theme_config(ui_theme_config);
-            // BORU-UI-06: dev theme file watcher — observes boru-ui.toml,
+            // BORU-UI-06/08: dev theme file watcher — observes boru-ui.toml,
             // debounces save storms, parses on a background thread and sends
-            // AppMessage::UiThemeReloaded into the update loop. Failure to
-            // start is non-fatal (dev feature; live reload just stays off).
-            let (ui_theme_tx, ui_theme_rx) =
-                tokio::sync::mpsc::channel::<theme_watcher::UiThemeReloadMsg>(8);
-            app.ui_theme_rx = Some(std::sync::Arc::new(tokio::sync::Mutex::new(ui_theme_rx)));
-            if let Err(e) = theme_watcher::spawn_ui_theme_watcher(data_dir.clone(), ui_theme_tx) {
-                warn!(error = %e, "boru-ui.toml watcher failed to start; live reload disabled");
+            // AppMessage::UiThemeReloaded into the update loop. Only started
+            // when the live UI editor gate is on; otherwise `ui_theme_rx`
+            // stays `None` and the subscription falls back to a closed dummy
+            // receiver, so no reload message can ever reach the update loop.
+            // Failure to start is non-fatal (live reload just stays off).
+            if dev_ui {
+                let (ui_theme_tx, ui_theme_rx) =
+                    tokio::sync::mpsc::channel::<theme_watcher::UiThemeReloadMsg>(8);
+                app.ui_theme_rx = Some(std::sync::Arc::new(tokio::sync::Mutex::new(ui_theme_rx)));
+                if let Err(e) =
+                    theme_watcher::spawn_ui_theme_watcher(data_dir.clone(), ui_theme_tx)
+                {
+                    warn!(error = %e, "boru-ui.toml watcher failed to start; live reload disabled");
+                }
             }
             app.directory_store = shared_directory_store;
             // BORU-CP-06: give the UI a read handle to the backend
@@ -2819,5 +2895,53 @@ mod tests {
             room_discovery_dht.is_some(),
             "DHT must be created when --no-dht is absent"
         );
+    }
+
+    // ── BORU-UI-08: developer-mode gate for the live UI editor ─────────
+
+    #[test]
+    fn dev_ui_gate_feature_wins_in_any_build() {
+        // The `dev-ui` cargo feature is the deliberate opt-in: it enables
+        // the live editor even in release builds, regardless of flags/env.
+        assert!(dev_ui_gate_on(true, false, false, None));
+        assert!(dev_ui_gate_on(true, true, false, None));
+        assert!(dev_ui_gate_on(true, false, true, Some("0")));
+        assert!(dev_ui_gate_on(true, true, true, Some("false")));
+    }
+
+    #[test]
+    fn dev_ui_gate_release_without_feature_is_always_off() {
+        // Release build (debug_assertions off) without the feature: the
+        // editor is off no matter what the operator passes — boru-ui.toml
+        // is never read and no watcher is spawned.
+        assert!(!dev_ui_gate_on(false, false, false, None));
+        assert!(!dev_ui_gate_on(false, false, true, None));
+        assert!(!dev_ui_gate_on(false, false, true, Some("1")));
+        assert!(!dev_ui_gate_on(false, false, true, Some("true")));
+    }
+
+    #[test]
+    fn dev_ui_gate_debug_needs_switch_or_env() {
+        // Debug build without the feature: off by default…
+        assert!(!dev_ui_gate_on(false, true, false, None));
+        assert!(!dev_ui_gate_on(false, true, false, Some("0")));
+        assert!(!dev_ui_gate_on(false, true, false, Some("false")));
+        assert!(!dev_ui_gate_on(false, true, false, Some("")));
+        // …on with --dev-ui (the CLI switch wins even over a false env)…
+        assert!(dev_ui_gate_on(false, true, true, None));
+        assert!(dev_ui_gate_on(false, true, true, Some("0")));
+        // …or BORU_DEV_UI=1 / BORU_DEV_UI=true (case-insensitive).
+        assert!(dev_ui_gate_on(false, true, false, Some("1")));
+        assert!(dev_ui_gate_on(false, true, false, Some("true")));
+        assert!(dev_ui_gate_on(false, true, false, Some("TRUE")));
+        assert!(dev_ui_gate_on(false, true, false, Some("True")));
+    }
+
+    #[test]
+    fn dev_ui_cli_flag_parses() {
+        let args = Args::try_parse_from(["boru", "--dev-ui"].iter()).unwrap();
+        assert!(args.dev_ui, "--dev-ui must set the gate flag");
+        let args = Args::try_parse_from(["boru"].iter()).unwrap();
+        assert!(!args.dev_ui, "--dev-ui must default to off");
     }
 }
