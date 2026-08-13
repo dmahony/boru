@@ -3820,10 +3820,11 @@ impl IcedChat {
     }
 
     pub(crate) fn view_composer(&self) -> iced::Element<'_, AppMessage> {
-        use crate::design_tokens::{RADIUS_XL, SPACE_8};
+        use crate::design_tokens::SPACE_8;
         use iced::widget::{button, container, row, text, text_input};
         use iced::{Alignment, Length, Padding};
 
+        let btheme = self.boru_theme();
         let has_text = !self.composer_text.is_empty();
         // A send in flight wins over the empty-text appearance: the button
         // shows a clear "sending" state until the broadcast task completes.
@@ -3884,7 +3885,7 @@ impl IcedChat {
                             } else {
                                 0.0
                             },
-                            radius: RADIUS_XL.into(),
+                            radius: crate::theme::BoruTheme::for_theme(t).radii.xl.into(),
                         },
                         icon: iced::Color::TRANSPARENT,
                         placeholder: crate::design_tokens::text_muted(t),
@@ -3923,7 +3924,7 @@ impl IcedChat {
         // circular affordance matches Figure 4.
         let send_btn = button(
             if sending {
-                iced::Element::from(text("…").size(TYPO_MD))
+                iced::Element::from(text("…").size(btheme.typography.composer_text))
             } else {
                 iced::Element::from(
                     icon_svg(ICON_SEND, IconSize::Sm.px())
@@ -3986,19 +3987,22 @@ impl IcedChat {
         container(composer_bar)
             .width(Length::Fill)
             .padding(Padding::new(0.0))
-            .style(move |t: &iced::Theme| iced::widget::container::Style {
-                background: Some(iced::Background::Color(bg_surface_secondary(t))),
-                border: iced::Border {
-                    width: 1.0,
-                    color: if self.composer_drag_over {
-                        accent_primary(t)
-                    } else {
-                        border_muted(t)
+            .style(move |t: &iced::Theme| {
+                let b = crate::theme::BoruTheme::for_theme(t);
+                iced::widget::container::Style {
+                    background: Some(iced::Background::Color(bg_surface_secondary(t))),
+                    border: iced::Border {
+                        width: b.borders.hairline,
+                        color: if self.composer_drag_over {
+                            accent_primary(t)
+                        } else {
+                            border_muted(t)
+                        },
+                        radius: b.radii.xl.into(),
                     },
-                    radius: RADIUS_XL.into(),
-                },
-                shadow: crate::design_tokens::shadow_card(t),
-                ..Default::default()
+                    shadow: crate::design_tokens::shadow_card(t),
+                    ..Default::default()
+                }
             })
             .into()
     }
