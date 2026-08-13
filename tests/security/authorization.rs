@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use boru_core::backfill::BackfillAuthorizer;
-use boru_core::chat_core::verify_advertisement;
+use boru_core::chat_core::{verify_advertisement, DEFAULT_ADVERT_TTL_SECS};
 use boru_core::file_access_protocol::{
     sign_download_descriptor, verify_download_descriptor, BlobFormat, DescriptorVerification,
 };
@@ -468,7 +468,7 @@ fn tunnel_capability_matrix() {
 
 #[test]
 fn room_advertisement_signature_matrix() {
-    use boru_core::chat_core::{sign_advertisement, RoomAdvertisement};
+    use boru_core::chat_core::{sign_advertisement, RoomAdvertisement, DEFAULT_ADVERT_TTL_SECS};
     let author = SecretKey::generate();
     let other = SecretKey::generate();
     let ad = RoomAdvertisement {
@@ -478,6 +478,7 @@ fn room_advertisement_signature_matrix() {
         ticket: "blob:iroh:t".into(),
         member_count: 3,
         last_activity: now_ms(),
+        expires_after_secs: DEFAULT_ADVERT_TTL_SECS,
     };
     let sig = sign_advertisement(&ad, &author);
 

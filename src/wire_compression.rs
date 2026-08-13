@@ -770,7 +770,9 @@ mod tests {
     /// measured ratio reflects real-world gain rather than dictionary
     /// overfitting.  `SecretKey`/signature bytes are fresh per run.
     fn representative_corpus() -> Vec<(String, Vec<u8>)> {
-        use crate::chat_core::{Message, RoomAdvertisement, SharedFileMeta};
+        use crate::chat_core::{
+            Message, RoomAdvertisement, SharedFileMeta, DEFAULT_ADVERT_TTL_SECS,
+        };
         use crate::contact::{ContactAction, SignedContactMessage};
         use crate::diagnostics::DiagnosticProbe;
         use crate::group_encryption::message::EncryptedGroupEnvelope;
@@ -931,6 +933,7 @@ mod tests {
             ticket: ticket("boru-dev"),
             member_count: 7,
             last_activity: 1_723_100_000_000u64,
+            expires_after_secs: DEFAULT_ADVERT_TTL_SECS,
         };
         add(
             "RoomAdvertisement",
@@ -1097,7 +1100,9 @@ mod tests {
         use std::fs;
         use std::path::PathBuf;
 
-        use crate::chat_core::{Message, RoomAdvertisement, SharedFileMeta, SignedMessage};
+        use crate::chat_core::{
+            Message, RoomAdvertisement, SharedFileMeta, SignedMessage, DEFAULT_ADVERT_TTL_SECS,
+        };
         use crate::contact::{ContactAction, SignedContactMessage};
         use crate::diagnostics::DiagnosticProbe;
         use crate::group_encryption::message::EncryptedGroupEnvelope;
@@ -1272,6 +1277,7 @@ mod tests {
             ticket: ticket("general"),
             member_count: 42,
             last_activity: 1_723_000_000_000u64,
+            expires_after_secs: DEFAULT_ADVERT_TTL_SECS,
         };
         add(
             "RoomAdvertisement",

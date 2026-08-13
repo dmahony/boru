@@ -721,6 +721,9 @@ fn handle_create_public_room(req: &JsonRpcRequest, state: &McpAppState) -> Resul
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64,
+        // BORU-DIR-08: advertise with the protocol TTL so directory
+        // clients expire the entry if refreshes stop.
+        expires_after_secs: boru_core::chat_core::DEFAULT_ADVERT_TTL_SECS,
     };
     state
         .directory_store

@@ -16,7 +16,7 @@
 use std::hint::black_box;
 
 use boru_core::{
-    chat_core::{Message, RoomAdvertisement, SignedMessage},
+    chat_core::{DEFAULT_ADVERT_TTL_SECS, Message, RoomAdvertisement, SignedMessage},
     diagnostics::DiagnosticProbe,
     group_encryption::message::EncryptedGroupEnvelope,
     group_encryption::types::PeerId,
@@ -107,6 +107,7 @@ fn samples() -> Vec<Sample> {
                 room_name: "Rust & Low Bandwidth Chat".into(),
                 description: "A public room for discussing the low bandwidth mode, matrix dictionary tricks, and deflate tuning.".into(),
                 topic: TopicId::from_bytes([7; 32]),
+                expires_after_secs: DEFAULT_ADVERT_TTL_SECS,
                 ticket: blob_ticket(),
                 member_count: 42,
                 last_activity: 1_700_000_000_000,

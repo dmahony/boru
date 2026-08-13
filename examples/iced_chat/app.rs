@@ -427,6 +427,33 @@ const STARTUP_ADVERT_JITTER_MAX_MS: u64 = 2_000;
 /// identical metadata back-to-back.
 const ADVERT_DEDUPE_WINDOW: Duration = Duration::from_secs(30);
 
+// ── Advertisement lifetime (BORU-DIR-08, PDF Task 3.2) ───────────────
+/// Advertisement TTL (seconds) — the expiry/refresh mechanism. Every
+/// published advertisement carries `expires_after_secs = ADVERT_TTL_SECS`;
+/// directory clients consider it stale `ADVERT_TTL_SECS` after receipt and
+/// evict it unless the advertiser refreshes first. Defined here as the
+/// crate protocol default (300 s) so publishers and receivers agree.
+///
+/// Deliberately **much longer than the refresh interval** (60 s — a 5:1
+/// margin): a few lost refreshes from temporary packet loss must not flicker
+/// a room out of the directory (PDF Task 3.2 step 5). A room only leaves
+/// after its advertiser stops refreshing for the full TTL.
+const ADVERT_TTL_SECS: u32 = boru_core::chat_core::DEFAULT_ADVERT_TTL_SECS;
+
+/// Periodic refresh interval (seconds) — how often the app re-broadcasts
+/// advertisements for rooms in [`IcedChat::advertised_rooms`]. The
+/// `advertise_counter` counts 1-second ConnMonitorTicks and resets to this
+/// value (plus jitter) after each broadcast, so the wire cadence is
+/// 60–65 s — significantly shorter than [`ADVERT_TTL_SECS`].
+const ADVERT_REFRESH_INTERVAL_SECS: u64 = 60;
+
+/// Maximum extra jitter (seconds) added to the periodic refresh cadence.
+/// Each cycle resets the counter to `ADVERT_REFRESH_INTERVAL_SECS +
+/// random(0..=ADVERT_REFRESH_JITTER_SECS)`, so advertisers that start at
+/// similar times drift out of phase and do not re-broadcast in synchronized
+/// bursts (PDF Task 3.2 step 3).
+const ADVERT_REFRESH_JITTER_SECS: u64 = 5;
+
 /// Stable fingerprint of the advertised metadata that would be broadcast
 /// for a room (BORU-DIR-07 dedupe). Computed over the fields that define
 /// the *advertisement content* (room identity, name, description, join
@@ -11070,6 +11097,10 @@ impl IcedChat {
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .unwrap_or_default()
                                 .as_millis() as u64,
+                            // BORU-DIR-08: advertisements carry their TTL so
+                            // directory clients can expire them without a
+                            // refresh.
+                            expires_after_secs: ADVERT_TTL_SECS,
                         };
                         store.upsert(ad, local_pk);
                     }
@@ -11193,6 +11224,9 @@ impl IcedChat {
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_millis() as u64,
+                    // BORU-DIR-08: TTL so directory clients expire the ad
+                    // if refreshes stop.
+                    expires_after_secs: ADVERT_TTL_SECS,
                 };
                 let ad_bytes = postcard::to_stdvec(&ad).unwrap_or_default();
                 let signature = sk.sign(&ad_bytes);
@@ -11320,6 +11354,9 @@ impl IcedChat {
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_millis() as u64,
+                        // BORU-DIR-08: TTL so directory clients expire the ad
+                        // if refreshes stop.
+                        expires_after_secs: ADVERT_TTL_SECS,
                     };
                     let ad_bytes = postcard::to_stdvec(&ad).unwrap_or_default();
                     let signature = sk.sign(&ad_bytes);
@@ -12230,6 +12267,9 @@ impl IcedChat {
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap_or_default()
                                     .as_millis() as u64,
+                                // BORU-DIR-08: TTL so directory clients expire
+                                // the ad if refreshes stop.
+                                expires_after_secs: ADVERT_TTL_SECS,
                             };
                             store.upsert(ad, local_pk);
                         }
@@ -12311,6 +12351,9 @@ impl IcedChat {
                                             .unwrap_or_default()
                                             .as_millis()
                                             as u64,
+                                        // BORU-DIR-08: TTL so directory clients
+                                        // expire the ad if refreshes stop.
+                                        expires_after_secs: ADVERT_TTL_SECS,
                                     };
                                     let ad_bytes = postcard::to_stdvec(&ad).unwrap_or_default();
                                     let signature = sk.sign(&ad_bytes);
@@ -15276,11 +15319,23 @@ impl IcedChat {
             }
 
             AppMessage::ConnMonitorTick => {
+                // BORU-DIR-08 (PDF Task 3.2 step 4): evict advertisements
+                // whose TTL elapsed since the last valid refresh.  This
+                // replaces the old fixed 1-hour window with the
+                // advertisement's own `expires_after_secs` (300 s policy
+                // TTL): a room whose advertiser disappears leaves the active
+                // directory after the TTL, while refreshes arriving within
+                // the TTL (refresh interval 60 s << TTL) keep it live — no
+                // flicker on temporary packet loss.
                 let evicted = {
                     let mut store = self.directory_store.lock().unwrap();
-                    store.evict_stale(Duration::from_secs(60 * 60))
+                    store.evict_expired()
                 };
                 if !evicted.is_empty() {
+                    tracing::debug!(
+                        count = evicted.len(),
+                        "evicted expired directory advertisements"
+                    );
                     if let Some(storage) = self.storage.as_ref() {
                         if let Err(err) = storage.with_conn(|conn| {
                             for (topic, author) in &evicted {
@@ -15297,6 +15352,7 @@ impl IcedChat {
                     }
                     self.public_rooms_sidebar_revision =
                         self.public_rooms_sidebar_revision.wrapping_add(1);
+                    self.invalidate_prewarm(&[Screen::Discover]);
                 }
                 self.save_directory_store();
                 self.refresh_missing_downloads();
@@ -15696,7 +15752,15 @@ impl IcedChat {
                 // topic.  The advertisement carries the room's name,
                 // description, member count, and a join ticket.
                 if self.advertise_counter == 0 {
-                    self.advertise_counter = 60;
+                    // BORU-DIR-08 (PDF Task 3.2 step 3): jitter the periodic
+                    // refresh cadence so advertisers that started around the
+                    // same time drift out of phase instead of re-broadcasting
+                    // in synchronized bursts. The dedupe window (30 s) is
+                    // still well below the jittered minimum gap (60 s), so
+                    // every periodic refresh passes the unchanged-metadata
+                    // check.
+                    self.advertise_counter = ADVERT_REFRESH_INTERVAL_SECS as u32
+                        + rand::random::<u64>() as u32 % (ADVERT_REFRESH_JITTER_SECS as u32 + 1);
                     if let Some(ref dir_sender) = self.directory_sender {
                         if !self.advertised_rooms.is_empty() {
                             let advertised: Vec<TopicId> =
@@ -15771,6 +15835,18 @@ impl IcedChat {
                                     for (topic, room_name, description, ticket_str, member_count) in
                                         room_info
                                     {
+                                        // BORU-DIR-08 (PDF Task 3.2 step 3):
+                                        // small per-room jitter inside the
+                                        // periodic refresh burst so multiple
+                                        // rooms do not re-broadcast at the
+                                        // same instant.
+                                        let jitter_ms =
+                                            (rand::random::<u64>() % STARTUP_ADVERT_JITTER_MAX_MS)
+                                                as u64;
+                                        if jitter_ms > 0 {
+                                            tokio::time::sleep(Duration::from_millis(jitter_ms))
+                                                .await;
+                                        }
                                         let ad = boru_core::chat_core::RoomAdvertisement {
                                             room_name,
                                             description,
@@ -15781,6 +15857,9 @@ impl IcedChat {
                                                 .duration_since(std::time::UNIX_EPOCH)
                                                 .unwrap_or_default()
                                                 .as_millis() as u64,
+                                            // BORU-DIR-08: TTL so directory clients
+                                            // expire the ad if refreshes stop.
+                                            expires_after_secs: ADVERT_TTL_SECS,
                                         };
                                         // Sign the advertisement bytes with the node key
                                         let ad_bytes = postcard::to_stdvec(&ad).unwrap_or_default();
@@ -15832,6 +15911,9 @@ impl IcedChat {
                                         .unwrap_or_default()
                                         .as_millis()
                                         as u64,
+                                    // BORU-DIR-08: TTL so directory clients expire
+                                    // the ad if refreshes stop.
+                                    expires_after_secs: ADVERT_TTL_SECS,
                                 };
                                 store.upsert(ad, local_pk);
                             }
@@ -27832,6 +27914,7 @@ mod tests {
                     ticket: "ticket".to_string(),
                     member_count: 0,
                     last_activity: 0,
+                    expires_after_secs: ADVERT_TTL_SECS,
                 },
                 local_pk,
             );
@@ -29901,6 +29984,7 @@ mod tests {
             ticket: boru_core::chat_core::Ticket::new(topic, vec![]).to_string(),
             member_count: 0,
             last_activity: 0,
+            expires_after_secs: ADVERT_TTL_SECS,
         };
 
         // First announcement: accepted and inserted into the directory.
@@ -32406,6 +32490,122 @@ fn vr_startup_publish_survives_missing_directory_sender() {
         "rooms remain marked even when broadcasting is unavailable"
     );
     drop(task);
+    let _ = app.view();
+}
+
+// ── BORU-DIR-08 (PDF Task 3.2): TTL refresh and expiry ─────────────────
+
+#[test]
+fn vr_ttl_refresh_interval_much_shorter_than_ttl() {
+    // PDF Task 3.2 step 5: "choose a refresh interval significantly shorter
+    // than TTL so temporary packet loss does not immediately remove rooms".
+    // The policy must keep at least a 5:1 margin so several consecutive lost
+    // refreshes are still well inside the TTL.
+    assert!(
+        ADVERT_REFRESH_INTERVAL_SECS * 5 <= u64::from(ADVERT_TTL_SECS),
+        "refresh interval ({} s) must be significantly shorter than TTL ({} s)",
+        ADVERT_REFRESH_INTERVAL_SECS,
+        ADVERT_TTL_SECS,
+    );
+    // The publisher and the protocol default must agree so receivers that
+    // see a pre-DIR-08 advertisement (no TTL field) use the same expiry.
+    assert_eq!(
+        ADVERT_TTL_SECS,
+        boru_core::chat_core::DEFAULT_ADVERT_TTL_SECS,
+        "app TTL policy must match the protocol default"
+    );
+}
+
+#[test]
+fn vr_ttl_periodic_refresh_cadence_is_jittered() {
+    // PDF Task 3.2 step 3: jitter desynchronizes advertisers so they do not
+    // re-broadcast in synchronized bursts. When the counter hits zero the
+    // next refresh is scheduled 60–65 s out (base interval + 0..=5 s jitter),
+    // never at a fixed global instant.
+    let (_runtime, mut app) = build_prewarm_test_app();
+    app.advertise_counter = 0;
+    let task = app.update(AppMessage::ConnMonitorTick);
+    drop(task);
+    assert!(
+        (60..=65).contains(&app.advertise_counter),
+        "jittered refresh cadence out of range: {}",
+        app.advertise_counter
+    );
+}
+
+#[test]
+fn vr_ttl_expired_advertisement_leaves_directory_on_tick() {
+    // PDF Task 3.2 acceptance: "a room whose advertiser disappears
+    // eventually leaves the active directory". After the TTL elapses without
+    // a refresh, the next monitor tick evicts the advertisement.
+    let (_runtime, mut app) = build_prewarm_test_app();
+    let author = SecretKey::generate().public();
+    let topic = TopicId::from_bytes([0x42; 32]);
+    let ad = RoomAdvertisement {
+        room_name: "Vanishing Room".to_string(),
+        description: String::new(),
+        topic,
+        ticket: boru_core::chat_core::Ticket::new(topic, vec![]).to_string(),
+        member_count: 0,
+        last_activity: 0,
+        expires_after_secs: 1,
+    };
+    {
+        let mut store = app.directory_store.lock().unwrap();
+        store.upsert(ad.clone(), author);
+    }
+    // Wait out the TTL, then let the monitor tick evict.
+    std::thread::sleep(std::time::Duration::from_millis(1_200));
+    let task = app.update(AppMessage::ConnMonitorTick);
+    drop(task);
+    {
+        let store = app.directory_store.lock().unwrap();
+        assert!(
+            !store.contains(topic, author),
+            "expired advertisement must leave the active directory"
+        );
+        assert!(store.list_active().is_empty());
+    }
+    let _ = app.view();
+}
+
+#[test]
+fn vr_ttl_recently_refreshed_advertisement_stays_in_directory() {
+    // PDF Task 3.2 acceptance: "temporary network loss does not cause
+    // constant room flicker". A room whose last refresh is well inside its
+    // TTL must remain listed — the eviction sweep must not remove entries
+    // just because a refresh is momentarily overdue.
+    let (_runtime, mut app) = build_prewarm_test_app();
+    let author = SecretKey::generate().public();
+    let topic = TopicId::from_bytes([0x43; 32]);
+    let ad = RoomAdvertisement {
+        room_name: "Steady Room".to_string(),
+        description: String::new(),
+        topic,
+        ticket: boru_core::chat_core::Ticket::new(topic, vec![]).to_string(),
+        member_count: 0,
+        last_activity: 0,
+        // Policy TTL (300 s): the periodic refresh interval (60 s) is far
+        // shorter, so one missed refresh never expires the room.
+        expires_after_secs: ADVERT_TTL_SECS,
+    };
+    {
+        let mut store = app.directory_store.lock().unwrap();
+        store.upsert(ad, author);
+    }
+    // Several ticks with no refresh arriving: still listed (no flicker).
+    for _ in 0..3 {
+        let task = app.update(AppMessage::ConnMonitorTick);
+        drop(task);
+    }
+    {
+        let store = app.directory_store.lock().unwrap();
+        assert!(
+            store.contains(topic, author),
+            "room within TTL must not be evicted by a missed refresh"
+        );
+        assert_eq!(store.list_active().len(), 1);
+    }
     let _ = app.view();
 }
 }

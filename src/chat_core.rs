@@ -63,7 +63,7 @@ pub use protocol::{
     message_hash, sign_advertisement, verify_advertisement, Hash, Message, MessageHash, NetEvent,
     RoomAdvertisement, RoomInvitation, RoomInviteV2, SharedFileMeta, SignedMessage, Ticket,
     ROOM_ADVERTISEMENT_PROTOCOL, ROOM_ADVERTISEMENT_VERSION, SIGNED_MESSAGE_PROTOCOL,
-    SIGNED_MESSAGE_VERSION, DEFAULT_MESSAGE_TTL,
+    SIGNED_MESSAGE_VERSION, DEFAULT_ADVERT_TTL_SECS, DEFAULT_MESSAGE_TTL,
 };
 
 /// UI/state types, extracted to submodules so the state machine can be tested

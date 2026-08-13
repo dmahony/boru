@@ -55,7 +55,7 @@ use crate::store::{DeliveryStatus, MessageId, OutboxRow, StoredEnvelope};
 // ── Current schema version ────────────────────────────────────────────────
 
 /// Bump every time a new migration is added.
-pub const CURRENT_SCHEMA_VERSION: u32 = 19;
+pub const CURRENT_SCHEMA_VERSION: u32 = 20;
 
 /// Maximum number of rows inspected by a single outbox claim query.
 pub const MAX_OUTBOX_CLAIM_LIMIT: u32 = 100;
@@ -977,6 +977,7 @@ impl Storage {
                 17 => self.migrate_v17(&conn)?,
                 18 => self.migrate_v18(&conn)?,
                 19 => self.migrate_v19(&conn)?,
+                20 => self.migrate_v20(&conn)?,
                 _ => unreachable!("unknown migration version {v}"),
             }
             let now = now_ms();
@@ -1539,6 +1540,25 @@ impl Storage {
             ",
         )
         .std_context("migrate v19 chat_messages")?;
+        Ok(())
+    }
+
+    /// v20 adds the advertisement TTL column to the durable public-room
+    /// directory table (BORU-DIR-08, PDF Task 3.2).
+    ///
+    /// `DirectoryStore` now tracks each advertisement's `expires_after_secs`
+    /// so directory clients can evict stale entries when no valid refresh
+    /// arrives.  Existing rows (created by migrate_v11) default to the
+    /// protocol TTL (`DEFAULT_ADVERT_TTL_SECS`, 300 s); rows whose TTL
+    /// elapsed while the app was offline are dropped at load time.
+    fn migrate_v20(&self, conn: &Connection) -> Result<()> {
+        Self::add_column_if_missing(
+            conn,
+            "directory_ads",
+            "expires_after_secs",
+            "INTEGER NOT NULL DEFAULT 300",
+        )
+        .std_context("migrate v20 directory_ads expires_after_secs")?;
         Ok(())
     }
 

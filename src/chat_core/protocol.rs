@@ -25,6 +25,20 @@ use crate::user_profile::UserProfile;
 /// Default maximum age of a received message before it is rejected as stale.
 pub const DEFAULT_MESSAGE_TTL: Duration = Duration::from_secs(3600);
 
+/// BORU-DIR-08 (PDF Task 3.2): default advertisement TTL (seconds).
+///
+/// This is the expiry/refresh mechanism: a room advertisement whose
+/// advertiser stops refreshing is considered stale by directory clients
+/// `expires_after_secs` after it was received, and is evicted from the
+/// directory cache.  The periodic refresh interval (60 s — see
+/// `ADVERT_REFRESH_INTERVAL_SECS` in the GUI) is deliberately much shorter
+/// than this TTL so temporary packet loss does not flicker rooms in and out
+/// of the directory (PDF Task 3.2 step 5).
+///
+/// Advertisements that predate the `expires_after_secs` wire field decode
+/// with this value.
+pub const DEFAULT_ADVERT_TTL_SECS: u32 = 300;
+
 /// An event received from the gossip network (decoded from the wire).
 #[derive(Debug, Clone)]
 pub enum NetEvent {
@@ -246,7 +260,7 @@ where
 ///
 /// Peers can use this to discover public rooms without needing an
 /// out-of-band invitation.
-#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize)]
 pub struct RoomAdvertisement {
     /// Human-readable room name.
     pub room_name: String,
@@ -260,6 +274,95 @@ pub struct RoomAdvertisement {
     pub member_count: u32,
     /// Unix ms timestamp of last activity.
     pub last_activity: u64,
+    /// Advertisement TTL in seconds (BORU-DIR-08, PDF Task 3.2) — the
+    /// expiry/refresh mechanism. Directory clients consider the
+    /// advertisement stale `expires_after_secs` after receipt and evict it
+    /// unless the advertiser refreshes first. The publisher refreshes well
+    /// before expiry (refresh interval 60 s vs. TTL 300 s). Legacy
+    /// advertisements that predate this field decode with
+    /// [`DEFAULT_ADVERT_TTL_SECS`].
+    pub expires_after_secs: u32,
+}
+
+/// Manual [`Deserialize`] for [`RoomAdvertisement`] so legacy advertisements
+/// (no trailing `expires_after_secs` field) still decode (BORU-DIR-08).
+///
+/// The TTL field is appended at the END of the struct.  Postcard's sequence
+/// access returns `Err(EOF)` — not `Ok(None)` — when the buffer is exhausted
+/// before the declared field count, so `#[serde(default)]` alone cannot
+/// backfill the missing field.  We read the six original fields, then treat
+/// an end-of-buffer on the seventh as [`DEFAULT_ADVERT_TTL_SECS`] (same
+/// pattern as `SignedMessage.compression` and the `FileShare` thumbnail
+/// field).
+impl<'de> Deserialize<'de> for RoomAdvertisement {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct RoomAdvertisementVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for RoomAdvertisementVisitor {
+            type Value = RoomAdvertisement;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                write!(f, "a room advertisement")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let room_name = seq
+                    .next_element()?
+                    .ok_or_else(|| serde::de::Error::custom("missing `room_name`"))?;
+                let description = seq
+                    .next_element()?
+                    .ok_or_else(|| serde::de::Error::custom("missing `description`"))?;
+                let topic = seq
+                    .next_element()?
+                    .ok_or_else(|| serde::de::Error::custom("missing `topic`"))?;
+                let ticket = seq
+                    .next_element()?
+                    .ok_or_else(|| serde::de::Error::custom("missing `ticket`"))?;
+                let member_count = seq
+                    .next_element()?
+                    .ok_or_else(|| serde::de::Error::custom("missing `member_count`"))?;
+                let last_activity = seq
+                    .next_element()?
+                    .ok_or_else(|| serde::de::Error::custom("missing `last_activity`"))?;
+                // Trailing TTL field (BORU-DIR-08). Legacy advertisements end
+                // after `last_activity` — treat a missing/EOF field as the
+                // protocol default so old advertisers keep working.
+                let expires_after_secs = match seq.next_element() {
+                    Ok(Some(v)) => v,
+                    Ok(None) | Err(_) => DEFAULT_ADVERT_TTL_SECS,
+                };
+                Ok(RoomAdvertisement {
+                    room_name,
+                    description,
+                    topic,
+                    ticket,
+                    member_count,
+                    last_activity,
+                    expires_after_secs,
+                })
+            }
+        }
+
+        deserializer.deserialize_struct(
+            "RoomAdvertisement",
+            &[
+                "room_name",
+                "description",
+                "topic",
+                "ticket",
+                "member_count",
+                "last_activity",
+                "expires_after_secs",
+            ],
+            RoomAdvertisementVisitor,
+        )
+    }
 }
 
 /// Metadata for a file advertised by a peer in [`Message::ProfileUpdate`].

@@ -72,6 +72,15 @@ pub struct DirectoryStore {
     ads: HashMap<(TopicId, PublicKey), (RoomAdvertisement, Instant)>,
 }
 
+/// How long an advertisement stays active after it was (re)ceived
+/// (BORU-DIR-08).  Uses the advertisement's own TTL field
+/// (`expires_after_secs`), clamped to at least 1 second.  Advertisements
+/// that predate the TTL field decode with
+/// [`DEFAULT_ADVERT_TTL_SECS`](crate::chat_core::DEFAULT_ADVERT_TTL_SECS).
+fn ad_lifetime(ad: &RoomAdvertisement) -> Duration {
+    Duration::from_secs(u64::from(ad.expires_after_secs.max(1)))
+}
+
 impl DirectoryStore {
     /// Create a new empty store.
     pub fn new() -> Self {
@@ -84,7 +93,9 @@ impl DirectoryStore {
     ///
     /// If an advertisement already exists for the same (topic, author) pair,
     /// it is replaced with the new value and the received timestamp is reset
-    /// to the current time.
+    /// to the current time — a **refresh** (BORU-DIR-08).  The entry's
+    /// lifetime restarts from `expires_after_secs` (see
+    /// [`evict_expired`](Self::evict_expired)).
     pub fn upsert(&mut self, ad: RoomAdvertisement, author: PublicKey) {
         self.ads.insert((ad.topic, author), (ad, Instant::now()));
     }
@@ -99,10 +110,20 @@ impl DirectoryStore {
         self.ads.contains_key(&(topic, author))
     }
 
-    /// Persist all current advertisements to the SQLite directory table.
+    /// Persist all current (non-expired) advertisements to the SQLite
+    /// directory table.
+    ///
+    /// Expired advertisements are skipped so 'currently active' is never
+    /// persisted forever (PDF Task 3.2 step 6): a room whose advertiser
+    /// went offline is not resurrected by the next restart.
     pub fn save_to_db(&self, conn: &Connection) -> Result<()> {
         conn.execute("DELETE FROM directory_ads", [])?;
+        let now = Instant::now();
         for ((topic, author), (ad, received)) in &self.ads {
+            if now.duration_since(*received) >= ad_lifetime(ad) {
+                // Expired — do not persist as active (BORU-DIR-08).
+                continue;
+            }
             let received_at_ms = std::time::SystemTime::now()
                 .checked_sub(received.elapsed())
                 .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
@@ -111,8 +132,8 @@ impl DirectoryStore {
             conn.execute(
                 "INSERT INTO directory_ads
                     (topic, author, room_name, description, ticket, member_count,
-                     last_activity, received_at_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                     last_activity, received_at_ms, expires_after_secs)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     topic.as_bytes(),
                     author.as_bytes(),
@@ -122,6 +143,7 @@ impl DirectoryStore {
                     ad.member_count as i64,
                     ad.last_activity as i64,
                     received_at_ms,
+                    ad.expires_after_secs as i64,
                 ],
             )?;
         }
@@ -129,10 +151,16 @@ impl DirectoryStore {
     }
 
     /// Load persisted advertisements, replacing the in-memory contents.
+    ///
+    /// Entries whose TTL already elapsed while the application was stopped
+    /// are **not** restored (PDF Task 3.2 step 6 — do not persist 'currently
+    /// active' forever across restarts).  Live advertisers re-announce on
+    /// startup (BORU-DIR-07) and refresh periodically, so a still-active
+    /// room reappears quickly even if its persisted row was dropped.
     pub fn load_from_db(&mut self, conn: &Connection) -> Result<()> {
         let mut stmt = conn.prepare(
             "SELECT topic, author, room_name, description, ticket, member_count,
-                    last_activity, received_at_ms
+                    last_activity, received_at_ms, expires_after_secs
              FROM directory_ads",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -155,6 +183,7 @@ impl DirectoryStore {
                     ticket: row.get(4)?,
                     member_count: row.get::<_, i64>(5)? as u32,
                     last_activity: row.get::<_, i64>(6)? as u64,
+                    expires_after_secs: row.get::<_, i64>(8)? as u32,
                 },
                 author,
                 row.get::<_, i64>(7)?,
@@ -170,6 +199,11 @@ impl DirectoryStore {
         for row in rows {
             let (ad, author, received_at_ms) = row?;
             let age_ms = now_ms.saturating_sub(received_at_ms).max(0) as u64;
+            // BORU-DIR-08: drop rows that already expired while offline so a
+            // stale advertisement cannot stay 'live' across a restart.
+            if age_ms >= ad_lifetime(&ad).as_millis() as u64 {
+                continue;
+            }
             self.ads.insert(
                 (ad.topic, author),
                 (
@@ -183,9 +217,17 @@ impl DirectoryStore {
     }
 
     /// Return all active advertisements paired with their author.
+    ///
+    /// Expired advertisements (received longer than `expires_after_secs`
+    /// ago without a refresh) are excluded — mirroring
+    /// [`evict_expired`](Self::evict_expired) on read paths so a stale
+    /// entry can never be presented as live (BORU-DIR-08, PDF Task 3.2
+    /// step 4).
     pub fn list_active(&self) -> Vec<(RoomAdvertisement, PublicKey)> {
+        let now = Instant::now();
         self.ads
             .iter()
+            .filter(|(_, (ad, received))| now.duration_since(*received) < ad_lifetime(ad))
             .map(|((_topic, author), (ad, _))| (ad.clone(), *author))
             .collect()
     }
@@ -205,8 +247,8 @@ impl DirectoryStore {
 
     /// Remove advertisements older than `max_age`.
     ///
-    /// Call this periodically (e.g. every 60 seconds) to keep the store
-    /// from accumulating stale entries from peers that have gone offline.
+    /// Legacy fixed-window eviction.  Prefer [`evict_expired`](Self::evict_expired),
+    /// which honours each advertisement's own TTL (BORU-DIR-08).
     pub fn evict_stale(&mut self, max_age: Duration) -> Vec<(TopicId, PublicKey)> {
         let cutoff = Instant::now() - max_age;
         let evicted: Vec<_> = self
@@ -217,6 +259,30 @@ impl DirectoryStore {
             .collect();
         self.ads.retain(|key, _| !evicted.contains(key));
         evicted
+    }
+
+    /// Remove advertisements whose TTL has elapsed since they were last
+    /// refreshed (BORU-DIR-08, PDF Task 3.2 step 4).
+    ///
+    /// A room whose advertiser disappears eventually leaves the active
+    /// directory: the entry expires `expires_after_secs` after the last
+    /// valid refresh.  Because the refresh interval is much shorter than
+    /// the TTL, a few lost refreshes (temporary network loss) never expire
+    /// a room — it only leaves after the advertiser stops refreshing for
+    /// the full TTL.  Returns the evicted `(topic, author)` keys so callers
+    /// can refresh UI state.
+    ///
+    /// Call this periodically (e.g. on the GUI's 1 s monitor tick).
+    pub fn evict_expired(&mut self) -> Vec<(TopicId, PublicKey)> {
+        let now = Instant::now();
+        let expired: Vec<_> = self
+            .ads
+            .iter()
+            .filter(|(_, (ad, received))| now.duration_since(*received) >= ad_lifetime(ad))
+            .map(|(key, _)| *key)
+            .collect();
+        self.ads.retain(|key, _| !expired.contains(key));
+        expired
     }
 
     /// Return the number of stored advertisements.
@@ -300,6 +366,7 @@ mod tests {
             ticket: format!("ticket-{room_name}"),
             member_count: 5,
             last_activity: 0,
+            expires_after_secs: crate::chat_core::DEFAULT_ADVERT_TTL_SECS,
         }
     }
 
@@ -367,6 +434,7 @@ mod tests {
             ticket: "ticket".to_string(),
             member_count: 1,
             last_activity: 0,
+            expires_after_secs: 300,
         };
         let ad_new = RoomAdvertisement {
             room_name: "new-name".to_string(),
@@ -375,6 +443,7 @@ mod tests {
             ticket: "ticket".to_string(),
             member_count: 10,
             last_activity: 1000,
+            expires_after_secs: 300,
         };
 
         store.upsert(ad_old, author);
@@ -437,6 +506,7 @@ mod tests {
                 topic BLOB NOT NULL, author BLOB NOT NULL, room_name TEXT NOT NULL,
                 description TEXT NOT NULL, ticket TEXT NOT NULL, member_count INTEGER NOT NULL,
                 last_activity INTEGER NOT NULL, received_at_ms INTEGER NOT NULL,
+                expires_after_secs INTEGER NOT NULL DEFAULT 300,
                 PRIMARY KEY (topic, author)
             )",
         )
@@ -450,5 +520,127 @@ mod tests {
         let mut restored = DirectoryStore::new();
         restored.load_from_db(&conn).unwrap();
         assert_eq!(restored.list_active(), vec![(ad, author)]);
+    }
+
+    // ── BORU-DIR-08 (PDF Task 3.2): TTL refresh and expiry ─────────────
+
+    /// An advertisement whose TTL elapses without a refresh is evicted from
+    /// the active directory — a room whose advertiser disappears eventually
+    /// leaves (PDF Task 3.2 acceptance criterion).
+    #[test]
+    fn directory_store_evicts_expired_ads_without_refresh() {
+        let mut store = DirectoryStore::new();
+        let topic = make_topic(1);
+        let author = make_public_key(42);
+        let mut ad = make_ad("vanishing-room", topic);
+        ad.expires_after_secs = 1; // 1-second TTL for the test
+
+        store.upsert(ad.clone(), author);
+        assert_eq!(store.list_active().len(), 1, "fresh ad is active");
+
+        std::thread::sleep(Duration::from_millis(1_200));
+        let evicted = store.evict_expired();
+        assert_eq!(evicted, vec![(topic, author)], "expired ad is evicted");
+        assert!(
+            store.is_empty(),
+            "stale room cannot remain permanently live"
+        );
+    }
+
+    /// `list_active` never presents an expired advertisement as live, even
+    /// before the periodic eviction sweep runs.
+    #[test]
+    fn directory_store_list_active_excludes_expired() {
+        let mut store = DirectoryStore::new();
+        let topic = make_topic(1);
+        let author = make_public_key(42);
+        let mut ad = make_ad("expiring-room", topic);
+        ad.expires_after_secs = 1;
+
+        store.upsert(ad, author);
+        std::thread::sleep(Duration::from_millis(1_200));
+        assert!(
+            store.list_active().is_empty(),
+            "expired ad must not appear in the active directory"
+        );
+    }
+
+    /// A room whose advertiser refreshes within the TTL stays active —
+    /// temporary gaps (packet loss) shorter than the TTL never flicker the
+    /// room out of the directory (PDF Task 3.2 step 5: refresh interval
+    /// significantly shorter than TTL).
+    #[test]
+    fn directory_store_refresh_within_ttl_keeps_ad_active() {
+        let mut store = DirectoryStore::new();
+        let topic = make_topic(1);
+        let author = make_public_key(42);
+        let mut ad = make_ad("steady-room", topic);
+        ad.expires_after_secs = 2;
+
+        store.upsert(ad.clone(), author);
+        // Simulate one lost refresh (a 1 s gap < 2 s TTL) then a refresh.
+        std::thread::sleep(Duration::from_millis(1_000));
+        store.upsert(ad.clone(), author);
+        std::thread::sleep(Duration::from_millis(1_000));
+        // The refresh keeps the entry alive past what the original receipt
+        // would have allowed.
+        assert_eq!(store.list_active().len(), 1, "refreshed room stays active");
+        assert!(
+            store.evict_expired().is_empty(),
+            "no eviction while refreshes keep arriving"
+        );
+    }
+
+    /// `save_to_db` does not persist ads that already expired, and
+    /// `load_from_db` drops rows whose TTL elapsed while the app was
+    /// stopped — 'currently active' must not survive a restart forever
+    /// (PDF Task 3.2 step 6).
+    #[test]
+    fn directory_store_expired_rows_not_persisted_or_resurrected() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE directory_ads (
+                topic BLOB NOT NULL, author BLOB NOT NULL, room_name TEXT NOT NULL,
+                description TEXT NOT NULL, ticket TEXT NOT NULL, member_count INTEGER NOT NULL,
+                last_activity INTEGER NOT NULL, received_at_ms INTEGER NOT NULL,
+                expires_after_secs INTEGER NOT NULL DEFAULT 300,
+                PRIMARY KEY (topic, author)
+            )",
+        )
+        .unwrap();
+
+        // Insert a row that expired 10 minutes ago (2-minute TTL) directly,
+        // simulating a stale row persisted before the app stopped.
+        let topic = make_topic(1);
+        let author = make_public_key(42);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        conn.execute(
+            "INSERT INTO directory_ads
+                (topic, author, room_name, description, ticket, member_count,
+                 last_activity, received_at_ms, expires_after_secs)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                topic.as_bytes(),
+                author.as_bytes(),
+                "stale-room",
+                "stale".to_string(),
+                "ticket".to_string(),
+                0i64,
+                0i64,
+                now_ms - 600_000, // received 10 minutes ago
+                120i64,           // 2-minute TTL → already expired
+            ],
+        )
+        .unwrap();
+
+        let mut store = DirectoryStore::new();
+        store.load_from_db(&conn).unwrap();
+        assert!(
+            store.list_active().is_empty(),
+            "an ad that expired while offline must not be resurrected"
+        );
     }
 }

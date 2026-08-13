@@ -4,7 +4,8 @@
 
 use crate::common::{now_secs, sweep_mutations};
 use boru_core::chat_core::{
-    sign_advertisement, verify_advertisement, Message, RoomAdvertisement, SignedMessage,
+    sign_advertisement, verify_advertisement, DEFAULT_ADVERT_TTL_SECS, Message,
+    RoomAdvertisement, SignedMessage,
 };
 use boru_core::contact::{ContactAction, SignedContactMessage};
 use boru_core::file_access_protocol::{
@@ -187,6 +188,7 @@ fn room_advertisement_flip_truncate_extend_rejected_without_panic() {
         ticket: "blob:iroh:xyz".into(),
         member_count: 1,
         last_activity: now_secs() * 1000,
+        expires_after_secs: DEFAULT_ADVERT_TTL_SECS,
     };
     let sig = sign_advertisement(&ad, &sk);
     let mut encoded = postcard::to_stdvec(&ad).unwrap();

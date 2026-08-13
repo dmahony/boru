@@ -1109,6 +1109,7 @@
                 "RoomAdvertisement",
                 Message::RoomAdvertisement {
                     ad: RoomAdvertisement {
+                        expires_after_secs: DEFAULT_ADVERT_TTL_SECS,
                         room_name: "Boru Public Room".into(),
                         description: "A public room for testing compression".into(),
                         topic: TopicId::from_bytes([7; 32]),
