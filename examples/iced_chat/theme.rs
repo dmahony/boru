@@ -175,6 +175,12 @@ pub struct ColorTokens {
     pub settings_danger: Color,
     /// Settings strong danger (Remove button) — light rgb(0.9,0.3,0.3), dark rgb(0.6,0.15,0.15).
     pub settings_danger_strong: Color,
+    /// Settings row-title text (GIF privacy heading) — light rgb(0.15,0.15,0.15), dark rgb(0.9,0.9,0.9).
+    pub settings_heading_text: Color,
+    /// Expanded-video overlay backdrop rgba(0,0,0,0.82) — both modes.
+    pub expanded_video_backdrop: Color,
+    /// Image lightbox backdrop rgba(0,0,0,0.90) — both modes.
+    pub lightbox_backdrop: Color,
     // ── Status card (dark privacy panel — theme-independent) ──
     /// Status card background — top/left gradient stop #10201C.
     pub status_card_bg_top: Color,
@@ -342,6 +348,9 @@ impl ColorTokens {
             settings_success: Color::from_rgb(0.15, 0.55, 0.2),
             settings_danger: Color::from_rgb(0.8, 0.2, 0.2),
             settings_danger_strong: Color::from_rgb(0.9, 0.3, 0.3),
+            settings_heading_text: Color::from_rgb(0.15, 0.15, 0.15),
+            expanded_video_backdrop: Color::from_rgba(0.0, 0.0, 0.0, 0.82),
+            lightbox_backdrop: Color::from_rgba(0.0, 0.0, 0.0, 0.90),
             status_card_bg_top: Color::from_rgb(
                 0x10 as f32 / 255.0,
                 0x20 as f32 / 255.0,
@@ -460,6 +469,9 @@ impl ColorTokens {
             settings_success: Color::from_rgb(0.15, 0.55, 0.2),
             settings_danger: Color::from_rgb(0.9, 0.3, 0.3),
             settings_danger_strong: Color::from_rgb(0.6, 0.15, 0.15),
+            settings_heading_text: Color::from_rgb(0.9, 0.9, 0.9),
+            expanded_video_backdrop: Color::from_rgba(0.0, 0.0, 0.0, 0.82),
+            lightbox_backdrop: Color::from_rgba(0.0, 0.0, 0.0, 0.90),
             status_card_bg_top: Color::from_rgb(
                 0x10 as f32 / 255.0,
                 0x20 as f32 / 255.0,
@@ -597,6 +609,10 @@ pub struct TypographyTokens {
     pub badge: f32,
     // Audit §3.10 — call screen text.
     pub call_name: f32,
+    /// Active-call (in-progress) name size — 26 px, one step above the
+    /// outgoing-call `call_name` (24 px). Kept separate so the two call
+    /// screens keep their distinct sizes.
+    pub call_name_active: f32,
     pub call_remote_name: f32,
     pub call_status: f32,
     pub call_duration: f32,
@@ -630,6 +646,7 @@ impl Default for TypographyTokens {
             section_label: 11.0,
             badge: 10.0,
             call_name: 24.0,
+            call_name_active: 26.0,
             call_remote_name: 18.0,
             call_status: 16.0,
             call_duration: 22.0,
@@ -1962,6 +1979,32 @@ mod tests {
         // Controls (audit §3.12)
         assert_eq!(theme.controls.header_height, 52.0);
         assert_eq!(theme.controls.slider_width, 160.0);
+        // Area-10 pinned raw literals (audit §3.9/§3.10/§3.12)
+        assert_eq!(theme.typography.call_name_active, 26.0);
+        assert_eq!(
+            theme.colors.settings_heading_text,
+            iced::Color::from_rgb(0.15, 0.15, 0.15)
+        );
+        assert_eq!(
+            BoruTheme::dark().colors.settings_heading_text,
+            iced::Color::from_rgb(0.9, 0.9, 0.9)
+        );
+        assert_eq!(
+            theme.colors.expanded_video_backdrop,
+            iced::Color::from_rgba(0.0, 0.0, 0.0, 0.82)
+        );
+        assert_eq!(
+            BoruTheme::dark().colors.expanded_video_backdrop,
+            iced::Color::from_rgba(0.0, 0.0, 0.0, 0.82)
+        );
+        assert_eq!(
+            theme.colors.lightbox_backdrop,
+            iced::Color::from_rgba(0.0, 0.0, 0.0, 0.90)
+        );
+        assert_eq!(
+            BoruTheme::dark().colors.lightbox_backdrop,
+            iced::Color::from_rgba(0.0, 0.0, 0.0, 0.90)
+        );
         // Chat overlay backdrops + panel shadow (audit §3.3 raw rgba values)
         assert_eq!(
             theme.colors.chat_overlay_backdrop,

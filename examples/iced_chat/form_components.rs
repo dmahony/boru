@@ -976,7 +976,7 @@ pub fn remove_chip(
         chip = chip.push(
             button(
                 text("\u{2715}")
-                    .size(10.0)
+                    .size(crate::theme::BoruTheme::default().typography.badge)
                     .style(|t| text::Style {
                         color: Some(design_tokens::text_muted(t)),
                     }),

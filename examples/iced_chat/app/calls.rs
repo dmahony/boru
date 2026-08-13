@@ -26,14 +26,19 @@ impl IcedChat {
         };
         let initials = crate::presentation::initials(&name);
         let avatar_label = if initials.is_empty() { "?".to_string() } else { initials };
-        let avatar = container(text(avatar_label).size(36.0))
-            .width(Length::Fixed(96.0))
-            .height(Length::Fixed(96.0))
-            .center_x(Length::Fixed(96.0))
-            .center_y(Length::Fixed(96.0))
+        let calls = crate::theme::BoruTheme::default().calls;
+        let typography = crate::theme::BoruTheme::default().typography;
+        let avatar = container(text(avatar_label).size(typography.call_avatar_glyph))
+            .width(Length::Fixed(calls.avatar_size))
+            .height(Length::Fixed(calls.avatar_size))
+            .center_x(Length::Fixed(calls.avatar_size))
+            .center_y(Length::Fixed(calls.avatar_size))
             .style(|theme| iced::widget::container::Style {
                 background: Some(iced::Background::Color(bg_surface_secondary(theme))),
-                border: iced::Border { radius: 48.0.into(), ..Default::default() },
+                border: iced::Border {
+                    radius: crate::theme::BoruTheme::for_theme(theme).radii.call_avatar.into(),
+                    ..Default::default()
+                },
                 ..Default::default()
             });
         let controls: iced::Element<'_, AppMessage> = match self.active_call_id {
@@ -42,11 +47,16 @@ impl IcedChat {
                 .padding([SPACE_8, SPACE_24])
                 .style(BUTTON_DANGER)
                 .into(),
-            None => iced::widget::Space::new().height(Length::Fixed(40.0)).into(),
+            None => iced::widget::Space::new().height(Length::Fixed(calls.controls_gap)).into(),
         };
-        container(column![avatar, text(name).size(24.0), text(status).size(16.0), controls]
-            .spacing(SPACE_16)
-            .align_x(Alignment::Center))
+        container(column![
+            avatar,
+            text(name).size(typography.call_name),
+            text(status).size(typography.call_status),
+            controls
+        ]
+        .spacing(SPACE_16)
+        .align_x(Alignment::Center))
             .width(Length::Fill)
             .height(Length::Fill)
             .center_x(Length::Fill)
@@ -61,8 +71,13 @@ impl IcedChat {
         let name = self.outgoing_call_peer.as_ref().map(|peer| self.resolve_name(peer)).unwrap_or_else(|| "Unknown contact".to_string());
         let initials = crate::presentation::initials(&name);
         let avatar_label = if initials.is_empty() { "?".to_string() } else { initials };
-        let remote_fallback = || container(column![text(avatar_label.clone()).size(44.0), text(name.clone()).size(18.0)]
-            .spacing(SPACE_8).align_x(Alignment::Center))
+        let calls = crate::theme::BoruTheme::default().calls;
+        let typography = crate::theme::BoruTheme::default().typography;
+        let remote_fallback = || container(column![
+            text(avatar_label.clone()).size(typography.call_avatar_glyph_large),
+            text(name.clone()).size(typography.call_remote_name)
+        ]
+        .spacing(SPACE_8).align_x(Alignment::Center))
             .width(Length::Fill).height(Length::Fill)
             .center_x(Length::Fill).center_y(Length::Fill)
             .style(|theme| iced::widget::container::Style {
@@ -93,7 +108,7 @@ impl IcedChat {
         let remote_main: iced::Element<'_, AppMessage> = remote.unwrap_or_else(|| remote_fallback().into());
         #[cfg(feature = "video-calls")]
         let local = self.latest_local_frame.as_ref().and_then(|frame| {
-            let fit = contain_fit_rect(frame.width as f32, frame.height as f32, 220.0, 150.0)?;
+            let fit = contain_fit_rect(frame.width as f32, frame.height as f32, calls.pip_w, calls.pip_h)?;
             Some(
             iced::widget::image(iced::widget::image::Handle::from_rgba(
                 frame.width, frame.height, frame.rgba.to_vec()))
@@ -103,12 +118,15 @@ impl IcedChat {
         });
         #[cfg(not(feature = "video-calls"))]
         let local: Option<iced::Element<'_, AppMessage>> = None;
-        let local_pip: iced::Element<'_, AppMessage> = local.unwrap_or_else(|| container(text("You").size(18.0))
-            .width(Length::Fixed(220.0)).height(Length::Fixed(150.0))
-            .center_x(Length::Fixed(220.0)).center_y(Length::Fixed(150.0))
+        let local_pip: iced::Element<'_, AppMessage> = local.unwrap_or_else(|| container(text("You").size(typography.call_pip_label))
+            .width(Length::Fixed(calls.pip_w)).height(Length::Fixed(calls.pip_h))
+            .center_x(Length::Fixed(calls.pip_w)).center_y(Length::Fixed(calls.pip_h))
             .style(|theme| iced::widget::container::Style {
                 background: Some(iced::Background::Color(bg_surface_secondary(theme))),
-                border: iced::Border { radius: 12.0.into(), ..Default::default() },
+                border: iced::Border {
+                    radius: crate::theme::BoruTheme::for_theme(theme).radii.lg.into(),
+                    ..Default::default()
+                },
                 ..Default::default()
             }).into());
         let elapsed = self.call_started_at.map(|start| start.elapsed().as_secs()).unwrap_or_default();
@@ -124,18 +142,23 @@ impl IcedChat {
             .on_press_maybe(self.active_call_id.map(AppMessage::HangUp))
             .style(BUTTON_DANGER);
         let stage = container(local_pip)
-            .width(Length::Fixed(220.0)).height(Length::Fixed(150.0))
+            .width(Length::Fixed(calls.pip_w)).height(Length::Fixed(calls.pip_h))
             .align_x(iced::alignment::Horizontal::Right)
             .align_y(iced::alignment::Vertical::Bottom)
             .style(|theme| iced::widget::container::Style {
                 background: Some(iced::Background::Color(bg_surface_secondary(theme))),
-                border: iced::Border { radius: 12.0.into(), ..Default::default() },
+                border: iced::Border {
+                    radius: crate::theme::BoruTheme::for_theme(theme).radii.lg.into(),
+                    ..Default::default()
+                },
                 ..Default::default()
             });
         container(column![
             container(remote_main).width(Length::Fill).height(Length::Fill),
             stage,
-            text(name).size(26.0), text(duration).size(22.0), text(status).size(16.0),
+            text(name).size(typography.call_name_active),
+            text(duration).size(typography.call_duration),
+            text(status).size(typography.call_status),
             row![mute, camera, switch_camera, hang_up].spacing(SPACE_12)
         ].spacing(SPACE_12).align_x(Alignment::Center))
             .width(Length::Fill).height(Length::Fill)

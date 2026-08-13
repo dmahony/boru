@@ -15,7 +15,7 @@ impl IcedChat {
         base: iced::widget::Container<'a, AppMessage>,
     ) -> iced::Element<'a, AppMessage> {
         use iced::widget::{button, column, container, row, text};
-        use iced::{Alignment, Color, Length};
+        use iced::{Alignment, Length};
         let Some(call) = self.incoming_call else { return base.into(); };
         let name = self.resolve_name(&call.peer);
         let kind = match call.kind {
@@ -23,22 +23,46 @@ impl IcedChat {
             CallKind::Video => "Incoming video call",
         };
         let avatar: iced::Element<'a, AppMessage> = self.friend_image_handles.get(&call.peer).and_then(|h| h.clone())
-            .map(|h| iced::widget::image(h).width(Length::Fixed(72.0)).height(Length::Fixed(72.0)).into())
-            .unwrap_or_else(|| text("👤").size(48).into());
-        let card = container(column![avatar, text(name).size(22), text(kind).size(15), row![
-            button(text("Decline")).on_press(AppMessage::RejectIncomingCall(call.call_id)),
-            button(text("Accept")).on_press(AppMessage::AcceptIncomingCall(call.call_id)),
-        ].spacing(12)].spacing(12).align_x(Alignment::Center))
-            .padding(32)
-            .style(|_| iced::widget::container::Style {
-                background: Some(iced::Background::Color(Color::from_rgb(0.12, 0.13, 0.17))),
-                border: iced::Border { color: Color::from_rgb(0.35, 0.38, 0.45), width: 1.0, radius: 16.0.into() },
-                ..Default::default()
+            .map(|h| {
+                let avatar_size = crate::theme::BoruTheme::default().dialogs.avatar_size;
+                iced::widget::image(h).width(Length::Fixed(avatar_size)).height(Length::Fixed(avatar_size)).into()
+            })
+            .unwrap_or_else(|| {
+                let glyph = crate::theme::BoruTheme::default().dialogs.avatar_glyph_size;
+                text("👤").size(glyph).into()
             });
+        let dialogs = crate::theme::BoruTheme::default().dialogs;
+        let card = container(column![
+            avatar,
+            text(name).size(crate::theme::BoruTheme::default().typography.dialog_title),
+            text(kind).size(crate::theme::BoruTheme::default().typography.body),
+            row![
+                button(text("Decline")).on_press(AppMessage::RejectIncomingCall(call.call_id)),
+                button(text("Accept")).on_press(AppMessage::AcceptIncomingCall(call.call_id)),
+            ]
+            .spacing(dialogs.control_spacing)
+        ]
+        .spacing(dialogs.spacing)
+        .align_x(Alignment::Center))
+        .padding(dialogs.padding)
+        .style(|t| {
+            let theme = crate::theme::BoruTheme::for_theme(t);
+            iced::widget::container::Style {
+                background: Some(iced::Background::Color(theme.colors.dialog_panel_bg)),
+                border: iced::Border {
+                    color: theme.colors.dialog_panel_border,
+                    width: theme.borders.hairline,
+                    radius: theme.radii.dialog.into(),
+                },
+                ..Default::default()
+            }
+        });
         let overlay = container(card).width(Length::Fill).height(Length::Fill)
             .center_x(Length::Fill).center_y(Length::Fill)
-            .style(|_| iced::widget::container::Style {
-                background: Some(iced::Background::Color(Color::from_rgba(0.0, 0.0, 0.0, 0.72))),
+            .style(|t| iced::widget::container::Style {
+                background: Some(iced::Background::Color(
+                    crate::theme::BoruTheme::for_theme(t).colors.incoming_call_backdrop,
+                )),
                 ..Default::default()
             });
         iced::widget::stack![base, overlay].into()
@@ -50,7 +74,7 @@ impl IcedChat {
         base: iced::widget::Container<'a, AppMessage>,
     ) -> iced::Element<'a, AppMessage> {
         use iced::widget::{button, column, container, stack, text};
-        use iced::{Color, Length};
+        use iced::Length;
 
         let Some(session) = self.inline_video.as_ref() else {
             return base.into();
@@ -120,10 +144,10 @@ impl IcedChat {
             .center_x(Length::Fill)
             .center_y(Length::Fill)
             .padding(SPACE_16)
-            .style(|_t| iced::widget::container::Style {
-                background: Some(iced::Background::Color(Color::from_rgba(
-                    0.0, 0.0, 0.0, 0.82,
-                ))),
+            .style(|t| iced::widget::container::Style {
+                background: Some(iced::Background::Color(
+                    crate::theme::BoruTheme::for_theme(t).colors.expanded_video_backdrop,
+                )),
                 ..Default::default()
             });
         stack![base, overlay].into()
@@ -173,7 +197,7 @@ impl IcedChat {
         entry_index: usize,
     ) -> iced::Element<'a, AppMessage> {
         use iced::widget::{container, image, mouse_area, stack};
-        use iced::{Color, Length};
+        use iced::Length;
 
         let Some(entry) = self.entries.get(entry_index) else {
             return base.into();
@@ -215,9 +239,9 @@ impl IcedChat {
             .width(Length::Fill)
             .height(Length::Fill)
             .style(move |t| iced::widget::container::Style {
-                background: Some(iced::Background::Color(Color::from_rgba(
-                    0.0, 0.0, 0.0, 0.9,
-                ))),
+                background: Some(iced::Background::Color(
+                    crate::theme::BoruTheme::for_theme(t).colors.lightbox_backdrop,
+                )),
                 ..Default::default()
             });
 
@@ -721,9 +745,12 @@ impl IcedChat {
             );
             let copy = iced::widget::button("Copy")
                 .on_press(AppMessage::CopyShortCode(code.clone()))
-                .padding([6, 14]);
+                .padding([
+                    crate::theme::BoruTheme::default().dialogs.control_padding_y,
+                    crate::theme::BoruTheme::default().dialogs.control_padding_x,
+                ]);
             let code_row: iced::Element<'_, AppMessage> = iced::widget::row![code_text, copy]
-                .spacing(12)
+                .spacing(crate::theme::BoruTheme::default().dialogs.control_spacing)
                 .align_y(iced::Alignment::Center)
                 .into();
             overlay = overlay.push_body(FormSection::new("Code").push(code_row).build());

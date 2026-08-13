@@ -816,7 +816,7 @@ pub fn divider<'a, Message: 'a>() -> Element<'a, Message> {
     rule::horizontal(1)
         .style(move |t| rule::Style {
             color: design_tokens::border_muted(t),
-            radius: 0.0.into(),
+            radius: crate::theme::BoruTheme::default().radii.none.into(),
             fill_mode: rule::FillMode::Full,
             snap: false,
         })
@@ -909,7 +909,7 @@ impl<'a, Message: Clone + 'a> ListRow<'a, Message> {
                     .size(TypeRole::Body.size_px())
                     .color(design_tokens::text_primary(theme)),
             )
-            .spacing(2.0)
+            .spacing(crate::theme::BoruTheme::default().spacing.space_2)
             .width(Length::Fill);
 
         if let Some(sec) = self.secondary_text {
@@ -1078,7 +1078,7 @@ impl<Message: 'static> Avatar<Message> {
         Self {
             name: name.into(),
             image: None,
-            size: design_tokens::AVATAR_MD,
+            size: crate::theme::BoruTheme::default().avatars.md,
             online_dot: false,
             unread_count: None,
             fallback_icon: None,
@@ -1125,22 +1125,22 @@ impl<Message: 'static> Avatar<Message> {
 
     /// Convenience presets so callers don't need to memorise the numbers.
     pub fn profile_size(mut self) -> Self {
-        self.size = design_tokens::AVATAR_PROFILE;
+        self.size = crate::theme::BoruTheme::default().avatars.profile;
         self
     }
 
     pub fn chat_list_size(mut self) -> Self {
-        self.size = design_tokens::AVATAR_CHAT_LIST;
+        self.size = crate::theme::BoruTheme::default().avatars.chat_list;
         self
     }
 
     pub fn chat_header_size(mut self) -> Self {
-        self.size = design_tokens::AVATAR_CHAT_HEADER;
+        self.size = crate::theme::BoruTheme::default().avatars.chat_header;
         self
     }
 
     pub fn message_size(mut self) -> Self {
-        self.size = design_tokens::AVATAR_MSG;
+        self.size = crate::theme::BoruTheme::default().avatars.msg;
         self
     }
 
@@ -1217,7 +1217,7 @@ impl<Message: 'static> Avatar<Message> {
                 };
                 container(
                     text(count_text)
-                        .size(10.0)
+                        .size(crate::theme::BoruTheme::default().typography.badge)
                         .color(Color::WHITE)
                         .font(TypeRole::Metadata.font()),
                 )
@@ -2015,7 +2015,7 @@ impl<'a, Message: Clone + 'a> TabStrip<Message> {
         // Full-width underline separator below the tabs
         let separator = rule::horizontal(1).style(move |t| rule::Style {
             color: design_tokens::border_muted(t),
-            radius: 0.0.into(),
+            radius: crate::theme::BoruTheme::default().radii.none.into(),
             fill_mode: rule::FillMode::Full,
             snap: false,
         });
@@ -2046,10 +2046,11 @@ fn tab_button_style(theme: &Theme, status: button::Status, active: bool) -> butt
     };
 
     let bottom_border = if active {
+        let boru = crate::theme::BoruTheme::default();
         Border {
             color: design_tokens::primary(theme),
-            width: 2.0,
-            radius: 0.0.into(),
+            width: boru.borders.tab_active,
+            radius: boru.radii.none.into(),
         }
     } else {
         Border::default()
@@ -2709,7 +2710,7 @@ impl<'a, Message: 'a> TableHeaderRow<'a, Message> {
                 border: Border {
                     color: design_tokens::border_muted(t),
                     width: 1.0,
-                    radius: 0.0.into(),
+                    radius: crate::theme::BoruTheme::default().radii.none.into(),
                 },
                 ..Default::default()
             })

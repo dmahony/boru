@@ -400,7 +400,7 @@ impl IcedChat {
             .align_y(Alignment::Center),
         )
         .width(Length::Fill)
-        .height(Length::Fixed(52.0))
+        .height(Length::Fixed(crate::theme::BoruTheme::default().controls.header_height))
         .padding([SPACE_6, SPACE_10])
         .style(container_header);
 
@@ -470,11 +470,9 @@ impl IcedChat {
                             .padding([SPACE_2, SPACE_6])
                             .style(|t, _status| iced::widget::button::Style {
                                 background: Some(iced::Background::Color(
-                                    if matches!(t, iced::Theme::Dark) {
-                                        Color::from_rgb(0.6, 0.15, 0.15)
-                                    } else {
-                                        Color::from_rgb(0.9, 0.3, 0.3)
-                                    },
+                                    crate::theme::BoruTheme::for_theme(t)
+                                        .colors
+                                        .settings_danger_strong,
                                 )),
                                 text_color: Color::WHITE,
                                 border: iced::Border {
@@ -793,7 +791,7 @@ impl IcedChat {
                                 background: None,
                                 text_color: match status {
                                     iced::widget::button::Status::Hovered => accent_primary(t),
-                                    _ => Color::from_rgb(0.5, 0.5, 0.5),
+                                    _ => crate::theme::BoruTheme::for_theme(t).colors.glyph_disabled,
                                 },
                                 border: iced::Border {
                                     radius: SPACE_6.into(),
@@ -924,10 +922,10 @@ impl IcedChat {
         )
         .style(move |t, _status| iced_aw::style::color_picker::Style {
             background: iced::Background::Color(bg_surface(t)),
-            border_radius: 8.0,
+            border_radius: crate::theme::BoruTheme::default().controls.color_picker_radius,
             border_width: 1.0,
             border_color: border_muted(t),
-            bar_border_radius: 4.0,
+            bar_border_radius: crate::theme::BoruTheme::default().controls.color_picker_bar_radius,
             bar_border_width: 1.0,
             bar_border_color: border_muted(t),
         });
@@ -996,7 +994,7 @@ impl IcedChat {
                             AppMessage::SetHomeMenuItemOpacity,
                         )
                         .step(0.05)
-                        .width(Length::Fixed(160.0)),
+                        .width(Length::Fixed(crate::theme::BoruTheme::default().controls.slider_width)),
                     )
                     .spacing(SPACE_12)
                     .align_y(Alignment::Center)
@@ -1188,10 +1186,13 @@ impl IcedChat {
                 "Delete all stored messages for the active chat permanently."
             };
             let status_line = clear_history_feedback.as_ref().map(|(message, is_error)| {
+                // Theme-independent by design (both modes render the same
+                // literal); use the light-palette captures.
+                let colors = crate::theme::BoruTheme::default().colors;
                 let color = if *is_error {
-                    Color::from_rgb(0.8, 0.2, 0.2)
+                    colors.settings_danger
                 } else {
-                    Color::from_rgb(0.15, 0.55, 0.2)
+                    colors.settings_success
                 };
                 crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, message.clone())
                     .style(move |_| iced::widget::text::Style { color: Some(color) })
@@ -1242,11 +1243,7 @@ impl IcedChat {
                     crate::fonts::type_role_text(crate::fonts::TypeRole::Body, title)
                         .style(move |t| iced::widget::text::Style {
                             color: Some(if is_danger_state {
-                                if matches!(t, iced::Theme::Dark) {
-                                    Color::from_rgb(0.9, 0.3, 0.3)
-                                } else {
-                                    Color::from_rgb(0.8, 0.2, 0.2)
-                                }
+                                crate::theme::BoruTheme::for_theme(t).colors.settings_danger
                             } else {
                                 accent_primary(t)
                             }),
@@ -1375,11 +1372,7 @@ impl IcedChat {
                     "External GIF search",
                 )
                 .style(move |t| iced::widget::text::Style {
-                    color: Some(if matches!(t, iced::Theme::Dark) {
-                        Color::from_rgb(0.9, 0.9, 0.9)
-                    } else {
-                        Color::from_rgb(0.15, 0.15, 0.15)
-                    }),
+                    color: Some(crate::theme::BoruTheme::for_theme(t).colors.settings_heading_text),
                     ..Default::default()
                 }),
             )
