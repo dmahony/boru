@@ -39,12 +39,12 @@ jobs:
       RUSTC_WRAPPER: "sccache"
       SCCACHE_CACHE_SIZE: "50G"
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
       with:
         submodules: recursive
     - uses: dtolnay/rust-toolchain@stable
     - name: Install sccache
-      uses: mozilla-actions/sccache-action@v0.0.9
+      uses: mozilla-actions/sccache-action@v0.0.11
     - name: Run deterministic adversarial + fuzz smoke tests
       run: cargo test --test security --release
       env:
@@ -70,7 +70,7 @@ jobs:
           # - x86_64-unknown-netbsd
     steps:
     - name: Checkout
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
       with:
         submodules: recursive
 
@@ -107,7 +107,7 @@ jobs:
           - armv7-linux-androideabi
     steps:
     - name: Checkout
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
 
     - name: Set up Rust
       uses: dtolnay/rust-toolchain@stable
@@ -123,7 +123,7 @@ jobs:
         java-version: '17'
 
     - name: Setup Android SDK
-      uses: android-actions/setup-android@v3
+      uses: android-actions/setup-android@v4
 
     - name: Setup Android NDK
       uses: arqu/setup-ndk@main
@@ -151,7 +151,7 @@ jobs:
           - i686-unknown-linux-gnu
     steps:
     - name: Checkout
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
       with:
         submodules: recursive
 
@@ -178,7 +178,7 @@ jobs:
           RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
       steps:
         - name: Checkout sources
-          uses: actions/checkout@v6
+          uses: actions/checkout@v7
   
         - name: Install stable toolchain
           uses: dtolnay/rust-toolchain@stable
@@ -205,11 +205,11 @@ jobs:
       RUSTC_WRAPPER: "sccache"
       SCCACHE_GHA_ENABLED: "on"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Install sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Setup Environment (PR)
         if: ${{ github.event_name == 'pull_request' }}
@@ -236,11 +236,11 @@ jobs:
       RUSTC_WRAPPER: "sccache"
       SCCACHE_GHA_ENABLED: "on"
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
     - uses: dtolnay/rust-toolchain@stable
       with:
         components: rustfmt
-    - uses: mozilla-actions/sccache-action@v0.0.9
+    - uses: mozilla-actions/sccache-action@v0.0.11
     - uses: taiki-e/install-action@cargo-make
     - run: cargo make format-check
 
@@ -256,10 +256,10 @@ jobs:
       # rustdoc::broken_intra_doc_links at the crate root (src/lib.rs).
       RUSTDOCFLAGS: -Dwarnings
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Install sccache
-        uses: mozilla-actions/sccache-action@v0.0.9
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Build docs (all features, no deps)
         # --all-features matches [package.metadata.docs.rs] (all-features = true)
@@ -281,12 +281,12 @@ jobs:
       RUSTC_WRAPPER: "sccache"
       SCCACHE_GHA_ENABLED: "on"
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
     - uses: dtolnay/rust-toolchain@stable
       with:
         components: clippy
     - name: Install sccache
-      uses: mozilla-actions/sccache-action@v0.0.9
+      uses: mozilla-actions/sccache-action@v0.0.11
 
     # TODO: We have a bunch of platform-dependent code so should
     #    probably run this job on the full platform matrix
@@ -308,12 +308,12 @@ jobs:
       RUSTC_WRAPPER: "sccache"
       SCCACHE_GHA_ENABLED: "on"
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
     - uses: dtolnay/rust-toolchain@master
       with:
         toolchain: ${{ env.MSRV }}
     - name: Install sccache
-      uses: mozilla-actions/sccache-action@v0.0.9
+      uses: mozilla-actions/sccache-action@v0.0.11
 
     - name: Check MSRV all features
       run: |
@@ -324,7 +324,7 @@ jobs:
     name: cargo deny
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           arguments: --workspace --all-features
@@ -335,6 +335,6 @@ jobs:
     timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
     - run: pip install --user codespell[toml]
     - run: codespell --ignore-words-list=ans,atmost,crate,inout,ratatui,ser,stayin,swarmin,worl --skip=docs/CHANGELOG.md
