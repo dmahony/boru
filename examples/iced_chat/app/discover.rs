@@ -1301,11 +1301,26 @@ impl IcedChat {
             }
         };
 
-        let header = Row::new()
+        let mut header = Row::new()
             .push(name)
             .push(action)
             .spacing(SPACE_8)
             .align_y(Alignment::Center);
+
+        // BORU-DIR-20 (PDF Task 7.2): Hide Room control on every offered
+        // card. Pressing it persists the hide preference locally and the
+        // card disappears from Discover (the cache derives it Blocked on
+        // the next sync). Local-only: nothing is broadcast, membership is
+        // untouched, and hidden rooms are restored from Settings →
+        // Hidden rooms (never by the network).
+        if !matches!(room.offered_action, boru_core::room_directory::RoomAction::Hidden) {
+            header = header.push(
+                button(text("Hide").size(TYPO_XS))
+                    .on_press(AppMessage::DirectoryRoomHideById(room.room_id))
+                    .padding([SPACE_4, SPACE_10])
+                    .style(BUTTON_GHOST),
+            );
+        }
 
         let mut body = Column::new().spacing(SPACE_4);
         body = body.push(header);
@@ -2375,6 +2390,55 @@ impl IcedChat {
                         iced::Task::none()
                     }
                 }
+            }
+            AppMessage::DirectoryRoomHideById(room_id) => {
+                // BORU-DIR-20 (PDF Task 7.2): local Hide Room. The hide
+                // preference is persisted through the DIR-12 persistence
+                // hook (Storage::set_room_hidden) and the directory cache
+                // is re-derived immediately so the card disappears from
+                // Discover on the next frame — and stays gone across
+                // advertisement refreshes and app restarts. This is a
+                // LOCAL moderation choice: nothing is broadcast, no
+                // membership changes, and the preference is never sent to
+                // the directory topic or any peer (PDF Core rule).
+                if let Some(storage) = self.storage.as_ref() {
+                    if let Err(err) = storage.set_room_hidden(&room_id, true) {
+                        warn!(error = %err, "failed to persist hidden room preference");
+                        self.push_system("Failed to hide room: the preference could not be saved.");
+                    }
+                }
+                self.sync_directory_local_states();
+                iced::Task::none()
+            }
+            AppMessage::DirectoryRoomUnhideById(room_id) => {
+                // BORU-DIR-20 (PDF Task 7.2): explicit reset of the hide
+                // preference for one room (Settings → Hidden rooms). The
+                // room is offered again on the next frame. Never
+                // broadcast — this is the local undo path the PDF
+                // requires.
+                if let Some(storage) = self.storage.as_ref() {
+                    if let Err(err) = storage.set_room_hidden(&room_id, false) {
+                        warn!(error = %err, "failed to persist unhidden room preference");
+                        self.push_system("Failed to restore room: the preference could not be saved.");
+                    }
+                }
+                self.sync_directory_local_states();
+                iced::Task::none()
+            }
+            AppMessage::DirectoryRoomUnhideAll => {
+                // BORU-DIR-20 (PDF Task 7.2): restore every hidden room
+                // (Settings → Hidden rooms → Restore all). Clears the
+                // persisted preference set. Never broadcast.
+                if let Some(storage) = self.storage.as_ref() {
+                    let ids = storage.room_hidden_ids().unwrap_or_default();
+                    for id in ids {
+                        if let Err(err) = storage.set_room_hidden(&id, false) {
+                            warn!(error = %err, "failed to persist unhidden room preference");
+                        }
+                    }
+                }
+                self.sync_directory_local_states();
+                iced::Task::none()
             }
             AppMessage::DeleteDirectoryRoom(topic) => {
                 let local_author = self.local_public;

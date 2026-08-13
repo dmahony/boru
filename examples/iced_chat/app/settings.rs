@@ -40,6 +40,21 @@ pub(crate) struct SettingsConnectedTunnelRow {
     pub(crate) connection_info: Option<String>,
 }
 
+/// Hash-compatible snapshot of one hidden room rendered in the Settings →
+/// Hidden rooms section (BORU-DIR-20, PDF Task 7.2).
+///
+/// The persisted preference (storage) is the source of truth for *which*
+/// rooms are hidden; the room name is resolved from the directory cache's
+/// full snapshot (which still contains hidden entries). A room whose
+/// advertisement has expired or been evicted renders by its short id only.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub(crate) struct SettingsHiddenRoomRow {
+    /// The room's gossip topic bytes (the advertised room id).
+    pub(crate) room_id: [u8; 32],
+    /// Last-known room name from the directory cache, or a short id.
+    pub(crate) room_name: String,
+}
+
 /// Dependency for the Settings screen. Delegates to the existing
 /// `SettingsCachedKey` and `ProfileIdentityCacheKey` (both already Hash) and
 /// adds Hash-compatible snapshots of the shared-files list and the Secure
@@ -133,6 +148,11 @@ pub(crate) struct SettingsCachedKey {
     show_accent_picker: bool,
     /// Whether the optional BORU-CP-06 presence indicator is shown.
     show_presence_indicator: bool,
+    /// BORU-DIR-20 (PDF Task 7.2): hidden rooms restore surface — the
+    /// persisted hidden room ids resolved against the directory cache.
+    /// Part of the Hash key so the lazy Settings screen re-renders when
+    /// the set changes (hide/unhide).
+    hidden_rooms: Vec<SettingsHiddenRoomRow>,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -173,7 +193,54 @@ impl IcedChat {
             accent_color: self.accent_color,
             show_accent_picker: self.show_accent_picker,
             show_presence_indicator: self.show_presence_indicator,
+            hidden_rooms: self.settings_hidden_rooms(),
         }
+    }
+
+    /// Build the Hash-compatible hidden-rooms list for the Settings →
+    /// Hidden rooms section (BORU-DIR-20, PDF Task 7.2).
+    ///
+    /// The persisted hide preference (storage) is the source of truth for
+    /// *which* rooms are hidden; names are resolved from the directory
+    /// cache's full snapshot (which still contains hidden entries), so a
+    /// hidden room whose advertisement is still cached shows its last
+    /// known name, and an expired/evicted one renders by short id.
+    pub(crate) fn settings_hidden_rooms(&self) -> Vec<SettingsHiddenRoomRow> {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let hidden_ids: BTreeSet<[u8; 32]> = match self.storage.as_ref() {
+            Some(storage) => storage.room_hidden_ids().unwrap_or_default().into_iter().collect(),
+            None => BTreeSet::new(),
+        };
+        if hidden_ids.is_empty() {
+            return Vec::new();
+        }
+        // Resolve last-known names from the directory cache (includes
+        // hidden entries via snapshot_all).
+        let mut names: BTreeMap<[u8; 32], String> = BTreeMap::new();
+        if let Some(dir) = &self.room_directory {
+            let guard = dir.lock().unwrap();
+            for entry in guard.snapshot_all() {
+                if entry.local_join_state == boru_core::room_directory::LocalJoinState::Blocked {
+                    names.insert(
+                        *entry.advert.room_id.as_bytes(),
+                        entry.advert.room_name.clone(),
+                    );
+                }
+            }
+        }
+        hidden_ids
+            .into_iter()
+            .map(|room_id| SettingsHiddenRoomRow {
+                room_id,
+                room_name: names.get(&room_id).cloned().unwrap_or_else(|| {
+                    format!(
+                        "{:02x}{:02x}{:02x}{:02x}…",
+                        room_id[0], room_id[1], room_id[2], room_id[3]
+                    )
+                }),
+            })
+            .collect()
     }
 
     pub(crate) fn settings_dependency(&self) -> SettingsDependency {
@@ -1206,6 +1273,96 @@ impl IcedChat {
 
         let data_card = section_card("DATA", vec![clear_history_row.into()]);
 
+        // ── Hidden rooms section (BORU-DIR-20, PDF Task 7.2) ──
+        // Local Hide/Block choices stay private (never broadcast); this
+        // settings surface is where the user can undo local hiding — the
+        // explicit reset path the PDF requires. Restoring a room removes
+        // the persisted preference so the room is offered again in
+        // Discover on the next refresh.
+        let mut hidden_room_rows: Vec<iced::Element<'static, AppMessage>> = Vec::new();
+        if key.hidden_rooms.is_empty() {
+            hidden_room_rows.push(
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::SupportingText,
+                    "No rooms hidden. Rooms you Hide in Discover appear here so you can restore them.",
+                )
+                .style(text_muted_style)
+                .into(),
+            );
+        } else {
+            hidden_room_rows.push(
+                Row::new()
+                    .push(
+                        Column::new()
+                            .push(crate::fonts::type_role_text(
+                                crate::fonts::TypeRole::Body,
+                                format!("{} hidden room(s)", key.hidden_rooms.len()),
+                            ))
+                            .push(
+                                crate::fonts::type_role_text(
+                                    crate::fonts::TypeRole::SupportingText,
+                                    "These rooms are hidden only on this device and are never broadcast.",
+                                )
+                                .style(text_muted_style),
+                            )
+                            .spacing(SPACE_2)
+                            .width(Length::Fill)
+                            .align_x(Alignment::Start),
+                    )
+                    .push(
+                        button(crate::fonts::type_role_text(
+                            crate::fonts::TypeRole::ButtonLabel,
+                            "Restore all",
+                        ))
+                        .on_press(AppMessage::DirectoryRoomUnhideAll)
+                        .style(BUTTON_OUTLINE)
+                        .padding([SPACE_6, SPACE_12]),
+                    )
+                    .spacing(SPACE_12)
+                    .align_y(Alignment::Center)
+                    .into(),
+            );
+            for room in &key.hidden_rooms {
+                let short_id = format!(
+                    "{:02x}{:02x}{:02x}{:02x}…",
+                    room.room_id[0], room.room_id[1], room.room_id[2], room.room_id[3]
+                );
+                hidden_room_rows.push(
+                    Row::new()
+                        .push(
+                            Column::new()
+                                .push(crate::fonts::type_role_text(
+                                    crate::fonts::TypeRole::Body,
+                                    room.room_name.clone(),
+                                ))
+                                .push(
+                                    crate::fonts::type_role_text(
+                                        crate::fonts::TypeRole::TechnicalValue,
+                                        short_id,
+                                    )
+                                    .style(text_muted_style),
+                                )
+                                .spacing(SPACE_2)
+                                .width(Length::Fill)
+                                .align_x(Alignment::Start),
+                        )
+                        .push(
+                            button(crate::fonts::type_role_text(
+                                crate::fonts::TypeRole::ButtonLabel,
+                                "Unhide",
+                            ))
+                            .on_press(AppMessage::DirectoryRoomUnhideById(room.room_id))
+                            .style(BUTTON_OUTLINE)
+                            .padding([SPACE_6, SPACE_12]),
+                        )
+                        .spacing(SPACE_12)
+                        .align_y(Alignment::Center)
+                        .into(),
+                );
+            }
+        }
+        let hidden_rooms_card = section_card("HIDDEN ROOMS", hidden_room_rows);
+
         // ── Privacy section (KLIPY-09) ──
         // Concise note about external GIF search: it is optional, and the only
         // data that leaves the device is the search term sent to the KLIPY
@@ -1256,6 +1413,8 @@ impl IcedChat {
             .push(relay_card)
             .push(Space::new().height(Length::Fixed(SPACE_12)))
             .push(data_card)
+            .push(Space::new().height(Length::Fixed(SPACE_12)))
+            .push(hidden_rooms_card)
             .push(Space::new().height(Length::Fixed(SPACE_12)))
             .push(privacy_card)
             .spacing(SPACE_6)

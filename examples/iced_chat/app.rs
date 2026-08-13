@@ -6419,6 +6419,22 @@ pub enum AppMessage {
     /// local conversation record exactly once and subscribes through
     /// normal room-topic logic.
     DirectoryRoomJoinById([u8; 32]),
+    /// BORU-DIR-20 (PDF Task 7.2): the user pressed Hide on a Discover
+    /// room card. Persists the hide preference locally through
+    /// [`Storage::set_room_hidden`] and re-derives the directory cache so
+    /// the room stops being offered. This is a LOCAL moderation choice —
+    /// nothing is ever broadcast, and the preference is never sent to the
+    /// directory topic or any peer.
+    DirectoryRoomHideById([u8; 32]),
+    /// BORU-DIR-20 (PDF Task 7.2): restore a previously hidden room from
+    /// the Settings → Hidden rooms surface. Removes the persisted hide
+    /// preference and re-derives the cache so the room is offered again
+    /// (the explicit reset path the PDF requires). Never broadcast.
+    DirectoryRoomUnhideById([u8; 32]),
+    /// BORU-DIR-20 (PDF Task 7.2): restore ALL hidden rooms from the
+    /// Settings → Hidden rooms surface. Clears the persisted preference
+    /// set. Never broadcast.
+    DirectoryRoomUnhideAll,
     /// Delete a locally-created room advertisement from the directory.
     DeleteDirectoryRoom(TopicId),
     /// A room advertisement was received from the directory gossip topic.
@@ -10236,6 +10252,9 @@ impl IcedChat {
             AppMessage::CloseGroups => "CloseGroups",
             AppMessage::DirectoryRoomJoin(..) => "DirectoryRoomJoin",
             AppMessage::DirectoryRoomJoinById(_) => "DirectoryRoomJoinById",
+            AppMessage::DirectoryRoomHideById(_) => "DirectoryRoomHideById",
+            AppMessage::DirectoryRoomUnhideById(_) => "DirectoryRoomUnhideById",
+            AppMessage::DirectoryRoomUnhideAll => "DirectoryRoomUnhideAll",
             AppMessage::DeleteDirectoryRoom(_) => "DeleteDirectoryRoom",
             AppMessage::DirectoryRoomUpdate(..) => "DirectoryRoomUpdate",
             AppMessage::DirectoryRoomWithdrawal(..) => "DirectoryRoomWithdrawal",
@@ -14626,6 +14645,9 @@ impl IcedChat {
             | AppMessage::DiscoverClearFilters
             | AppMessage::DirectoryRoomJoin(_)
             | AppMessage::DirectoryRoomJoinById(_)
+            | AppMessage::DirectoryRoomHideById(_)
+            | AppMessage::DirectoryRoomUnhideById(_)
+            | AppMessage::DirectoryRoomUnhideAll
             | AppMessage::DeleteDirectoryRoom(_)
             | AppMessage::DirectoryRoomUpdate(..) => self.update_discover(message),
             // BORU-DIR-09 (PDF Task 3.3): a verified withdrawal removes the
@@ -30384,6 +30406,228 @@ mod tests {
             assert_eq!(store.list_active().len(), 2);
             assert!(store.contains(topic, author2));
         }
+    }
+
+    // ── BORU-DIR-20 (PDF Task 7.2): local Hide/Block room controls ──────
+    // The PDF requires: hidden rooms do not reappear after every
+    // advertisement refresh, local moderation choices remain private
+    // (never rebroadcast), and users can undo local hiding. DIR-12 built
+    // the cache-side state + persistence hook; these tests prove the
+    // user-facing wiring (Hide on the card → persisted preference →
+    // cache re-derivation → restore surface in Settings).
+
+    /// Seed the app with a real room-directory cache (as main.rs does via
+    /// the discovery service) plus a real storage instance, and advertise
+    /// one room so the Discover browse surface has a card to hide.
+    fn directory_app_with_room(
+    ) -> (tokio::runtime::Runtime, IcedChat, boru_core::proto::TopicId, PublicKey) {
+        let (_runtime, mut app) = build_prewarm_test_app();
+        app.storage = Some(boru_core::storage::Storage::memory().expect("test storage"));
+        let dir = std::sync::Arc::new(StdMutex::new(
+            boru_core::room_directory::RoomDirectory::new(),
+        ));
+        app.room_directory = Some(dir.clone());
+        let room = boru_core::proto::TopicId::from_bytes([0x11; 32]);
+        let owner = SecretKey::generate().public();
+        let advert = boru_core::control_plane::advertisement::PublicRoomAdvertisement::minimal(
+            room,
+            "Test Lounge".to_string(),
+            *owner.as_bytes(),
+        );
+        let auth = boru_core::control_plane::advertisement::AdvertisementAuth::Verified {
+            publisher: owner,
+        };
+        dir.lock()
+            .unwrap()
+            .apply_advertisement_at(advert, owner, auth, 1, 1000, std::time::Instant::now());
+        // The app feeds the real local relationship facts into the cache
+        // the same way ConnMonitorTick does in production.
+        app.sync_directory_local_states();
+        (_runtime, app, room, owner)
+    }
+
+    /// Hide Room persists the preference, removes the card from Discover
+    /// immediately, and keeps it hidden across advertisement refreshes
+    /// (PDF Task 7.2 acceptance: "Hidden rooms do not reappear after
+    /// every advertisement refresh").
+    #[test]
+    fn directory_hide_persists_and_survives_advertisement_refresh() {
+        let (_runtime, mut app, room, owner) = directory_app_with_room();
+        let room_id = *room.as_bytes();
+
+        // The room is offered before hiding.
+        assert!(
+            app.discover_dependency()
+                .rooms
+                .iter()
+                .any(|r| r.room_id == room_id),
+            "room is browseable before hiding"
+        );
+
+        let task = app.update(AppMessage::DirectoryRoomHideById(room_id));
+        drop(task);
+
+        // The preference is persisted through the DIR-12 hook.
+        let storage = app.storage.as_ref().unwrap();
+        assert_eq!(storage.room_hidden_ids().unwrap(), vec![room_id]);
+
+        // The cache derives the room Blocked and excludes it from the
+        // browse surface immediately (the handler re-synced rather than
+        // waiting for the next ConnMonitorTick).
+        let dir = app.room_directory.as_ref().unwrap();
+        {
+            let guard = dir.lock().unwrap();
+            assert_eq!(
+                guard.get(&room).unwrap().local_join_state,
+                boru_core::room_directory::LocalJoinState::Blocked
+            );
+            assert!(guard.snapshot().is_empty(), "no re-show in browse surface");
+            assert_eq!(guard.snapshot_all().len(), 1, "diagnostics still see the entry");
+        }
+        assert!(
+            !app.discover_dependency()
+                .rooms
+                .iter()
+                .any(|r| r.room_id == room_id),
+            "hidden room is not offered in Discover"
+        );
+
+        // A refresh advertisement arrives (the advertiser re-broadcasts on
+        // its periodic tick): the persisted preference keeps the room
+        // hidden — the acceptance criterion.
+        let advert = boru_core::control_plane::advertisement::PublicRoomAdvertisement::minimal(
+            room,
+            "Test Lounge".to_string(),
+            *owner.as_bytes(),
+        );
+        let auth = boru_core::control_plane::advertisement::AdvertisementAuth::Verified {
+            publisher: owner,
+        };
+        let outcome = dir.lock().unwrap().apply_advertisement_at(
+            advert,
+            owner,
+            auth,
+            2,
+            2000,
+            std::time::Instant::now(),
+        );
+        assert_eq!(outcome, boru_core::room_directory::AdvertiseOutcome::Refreshed);
+        let guard = dir.lock().unwrap();
+        assert_eq!(
+            guard.get(&room).unwrap().local_join_state,
+            boru_core::room_directory::LocalJoinState::Blocked,
+            "refresh must not un-hide the room"
+        );
+        assert!(guard.snapshot().is_empty());
+    }
+
+    /// The explicit reset path (Settings → Hidden rooms → Unhide) removes
+    /// the persisted preference and restores the room to the browse
+    /// surface — the PDF's "Users can undo local hiding" acceptance.
+    #[test]
+    fn directory_unhide_restores_room_to_browse_surface() {
+        let (_runtime, mut app, room, _owner) = directory_app_with_room();
+        let room_id = *room.as_bytes();
+
+        let task = app.update(AppMessage::DirectoryRoomHideById(room_id));
+        drop(task);
+        assert!(
+            app.discover_dependency().rooms.is_empty(),
+            "room hidden after Hide"
+        );
+
+        let task = app.update(AppMessage::DirectoryRoomUnhideById(room_id));
+        drop(task);
+
+        let storage = app.storage.as_ref().unwrap();
+        assert!(
+            storage.room_hidden_ids().unwrap().is_empty(),
+            "hide preference removed on unhide"
+        );
+        assert!(
+            app.discover_dependency()
+                .rooms
+                .iter()
+                .any(|r| r.room_id == room_id),
+            "room is offered again after unhide"
+        );
+    }
+
+    /// Local moderation stays private: Hide writes only the persisted
+    /// preference + the local cache. It must not create a conversation,
+    /// subscribe to the room topic, start advertising the room, or touch
+    /// the directory gossip sender (PDF Core rule: never rebroadcast the
+    /// user's hide/block preferences).
+    #[test]
+    fn directory_hide_is_local_only_no_broadcast_or_membership_change() {
+        let (_runtime, mut app, room, _owner) = directory_app_with_room();
+        let room_id = *room.as_bytes();
+
+        let conversations_before = app.conversations.len();
+        let subscribed_before = app.auto_subscribed_rooms.len();
+        let advertised_before = app.advertised_rooms.len();
+
+        let task = app.update(AppMessage::DirectoryRoomHideById(room_id));
+        drop(task);
+
+        assert_eq!(
+            app.conversations.len(),
+            conversations_before,
+            "hide must not join/create the room"
+        );
+        assert_eq!(
+            app.auto_subscribed_rooms.len(),
+            subscribed_before,
+            "hide must not subscribe to the room topic"
+        );
+        assert_eq!(
+            app.advertised_rooms.len(),
+            advertised_before,
+            "hide must not start advertising the room"
+        );
+        assert!(
+            app.directory_sender.is_none(),
+            "hide never touches the directory gossip sender"
+        );
+        // The only trace of the choice is the local preference + cache.
+        assert_eq!(
+            app.storage.as_ref().unwrap().room_hidden_ids().unwrap(),
+            vec![room_id]
+        );
+    }
+
+    /// The Settings restore surface (Settings → Hidden rooms) lists the
+    /// hidden room with its last-known name, and Restore all clears every
+    /// preference so all rooms are offered again.
+    #[test]
+    fn settings_surface_lists_hidden_rooms_and_unhide_all_clears() {
+        let (_runtime, mut app, room, _owner) = directory_app_with_room();
+        let room_id = *room.as_bytes();
+
+        // Hide one room; the settings snapshot carries it with the cached
+        // room name so the restore surface shows a readable row.
+        let task = app.update(AppMessage::DirectoryRoomHideById(room_id));
+        drop(task);
+        let hidden = app.settings_hidden_rooms();
+        assert_eq!(hidden.len(), 1);
+        assert_eq!(hidden[0].room_id, room_id);
+        assert_eq!(hidden[0].room_name, "Test Lounge");
+
+        // Settings → Hidden rooms → Restore all clears every preference.
+        let task = app.update(AppMessage::DirectoryRoomUnhideAll);
+        drop(task);
+        assert!(
+            app.storage.as_ref().unwrap().room_hidden_ids().unwrap().is_empty(),
+            "restore all clears the preference set"
+        );
+        assert!(app.settings_hidden_rooms().is_empty());
+        assert!(
+            app.discover_dependency()
+                .rooms
+                .iter()
+                .any(|r| r.room_id == room_id),
+            "restore all brings rooms back to Discover"
+        );
     }
 
     // ── BORU-DIR-13 (PDF Task 5.1): Discover Rooms entry point ─────────
