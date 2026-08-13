@@ -189,7 +189,10 @@ impl IcedChat {
                             ..Default::default()
                         }),
                 )
-                .padding([2, 6])
+                .padding([
+                    crate::theme::BoruTheme::default().tunnels.chip_padding_y,
+                    crate::theme::BoruTheme::default().tunnels.chip_padding_x,
+                ])
                 .style(move |t| container::Style {
                     background: Some(Background::Color(crate::design_tokens::primary_soft(t))),
                     border: Border {
