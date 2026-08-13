@@ -455,6 +455,7 @@ config_group! {
         status_divider_height: f32,
         status_divider_radius: f32,
         security_pill_radius: f32,
+        show_activity_feed: bool,
     }
 }
 

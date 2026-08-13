@@ -40,6 +40,8 @@ mod theme;
 mod theme_config;
 mod theme_merge;
 mod theme_watcher;
+#[cfg(feature = "dev-ui")]
+mod inspector;
 #[cfg(test)]
 mod offscreen_status_card;
 mod sharing_summary;

@@ -3975,6 +3975,15 @@ pub struct IcedChat {
     /// BORU-UI-06: generation tracker for reload staleness — results older
     /// than the last accepted generation are dropped in update().
     ui_theme_reload_tracker: crate::theme_watcher::ReloadTracker,
+    /// BORU-UI-09: whether the dev UI Inspector panel is visible (Ctrl+Shift+D).
+    /// Compiled only with the `dev-ui` cargo feature (release builds exclude
+    /// the panel entirely).
+    #[cfg(feature = "dev-ui")]
+    inspector_visible: bool,
+    /// BORU-UI-09: in-progress text for the inspector's numeric/hex inputs so
+    /// a half-typed value is not clobbered by the rendered current value.
+    #[cfg(feature = "dev-ui")]
+    inspector_draft: crate::inspector::InspectorDraft,
     /// Whether notification sounds are enabled.
     sound_enabled: bool,
     /// Whether room invitations may include direct endpoint addresses.
@@ -6053,6 +6062,11 @@ pub enum AppMessage {
         generation: u64,
         result: Result<crate::theme_config::UiThemeConfig, String>,
     },
+    /// BORU-UI-09: a dev UI Inspector panel message (Ctrl+Shift+D toggles
+    /// the panel; sliders/inputs/toggles/colour fields emit edits). Compiled
+    /// only with the `dev-ui` cargo feature.
+    #[cfg(feature = "dev-ui")]
+    Inspector(crate::inspector::InspectorMsg),
     /// Open/close the iced_aw ColorPicker overlay in Settings (accent color).
     ToggleAccentColorPicker,
     /// The user confirmed a new accent color in the ColorPicker (RGB bytes).
@@ -8303,6 +8317,12 @@ impl IcedChat {
             // (and in tests/headless) the subscription uses a closed dummy.
             ui_theme_rx: None,
             ui_theme_reload_tracker: crate::theme_watcher::ReloadTracker::new(),
+            // BORU-UI-09: inspector hidden by default; drafts empty until the
+            // user edits a field.
+            #[cfg(feature = "dev-ui")]
+            inspector_visible: false,
+            #[cfg(feature = "dev-ui")]
+            inspector_draft: crate::inspector::InspectorDraft::default(),
             // ── Notification system ──
             notification_service: NotificationService::new(),
             window_focus_tracker: WindowFocusTracker::new(),
@@ -10153,6 +10173,8 @@ impl IcedChat {
 
             AppMessage::ToggleDark(_) => "ToggleDark",
             AppMessage::UiThemeReloaded { .. } => "UiThemeReloaded",
+            #[cfg(feature = "dev-ui")]
+            AppMessage::Inspector(_) => "Inspector",
             AppMessage::ToggleAccentColorPicker => "ToggleAccentColorPicker",
             AppMessage::AccentColorSelected(_) => "AccentColorSelected",
             AppMessage::AccentColorCancelled => "AccentColorCancelled",
@@ -16690,6 +16712,9 @@ impl IcedChat {
             AppMessage::UiThemeReloaded { generation, result } => {
                 self.update_ui_theme_reloaded(generation, result)
             }
+            // ── Dev UI Inspector (BORU-UI-09) ───────────────────────
+            #[cfg(feature = "dev-ui")]
+            AppMessage::Inspector(msg) => self.update_inspector(msg),
             // ── File sharing dashboard (state layer) ────────────────
             AppMessage::OpenDownloadsFolder
             | AppMessage::DashboardSearchChanged(_)
@@ -18821,6 +18846,18 @@ impl IcedChat {
         self.active_theme
     }
 
+    /// BORU-UI-09: build the dev UI Inspector panel element. Reads the live
+    /// active theme and the draft text; the returned widget emits
+    /// [`AppMessage::Inspector`] messages handled in `update()`.
+    #[cfg(feature = "dev-ui")]
+    fn view_inspector_panel(&self) -> iced::Element<'_, AppMessage> {
+        crate::inspector::view_inspector(
+            &self.active_theme,
+            &self.inspector_draft,
+            self.dark_mode,
+        )
+    }
+
     /// BORU-UI-07: recompute `active_theme` from the current dark-mode base
     /// and the stored `ui_theme_config` overrides. Called at startup (via
     /// [`Self::set_ui_theme_config`]) and on dark-mode toggle so the cached
@@ -18886,6 +18923,72 @@ impl IcedChat {
             }
         }
         iced::Task::none()
+    }
+
+    /// BORU-UI-09: handle a dev UI Inspector message.
+    ///
+    /// Every edit applies to the stored `ui_theme_config` overrides through
+    /// the pure `inspector::apply_*` mapping and then recomputes the live
+    /// theme via [`Self::set_ui_theme_config`] — the same seam the
+    /// `boru-ui.toml` watcher uses. Only theme/config state is touched;
+    /// networking, gossip, rooms, tunnels, media, chat history, the selected
+    /// conversation, scroll position and composer input are never mutated.
+    /// Text inputs keep a draft so half-typed values are not clobbered; the
+    /// value is applied once it parses.
+    #[cfg(feature = "dev-ui")]
+    fn update_inspector(&mut self, msg: crate::inspector::InspectorMsg) -> iced::Task<AppMessage> {
+        use crate::inspector::InspectorMsg;
+        match msg {
+            InspectorMsg::ToggleVisible => {
+                self.inspector_visible = !self.inspector_visible;
+                if !self.inspector_visible {
+                    self.inspector_draft = Default::default();
+                }
+                tracing::debug!(visible = self.inspector_visible, "UI Inspector toggled");
+                iced::Task::none()
+            }
+            InspectorMsg::SetFloat { field, value } => {
+                // Slider edit: apply immediately and clear any stale draft so
+                // the numeric field shows the live value.
+                self.inspector_draft.float_text.remove(&field);
+                let mut cfg = self.ui_theme_config.clone();
+                match crate::inspector::apply_float(&mut cfg, field, value) {
+                    Ok(()) => self.set_ui_theme_config(cfg),
+                    Err(e) => tracing::warn!(error = %e, "inspector: rejected float edit"),
+                }
+                iced::Task::none()
+            }
+            InspectorMsg::SetBool { field, value } => {
+                let mut cfg = self.ui_theme_config.clone();
+                match crate::inspector::apply_bool(&mut cfg, field, value) {
+                    Ok(()) => self.set_ui_theme_config(cfg),
+                    Err(e) => tracing::warn!(error = %e, "inspector: rejected toggle edit"),
+                }
+                iced::Task::none()
+            }
+            InspectorMsg::FloatTextChanged { field, text } => {
+                self.inspector_draft.float_text.insert(field, text.clone());
+                if let Ok(value) = text.trim().parse::<f32>() {
+                    let mut cfg = self.ui_theme_config.clone();
+                    match crate::inspector::apply_float(&mut cfg, field, value) {
+                        Ok(()) => self.set_ui_theme_config(cfg),
+                        Err(e) => tracing::warn!(error = %e, "inspector: rejected numeric input"),
+                    }
+                }
+                iced::Task::none()
+            }
+            InspectorMsg::ColorTextChanged { field, text } => {
+                self.inspector_draft.color_text.insert(field, text.clone());
+                if let Some(cv) = crate::inspector::parse_hex_rgba(text.trim()) {
+                    let mut cfg = self.ui_theme_config.clone();
+                    match crate::inspector::apply_color(&mut cfg, field, cv) {
+                        Ok(()) => self.set_ui_theme_config(cfg),
+                        Err(e) => tracing::warn!(error = %e, "inspector: rejected colour input"),
+                    }
+                }
+                iced::Task::none()
+            }
+        }
     }
 
     /// Return the iced Theme enum for an arbitrary dark-mode flag.
@@ -19159,7 +19262,17 @@ impl IcedChat {
         };
 
         // Responsive sidebar width – clamps to 288–320 px based on window width.
-        let sidebar_w = crate::design_tokens::sidebar_width_for(self.window_width);
+        // BORU-UI-09: read from the LIVE active theme so the Inspector's
+        // "Sidebar → Width" slider changes the shell immediately; defaults
+        // reproduce `sidebar_width_for` exactly (304 px target, 288 min).
+        let btheme = self.boru_theme();
+        let sidebar_w = {
+            let fraction = (self.window_width - crate::design_tokens::VIEWPORT_MIN_WIDTH)
+                / (crate::design_tokens::VIEWPORT_REF_WIDTH - crate::design_tokens::VIEWPORT_MIN_WIDTH);
+            let clamped_fraction = fraction.clamp(0.0, 1.0);
+            btheme.sidebar.width_min
+                + (btheme.sidebar.width - btheme.sidebar.width_min) * clamped_fraction
+        };
 
         let content = row![
             container(sidebar)
@@ -19223,6 +19336,29 @@ impl IcedChat {
             container(content)
                 .width(iced::Length::Fill)
                 .height(iced::Length::Fill)
+        };
+
+        // BORU-UI-09: dev UI Inspector panel — a fixed-width right column
+        // overlaid on the whole app (every screen) while visible. The app
+        // stays fully interactive beside it; closing (Ctrl+Shift+D or the ×
+        // button) returns to the exact layout. Compiled only with dev-ui.
+        #[cfg(feature = "dev-ui")]
+        let base = if self.inspector_visible {
+            let inspector = self.view_inspector_panel();
+            container(
+                row![
+                    base,
+                    container(inspector)
+                        .width(iced::Length::Fixed(crate::inspector::INSPECTOR_PANEL_WIDTH))
+                        .height(iced::Length::Fill),
+                ]
+                .width(iced::Length::Fill)
+                .height(iced::Length::Fill),
+            )
+            .width(iced::Length::Fill)
+            .height(iced::Length::Fill)
+        } else {
+            base
         };
 
         #[cfg(feature = "video-playback")]
@@ -19330,6 +19466,17 @@ pub fn keyboard_shortcuts_subscription() -> iced::Subscription<AppMessage> {
                         if ctrl && modifiers.shift() && c.eq_ignore_ascii_case("g") =>
                     {
                         return Some(AppMessage::ToggleGallery);
+                    }
+                    // BORU-UI-09: dev UI Inspector panel (Ctrl+Shift+D).
+                    // Compiled only with the dev-ui feature — release builds
+                    // have no inspector code at all.
+                    #[cfg(feature = "dev-ui")]
+                    key::Key::Character(c)
+                        if ctrl && modifiers.shift() && c.eq_ignore_ascii_case("d") =>
+                    {
+                        return Some(AppMessage::Inspector(
+                            crate::inspector::InspectorMsg::ToggleVisible,
+                        ));
                     }
                     _ => {}
                 }
@@ -35335,6 +35482,69 @@ fn ui_theme_reload_stale_generation_is_dropped() {
         app.theme_revision,
         revision_before.wrapping_add(1),
         "only the accepted reload bumps the revision"
+    );
+}
+
+// ── BORU-UI-09: dev UI Inspector (dev-ui feature only) ────────────────
+
+#[cfg(feature = "dev-ui")]
+#[test]
+fn inspector_toggle_and_edit_updates_active_theme_via_messages() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    // Hidden by default; Ctrl+Shift+D toggles visibility.
+    assert!(!app.inspector_visible, "inspector hidden by default");
+    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::ToggleVisible));
+    drop(task);
+    assert!(app.inspector_visible, "inspector shown after toggle");
+
+    // A slider edit is a normal Iced message that replaces ONLY theme state.
+    let revision_before = app.theme_revision;
+    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetFloat {
+        field: crate::inspector::ThemeField::SidebarWidth,
+        value: 270.0,
+    }));
+    drop(task);
+    assert_eq!(
+        app.active_theme.sidebar.width, 270.0,
+        "slider edit applied to the active theme"
+    );
+    assert_eq!(
+        app.theme_revision,
+        revision_before.wrapping_add(1),
+        "theme revision bumps so the UI redraws immediately"
+    );
+
+    // A toggle edit applies an optional visual feature.
+    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetBool {
+        field: crate::inspector::ThemeField::HomeShowActivityFeed,
+        value: false,
+    }));
+    drop(task);
+    assert!(
+        !app.active_theme.home.show_activity_feed,
+        "toggle edit applied to the active theme"
+    );
+
+    // A colour edit (hex) applies through the pure mapping.
+    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::ColorTextChanged {
+        field: crate::inspector::ThemeField::ColorPrimary,
+        text: "#102030".to_string(),
+    }));
+    drop(task);
+    assert_eq!(
+        app.active_theme.colors.primary,
+        iced::Color::from_rgb(0x10 as f32 / 255.0, 0x20 as f32 / 255.0, 0x30 as f32 / 255.0),
+        "colour edit applied to the active theme"
+    );
+
+    // Toggle off clears the draft and hides the panel.
+    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::ToggleVisible));
+    drop(task);
+    assert!(!app.inspector_visible, "inspector hidden after second toggle");
+    assert!(
+        app.inspector_draft.float_text.is_empty() && app.inspector_draft.color_text.is_empty(),
+        "drafts cleared when the panel closes"
     );
 }
 }

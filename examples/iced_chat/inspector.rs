@@ -1,0 +1,1379 @@
+//! Dev-only UI Inspector panel (BORU-UI-09 / PDF Task 9).
+//!
+//! A hidden developer panel that edits the **currently active BoruTheme in
+//! memory** while the app runs. It is toggled with Ctrl+Shift+D and exposes:
+//!
+//! - sliders for continuous values (padding, radius, width, sizes);
+//! - numeric text inputs where exact values are useful;
+//! - toggles for optional visual features (`HomeTheme::show_activity_feed`);
+//! - colour controls via a hex/RGBA text field (initial implementation).
+//!
+//! ## State boundary
+//!
+//! The panel NEVER mutates view-local state. Every edit becomes a normal Iced
+//! message ([`InspectorMsg`]) handled in `app.rs`'s `update()`, which applies
+//! the change to the stored [`UiThemeConfig`] overrides and recomputes the
+//! live theme through the same seam the `boru-ui.toml` watcher uses
+//! (`IcedChat::set_ui_theme_config`): default + overrides → merged
+//! `BoruTheme`, theme revision bumped, normal state/update/view cycle
+//! redraws affected widgets.
+//!
+//! ## Gating
+//!
+//! This module is declared `#[cfg(feature = "dev-ui")]` in `main.rs`, so
+//! release builds do not compile any of it. The `dev-ui` cargo feature is the
+//! deliberate opt-in that also turns the runtime dev gate on in every build
+//! (BORU-UI-08), so the panel can only ever exist when the live editor is
+//! enabled.
+//!
+//! ## Pure mapping (unit-tested)
+//!
+//! [`ThemeField`] identifies a theme leaf. [`apply_float`] / [`apply_bool`] /
+//! [`apply_color`] are the pure message → theme-edit mapping: they mutate a
+//! `UiThemeConfig` and return `Err` for a field that cannot hold the value.
+//! The tests in this module exercise those mappings plus the merge round-trip.
+
+use std::collections::HashMap;
+
+use iced::widget::{button, container, row, scrollable, slider, text, text_input, toggler, Space};
+use iced::{Alignment, Color, Element, Length};
+
+use crate::app::AppMessage;
+use crate::theme::BoruTheme;
+use crate::theme_config::{ColorValue, UiThemeConfig};
+
+/// Panel width in px. Fixed so the inspector does not fight the app layout.
+pub const INSPECTOR_PANEL_WIDTH: f32 = 320.0;
+
+/// Which value type a theme leaf holds. Drives which control the panel shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldKind {
+    /// Continuous / exact float (px sizes, ratios, spacing).
+    Float,
+    /// Boolean optional visual feature (rendered as a toggle).
+    Bool,
+    /// Colour (rendered as a hex/RGBA text field + swatch).
+    Color,
+}
+
+/// Identifies one editable leaf of the typed theme.
+///
+/// Every variant maps 1:1 to a `BoruTheme` field (for display) and a
+/// `UiThemeConfig` `Option` leaf (for editing). Variant names follow the
+/// group + field naming convention of `theme.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ThemeField {
+    // ── Colours (ColorTokens) ──
+    ColorCanvas,
+    ColorSidebar,
+    ColorSurface,
+    ColorSurfaceSelected,
+    ColorSurfaceHover,
+    ColorSurfacePressed,
+    ColorSurfaceSecondary,
+    ColorInputBg,
+    ColorBorderMuted,
+    ColorBorderStrong,
+    ColorTextPrimary,
+    ColorTextSecondary,
+    ColorTextMuted,
+    ColorPrimary,
+    ColorPrimaryHover,
+    ColorPrimaryPressed,
+    ColorPrimarySoft,
+    ColorSuccess,
+    ColorDanger,
+    ColorWarning,
+    ColorFocus,
+    ColorDialogBackdrop,
+    // ── Typography (TypographyTokens) ──
+    TypeDisplayHeading,
+    TypePageTitle,
+    TypeSectionTitle,
+    TypeCardTitle,
+    TypeBody,
+    TypeBodyEmphasised,
+    TypeButtonLabel,
+    TypeSupportingText,
+    TypeMetadata,
+    TypeChatMessage,
+    TypeChatSender,
+    TypeChatMetadata,
+    TypeComposerText,
+    TypeHomeSubtitle,
+    TypeDialogTitle,
+    TypeDialogSubtitle,
+    // ── Spacing (SpacingTokens) ──
+    Space4,
+    Space8,
+    Space12,
+    Space16,
+    Space20,
+    Space24,
+    Space32,
+    Space40,
+    ControlHeight,
+    // ── Radii (RadiusTokens) ──
+    RadiusSm,
+    RadiusMd,
+    RadiusLg,
+    RadiusXl,
+    RadiusCard,
+    RadiusPill,
+    RadiusDialog,
+    // ── Sidebar (SidebarTheme) ──
+    SidebarWidth,
+    SidebarWidthMin,
+    SidebarWidthMax,
+    SidebarInset,
+    SidebarItemRadius,
+    SidebarAvatarContainerRadius,
+    SidebarNameSize,
+    SidebarSectionLabelSize,
+    // ── Home (HomeTheme) ──
+    HomePeersBodyMin,
+    HomeActivityRowHeight,
+    HomeHeroGap,
+    HomeQuickActionGap,
+    HomeQuickActionIconSize,
+    HomeQuickActionTitleSize,
+    HomeQuickActionDescSize,
+    HomeQuickActionDescLineHeight,
+    HomeShowActivityFeed,
+    // ── Chat (ChatTheme) ──
+    ChatBubbleMaxWidth,
+    ChatBubbleWidthRatio,
+    ChatMessageMaxWidth,
+    ChatImagePreviewMaxWidth,
+    ChatImagePreviewMaxHeight,
+    ChatGifThumbnailWidth,
+    ChatGifThumbnailHeight,
+    ChatEmojiPickerWidth,
+    // ── Attachments (AttachmentTheme) ──
+    AttachProgressBarGirth,
+    AttachChipAvatarSize,
+    AttachSearchWidthFull,
+    AttachEmptyStateHeight,
+    // ── Rooms (RoomTheme) ──
+    RoomCatalogueRowHeight,
+    RoomBannerWidth,
+    RoomProgressGirth,
+    // ── Tunnels (TunnelTheme) ──
+    TunnelChipPaddingX,
+    TunnelChipPaddingY,
+    // ── Dialogs (DialogTheme) ──
+    DialogPadding,
+    DialogSpacing,
+    DialogTitleSize,
+    DialogBodySize,
+    DialogControlPaddingX,
+    // ── Calls (CallTheme) ──
+    CallAvatarSize,
+    CallPipW,
+    CallPipH,
+    CallControlsGap,
+    // ── Controls (ControlTokens) ──
+    ControlHeaderHeight,
+    ControlSliderWidth,
+    // ── Motion (MotionTokens) ──
+    MotionSidebarFadeFrames,
+}
+
+impl ThemeField {
+    /// Human-readable label shown beside the control.
+    pub fn label(self) -> &'static str {
+        use ThemeField::*;
+        match self {
+            ColorCanvas => "Canvas",
+            ColorSidebar => "Sidebar",
+            ColorSurface => "Surface",
+            ColorSurfaceSelected => "Surface (selected)",
+            ColorSurfaceHover => "Surface (hover)",
+            ColorSurfacePressed => "Surface (pressed)",
+            ColorSurfaceSecondary => "Surface (secondary)",
+            ColorInputBg => "Input background",
+            ColorBorderMuted => "Border (muted)",
+            ColorBorderStrong => "Border (strong)",
+            ColorTextPrimary => "Text (primary)",
+            ColorTextSecondary => "Text (secondary)",
+            ColorTextMuted => "Text (muted)",
+            ColorPrimary => "Accent",
+            ColorPrimaryHover => "Accent (hover)",
+            ColorPrimaryPressed => "Accent (pressed)",
+            ColorPrimarySoft => "Accent (soft)",
+            ColorSuccess => "Success",
+            ColorDanger => "Danger",
+            ColorWarning => "Warning",
+            ColorFocus => "Focus ring",
+            ColorDialogBackdrop => "Dialog backdrop",
+            TypeDisplayHeading => "Display heading",
+            TypePageTitle => "Page title",
+            TypeSectionTitle => "Section title",
+            TypeCardTitle => "Card title",
+            TypeBody => "Body",
+            TypeBodyEmphasised => "Body (emphasised)",
+            TypeButtonLabel => "Button label",
+            TypeSupportingText => "Supporting text",
+            TypeMetadata => "Metadata",
+            TypeChatMessage => "Chat message",
+            TypeChatSender => "Chat sender",
+            TypeChatMetadata => "Chat metadata",
+            TypeComposerText => "Composer text",
+            TypeHomeSubtitle => "Home subtitle",
+            TypeDialogTitle => "Dialog title",
+            TypeDialogSubtitle => "Dialog subtitle",
+            Space4 => "Space 4",
+            Space8 => "Space 8",
+            Space12 => "Space 12",
+            Space16 => "Space 16",
+            Space20 => "Space 20",
+            Space24 => "Space 24",
+            Space32 => "Space 32",
+            Space40 => "Space 40",
+            ControlHeight => "Control height",
+            RadiusSm => "Radius sm",
+            RadiusMd => "Radius md",
+            RadiusLg => "Radius lg",
+            RadiusXl => "Radius xl",
+            RadiusCard => "Card radius",
+            RadiusPill => "Pill radius",
+            RadiusDialog => "Dialog radius",
+            SidebarWidth => "Width",
+            SidebarWidthMin => "Width (min)",
+            SidebarWidthMax => "Width (max)",
+            SidebarInset => "Inset",
+            SidebarItemRadius => "Item radius",
+            SidebarAvatarContainerRadius => "Avatar radius",
+            SidebarNameSize => "Name size",
+            SidebarSectionLabelSize => "Section label size",
+            HomePeersBodyMin => "Peers body min",
+            HomeActivityRowHeight => "Activity row height",
+            HomeHeroGap => "Hero gap",
+            HomeQuickActionGap => "Quick action gap",
+            HomeQuickActionIconSize => "Quick action icon size",
+            HomeQuickActionTitleSize => "Quick action title size",
+            HomeQuickActionDescSize => "Quick action desc size",
+            HomeQuickActionDescLineHeight => "Quick action desc line height",
+            HomeShowActivityFeed => "Show Recent Activity feed",
+            ChatBubbleMaxWidth => "Bubble max width",
+            ChatBubbleWidthRatio => "Bubble width ratio",
+            ChatMessageMaxWidth => "Message max width",
+            ChatImagePreviewMaxWidth => "Image preview max width",
+            ChatImagePreviewMaxHeight => "Image preview max height",
+            ChatGifThumbnailWidth => "GIF thumbnail width",
+            ChatGifThumbnailHeight => "GIF thumbnail height",
+            ChatEmojiPickerWidth => "Emoji picker width",
+            AttachProgressBarGirth => "Progress bar girth",
+            AttachChipAvatarSize => "Chip avatar size",
+            AttachSearchWidthFull => "Search width (full)",
+            AttachEmptyStateHeight => "Empty state height",
+            RoomCatalogueRowHeight => "Catalogue row height",
+            RoomBannerWidth => "Banner width",
+            RoomProgressGirth => "Progress girth",
+            TunnelChipPaddingX => "Chip padding x",
+            TunnelChipPaddingY => "Chip padding y",
+            DialogPadding => "Padding",
+            DialogSpacing => "Spacing",
+            DialogTitleSize => "Title size",
+            DialogBodySize => "Body size",
+            DialogControlPaddingX => "Control padding x",
+            CallAvatarSize => "Avatar size",
+            CallPipW => "PiP width",
+            CallPipH => "PiP height",
+            CallControlsGap => "Controls gap",
+            ControlHeaderHeight => "Header height",
+            ControlSliderWidth => "Slider width",
+            MotionSidebarFadeFrames => "Sidebar fade frames",
+        }
+    }
+
+    /// Group header the field is rendered under.
+    pub fn group(self) -> &'static str {
+        use ThemeField::*;
+        match self {
+            ColorCanvas
+            | ColorSidebar
+            | ColorSurface
+            | ColorSurfaceSelected
+            | ColorSurfaceHover
+            | ColorSurfacePressed
+            | ColorSurfaceSecondary
+            | ColorInputBg
+            | ColorBorderMuted
+            | ColorBorderStrong
+            | ColorTextPrimary
+            | ColorTextSecondary
+            | ColorTextMuted
+            | ColorPrimary
+            | ColorPrimaryHover
+            | ColorPrimaryPressed
+            | ColorPrimarySoft
+            | ColorSuccess
+            | ColorDanger
+            | ColorWarning
+            | ColorFocus
+            | ColorDialogBackdrop => "Colours",
+            TypeDisplayHeading
+            | TypePageTitle
+            | TypeSectionTitle
+            | TypeCardTitle
+            | TypeBody
+            | TypeBodyEmphasised
+            | TypeButtonLabel
+            | TypeSupportingText
+            | TypeMetadata
+            | TypeChatMessage
+            | TypeChatSender
+            | TypeChatMetadata
+            | TypeComposerText
+            | TypeHomeSubtitle
+            | TypeDialogTitle
+            | TypeDialogSubtitle => "Typography",
+            Space4 | Space8 | Space12 | Space16 | Space20 | Space24 | Space32 | Space40
+            | ControlHeight => "Spacing",
+            RadiusSm | RadiusMd | RadiusLg | RadiusXl | RadiusCard | RadiusPill | RadiusDialog => {
+                "Radii"
+            }
+            SidebarWidth | SidebarWidthMin | SidebarWidthMax | SidebarInset | SidebarItemRadius
+            | SidebarAvatarContainerRadius | SidebarNameSize | SidebarSectionLabelSize => {
+                "Sidebar"
+            }
+            HomePeersBodyMin | HomeActivityRowHeight | HomeHeroGap | HomeQuickActionGap
+            | HomeQuickActionIconSize | HomeQuickActionTitleSize | HomeQuickActionDescSize
+            | HomeQuickActionDescLineHeight | HomeShowActivityFeed => "Home",
+            ChatBubbleMaxWidth | ChatBubbleWidthRatio | ChatMessageMaxWidth
+            | ChatImagePreviewMaxWidth | ChatImagePreviewMaxHeight | ChatGifThumbnailWidth
+            | ChatGifThumbnailHeight | ChatEmojiPickerWidth => "Chat",
+            AttachProgressBarGirth | AttachChipAvatarSize | AttachSearchWidthFull
+            | AttachEmptyStateHeight => "Attachments",
+            RoomCatalogueRowHeight | RoomBannerWidth | RoomProgressGirth => "Rooms",
+            TunnelChipPaddingX | TunnelChipPaddingY => "Tunnels",
+            DialogPadding | DialogSpacing | DialogTitleSize | DialogBodySize
+            | DialogControlPaddingX => "Dialogs",
+            CallAvatarSize | CallPipW | CallPipH | CallControlsGap => "Calls",
+            ControlHeaderHeight | ControlSliderWidth => "Controls",
+            MotionSidebarFadeFrames => "Motion",
+        }
+    }
+
+    /// Value type driving which control is rendered.
+    pub fn kind(self) -> FieldKind {
+        use ThemeField::*;
+        match self {
+            HomeShowActivityFeed => FieldKind::Bool,
+            ColorCanvas
+            | ColorSidebar
+            | ColorSurface
+            | ColorSurfaceSelected
+            | ColorSurfaceHover
+            | ColorSurfacePressed
+            | ColorSurfaceSecondary
+            | ColorInputBg
+            | ColorBorderMuted
+            | ColorBorderStrong
+            | ColorTextPrimary
+            | ColorTextSecondary
+            | ColorTextMuted
+            | ColorPrimary
+            | ColorPrimaryHover
+            | ColorPrimaryPressed
+            | ColorPrimarySoft
+            | ColorSuccess
+            | ColorDanger
+            | ColorWarning
+            | ColorFocus
+            | ColorDialogBackdrop => FieldKind::Color,
+            _ => FieldKind::Float,
+        }
+    }
+
+    /// Slider bounds for float fields (a sane band around the theme value).
+    pub fn range(self) -> (f32, f32) {
+        use ThemeField::*;
+        match self {
+            TypeDisplayHeading | TypePageTitle | TypeDialogTitle => (16.0, 64.0),
+            TypeSectionTitle | TypeCardTitle | TypeHomeSubtitle => (12.0, 40.0),
+            TypeBody | TypeBodyEmphasised | TypeComposerText | TypeChatMessage | TypeChatSender => {
+                (8.0, 32.0)
+            }
+            TypeButtonLabel | TypeSupportingText | TypeMetadata | TypeChatMetadata => (8.0, 24.0),
+            TypeDialogSubtitle => (10.0, 24.0),
+            Space4 | Space8 | Space12 | Space16 | Space20 | Space24 | Space32 | Space40 => {
+                (0.0, 64.0)
+            }
+            ControlHeight => (20.0, 64.0),
+            RadiusSm | RadiusMd | RadiusLg | RadiusXl | RadiusCard | RadiusPill | RadiusDialog => {
+                (0.0, 48.0)
+            }
+            SidebarWidth | SidebarWidthMin | SidebarWidthMax => (80.0, 2000.0),
+            SidebarInset => (0.0, 64.0),
+            SidebarItemRadius => (0.0, 32.0),
+            SidebarAvatarContainerRadius => (0.0, 48.0),
+            SidebarNameSize => (10.0, 28.0),
+            SidebarSectionLabelSize => (8.0, 20.0),
+            HomePeersBodyMin => (0.0, 400.0),
+            HomeActivityRowHeight => (16.0, 64.0),
+            HomeHeroGap | HomeQuickActionGap => (0.0, 80.0),
+            HomeQuickActionIconSize => (16.0, 96.0),
+            HomeQuickActionTitleSize | HomeQuickActionDescSize => (8.0, 48.0),
+            HomeQuickActionDescLineHeight => (1.0, 3.0),
+            ChatBubbleMaxWidth | ChatMessageMaxWidth => (100.0, 1200.0),
+            ChatBubbleWidthRatio => (0.3, 1.0),
+            ChatImagePreviewMaxWidth | ChatImagePreviewMaxHeight => (80.0, 800.0),
+            ChatGifThumbnailWidth | ChatGifThumbnailHeight | ChatEmojiPickerWidth => (40.0, 600.0),
+            AttachProgressBarGirth | AttachChipAvatarSize => (0.0, 48.0),
+            AttachSearchWidthFull => (80.0, 800.0),
+            AttachEmptyStateHeight => (0.0, 512.0),
+            RoomCatalogueRowHeight => (16.0, 160.0),
+            RoomBannerWidth => (80.0, 800.0),
+            RoomProgressGirth => (0.0, 32.0),
+            TunnelChipPaddingX | TunnelChipPaddingY => (0.0, 64.0),
+            DialogPadding | DialogSpacing => (0.0, 128.0),
+            DialogTitleSize => (12.0, 48.0),
+            DialogBodySize => (8.0, 32.0),
+            DialogControlPaddingX => (0.0, 64.0),
+            CallAvatarSize => (32.0, 256.0),
+            CallPipW | CallPipH => (0.0, 1024.0),
+            CallControlsGap => (0.0, 160.0),
+            ControlHeaderHeight => (24.0, 160.0),
+            ControlSliderWidth => (40.0, 600.0),
+            MotionSidebarFadeFrames => (0.0, 240.0),
+            // Colour / toggle fields never use the slider range; the panel
+            // renders a hex field / toggle instead.
+            _ => (0.0, 1.0),
+        }
+    }
+}
+
+// ── Read from the ACTIVE theme (display side) ─────────────────────────
+
+/// Read a float leaf from the active theme.
+pub fn read_float(theme: &BoruTheme, field: ThemeField) -> f32 {
+    use ThemeField::*;
+    match field {
+        TypeDisplayHeading => theme.typography.display_heading,
+        TypePageTitle => theme.typography.page_title,
+        TypeSectionTitle => theme.typography.section_title,
+        TypeCardTitle => theme.typography.card_title,
+        TypeBody => theme.typography.body,
+        TypeBodyEmphasised => theme.typography.body_emphasised,
+        TypeButtonLabel => theme.typography.button_label,
+        TypeSupportingText => theme.typography.supporting_text,
+        TypeMetadata => theme.typography.metadata,
+        TypeChatMessage => theme.typography.chat_message,
+        TypeChatSender => theme.typography.chat_sender,
+        TypeChatMetadata => theme.typography.chat_metadata,
+        TypeComposerText => theme.typography.composer_text,
+        TypeHomeSubtitle => theme.typography.home_subtitle,
+        TypeDialogTitle => theme.typography.dialog_title,
+        TypeDialogSubtitle => theme.typography.dialog_subtitle,
+        Space4 => theme.spacing.space_4,
+        Space8 => theme.spacing.space_8,
+        Space12 => theme.spacing.space_12,
+        Space16 => theme.spacing.space_16,
+        Space20 => theme.spacing.space_20,
+        Space24 => theme.spacing.space_24,
+        Space32 => theme.spacing.space_32,
+        Space40 => theme.spacing.space_40,
+        ControlHeight => theme.spacing.control_height,
+        RadiusSm => theme.radii.sm,
+        RadiusMd => theme.radii.md,
+        RadiusLg => theme.radii.lg,
+        RadiusXl => theme.radii.xl,
+        RadiusCard => theme.radii.card,
+        RadiusPill => theme.radii.pill,
+        RadiusDialog => theme.radii.dialog,
+        SidebarWidth => theme.sidebar.width,
+        SidebarWidthMin => theme.sidebar.width_min,
+        SidebarWidthMax => theme.sidebar.width_max,
+        SidebarInset => theme.sidebar.inset,
+        SidebarItemRadius => theme.sidebar.item_radius,
+        SidebarAvatarContainerRadius => theme.sidebar.avatar_container_radius,
+        SidebarNameSize => theme.sidebar.name_size,
+        SidebarSectionLabelSize => theme.sidebar.section_label_size,
+        HomePeersBodyMin => theme.home.peers_body_min,
+        HomeActivityRowHeight => theme.home.activity_row_height,
+        HomeHeroGap => theme.home.hero_gap,
+        HomeQuickActionGap => theme.home.quick_action_gap,
+        HomeQuickActionIconSize => theme.home.quick_action_icon_size,
+        HomeQuickActionTitleSize => theme.home.quick_action_title_size,
+        HomeQuickActionDescSize => theme.home.quick_action_desc_size,
+        HomeQuickActionDescLineHeight => theme.home.quick_action_desc_line_height,
+        ChatBubbleMaxWidth => theme.chat.bubble_max_width,
+        ChatBubbleWidthRatio => theme.chat.bubble_width_ratio,
+        ChatMessageMaxWidth => theme.chat.message_max_width,
+        ChatImagePreviewMaxWidth => theme.chat.image_preview_max_width,
+        ChatImagePreviewMaxHeight => theme.chat.image_preview_max_height,
+        ChatGifThumbnailWidth => theme.chat.gif_thumbnail_width,
+        ChatGifThumbnailHeight => theme.chat.gif_thumbnail_height,
+        ChatEmojiPickerWidth => theme.chat.emoji_picker_width,
+        AttachProgressBarGirth => theme.attachments.progress_bar_girth,
+        AttachChipAvatarSize => theme.attachments.chip_avatar_size,
+        AttachSearchWidthFull => theme.attachments.search_width_full,
+        AttachEmptyStateHeight => theme.attachments.empty_state_height,
+        RoomCatalogueRowHeight => theme.rooms.catalogue_row_height,
+        RoomBannerWidth => theme.rooms.banner_width,
+        RoomProgressGirth => theme.rooms.progress_girth,
+        TunnelChipPaddingX => theme.tunnels.chip_padding_x,
+        TunnelChipPaddingY => theme.tunnels.chip_padding_y,
+        DialogPadding => theme.dialogs.padding,
+        DialogSpacing => theme.dialogs.spacing,
+        DialogTitleSize => theme.dialogs.title_size,
+        DialogBodySize => theme.dialogs.body_size,
+        DialogControlPaddingX => theme.dialogs.control_padding_x,
+        CallAvatarSize => theme.calls.avatar_size,
+        CallPipW => theme.calls.pip_w,
+        CallPipH => theme.calls.pip_h,
+        CallControlsGap => theme.calls.controls_gap,
+        ControlHeaderHeight => theme.controls.header_height,
+        ControlSliderWidth => theme.controls.slider_width,
+        MotionSidebarFadeFrames => theme.motion.sidebar_fade_frames as f32,
+        // Bool fields have no float read; the caller checks `kind()` first.
+        HomeShowActivityFeed | ColorCanvas | ColorSidebar | ColorSurface | ColorSurfaceSelected
+        | ColorSurfaceHover | ColorSurfacePressed | ColorSurfaceSecondary | ColorInputBg
+        | ColorBorderMuted | ColorBorderStrong | ColorTextPrimary | ColorTextSecondary
+        | ColorTextMuted | ColorPrimary | ColorPrimaryHover | ColorPrimaryPressed | ColorPrimarySoft
+        | ColorSuccess | ColorDanger | ColorWarning | ColorFocus | ColorDialogBackdrop => 0.0,
+    }
+}
+
+/// Read a colour leaf from the active theme.
+pub fn read_color(theme: &BoruTheme, field: ThemeField) -> Color {
+    use ThemeField::*;
+    match field {
+        ColorCanvas => theme.colors.canvas,
+        ColorSidebar => theme.colors.sidebar,
+        ColorSurface => theme.colors.surface,
+        ColorSurfaceSelected => theme.colors.surface_selected,
+        ColorSurfaceHover => theme.colors.surface_hover,
+        ColorSurfacePressed => theme.colors.surface_pressed,
+        ColorSurfaceSecondary => theme.colors.surface_secondary,
+        ColorInputBg => theme.colors.input_bg,
+        ColorBorderMuted => theme.colors.border_muted,
+        ColorBorderStrong => theme.colors.border_strong,
+        ColorTextPrimary => theme.colors.text_primary,
+        ColorTextSecondary => theme.colors.text_secondary,
+        ColorTextMuted => theme.colors.text_muted,
+        ColorPrimary => theme.colors.primary,
+        ColorPrimaryHover => theme.colors.primary_hover,
+        ColorPrimaryPressed => theme.colors.primary_pressed,
+        ColorPrimarySoft => theme.colors.primary_soft,
+        ColorSuccess => theme.colors.success,
+        ColorDanger => theme.colors.danger,
+        ColorWarning => theme.colors.warning,
+        ColorFocus => theme.colors.focus,
+        ColorDialogBackdrop => theme.colors.dialog_backdrop,
+        _ => Color::TRANSPARENT,
+    }
+}
+
+/// Read a boolean optional-visual-feature leaf from the active theme.
+pub fn read_bool(theme: &BoruTheme, field: ThemeField) -> bool {
+    match field {
+        ThemeField::HomeShowActivityFeed => theme.home.show_activity_feed,
+        _ => false,
+    }
+}
+
+// ── Apply to the config (message → theme-edit mapping) ────────────────
+
+/// Apply a float edit to the stored `UiThemeConfig` overrides.
+///
+/// This is the pure mapping half of the inspector: it mutates only the
+/// config (never any view state). `app.rs` calls it and then recomputes the
+/// merged theme via `set_ui_theme_config`.
+pub fn apply_float(config: &mut UiThemeConfig, field: ThemeField, value: f32) -> Result<(), String> {
+    use ThemeField::*;
+    if !matches!(field.kind(), FieldKind::Float) {
+        return Err(format!("{} is not a float field", field.label()));
+    }
+    let set = |slot: &mut Option<f32>| *slot = Some(value);
+    match field {
+        TypeDisplayHeading => set(&mut cfg_typography(config).display_heading),
+        TypePageTitle => set(&mut cfg_typography(config).page_title),
+        TypeSectionTitle => set(&mut cfg_typography(config).section_title),
+        TypeCardTitle => set(&mut cfg_typography(config).card_title),
+        TypeBody => set(&mut cfg_typography(config).body),
+        TypeBodyEmphasised => set(&mut cfg_typography(config).body_emphasised),
+        TypeButtonLabel => set(&mut cfg_typography(config).button_label),
+        TypeSupportingText => set(&mut cfg_typography(config).supporting_text),
+        TypeMetadata => set(&mut cfg_typography(config).metadata),
+        TypeChatMessage => set(&mut cfg_typography(config).chat_message),
+        TypeChatSender => set(&mut cfg_typography(config).chat_sender),
+        TypeChatMetadata => set(&mut cfg_typography(config).chat_metadata),
+        TypeComposerText => set(&mut cfg_typography(config).composer_text),
+        TypeHomeSubtitle => set(&mut cfg_typography(config).home_subtitle),
+        TypeDialogTitle => set(&mut cfg_typography(config).dialog_title),
+        TypeDialogSubtitle => set(&mut cfg_typography(config).dialog_subtitle),
+        Space4 => set(&mut cfg_spacing(config).space_4),
+        Space8 => set(&mut cfg_spacing(config).space_8),
+        Space12 => set(&mut cfg_spacing(config).space_12),
+        Space16 => set(&mut cfg_spacing(config).space_16),
+        Space20 => set(&mut cfg_spacing(config).space_20),
+        Space24 => set(&mut cfg_spacing(config).space_24),
+        Space32 => set(&mut cfg_spacing(config).space_32),
+        Space40 => set(&mut cfg_spacing(config).space_40),
+        ControlHeight => set(&mut cfg_spacing(config).control_height),
+        RadiusSm => set(&mut cfg_radii(config).sm),
+        RadiusMd => set(&mut cfg_radii(config).md),
+        RadiusLg => set(&mut cfg_radii(config).lg),
+        RadiusXl => set(&mut cfg_radii(config).xl),
+        RadiusCard => set(&mut cfg_radii(config).card),
+        RadiusPill => set(&mut cfg_radii(config).pill),
+        RadiusDialog => set(&mut cfg_radii(config).dialog),
+        SidebarWidth => set(&mut cfg_sidebar(config).width),
+        SidebarWidthMin => set(&mut cfg_sidebar(config).width_min),
+        SidebarWidthMax => set(&mut cfg_sidebar(config).width_max),
+        SidebarInset => set(&mut cfg_sidebar(config).inset),
+        SidebarItemRadius => set(&mut cfg_sidebar(config).item_radius),
+        SidebarAvatarContainerRadius => set(&mut cfg_sidebar(config).avatar_container_radius),
+        SidebarNameSize => set(&mut cfg_sidebar(config).name_size),
+        SidebarSectionLabelSize => set(&mut cfg_sidebar(config).section_label_size),
+        HomePeersBodyMin => set(&mut cfg_home(config).peers_body_min),
+        HomeActivityRowHeight => set(&mut cfg_home(config).activity_row_height),
+        HomeHeroGap => set(&mut cfg_home(config).hero_gap),
+        HomeQuickActionGap => set(&mut cfg_home(config).quick_action_gap),
+        HomeQuickActionIconSize => set(&mut cfg_home(config).quick_action_icon_size),
+        HomeQuickActionTitleSize => set(&mut cfg_home(config).quick_action_title_size),
+        HomeQuickActionDescSize => set(&mut cfg_home(config).quick_action_desc_size),
+        HomeQuickActionDescLineHeight => set(&mut cfg_home(config).quick_action_desc_line_height),
+        ChatBubbleMaxWidth => set(&mut cfg_chat(config).bubble_max_width),
+        ChatBubbleWidthRatio => set(&mut cfg_chat(config).bubble_width_ratio),
+        ChatMessageMaxWidth => set(&mut cfg_chat(config).message_max_width),
+        ChatImagePreviewMaxWidth => set(&mut cfg_chat(config).image_preview_max_width),
+        ChatImagePreviewMaxHeight => set(&mut cfg_chat(config).image_preview_max_height),
+        ChatGifThumbnailWidth => set(&mut cfg_chat(config).gif_thumbnail_width),
+        ChatGifThumbnailHeight => set(&mut cfg_chat(config).gif_thumbnail_height),
+        ChatEmojiPickerWidth => set(&mut cfg_chat(config).emoji_picker_width),
+        AttachProgressBarGirth => set(&mut cfg_attachments(config).progress_bar_girth),
+        AttachChipAvatarSize => set(&mut cfg_attachments(config).chip_avatar_size),
+        AttachSearchWidthFull => set(&mut cfg_attachments(config).search_width_full),
+        AttachEmptyStateHeight => set(&mut cfg_attachments(config).empty_state_height),
+        RoomCatalogueRowHeight => set(&mut cfg_rooms(config).catalogue_row_height),
+        RoomBannerWidth => set(&mut cfg_rooms(config).banner_width),
+        RoomProgressGirth => set(&mut cfg_rooms(config).progress_girth),
+        TunnelChipPaddingX => set(&mut cfg_tunnels(config).chip_padding_x),
+        TunnelChipPaddingY => set(&mut cfg_tunnels(config).chip_padding_y),
+        DialogPadding => set(&mut cfg_dialogs(config).padding),
+        DialogSpacing => set(&mut cfg_dialogs(config).spacing),
+        DialogTitleSize => set(&mut cfg_dialogs(config).title_size),
+        DialogBodySize => set(&mut cfg_dialogs(config).body_size),
+        DialogControlPaddingX => set(&mut cfg_dialogs(config).control_padding_x),
+        CallAvatarSize => set(&mut cfg_calls(config).avatar_size),
+        CallPipW => set(&mut cfg_calls(config).pip_w),
+        CallPipH => set(&mut cfg_calls(config).pip_h),
+        CallControlsGap => set(&mut cfg_calls(config).controls_gap),
+        ControlHeaderHeight => set(&mut cfg_controls(config).header_height),
+        ControlSliderWidth => set(&mut cfg_controls(config).slider_width),
+        MotionSidebarFadeFrames => {
+            let frames = value.round().clamp(0.0, 240.0) as u32;
+            cfg_motion(config).sidebar_fade_frames = Some(frames);
+        }
+        // Non-float fields rejected above.
+        HomeShowActivityFeed | ColorCanvas | ColorSidebar | ColorSurface | ColorSurfaceSelected
+        | ColorSurfaceHover | ColorSurfacePressed | ColorSurfaceSecondary | ColorInputBg
+        | ColorBorderMuted | ColorBorderStrong | ColorTextPrimary | ColorTextSecondary
+        | ColorTextMuted | ColorPrimary | ColorPrimaryHover | ColorPrimaryPressed | ColorPrimarySoft
+        | ColorSuccess | ColorDanger | ColorWarning | ColorFocus | ColorDialogBackdrop => {}
+    }
+    Ok(())
+}
+
+/// Apply a boolean optional-visual-feature edit to the stored config.
+pub fn apply_bool(config: &mut UiThemeConfig, field: ThemeField, value: bool) -> Result<(), String> {
+    match field {
+        ThemeField::HomeShowActivityFeed => {
+            cfg_home(config).show_activity_feed = Some(value);
+            Ok(())
+        }
+        _ => Err(format!("{} is not a toggle field", field.label())),
+    }
+}
+
+/// Apply a colour edit (as a parsed `ColorValue`) to the stored config.
+pub fn apply_color(
+    config: &mut UiThemeConfig,
+    field: ThemeField,
+    value: ColorValue,
+) -> Result<(), String> {
+    use ThemeField::*;
+    if !matches!(field.kind(), FieldKind::Color) {
+        return Err(format!("{} is not a colour field", field.label()));
+    }
+    let set = |slot: &mut Option<ColorValue>| *slot = Some(value);
+    match field {
+        ColorCanvas => set(&mut cfg_colors(config).canvas),
+        ColorSidebar => set(&mut cfg_colors(config).sidebar),
+        ColorSurface => set(&mut cfg_colors(config).surface),
+        ColorSurfaceSelected => set(&mut cfg_colors(config).surface_selected),
+        ColorSurfaceHover => set(&mut cfg_colors(config).surface_hover),
+        ColorSurfacePressed => set(&mut cfg_colors(config).surface_pressed),
+        ColorSurfaceSecondary => set(&mut cfg_colors(config).surface_secondary),
+        ColorInputBg => set(&mut cfg_colors(config).input_bg),
+        ColorBorderMuted => set(&mut cfg_colors(config).border_muted),
+        ColorBorderStrong => set(&mut cfg_colors(config).border_strong),
+        ColorTextPrimary => set(&mut cfg_colors(config).text_primary),
+        ColorTextSecondary => set(&mut cfg_colors(config).text_secondary),
+        ColorTextMuted => set(&mut cfg_colors(config).text_muted),
+        ColorPrimary => set(&mut cfg_colors(config).primary),
+        ColorPrimaryHover => set(&mut cfg_colors(config).primary_hover),
+        ColorPrimaryPressed => set(&mut cfg_colors(config).primary_pressed),
+        ColorPrimarySoft => set(&mut cfg_colors(config).primary_soft),
+        ColorSuccess => set(&mut cfg_colors(config).success),
+        ColorDanger => set(&mut cfg_colors(config).danger),
+        ColorWarning => set(&mut cfg_colors(config).warning),
+        ColorFocus => set(&mut cfg_colors(config).focus),
+        ColorDialogBackdrop => set(&mut cfg_colors(config).dialog_backdrop),
+        _ => {}
+    }
+    Ok(())
+}
+
+// ── Config group get-or-create helpers ────────────────────────────────
+
+fn cfg_colors(cfg: &mut UiThemeConfig) -> &mut crate::theme_config::ColorConfig {
+    cfg.colors.get_or_insert_with(Default::default)
+}
+fn cfg_typography(cfg: &mut UiThemeConfig) -> &mut crate::theme_config::TypographyConfig {
+    cfg.typography.get_or_insert_with(Default::default)
+}
+fn cfg_spacing(cfg: &mut UiThemeConfig) -> &mut crate::theme_config::SpacingConfig {
+    cfg.spacing.get_or_insert_with(Default::default)
+}
+fn cfg_radii(cfg: &mut UiThemeConfig) -> &mut crate::theme_config::RadiusConfig {
+    cfg.radii.get_or_insert_with(Default::default)
+}
+fn cfg_sidebar(cfg: &mut UiThemeConfig) -> &mut crate::theme_config::SidebarConfig {
+    cfg.sidebar.get_or_insert_with(Default::default)
+}
+fn cfg_home(cfg: &mut UiThemeConfig) -> &mut crate::theme_config::HomeConfig {
+    cfg.home.get_or_insert_with(Default::default)
+}
+fn cfg_chat(cfg: &mut UiThemeConfig) -> &mut crate::theme_config::ChatConfig {
+    cfg.chat.get_or_insert_with(Default::default)
+}
+fn cfg_attachments(cfg: &mut UiThemeConfig) -> &mut crate::theme_config::AttachmentConfig {
+    cfg.attachments.get_or_insert_with(Default::default)
+}
+fn cfg_rooms(cfg: &mut UiThemeConfig) -> &mut crate::theme_config::RoomConfig {
+    cfg.rooms.get_or_insert_with(Default::default)
+}
+fn cfg_tunnels(cfg: &mut UiThemeConfig) -> &mut crate::theme_config::TunnelConfig {
+    cfg.tunnels.get_or_insert_with(Default::default)
+}
+fn cfg_dialogs(cfg: &mut UiThemeConfig) -> &mut crate::theme_config::DialogConfig {
+    cfg.dialogs.get_or_insert_with(Default::default)
+}
+fn cfg_calls(cfg: &mut UiThemeConfig) -> &mut crate::theme_config::CallConfig {
+    cfg.calls.get_or_insert_with(Default::default)
+}
+fn cfg_controls(cfg: &mut UiThemeConfig) -> &mut crate::theme_config::ControlConfig {
+    cfg.controls.get_or_insert_with(Default::default)
+}
+fn cfg_motion(cfg: &mut UiThemeConfig) -> &mut crate::theme_config::MotionConfig {
+    cfg.motion.get_or_insert_with(Default::default)
+}
+
+// ── Colour helpers ────────────────────────────────────────────────────
+
+/// Parse `#RRGGBB` / `#RRGGBBAA` (leading `#` optional) into a `ColorValue`.
+pub fn parse_hex_rgba(s: &str) -> Option<ColorValue> {
+    let hex = s.trim().strip_prefix('#').unwrap_or(s.trim());
+    if !(hex.len() == 6 || hex.len() == 8) {
+        return None;
+    }
+    let mut channels = [0u8; 4];
+    for (i, pair) in hex.as_bytes().chunks(2).enumerate() {
+        let pair = std::str::from_utf8(pair).ok()?;
+        channels[i] = u8::from_str_radix(pair, 16).ok()?;
+    }
+    let (r, g, b) = (channels[0], channels[1], channels[2]);
+    let a = if hex.len() == 8 { channels[3] } else { 255 };
+    Some(ColorValue {
+        r: r as f32 / 255.0,
+        g: g as f32 / 255.0,
+        b: b as f32 / 255.0,
+        a: a as f32 / 255.0,
+    })
+}
+
+/// Format a colour as `#RRGGBB` or `#RRGGBBAA` (alpha included only when < 1).
+pub fn color_to_hex(c: Color) -> String {
+    let r = (c.r.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let g = (c.g.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let b = (c.b.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let a = (c.a.clamp(0.0, 1.0) * 255.0).round() as u8;
+    if a == 255 {
+        format!("#{r:02X}{g:02X}{b:02X}")
+    } else {
+        format!("#{r:02X}{g:02X}{b:02X}{a:02X}")
+    }
+}
+
+// ── Messages ──────────────────────────────────────────────────────────
+
+/// Inspector panel messages — all normal Iced messages handled in `update()`.
+#[derive(Debug, Clone)]
+pub enum InspectorMsg {
+    /// Toggle panel visibility (Ctrl+Shift+D).
+    ToggleVisible,
+    /// Slider changed a continuous float value.
+    SetFloat { field: ThemeField, value: f32 },
+    /// Toggle changed an optional visual feature.
+    SetBool { field: ThemeField, value: bool },
+    /// Numeric text input changed; apply when it parses.
+    FloatTextChanged { field: ThemeField, text: String },
+    /// Hex/RGBA text input changed; apply when it parses.
+    ColorTextChanged { field: ThemeField, text: String },
+}
+
+/// Draft text for the inspector's text inputs. Kept so a half-typed value
+/// (e.g. `"2."`) is not clobbered by the rendered current value each frame;
+/// the value is only applied to the theme once it parses.
+#[derive(Debug, Clone, Default)]
+pub struct InspectorDraft {
+    /// Per-field numeric text (float fields).
+    pub float_text: HashMap<ThemeField, String>,
+    /// Per-field hex/RGBA text (colour fields).
+    pub color_text: HashMap<ThemeField, String>,
+}
+
+// ── View ──────────────────────────────────────────────────────────────
+
+/// Ordered `(group label, fields)` list rendered top-to-bottom.
+const FIELD_GROUPS: &[(&str, &[ThemeField])] = &[
+    (
+        "Colours",
+        &[
+            ThemeField::ColorCanvas,
+            ThemeField::ColorSidebar,
+            ThemeField::ColorSurface,
+            ThemeField::ColorSurfaceSelected,
+            ThemeField::ColorSurfaceHover,
+            ThemeField::ColorSurfacePressed,
+            ThemeField::ColorSurfaceSecondary,
+            ThemeField::ColorInputBg,
+            ThemeField::ColorBorderMuted,
+            ThemeField::ColorBorderStrong,
+            ThemeField::ColorTextPrimary,
+            ThemeField::ColorTextSecondary,
+            ThemeField::ColorTextMuted,
+            ThemeField::ColorPrimary,
+            ThemeField::ColorPrimaryHover,
+            ThemeField::ColorPrimaryPressed,
+            ThemeField::ColorPrimarySoft,
+            ThemeField::ColorSuccess,
+            ThemeField::ColorDanger,
+            ThemeField::ColorWarning,
+            ThemeField::ColorFocus,
+            ThemeField::ColorDialogBackdrop,
+        ],
+    ),
+    (
+        "Typography",
+        &[
+            ThemeField::TypeDisplayHeading,
+            ThemeField::TypePageTitle,
+            ThemeField::TypeSectionTitle,
+            ThemeField::TypeCardTitle,
+            ThemeField::TypeBody,
+            ThemeField::TypeBodyEmphasised,
+            ThemeField::TypeButtonLabel,
+            ThemeField::TypeSupportingText,
+            ThemeField::TypeMetadata,
+            ThemeField::TypeChatMessage,
+            ThemeField::TypeChatSender,
+            ThemeField::TypeChatMetadata,
+            ThemeField::TypeComposerText,
+            ThemeField::TypeHomeSubtitle,
+            ThemeField::TypeDialogTitle,
+            ThemeField::TypeDialogSubtitle,
+        ],
+    ),
+    (
+        "Spacing",
+        &[
+            ThemeField::Space4,
+            ThemeField::Space8,
+            ThemeField::Space12,
+            ThemeField::Space16,
+            ThemeField::Space20,
+            ThemeField::Space24,
+            ThemeField::Space32,
+            ThemeField::Space40,
+            ThemeField::ControlHeight,
+        ],
+    ),
+    (
+        "Radii",
+        &[
+            ThemeField::RadiusSm,
+            ThemeField::RadiusMd,
+            ThemeField::RadiusLg,
+            ThemeField::RadiusXl,
+            ThemeField::RadiusCard,
+            ThemeField::RadiusPill,
+            ThemeField::RadiusDialog,
+        ],
+    ),
+    (
+        "Sidebar",
+        &[
+            ThemeField::SidebarWidth,
+            ThemeField::SidebarWidthMin,
+            ThemeField::SidebarWidthMax,
+            ThemeField::SidebarInset,
+            ThemeField::SidebarItemRadius,
+            ThemeField::SidebarAvatarContainerRadius,
+            ThemeField::SidebarNameSize,
+            ThemeField::SidebarSectionLabelSize,
+        ],
+    ),
+    (
+        "Home",
+        &[
+            ThemeField::HomeShowActivityFeed,
+            ThemeField::HomePeersBodyMin,
+            ThemeField::HomeActivityRowHeight,
+            ThemeField::HomeHeroGap,
+            ThemeField::HomeQuickActionGap,
+            ThemeField::HomeQuickActionIconSize,
+            ThemeField::HomeQuickActionTitleSize,
+            ThemeField::HomeQuickActionDescSize,
+            ThemeField::HomeQuickActionDescLineHeight,
+        ],
+    ),
+    (
+        "Chat",
+        &[
+            ThemeField::ChatBubbleMaxWidth,
+            ThemeField::ChatBubbleWidthRatio,
+            ThemeField::ChatMessageMaxWidth,
+            ThemeField::ChatImagePreviewMaxWidth,
+            ThemeField::ChatImagePreviewMaxHeight,
+            ThemeField::ChatGifThumbnailWidth,
+            ThemeField::ChatGifThumbnailHeight,
+            ThemeField::ChatEmojiPickerWidth,
+        ],
+    ),
+    (
+        "Attachments",
+        &[
+            ThemeField::AttachProgressBarGirth,
+            ThemeField::AttachChipAvatarSize,
+            ThemeField::AttachSearchWidthFull,
+            ThemeField::AttachEmptyStateHeight,
+        ],
+    ),
+    (
+        "Rooms",
+        &[
+            ThemeField::RoomCatalogueRowHeight,
+            ThemeField::RoomBannerWidth,
+            ThemeField::RoomProgressGirth,
+        ],
+    ),
+    (
+        "Tunnels",
+        &[ThemeField::TunnelChipPaddingX, ThemeField::TunnelChipPaddingY],
+    ),
+    (
+        "Dialogs",
+        &[
+            ThemeField::DialogPadding,
+            ThemeField::DialogSpacing,
+            ThemeField::DialogTitleSize,
+            ThemeField::DialogBodySize,
+            ThemeField::DialogControlPaddingX,
+        ],
+    ),
+    (
+        "Calls",
+        &[
+            ThemeField::CallAvatarSize,
+            ThemeField::CallPipW,
+            ThemeField::CallPipH,
+            ThemeField::CallControlsGap,
+        ],
+    ),
+    (
+        "Controls",
+        &[
+            ThemeField::ControlHeaderHeight,
+            ThemeField::ControlSliderWidth,
+        ],
+    ),
+    ("Motion", &[ThemeField::MotionSidebarFadeFrames]),
+];
+
+/// Build the inspector panel element.
+///
+/// `theme` is the CURRENT active theme (display values), `draft` holds
+/// in-progress text input state, `dark_mode` selects panel styling. The
+/// returned element emits [`InspectorMsg`] wrapped in
+/// [`AppMessage::Inspector`].
+pub fn view_inspector(
+    theme: &BoruTheme,
+    draft: &InspectorDraft,
+    dark_mode: bool,
+) -> Element<'static, AppMessage> {
+    let mut col = iced::widget::Column::new()
+        .push(panel_heading(dark_mode))
+        .push(Space::new().height(Length::Fixed(6.0)))
+        .spacing(2.0);
+
+    for (group, fields) in FIELD_GROUPS {
+        col = col
+            .push(group_header(group, dark_mode))
+            .push(Space::new().height(Length::Fixed(2.0)));
+        for field in *fields {
+            col = col.push(field_row(theme, draft, *field, dark_mode));
+        }
+        col = col.push(Space::new().height(Length::Fixed(8.0)));
+    }
+
+    let panel = container(
+        scrollable(col)
+            .width(Length::Fill)
+            .height(Length::Fill),
+    )
+    .width(Length::Fixed(INSPECTOR_PANEL_WIDTH))
+    .height(Length::Fill)
+    .padding(10)
+    .style(move |t| panel_style(t, dark_mode));
+
+    panel.into()
+}
+
+fn panel_heading(dark_mode: bool) -> Element<'static, AppMessage> {
+    let title = text("UI Inspector (dev)")
+        .size(14.0)
+        .color(if dark_mode {
+            Color::from_rgb(0.9, 0.9, 0.9)
+        } else {
+            Color::from_rgb(0.1, 0.1, 0.1)
+        });
+    let hint = text("Ctrl+Shift+D")
+        .size(10.0)
+        .color(if dark_mode {
+            Color::from_rgb(0.6, 0.6, 0.6)
+        } else {
+            Color::from_rgb(0.4, 0.4, 0.4)
+        });
+    let close = button(
+        text("×")
+            .size(14.0)
+            .color(if dark_mode {
+                Color::from_rgb(0.8, 0.8, 0.8)
+            } else {
+                Color::from_rgb(0.2, 0.2, 0.2)
+            }),
+    )
+    .on_press(AppMessage::Inspector(InspectorMsg::ToggleVisible))
+    .padding([0, 6]);
+    row![
+        title,
+        Space::new().width(Length::Fill),
+        hint,
+        Space::new().width(Length::Fixed(6.0)),
+        close
+    ]
+    .align_y(Alignment::Center)
+    .into()
+}
+
+fn group_header(label: &str, dark_mode: bool) -> Element<'static, AppMessage> {
+    text(label.to_uppercase())
+        .size(10.0)
+        .color(if dark_mode {
+            Color::from_rgb(0.5, 0.7, 0.6)
+        } else {
+            Color::from_rgb(0.1, 0.5, 0.3)
+        })
+        .into()
+}
+
+fn panel_style(t: &iced::Theme, dark_mode: bool) -> container::Style {
+    let bg = if dark_mode {
+        Color::from_rgb(0.12, 0.12, 0.20)
+    } else {
+        Color::from_rgb(0.98, 0.99, 0.98)
+    };
+    let border = if dark_mode {
+        Color::from_rgb(0.28, 0.28, 0.38)
+    } else {
+        Color::from_rgb(0.82, 0.88, 0.84)
+    };
+    let _ = t;
+    container::Style {
+        background: Some(iced::Background::Color(bg)),
+        border: iced::Border {
+            color: border,
+            width: 1.0,
+            radius: iced::border::Radius::default(),
+        },
+        ..Default::default()
+    }
+}
+
+fn field_row(
+    theme: &BoruTheme,
+    draft: &InspectorDraft,
+    field: ThemeField,
+    dark_mode: bool,
+) -> Element<'static, AppMessage> {
+    match field.kind() {
+        FieldKind::Float => float_row(theme, draft, field, dark_mode),
+        FieldKind::Bool => bool_row(theme, draft, field, dark_mode),
+        FieldKind::Color => color_row(theme, draft, field, dark_mode),
+    }
+}
+
+fn float_row(
+    theme: &BoruTheme,
+    draft: &InspectorDraft,
+    field: ThemeField,
+    dark_mode: bool,
+) -> Element<'static, AppMessage> {
+    let current = read_float(theme, field);
+    let (min, max) = field.range();
+    let text_value = draft
+        .float_text
+        .get(&field)
+        .cloned()
+        .unwrap_or_else(|| format!("{current:.1}"));
+
+    let label = text(field.label()).size(11.0).color(muted_text(dark_mode));
+    let value = text(format!("{current:.1}")).size(11.0).color(value_text(dark_mode));
+
+    let slider = slider(min..=max, current.clamp(min, max), move |v| {
+        AppMessage::Inspector(InspectorMsg::SetFloat { field, value: v })
+    })
+    .width(Length::Fill);
+
+    let input = text_input("value", &text_value)
+        .width(Length::Fixed(64.0))
+        .padding([2, 6])
+        .size(11.0)
+        .on_input(move |s| {
+            AppMessage::Inspector(InspectorMsg::FloatTextChanged { field, text: s })
+        });
+
+    iced::widget::Column::new()
+        .push(
+            row![label, Space::new().width(Length::Fill), value]
+                .align_y(Alignment::Center),
+        )
+        .push(row![slider, Space::new().width(Length::Fixed(6.0)), input].align_y(Alignment::Center))
+        .spacing(2.0)
+        .into()
+}
+
+fn bool_row(
+    theme: &BoruTheme,
+    draft: &InspectorDraft,
+    field: ThemeField,
+    dark_mode: bool,
+) -> Element<'static, AppMessage> {
+    let _ = draft;
+    let current = read_bool(theme, field);
+    let label = field.label();
+    let tg = toggler(current).label(label).on_toggle(move |v| {
+        AppMessage::Inspector(InspectorMsg::SetBool { field, value: v })
+    });
+    let _ = dark_mode;
+    container(tg).width(Length::Fill).into()
+}
+
+fn color_row(
+    theme: &BoruTheme,
+    draft: &InspectorDraft,
+    field: ThemeField,
+    dark_mode: bool,
+) -> Element<'static, AppMessage> {
+    let current = read_color(theme, field);
+    let text_value = draft
+        .color_text
+        .get(&field)
+        .cloned()
+        .unwrap_or_else(|| color_to_hex(current));
+
+    let label = text(field.label()).size(11.0).color(muted_text(dark_mode));
+    let swatch = container(Space::new().width(Length::Fixed(18.0)).height(Length::Fixed(14.0)))
+        .style(move |_| container::Style {
+            background: Some(iced::Background::Color(current)),
+            border: iced::Border {
+                color: Color::from_rgb(0.5, 0.5, 0.5),
+                width: 1.0,
+                radius: iced::border::Radius::from(3.0),
+            },
+            ..Default::default()
+        });
+
+    let input = text_input("#RRGGBB[AA]", &text_value)
+        .width(Length::Fill)
+        .padding([2, 6])
+        .size(11.0)
+        .on_input(move |s| {
+            AppMessage::Inspector(InspectorMsg::ColorTextChanged { field, text: s })
+        });
+
+    iced::widget::Column::new()
+        .push(
+            row![label, Space::new().width(Length::Fill), swatch]
+                .align_y(Alignment::Center),
+        )
+        .push(input)
+        .spacing(2.0)
+        .into()
+}
+
+fn muted_text(dark_mode: bool) -> Color {
+    if dark_mode {
+        Color::from_rgb(0.65, 0.65, 0.70)
+    } else {
+        Color::from_rgb(0.35, 0.38, 0.36)
+    }
+}
+
+fn value_text(dark_mode: bool) -> Color {
+    if dark_mode {
+        Color::from_rgb(0.80, 0.85, 0.80)
+    } else {
+        Color::from_rgb(0.10, 0.45, 0.28)
+    }
+}
+
+// ── Tests: message → theme-edit mapping ───────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::theme_merge::merge_ui_theme;
+
+    fn default_config() -> UiThemeConfig {
+        UiThemeConfig::default()
+    }
+
+    fn merged(config: &UiThemeConfig) -> BoruTheme {
+        merge_ui_theme(&BoruTheme::default(), config).0
+    }
+
+    #[test]
+    fn apply_float_sets_exact_config_leaf() {
+        let mut cfg = default_config();
+        apply_float(&mut cfg, ThemeField::SidebarWidth, 270.0).unwrap();
+        let theme = merged(&cfg);
+        assert_eq!(theme.sidebar.width, 270.0);
+        // Unrelated fields stay at defaults.
+        assert_eq!(theme.sidebar.width_min, BoruTheme::default().sidebar.width_min);
+        assert_eq!(theme.typography.body, BoruTheme::default().typography.body);
+    }
+
+    #[test]
+    fn apply_float_rejects_non_float_field() {
+        let mut cfg = default_config();
+        let err = apply_float(&mut cfg, ThemeField::ColorPrimary, 1.0).unwrap_err();
+        assert!(err.contains("not a float"), "{err}");
+    }
+
+    #[test]
+    fn apply_bool_sets_optional_visual_feature() {
+        let mut cfg = default_config();
+        apply_bool(&mut cfg, ThemeField::HomeShowActivityFeed, false).unwrap();
+        let theme = merged(&cfg);
+        assert!(!theme.home.show_activity_feed);
+        let err = apply_bool(&mut cfg, ThemeField::SidebarWidth, false).unwrap_err();
+        assert!(err.contains("not a toggle"), "{err}");
+    }
+
+    #[test]
+    fn apply_color_sets_exact_config_leaf() {
+        let mut cfg = default_config();
+        let cv = parse_hex_rgba("#187F50").unwrap();
+        apply_color(&mut cfg, ThemeField::ColorPrimary, cv).unwrap();
+        let theme = merged(&cfg);
+        assert_eq!(theme.colors.primary, cv.to_iced());
+        let err = apply_color(&mut cfg, ThemeField::SidebarWidth, cv).unwrap_err();
+        assert!(err.contains("not a colour"), "{err}");
+    }
+
+    #[test]
+    fn float_text_draft_applies_on_valid_parse() {
+        // Simulate what update() does for FloatTextChanged.
+        let mut cfg = default_config();
+        let text = "288.5".to_string();
+        let value: f32 = text.trim().parse().unwrap();
+        apply_float(&mut cfg, ThemeField::SidebarWidth, value).unwrap();
+        assert_eq!(merged(&cfg).sidebar.width, 288.5);
+    }
+
+    #[test]
+    fn color_text_draft_applies_on_valid_parse() {
+        let mut cfg = default_config();
+        let text = "#F7F9F8";
+        let cv = parse_hex_rgba(text).unwrap();
+        apply_color(&mut cfg, ThemeField::ColorCanvas, cv).unwrap();
+        assert_eq!(merged(&cfg).colors.canvas, cv.to_iced());
+    }
+
+    #[test]
+    fn parse_hex_rgba_accepts_6_and_8_digit_and_rejects_garbage() {
+        let six = parse_hex_rgba("#F7F9F8").unwrap();
+        assert_eq!((six.r, six.g, six.b, six.a), (247.0 / 255.0, 249.0 / 255.0, 248.0 / 255.0, 1.0));
+        let eight = parse_hex_rgba("187F5080").unwrap();
+        assert!((eight.a - 128.0 / 255.0).abs() < 1e-6);
+        assert!(parse_hex_rgba("not-a-color").is_none());
+        assert!(parse_hex_rgba("#FFF").is_none());
+        assert!(parse_hex_rgba("").is_none());
+    }
+
+    #[test]
+    fn color_to_hex_round_trips() {
+        let c = Color::from_rgb(0x18 as f32 / 255.0, 0x7F as f32 / 255.0, 0x50 as f32 / 255.0);
+        assert_eq!(color_to_hex(c), "#187F50");
+        let c8 = Color::from_rgba(0.1, 0.2, 0.3, 0.5);
+        assert_eq!(color_to_hex(c8), "#1A334D80");
+    }
+
+    #[test]
+    fn every_exposed_field_maps_to_a_real_config_leaf() {
+        // Every field in the panel's group list must apply without error
+        // (regression guard: a ThemeField added to the panel but missing
+        // from apply_* would silently no-op and fail this test).
+        let mut cfg = default_config();
+        for (_, fields) in FIELD_GROUPS {
+            for field in *fields {
+                match field.kind() {
+                    FieldKind::Float => {
+                        let (min, max) = field.range();
+                        let v = (min + max) / 2.0;
+                        apply_float(&mut cfg, *field, v)
+                            .unwrap_or_else(|e| panic!("{field:?}: {e}"));
+                    }
+                    FieldKind::Bool => {
+                        apply_bool(&mut cfg, *field, true)
+                            .unwrap_or_else(|e| panic!("{field:?}: {e}"));
+                    }
+                    FieldKind::Color => {
+                        apply_color(&mut cfg, *field, parse_hex_rgba("#123456").unwrap())
+                            .unwrap_or_else(|e| panic!("{field:?}: {e}"));
+                    }
+                }
+            }
+        }
+        // The merged theme reflects the edits and stays finite everywhere.
+        let theme = merged(&cfg);
+        assert!(!theme.home.show_activity_feed || true); // field was set to true
+        assert_eq!(theme.home.show_activity_feed, true);
+        assert!(theme.sidebar.width.is_finite());
+    }
+
+    #[test]
+    fn reads_match_writes_for_a_sample_field() {
+        let mut cfg = default_config();
+        apply_float(&mut cfg, ThemeField::ChatBubbleMaxWidth, 620.0).unwrap();
+        let theme = merged(&cfg);
+        assert_eq!(read_float(&theme, ThemeField::ChatBubbleMaxWidth), 620.0);
+    }
+}

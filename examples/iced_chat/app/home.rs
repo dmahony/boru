@@ -878,14 +878,22 @@ impl IcedChat {
         };
 
         // ── Assemble body ──
-        let body = Column::new()
-            .push(peers_body)
-            .push(Space::new().height(Length::Fixed(SPACE_8)))
-            .push(divider)
-            .push(Space::new().height(Length::Fixed(SPACE_8)))
-            .push(activity_body)
-            .spacing(0)
-            .width(Length::Fill);
+        // BORU-UI-09: the Recent Activity feed slice is an optional visual
+        // feature (`HomeTheme::show_activity_feed`, toggled from the dev UI
+        // Inspector). When disabled the People & Activity card shows only the
+        // Online Peers section — the baseline UI keeps the feed.
+        let body = if btheme.home.show_activity_feed {
+            Column::new()
+                .push(peers_body)
+                .push(Space::new().height(Length::Fixed(SPACE_8)))
+                .push(divider)
+                .push(Space::new().height(Length::Fixed(SPACE_8)))
+                .push(activity_body)
+        } else {
+            Column::new().push(peers_body)
+        }
+        .spacing(0)
+        .width(Length::Fill);
 
         CardShell::new("People & Activity", vec![])
             .title_case(false)

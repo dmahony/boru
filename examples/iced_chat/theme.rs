@@ -1074,6 +1074,10 @@ pub struct HomeTheme {
     pub status_divider_radius: f32,
     /// Status card: security pill radius (14 px).
     pub security_pill_radius: f32,
+    /// Whether the Recent Activity feed slice inside the home "People &
+    /// Activity" card is rendered (BORU-UI-09: optional visual feature,
+    /// toggled from the dev UI Inspector). `true` is the baseline UI.
+    pub show_activity_feed: bool,
 }
 
 impl Default for HomeTheme {
@@ -1098,6 +1102,7 @@ impl Default for HomeTheme {
             status_divider_height: 3.0,
             status_divider_radius: 1.5,
             security_pill_radius: 14.0,
+            show_activity_feed: true,
         }
     }
 }
@@ -1915,6 +1920,11 @@ mod tests {
         assert_eq!(theme.home.quick_action_title_size, 16.0);
         assert_eq!(theme.home.quick_action_desc_size, 14.0);
         assert_eq!(theme.home.quick_action_desc_line_height, 1.45);
+        // BORU-UI-09: optional visual features default to the baseline UI.
+        assert!(
+            theme.home.show_activity_feed,
+            "activity feed shown by default"
+        );
         // Chat (audit §3.3)
         assert_eq!(theme.chat.spinner_size, 40.0);
         assert_eq!(theme.chat.context_menu_width, 180.0);

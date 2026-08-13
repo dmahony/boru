@@ -287,6 +287,8 @@
 # status_divider_height = 3.0
 # status_divider_radius = 1.5
 # security_pill_radius = 14.0
+# show_activity_feed = true   # BORU-UI-09: hide the Recent Activity feed inside
+#                              # the People & Activity card (optional visual feature)
 
 # ── Chat (BoruTheme.chat) — px (bubble_width_ratio is 0..1) ───────────
 # [chat]

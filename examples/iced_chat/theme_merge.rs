@@ -143,6 +143,12 @@ fn clamp_frames(field: &str, v: u32, default: u32, warnings: &mut Vec<String>) -
     v
 }
 
+/// Identity policy for boolean visual flags — a bool cannot be nonsense, so
+/// the configured value is used as-is (BORU-UI-09 optional visual features).
+fn clamp_flag(_field: &str, v: bool, _default: bool, _warnings: &mut Vec<String>) -> bool {
+    v
+}
+
 /// Convert a config colour to `iced::Color`, clamping channels to 0..=1 and
 /// falling back to the default on NaN.
 fn clamp_color(field: &str, v: ColorValue, default: Color, warnings: &mut Vec<String>) -> Color {
@@ -448,6 +454,7 @@ merge_group! {
         status_divider_height: clamp_size0,
         status_divider_radius: clamp_size0,
         security_pill_radius: clamp_size0,
+        show_activity_feed: clamp_flag,
     }
 }
 
