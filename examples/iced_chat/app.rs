@@ -3117,7 +3117,8 @@ pub enum Screen {
     /// Embedded terminal tab (feature `terminal`).
     #[cfg(feature = "terminal")]
     Terminal,
-    /// Developer component gallery — excluded from release navigation.
+    /// Developer component gallery — dev-ui only, excluded from release navigation.
+    #[cfg(feature = "dev-ui")]
     Gallery,
 }
 
@@ -6100,7 +6101,8 @@ pub enum AppMessage {
     /// Internal no-op for async task completions that should not change UI state.
     Noop,
 
-    /// Toggle the developer component gallery screen (debug builds only).
+    /// Toggle the developer component gallery screen (dev-ui builds only).
+    #[cfg(feature = "dev-ui")]
     ToggleGallery,
 
     // ── Shared file catalogue management ──
@@ -10209,6 +10211,7 @@ impl IcedChat {
             AppMessage::WindowResized(_) => "WindowResized",
 
             AppMessage::Noop => "Noop",
+            #[cfg(feature = "dev-ui")]
             AppMessage::ToggleGallery => "ToggleGallery",
             AppMessage::AddSharedFile => "AddSharedFile",
             AppMessage::AddSharedFolder => "AddSharedFolder",
@@ -11787,6 +11790,7 @@ impl IcedChat {
             Screen::Groups => "Groups".to_string(),
             #[cfg(feature = "terminal")]
             Screen::Terminal => "Terminal open".to_string(),
+            #[cfg(feature = "dev-ui")]
             Screen::Gallery => "Component gallery".to_string(),
         };
 
@@ -12039,6 +12043,7 @@ impl IcedChat {
             Screen::Groups => ("Groups", None),
             #[cfg(feature = "terminal")]
             Screen::Terminal => ("Terminal", None),
+            #[cfg(feature = "dev-ui")]
             Screen::Gallery => ("Gallery", None),
         };
         let snapshot = IcedStateSnapshot {
@@ -16847,6 +16852,7 @@ impl IcedChat {
 
             AppMessage::Noop => iced::Task::none(),
 
+            #[cfg(feature = "dev-ui")]
             AppMessage::ToggleGallery => {
                 self.screen = match self.screen {
                     Screen::Gallery => Screen::ChatList,
@@ -19494,9 +19500,9 @@ impl IcedChat {
                 )
                 .into(),
             },
+            #[cfg(feature = "dev-ui")]
             Screen::Gallery => crate::component_gallery::view_gallery(),
         };
-
         // BORU-UI-11: when inspection mode is enabled, tag the sidebar and
         // main panel with their component IDs so hovering/clicking them shows
         // the component name and can jump the inspector to its section. When
@@ -19750,8 +19756,9 @@ pub fn keyboard_shortcuts_subscription() -> iced::Subscription<AppMessage> {
                 let ctrl = modifiers.control();
                 match key {
                     // Developer gallery: Ctrl+Shift+G (documented in
-                    // component_gallery.rs). Debug-only harness — harmless in
-                    // release builds since ToggleGallery just flips screens.
+                    // component_gallery.rs). Dev-ui-only harness — release
+                    // builds have no gallery screen at all.
+                    #[cfg(feature = "dev-ui")]
                     key::Key::Character(c)
                         if ctrl && modifiers.shift() && c.eq_ignore_ascii_case("g") =>
                     {

@@ -1420,6 +1420,7 @@ pub fn view_inspector(
         .push(reset_actions_row(dark_mode))
         .push(save_theme_row(dark_mode, &draft.save_status))
         .push(reload_theme_row(dark_mode, &draft.reload_status))
+        .push(gallery_row(dark_mode))
         .push(Space::new().height(Length::Fixed(6.0)))
         .spacing(2.0);
 
@@ -1523,6 +1524,35 @@ fn reset_actions_row(dark_mode: bool) -> Element<'static, AppMessage> {
         });
     row![
         reset_all,
+        Space::new().width(Length::Fixed(6.0)),
+        hint,
+        Space::new().width(Length::Fill)
+    ]
+    .align_y(Alignment::Center)
+    .into()
+}
+
+/// Row with the Component Gallery launch button (BORU-UI-14 / PDF Task 14).
+///
+/// The button navigates to the developer-only component gallery screen
+/// (Ctrl+Shift+G); the hint keeps the shortcut discoverable inside the panel.
+fn gallery_row(dark_mode: bool) -> Element<'static, AppMessage> {
+    let open = button(text("Component Gallery").size(11.0).color(if dark_mode {
+        Color::from_rgb(0.85, 0.85, 0.85)
+    } else {
+        Color::from_rgb(0.15, 0.15, 0.15)
+    }))
+    .on_press(AppMessage::ToggleGallery)
+    .padding([3, 8]);
+    let hint = text("opens the component playground (Ctrl+Shift+G)")
+        .size(9.0)
+        .color(if dark_mode {
+            Color::from_rgb(0.55, 0.55, 0.6)
+        } else {
+            Color::from_rgb(0.45, 0.45, 0.45)
+        });
+    row![
+        open,
         Space::new().width(Length::Fixed(6.0)),
         hint,
         Space::new().width(Length::Fill)

@@ -1,15 +1,21 @@
-//! Temporary developer component gallery — excluded from release navigation.
+//! Developer component gallery / UI playground — dev-ui only (PDF Task 14).
 //!
-//! Shows every primitive from `ui_components` in every applicable state.
-//! Accessible only via `Screen::Gallery` (Ctrl+Shift+G in debug builds).
+//! Shows every primitive from `ui_components` in every applicable state,
+//! plus representative states for chat messages, attachment cards and video
+//! cards rendered through the EXACT production components (never duplicated
+//! mocks). Accessible only via `Screen::Gallery` (Ctrl+Shift+G or the
+//! "Component Gallery" button in the dev UI Inspector) in dev-ui builds.
 
 use iced::widget::{container, rule::horizontal, text, Column, Row, Space};
 use iced::{Alignment, Element, Length, Theme};
 
-use crate::app::AppMessage;
+use crate::app::{
+    DownloadAttachment, DownloadFailure, DownloadState, TransferKind, AppMessage,
+};
 use crate::boru_dialog::BoruDialog;
 use crate::card_shell::{CardShell, CARD_ROW_HEIGHT};
 use crate::design_tokens;
+use crate::download_progress_view::view_download_progress;
 use crate::fonts::TypeRole;
 use crate::icon_system::{Icon, IconSize};
 use crate::ui_components::{
@@ -93,6 +99,24 @@ pub fn view_gallery() -> Element<'static, AppMessage> {
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
         .push(gallery_section("Form Primitives (UI-RESTYLE-03)"))
         .push(form_gallery())
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
+        .push(gallery_section("Names: Short & Long (PDF Task 14)"))
+        .push(name_variants_gallery())
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
+        .push(gallery_section("Message Bubbles (PDF Task 14)"))
+        .push(message_bubble_gallery())
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
+        .push(gallery_section("Attachment States (PDF Task 14)"))
+        .push(attachment_states_gallery())
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
+        .push(gallery_section("Video Cards & Aspect Ratios (PDF Task 14)"))
+        .push(video_card_gallery())
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
+        .push(gallery_section("Available Widths (PDF Task 14)"))
+        .push(width_variants_gallery())
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
+        .push(gallery_section("State Variants (PDF Task 14)"))
+        .push(state_variants_gallery())
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
         .push(gallery_section("Typography (UI-HOME-11)"))
         .push(typography_gallery())
@@ -1804,4 +1828,621 @@ fn typography_gallery() -> Element<'static, AppMessage> {
         .push(fallback_demo)
         .push(fallback_note)
         .into()
+}
+
+// ── Names: short & long (PDF Task 14) ────────────────────────────────
+
+/// Short and long usernames and room names rendered through the production
+/// `Avatar`, `ListRow`, `CardShell` and `PeerChipStack` components.
+fn name_variants_gallery() -> Element<'static, AppMessage> {
+    let theme = Theme::Light;
+
+    // Short vs long usernames in the production avatar + list row.
+    let short_avatar: Element<'static, AppMessage> = Avatar::<AppMessage>::new("Ada")
+        .size(design_tokens::AVATAR_SM)
+        .build();
+    let long_avatar: Element<'static, AppMessage> = Avatar::<AppMessage>::new(
+        "Alexandrina von Hohenzollern-Sigmaringen",
+    )
+    .size(design_tokens::AVATAR_SM)
+    .build();
+
+    // Short vs long room names in the production CardShell header.
+    let short_room = CardShell::new("Lobby", vec![])
+        .count(3)
+        .empty_message("No one is here yet.")
+        .build(&theme);
+    let long_room = CardShell::new(
+        "The Very Long Room Name That Keeps Going And Going For Testing Purposes",
+        vec![],
+    )
+    .count(12)
+    .empty_message("A very long room name still fits.")
+    .build(&theme);
+
+    Column::new()
+        .push(state_label("Short username (Avatar + ListRow)"))
+        .push(
+            ListRow::<AppMessage>::new("Ada")
+                .leading(short_avatar)
+                .secondary("Online")
+                .build(&theme),
+        )
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(state_label("Long username (Avatar + ListRow)"))
+        .push(
+            ListRow::<AppMessage>::new("Alexandrina von Hohenzollern-Sigmaringen")
+                .leading(long_avatar)
+                .secondary("Last seen 2m ago")
+                .build(&theme),
+        )
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(state_label("Short room name (CardShell)"))
+        .push(short_room)
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(state_label("Long room name (CardShell)"))
+        .push(long_room)
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(state_label("Long peer names (PeerChipStack truncates to 12 chars)"))
+        .push(
+            PeerChipStack::<AppMessage>::new(vec![
+                "Alexandrina von Hohenzollern-Sigmaringen",
+                "Maximiliana-Theresia van der Berg",
+            ])
+            .build(&theme),
+        )
+        .spacing(0)
+        .into()
+}
+
+// ── Message bubbles (PDF Task 14) ─────────────────────────────────────
+
+/// A representative message bubble composed from the exact production style
+/// functions `view_chat_log` uses (`design_tokens::bubble_bg`,
+/// `bubble_border`, `TypeRole` fonts, `Avatar`, `delivery_label`). This is
+/// not a mock — every style token and font role is the production one.
+fn message_bubble(
+    label: &str,
+    body: &str,
+    is_local: bool,
+    failed: bool,
+    delivery: Option<&boru_core::chat_history::DeliveryState>,
+) -> Element<'static, AppMessage> {
+    let theme = Theme::Light;
+    let label_color = if is_local {
+        design_tokens::text_local_label(&theme)
+    } else {
+        design_tokens::text_remote_label(&theme)
+    };
+    let body_color = if is_local {
+        design_tokens::text_local_body(&theme)
+    } else {
+        design_tokens::text_remote_body(&theme)
+    };
+
+    let label_el = text(label.to_string())
+        .font(TypeRole::ChatSender.font())
+        .size(TypeRole::ChatSender.size_px())
+        .color(label_color);
+    let body_el = text(body.to_string())
+        .font(TypeRole::ChatMessage.font())
+        .size(TypeRole::ChatMessage.size_px())
+        .line_height(iced::widget::text::LineHeight::Relative(1.45))
+        .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+        .color(body_color);
+    let ts = if let Some(state) = delivery {
+        format!(
+            "14:32 · {}",
+            crate::presentation::delivery_label(state)
+        )
+    } else {
+        "14:32".to_string()
+    };
+    let ts_el = text(ts)
+        .font(TypeRole::ChatMetadata.font())
+        .size(TypeRole::ChatMetadata.size_px())
+        .color(design_tokens::text_muted(&theme));
+
+    let bubble = container(body_el)
+        .padding([design_tokens::SPACE_10, design_tokens::SPACE_16])
+        .style(move |t| {
+            let mut s = iced::widget::container::Style {
+                border: design_tokens::bubble_border(t, is_local, false, failed)
+                    .unwrap_or_default(),
+                ..Default::default()
+            };
+            if let Some(bg) = design_tokens::bubble_bg(t, is_local, false) {
+                s.background = Some(bg);
+            }
+            s
+        });
+
+    let avatar: Element<'static, AppMessage> = Avatar::<AppMessage>::new(label)
+        .size(design_tokens::AVATAR_MSG)
+        .build();
+
+    let col = Column::new()
+        .push(label_el)
+        .push(bubble)
+        .push(ts_el)
+        .spacing(design_tokens::SPACE_2)
+        .max_width(crate::presentation::chat_bubble_max_width(640.0))
+        .align_x(if is_local {
+            iced::Alignment::End
+        } else {
+            iced::Alignment::Start
+        });
+
+    let row = if is_local {
+        Row::new().push(col).push(avatar).spacing(design_tokens::SPACE_8)
+    } else {
+        Row::new().push(avatar).push(col).spacing(design_tokens::SPACE_8)
+    };
+    row.width(Length::Fill).into()
+}
+
+fn message_bubble_gallery() -> Element<'static, AppMessage> {
+    use boru_core::chat_history::DeliveryState;
+
+    Column::new()
+        .push(state_label("Incoming — short name"))
+        .push(message_bubble(
+            "Ada",
+            "Hey, are you free for a quick call?",
+            false,
+            false,
+            None,
+        ))
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(state_label("Incoming — long name (wraps)"))
+        .push(message_bubble(
+            "Alexandrina von Hohenzollern-Sigmaringen",
+            "The architecture review notes are ready — I dropped them in the shared folder.",
+            false,
+            false,
+            None,
+        ))
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(state_label("Outgoing — sent"))
+        .push(message_bubble(
+            "You",
+            "Sounds good, send them over.",
+            true,
+            false,
+            Some(&DeliveryState::Sent),
+        ))
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(state_label("Outgoing — delivered"))
+        .push(message_bubble(
+            "You",
+            "Actually, let's do it after lunch.",
+            true,
+            false,
+            Some(&DeliveryState::Delivered),
+        ))
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(state_label("Outgoing — read (Seen)"))
+        .push(message_bubble(
+            "You",
+            "👍",
+            true,
+            false,
+            Some(&DeliveryState::Seen),
+        ))
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(state_label("Outgoing — failed (danger border)"))
+        .push(message_bubble(
+            "You",
+            "Did you get the file?",
+            true,
+            true,
+            Some(&DeliveryState::Failed),
+        ))
+        .spacing(0)
+        .into()
+}
+
+// ── Attachment states (PDF Task 14) ───────────────────────────────────
+
+/// Build a production `DownloadAttachment` fixture for a given state.
+fn attachment_fixture(
+    kind: TransferKind,
+    name: &str,
+    state: DownloadState,
+) -> DownloadAttachment {
+    let mut att = DownloadAttachment::new(kind, name, "", "Ada", None);
+    att.state = state;
+    att
+}
+
+/// Render one production download card inside a labelled frame.
+fn attachment_card(
+    label: &str,
+    attachment: &DownloadAttachment,
+) -> Element<'static, AppMessage> {
+    let card = view_download_progress(
+        0,
+        attachment,
+        false,
+        false,
+        Some(1_752_000_000_000),
+        640.0,
+    );
+    Column::new()
+        .push(state_label(label))
+        .push(
+            Space::new()
+                .width(Length::Shrink)
+                .height(Length::Fixed(4.0)),
+        )
+        .push(card)
+        .width(Length::Fill)
+        .spacing(0)
+        .into()
+}
+
+fn attachment_states_gallery() -> Element<'static, AppMessage> {
+    let pending = attachment_fixture(
+        TransferKind::File,
+        "QuarterlyReport.pdf",
+        DownloadState::Ready { total: Some(2_415_888) },
+    );
+    let downloading = attachment_fixture(
+        TransferKind::File,
+        "QuarterlyReport.pdf",
+        DownloadState::Active {
+            bytes: 1_200_000,
+            total: Some(2_415_888),
+        },
+    );
+    let downloaded = attachment_fixture(
+        TransferKind::File,
+        "QuarterlyReport.pdf",
+        DownloadState::Completed {
+            saved_name: "QuarterlyReport.pdf".to_string(),
+            saved_path: Some(std::path::PathBuf::from("/home/ada/Downloads")),
+            total_size: Some(2_415_888),
+        },
+    );
+    let error = attachment_fixture(
+        TransferKind::File,
+        "QuarterlyReport.pdf",
+        DownloadState::Failed {
+            failure: DownloadFailure::VerificationFailed {
+                attempts: 3,
+                max_attempts: 3,
+                detail: Some("hash mismatch".to_string()),
+            },
+        },
+    );
+    let image_pending = attachment_fixture(
+        TransferKind::Image,
+        "vacation-photo-2024.jpg",
+        DownloadState::Ready { total: Some(5_120_000) },
+    );
+    let image_downloading = attachment_fixture(
+        TransferKind::Image,
+        "vacation-photo-2024.jpg",
+        DownloadState::Active {
+            bytes: 3_300_000,
+            total: Some(5_120_000),
+        },
+    );
+    let image_downloaded = attachment_fixture(
+        TransferKind::Image,
+        "vacation-photo-2024.jpg",
+        DownloadState::Completed {
+            saved_name: "vacation-photo-2024.jpg".to_string(),
+            saved_path: Some(std::path::PathBuf::from("/home/ada/Downloads")),
+            total_size: Some(5_120_000),
+        },
+    );
+
+    Column::new()
+        .push(attachment_card("File — pending (Ready)", &pending))
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(attachment_card("File — downloading (Active)", &downloading))
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(attachment_card("File — downloaded (Completed)", &downloaded))
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(attachment_card("File — error (Failed)", &error))
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(attachment_card("Image — pending", &image_pending))
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(attachment_card("Image — downloading", &image_downloading))
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(attachment_card("Image — downloaded", &image_downloaded))
+        .spacing(0)
+        .into()
+}
+
+// ── Video cards & aspect ratios (PDF Task 14) ─────────────────────────
+
+/// Build a video attachment with explicit poster dimensions (aspect ratio).
+fn video_fixture(
+    name: &str,
+    poster: (u32, u32),
+    state: DownloadState,
+) -> DownloadAttachment {
+    let mut att = attachment_fixture(TransferKind::Video, name, state);
+    att.poster_dimensions = Some(poster);
+    att
+}
+
+fn video_card_gallery() -> Element<'static, AppMessage> {
+    let ready_16_9 = video_fixture(
+        "presentation-recording.mp4",
+        (1920, 1080),
+        DownloadState::Completed {
+            saved_name: "presentation-recording.mp4".to_string(),
+            saved_path: Some(std::path::PathBuf::from("/home/ada/Downloads")),
+            total_size: Some(48_000_000),
+        },
+    );
+    let ready_square = video_fixture(
+        "square-demo.mp4",
+        (1080, 1080),
+        DownloadState::Completed {
+            saved_name: "square-demo.mp4".to_string(),
+            saved_path: Some(std::path::PathBuf::from("/home/ada/Downloads")),
+            total_size: Some(12_000_000),
+        },
+    );
+    let ready_vertical = video_fixture(
+        "vertical-short.mp4",
+        (1080, 1920),
+        DownloadState::Completed {
+            saved_name: "vertical-short.mp4".to_string(),
+            saved_path: Some(std::path::PathBuf::from("/home/ada/Downloads")),
+            total_size: Some(8_000_000),
+        },
+    );
+    let downloading = video_fixture(
+        "presentation-recording.mp4",
+        (1920, 1080),
+        DownloadState::Active {
+            bytes: 22_000_000,
+            total: Some(48_000_000),
+        },
+    );
+    let error = video_fixture(
+        "presentation-recording.mp4",
+        (1920, 1080),
+        DownloadState::Failed {
+            failure: DownloadFailure::PeerOffline {
+                detail: Some("peer unreachable".to_string()),
+            },
+        },
+    );
+
+    Column::new()
+        .push(state_label("16:9 — ready to play"))
+        .push(attachment_card("16:9 (1920×1080)", &ready_16_9))
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(state_label("Square — ready to play"))
+        .push(attachment_card("Square (1080×1080)", &ready_square))
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(state_label("Vertical — ready to play"))
+        .push(attachment_card("Vertical (1080×1920)", &ready_vertical))
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(state_label("Downloading (progress)"))
+        .push(attachment_card("Downloading", &downloading))
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(state_label("Error (failed)"))
+        .push(attachment_card("Error", &error))
+        .spacing(0)
+        .into()
+}
+
+// ── Available widths (PDF Task 14) ────────────────────────────────────
+
+/// Render one component at a fixed width to demonstrate narrow/normal/wide.
+fn width_frame(
+    label: &str,
+    width: f32,
+    inner: Element<'static, AppMessage>,
+) -> Element<'static, AppMessage> {
+    Column::new()
+        .push(state_label(label))
+        .push(
+            Space::new()
+                .width(Length::Shrink)
+                .height(Length::Fixed(4.0)),
+        )
+        .push(
+            container(inner)
+                .width(Length::Fixed(width))
+                .style(design_tokens::card_style),
+        )
+        .width(Length::Fill)
+        .spacing(0)
+        .into()
+}
+
+fn width_variants_gallery() -> Element<'static, AppMessage> {
+    use boru_core::chat_history::DeliveryState;
+
+    // iced Elements are not Clone — rebuild per frame with the same inputs.
+    let bubble_at = |width: f32| {
+        message_bubble(
+            "Ada",
+            "This message demonstrates how the bubble behaves when the available column width changes.",
+            false,
+            false,
+            Some(&DeliveryState::Delivered),
+        )
+    };
+    let shell_at = || {
+        CardShell::new(
+            "Online Peers",
+            vec![
+                card_shell_row("Alice", "online"),
+                card_shell_row("Bob", "idle"),
+                card_shell_row("Carol", "online"),
+            ],
+        )
+        .count(3)
+        .build(&Theme::Light)
+    };
+
+    Column::new()
+        .push(width_frame(
+            "Narrow — 320 px (message bubble)",
+            320.0,
+            bubble_at(320.0),
+        ))
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(width_frame(
+            "Normal — 640 px (message bubble)",
+            640.0,
+            bubble_at(640.0),
+        ))
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(width_frame(
+            "Wide — 1024 px (message bubble)",
+            1024.0,
+            bubble_at(1024.0),
+        ))
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(width_frame("Narrow — 320 px (card shell)", 320.0, shell_at()))
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(width_frame("Normal — 640 px (card shell)", 640.0, shell_at()))
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(width_frame("Wide — 1024 px (card shell)", 1024.0, shell_at()))
+        .spacing(0)
+        .into()
+}
+
+// ── State variants (PDF Task 14) ──────────────────────────────────────
+
+fn state_variants_gallery() -> Element<'static, AppMessage> {
+    let theme = Theme::Light;
+
+    let dot_online: Element<'static, AppMessage> = status_dot(StatusDotKind::Online, 10.0);
+    let unread_badge: Element<'static, AppMessage> = badge("4", BadgeKind::Count);
+    let danger_badge: Element<'static, AppMessage> = badge("Error", BadgeKind::Danger);
+
+    Column::new()
+        .push(state_label("Selected (ListRow)"))
+        .push(
+            ListRow::<AppMessage>::new("Selected conversation")
+                .secondary("Selected row example")
+                .selected(true)
+                .build(&theme),
+        )
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(state_label("Unread (ListRow with count badge)"))
+        .push(
+            ListRow::<AppMessage>::new("Unread conversation")
+                .leading(dot_online)
+                .secondary("New message preview…")
+                .trailing(unread_badge)
+                .build(&theme),
+        )
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(state_label("Disabled (buttons)"))
+        .push(
+            Row::new()
+                .push(primary_button("Disabled primary", None, true))
+                .push(
+                    Space::new()
+                        .width(Length::Fixed(design_tokens::SPACE_12))
+                        .height(Length::Shrink),
+                )
+                .push(secondary_button("Disabled secondary", None, true))
+                .spacing(0),
+        )
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(state_label("Error (InlineError with retry)"))
+        .push(
+            InlineError::new("Transfer failed: hash mismatch.")
+                .on_retry(AppMessage::Noop)
+                .build(&theme),
+        )
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(state_label("Error (danger badge)"))
+        .push(danger_badge)
+        .spacing(0)
+        .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// PDF Task 14 smoke test: every gallery section must build its element
+    /// tree without panicking. Building the tree is pure construction (no
+    /// renderer, no layout) so this is a cheap guard against regressions in
+    /// the fixture builders and production-component wiring.
+    #[test]
+    fn all_gallery_sections_build() {
+        let _ = view_gallery();
+        let _ = name_variants_gallery();
+        let _ = message_bubble_gallery();
+        let _ = attachment_states_gallery();
+        let _ = video_card_gallery();
+        let _ = width_variants_gallery();
+        let _ = state_variants_gallery();
+    }
+
+    /// The attachment fixtures map to the production `DownloadState` variants
+    /// the PDF requires: pending (Ready), downloading (Active), downloaded
+    /// (Completed), error (Failed).
+    #[test]
+    fn attachment_fixture_states_cover_required_set() {
+        let pending = attachment_fixture(
+            TransferKind::File,
+            "a.pdf",
+            DownloadState::Ready { total: Some(10) },
+        );
+        assert!(matches!(pending.state, DownloadState::Ready { .. }));
+
+        let downloading = attachment_fixture(
+            TransferKind::File,
+            "a.pdf",
+            DownloadState::Active {
+                bytes: 5,
+                total: Some(10),
+            },
+        );
+        assert!(matches!(downloading.state, DownloadState::Active { .. }));
+
+        let downloaded = attachment_fixture(
+            TransferKind::File,
+            "a.pdf",
+            DownloadState::Completed {
+                saved_name: "a.pdf".into(),
+                saved_path: None,
+                total_size: Some(10),
+            },
+        );
+        assert!(matches!(downloaded.state, DownloadState::Completed { .. }));
+
+        let error = attachment_fixture(
+            TransferKind::File,
+            "a.pdf",
+            DownloadState::Failed {
+                failure: DownloadFailure::VerificationFailed {
+                    attempts: 3,
+                    max_attempts: 3,
+                    detail: None,
+                },
+            },
+        );
+        assert!(matches!(error.state, DownloadState::Failed { .. }));
+    }
+
+    /// Video fixtures carry poster dimensions for the three required aspect
+    /// ratios: 16:9, square and vertical.
+    #[test]
+    fn video_fixtures_cover_aspect_ratios() {
+        let widescreen = video_fixture("w.mp4", (1920, 1080), DownloadState::Ready { total: None });
+        assert_eq!(widescreen.poster_dimensions, Some((1920, 1080)));
+
+        let square = video_fixture("s.mp4", (1080, 1080), DownloadState::Ready { total: None });
+        assert_eq!(square.poster_dimensions, Some((1080, 1080)));
+
+        let vertical = video_fixture("v.mp4", (1080, 1920), DownloadState::Ready { total: None });
+        assert_eq!(vertical.poster_dimensions, Some((1080, 1920)));
+    }
 }

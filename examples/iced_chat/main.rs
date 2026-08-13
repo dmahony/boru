@@ -9,6 +9,7 @@ mod activity_log_view_model;
 mod app;
 mod boru_dialog;
 mod card_shell;
+#[cfg(feature = "dev-ui")]
 mod component_gallery;
 mod connection_details;
 mod dashboard_filters;
