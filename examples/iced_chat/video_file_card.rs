@@ -132,21 +132,18 @@ enum CardBand {
     Narrow,
 }
 
-/// Timeline width at or below which the card switches to a 100%-width
-/// layout. Below the card's natural landscape footprint (~720 px frame plus
-/// card padding) a content-driven card could not fit without overflowing, so
-/// the card fills the column and its controls wrap/stack instead.
-const NARROW_CARD_BREAKPOINT: f32 = 560.0;
-
-/// Timeline width below which the media caps are scaled down (spec Task 15
-/// medium behaviour).
-const MEDIUM_CARD_BREAKPOINT: f32 = 780.0;
+// BORU-UI-03: the responsive band breakpoints (560/780 px) now live in
+// `BoruTheme::attachments.video` (narrow_breakpoint / medium_breakpoint);
+// the theme test pins them to the audit §3.5 values.
 
 impl CardBand {
     fn of(width: f32) -> Self {
-        if width <= NARROW_CARD_BREAKPOINT {
+        // BORU-UI-03: responsive band breakpoints come from the typed theme
+        // (mode-independent geometry, so `default()` is the light-mode copy).
+        let video = crate::theme::BoruTheme::default().attachments.video;
+        if width <= video.narrow_breakpoint {
             CardBand::Narrow
-        } else if width < MEDIUM_CARD_BREAKPOINT {
+        } else if width < video.medium_breakpoint {
             CardBand::Medium
         } else {
             CardBand::Wide
@@ -301,18 +298,10 @@ pub(crate) fn estimated_media_frame_height(
     .height
 }
 
-/// Neutral dark media background (VIDCARD-08 / spec Tasks 8 & 11).
-///
-/// Video previews are framed on a fixed near-black neutral in BOTH themes so
-/// letterboxed portrait/square content reads as a deliberate, polished media
-/// surface rather than empty card space — the classic video-player
-/// convention, and the same family as the play overlay / controls surfaces.
-const MEDIA_FRAME_BACKGROUND: Color = Color::from_rgb(0.055, 0.06, 0.07);
-
-/// Light neutral for on-media placeholder/error text — readable on
-/// [`MEDIA_FRAME_BACKGROUND`] in both themes (the theme-aware `muted` token
-/// is near-black in the light theme and would vanish on the dark frame).
-const ON_MEDIA_TEXT: Color = Color::from_rgb(0.78, 0.80, 0.82);
+// BORU-UI-03: the neutral dark media background (0.055,0.06,0.07), on-media
+// text (0.78,0.80,0.82), border and overlay colours now come from
+// `BoruTheme::colors` (media_frame_bg / on_media_text / media_frame_border /
+// media_frame_overlay); the theme test pins them to the audit §3.5 values.
 
 /// Shared media-frame surface (VIDCARD-08 structure + VIDCARD-11 spec
 /// styling): neutral dark background, thin subtle border, 12–14 px corner
@@ -320,13 +309,14 @@ const ON_MEDIA_TEXT: Color = Color::from_rgb(0.78, 0.80, 0.82);
 /// the active player frame (Task 10 geometry). Overflow is clipped only at
 /// this boundary (each media-frame container sets `.clip(true)`), so the
 /// rounded corners never leak.
-fn media_frame_style(_theme: &iced::Theme) -> widget::container::Style {
+fn media_frame_style(theme: &iced::Theme) -> widget::container::Style {
+    let b = crate::theme::BoruTheme::for_theme(theme);
     widget::container::Style {
-        background: Some(iced::Background::Color(MEDIA_FRAME_BACKGROUND)),
+        background: Some(iced::Background::Color(b.colors.media_frame_bg)),
         border: iced::Border {
-            color: MEDIA_FRAME_BORDER,
-            width: 1.0,
-            radius: MEDIA_FRAME_RADIUS.into(),
+            color: b.colors.media_frame_border,
+            width: b.borders.media_frame,
+            radius: b.radii.media_frame.into(),
         },
         ..Default::default()
     }
@@ -342,6 +332,8 @@ fn loading_indicator<'a>(
     attachment: &DownloadAttachment,
     dark_mode: bool,
 ) -> iced::Element<'a, AppMessage> {
+    let theme = resolve_theme(dark_mode);
+    let b = crate::theme::BoruTheme::for_theme(&theme);
     container(
         Column::new()
             .push(file_type_icon_element(
@@ -349,18 +341,20 @@ fn loading_indicator<'a>(
                 None,
                 None,
                 FileTypeIconSize::List,
-                &resolve_theme(dark_mode),
+                &theme,
             ))
             .push(
                 crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, "Preparing…")
-                    .color(ON_MEDIA_TEXT),
+                    .color(b.colors.on_media_text),
             )
             .spacing(SPACE_4)
             .align_x(Alignment::Center),
     )
     .padding([SPACE_12, SPACE_16])
-    .style(|_t| widget::container::Style {
-        background: Some(iced::Background::Color(MEDIA_FRAME_OVERLAY_BG)),
+    .style(move |_t| widget::container::Style {
+        background: Some(iced::Background::Color(
+            crate::theme::BoruTheme::default().colors.media_frame_overlay,
+        )),
         border: iced::Border {
             radius: SPACE_16.into(),
             ..Default::default()
@@ -471,32 +465,14 @@ fn file_format_label(name: &str) -> Option<String> {
 /// collapsed with an ellipsis (the extension stays visible).
 const HEADER_FILENAME_MAX_CHARS: usize = 56;
 
-/// Hard width cap (px) for the header filename element. Together with
-/// `.clip(true)` this guarantees a long filename can never widen the card.
-const HEADER_FILENAME_MAX_WIDTH: f32 = 420.0;
-
 // ── Media-frame styling (VIDCARD-11) ─────────────────────────────────
-// The shared neutral-dark background and on-media text colours live with
-// `MEDIA_FRAME_BACKGROUND` / `ON_MEDIA_TEXT` above (VIDCARD-08 landed the
-// same spec direction first); this block adds the VIDCARD-11 deltas: the
-// spec's 12–14 px radius, the thin subtle border, and the overlay/badge
-// surfaces.
-
-/// Corner radius of the media frame (spec Task 11: ~12–14 px).
-const MEDIA_FRAME_RADIUS: f32 = 13.0;
-
-/// Thin subtle border on the dark media frame. A faint light border keeps
-/// the well visible against both light and dark card surfaces.
-const MEDIA_FRAME_BORDER: Color = Color::from_rgba(1.0, 1.0, 1.0, 0.10);
-
-/// Semi-transparent dark surface used for the play overlay and the
-/// loading indicator so they stay readable over any poster/video frame.
-const MEDIA_FRAME_OVERLAY_BG: Color = Color::from_rgba(0.0, 0.0, 0.0, 0.62);
-
-/// Diameter (px) of the circular play overlay button. Large but
-/// restrained: clearly visible over the poster without dominating it.
-const PLAY_OVERLAY_SIZE: f32 = 64.0;
-
+// BORU-UI-03: the media-frame geometry and surfaces now come from the
+// typed theme — the 13 px radius (`radii.media_frame`), the 1 px subtle
+// border (`colors.media_frame_border`), the 0.62 overlay surface
+// (`colors.media_frame_overlay`), the 64 px play overlay
+// (`attachments.video.play_overlay_size`) and the 420 px header filename
+// cap (`attachments.video.header_filename_max_width`). The theme test pins
+// them to the audit §3.5 values.
 
 /// Real transfer-state badge mapping for the card header.
 ///
@@ -894,7 +870,12 @@ impl<'a> BoruVideoFileCard<'a> {
                 .wrapping(Wrapping::None),
         )
         .width(if narrow { Length::Fill } else { Length::Shrink })
-        .max_width(HEADER_FILENAME_MAX_WIDTH)
+        .max_width(
+            crate::theme::BoruTheme::for_theme(theme)
+                .attachments
+                .video
+                .header_filename_max_width,
+        )
         .clip(true);
         let filename_tooltip = tooltip::Tooltip::new(
             filename,
@@ -1030,6 +1011,7 @@ impl<'a> BoruVideoFileCard<'a> {
         attachment: &DownloadAttachment,
         error_color: Color,
     ) -> iced::Element<'a, AppMessage> {
+        let media_theme = crate::theme::BoruTheme::for_theme(&resolve_theme(self.dark_mode));
         let presentation = video_presentation_state(attachment);
         // Task 15: the frame is sized from the intrinsic dimensions (or the
         // safe 16:9 default), the responsive band's media caps and the
@@ -1094,7 +1076,7 @@ impl<'a> BoruVideoFileCard<'a> {
                                 crate::fonts::TypeRole::Metadata,
                                 subtitle,
                             )
-                            .color(ON_MEDIA_TEXT),
+                            .color(media_theme.colors.on_media_text),
                         )
                         .spacing(SPACE_4)
                         .align_x(Alignment::Center),
@@ -1139,18 +1121,21 @@ impl<'a> BoruVideoFileCard<'a> {
                         .build(),
                 )
                 .on_press_maybe(play_enabled.then_some(play_message.clone()))
-                .padding([(PLAY_OVERLAY_SIZE - IconSize::Xl.px()) / 2.0; 2])
-                .style(|_theme, _status| widget::button::Style {
-                    background: Some(iced::Background::Color(MEDIA_FRAME_OVERLAY_BG)),
-                    border: iced::Border {
-                        radius: (PLAY_OVERLAY_SIZE / 2.0).into(),
+                .padding([(media_theme.attachments.video.play_overlay_size - IconSize::Xl.px()) / 2.0; 2])
+                .style(move |_theme, _status| {
+                    let b = crate::theme::BoruTheme::default();
+                    widget::button::Style {
+                        background: Some(iced::Background::Color(b.colors.media_frame_overlay)),
+                        border: iced::Border {
+                            radius: (b.attachments.video.play_overlay_size / 2.0).into(),
+                            ..Default::default()
+                        },
                         ..Default::default()
-                    },
-                    ..Default::default()
+                    }
                 }),
                 play_enabled.then_some(play_message),
             )
-            .ring_radius(PLAY_OVERLAY_SIZE / 2.0),
+            .ring_radius(media_theme.attachments.video.play_overlay_size / 2.0),
             crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, "Play video"),
             tooltip::Position::Top,
         )
@@ -1171,14 +1156,14 @@ impl<'a> BoruVideoFileCard<'a> {
                             crate::fonts::TypeRole::Metadata,
                             error.message(),
                         )
-                        .color(ON_MEDIA_TEXT),
+                        .color(media_theme.colors.on_media_text),
                     )
                     .push(
                         crate::fonts::type_role_text(
                             crate::fonts::TypeRole::Metadata,
                             "The original attachment is still available below.",
                         )
-                        .color(ON_MEDIA_TEXT),
+                        .color(media_theme.colors.on_media_text),
                     )
                     .spacing(SPACE_4)
                     .align_x(Alignment::Center),
@@ -1286,7 +1271,9 @@ impl<'a> BoruVideoFileCard<'a> {
                                 AppMessage::InlineVideoSetVolume,
                             )
                             .step(0.01_f32)
-                            .width(Length::Fixed(90.0));
+                            .width(Length::Fixed(
+                                media_theme.attachments.video.controls_slider_width,
+                            ));
                             tooltip::Tooltip::new(
                                 media_icon_button(
                                     icon,
@@ -1608,7 +1595,7 @@ mod tests {
         media_frame_size, media_placeholder_text, truncate_filename, video_presentation_state,
         BoruVideoFileCard, CardBand, ControlLayout, MediaAspectClass, MediaFrameSizing, VideoPresentationState,
         control_layout,
-        HEADER_FILENAME_MAX_CHARS, MEDIUM_CARD_BREAKPOINT, NARROW_CARD_BREAKPOINT,
+        HEADER_FILENAME_MAX_CHARS,
     };
     use super::super::app::AppMessage;
     use iced::Length;
@@ -1945,8 +1932,8 @@ mod tests {
             .and_then(|s| s.split("#[cfg(feature = \"video-playback\")]").next())
             .expect("media_frame_style body must exist");
         assert!(
-            style_fn.contains("MEDIA_FRAME_BACKGROUND"),
-            "media_frame_style must use the fixed neutral-dark background"
+            style_fn.contains("media_frame_bg"),
+            "media_frame_style must use the fixed neutral-dark background from BoruTheme"
         );
         assert!(
             !frame.contains("bg_surface("),
@@ -2106,8 +2093,16 @@ mod tests {
     fn media_container_meets_task16_subtle_surface_contract() {
         let src = include_str!("video_file_card.rs");
         let prod = src.split("#[cfg(test)]").next().unwrap();
-        assert!(prod.contains("const MEDIA_FRAME_RADIUS: f32 = 13.0"));
-        assert!(prod.contains("const MEDIA_FRAME_BACKGROUND: Color = Color::from_rgb"));
+        // BORU-UI-03: the media-frame surface contract now lives in the
+        // typed theme (pinned by theme::tests::default_matches_audit_source_values).
+        assert!(
+            prod.contains("radii.media_frame"),
+            "media frame radius must come from BoruTheme radii.media_frame"
+        );
+        assert!(
+            prod.contains("media_frame_bg"),
+            "media frame must use BoruTheme colors.media_frame_bg"
+        );
         assert!(prod.contains(".clip(true)"));
         assert!(
             !prod.contains("shadow:") || prod.matches("shadow:").count() == 0,
@@ -2359,16 +2354,16 @@ mod tests {
         let prod = src.split("#[cfg(test)]").next().unwrap();
 
         assert!(
-            prod.contains("const MEDIA_FRAME_RADIUS: f32 = 13.0;"),
-            "media frame radius must sit in the 12–14 px spec band"
+            prod.contains("radii.media_frame"),
+            "media frame radius must come from BoruTheme radii.media_frame (12–14 px band)"
         );
         assert!(
-            prod.contains("const MEDIA_FRAME_BACKGROUND: Color"),
-            "media frame must define a neutral dark background"
+            prod.contains("media_frame_bg"),
+            "media frame must use BoruTheme colors.media_frame_bg (neutral dark)"
         );
         assert!(
-            prod.contains("const MEDIA_FRAME_BORDER: Color"),
-            "media frame must define a thin subtle border"
+            prod.contains("media_frame_border"),
+            "media frame must use BoruTheme colors.media_frame_border (thin subtle border)"
         );
         // The shared surface style is applied to both the poster frame and
         // the player frame; the media frame is the ONLY boundary that clips.
@@ -2397,11 +2392,13 @@ mod tests {
     #[test]
     fn card_band_classifies_timeline_widths() {
         use CardBand::*;
+        // BORU-UI-03: breakpoints come from the typed theme (audit §3.5).
+        let v = crate::theme::BoruTheme::default().attachments.video;
         assert_eq!(CardBand::of(320.0), Narrow);
-        assert_eq!(CardBand::of(NARROW_CARD_BREAKPOINT), Narrow);
-        assert_eq!(CardBand::of(NARROW_CARD_BREAKPOINT + 1.0), Medium);
-        assert_eq!(CardBand::of(MEDIUM_CARD_BREAKPOINT - 1.0), Medium);
-        assert_eq!(CardBand::of(MEDIUM_CARD_BREAKPOINT), Wide);
+        assert_eq!(CardBand::of(v.narrow_breakpoint), Narrow);
+        assert_eq!(CardBand::of(v.narrow_breakpoint + 1.0), Medium);
+        assert_eq!(CardBand::of(v.medium_breakpoint - 1.0), Medium);
+        assert_eq!(CardBand::of(v.medium_breakpoint), Wide);
         assert_eq!(CardBand::of(1280.0), Wide);
     }
 
@@ -2511,12 +2508,12 @@ mod tests {
             "play overlay must use the play icon"
         );
         assert!(
-            media_frame_fns.contains("MEDIA_FRAME_OVERLAY_BG"),
-            "play overlay must use the semi-transparent dark surface"
+            media_frame_fns.contains("media_frame_overlay"),
+            "play overlay must use the semi-transparent dark surface from BoruTheme"
         );
         assert!(
-            media_frame_fns.contains("PLAY_OVERLAY_SIZE"),
-            "play overlay must be sized by the restrained-size constant"
+            media_frame_fns.contains("play_overlay_size"),
+            "play overlay must be sized by BoruTheme's play_overlay_size token"
         );
         assert!(
             media_frame_fns.contains("\"Play video\""),
@@ -2531,7 +2528,7 @@ mod tests {
             "play overlay must be wrapped in the focusable button for keyboard access"
         );
         assert!(
-            media_frame_fns.contains(".ring_radius(PLAY_OVERLAY_SIZE / 2.0)"),
+            media_frame_fns.contains("play_overlay_size / 2.0"),
             "play overlay focus ring must follow the circular button radius"
         );
         assert!(
@@ -2610,8 +2607,8 @@ mod tests {
             "header title row must fill the card at narrow widths"
         );
         assert!(
-            header.contains(".max_width(HEADER_FILENAME_MAX_WIDTH)"),
-            "header filename must stay capped"
+            header.contains("header_filename_max_width"),
+            "header filename must stay capped (BoruTheme attachments.video)"
         );
         assert!(
             header.contains(".clip(true)"),
