@@ -9,6 +9,64 @@
 
 use super::*;
 
+// ── Room card display helpers (PDF Task 5.2) ─────────────────────────
+//
+// Display bounds for directory-card text. Every text field is elided to
+// these lengths AND wrapped (`WordOrGlyph`), so even a hostile
+// advertisement with oversized metadata can never push the card wider
+// than its column or split a multi-byte character (PDF Task 5.2
+// acceptance: "Oversized text cannot break layout").
+const DISCOVER_MAX_NAME_CHARS: usize = 64;
+const DISCOVER_MAX_DESC_CHARS: usize = 160;
+const DISCOVER_MAX_TAG_CHARS: usize = 24;
+const DISCOVER_MAX_TAGS_SHOWN: usize = 4;
+
+/// Elide `text` to at most `max_chars` Unicode characters, appending an
+/// ellipsis when truncated. Char-boundary safe: never splits a
+/// multi-byte character.
+pub(crate) fn discover_elide(text: &str, max_chars: usize) -> String {
+    let mut out: String = text.chars().take(max_chars).collect();
+    if text.chars().count() > max_chars {
+        out.push('…');
+    }
+    out
+}
+
+/// The action-button label for a directory card (PDF Task 5.2: Join /
+/// Open). Join wiring itself is BORU-DIR-16; this only names the action.
+pub(crate) fn discover_action_label(
+    action: boru_core::room_directory::RoomAction,
+) -> &'static str {
+    match action {
+        boru_core::room_directory::RoomAction::Join => "Join",
+        boru_core::room_directory::RoomAction::Open => "Open",
+        boru_core::room_directory::RoomAction::Hidden => "Hidden",
+        boru_core::room_directory::RoomAction::Incompatible => "Incompatible",
+    }
+}
+
+/// Human-readable compatibility label (PDF Task 5.2 step 4: clearly
+/// label incompatible rooms). DIR-17 refines the model later; the
+/// cache already exposes Compatible/UpgradeRequired/Unsupported/Unknown.
+pub(crate) fn discover_compat_label(
+    compat: boru_core::room_directory::RoomCompatibility,
+) -> &'static str {
+    match compat {
+        boru_core::room_directory::RoomCompatibility::Compatible => "Compatible",
+        boru_core::room_directory::RoomCompatibility::UpgradeRequired => "Upgrade required",
+        boru_core::room_directory::RoomCompatibility::Unsupported => "Not supported",
+        boru_core::room_directory::RoomCompatibility::Unknown => "Compatibility unknown",
+    }
+}
+
+/// Approximate member-count text. The count is an untrusted
+/// self-reported hint (PDF Task 7.3 / DIR-21 guardrails), so it is
+/// always rendered as clearly approximate ("~N members") and omitted
+/// entirely when absent or zero — never presented as authoritative.
+pub(crate) fn discover_member_count_text(count: Option<u32>) -> Option<String> {
+    count.filter(|&c| c > 0).map(|c| format!("~{c} members"))
+}
+
 impl IcedChat {
     pub(crate) fn view_peer_profile(&self, peer: PublicKey) -> iced::Element<'_, AppMessage> {
         let profile_data = self.profile_cache.get(&peer);
@@ -591,6 +649,7 @@ impl IcedChat {
                     room_id: *entry.advert.room_id.as_bytes(),
                     room_name: entry.advert.room_name.clone(),
                     short_description: entry.advert.short_description.clone(),
+                    tags: entry.advert.tags.clone(),
                     room_protocol_version: entry.advert.room_protocol_version,
                     owner_peer_id: entry.advert.owner_peer_id,
                     member_count: entry.advert.approximate_member_count,
@@ -612,6 +671,7 @@ impl IcedChat {
                     room_id: *ad.topic.as_bytes(),
                     room_name: ad.room_name.clone(),
                     short_description: ad.description.clone(),
+                    tags: Vec::new(),
                     room_protocol_version: 0,
                     owner_peer_id: [0u8; 32],
                     member_count: Some(ad.member_count),
@@ -638,7 +698,7 @@ impl IcedChat {
     /// membership (PDF Task 5.1 acceptance).
     pub(crate) fn view_discover_content(dep: &DiscoverDependency) -> iced::Element<'static, AppMessage> {
         use iced::widget::{button, container, text, Column, Row, Space};
-        use iced::{Alignment, Background, Length};
+        use iced::{Alignment, Length};
 
         let header = Row::new()
             .push(
@@ -684,67 +744,9 @@ impl IcedChat {
                 .padding(SPACE_16),
             );
         } else {
-            let theme = Self::theme_from_dark(dep.dark_mode);
             for room in rooms {
-                let theme = theme.clone();
-                let room_name = room.room_name.clone();
-                let member_count = room.member_count;
-                let desc = if room.short_description.chars().count() > 100 {
-                    let mut chars: String = room.short_description.chars().take(100).collect();
-                    chars.push('…');
-                    chars
-                } else {
-                    room.short_description.clone()
-                };
-                // The browse surface shows the local relationship verdict as
-                // a label. Join wiring is BORU-DIR-16; opening the directory
-                // must never change membership (PDF Task 5.1).
-                let action_label = match room.offered_action {
-                    boru_core::room_directory::RoomAction::Join => "Join",
-                    boru_core::room_directory::RoomAction::Open => "Open",
-                    boru_core::room_directory::RoomAction::Hidden => "Hidden",
-                    boru_core::room_directory::RoomAction::Incompatible => "Incompatible",
-                };
-
-                let room_card = container(
-                    Row::new()
-                        .push(
-                            Column::new()
-                                .push(text(room_name).size(TYPO_MD))
-                                .push(text(desc).size(TYPO_SM).style(text_muted_style))
-                                .push(
-                                    Row::new()
-                                        .push(
-                                            text(member_count
-                                                .filter(|&c| c > 0)
-                                                .map(|c| format!("{c} members"))
-                                                .unwrap_or_default())
-                                            .size(TYPO_XS)
-                                            .style(text_muted_style),
-                                        )
-                                        .push(
-                                            text(action_label).size(TYPO_XS).style(text_muted_style),
-                                        )
-                                        .spacing(SPACE_12),
-                                )
-                                .spacing(SPACE_4)
-                                .width(Length::Fill),
-                        )
-                        .spacing(SPACE_12)
-                        .align_y(Alignment::Center),
-                )
-                .padding(SPACE_12)
-                .width(Length::Fill)
-                .style(move |t| container::Style {
-                    background: Some(Background::Color(bg_surface(t))),
-                    border: iced::Border {
-                        radius: SPACE_8.into(),
-                        color: border_muted(&theme),
-                        width: 1.0,
-                    },
-                    ..Default::default()
-                });
-                main_content = main_content.push(room_card);
+                main_content =
+                    main_content.push(Self::render_discover_room_card(room, dep.dark_mode));
             }
         }
 
@@ -761,6 +763,149 @@ impl IcedChat {
             .width(Length::Fill)
             .height(Length::Fill)
             .style(container_primary)
+            .into()
+    }
+
+    // ── Room card (PDF Task 5.2) ─────────────────────────────────────
+    // Display bounds for directory-card text. Every text field is elided to
+    // these lengths AND wrapped (`WordOrGlyph`), so even a hostile
+    // advertisement with oversized metadata can never push the card wider
+    // than its column or split a multi-byte character (PDF Task 5.2
+    // acceptance: "Oversized text cannot break layout").
+    /// Render one room card in the Discover browse surface (PDF Task 5.2).
+    ///
+    /// Card layout (top to bottom):
+    ///   1. room name (elided + wrapped) with the Join/Open action button
+    ///      on the right;
+    ///   2. short description (elided + wrapped; hidden when empty);
+    ///   3. tag pills (hidden when empty, capped with a "+N" overflow pill);
+    ///   4. meta row: compatibility label + approximate member count
+    ///      (hidden when absent) + "Unverified" marker for contested ads.
+    ///
+    /// A minimal advertisement (empty description, no tags, no count) still
+    /// renders a correct card: every optional field degrades to nothing.
+    /// The action button is rendered but not yet wired (Join wiring is
+    /// BORU-DIR-16; opening the directory never changes membership — PDF
+    /// Task 5.1).
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn render_discover_room_card(
+        room: &DiscoverRoomRow,
+        dark_mode: bool,
+    ) -> iced::Element<'static, AppMessage> {
+        use iced::widget::{button, container, text, Column, Row};
+        use iced::{Alignment, Background, Length};
+
+        let theme = Self::theme_from_dark(dark_mode);
+
+        // ── Header: room name + action button ──
+        let name = text(discover_elide(&room.room_name, DISCOVER_MAX_NAME_CHARS))
+            .size(TYPO_MD)
+            .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+            .width(Length::Fill);
+
+        let action: iced::Element<'static, AppMessage> = match room.offered_action {
+            boru_core::room_directory::RoomAction::Join => button(
+                text(discover_action_label(room.offered_action))
+                    .size(TYPO_XS)
+                    .color(Color::WHITE),
+            )
+            .padding([SPACE_4, SPACE_10])
+            .style(BUTTON_PRIMARY)
+            .into(),
+            boru_core::room_directory::RoomAction::Open => button(
+                text(discover_action_label(room.offered_action)).size(TYPO_XS),
+            )
+            .padding([SPACE_4, SPACE_10])
+            .style(BUTTON_GHOST_BG)
+            .into(),
+            boru_core::room_directory::RoomAction::Incompatible => {
+                let label = discover_compat_label(room.compatibility);
+                button(text(label).size(TYPO_XS).color(Color::WHITE))
+                    .padding([SPACE_4, SPACE_10])
+                    .style(BUTTON_DANGER)
+                    .into()
+            }
+            boru_core::room_directory::RoomAction::Hidden => {
+                text("Hidden").size(TYPO_XS).style(text_muted_style).into()
+            }
+        };
+
+        let header = Row::new()
+            .push(name)
+            .push(action)
+            .spacing(SPACE_8)
+            .align_y(Alignment::Center);
+
+        let mut body = Column::new().spacing(SPACE_4);
+        body = body.push(header);
+
+        // ── Description (optional) ──
+        if !room.short_description.is_empty() {
+            body = body.push(
+                text(discover_elide(&room.short_description, DISCOVER_MAX_DESC_CHARS))
+                    .size(TYPO_SM)
+                    .style(text_muted_style)
+                    .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+                    .width(Length::Fill),
+            );
+        }
+
+        // ── Tags (optional) ──
+        if !room.tags.is_empty() {
+            let mut tags_row = Row::new().spacing(SPACE_4);
+            for tag in room.tags.iter().take(DISCOVER_MAX_TAGS_SHOWN) {
+                tags_row = tags_row.push(crate::ui_components::badge_owned(
+                    format!("#{}", discover_elide(tag, DISCOVER_MAX_TAG_CHARS)),
+                    crate::ui_components::BadgeKind::Default,
+                ));
+            }
+            if room.tags.len() > DISCOVER_MAX_TAGS_SHOWN {
+                tags_row = tags_row.push(crate::ui_components::badge_owned(
+                    format!("+{}", room.tags.len() - DISCOVER_MAX_TAGS_SHOWN),
+                    crate::ui_components::BadgeKind::Default,
+                ));
+            }
+            body = body.push(tags_row);
+        }
+
+        // ── Meta row: compatibility + approximate member count + conflict ──
+        let mut meta = Row::new().spacing(SPACE_8).align_y(Alignment::Center);
+        let compat_label = discover_compat_label(room.compatibility);
+        let compat_color = match room.compatibility {
+            boru_core::room_directory::RoomCompatibility::Compatible => text_muted(&theme),
+            boru_core::room_directory::RoomCompatibility::UpgradeRequired => {
+                crate::design_tokens::color_warning(&theme)
+            }
+            boru_core::room_directory::RoomCompatibility::Unsupported => color_error(&theme),
+            boru_core::room_directory::RoomCompatibility::Unknown => text_muted(&theme),
+        };
+        meta = meta.push(text(compat_label).size(TYPO_XS).color(compat_color));
+        if let Some(count_text) = discover_member_count_text(room.member_count) {
+            meta = meta.push(text(count_text).size(TYPO_XS).style(text_muted_style));
+        }
+        if room.conflict {
+            // BORU-DIR-11: contested metadata must be shown as unverified,
+            // never silently trusted.
+            meta = meta.push(
+                text("Unverified")
+                    .size(TYPO_XS)
+                    .color(crate::design_tokens::color_warning(&theme)),
+            );
+        }
+        body = body.push(meta);
+
+        container(body)
+            .padding(SPACE_12)
+            .width(Length::Fill)
+            .style(move |t| container::Style {
+                background: Some(Background::Color(bg_surface(t))),
+                border: iced::Border {
+                    radius: SPACE_8.into(),
+                    color: border_muted(&theme),
+                    width: 1.0,
+                },
+                ..Default::default()
+            })
             .into()
     }
     /// Redesigned friend profile view with clean layout, context menu, and action buttons.

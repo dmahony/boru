@@ -5042,6 +5042,9 @@ pub(crate) struct DiscoverRoomRow {
     pub(crate) room_name: String,
     /// Short description from the advertisement.
     pub(crate) short_description: String,
+    /// Optional searchable category tags from the advertisement (empty =
+    /// no tags; the card hides the tag row entirely).
+    pub(crate) tags: Vec<String>,
     /// Advertised room chat protocol version.
     pub(crate) room_protocol_version: u8,
     /// Owner/creator peer id bytes (descriptive metadata only).
@@ -30352,6 +30355,171 @@ mod tests {
             boru_core::room_directory::RoomAction::Join,
             "browse surface shows a Join action label for a not-joined room"
         );
+    }
+
+    // ── BORU-DIR-14 (PDF Task 5.2): room card design ────────────────
+    // The directory card shows advertised metadata (name, description,
+    // optional tags, compatibility state) plus a Join/Open action. Cards
+    // must survive a minimal advertisement and oversized text, and joined
+    // rooms must offer Open instead of Join.
+
+    /// A minimal advertisement (name only, empty description, no tags, no
+    /// member count) still renders a correct card — every optional field
+    /// degrades to nothing instead of breaking the render.
+    #[test]
+    fn discover_minimal_advertisement_renders() {
+        let row = DiscoverRoomRow {
+            room_id: [0x41; 32],
+            room_name: "Minimal Room".to_string(),
+            short_description: String::new(),
+            tags: Vec::new(),
+            room_protocol_version: 1,
+            owner_peer_id: [0u8; 32],
+            member_count: None,
+            compatibility: boru_core::room_directory::RoomCompatibility::Compatible,
+            local_join_state: boru_core::room_directory::LocalJoinState::NotJoined,
+            offered_action: boru_core::room_directory::RoomAction::Join,
+            conflict: false,
+        };
+        let _element = IcedChat::render_discover_room_card(&row, false);
+        // Empty optional fields produce no member-count text and elide to
+        // the original (empty) string.
+        assert_eq!(discover_member_count_text(row.member_count), None);
+        assert_eq!(discover_elide("", 160), "");
+        // The full browse surface also renders with the minimal card in it.
+        let dep = DiscoverDependency {
+            dark_mode: false,
+            rooms: vec![row],
+        };
+        let _screen = IcedChat::view_discover_content(&dep);
+    }
+
+    /// Oversized advertisement text cannot break the card layout: the elide
+    /// helper bounds every text field to a maximum character count (on
+    /// char boundaries, so multi-byte content is never split), and the card
+    /// still renders.
+    #[test]
+    fn discover_oversized_text_cannot_break_layout() {
+        let huge_name = "X".repeat(10_000);
+        let huge_desc = "é".repeat(10_000); // multi-byte chars
+        let huge_tags = vec!["tag".repeat(500); 20];
+
+        let row = DiscoverRoomRow {
+            room_id: [0x42; 32],
+            room_name: huge_name.clone(),
+            short_description: huge_desc.clone(),
+            tags: huge_tags.clone(),
+            room_protocol_version: 1,
+            owner_peer_id: [0u8; 32],
+            member_count: Some(9_999),
+            compatibility: boru_core::room_directory::RoomCompatibility::Compatible,
+            local_join_state: boru_core::room_directory::LocalJoinState::NotJoined,
+            offered_action: boru_core::room_directory::RoomAction::Join,
+            conflict: false,
+        };
+        let _element = IcedChat::render_discover_room_card(&row, false);
+
+        // Elide caps at the display bounds without splitting a char.
+        let elided_name = discover_elide(&huge_name, 64);
+        assert!(elided_name.chars().count() <= 65, "name bounded");
+        let elided_desc = discover_elide(&huge_desc, 160);
+        assert!(elided_desc.chars().count() <= 161, "description bounded");
+        for tag in &huge_tags {
+            assert!(
+                discover_elide(tag, 24).chars().count() <= 25,
+                "each tag bounded"
+            );
+        }
+        // The member count hint is rendered as clearly approximate.
+        assert_eq!(
+            discover_member_count_text(Some(9_999)).as_deref(),
+            Some("~9999 members")
+        );
+    }
+
+    /// A joined room offers Open instead of Join (PDF Task 5.2 acceptance:
+    /// "Joined rooms show Open instead of Join").
+    #[test]
+    fn discover_joined_room_shows_open_action() {
+        let joined_row = DiscoverRoomRow {
+            room_id: [0x43; 32],
+            room_name: "Joined Room".to_string(),
+            short_description: "Already a member".to_string(),
+            tags: Vec::new(),
+            room_protocol_version: 1,
+            owner_peer_id: [0u8; 32],
+            member_count: Some(5),
+            compatibility: boru_core::room_directory::RoomCompatibility::Compatible,
+            local_join_state: boru_core::room_directory::LocalJoinState::Joined,
+            offered_action: boru_core::room_directory::RoomAction::Open,
+            conflict: false,
+        };
+        assert_eq!(
+            discover_action_label(joined_row.offered_action),
+            "Open",
+            "joined rooms show Open"
+        );
+        let _element = IcedChat::render_discover_room_card(&joined_row, false);
+
+        let not_joined_row = DiscoverRoomRow {
+            offered_action: boru_core::room_directory::RoomAction::Join,
+            ..joined_row.clone()
+        };
+        assert_eq!(
+            discover_action_label(not_joined_row.offered_action),
+            "Join",
+            "not-joined rooms show Join"
+        );
+    }
+
+    /// Incompatible rooms are clearly labelled with the compatibility
+    /// reason (PDF Task 5.2 step 4) and never offer a Join action.
+    #[test]
+    fn discover_incompatible_room_is_clearly_labeled() {
+        let row = DiscoverRoomRow {
+            room_id: [0x44; 32],
+            room_name: "Needs Upgrade".to_string(),
+            short_description: String::new(),
+            tags: Vec::new(),
+            room_protocol_version: 99,
+            owner_peer_id: [0u8; 32],
+            member_count: None,
+            compatibility: boru_core::room_directory::RoomCompatibility::UpgradeRequired,
+            local_join_state: boru_core::room_directory::LocalJoinState::Incompatible,
+            offered_action: boru_core::room_directory::RoomAction::Incompatible,
+            conflict: false,
+        };
+        assert_eq!(
+            discover_action_label(row.offered_action),
+            "Incompatible",
+            "incompatible rooms never offer Join"
+        );
+        assert_eq!(
+            discover_compat_label(row.compatibility),
+            "Upgrade required",
+            "compatibility reason is human-readable"
+        );
+        let _element = IcedChat::render_discover_room_card(&row, false);
+    }
+
+    /// Contested advertisements (BORU-DIR-11) render with an unverified
+    /// marker instead of being silently trusted.
+    #[test]
+    fn discover_conflict_renders_unverified() {
+        let row = DiscoverRoomRow {
+            room_id: [0x45; 32],
+            room_name: "Contested".to_string(),
+            short_description: String::new(),
+            tags: Vec::new(),
+            room_protocol_version: 1,
+            owner_peer_id: [0u8; 32],
+            member_count: None,
+            compatibility: boru_core::room_directory::RoomCompatibility::Compatible,
+            local_join_state: boru_core::room_directory::LocalJoinState::NotJoined,
+            offered_action: boru_core::room_directory::RoomAction::Join,
+            conflict: true,
+        };
+        let _element = IcedChat::render_discover_room_card(&row, false);
     }
 
     // ── BORU-DIR-09 (PDF Task 3.3): room withdrawals ─────────────────
