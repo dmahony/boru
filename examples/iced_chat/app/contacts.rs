@@ -100,17 +100,22 @@ impl IcedChat {
             "← Back",
         ))
         .on_press(AppMessage::CloseFriendRequests)
-        .style(|t, _status| iced::widget::button::Style {
-            background: Some(iced::Background::Color(bg_surface(t))),
-            border: iced::Border {
-                color: border_muted(t),
-                width: 1.0,
-                radius: SPACE_8.into(),
-            },
-            text_color: text_muted_style(t)
-                .color
-                .unwrap_or(iced::Color::from_rgb(0.6, 0.6, 0.6)),
-            ..Default::default()
+        .style(|t, _status| {
+            let b = crate::theme::BoruTheme::for_theme(t);
+            iced::widget::button::Style {
+                background: Some(iced::Background::Color(bg_surface(t))),
+                border: iced::Border {
+                    color: border_muted(t),
+                    width: b.borders.hairline,
+                    radius: b.radii.sm.into(),
+                },
+                // BORU-UI-03: the muted fallback grey rgb(0.6,0.6,0.6) is
+                // captured by ColorTokens::glyph_muted_dark in both modes.
+                text_color: text_muted_style(t)
+                    .color
+                    .unwrap_or(b.colors.glyph_muted_dark),
+                ..Default::default()
+            }
         })
         .padding([SPACE_8, SPACE_16]);
 
@@ -311,7 +316,7 @@ impl IcedChat {
                     crate::fonts::type_role_text(crate::fonts::TypeRole::Body, req.label.clone())
                         .width(Length::Fill),
                     crate::fonts::type_role_text(crate::fonts::TypeRole::Metadata, "Pending")
-                        .color(Color::from_rgb(0.7, 0.6, 0.0)),
+                        .color(crate::theme::BoruTheme::for_theme(&theme).colors.request_pending),
                     button(crate::fonts::type_role_text(
                         crate::fonts::TypeRole::ButtonLabel,
                         "Cancel",
@@ -323,7 +328,7 @@ impl IcedChat {
                             text_color: color_error(t),
                             border: iced::Border {
                                 color: color_error(t),
-                                width: 1.0,
+                                width: crate::theme::BoruTheme::for_theme(t).borders.hairline,
                                 radius: SPACE_6.into(),
                             },
                             ..Default::default()
