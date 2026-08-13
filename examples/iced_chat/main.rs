@@ -36,6 +36,7 @@ mod quick_actions;
 mod recent_activity_view_model;
 mod shared_by_me_table;
 mod status_card;
+mod theme;
 #[cfg(test)]
 mod offscreen_status_card;
 mod sharing_summary;

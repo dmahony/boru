@@ -6931,17 +6931,6 @@ struct SidebarIdentityCacheKey {
     has_profile_image: bool,
 }
 
-/// FONTS-06: sidebar contact/peer name size (IBM Plex Sans Medium ~14–15 px).
-///
-/// Sidebar rows (CHATS conversation names, GROUPS group names, FRIENDS,
-/// DISCOVER, PUBLIC ROOMS, REQUESTS) render contact/peer display names in
-/// IBM Plex Sans Medium at this size. The name role keeps the `Body` size
-/// band (15 px) so row heights don't shift; `BodyEmphasised` would be too
-/// heavy (SemiBold) and `Body` too light (Regular), so the approved Medium
-/// weight resolves through the central family constructor
-/// (`public_sans(Weight::Medium)`) exactly as `TypeRole::font()` does.
-const SIDEBAR_NAME_SIZE: f32 = 15.0;
-
 /// Build a sidebar contact/peer name in IBM Plex Sans Medium (FONTS-06).
 ///
 /// `TypeRole` has no Medium-weight UI role (Body is Regular 400,
@@ -6950,12 +6939,16 @@ const SIDEBAR_NAME_SIZE: f32 = 15.0;
 /// FONTS-06 name size — the same token-based helper `TypeRole::font()`
 /// resolves IBM Plex Sans through. Raw peer identifiers shown as technical
 /// values keep `TypeRole::TechnicalValue` (JetBrains Mono, FONTS-09).
+///
+/// The size is read from the typed theme (`SidebarTheme::name_size`,
+/// BORU-UI-02) instead of a raw literal so the live-editor chain can
+/// override it later.
 fn sidebar_name_text<'a>(
     content: impl iced::widget::text::IntoFragment<'a>,
 ) -> iced::widget::text::Text<'a, iced::Theme, iced::Renderer> {
     iced::widget::text(content)
         .font(crate::fonts::public_sans(iced::font::Weight::Medium))
-        .size(SIDEBAR_NAME_SIZE)
+        .size(crate::theme::BoruTheme::default().sidebar.name_size)
 }
 
 /// Renders the local-user profile block in the sidebar: avatar (profile image
@@ -18740,6 +18733,15 @@ impl IcedChat {
         } else {
             iced::Theme::Light
         }
+    }
+
+    /// Typed Boru theme matching the current dark-mode toggle.
+    ///
+    /// This is the seam view/style code consumes instead of raw literals
+    /// (BORU-UI-02). Later tasks (BORU-UI-03+) migrate call sites onto
+    /// `self.boru_theme()` fields; BORU-UI-04/05 layer file overrides on top.
+    pub(crate) fn boru_theme(&self) -> crate::theme::BoruTheme {
+        crate::theme::BoruTheme::for_theme(&self.theme())
     }
 
     /// Return the iced Theme enum for an arbitrary dark-mode flag.
