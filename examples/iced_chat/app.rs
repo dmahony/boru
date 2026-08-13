@@ -5028,13 +5028,43 @@ pub(crate) struct FriendProfileDependency {
     pub(crate) shared_services: Vec<FriendProfileServiceRow>,
 }
 
+/// One renderable row of the Discover Rooms browse surface — a Hash-friendly
+/// snapshot of a [`DirectoryEntry`](boru_core::room_directory::DirectoryEntry)
+/// (BORU-DIR-10..12). The bounded cache stores richer per-entry state
+/// (`Instant`s, publisher identity, auth verdict) that is deliberately not
+/// part of the render dependency: iced's `lazy` / prewarm hashing only needs
+/// the stable, user-visible metadata and the local-relationship verdict.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub(crate) struct DiscoverRoomRow {
+    /// Room gossip topic bytes (the advertised room id).
+    pub(crate) room_id: [u8; 32],
+    /// Human-readable room name.
+    pub(crate) room_name: String,
+    /// Short description from the advertisement.
+    pub(crate) short_description: String,
+    /// Advertised room chat protocol version.
+    pub(crate) room_protocol_version: u8,
+    /// Owner/creator peer id bytes (descriptive metadata only).
+    pub(crate) owner_peer_id: [u8; 32],
+    /// Optional approximate member count (untrusted hint, PDF Phase 7).
+    pub(crate) member_count: Option<u32>,
+    /// Room chat-protocol compatibility verdict.
+    pub(crate) compatibility: boru_core::room_directory::RoomCompatibility,
+    /// Local relationship state (NotJoined/Joined/Blocked/...).
+    pub(crate) local_join_state: boru_core::room_directory::LocalJoinState,
+    /// The action the browse surface should offer (Join/Open/Incompatible).
+    pub(crate) offered_action: boru_core::room_directory::RoomAction,
+    /// Whether the stored metadata is contested by conflicting ads.
+    pub(crate) conflict: bool,
+}
+
 /// Dependency for the Discover screen. Holds the full renderable room
-/// advertisement rows (RoomAdvertisement is Hash) plus the theme flag, so the
-/// static content renderer can rebuild the whole screen from this snapshot.
+/// browse rows plus the theme flag, so the static content renderer can
+/// rebuild the whole screen from this snapshot.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub(crate) struct DiscoverDependency {
     pub(crate) dark_mode: bool,
-    pub(crate) ads: Vec<(RoomAdvertisement, PublicKey)>,
+    pub(crate) rooms: Vec<DiscoverRoomRow>,
 }
 
 /// Dependency for the Groups screen.
@@ -18421,7 +18451,14 @@ impl IcedChat {
             .filter(|(_, r)| r.relationship.can_message())
             .count();
         let new_discover_count = self.discovered_peers.len();
-        let new_public_room_count = self.directory_store.lock().unwrap().len();
+        // BORU-DIR-13 (PDF 5.1): the PUBLIC ROOMS count badge reflects the
+        // browse surface (bounded RoomDirectory cache) when the discovery
+        // service provided a read handle; fall back to the legacy directory
+        // store (tests / discovery service unavailable).
+        let new_public_room_count = match &self.room_directory {
+            Some(dir) => dir.lock().unwrap().snapshot().len(),
+            None => self.directory_store.lock().unwrap().len(),
+        };
         let new_request_count = self
             .friend_request_store
             .list_incoming_by_status(
@@ -30186,8 +30223,7 @@ mod tests {
             assert_eq!(store.list_active().len(), 1);
         }
         let dep = app.sidebar_public_rooms_dependency();
-        assert_eq!(dep.rooms.len(), 1, "public room appears in sidebar");
-        assert_eq!(dep.rooms[0].room_name, "Lounge");
+        assert_eq!(dep.count, 1, "public room count appears in sidebar");
 
         // Re-broadcast of the SAME room from the SAME author (periodic tick
         // fallback): must not create a second entry.
@@ -30206,7 +30242,7 @@ mod tests {
             );
         }
         let dep = app.sidebar_public_rooms_dependency();
-        assert_eq!(dep.rooms.len(), 1);
+        assert_eq!(dep.count, 1);
 
         // A different author announcing the SAME room is a distinct directory
         // entry (keyed by (topic, author)) but still renders as one sidebar
@@ -30223,6 +30259,99 @@ mod tests {
             assert_eq!(store.list_active().len(), 2);
             assert!(store.contains(topic, author2));
         }
+    }
+
+    // ── BORU-DIR-13 (PDF Task 5.1): Discover Rooms entry point ─────────
+    // The directory is a browse surface, NOT part of the conversation
+    // list. Opening it must not subscribe to any room topic or change
+    // membership, and the main chat list must contain only actual
+    // conversations (never directory entries).
+
+    /// Opening the Discover Rooms screen only changes the screen: it does
+    /// not subscribe to any room topic, create conversations, or mutate the
+    /// directory caches. (PDF Task 5.1: "No room membership changes merely
+    /// by opening Discover Rooms".)
+    #[test]
+    fn open_directory_does_not_subscribe_or_change_membership() {
+        let (_runtime, mut app) = build_prewarm_test_app();
+
+        let conversations_before = app.conversations.len();
+        let subscribed_before = app.auto_subscribed_rooms.len();
+        let store_len_before = app.directory_store.lock().unwrap().len();
+
+        let task = app.update(AppMessage::OpenDirectory);
+        drop(task);
+
+        assert_eq!(app.screen, Screen::Discover, "OpenDirectory opens the browse surface");
+        assert_eq!(
+            app.conversations.len(),
+            conversations_before,
+            "opening the directory must not create conversations"
+        );
+        assert_eq!(
+            app.auto_subscribed_rooms.len(),
+            subscribed_before,
+            "opening the directory must not subscribe to room topics"
+        );
+        assert_eq!(
+            app.directory_store.lock().unwrap().len(),
+            store_len_before,
+            "opening the directory must not mutate the directory store"
+        );
+    }
+
+    /// The main chat list contains only actual conversations — a room
+    /// discovered via the directory must NOT appear in the sidebar CHATS
+    /// section (it lives on the Discover browse surface instead).
+    #[test]
+    fn main_chat_list_contains_only_actual_conversations() {
+        let (_runtime, mut app) = build_prewarm_test_app();
+
+        // A real conversation the user is actually in.
+        let real_topic = TopicId::from_bytes([0x42; 32]);
+        let real_entry = boru_core::conversations::ConversationEntry::new(
+            real_topic,
+            "",
+            "Real chat",
+        );
+        app.conversation_store.upsert(real_entry);
+
+        // A directory advertisement that must NOT show up in the chat list.
+        let ad_topic = TopicId::from_bytes([0xAB; 32]);
+        let ad = RoomAdvertisement {
+            room_name: "Lounge".to_string(),
+            description: String::new(),
+            topic: ad_topic,
+            ticket: boru_core::chat_core::Ticket::new(ad_topic, vec![]).to_string(),
+            member_count: 0,
+            last_activity: 0,
+            expires_after_secs: ADVERT_TTL_SECS,
+        };
+        app.directory_store
+            .lock()
+            .unwrap()
+            .upsert(ad, SecretKey::generate().public());
+        app.refresh_sidebar_counts();
+
+        let chats = app.sidebar_chats_dependency();
+        assert!(
+            chats.conversations.iter().any(|c| c.topic == real_topic),
+            "real conversations appear in the main chat list"
+        );
+        assert!(
+            !chats.conversations.iter().any(|c| c.topic == ad_topic),
+            "advertised rooms must NOT appear in the main chat list (directory is a separate browse surface)"
+        );
+
+        // The advertised room is still reachable on the Discover screen.
+        let dep = app.discover_dependency();
+        assert_eq!(dep.rooms.len(), 1, "advertised room rendered on Discover");
+        assert_eq!(dep.rooms[0].room_name, "Lounge");
+        assert_eq!(
+            dep.rooms[0].offered_action,
+            boru_core::room_directory::RoomAction::Join,
+            "browse surface shows a Join action label for a not-joined room"
+        );
     }
 
     // ── BORU-DIR-09 (PDF Task 3.3): room withdrawals ─────────────────

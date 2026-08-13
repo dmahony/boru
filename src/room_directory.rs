@@ -136,7 +136,7 @@ pub const MAX_DIRECTORY_TOTAL_BYTES: usize = 1024 * 1024;
 /// Compatibility of a discovered room's chat protocol with this client
 /// (PDF Task 6.2; stored per entry by BORU-DIR-10, refined by the Phase 6
 /// join-flow task).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RoomCompatibility {
     /// No advertisement seen yet for the room (only used for empty
     /// placeholders; every cached entry has a concrete verdict).
@@ -174,7 +174,7 @@ impl RoomCompatibility {
 /// source of truth for `Joined`/`Blocked` is the real local room database;
 /// the directory defaults every entry to [`LocalJoinState::NotJoined`] and
 /// never duplicates local membership records.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LocalJoinState {
     /// The user has not joined this room (default for every cached entry).
     NotJoined,
@@ -319,7 +319,7 @@ pub enum AdvertiseOutcome {
 /// [`RoomCompatibility`]; BORU-DIR-12 exposes this so the future UI
 /// layer shows **Open** for already-joined rooms instead of **Join**
 /// (PDF Task 4.3 step 4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RoomAction {
     /// Offer a Join button — the room is discoverable and the user has
     /// not joined it.

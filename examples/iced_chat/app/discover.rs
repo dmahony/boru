@@ -574,20 +574,68 @@ impl IcedChat {
     }
 
     /// Builds the Discover screen's renderable snapshot.
+    ///
+    /// BORU-DIR-13 (PDF 5.1): the browse surface reads from the bounded
+    /// [`RoomDirectory`] cache (BORU-DIR-10..12) when the discovery service
+    /// provided a read handle, falling back to the legacy directory store
+    /// (tests / discovery service unavailable). The directory is a pure
+    /// browse surface: rows are snapshots of cached metadata plus the local
+    /// relationship verdict — no subscription, no membership mutation.
     pub(crate) fn discover_dependency(&self) -> DiscoverDependency {
-        let ads: Vec<(RoomAdvertisement, PublicKey)> = {
+        let rooms: Vec<DiscoverRoomRow> = if let Some(dir) = &self.room_directory {
+            let guard = dir.lock().unwrap();
+            guard
+                .snapshot()
+                .into_iter()
+                .map(|entry| DiscoverRoomRow {
+                    room_id: *entry.advert.room_id.as_bytes(),
+                    room_name: entry.advert.room_name.clone(),
+                    short_description: entry.advert.short_description.clone(),
+                    room_protocol_version: entry.advert.room_protocol_version,
+                    owner_peer_id: entry.advert.owner_peer_id,
+                    member_count: entry.advert.approximate_member_count,
+                    compatibility: entry.compatibility,
+                    local_join_state: entry.local_join_state,
+                    offered_action: entry.offered_action(),
+                    conflict: entry.conflict,
+                })
+                .collect()
+        } else {
+            // Legacy fallback: the old directory-store advertisements
+            // (relay-scoped directory gossip topic). Same row shape so the
+            // browse surface renders identically.
             let store = self.directory_store.lock().unwrap();
-            let mut list = store.list_active();
-            list.sort_by(|(a, _), (b, _)| b.last_activity.cmp(&a.last_activity));
-            list
+            store
+                .list_active()
+                .into_iter()
+                .map(|(ad, _author)| DiscoverRoomRow {
+                    room_id: *ad.topic.as_bytes(),
+                    room_name: ad.room_name.clone(),
+                    short_description: ad.description.clone(),
+                    room_protocol_version: 0,
+                    owner_peer_id: [0u8; 32],
+                    member_count: Some(ad.member_count),
+                    compatibility: boru_core::room_directory::RoomCompatibility::Compatible,
+                    local_join_state: boru_core::room_directory::LocalJoinState::NotJoined,
+                    offered_action: boru_core::room_directory::RoomAction::Join,
+                    conflict: false,
+                })
+                .collect()
         };
         DiscoverDependency {
             dark_mode: self.dark_mode,
-            ads,
+            rooms,
         }
     }
 
     /// Static renderer for the Discover screen, driven by [`DiscoverDependency`].
+    ///
+    /// The screen is the public-room directory **browse surface** (PDF Phase
+    /// 5). It is deliberately separate from the conversation list: cards show
+    /// advertised metadata plus the local relationship verdict
+    /// (Join/Open/Incompatible) as a label. Join wiring is BORU-DIR-16 —
+    /// opening the directory never subscribes to a room topic or changes
+    /// membership (PDF Task 5.1 acceptance).
     pub(crate) fn view_discover_content(dep: &DiscoverDependency) -> iced::Element<'static, AppMessage> {
         use iced::widget::{button, container, text, Column, Row, Space};
         use iced::{Alignment, Background, Length};
@@ -611,9 +659,9 @@ impl IcedChat {
 
         let mut main_content = Column::new().spacing(SPACE_8).padding(SPACE_16);
 
-        let ads = &dep.ads;
+        let rooms = &dep.rooms;
 
-        if ads.is_empty() {
+        if rooms.is_empty() {
             main_content = main_content.push(
                 container(
                     Column::new()
@@ -624,7 +672,7 @@ impl IcedChat {
                         )
                         .push(Space::new().height(SPACE_8))
                         .push(
-                            text("Rooms advertised on your relay will appear here.")
+                            text("Rooms appear here when they are discovered on the Boru network.")
                                 .size(TYPO_SM)
                                 .style(text_muted_style),
                         )
@@ -637,17 +685,26 @@ impl IcedChat {
             );
         } else {
             let theme = Self::theme_from_dark(dep.dark_mode);
-            for (ad, _author) in ads {
+            for room in rooms {
                 let theme = theme.clone();
-                let ad_for_join = ad.clone();
-                let room_name = ad.room_name.clone();
-                let member_count = ad.member_count;
-                let desc = if ad.description.len() > 100 {
-                    format!("{}…", &ad.description[..100])
+                let room_name = room.room_name.clone();
+                let member_count = room.member_count;
+                let desc = if room.short_description.chars().count() > 100 {
+                    let mut chars: String = room.short_description.chars().take(100).collect();
+                    chars.push('…');
+                    chars
                 } else {
-                    ad.description.clone()
+                    room.short_description.clone()
                 };
-                let last_active = crate::presentation::relative_time(ad.last_activity);
+                // The browse surface shows the local relationship verdict as
+                // a label. Join wiring is BORU-DIR-16; opening the directory
+                // must never change membership (PDF Task 5.1).
+                let action_label = match room.offered_action {
+                    boru_core::room_directory::RoomAction::Join => "Join",
+                    boru_core::room_directory::RoomAction::Open => "Open",
+                    boru_core::room_directory::RoomAction::Hidden => "Hidden",
+                    boru_core::room_directory::RoomAction::Incompatible => "Incompatible",
+                };
 
                 let room_card = container(
                     Row::new()
@@ -658,23 +715,20 @@ impl IcedChat {
                                 .push(
                                     Row::new()
                                         .push(
-                                            text(format!("{} members", member_count))
-                                                .size(TYPO_XS)
-                                                .style(text_muted_style),
+                                            text(member_count
+                                                .filter(|&c| c > 0)
+                                                .map(|c| format!("{c} members"))
+                                                .unwrap_or_default())
+                                            .size(TYPO_XS)
+                                            .style(text_muted_style),
                                         )
                                         .push(
-                                            text(last_active).size(TYPO_XS).style(text_muted_style),
+                                            text(action_label).size(TYPO_XS).style(text_muted_style),
                                         )
                                         .spacing(SPACE_12),
                                 )
                                 .spacing(SPACE_4)
                                 .width(Length::Fill),
-                        )
-                        .push(
-                            button(text("Join").size(TYPO_SM))
-                                .on_press(AppMessage::DirectoryRoomJoin(ad_for_join))
-                                .padding([SPACE_6, SPACE_12])
-                                .style(BUTTON_PRIMARY),
                         )
                         .spacing(SPACE_12)
                         .align_y(Alignment::Center),
