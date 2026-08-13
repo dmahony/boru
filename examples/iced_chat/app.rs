@@ -5065,6 +5065,9 @@ pub(crate) struct DiscoverRoomRow {
     pub(crate) member_count: Option<u32>,
     /// Room chat-protocol compatibility verdict.
     pub(crate) compatibility: boru_core::room_directory::RoomCompatibility,
+    /// Optional-feature compatibility verdict (PDF Task 6.2 step 2).
+    /// Informational only — never blocks the Join action.
+    pub(crate) feature_compat: boru_core::room_directory::RoomFeatureCompatibility,
     /// Local relationship state (NotJoined/Joined/Blocked/...).
     pub(crate) local_join_state: boru_core::room_directory::LocalJoinState,
     /// The action the browse surface should offer (Join/Open/Incompatible).
@@ -30463,6 +30466,7 @@ mod tests {
             owner_peer_id: [0u8; 32],
             member_count: None,
             compatibility: boru_core::room_directory::RoomCompatibility::Compatible,
+            feature_compat: boru_core::room_directory::RoomFeatureCompatibility::None,
             local_join_state: boru_core::room_directory::LocalJoinState::NotJoined,
             offered_action: boru_core::room_directory::RoomAction::Join,
             conflict: false,
@@ -30507,6 +30511,7 @@ mod tests {
             owner_peer_id: [0u8; 32],
             member_count: Some(9_999),
             compatibility: boru_core::room_directory::RoomCompatibility::Compatible,
+            feature_compat: boru_core::room_directory::RoomFeatureCompatibility::None,
             local_join_state: boru_core::room_directory::LocalJoinState::NotJoined,
             offered_action: boru_core::room_directory::RoomAction::Join,
             conflict: false,
@@ -30544,6 +30549,7 @@ mod tests {
             owner_peer_id: [0u8; 32],
             member_count: Some(5),
             compatibility: boru_core::room_directory::RoomCompatibility::Compatible,
+            feature_compat: boru_core::room_directory::RoomFeatureCompatibility::None,
             local_join_state: boru_core::room_directory::LocalJoinState::Joined,
             offered_action: boru_core::room_directory::RoomAction::Open,
             conflict: false,
@@ -30579,6 +30585,7 @@ mod tests {
             owner_peer_id: [0u8; 32],
             member_count: None,
             compatibility: boru_core::room_directory::RoomCompatibility::UpgradeRequired,
+            feature_compat: boru_core::room_directory::RoomFeatureCompatibility::None,
             local_join_state: boru_core::room_directory::LocalJoinState::Incompatible,
             offered_action: boru_core::room_directory::RoomAction::Incompatible,
             conflict: false,
@@ -30609,11 +30616,55 @@ mod tests {
             owner_peer_id: [0u8; 32],
             member_count: None,
             compatibility: boru_core::room_directory::RoomCompatibility::Compatible,
+            feature_compat: boru_core::room_directory::RoomFeatureCompatibility::None,
             local_join_state: boru_core::room_directory::LocalJoinState::NotJoined,
             offered_action: boru_core::room_directory::RoomAction::Join,
             conflict: true,
         };
         let _element = IcedChat::render_discover_room_card(&row, false);
+    }
+
+    /// PDF Task 6.2 step 2: optional-feature compatibility surfaces as a
+    /// muted, non-blocking hint on the card — a Compatible room with
+    /// missing optional features still offers Join.
+    #[test]
+    fn discover_missing_optional_features_render_hint_not_block() {
+        let row = DiscoverRoomRow {
+            room_id: [0x46; 32],
+            room_name: "Future Features".to_string(),
+            short_description: String::new(),
+            tags: Vec::new(),
+            room_protocol_version: 1,
+            owner_peer_id: [0u8; 32],
+            member_count: None,
+            compatibility: boru_core::room_directory::RoomCompatibility::Compatible,
+            feature_compat: boru_core::room_directory::RoomFeatureCompatibility::SomeMissing(
+                vec!["hologram-v9".to_string()],
+            ),
+            local_join_state: boru_core::room_directory::LocalJoinState::NotJoined,
+            offered_action: boru_core::room_directory::RoomAction::Join,
+            conflict: false,
+        };
+        assert_eq!(
+            discover_feature_hint(&row.feature_compat).as_deref(),
+            Some("Optional features unavailable: hologram-v9")
+        );
+        assert_eq!(
+            discover_action_label(row.offered_action),
+            "Join",
+            "missing optional features never block the Join action"
+        );
+        let _element = IcedChat::render_discover_room_card(&row, false);
+    }
+
+    /// PDF Task 6.2 step 2: rooms with no optional features or fully
+    /// supported features show no hint at all.
+    #[test]
+    fn discover_supported_or_absent_features_render_no_hint() {
+        use boru_core::room_directory::RoomFeatureCompatibility as FC;
+        assert_eq!(discover_feature_hint(&FC::None), None);
+        assert_eq!(discover_feature_hint(&FC::AllSupported), None);
+        assert_eq!(discover_feature_hint(&FC::SomeMissing(vec![])), None);
     }
 
     // ── BORU-DIR-15 (PDF Task 5.3): local search / filter / sort ────
@@ -30639,6 +30690,7 @@ mod tests {
             owner_peer_id: [0u8; 32],
             member_count: None,
             compatibility,
+            feature_compat: boru_core::room_directory::RoomFeatureCompatibility::None,
             local_join_state,
             offered_action: boru_core::room_directory::RoomAction::Join,
             conflict: false,
@@ -31317,6 +31369,97 @@ mod tests {
         assert!(
             err.contains("newer"),
             "block reason explains the upgrade requirement: {err}"
+        );
+        assert!(
+            err.contains(&format!("v{}", boru_core::public_room::PROTOCOL_VERSION + 1)),
+            "block reason names the room's protocol version: {err}"
+        );
+    }
+
+    /// PDF Task 6.2: an Unsupported room (protocol more than one version
+    /// ahead) is blocked with a useful message that distinguishes it from
+    /// the upgrade-required case.
+    #[test]
+    fn directory_join_target_blocks_unsupported_protocol() {
+        let (_runtime, mut app) = build_prewarm_test_app();
+        let room_id = TopicId::from_bytes([0x62; 32]);
+        let mut dir = boru_core::room_directory::RoomDirectory::new();
+        let owner = SecretKey::generate().public();
+        let mut advert =
+            boru_core::control_plane::advertisement::PublicRoomAdvertisement::minimal(
+                room_id,
+                "Far Future Room".to_string(),
+                *owner.as_bytes(),
+            );
+        advert.room_protocol_version = boru_core::public_room::PROTOCOL_VERSION + 2;
+        dir.apply_advertisement(
+            advert,
+            owner,
+            boru_core::control_plane::advertisement::AdvertisementAuth::Verified {
+                publisher: owner,
+            },
+            1,
+            1000,
+        );
+        app.room_directory = Some(Arc::new(StdMutex::new(dir)));
+
+        let err = app
+            .directory_join_target(*room_id.as_bytes())
+            .expect_err("unsupported room must be blocked");
+        assert!(
+            err.contains("does not support"),
+            "block reason explains the protocol is unsupported: {err}"
+        );
+        assert!(
+            err.contains(&format!("v{}", boru_core::public_room::PROTOCOL_VERSION + 2)),
+            "block reason names the unsupported version: {err}"
+        );
+    }
+
+    /// PDF Task 6.2 acceptance: optional feature differences do NOT
+    /// unnecessarily block basic room access. A Compatible room that
+    /// advertises optional features this client lacks stays joinable.
+    #[test]
+    fn directory_join_target_allows_missing_optional_features() {
+        let (_runtime, mut app) = build_prewarm_test_app();
+        let room_id = TopicId::from_bytes([0x62; 32]);
+        let mut dir = boru_core::room_directory::RoomDirectory::new();
+        let owner = SecretKey::generate().public();
+        let mut advert =
+            boru_core::control_plane::advertisement::PublicRoomAdvertisement::minimal(
+                room_id,
+                "Feature Room".to_string(),
+                *owner.as_bytes(),
+            );
+        advert.feature_flags = vec!["hologram-v9".to_string()];
+        dir.apply_advertisement(
+            advert,
+            owner,
+            boru_core::control_plane::advertisement::AdvertisementAuth::Verified {
+                publisher: owner,
+            },
+            1,
+            1000,
+        );
+        let entry = dir.get(&room_id).unwrap();
+        assert_eq!(
+            entry.compatibility,
+            boru_core::room_directory::RoomCompatibility::Compatible,
+            "base protocol compatible"
+        );
+        assert_eq!(
+            entry.feature_compat,
+            boru_core::room_directory::RoomFeatureCompatibility::SomeMissing(vec![
+                "hologram-v9".to_string(),
+            ]),
+            "missing optional feature is informational only"
+        );
+        app.room_directory = Some(Arc::new(StdMutex::new(dir)));
+
+        assert_eq!(
+            app.directory_join_target(*room_id.as_bytes()),
+            Ok(room_id),
+            "optional-feature differences never block basic room access"
         );
     }
 

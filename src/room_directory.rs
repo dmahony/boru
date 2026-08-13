@@ -104,6 +104,7 @@ use std::{
 use iroh_base::PublicKey;
 
 use crate::control_plane::advertisement::{AdvertisementAuth, PublicRoomAdvertisement};
+use crate::control_plane::capabilities::{default_local_capabilities, CapabilityId, CapabilitySet};
 use crate::proto::TopicId;
 
 // ---------------------------------------------------------------------------
@@ -152,17 +153,98 @@ pub enum RoomCompatibility {
 
 impl RoomCompatibility {
     /// Deterministic compatibility verdict from the room's advertised
-    /// chat protocol version.
+    /// chat protocol version (PDF Task 6.2 step 1).
     ///
-    /// A room speaking the same protocol version as this client, or an
-    /// older one, is joinable; a room speaking a newer protocol requires
-    /// an upgrade. Phase 6 (PDF Task 6.2) may refine this with capability
-    /// negotiation for optional features — the stored value here is the
-    /// base-room-protocol verdict.
+    /// Formalization of the comparison:
+    ///
+    /// * a room speaking the **same** protocol version as this client, or
+    ///   an **older** one, is joinable → [`Compatible`](Self::Compatible);
+    /// * a room speaking exactly **one version newer** requires a client
+    ///   upgrade → [`UpgradeRequired`](Self::UpgradeRequired) (upgrading
+    ///   this client to the next protocol version makes the room usable);
+    /// * a room speaking a protocol **more than one version newer** is
+    ///   [`Unsupported`](Self::Unsupported) — the room's protocol has
+    ///   diverged beyond the adjacent version this client can reason
+    ///   about, so no simple upgrade path exists and joining is not
+    ///   attempted (PDF Task 6.2 step 5).
+    ///
+    /// Version `0` is treated as [`Compatible`](Self::Compatible): it is
+    /// the legacy "no protocol version declared" marker used by the
+    /// pre-control-plane directory store, and blocking those rooms would
+    /// unnecessarily break basic room access (PDF Task 6.2 acceptance:
+    /// optional/unknown fields must not block a compatible base protocol).
     pub fn for_room_protocol(room_protocol_version: u8) -> Self {
         match room_protocol_version.cmp(&crate::public_room::PROTOCOL_VERSION) {
             Ordering::Equal | Ordering::Less => RoomCompatibility::Compatible,
-            Ordering::Greater => RoomCompatibility::UpgradeRequired,
+            Ordering::Greater => {
+                if room_protocol_version == crate::public_room::PROTOCOL_VERSION.saturating_add(1) {
+                    RoomCompatibility::UpgradeRequired
+                } else {
+                    RoomCompatibility::Unsupported
+                }
+            }
+        }
+    }
+}
+
+/// Optional-feature compatibility of a discovered room with this client
+/// (PDF Task 6.2 step 2: capability negotiation for optional room
+/// features).
+///
+/// The base-room-protocol verdict ([`RoomCompatibility`]) decides whether
+/// the local client can join at all. Optional features are negotiated
+/// separately against the local capability set (reusing the BORU-CP
+/// capability machinery): a room may advertise optional feature flags
+/// (e.g. `files-v2`, `voice-v1`) that this client does not support.
+///
+/// **Optional feature differences never block basic room access** (PDF
+/// Task 6.2 acceptance: "Optional feature differences do not
+/// unnecessarily block basic room access"). The verdict here is
+/// informational — the UI can surface it as a hint, but a room whose
+/// base protocol is [`RoomCompatibility::Compatible`] remains joinable
+/// even when some advertised optional features are missing locally.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum RoomFeatureCompatibility {
+    /// The room advertises no optional feature flags.
+    None,
+    /// Every advertised optional feature flag is supported by this
+    /// client (the local capability set contains the negotiated
+    /// feature-version id).
+    AllSupported,
+    /// Some advertised optional features are **not** supported by this
+    /// client. Informational only — basic room access is unaffected;
+    /// the listed flags are the feature-version ids this client lacks.
+    SomeMissing(Vec<String>),
+}
+
+impl RoomFeatureCompatibility {
+    /// Negotiate a room's advertised optional feature flags against the
+    /// local capability set (PDF Task 6.2 step 2).
+    ///
+    /// Each advertised flag is a `feature-version` capability id (the
+    /// BORU-CP capability format). The flag is supported when the local
+    /// capability set contains the exact id. Unknown future flags are
+    /// **preserved and reported as missing**, never fatal — a future
+    /// client can ignore unknown optional fields without rejecting the
+    /// room when the base protocol remains compatible (PDF Task 6.2 step
+    /// 4).
+    pub fn negotiate(local: &CapabilitySet, advertised: &[String]) -> Self {
+        if advertised.is_empty() {
+            return Self::None;
+        }
+        let missing: Vec<String> = advertised
+            .iter()
+            .filter(|flag| {
+                CapabilityId::parse(flag)
+                    .map(|id| !local.contains(&id))
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect();
+        if missing.is_empty() {
+            Self::AllSupported
+        } else {
+            Self::SomeMissing(missing)
         }
     }
 }
@@ -271,6 +353,12 @@ pub struct DirectoryEntry {
     pub expires_at: Instant,
     /// Room chat-protocol compatibility with this client.
     pub compatibility: RoomCompatibility,
+    /// Optional-feature compatibility with this client (PDF Task 6.2 step
+    /// 2). Derived from the advertised `feature_flags` against the local
+    /// capability set at apply time. Informational only — it never blocks
+    /// basic room access; the base `compatibility` verdict is the join
+    /// gate.
+    pub feature_compat: RoomFeatureCompatibility,
     /// Local relationship state (NotJoined by default; BORU-DIR-12).
     pub local_join_state: LocalJoinState,
     /// Conflict state (BORU-DIR-11, PDF Task 4.2): `true` when different
@@ -373,6 +461,13 @@ pub struct RoomDirectory {
     /// Used to derive each entry's `local_join_state`; the directory
     /// never creates or duplicates membership records itself.
     local_facts: LocalRoomFacts,
+    /// The local capability set this client advertises (BORU-CP-11).
+    /// Used to negotiate optional room features (PDF Task 6.2 step 2):
+    /// each entry's `feature_compat` is derived by comparing the room's
+    /// advertised `feature_flags` against this set. Defaults to
+    /// [`default_local_capabilities`]; the discovery service replaces it
+    /// when the app updates the local capability set.
+    local_capabilities: CapabilitySet,
 }
 
 impl RoomDirectory {
@@ -390,7 +485,32 @@ impl RoomDirectory {
             max_entries,
             max_bytes,
             local_facts: LocalRoomFacts::default(),
+            local_capabilities: default_local_capabilities(),
         }
+    }
+
+    /// Replace the local capability set used to negotiate optional room
+    /// features (PDF Task 6.2 step 2) and re-derive every cached entry's
+    /// `feature_compat`.
+    ///
+    /// The set should match what this client advertises on the control
+    /// plane (BORU-CP-11) — the app updates it via the discovery service
+    /// when locally enabled capabilities materially change. Entries added
+    /// after this call are derived immediately.
+    pub fn set_local_capabilities(&mut self, capabilities: CapabilitySet) {
+        self.local_capabilities = capabilities;
+        for entry in self.entries.values_mut() {
+            entry.feature_compat = RoomFeatureCompatibility::negotiate(
+                &self.local_capabilities,
+                &entry.advert.feature_flags,
+            );
+        }
+    }
+
+    /// The local capability set currently used for optional-feature
+    /// negotiation.
+    pub fn local_capabilities(&self) -> &CapabilitySet {
+        &self.local_capabilities
     }
 
     /// Replace the local relationship facts and re-derive every cached
@@ -474,6 +594,11 @@ impl RoomDirectory {
         let bytes = encoded_size(&advert);
         let ttl = Duration::from_secs(u64::from(advert.expires_after_secs.max(1)));
         let compatibility = RoomCompatibility::for_room_protocol(advert.room_protocol_version);
+        // PDF Task 6.2 step 2: negotiate optional room features against
+        // the local capability set. Informational only — never a join
+        // gate; the base `compatibility` verdict above is the gate.
+        let feature_compat =
+            RoomFeatureCompatibility::negotiate(&self.local_capabilities, &advert.feature_flags);
         // BORU-DIR-12: derive the local relationship state once, before
         // the entries map is mutably borrowed (Joined/hidden come from
         // the local room DB facts, never from the advertisement).
@@ -526,6 +651,7 @@ impl RoomDirectory {
                         existing.last_seen = now;
                         existing.expires_at = now + ttl;
                         existing.compatibility = compatibility;
+                        existing.feature_compat = feature_compat;
                         existing.conflict = conflict;
                         existing.digest = incoming_digest;
                         existing.bytes = bytes;
@@ -573,6 +699,7 @@ impl RoomDirectory {
                     last_seen: now,
                     expires_at: now + ttl,
                     compatibility,
+                    feature_compat,
                     // BORU-DIR-12: derive the local relationship state at
                     // insert from the stored facts — a hidden room that is
                     // re-advertised after eviction stays hidden, a joined
@@ -1651,6 +1778,172 @@ mod tests {
         assert_eq!(
             dir.get(&room).unwrap().compatibility,
             RoomCompatibility::UpgradeRequired
+        );
+    }
+
+    /// PDF Task 6.2 step 1 formalization: a room speaking a protocol more
+    /// than one version newer is Unsupported — the protocol has diverged
+    /// beyond the adjacent version this client can reason about.
+    #[test]
+    fn far_newer_room_protocol_is_unsupported() {
+        let mut dir = RoomDirectory::new();
+        let room = topic(1);
+        let owner = key(0x42);
+        let mut advert = ad(room, 0x42, "far-future-room");
+        advert.room_protocol_version = crate::public_room::PROTOCOL_VERSION + 2;
+
+        dir.apply_advertisement(advert, owner, verified_auth(owner), 1, 1000);
+        assert_eq!(
+            dir.get(&room).unwrap().compatibility,
+            RoomCompatibility::Unsupported,
+            "protocol more than one version ahead is Unsupported"
+        );
+    }
+
+    /// PDF Task 6.2 step 1: the same, older, and legacy (version 0)
+    /// protocols are all Compatible — a client can join them.
+    #[test]
+    fn same_older_and_legacy_protocols_are_compatible() {
+        assert_eq!(
+            RoomCompatibility::for_room_protocol(crate::public_room::PROTOCOL_VERSION),
+            RoomCompatibility::Compatible
+        );
+        assert_eq!(
+            RoomCompatibility::for_room_protocol(crate::public_room::PROTOCOL_VERSION - 1),
+            RoomCompatibility::Compatible
+        );
+        // Version 0 = legacy "no protocol version declared" marker from
+        // the pre-control-plane directory store — joinable, never blocked.
+        assert_eq!(RoomCompatibility::for_room_protocol(0), RoomCompatibility::Compatible);
+    }
+
+    /// PDF Task 6.2 step 1: exactly one version newer is UpgradeRequired;
+    /// more than one version newer is Unsupported.
+    #[test]
+    fn adjacent_newer_is_upgrade_required_not_unsupported() {
+        assert_eq!(
+            RoomCompatibility::for_room_protocol(crate::public_room::PROTOCOL_VERSION + 1),
+            RoomCompatibility::UpgradeRequired
+        );
+        assert_eq!(
+            RoomCompatibility::for_room_protocol(crate::public_room::PROTOCOL_VERSION + 2),
+            RoomCompatibility::Unsupported
+        );
+        assert_eq!(
+            RoomCompatibility::for_room_protocol(crate::public_room::PROTOCOL_VERSION + 3),
+            RoomCompatibility::Unsupported
+        );
+    }
+
+    /// PDF Task 6.2 step 2: a room advertising no optional feature flags
+    /// has no feature-compatibility verdict (None).
+    #[test]
+    fn room_without_feature_flags_has_no_feature_verdict() {
+        let mut dir = RoomDirectory::new();
+        let room = topic(1);
+        let owner = key(0x42);
+        let advert = ad(room, 0x42, "plain-room");
+        assert!(advert.feature_flags.is_empty());
+
+        dir.apply_advertisement(advert, owner, verified_auth(owner), 1, 1000);
+        assert_eq!(
+            dir.get(&room).unwrap().feature_compat,
+            RoomFeatureCompatibility::None
+        );
+    }
+
+    /// PDF Task 6.2 step 2: a room whose advertised optional feature
+    /// flags are all in the local capability set is AllSupported.
+    #[test]
+    fn all_advertised_features_supported() {
+        let mut dir = RoomDirectory::new();
+        let room = topic(1);
+        let owner = key(0x42);
+        let mut advert = ad(room, 0x42, "files-room");
+        advert.feature_flags = vec![
+            crate::control_plane::capabilities::ids::FILES_V2.to_string(),
+            crate::control_plane::capabilities::ids::RICH_TEXT_V1.to_string(),
+        ];
+
+        dir.apply_advertisement(advert, owner, verified_auth(owner), 1, 1000);
+        assert_eq!(
+            dir.get(&room).unwrap().feature_compat,
+            RoomFeatureCompatibility::AllSupported
+        );
+        // The base verdict stays Compatible — the join gate is untouched.
+        assert_eq!(
+            dir.get(&room).unwrap().compatibility,
+            RoomCompatibility::Compatible
+        );
+    }
+
+    /// PDF Task 6.2 step 2/4: a room advertising optional features this
+    /// client does NOT support is still Compatible (joinable) — the
+    /// missing flags are informational only. Unknown future flags are
+    /// preserved and reported, never fatal.
+    #[test]
+    fn missing_optional_features_do_not_block_room() {
+        let mut dir = RoomDirectory::new();
+        let room = topic(1);
+        let owner = key(0x42);
+        let mut advert = ad(room, 0x42, "future-features-room");
+        advert.feature_flags = vec![
+            crate::control_plane::capabilities::ids::FILES_V2.to_string(),
+            "voice-v1".to_string(),    // well-known, in the default local set
+            "hologram-v9".to_string(), // unknown future flag
+        ];
+        // NOTE: `voice-v1` IS in the default local capability set (the
+        // default set contains every well-known id). To exercise a
+        // genuinely missing feature we use `hologram-v9`, an id that is
+        // not well-known at all.
+
+        dir.apply_advertisement(advert, owner, verified_auth(owner), 1, 1000);
+        let entry = dir.get(&room).unwrap();
+        assert_eq!(
+            entry.compatibility,
+            RoomCompatibility::Compatible,
+            "base protocol compatible — room stays joinable"
+        );
+        // voice-v1 is well-known and in the default local set → supported.
+        // hologram-v9 is unknown → reported missing, never fatal.
+        assert_eq!(
+            entry.feature_compat,
+            RoomFeatureCompatibility::SomeMissing(vec!["hologram-v9".to_string()]),
+            "unknown future flag reported as missing, never fatal"
+        );
+        assert_eq!(
+            dir.snapshot()[0].offered_action(),
+            RoomAction::Join,
+            "optional-feature differences never block basic room access"
+        );
+    }
+
+    /// PDF Task 6.2 step 2: replacing the local capability set re-derives
+    /// every cached entry's feature compatibility — a previously missing
+    /// future feature becomes AllSupported once the client gains it.
+    #[test]
+    fn set_local_capabilities_renegotiates_entries() {
+        let mut dir = RoomDirectory::new();
+        let room = topic(1);
+        let owner = key(0x42);
+        let mut advert = ad(room, 0x42, "future-room");
+        advert.feature_flags = vec!["hologram-v9".to_string()];
+
+        dir.apply_advertisement(advert, owner, verified_auth(owner), 1, 1000);
+        // Unknown future flag → missing under the default local set.
+        assert_eq!(
+            dir.get(&room).unwrap().feature_compat,
+            RoomFeatureCompatibility::SomeMissing(vec!["hologram-v9".to_string()])
+        );
+
+        // The client later gains the feature → renegotiation flips to
+        // supported.
+        let mut caps = dir.local_capabilities().clone();
+        caps.insert_id("hologram-v9");
+        dir.set_local_capabilities(caps);
+        assert_eq!(
+            dir.get(&room).unwrap().feature_compat,
+            RoomFeatureCompatibility::AllSupported
         );
     }
 

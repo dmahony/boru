@@ -2263,8 +2263,16 @@ impl DiscoveryService {
     ) -> Result<AnnounceOutcome, DiscoveryServiceError> {
         {
             let mut local = self.local_caps.lock().expect("local caps lock poisoned");
-            *local = caps;
+            *local = caps.clone();
         }
+        // PDF Task 6.2 step 2: keep the room directory's optional-feature
+        // negotiation in sync with the local capability set — a room's
+        // `feature_compat` is derived from these capabilities.
+        self.core
+            .room_directory
+            .lock()
+            .expect("room directory lock poisoned")
+            .set_local_capabilities(caps);
         self.announce_capabilities().await
     }
 

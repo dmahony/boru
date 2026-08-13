@@ -59,6 +59,30 @@ pub(crate) fn discover_compat_label(
     }
 }
 
+/// Optional-feature hint text for a discovered room card (PDF Task 6.2
+/// step 2). Returns `None` when the room advertises no optional features
+/// or every advertised feature is supported locally. When some features
+/// are missing, returns a muted, informational hint — the room remains
+/// joinable; the hint never blocks basic room access.
+pub(crate) fn discover_feature_hint(
+    feature_compat: &boru_core::room_directory::RoomFeatureCompatibility,
+) -> Option<String> {
+    match feature_compat {
+        boru_core::room_directory::RoomFeatureCompatibility::None
+        | boru_core::room_directory::RoomFeatureCompatibility::AllSupported => None,
+        boru_core::room_directory::RoomFeatureCompatibility::SomeMissing(missing) => {
+            if missing.is_empty() {
+                None
+            } else {
+                Some(format!(
+                    "Optional features unavailable: {}",
+                    missing.join(", ")
+                ))
+            }
+        }
+    }
+}
+
 /// Approximate member-count text. The count is an untrusted
 /// self-reported hint (PDF Task 7.3 / DIR-21 guardrails), so it is
 /// always rendered as clearly approximate ("~N members") and omitted
@@ -835,6 +859,7 @@ impl IcedChat {
                         owner_peer_id: entry.advert.owner_peer_id,
                         member_count: entry.advert.approximate_member_count,
                         compatibility: entry.compatibility,
+                        feature_compat: entry.feature_compat.clone(),
                         local_join_state: entry.local_join_state,
                         offered_action: entry.offered_action(),
                         conflict: entry.conflict,
@@ -861,6 +886,7 @@ impl IcedChat {
                         owner_peer_id: [0u8; 32],
                         member_count: Some(ad.member_count),
                         compatibility: boru_core::room_directory::RoomCompatibility::Compatible,
+                        feature_compat: boru_core::room_directory::RoomFeatureCompatibility::None,
                         local_join_state: boru_core::room_directory::LocalJoinState::NotJoined,
                         offered_action: boru_core::room_directory::RoomAction::Join,
                         conflict: false,
@@ -1338,6 +1364,19 @@ impl IcedChat {
             );
         }
         body = body.push(meta);
+
+        // ── Optional-feature hint (PDF Task 6.2 step 2) ──
+        // Informational only: a room whose base protocol is Compatible
+        // stays joinable even when some advertised optional features are
+        // missing locally. The hint is muted and never blocks the action.
+        if let Some(hint) = discover_feature_hint(&room.feature_compat) {
+            body = body.push(
+                text(hint)
+                    .size(TYPO_XS)
+                    .style(text_muted_style)
+                    .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+            );
+        }
 
         container(body)
             .padding(SPACE_12)
@@ -2790,6 +2829,11 @@ impl IcedChat {
     /// bootstrap peers come from the normal OpenRoom path (discovered
     /// peers + saved RoomStore).
     ///
+    /// Base-room-protocol incompatibility (UpgradeRequired/Unsupported,
+    /// PDF Task 6.2 step 5) blocks the join with a useful explanation.
+    /// Optional-feature differences are informational only and never
+    /// block basic room access (PDF Task 6.2 acceptance).
+    ///
     /// Returns `Ok(topic)` when the join may proceed, or `Err(reason)`
     /// with a user-facing explanation when it must be blocked.
     pub(crate) fn directory_join_target(&self, room_id: [u8; 32]) -> Result<TopicId, String> {
@@ -2802,19 +2846,26 @@ impl IcedChat {
         // service unavailable) carries no compatibility metadata — the
         // browse surface treats those rows as compatible.
         let compat = match &self.room_directory {
-            Some(dir) => dir.lock().unwrap().get(&topic).map(|e| e.compatibility),
+            Some(dir) => dir.lock().unwrap().get(&topic).map(|e| {
+                (
+                    e.compatibility,
+                    e.advert.room_protocol_version,
+                    boru_core::public_room::PROTOCOL_VERSION,
+                )
+            }),
             None => None,
         };
 
         match compat {
-            Some(RoomCompatibility::UpgradeRequired) => {
-                Err("this room requires a newer version of Boru".to_string())
-            }
-            Some(RoomCompatibility::Unsupported) => {
-                Err("this room uses an unsupported protocol version".to_string())
-            }
+            Some((RoomCompatibility::UpgradeRequired, room_v, local_v)) => Err(format!(
+                "Cannot join room: this room requires a newer protocol version (v{room_v}), but this Boru build only supports v{local_v}. Please upgrade Boru to join.",
+            )),
+            Some((RoomCompatibility::Unsupported, room_v, local_v)) => Err(format!(
+                "Cannot join room: this room uses protocol v{room_v}, which this Boru build (v{local_v}) does not support.",
+            )),
             // Compatible, Unknown, or legacy fallback: proceed to the
-            // normal join path.
+            // normal join path. Optional-feature differences never block
+            // basic room access (PDF Task 6.2 acceptance).
             _ => Ok(topic),
         }
     }
