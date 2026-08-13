@@ -38,6 +38,7 @@ mod shared_by_me_table;
 mod status_card;
 mod theme;
 mod theme_config;
+mod theme_merge;
 #[cfg(test)]
 mod offscreen_status_card;
 mod sharing_summary;
@@ -499,6 +500,19 @@ fn main() -> Result<()> {
             theme_config::UiThemeConfig::default()
         }
     };
+    // BORU-UI-05: surface validation warnings for unsafe/nonsensical values
+    // (negative padding, zero font size, absurd sidebar widths, …) exactly
+    // once at startup. The merge itself is pure and runs on every
+    // `IcedChat::boru_theme()` call; the warnings are reported here.
+    {
+        let (_, theme_warnings) = theme_merge::merge_ui_theme(
+            &crate::theme::BoruTheme::default(),
+            &ui_theme_config,
+        );
+        for w in &theme_warnings {
+            warn!(override = %w, "boru-ui.toml theme override adjusted");
+        }
+    }
 
     // ── Panic hook: catch Rust panics and write crash info to instance.log
     //     (which the splash window is tailing) plus a crash report file.

@@ -1537,6 +1537,16 @@ impl Default for BoruTheme {
     }
 }
 
+/// The live theme produced by merging `BoruTheme::default()` with optional
+/// `boru-ui.toml` overrides (PDF Task 5 / BORU-UI-05).
+///
+/// This is an alias, not a separate struct: `BoruTheme` already is the type
+/// every view/style call site consumes, so the merge in `theme_merge` just
+/// returns a (possibly overridden) `BoruTheme`. The alias keeps the PDF's
+/// `ActiveTheme` vocabulary available for later tasks (BORU-UI-06/07 file
+/// watching + live redraw) without introducing a parallel type.
+pub type ActiveTheme = BoruTheme;
+
 // ── Tests ─────────────────────────────────────────────────────────────
 //
 // Every token is asserted against the existing source modules

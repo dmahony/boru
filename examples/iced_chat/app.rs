@@ -18746,10 +18746,13 @@ impl IcedChat {
     /// Typed Boru theme matching the current dark-mode toggle.
     ///
     /// This is the seam view/style code consumes instead of raw literals
-    /// (BORU-UI-02). Later tasks (BORU-UI-03+) migrate call sites onto
-    /// `self.boru_theme()` fields; BORU-UI-04/05 layer file overrides on top.
+    /// (BORU-UI-02). BORU-UI-04/05 layer file overrides on top: the
+    /// `boru-ui.toml` config (stored in `self.ui_theme_config`) is merged
+    /// over `BoruTheme::for_theme(...)` — the default theme is the source of
+    /// truth and only explicit config fields override it (BORU-UI-05).
     pub(crate) fn boru_theme(&self) -> crate::theme::BoruTheme {
-        crate::theme::BoruTheme::for_theme(&self.theme())
+        let base = crate::theme::BoruTheme::for_theme(&self.theme());
+        crate::theme_merge::merge_ui_theme(&base, &self.ui_theme_config).0
     }
 
     /// Return the iced Theme enum for an arbitrary dark-mode flag.
