@@ -18947,6 +18947,46 @@ impl IcedChat {
                 tracing::debug!(visible = self.inspector_visible, "UI Inspector toggled");
                 iced::Task::none()
             }
+            InspectorMsg::ToggleSection(section) => {
+                // View-local collapse state only — never theme state.
+                if !self.inspector_draft.collapsed_sections.remove(&section) {
+                    self.inspector_draft.collapsed_sections.insert(section);
+                }
+                iced::Task::none()
+            }
+            InspectorMsg::ResetSection(section) => {
+                // One component group back to Boru defaults. Only theme
+                // state is replaced (via the same seam as the watcher);
+                // networking, gossip, rooms, tunnels, media, chat history,
+                // the selected conversation and composer input are untouched.
+                let mut cfg = self.ui_theme_config.clone();
+                section.reset(&mut cfg);
+                // Clear drafts for fields in this section so stale text
+                // inputs do not outlive their values.
+                for group in crate::inspector::SECTIONS {
+                    if group.id == section {
+                        for g in group.groups {
+                            for field in g.fields {
+                                self.inspector_draft.float_text.remove(field);
+                                self.inspector_draft.color_text.remove(field);
+                            }
+                        }
+                    }
+                }
+                self.set_ui_theme_config(cfg);
+                tracing::debug!(?section, "UI Inspector: reset section");
+                iced::Task::none()
+            }
+            InspectorMsg::ResetAll => {
+                // Complete active theme back to Boru defaults: clear every
+                // config group (an empty UiThemeConfig merges to defaults).
+                let cfg = crate::theme_config::UiThemeConfig::default();
+                self.inspector_draft.float_text.clear();
+                self.inspector_draft.color_text.clear();
+                self.set_ui_theme_config(cfg);
+                tracing::debug!("UI Inspector: reset all to defaults");
+                iced::Task::none()
+            }
             InspectorMsg::SetFloat { field, value } => {
                 // Slider edit: apply immediately and clear any stale draft so
                 // the numeric field shows the live value.
@@ -35546,5 +35586,109 @@ fn inspector_toggle_and_edit_updates_active_theme_via_messages() {
         app.inspector_draft.float_text.is_empty() && app.inspector_draft.color_text.is_empty(),
         "drafts cleared when the panel closes"
     );
+}
+
+#[cfg(feature = "dev-ui")]
+#[test]
+fn inspector_reset_section_and_reset_all_via_messages() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    // Apply edits in several sections.
+    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetFloat {
+        field: crate::inspector::ThemeField::SidebarWidth,
+        value: 270.0,
+    }));
+    drop(task);
+    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetFloat {
+        field: crate::inspector::ThemeField::ChatBubbleMaxWidth,
+        value: 620.0,
+    }));
+    drop(task);
+    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetBool {
+        field: crate::inspector::ThemeField::HomeShowActivityFeed,
+        value: false,
+    }));
+    drop(task);
+    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::ColorTextChanged {
+        field: crate::inspector::ThemeField::ColorPrimary,
+        text: "#102030".to_string(),
+    }));
+    drop(task);
+    assert_eq!(app.active_theme.sidebar.width, 270.0);
+    assert_eq!(app.active_theme.chat.bubble_max_width, 620.0);
+    assert!(!app.active_theme.home.show_activity_feed);
+
+    // Reset Section (Sidebar): only the sidebar group returns to defaults.
+    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::ResetSection(
+        crate::inspector::SectionId::Sidebar,
+    )));
+    drop(task);
+    assert_eq!(
+        app.active_theme.sidebar.width,
+        crate::theme::BoruTheme::default().sidebar.width,
+        "Reset Section restored the sidebar group"
+    );
+    assert_eq!(
+        app.active_theme.chat.bubble_max_width, 620.0,
+        "unrelated section untouched"
+    );
+    assert!(
+        !app.active_theme.home.show_activity_feed,
+        "unrelated section untouched"
+    );
+    assert_eq!(
+        app.active_theme.colors.primary,
+        iced::Color::from_rgb(0x10 as f32 / 255.0, 0x20 as f32 / 255.0, 0x30 as f32 / 255.0),
+        "colour edit untouched"
+    );
+
+    // Reset All: complete active theme back to Boru defaults.
+    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::ResetAll));
+    drop(task);
+    assert_eq!(
+        app.active_theme,
+        crate::theme::BoruTheme::default(),
+        "Reset All restored the complete default theme"
+    );
+    assert_eq!(
+        app.ui_theme_config,
+        crate::theme_config::UiThemeConfig::default(),
+        "Reset All cleared every config group"
+    );
+    assert!(
+        app.inspector_draft.float_text.is_empty() && app.inspector_draft.color_text.is_empty(),
+        "Reset All cleared all drafts"
+    );
+}
+
+#[cfg(feature = "dev-ui")]
+#[test]
+fn inspector_section_collapse_is_view_local_state() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::ToggleSection(
+        crate::inspector::SectionId::Chat,
+    )));
+    drop(task);
+    assert!(
+        app.inspector_draft
+            .collapsed_sections
+            .contains(&crate::inspector::SectionId::Chat),
+        "Chat section collapsed"
+    );
+
+    // Collapse state never touches the theme.
+    let theme_before = app.active_theme;
+    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::ToggleSection(
+        crate::inspector::SectionId::Chat,
+    )));
+    drop(task);
+    assert!(
+        !app.inspector_draft
+            .collapsed_sections
+            .contains(&crate::inspector::SectionId::Chat),
+        "Chat section re-expanded"
+    );
+    assert_eq!(app.active_theme, theme_before, "collapse is view-local only");
 }
 }

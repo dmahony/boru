@@ -33,7 +33,7 @@
 //! `UiThemeConfig` and return `Err` for a field that cannot hold the value.
 //! The tests in this module exercise those mappings plus the merge round-trip.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use iced::widget::{button, container, row, scrollable, slider, text, text_input, toggler, Space};
 use iced::{Alignment, Color, Element, Length};
@@ -179,6 +179,83 @@ pub enum ThemeField {
     MotionSidebarFadeFrames,
 }
 
+/// Top-level component section of the inspector (BORU-UI-10 hierarchy).
+///
+/// Mirrors the component groups of the typed [`BoruTheme`]: the PDF's
+/// Global / Sidebar / Home / Chat / Attachments / Rooms / Tunnels / Dialogs
+/// plus the remaining typed-theme groups the inspector exposes (Calls,
+/// Controls, Motion). `Global` groups the four global token families
+/// (Colours, Typography, Spacing, Radii).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SectionId {
+    /// Global token families: Colours, Typography, Spacing, Radii.
+    Global,
+    /// Sidebar / global shell.
+    Sidebar,
+    /// Home dashboard.
+    Home,
+    /// Chat message list + composer.
+    Chat,
+    /// File / shared / download / video attachments.
+    Attachments,
+    /// Public rooms / discover.
+    Rooms,
+    /// Tunnels.
+    Tunnels,
+    /// Dialogs.
+    Dialogs,
+    /// Call screens.
+    Calls,
+    /// Settings / generic controls.
+    Controls,
+    /// Presentation motion.
+    Motion,
+}
+
+impl SectionId {
+    /// Human-readable section label.
+    pub fn label(self) -> &'static str {
+        match self {
+            SectionId::Global => "Global",
+            SectionId::Sidebar => "Sidebar",
+            SectionId::Home => "Home",
+            SectionId::Chat => "Chat",
+            SectionId::Attachments => "Attachments",
+            SectionId::Rooms => "Rooms",
+            SectionId::Tunnels => "Tunnels",
+            SectionId::Dialogs => "Dialogs",
+            SectionId::Calls => "Calls",
+            SectionId::Controls => "Controls",
+            SectionId::Motion => "Motion",
+        }
+    }
+
+    /// The config groups this section owns. `Global` owns all four global
+    /// token families; every other section owns exactly its typed group.
+    /// Used by `reset_section` so Reset Section clears exactly this
+    /// component group back to defaults.
+    pub fn reset(self, config: &mut UiThemeConfig) {
+        match self {
+            SectionId::Global => {
+                config.colors = None;
+                config.typography = None;
+                config.spacing = None;
+                config.radii = None;
+            }
+            SectionId::Sidebar => config.sidebar = None,
+            SectionId::Home => config.home = None,
+            SectionId::Chat => config.chat = None,
+            SectionId::Attachments => config.attachments = None,
+            SectionId::Rooms => config.rooms = None,
+            SectionId::Tunnels => config.tunnels = None,
+            SectionId::Dialogs => config.dialogs = None,
+            SectionId::Calls => config.calls = None,
+            SectionId::Controls => config.controls = None,
+            SectionId::Motion => config.motion = None,
+        }
+    }
+}
+
 impl ThemeField {
     /// Human-readable label shown beside the control.
     pub fn label(self) -> &'static str {
@@ -287,8 +364,9 @@ impl ThemeField {
         }
     }
 
-    /// Group header the field is rendered under.
-    pub fn group(self) -> &'static str {
+    /// Top-level component section the field is rendered under
+    /// (BORU-UI-10 component hierarchy).
+    pub fn section(self) -> SectionId {
         use ThemeField::*;
         match self {
             ColorCanvas
@@ -312,7 +390,7 @@ impl ThemeField {
             | ColorDanger
             | ColorWarning
             | ColorFocus
-            | ColorDialogBackdrop => "Colours",
+            | ColorDialogBackdrop => SectionId::Global,
             TypeDisplayHeading
             | TypePageTitle
             | TypeSectionTitle
@@ -328,31 +406,31 @@ impl ThemeField {
             | TypeComposerText
             | TypeHomeSubtitle
             | TypeDialogTitle
-            | TypeDialogSubtitle => "Typography",
+            | TypeDialogSubtitle => SectionId::Global,
             Space4 | Space8 | Space12 | Space16 | Space20 | Space24 | Space32 | Space40
-            | ControlHeight => "Spacing",
+            | ControlHeight => SectionId::Global,
             RadiusSm | RadiusMd | RadiusLg | RadiusXl | RadiusCard | RadiusPill | RadiusDialog => {
-                "Radii"
+                SectionId::Global
             }
             SidebarWidth | SidebarWidthMin | SidebarWidthMax | SidebarInset | SidebarItemRadius
             | SidebarAvatarContainerRadius | SidebarNameSize | SidebarSectionLabelSize => {
-                "Sidebar"
+                SectionId::Sidebar
             }
             HomePeersBodyMin | HomeActivityRowHeight | HomeHeroGap | HomeQuickActionGap
             | HomeQuickActionIconSize | HomeQuickActionTitleSize | HomeQuickActionDescSize
-            | HomeQuickActionDescLineHeight | HomeShowActivityFeed => "Home",
+            | HomeQuickActionDescLineHeight | HomeShowActivityFeed => SectionId::Home,
             ChatBubbleMaxWidth | ChatBubbleWidthRatio | ChatMessageMaxWidth
             | ChatImagePreviewMaxWidth | ChatImagePreviewMaxHeight | ChatGifThumbnailWidth
-            | ChatGifThumbnailHeight | ChatEmojiPickerWidth => "Chat",
+            | ChatGifThumbnailHeight | ChatEmojiPickerWidth => SectionId::Chat,
             AttachProgressBarGirth | AttachChipAvatarSize | AttachSearchWidthFull
-            | AttachEmptyStateHeight => "Attachments",
-            RoomCatalogueRowHeight | RoomBannerWidth | RoomProgressGirth => "Rooms",
-            TunnelChipPaddingX | TunnelChipPaddingY => "Tunnels",
+            | AttachEmptyStateHeight => SectionId::Attachments,
+            RoomCatalogueRowHeight | RoomBannerWidth | RoomProgressGirth => SectionId::Rooms,
+            TunnelChipPaddingX | TunnelChipPaddingY => SectionId::Tunnels,
             DialogPadding | DialogSpacing | DialogTitleSize | DialogBodySize
-            | DialogControlPaddingX => "Dialogs",
-            CallAvatarSize | CallPipW | CallPipH | CallControlsGap => "Calls",
-            ControlHeaderHeight | ControlSliderWidth => "Controls",
-            MotionSidebarFadeFrames => "Motion",
+            | DialogControlPaddingX => SectionId::Dialogs,
+            CallAvatarSize | CallPipW | CallPipH | CallControlsGap => SectionId::Calls,
+            ControlHeaderHeight | ControlSliderWidth => SectionId::Controls,
+            MotionSidebarFadeFrames => SectionId::Motion,
         }
     }
 
@@ -817,6 +895,12 @@ pub fn color_to_hex(c: Color) -> String {
 pub enum InspectorMsg {
     /// Toggle panel visibility (Ctrl+Shift+D).
     ToggleVisible,
+    /// Toggle a component section expanded/collapsed (BORU-UI-10).
+    ToggleSection(SectionId),
+    /// Reset one component section back to Boru defaults (BORU-UI-10).
+    ResetSection(SectionId),
+    /// Reset the complete active theme back to Boru defaults (BORU-UI-10).
+    ResetAll,
     /// Slider changed a continuous float value.
     SetFloat { field: ThemeField, value: f32 },
     /// Toggle changed an optional visual feature.
@@ -836,174 +920,284 @@ pub struct InspectorDraft {
     pub float_text: HashMap<ThemeField, String>,
     /// Per-field hex/RGBA text (colour fields).
     pub color_text: HashMap<ThemeField, String>,
+    /// Component sections the user collapsed (BORU-UI-10). View-local
+    /// state only — never part of the theme.
+    pub collapsed_sections: HashSet<SectionId>,
 }
 
 // ── View ──────────────────────────────────────────────────────────────
 
-/// Ordered `(group label, fields)` list rendered top-to-bottom.
-const FIELD_GROUPS: &[(&str, &[ThemeField])] = &[
-    (
-        "Colours",
-        &[
-            ThemeField::ColorCanvas,
-            ThemeField::ColorSidebar,
-            ThemeField::ColorSurface,
-            ThemeField::ColorSurfaceSelected,
-            ThemeField::ColorSurfaceHover,
-            ThemeField::ColorSurfacePressed,
-            ThemeField::ColorSurfaceSecondary,
-            ThemeField::ColorInputBg,
-            ThemeField::ColorBorderMuted,
-            ThemeField::ColorBorderStrong,
-            ThemeField::ColorTextPrimary,
-            ThemeField::ColorTextSecondary,
-            ThemeField::ColorTextMuted,
-            ThemeField::ColorPrimary,
-            ThemeField::ColorPrimaryHover,
-            ThemeField::ColorPrimaryPressed,
-            ThemeField::ColorPrimarySoft,
-            ThemeField::ColorSuccess,
-            ThemeField::ColorDanger,
-            ThemeField::ColorWarning,
-            ThemeField::ColorFocus,
-            ThemeField::ColorDialogBackdrop,
+/// One sub-group of fields inside a component section (e.g. "Width" under
+/// Sidebar). The label is rendered as a smaller header above its rows.
+pub struct FieldGroup {
+    pub label: &'static str,
+    pub fields: &'static [ThemeField],
+}
+
+/// One top-level component section of the inspector (BORU-UI-10).
+pub struct InspectorSection {
+    pub id: SectionId,
+    pub label: &'static str,
+    /// Ordered sub-groups. A section with a single sub-group renders its
+    /// fields directly under the section header (no duplicate header).
+    pub groups: &'static [FieldGroup],
+}
+
+/// Ordered component sections rendered top-to-bottom (BORU-UI-10).
+///
+/// The hierarchy mirrors the typed theme's component groups: the PDF's
+/// Global / Sidebar / Home / Chat / Attachments / Rooms / Tunnels / Dialogs,
+/// plus the remaining typed groups the inspector exposes (Calls, Controls,
+/// Motion). Sub-group labels use the actual field names from `theme.rs` —
+/// only values that exist in the typed theme are exposed, nothing derived.
+pub const SECTIONS: &[InspectorSection] = &[
+    InspectorSection {
+        id: SectionId::Global,
+        label: "Global",
+        groups: &[
+            FieldGroup {
+                label: "Colours",
+                fields: &[
+                    ThemeField::ColorCanvas,
+                    ThemeField::ColorSidebar,
+                    ThemeField::ColorSurface,
+                    ThemeField::ColorSurfaceSelected,
+                    ThemeField::ColorSurfaceHover,
+                    ThemeField::ColorSurfacePressed,
+                    ThemeField::ColorSurfaceSecondary,
+                    ThemeField::ColorInputBg,
+                    ThemeField::ColorBorderMuted,
+                    ThemeField::ColorBorderStrong,
+                    ThemeField::ColorTextPrimary,
+                    ThemeField::ColorTextSecondary,
+                    ThemeField::ColorTextMuted,
+                    ThemeField::ColorPrimary,
+                    ThemeField::ColorPrimaryHover,
+                    ThemeField::ColorPrimaryPressed,
+                    ThemeField::ColorPrimarySoft,
+                    ThemeField::ColorSuccess,
+                    ThemeField::ColorDanger,
+                    ThemeField::ColorWarning,
+                    ThemeField::ColorFocus,
+                    ThemeField::ColorDialogBackdrop,
+                ],
+            },
+            FieldGroup {
+                label: "Typography",
+                fields: &[
+                    ThemeField::TypeDisplayHeading,
+                    ThemeField::TypePageTitle,
+                    ThemeField::TypeSectionTitle,
+                    ThemeField::TypeCardTitle,
+                    ThemeField::TypeBody,
+                    ThemeField::TypeBodyEmphasised,
+                    ThemeField::TypeButtonLabel,
+                    ThemeField::TypeSupportingText,
+                    ThemeField::TypeMetadata,
+                    ThemeField::TypeChatMessage,
+                    ThemeField::TypeChatSender,
+                    ThemeField::TypeChatMetadata,
+                    ThemeField::TypeComposerText,
+                    ThemeField::TypeHomeSubtitle,
+                    ThemeField::TypeDialogTitle,
+                    ThemeField::TypeDialogSubtitle,
+                ],
+            },
+            FieldGroup {
+                label: "Spacing",
+                fields: &[
+                    ThemeField::Space4,
+                    ThemeField::Space8,
+                    ThemeField::Space12,
+                    ThemeField::Space16,
+                    ThemeField::Space20,
+                    ThemeField::Space24,
+                    ThemeField::Space32,
+                    ThemeField::Space40,
+                    ThemeField::ControlHeight,
+                ],
+            },
+            FieldGroup {
+                label: "Radii",
+                fields: &[
+                    ThemeField::RadiusSm,
+                    ThemeField::RadiusMd,
+                    ThemeField::RadiusLg,
+                    ThemeField::RadiusXl,
+                    ThemeField::RadiusCard,
+                    ThemeField::RadiusPill,
+                    ThemeField::RadiusDialog,
+                ],
+            },
         ],
-    ),
-    (
-        "Typography",
-        &[
-            ThemeField::TypeDisplayHeading,
-            ThemeField::TypePageTitle,
-            ThemeField::TypeSectionTitle,
-            ThemeField::TypeCardTitle,
-            ThemeField::TypeBody,
-            ThemeField::TypeBodyEmphasised,
-            ThemeField::TypeButtonLabel,
-            ThemeField::TypeSupportingText,
-            ThemeField::TypeMetadata,
-            ThemeField::TypeChatMessage,
-            ThemeField::TypeChatSender,
-            ThemeField::TypeChatMetadata,
-            ThemeField::TypeComposerText,
-            ThemeField::TypeHomeSubtitle,
-            ThemeField::TypeDialogTitle,
-            ThemeField::TypeDialogSubtitle,
+    },
+    InspectorSection {
+        id: SectionId::Sidebar,
+        label: "Sidebar",
+        groups: &[
+            FieldGroup {
+                label: "Width",
+                fields: &[
+                    ThemeField::SidebarWidth,
+                    ThemeField::SidebarWidthMin,
+                    ThemeField::SidebarWidthMax,
+                ],
+            },
+            FieldGroup {
+                label: "Item",
+                fields: &[
+                    ThemeField::SidebarInset,
+                    ThemeField::SidebarItemRadius,
+                    ThemeField::SidebarAvatarContainerRadius,
+                ],
+            },
+            FieldGroup {
+                label: "Typography",
+                fields: &[
+                    ThemeField::SidebarNameSize,
+                    ThemeField::SidebarSectionLabelSize,
+                ],
+            },
         ],
-    ),
-    (
-        "Spacing",
-        &[
-            ThemeField::Space4,
-            ThemeField::Space8,
-            ThemeField::Space12,
-            ThemeField::Space16,
-            ThemeField::Space20,
-            ThemeField::Space24,
-            ThemeField::Space32,
-            ThemeField::Space40,
-            ThemeField::ControlHeight,
+    },
+    InspectorSection {
+        id: SectionId::Home,
+        label: "Home",
+        groups: &[
+            FieldGroup {
+                label: "Quick Action Card",
+                fields: &[
+                    ThemeField::HomeQuickActionGap,
+                    ThemeField::HomeQuickActionIconSize,
+                    ThemeField::HomeQuickActionTitleSize,
+                    ThemeField::HomeQuickActionDescSize,
+                    ThemeField::HomeQuickActionDescLineHeight,
+                ],
+            },
+            FieldGroup {
+                label: "Status & Activity",
+                fields: &[
+                    ThemeField::HomePeersBodyMin,
+                    ThemeField::HomeActivityRowHeight,
+                    ThemeField::HomeHeroGap,
+                    ThemeField::HomeShowActivityFeed,
+                ],
+            },
         ],
-    ),
-    (
-        "Radii",
-        &[
-            ThemeField::RadiusSm,
-            ThemeField::RadiusMd,
-            ThemeField::RadiusLg,
-            ThemeField::RadiusXl,
-            ThemeField::RadiusCard,
-            ThemeField::RadiusPill,
-            ThemeField::RadiusDialog,
+    },
+    InspectorSection {
+        id: SectionId::Chat,
+        label: "Chat",
+        groups: &[
+            FieldGroup {
+                label: "Message Bubble",
+                fields: &[
+                    ThemeField::ChatBubbleMaxWidth,
+                    ThemeField::ChatBubbleWidthRatio,
+                    ThemeField::ChatMessageMaxWidth,
+                ],
+            },
+            FieldGroup {
+                label: "Media & Pickers",
+                fields: &[
+                    ThemeField::ChatImagePreviewMaxWidth,
+                    ThemeField::ChatImagePreviewMaxHeight,
+                    ThemeField::ChatGifThumbnailWidth,
+                    ThemeField::ChatGifThumbnailHeight,
+                    ThemeField::ChatEmojiPickerWidth,
+                ],
+            },
         ],
-    ),
-    (
-        "Sidebar",
-        &[
-            ThemeField::SidebarWidth,
-            ThemeField::SidebarWidthMin,
-            ThemeField::SidebarWidthMax,
-            ThemeField::SidebarInset,
-            ThemeField::SidebarItemRadius,
-            ThemeField::SidebarAvatarContainerRadius,
-            ThemeField::SidebarNameSize,
-            ThemeField::SidebarSectionLabelSize,
+    },
+    InspectorSection {
+        id: SectionId::Attachments,
+        label: "Attachments",
+        groups: &[
+            FieldGroup {
+                label: "File Card",
+                fields: &[
+                    ThemeField::AttachSearchWidthFull,
+                    ThemeField::AttachEmptyStateHeight,
+                ],
+            },
+            FieldGroup {
+                label: "Progress & Chips",
+                fields: &[
+                    ThemeField::AttachProgressBarGirth,
+                    ThemeField::AttachChipAvatarSize,
+                ],
+            },
         ],
-    ),
-    (
-        "Home",
-        &[
-            ThemeField::HomeShowActivityFeed,
-            ThemeField::HomePeersBodyMin,
-            ThemeField::HomeActivityRowHeight,
-            ThemeField::HomeHeroGap,
-            ThemeField::HomeQuickActionGap,
-            ThemeField::HomeQuickActionIconSize,
-            ThemeField::HomeQuickActionTitleSize,
-            ThemeField::HomeQuickActionDescSize,
-            ThemeField::HomeQuickActionDescLineHeight,
-        ],
-    ),
-    (
-        "Chat",
-        &[
-            ThemeField::ChatBubbleMaxWidth,
-            ThemeField::ChatBubbleWidthRatio,
-            ThemeField::ChatMessageMaxWidth,
-            ThemeField::ChatImagePreviewMaxWidth,
-            ThemeField::ChatImagePreviewMaxHeight,
-            ThemeField::ChatGifThumbnailWidth,
-            ThemeField::ChatGifThumbnailHeight,
-            ThemeField::ChatEmojiPickerWidth,
-        ],
-    ),
-    (
-        "Attachments",
-        &[
-            ThemeField::AttachProgressBarGirth,
-            ThemeField::AttachChipAvatarSize,
-            ThemeField::AttachSearchWidthFull,
-            ThemeField::AttachEmptyStateHeight,
-        ],
-    ),
-    (
-        "Rooms",
-        &[
-            ThemeField::RoomCatalogueRowHeight,
-            ThemeField::RoomBannerWidth,
-            ThemeField::RoomProgressGirth,
-        ],
-    ),
-    (
-        "Tunnels",
-        &[ThemeField::TunnelChipPaddingX, ThemeField::TunnelChipPaddingY],
-    ),
-    (
-        "Dialogs",
-        &[
-            ThemeField::DialogPadding,
-            ThemeField::DialogSpacing,
-            ThemeField::DialogTitleSize,
-            ThemeField::DialogBodySize,
-            ThemeField::DialogControlPaddingX,
-        ],
-    ),
-    (
-        "Calls",
-        &[
-            ThemeField::CallAvatarSize,
-            ThemeField::CallPipW,
-            ThemeField::CallPipH,
-            ThemeField::CallControlsGap,
-        ],
-    ),
-    (
-        "Controls",
-        &[
-            ThemeField::ControlHeaderHeight,
-            ThemeField::ControlSliderWidth,
-        ],
-    ),
-    ("Motion", &[ThemeField::MotionSidebarFadeFrames]),
+    },
+    InspectorSection {
+        id: SectionId::Rooms,
+        label: "Rooms",
+        groups: &[FieldGroup {
+            label: "Rooms",
+            fields: &[
+                ThemeField::RoomCatalogueRowHeight,
+                ThemeField::RoomBannerWidth,
+                ThemeField::RoomProgressGirth,
+            ],
+        }],
+    },
+    InspectorSection {
+        id: SectionId::Tunnels,
+        label: "Tunnels",
+        groups: &[FieldGroup {
+            label: "Tunnels",
+            fields: &[
+                ThemeField::TunnelChipPaddingX,
+                ThemeField::TunnelChipPaddingY,
+            ],
+        }],
+    },
+    InspectorSection {
+        id: SectionId::Dialogs,
+        label: "Dialogs",
+        groups: &[FieldGroup {
+            label: "Dialogs",
+            fields: &[
+                ThemeField::DialogPadding,
+                ThemeField::DialogSpacing,
+                ThemeField::DialogTitleSize,
+                ThemeField::DialogBodySize,
+                ThemeField::DialogControlPaddingX,
+            ],
+        }],
+    },
+    InspectorSection {
+        id: SectionId::Calls,
+        label: "Calls",
+        groups: &[FieldGroup {
+            label: "Calls",
+            fields: &[
+                ThemeField::CallAvatarSize,
+                ThemeField::CallPipW,
+                ThemeField::CallPipH,
+                ThemeField::CallControlsGap,
+            ],
+        }],
+    },
+    InspectorSection {
+        id: SectionId::Controls,
+        label: "Controls",
+        groups: &[FieldGroup {
+            label: "Controls",
+            fields: &[
+                ThemeField::ControlHeaderHeight,
+                ThemeField::ControlSliderWidth,
+            ],
+        }],
+    },
+    InspectorSection {
+        id: SectionId::Motion,
+        label: "Motion",
+        groups: &[FieldGroup {
+            label: "Motion",
+            fields: &[ThemeField::MotionSidebarFadeFrames],
+        }],
+    },
 ];
 
 /// Build the inspector panel element.
@@ -1019,30 +1213,120 @@ pub fn view_inspector(
 ) -> Element<'static, AppMessage> {
     let mut col = iced::widget::Column::new()
         .push(panel_heading(dark_mode))
+        .push(reset_actions_row(dark_mode))
         .push(Space::new().height(Length::Fixed(6.0)))
         .spacing(2.0);
 
-    for (group, fields) in FIELD_GROUPS {
+    for section in SECTIONS {
+        let collapsed = draft.collapsed_sections.contains(&section.id);
         col = col
-            .push(group_header(group, dark_mode))
+            .push(section_header(section, collapsed, dark_mode))
             .push(Space::new().height(Length::Fixed(2.0)));
-        for field in *fields {
-            col = col.push(field_row(theme, draft, *field, dark_mode));
+        if collapsed {
+            continue;
+        }
+        let multi = section.groups.len() > 1;
+        for group in section.groups {
+            if multi {
+                col = col
+                    .push(subgroup_header(group.label, dark_mode))
+                    .push(Space::new().height(Length::Fixed(2.0)));
+            }
+            for field in group.fields {
+                col = col.push(field_row(theme, draft, *field, dark_mode));
+            }
+            col = col.push(Space::new().height(Length::Fixed(4.0)));
         }
         col = col.push(Space::new().height(Length::Fixed(8.0)));
     }
 
-    let panel = container(
-        scrollable(col)
-            .width(Length::Fill)
-            .height(Length::Fill),
-    )
-    .width(Length::Fixed(INSPECTOR_PANEL_WIDTH))
-    .height(Length::Fill)
-    .padding(10)
-    .style(move |t| panel_style(t, dark_mode));
+    let panel = container(scrollable(col).width(Length::Fill).height(Length::Fill))
+        .width(Length::Fixed(INSPECTOR_PANEL_WIDTH))
+        .height(Length::Fill)
+        .padding(10)
+        .style(move |t| panel_style(t, dark_mode));
 
     panel.into()
+}
+
+/// Row with the Reset All action (BORU-UI-10).
+fn reset_actions_row(dark_mode: bool) -> Element<'static, AppMessage> {
+    let reset_all = button(text("Reset All").size(11.0).color(if dark_mode {
+        Color::from_rgb(0.85, 0.85, 0.85)
+    } else {
+        Color::from_rgb(0.15, 0.15, 0.15)
+    }))
+    .on_press(AppMessage::Inspector(InspectorMsg::ResetAll))
+    .padding([3, 8]);
+    let hint = text("resets every section to Boru defaults")
+        .size(9.0)
+        .color(if dark_mode {
+            Color::from_rgb(0.55, 0.55, 0.6)
+        } else {
+            Color::from_rgb(0.45, 0.45, 0.45)
+        });
+    row![
+        reset_all,
+        Space::new().width(Length::Fixed(6.0)),
+        hint,
+        Space::new().width(Length::Fill)
+    ]
+    .align_y(Alignment::Center)
+    .into()
+}
+
+/// Collapsible component section header with a per-section Reset action.
+fn section_header(
+    section: &InspectorSection,
+    collapsed: bool,
+    dark_mode: bool,
+) -> Element<'static, AppMessage> {
+    let chevron = if collapsed { "▸" } else { "▾" };
+    let toggle = button(
+        row![
+            text(chevron).size(10.0).color(if dark_mode {
+                Color::from_rgb(0.6, 0.8, 0.7)
+            } else {
+                Color::from_rgb(0.1, 0.5, 0.3)
+            }),
+            Space::new().width(Length::Fixed(4.0)),
+            text(section.label.to_uppercase())
+                .size(11.0)
+                .color(if dark_mode {
+                    Color::from_rgb(0.7, 0.85, 0.75)
+                } else {
+                    Color::from_rgb(0.1, 0.45, 0.28)
+                }),
+        ]
+        .align_y(Alignment::Center),
+    )
+    .on_press(AppMessage::Inspector(InspectorMsg::ToggleSection(section.id)))
+    .padding([3, 6])
+    .style(button::text);
+
+    let reset = button(text("Reset").size(9.0).color(if dark_mode {
+        Color::from_rgb(0.75, 0.75, 0.78)
+    } else {
+        Color::from_rgb(0.4, 0.42, 0.4)
+    }))
+    .on_press(AppMessage::Inspector(InspectorMsg::ResetSection(section.id)))
+    .padding([2, 6])
+    .style(button::text);
+
+    row![toggle, Space::new().width(Length::Fill), reset]
+        .align_y(Alignment::Center)
+        .into()
+}
+
+fn subgroup_header(label: &str, dark_mode: bool) -> Element<'static, AppMessage> {
+    text(label.to_uppercase())
+        .size(9.0)
+        .color(if dark_mode {
+            Color::from_rgb(0.5, 0.6, 0.55)
+        } else {
+            Color::from_rgb(0.2, 0.4, 0.28)
+        })
+        .into()
 }
 
 fn panel_heading(dark_mode: bool) -> Element<'static, AppMessage> {
@@ -1080,17 +1364,6 @@ fn panel_heading(dark_mode: bool) -> Element<'static, AppMessage> {
     ]
     .align_y(Alignment::Center)
     .into()
-}
-
-fn group_header(label: &str, dark_mode: bool) -> Element<'static, AppMessage> {
-    text(label.to_uppercase())
-        .size(10.0)
-        .color(if dark_mode {
-            Color::from_rgb(0.5, 0.7, 0.6)
-        } else {
-            Color::from_rgb(0.1, 0.5, 0.3)
-        })
-        .into()
 }
 
 fn panel_style(t: &iced::Theme, dark_mode: bool) -> container::Style {
@@ -1338,33 +1611,34 @@ mod tests {
 
     #[test]
     fn every_exposed_field_maps_to_a_real_config_leaf() {
-        // Every field in the panel's group list must apply without error
+        // Every field in the panel's section list must apply without error
         // (regression guard: a ThemeField added to the panel but missing
         // from apply_* would silently no-op and fail this test).
         let mut cfg = default_config();
-        for (_, fields) in FIELD_GROUPS {
-            for field in *fields {
-                match field.kind() {
-                    FieldKind::Float => {
-                        let (min, max) = field.range();
-                        let v = (min + max) / 2.0;
-                        apply_float(&mut cfg, *field, v)
-                            .unwrap_or_else(|e| panic!("{field:?}: {e}"));
-                    }
-                    FieldKind::Bool => {
-                        apply_bool(&mut cfg, *field, true)
-                            .unwrap_or_else(|e| panic!("{field:?}: {e}"));
-                    }
-                    FieldKind::Color => {
-                        apply_color(&mut cfg, *field, parse_hex_rgba("#123456").unwrap())
-                            .unwrap_or_else(|e| panic!("{field:?}: {e}"));
+        for section in SECTIONS {
+            for group in section.groups {
+                for field in group.fields {
+                    match field.kind() {
+                        FieldKind::Float => {
+                            let (min, max) = field.range();
+                            let v = (min + max) / 2.0;
+                            apply_float(&mut cfg, *field, v)
+                                .unwrap_or_else(|e| panic!("{field:?}: {e}"));
+                        }
+                        FieldKind::Bool => {
+                            apply_bool(&mut cfg, *field, true)
+                                .unwrap_or_else(|e| panic!("{field:?}: {e}"));
+                        }
+                        FieldKind::Color => {
+                            apply_color(&mut cfg, *field, parse_hex_rgba("#123456").unwrap())
+                                .unwrap_or_else(|e| panic!("{field:?}: {e}"));
+                        }
                     }
                 }
             }
         }
         // The merged theme reflects the edits and stays finite everywhere.
         let theme = merged(&cfg);
-        assert!(!theme.home.show_activity_feed || true); // field was set to true
         assert_eq!(theme.home.show_activity_feed, true);
         assert!(theme.sidebar.width.is_finite());
     }
@@ -1375,5 +1649,153 @@ mod tests {
         apply_float(&mut cfg, ThemeField::ChatBubbleMaxWidth, 620.0).unwrap();
         let theme = merged(&cfg);
         assert_eq!(read_float(&theme, ThemeField::ChatBubbleMaxWidth), 620.0);
+    }
+
+    #[test]
+    fn reset_section_clears_only_that_section() {
+        let mut cfg = default_config();
+        apply_float(&mut cfg, ThemeField::SidebarWidth, 270.0).unwrap();
+        apply_float(&mut cfg, ThemeField::ChatBubbleMaxWidth, 620.0).unwrap();
+        apply_bool(&mut cfg, ThemeField::HomeShowActivityFeed, false).unwrap();
+
+        SectionId::Sidebar.reset(&mut cfg);
+
+        // Sidebar group cleared back to defaults.
+        assert!(cfg.sidebar.is_none());
+        let theme = merged(&cfg);
+        assert_eq!(theme.sidebar.width, BoruTheme::default().sidebar.width);
+        // Other sections keep their edits.
+        assert_eq!(theme.chat.bubble_max_width, 620.0);
+        assert!(!theme.home.show_activity_feed);
+    }
+
+    #[test]
+    fn reset_global_clears_all_four_global_groups() {
+        let mut cfg = default_config();
+        apply_color(&mut cfg, ThemeField::ColorPrimary, parse_hex_rgba("#123456").unwrap())
+            .unwrap();
+        apply_float(&mut cfg, ThemeField::TypeBody, 18.0).unwrap();
+        apply_float(&mut cfg, ThemeField::Space8, 9.0).unwrap();
+        apply_float(&mut cfg, ThemeField::RadiusCard, 20.0).unwrap();
+
+        SectionId::Global.reset(&mut cfg);
+
+        assert!(cfg.colors.is_none());
+        assert!(cfg.typography.is_none());
+        assert!(cfg.spacing.is_none());
+        assert!(cfg.radii.is_none());
+        let theme = merged(&cfg);
+        assert_eq!(theme, BoruTheme::default());
+    }
+
+    #[test]
+    fn reset_all_clears_every_config_group() {
+        let mut cfg = default_config();
+        apply_float(&mut cfg, ThemeField::SidebarWidth, 270.0).unwrap();
+        apply_float(&mut cfg, ThemeField::ChatBubbleMaxWidth, 620.0).unwrap();
+        apply_bool(&mut cfg, ThemeField::HomeShowActivityFeed, false).unwrap();
+        apply_color(&mut cfg, ThemeField::ColorPrimary, parse_hex_rgba("#123456").unwrap())
+            .unwrap();
+
+        SectionId::Motion.reset(&mut cfg); // unrelated group first
+        for section in SECTIONS {
+            section.id.reset(&mut cfg);
+        }
+
+        assert_eq!(cfg, UiThemeConfig::default());
+        assert_eq!(merged(&cfg), BoruTheme::default());
+    }
+
+    #[test]
+    fn every_section_reset_restores_defaults_for_its_fields() {
+        // Regression guard: Reset Section must return every field under that
+        // section back to the Boru default (no field left overridden).
+        for section in SECTIONS {
+            let mut cfg = default_config();
+            for group in section.groups {
+                for field in group.fields {
+                    match field.kind() {
+                        FieldKind::Float => {
+                            let (min, max) = field.range();
+                            apply_float(&mut cfg, *field, min + 1.0)
+                                .unwrap_or_else(|e| panic!("{field:?}: {e}"));
+                        }
+                        FieldKind::Bool => {
+                            apply_bool(&mut cfg, *field, false)
+                                .unwrap_or_else(|e| panic!("{field:?}: {e}"));
+                        }
+                        FieldKind::Color => {
+                            apply_color(&mut cfg, *field, parse_hex_rgba("#123456").unwrap())
+                                .unwrap_or_else(|e| panic!("{field:?}: {e}"));
+                        }
+                    }
+                }
+            }
+            let edited = merged(&cfg);
+            assert_ne!(
+                edited, BoruTheme::default(),
+                "{} must actually edit the theme (test fixture broken)",
+                section.label
+            );
+
+            section.id.reset(&mut cfg);
+            let reset = merged(&cfg);
+            assert_eq!(
+                reset,
+                BoruTheme::default(),
+                "{} reset must restore defaults",
+                section.label
+            );
+        }
+    }
+
+    #[test]
+    fn section_id_reset_is_total_for_known_sections() {
+        // Every config group the merge reads AND the inspector exposes is
+        // owned by exactly one section; resetting all sections yields an
+        // empty config. (The typed-theme groups the inspector deliberately
+        // does not expose — icons, avatars, lists, borders, responsive —
+        // are not owned by any section; Reset All handles them via
+        // `UiThemeConfig::default()`.)
+        let mut cfg = default_config();
+        cfg.colors = Some(Default::default());
+        cfg.typography = Some(Default::default());
+        cfg.spacing = Some(Default::default());
+        cfg.radii = Some(Default::default());
+        cfg.sidebar = Some(Default::default());
+        cfg.home = Some(Default::default());
+        cfg.chat = Some(Default::default());
+        cfg.attachments = Some(Default::default());
+        cfg.rooms = Some(Default::default());
+        cfg.tunnels = Some(Default::default());
+        cfg.dialogs = Some(Default::default());
+        cfg.calls = Some(Default::default());
+        cfg.controls = Some(Default::default());
+        cfg.motion = Some(Default::default());
+
+        for section in SECTIONS {
+            section.id.reset(&mut cfg);
+        }
+        assert_eq!(cfg, UiThemeConfig::default());
+    }
+
+    #[test]
+    fn section_membership_matches_field_section_mapping() {
+        // Every field rendered under a section must claim that section via
+        // ThemeField::section(), so the hierarchy and the pure mapping never
+        // drift apart.
+        for section in SECTIONS {
+            for group in section.groups {
+                for field in group.fields {
+                    assert_eq!(
+                        field.section(),
+                        section.id,
+                        "{field:?} is listed under {} but maps to {:?}",
+                        section.label,
+                        field.section()
+                    );
+                }
+            }
+        }
     }
 }
