@@ -30806,10 +30806,12 @@ mod tests {
                 "each tag bounded"
             );
         }
-        // The member count hint is rendered as clearly approximate.
+        // The member count hint is rendered as clearly approximate —
+        // never presented as an authoritative count (PDF Task 7.3 /
+        // DIR-21).
         assert_eq!(
             discover_member_count_text(Some(9_999)).as_deref(),
-            Some("~9999 members")
+            Some("~9999 members (approx.)")
         );
     }
 
@@ -31508,6 +31510,118 @@ mod tests {
         );
         let names: Vec<&str> = sorted.iter().map(|r| r.room_name.as_str()).collect();
         assert_eq!(names, vec!["Alpha", "bravo", "zeta"]);
+    }
+
+    /// DIR-21 (PDF Task 7.3): a room that merely claims millions of
+    /// members must NOT gain top ranking. The Discover sort orders
+    /// (RecentlySeen, Compatibility, Name) never consult
+    /// `member_count`, so an inflated self-reported count is ignored for
+    /// ordering — local signals (recency, compatibility, name) win.
+    #[test]
+    fn discover_member_count_never_ranks_rooms() {
+        let now = Instant::now();
+        let fake_popular = DiscoverRoomRow {
+            member_count: Some(9_999_999),
+            ..discover_test_row(
+                "Fake Popular",
+                "claims a million members",
+                &[],
+                boru_core::room_directory::RoomCompatibility::Compatible,
+                boru_core::room_directory::LocalJoinState::NotJoined,
+            )
+        };
+        let honest_recent = discover_test_row(
+            "Honest Recent",
+            "no inflated claims",
+            &[],
+            boru_core::room_directory::RoomCompatibility::Compatible,
+            boru_core::room_directory::LocalJoinState::NotJoined,
+        );
+        let honest_alpha = discover_test_row(
+            "Aardvark",
+            "no inflated claims",
+            &[],
+            boru_core::room_directory::RoomCompatibility::Compatible,
+            boru_core::room_directory::LocalJoinState::NotJoined,
+        );
+        let unsupported_huge = DiscoverRoomRow {
+            member_count: Some(9_999_999),
+            ..discover_test_row(
+                "Unsupported Huge",
+                "claims a million members but cannot be joined",
+                &[],
+                boru_core::room_directory::RoomCompatibility::Unsupported,
+                boru_core::room_directory::LocalJoinState::Incompatible,
+            )
+        };
+
+        // RecentlySeen: an OLD fake-popular room must sort after a
+        // freshly-seen honest room — recency is local, the count is not.
+        let sorted = discover_filter_sort(
+            vec![
+                (fake_popular.clone(), Some(now - Duration::from_secs(3600))),
+                (honest_recent.clone(), Some(now)),
+            ],
+            "",
+            discover_default_filters(),
+            &[],
+            DiscoverSort::RecentlySeen,
+            now,
+        );
+        let names: Vec<&str> = sorted.iter().map(|r| r.room_name.as_str()).collect();
+        assert_eq!(names, vec!["Honest Recent", "Fake Popular"]);
+
+        // Compatibility: an Unsupported room stays last even when it
+        // claims millions of members; among Compatible rooms the
+        // name tiebreak is alphabetical, not popularity.
+        let sorted = discover_filter_sort(
+            vec![
+                (fake_popular.clone(), Some(now)),
+                (honest_alpha.clone(), Some(now)),
+                (unsupported_huge.clone(), Some(now)),
+            ],
+            "",
+            discover_default_filters(),
+            &[],
+            DiscoverSort::Compatibility,
+            now,
+        );
+        let names: Vec<&str> = sorted.iter().map(|r| r.room_name.as_str()).collect();
+        assert_eq!(names, vec!["Aardvark", "Fake Popular", "Unsupported Huge"]);
+
+        // Name: alphabetical regardless of the inflated claim.
+        let sorted = discover_filter_sort(
+            vec![
+                (fake_popular.clone(), Some(now)),
+                (honest_alpha.clone(), Some(now)),
+            ],
+            "",
+            discover_default_filters(),
+            &[],
+            DiscoverSort::Name,
+            now,
+        );
+        let names: Vec<&str> = sorted.iter().map(|r| r.room_name.as_str()).collect();
+        assert_eq!(names, vec!["Aardvark", "Fake Popular"]);
+    }
+
+    /// DIR-21 (PDF Task 7.3): the UI never presents the self-reported
+    /// count as authoritative — it is labeled approximate ("~N members
+    /// (approx.)") and omitted when absent or zero.
+    #[test]
+    fn discover_member_count_is_optional_hint_labeled_approximate() {
+        assert_eq!(
+            discover_member_count_text(Some(42)).as_deref(),
+            Some("~42 members (approx.)")
+        );
+        assert_eq!(
+            discover_member_count_text(Some(9_999_999)).as_deref(),
+            Some("~9999999 members (approx.)")
+        );
+        // Absent or zero counts are omitted entirely — never shown as a
+        // bare authoritative number.
+        assert_eq!(discover_member_count_text(None), None);
+        assert_eq!(discover_member_count_text(Some(0)), None);
     }
 
     /// The filter/search handlers in `update_discover` are pure local

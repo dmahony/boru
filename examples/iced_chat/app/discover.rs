@@ -85,10 +85,14 @@ pub(crate) fn discover_feature_hint(
 
 /// Approximate member-count text. The count is an untrusted
 /// self-reported hint (PDF Task 7.3 / DIR-21 guardrails), so it is
-/// always rendered as clearly approximate ("~N members") and omitted
-/// entirely when absent or zero — never presented as authoritative.
+/// always rendered as clearly approximate ("~N members (approx.)") and
+/// omitted entirely when absent or zero — never presented as
+/// authoritative, and never used for ranking (the Discover sort orders
+/// do not consult it).
 pub(crate) fn discover_member_count_text(count: Option<u32>) -> Option<String> {
-    count.filter(|&c| c > 0).map(|c| format!("~{c} members"))
+    count
+        .filter(|&c| c > 0)
+        .map(|c| format!("~{c} members (approx.)"))
 }
 
 // ── Search / filter / sort (PDF Task 5.3) ─────────────────────────────

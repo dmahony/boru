@@ -679,7 +679,7 @@ fn handle_list_public_rooms(state: &McpAppState) -> Result<Value, String> {
                 "name": ad.room_name,
                 "description": ad.description,
                 "ticket": ad.ticket,
-                "member_count": ad.member_count,
+                "approximate_member_count": ad.member_count,
                 "last_activity": ad.last_activity,
                 "author": author.to_string(),
             })
