@@ -597,6 +597,11 @@ path = "tests/test_discovery_two_node.rs"
 required-features = ["net"]
 
 [[test]]
+name = "test_public_room_directory"
+path = "tests/test_public_room_directory.rs"
+required-features = ["net"]
+
+[[test]]
 name = "test_discovery_dm_isolation"
 path = "tests/test_discovery_dm_isolation.rs"
 required-features = ["net"]

@@ -215,6 +215,22 @@ pub const RECONNECT_LOOP_TICK: Duration = Duration::from_secs(1);
 /// unconfirmed dial is never message-path recovery (PDF Task 3.1).
 pub const RECONNECT_CONFIRM_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// How often the room-directory TTL sweep (BORU-DIR-23, PDF Phase 8 test
+/// matrix scenario \"Advertiser disappears\") wakes to evict expired room
+/// advertisements.
+///
+/// Each cached advertisement carries its own `expires_after_secs` TTL
+/// (policy minimum 60 s, default 1 h). The sweep runs every
+/// [`DEFAULT_DIRECTORY_SWEEP_INTERVAL`] — comfortably under the policy
+/// minimum TTL so a room whose advertiser disappears leaves the active
+/// directory within one sweep of its expiry, while refreshes arriving
+/// within the TTL keep it live (no flicker on temporary packet loss; PDF
+/// Task 3.2 step 5). This is the production wiring for the cache's
+/// [`evict_expired`](crate::room_directory::RoomDirectory::evict_expired)
+/// — without it, expired entries would only be evicted as a side effect of
+/// the *next* advertisement arriving.
+pub const DEFAULT_DIRECTORY_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
@@ -878,12 +894,20 @@ impl ControlAnnounceHandle {
         Self {
             sender,
             local_node,
-            // BORU-CP-07: seed the sequence counter RANDOMLY (same restart
-            // rationale as the legacy event-id counter): a restarted
-            // process must not reuse the pre-restart sequence space, or
-            // its byte-identical control HELLO is deduped by the gossip
-            // actor (blake3 content hash) and never reaches peers.
-            sequence: Arc::new(AtomicU64::new(rand::random::<u64>())),
+            // BORU-DIR-23: seed the sequence counter with wall-clock
+            // seconds (monotonic per identity across restarts). The
+            // original random seed made a restarted advertiser's fresh
+            // sequence space collide with the pre-restart space at the
+            // receive gate (`PeerControlStateStore::record` rejects any
+            // sequence `<=` the last seen for that sender), so a restarted
+            // room's re-announcement was silently dropped ~50% of the
+            // time (matrix scenario "Advertiser restarts — advertisement
+            // returns after discovery startup"). `now_secs` both avoids
+            // the gossip actor's blake3 content dedup for byte-identical
+            // frames (the original rationale) and guarantees the
+            // post-restart sequence is higher than anything the same
+            // identity broadcast before.
+            sequence: Arc::new(AtomicU64::new(unix_now_secs())),
             throttle: Arc::new(AnnounceThrottle::with_min_interval(
                 DEFAULT_CONTROL_ANNOUNCE_MIN_INTERVAL,
             )),
@@ -1821,6 +1845,12 @@ pub struct DiscoveryService {
     /// reconnect attempts with exponential backoff and emits
     /// [`ReconnectSignal`]s when a dial succeeds.
     reconnect_task: JoinHandle<()>,
+    /// Join handle of the room-directory TTL sweep task (BORU-DIR-23 / PDF
+    /// Phase 8 test matrix \"Advertiser disappears\"): periodically evicts
+    /// room advertisements whose TTL elapsed since the last valid refresh,
+    /// so rooms whose advertiser disappears leave the active directory
+    /// naturally (TTL remains the final cleanup mechanism, PDF Task 3.2).
+    directory_expiry_task: JoinHandle<()>,
     /// Join handle of the path-refresh sweep (BORU-CP-14): periodically
     /// classifies each tracked peer's path (direct / relay / transitioning)
     /// from the iroh endpoint's `remote_info` snapshots. `None` until the
@@ -1834,6 +1864,10 @@ pub struct DiscoveryService {
     /// jitter) so the builder can tune it after construction and the
     /// refresh loop observes it.
     refresh_config: Arc<Mutex<PresenceRefreshConfig>>,
+    /// Shared room-directory expiry configuration (sweep interval) so the
+    /// builder can tune it after construction and the directory-expiry
+    /// sweep observes it (BORU-DIR-23).
+    directory_expiry_config: Arc<Mutex<DirectoryExpiryConfig>>,
     /// The local capability set this node advertises (BORU-CP-11 / PDF Task
     /// 4.2). Defaults to [`default_local_capabilities`]; the app replaces it
     /// via [`update_local_capabilities`](Self::update_local_capabilities)
@@ -2172,6 +2206,22 @@ impl DiscoveryService {
             core.peer_updates_tx.clone(),
             expiry_cancel,
         ));
+        // BORU-DIR-23 (PDF Phase 8 test matrix): room-directory TTL sweep —
+        // every `directory_sweep_interval` evicts cached room advertisements
+        // whose TTL elapsed since the last valid refresh, so rooms whose
+        // advertiser disappears leave the active directory naturally (PDF
+        // Task 3.2 step 4; TTL remains the final cleanup mechanism). The
+        // sweep interval is re-read every cycle, so tests can tune it after
+        // construction.
+        let directory_expiry_config = Arc::new(Mutex::new(DirectoryExpiryConfig {
+            sweep_interval: DEFAULT_DIRECTORY_SWEEP_INTERVAL,
+        }));
+        let directory_expiry_cancel = cancel.clone();
+        let directory_expiry_task = tokio::spawn(directory_expiry_loop(
+            directory_expiry_config.clone(),
+            core.room_directory.clone(),
+            directory_expiry_cancel,
+        ));
         // BORU-CP-04: control-plane presence refresh — low-frequency
         // PRESENCE announcements with jitter so presence stays fresh without
         // synchronised bursts. The join-time HELLO already covers the
@@ -2226,9 +2276,11 @@ impl DiscoveryService {
             expiry_task,
             refresh_task,
             reconnect_task,
+            directory_expiry_task,
             path_task: None,
             expiry_config,
             refresh_config,
+            directory_expiry_config,
             local_caps,
             local_extensions,
         }
@@ -2582,6 +2634,21 @@ impl DiscoveryService {
         self
     }
 
+    /// Override the minimum interval between room-advertisement /
+    /// room-withdrawal announcements (BORU-DIR-03).
+    ///
+    /// Defaults to [`DEFAULT_CONTROL_ANNOUNCE_MIN_INTERVAL`]. Tests use
+    /// short intervals so re-announcements (e.g. after an advertiser
+    /// restart) are not throttled — the production periodic refresh
+    /// cadence is longer than the default throttle interval, so real
+    /// re-announcements are never throttled either.
+    pub fn with_advert_min_interval(self, min_interval: Duration) -> Self {
+        self.control_announce
+            .advert_throttle
+            .set_min_interval(min_interval);
+        self
+    }
+
     /// Override the control-plane presence-refresh base interval
     /// (BORU-CP-04).
     ///
@@ -2649,6 +2716,19 @@ impl DiscoveryService {
         self.expiry_config
             .lock()
             .expect("expiry config lock poisoned")
+            .sweep_interval = interval;
+        self
+    }
+
+    /// Override the room-directory TTL sweep interval (BORU-DIR-23 / PDF
+    /// Phase 8 test matrix "Advertiser disappears").
+    ///
+    /// Defaults to [`DEFAULT_DIRECTORY_SWEEP_INTERVAL`]. Tests use short
+    /// intervals to exercise the sweep without sleeping.
+    pub fn with_directory_sweep_interval(self, interval: Duration) -> Self {
+        self.directory_expiry_config
+            .lock()
+            .expect("directory expiry config lock poisoned")
             .sweep_interval = interval;
         self
     }
@@ -3045,6 +3125,7 @@ impl DiscoveryService {
         let _ = self.expiry_task.await;
         let _ = self.refresh_task.await;
         let _ = self.reconnect_task.await;
+        let _ = self.directory_expiry_task.await;
         if let Some(path_task) = self.path_task {
             let _ = path_task.await;
         }
@@ -3948,6 +4029,70 @@ async fn presence_refresh_loop(
         }
     }
     debug!("discovery presence refresh loop exited");
+}
+
+// ---------------------------------------------------------------------------
+// Room-directory TTL expiry (BORU-DIR-23, PDF Phase 8 test matrix)
+// ---------------------------------------------------------------------------
+
+/// Runtime-tunable room-directory expiry configuration shared between the
+/// [`DiscoveryService`] builders and the sweep task (BORU-DIR-23).
+#[derive(Debug, Clone, Copy)]
+struct DirectoryExpiryConfig {
+    /// How often the sweep runs to evict expired room advertisements.
+    sweep_interval: Duration,
+}
+
+/// Background task that evicts expired room advertisements from the
+/// bounded room-directory cache (BORU-DIR-23 / PDF Task 3.2 step 4).
+///
+/// Every `sweep_interval` it calls
+/// [`RoomDirectory::evict_expired`](crate::room_directory::RoomDirectory::evict_expired),
+/// which removes every cached room whose TTL elapsed since the last valid
+/// refresh. This is the production wiring for the matrix scenario
+/// "Advertiser disappears — Room becomes stale and expires after TTL":
+/// without this sweep, expired rooms would only leave the cache as a side
+/// effect of the *next* advertisement arriving (the receive path evicts
+/// expired entries before inserting a new room). Refreshes arriving within
+/// the TTL keep entries live — the sweep only removes genuinely stale
+/// rooms, so temporary packet loss does not cause room flicker (PDF Task
+/// 3.2 step 5).
+///
+/// The sweep interval is re-read from the shared config before every
+/// sleep, so builder tuning (e.g. short intervals in tests) takes effect
+/// immediately. Logs state transitions only, never message contents.
+async fn directory_expiry_loop(
+    config: Arc<Mutex<DirectoryExpiryConfig>>,
+    room_directory: Arc<Mutex<RoomDirectory>>,
+    cancel: CancellationToken,
+) {
+    loop {
+        let sweep = config
+            .lock()
+            .expect("directory expiry config lock poisoned")
+            .sweep_interval;
+
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                debug!("discovery directory expiry loop cancelled");
+                break;
+            }
+            _ = tokio::time::sleep(sweep) => {
+                let evicted = {
+                    let mut dir = room_directory.lock().expect("room directory lock poisoned");
+                    dir.evict_expired()
+                };
+                if !evicted.is_empty() {
+                    info!(
+                        count = evicted.len(),
+                        "discovery: evicted room advertisements whose TTL expired",
+                    );
+                }
+            }
+        }
+    }
+    debug!("discovery directory expiry loop exited");
 }
 
 /// Random delay in `0..=jitter` (0 when `jitter` is zero, so tests get
@@ -7042,6 +7187,64 @@ mod tests {
         let snap = directory_counters.snapshot();
         assert_eq!(snap.advertisements_expired, 1);
         assert_eq!(snap.advertisements_withdrawn, 0);
+    }
+
+    /// BORU-DIR-23 (PDF Phase 8 test matrix "Advertiser disappears"): the
+    /// room-directory TTL sweep wired into the service evicts expired room
+    /// advertisements on its periodic tick — rooms whose advertiser
+    /// disappears leave the active directory naturally after their TTL,
+    /// without waiting for the *next* advertisement to arrive.
+    #[tokio::test]
+    async fn directory_expiry_sweep_evicts_expired_entries() {
+        let local = test_key(0xAA);
+        let service = test_service(local)
+            .with_directory_sweep_interval(Duration::from_millis(50));
+
+        // A cached advertisement with a short TTL (applied directly to the
+        // cache — the receive gate enforces a 60s minimum, but the cache
+        // itself trusts its caller, which is exactly how the production
+        // sweep sees entries).
+        let room_id = crate::proto::state::TopicId::from_bytes([0x77; 32]);
+        let owner = test_secret_key(0x42);
+        let mut advert = crate::control_plane::advertisement::PublicRoomAdvertisement::minimal(
+            room_id,
+            "Swept Room".into(),
+            *owner.public().as_bytes(),
+        );
+        advert.expires_after_secs = 1;
+        let outcome = service
+            .room_directory()
+            .lock()
+            .unwrap()
+            .apply_advertisement(
+                advert,
+                owner.public(),
+                AdvertisementAuth::Verified {
+                    publisher: owner.public(),
+                },
+                1,
+                1_700_000_000,
+            );
+        assert_eq!(outcome, AdvertiseOutcome::Added);
+        assert_eq!(service.room_directory().lock().unwrap().len(), 1);
+
+        // The sweep removes the entry once its TTL elapses (well under the
+        // test timeout).
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if !service.room_directory().lock().unwrap().contains(&room_id) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for the directory TTL sweep to evict the expired advertisement"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            service.room_directory().lock().unwrap().is_empty(),
+            "the expired advertisement is gone from the active directory"
+        );
     }
 
     /// The per-room diagnostics view surfaces last_seen, expiry,
