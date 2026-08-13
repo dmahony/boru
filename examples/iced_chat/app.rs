@@ -3956,6 +3956,14 @@ pub struct IcedChat {
     /// merges these overrides on top of `BoruTheme::default()`.
     #[expect(dead_code)]
     pub(crate) ui_theme_config: crate::theme_config::UiThemeConfig,
+    /// BORU-UI-06: receiver for debounced `boru-ui.toml` reload messages.
+    /// Set by main.rs when the watcher thread starts; `None` in headless
+    /// launches and tests (the subscription falls back to a closed dummy).
+    pub(crate) ui_theme_rx:
+        Option<Arc<Mutex<tokio::sync::mpsc::Receiver<crate::theme_watcher::UiThemeReloadMsg>>>>,
+    /// BORU-UI-06: generation tracker for reload staleness — results older
+    /// than the last accepted generation are dropped in update().
+    ui_theme_reload_tracker: crate::theme_watcher::ReloadTracker,
     /// Whether notification sounds are enabled.
     sound_enabled: bool,
     /// Whether room invitations may include direct endpoint addresses.
@@ -6007,6 +6015,15 @@ pub enum AppMessage {
 
     /// Toggle dark mode on/off.
     ToggleDark(bool),
+    /// A debounced `boru-ui.toml` reload finished on the watcher thread
+    /// (BORU-UI-06). `generation` increases per reload; results older than
+    /// the last accepted generation are dropped in update(). The parsed
+    /// config is delivered here so BORU-UI-07 can apply it to the live
+    /// theme; this task only delivers + tracks staleness.
+    UiThemeReloaded {
+        generation: u64,
+        result: Result<crate::theme_config::UiThemeConfig, String>,
+    },
     /// Open/close the iced_aw ColorPicker overlay in Settings (accent color).
     ToggleAccentColorPicker,
     /// The user confirmed a new accent color in the ColorPicker (RGB bytes).
@@ -8242,6 +8259,11 @@ impl IcedChat {
             gui_snapshot_pending: false,
             // BORU-UI-04: dev theme overrides; main.rs sets the loaded value.
             ui_theme_config: crate::theme_config::UiThemeConfig::default(),
+            // BORU-UI-06: watcher receiver + staleness tracker. main.rs
+            // starts the watcher thread and sets ui_theme_rx; until then
+            // (and in tests/headless) the subscription uses a closed dummy.
+            ui_theme_rx: None,
+            ui_theme_reload_tracker: crate::theme_watcher::ReloadTracker::new(),
             // ── Notification system ──
             notification_service: NotificationService::new(),
             window_focus_tracker: WindowFocusTracker::new(),
@@ -10091,6 +10113,7 @@ impl IcedChat {
             AppMessage::UserActivity => "UserActivity",
 
             AppMessage::ToggleDark(_) => "ToggleDark",
+            AppMessage::UiThemeReloaded { .. } => "UiThemeReloaded",
             AppMessage::ToggleAccentColorPicker => "ToggleAccentColorPicker",
             AppMessage::AccentColorSelected(_) => "AccentColorSelected",
             AppMessage::AccentColorCancelled => "AccentColorCancelled",
@@ -16624,6 +16647,10 @@ impl IcedChat {
             | AppMessage::AccentColorCancelled
             | AppMessage::SetNickname(_)
             | AppMessage::SetChatTextSize(_) => self.update_settings(message),
+            // ── Dev UI theme watcher (BORU-UI-06) ───────────────────
+            AppMessage::UiThemeReloaded { generation, result } => {
+                self.update_ui_theme_reloaded(generation, result)
+            }
             // ── File sharing dashboard (state layer) ────────────────
             AppMessage::OpenDownloadsFolder
             | AppMessage::DashboardSearchChanged(_)
@@ -18755,6 +18782,45 @@ impl IcedChat {
         crate::theme_merge::merge_ui_theme(&base, &self.ui_theme_config).0
     }
 
+    /// Handle a debounced `boru-ui.toml` reload (BORU-UI-06).
+    ///
+    /// The file watcher thread parsed the file away from the rendering
+    /// path; this is the only place shared UI state may change. Stale
+    /// results (an older save racing a newer one) are dropped via the
+    /// generation tracker. Applying the fresh config to the live theme is
+    /// BORU-UI-07's job — this task only delivers + tracks the message;
+    /// on an error the last known-good theme stays active (BORU-UI-18).
+    fn update_ui_theme_reloaded(
+        &mut self,
+        generation: u64,
+        result: Result<crate::theme_config::UiThemeConfig, String>,
+    ) -> iced::Task<AppMessage> {
+        if !self.ui_theme_reload_tracker.should_apply(generation) {
+            tracing::debug!(
+                generation,
+                "boru-ui.toml reload dropped (stale; newer generation already accepted)"
+            );
+            return iced::Task::none();
+        }
+        self.ui_theme_reload_tracker.mark_applied(generation);
+        match &result {
+            Ok(_) => {
+                tracing::info!(
+                    generation,
+                    "boru-ui.toml reloaded; live theme apply is BORU-UI-07's job"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    generation,
+                    error = %e,
+                    "boru-ui.toml reload failed; keeping last known-good theme"
+                );
+            }
+        }
+        iced::Task::none()
+    }
+
     /// Return the iced Theme enum for an arbitrary dark-mode flag.
     fn theme_from_dark(dark_mode: bool) -> iced::Theme {
         if dark_mode {
@@ -19355,6 +19421,16 @@ impl std::hash::Hash for TransferProjectionHandle {
     }
 }
 
+/// Wrapper for the dev theme reload channel (BORU-UI-06). Used as the
+/// iced subscription identity so the stream restarts on re-subscribe.
+struct UiThemeRxHandle(Arc<Mutex<tokio::sync::mpsc::Receiver<crate::theme_watcher::UiThemeReloadMsg>>>);
+
+impl std::hash::Hash for UiThemeRxHandle {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (Arc::as_ptr(&self.0) as usize).hash(state);
+    }
+}
+
 /// Convert one channel item into an Iced message without performing any
 /// application work. Validation and handling remain in `update`.
 fn map_gui_action(action: GuiActionRequest) -> AppMessage {
@@ -19481,6 +19557,7 @@ fn subscription_stream(
     reconnect_rx: &ReconnectReadyRxHandle,
     gui_action_rx: &GuiActionHandle,
     transfer_rx: &TransferProjectionHandle,
+    ui_theme_rx: &UiThemeRxHandle,
 ) -> Pin<Box<dyn Stream<Item = AppMessage> + Send>> {
     let rx = Arc::clone(&rx.0);
     let friend_rx = Arc::clone(&friend_rx.0);
@@ -19490,6 +19567,7 @@ fn subscription_stream(
     let reconnect_rx = Arc::clone(&reconnect_rx.0);
     let gui_action_rx = Arc::clone(&gui_action_rx.0);
     let transfer_rx = Arc::clone(&transfer_rx.0);
+    let ui_theme_rx = Arc::clone(&ui_theme_rx.0);
     Box::pin(n0_future::stream::unfold(
         (
             rx,
@@ -19500,8 +19578,9 @@ fn subscription_stream(
             reconnect_rx,
             gui_action_rx,
             transfer_rx,
+            ui_theme_rx,
         ),
-        |(rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, reconnect_rx, gui_action_rx, transfer_rx)| async move {
+        |(rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, reconnect_rx, gui_action_rx, transfer_rx, ui_theme_rx)| async move {
             // A closed GUI-action sender is a normal shutdown condition.  Do
             // not let it terminate this combined subscription: the network
             // and friend streams still belong to the application and must
@@ -19522,6 +19601,7 @@ fn subscription_stream(
             let mut reconnect_open = true;
             let mut gui_action_open = true;
             let mut transfer_open = true;
+            let mut ui_theme_open = true;
             // Identify this stream instance so duplicate/competing consumers
             // (two live subscription streams fighting over the same receiver
             // mutexes would wedge both) are visible in logs.
@@ -19554,7 +19634,7 @@ fn subscription_stream(
                                 tracing::debug!(
                                     "APP_NET_RX: combined stream received net event",
                                 );
-                                return Some((AppMessage::NetEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, reconnect_rx, gui_action_rx, transfer_rx)));
+                                return Some((AppMessage::NetEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, reconnect_rx, gui_action_rx, transfer_rx, ui_theme_rx)));
                             }
                             None => {
                                 tracing::warn!(
@@ -19567,31 +19647,31 @@ fn subscription_stream(
                     }
                     event = async { friend_rx.lock().await.recv().await }, if friend_open => {
                         match event {
-                            Some(e) => return Some((AppMessage::FriendEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, reconnect_rx, gui_action_rx, transfer_rx))),
+                            Some(e) => return Some((AppMessage::FriendEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, reconnect_rx, gui_action_rx, transfer_rx, ui_theme_rx))),
                             None => { friend_open = false; continue; }
                         }
                     }
                     event = async { whisper_rx.lock().await.recv().await }, if whisper_open => {
                         match event {
-                            Some(e) => return Some((AppMessage::WhisperEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, reconnect_rx, gui_action_rx, transfer_rx))),
+                            Some(e) => return Some((AppMessage::WhisperEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, reconnect_rx, gui_action_rx, transfer_rx, ui_theme_rx))),
                             None => { whisper_open = false; continue; }
                         }
                     }
                     event = async { inbox_rx.lock().await.recv().await }, if inbox_open => {
                         match event {
-                            Some(e) => return Some((AppMessage::InboxEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, reconnect_rx, gui_action_rx, transfer_rx))),
+                            Some(e) => return Some((AppMessage::InboxEvent(e), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, reconnect_rx, gui_action_rx, transfer_rx, ui_theme_rx))),
                             None => { inbox_open = false; continue; }
                         }
                     }
                     peers = async { discovered_rx.lock().await.recv().await }, if discovered_open => {
                         match peers {
-                            Some(peers) => return Some((AppMessage::NewDiscoveredPeers(peers), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, reconnect_rx, gui_action_rx, transfer_rx))),
+                            Some(peers) => return Some((AppMessage::NewDiscoveredPeers(peers), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, reconnect_rx, gui_action_rx, transfer_rx, ui_theme_rx))),
                             None => { discovered_open = false; continue; }
                         }
                     }
                     reconnect_peer = async { reconnect_rx.lock().await.recv().await }, if reconnect_open => {
                         match reconnect_peer {
-                            Some(peer) => return Some((AppMessage::ReconnectPeerReady(peer), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, reconnect_rx, gui_action_rx, transfer_rx))),
+                            Some(peer) => return Some((AppMessage::ReconnectPeerReady(peer), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, reconnect_rx, gui_action_rx, transfer_rx, ui_theme_rx))),
                             None => { reconnect_open = false; continue; }
                         }
                     }
@@ -19599,7 +19679,7 @@ fn subscription_stream(
                         match action {
                             Some(a) => return Some((
                                 map_gui_action(a),
-                                (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, reconnect_rx, gui_action_rx, transfer_rx),
+                                (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, reconnect_rx, gui_action_rx, transfer_rx, ui_theme_rx),
                             )),
                             None => {
                                 // The MCP/GUI sender was dropped.  Disable only
@@ -19612,18 +19692,38 @@ fn subscription_stream(
                     }
                     transfer_update = async { transfer_rx.lock().await.recv().await }, if transfer_open => {
                         match transfer_update {
-                            Ok(update) => return Some((AppMessage::TransferProjectionUpdate(update), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, reconnect_rx, gui_action_rx, transfer_rx))),
+                            Ok(update) => return Some((AppMessage::TransferProjectionUpdate(update), (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, reconnect_rx, gui_action_rx, transfer_rx, ui_theme_rx))),
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                                 // The broadcast receiver fell behind (progress is
                                 // coalesced to 250 ms but a long UI stall can still
                                 // drop messages). The snapshot is authoritative, so
                                 // rebuild the panel maps instead of replaying.
-                                return Some((AppMessage::TransferSnapshotResync, (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, reconnect_rx, gui_action_rx, transfer_rx)));
+                                return Some((AppMessage::TransferSnapshotResync, (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, reconnect_rx, gui_action_rx, transfer_rx, ui_theme_rx)));
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                                 // The projection store was dropped (shutdown). Keep
                                 // the other channels alive.
                                 transfer_open = false;
+                                continue;
+                            }
+                        }
+                    }
+                    reload = async { ui_theme_rx.lock().await.recv().await }, if ui_theme_open => {
+                        match reload {
+                            // BORU-UI-06: a debounced boru-ui.toml reload from
+                            // the watcher thread. update() drops stale
+                            // generations; no UI state is touched here.
+                            Some(msg) => return Some((
+                                AppMessage::UiThemeReloaded {
+                                    generation: msg.generation,
+                                    result: msg.result,
+                                },
+                                (rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, reconnect_rx, gui_action_rx, transfer_rx, ui_theme_rx),
+                            )),
+                            None => {
+                                // Watcher thread stopped (shutdown). Disable only
+                                // this branch and keep the app channels alive.
+                                ui_theme_open = false;
                                 continue;
                             }
                         }
@@ -19985,6 +20085,7 @@ impl IcedChat {
         reconnect_ready_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<PublicKey>>>,
         gui_action_rx: Option<Arc<Mutex<tokio::sync::mpsc::Receiver<GuiActionRequest>>>>,
         transfer_rx: Arc<Mutex<TransferUpdateReceiver>>,
+        ui_theme_rx: Option<Arc<Mutex<tokio::sync::mpsc::Receiver<crate::theme_watcher::UiThemeReloadMsg>>>>,
         call_events_rx: Arc<Mutex<Receiver<CallEvent>>>,
         #[cfg(feature = "screen-sharing")]
         screen_share_events_rx: Option<Arc<Mutex<Receiver<SessionEvent>>>>,
@@ -20055,6 +20156,15 @@ impl IcedChat {
                 drop(tx);
                 Arc::new(Mutex::new(rx))
             });
+        // BORU-UI-06: dev theme reload channel. When the watcher is absent
+        // (headless launches, tests) fall back to a closed dummy receiver so
+        // the combined stream still has a stable ui_theme branch.
+        let ui_theme_inner: Arc<Mutex<tokio::sync::mpsc::Receiver<crate::theme_watcher::UiThemeReloadMsg>>> =
+            ui_theme_rx.unwrap_or_else(|| {
+                let (tx, rx) = tokio::sync::mpsc::channel(1);
+                drop(tx);
+                Arc::new(Mutex::new(rx))
+            });
         subs.push(iced::Subscription::run_with(
             (
                 RxHandle(rx),
@@ -20065,8 +20175,9 @@ impl IcedChat {
                 ReconnectReadyRxHandle(reconnect_ready_rx),
                 GuiActionHandle(gui_action_inner),
                 TransferProjectionHandle(transfer_rx),
+                UiThemeRxHandle(ui_theme_inner),
             ),
-            |(rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, reconnect_rx, gui_action_rx, transfer_rx)| {
+            |(rx, friend_rx, whisper_rx, inbox_rx, discovered_rx, reconnect_rx, gui_action_rx, transfer_rx, ui_theme_rx)| {
                 subscription_stream(
                     rx,
                     friend_rx,
@@ -20076,6 +20187,7 @@ impl IcedChat {
                     reconnect_rx,
                     gui_action_rx,
                     transfer_rx,
+                    ui_theme_rx,
                 )
             },
         ));
@@ -20465,6 +20577,15 @@ mod tests {
     use super::*;
     use boru_core::call::manager::{CallEndReason, CallError};
     use boru_core::gif_provider::GifMediaSource;
+
+    /// A closed dummy receiver for the dev-theme reload channel (BORU-UI-06).
+    /// The subscription stream's ui_theme branch immediately sees the closed
+    /// sender and stays disabled — exactly like the app's headless path.
+    fn dummy_ui_theme_handle() -> UiThemeRxHandle {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        drop(tx);
+        UiThemeRxHandle(Arc::new(Mutex::new(rx)))
+    }
     use chrono::{FixedOffset, TimeZone, Utc};
 
     // ── GIF picker pure logic (KLIPY-05) ───────────────────────────────
@@ -27601,6 +27722,7 @@ mod tests {
             &ReconnectReadyRxHandle(Arc::new(Mutex::new(reconnect_rx))),
             &GuiActionHandle(Arc::new(Mutex::new(gui_rx))),
             &TransferProjectionHandle(Arc::new(Mutex::new(transfer_rx))),
+            &dummy_ui_theme_handle(),
         );
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
@@ -27669,6 +27791,7 @@ mod tests {
             &ReconnectReadyRxHandle(Arc::new(tokio::sync::Mutex::new(reconnect_rx))),
             &GuiActionHandle(Arc::new(tokio::sync::Mutex::new(gui_rx))),
             &TransferProjectionHandle(Arc::new(tokio::sync::Mutex::new(transfer_rx))),
+            &dummy_ui_theme_handle(),
         );
         let runtime = tokio::runtime::Runtime::new().expect("test runtime");
         let messages = runtime.block_on(async {

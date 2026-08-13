@@ -39,6 +39,7 @@ mod status_card;
 mod theme;
 mod theme_config;
 mod theme_merge;
+mod theme_watcher;
 #[cfg(test)]
 mod offscreen_status_card;
 mod sharing_summary;
@@ -1708,7 +1709,7 @@ fn main() -> Result<()> {
                 local_label,
                 local_public,
                 relay_mode,
-                data_dir,
+                data_dir.clone(),
                 persist_tx,
                 runtime.handle().clone(),
                 Arc::clone(&net_rx),
@@ -1752,6 +1753,16 @@ fn main() -> Result<()> {
             app.gui_snapshot_throttle_ms = 125;
             // BORU-UI-04: dev theme overrides loaded from <data_dir>/boru-ui.toml.
             app.ui_theme_config = ui_theme_config;
+            // BORU-UI-06: dev theme file watcher — observes boru-ui.toml,
+            // debounces save storms, parses on a background thread and sends
+            // AppMessage::UiThemeReloaded into the update loop. Failure to
+            // start is non-fatal (dev feature; live reload just stays off).
+            let (ui_theme_tx, ui_theme_rx) =
+                tokio::sync::mpsc::channel::<theme_watcher::UiThemeReloadMsg>(8);
+            app.ui_theme_rx = Some(std::sync::Arc::new(tokio::sync::Mutex::new(ui_theme_rx)));
+            if let Err(e) = theme_watcher::spawn_ui_theme_watcher(data_dir.clone(), ui_theme_tx) {
+                warn!(error = %e, "boru-ui.toml watcher failed to start; live reload disabled");
+            }
             app.directory_store = shared_directory_store;
             // BORU-CP-06: give the UI a read handle to the backend
             // connectivity state machine (the discovery service handle
@@ -1900,6 +1911,7 @@ fn main() -> Result<()> {
                 Arc::clone(&state.reconnect_ready_rx),
                 state.gui_action_rx.clone(),
                 Arc::clone(&state.transfer_update_rx),
+                state.ui_theme_rx.clone(),
                 Arc::clone(&state.call_events_rx),
                 #[cfg(feature = "screen-sharing")]
                 state.screen_share_events_rx.clone(),
