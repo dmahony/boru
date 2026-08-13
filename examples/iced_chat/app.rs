@@ -3984,6 +3984,23 @@ pub struct IcedChat {
     /// a half-typed value is not clobbered by the rendered current value.
     #[cfg(feature = "dev-ui")]
     inspector_draft: crate::inspector::InspectorDraft,
+    /// BORU-UI-11: whether 'Inspect UI' mode is enabled (toggle in the
+    /// developer panel). When enabled, supported components are wrapped in
+    /// mouse areas that report their component ID on hover and jump the
+    /// inspector to the relevant section on click. When disabled no wrappers
+    /// exist at all, so normal clicks pass through untouched.
+    #[cfg(feature = "dev-ui")]
+    inspect_ui_enabled: bool,
+    /// BORU-UI-11: the component currently under the cursor (None when the
+    /// cursor left every supported region). Updated by mouse_area on_enter /
+    /// on_exit while inspection mode is enabled.
+    #[cfg(feature = "dev-ui")]
+    inspect_hover: Option<crate::inspector::ComponentId>,
+    /// BORU-UI-11: the component the developer most recently clicked while
+    /// inspecting. Selecting a component jumps the inspector to its section
+    /// (scroll + expand + highlight).
+    #[cfg(feature = "dev-ui")]
+    inspect_selected: Option<crate::inspector::ComponentId>,
     /// Whether notification sounds are enabled.
     sound_enabled: bool,
     /// Whether room invitations may include direct endpoint addresses.
@@ -8323,6 +8340,15 @@ impl IcedChat {
             inspector_visible: false,
             #[cfg(feature = "dev-ui")]
             inspector_draft: crate::inspector::InspectorDraft::default(),
+            // BORU-UI-11: inspection mode off by default — no mouse wrappers,
+            // so normal clicks are never intercepted unless the developer
+            // explicitly flips the 'Inspect UI' toggle.
+            #[cfg(feature = "dev-ui")]
+            inspect_ui_enabled: false,
+            #[cfg(feature = "dev-ui")]
+            inspect_hover: None,
+            #[cfg(feature = "dev-ui")]
+            inspect_selected: None,
             // ── Notification system ──
             notification_service: NotificationService::new(),
             window_focus_tracker: WindowFocusTracker::new(),
@@ -18848,14 +18874,77 @@ impl IcedChat {
 
     /// BORU-UI-09: build the dev UI Inspector panel element. Reads the live
     /// active theme and the draft text; the returned widget emits
-    /// [`AppMessage::Inspector`] messages handled in `update()`.
+    /// [`AppMessage::Inspector`] messages handled in `update()`. BORU-UI-11
+    /// passes inspection-mode state (toggle, hover, selection) so the panel
+    /// can render the 'Inspect UI' switch and its status line.
     #[cfg(feature = "dev-ui")]
     fn view_inspector_panel(&self) -> iced::Element<'_, AppMessage> {
         crate::inspector::view_inspector(
             &self.active_theme,
             &self.inspector_draft,
             self.dark_mode,
+            self.inspect_ui_enabled,
+            self.inspect_hover,
+            self.inspect_selected,
         )
+    }
+
+    /// BORU-UI-11: wrap a supported component region in a mouse area that
+    /// reports hover/click while inspection mode is enabled.
+    ///
+    /// When inspection is DISABLED the content is returned unchanged — no
+    /// mouse area is added at all, so normal clicks pass through untouched
+    /// and there is zero runtime overhead. When enabled, the mouse area:
+    /// - fires `InspectHover(Some(id))` when the cursor enters the region and
+    ///   `InspectHover(None)` when it leaves;
+    /// - fires `InspectSelect(id)` on a left press over the region (the
+    ///   child's own buttons still capture their presses first, so buttons
+    ///   keep working; empty regions select the component).
+    #[cfg(feature = "dev-ui")]
+    fn inspect_region<'a>(
+        &self,
+        component: crate::inspector::ComponentId,
+        content: iced::Element<'a, AppMessage>,
+    ) -> iced::Element<'a, AppMessage> {
+        if !self.inspect_ui_enabled {
+            return content;
+        }
+        use iced::widget::mouse_area;
+        mouse_area(content)
+            .on_enter(AppMessage::Inspector(crate::inspector::InspectorMsg::InspectHover(
+                Some(component),
+            )))
+            .on_exit(AppMessage::Inspector(crate::inspector::InspectorMsg::InspectHover(
+                None,
+            )))
+            .on_press(AppMessage::Inspector(crate::inspector::InspectorMsg::InspectSelect(
+                component,
+            )))
+            .interaction(iced::mouse::Interaction::Crosshair)
+            .into()
+    }
+
+    /// BORU-UI-11: the inspector component id for the current screen's main
+    /// panel. Used to tag the main panel region with its component identity so
+    /// inspection mode can report it and jump to the right section.
+    #[cfg(feature = "dev-ui")]
+    fn component_id_for_screen(&self) -> crate::inspector::ComponentId {
+        use crate::inspector::ComponentId;
+        match &self.screen {
+            Screen::ChatList => ComponentId::Home,
+            Screen::FileSharing | Screen::DownloadManager => ComponentId::Attachments,
+            Screen::Chat { .. } => ComponentId::Chat,
+            Screen::OutgoingCall | Screen::ActiveCall => ComponentId::Calls,
+            Screen::FriendRequests
+            | Screen::Settings
+            | Screen::PeerProfile(_)
+            | Screen::PeerCatalogue(_)
+            | Screen::FriendProfile(_) => ComponentId::Controls,
+            Screen::Discover | Screen::Groups => ComponentId::Rooms,
+            #[cfg(feature = "terminal")]
+            Screen::Terminal => ComponentId::Controls,
+            Screen::Gallery => ComponentId::Controls,
+        }
     }
 
     /// BORU-UI-07: recompute `active_theme` from the current dark-mode base
@@ -19027,6 +19116,50 @@ impl IcedChat {
                     }
                 }
                 iced::Task::none()
+            }
+            // ── Inspection mode (BORU-UI-11) ────────────────────────────
+            InspectorMsg::SetInspectUi(enabled) => {
+                self.inspect_ui_enabled = enabled;
+                if !enabled {
+                    // Leaving inspection mode clears hover/selection so no
+                    // stale component stays highlighted.
+                    self.inspect_hover = None;
+                    self.inspect_selected = None;
+                }
+                tracing::debug!(enabled, "UI Inspector: inspection mode toggled");
+                iced::Task::none()
+            }
+            InspectorMsg::InspectHover(component) => {
+                // Only meaningful while inspection is enabled; the mouse
+                // areas that emit these messages only exist in that state,
+                // so this is a cheap guard for safety.
+                if self.inspect_ui_enabled {
+                    self.inspect_hover = component;
+                }
+                iced::Task::none()
+            }
+            InspectorMsg::InspectSelect(component) => {
+                // Selecting a component jumps the inspector to its section:
+                // expand the section, remember the selection for highlight,
+                // and scroll the panel to the section header.
+                let section = component.section();
+                self.inspect_selected = Some(component);
+                self.inspect_hover = Some(component);
+                self.inspector_draft.collapsed_sections.remove(&section);
+                let offset = crate::inspector::section_scroll_offset(
+                    section,
+                    &self.inspector_draft.collapsed_sections,
+                );
+                tracing::debug!(
+                    ?component,
+                    ?section,
+                    offset,
+                    "UI Inspector: component selected — jumping to section"
+                );
+                iced::widget::operation::scroll_to(
+                    crate::inspector::INSPECTOR_SCROLL_ID,
+                    iced::widget::operation::AbsoluteOffset { x: 0.0, y: offset },
+                )
             }
         }
     }
@@ -19243,7 +19376,7 @@ impl IcedChat {
 
     pub fn view(&self) -> iced::Element<'_, AppMessage> {
         let _timer = PerfTracker::timer("view", format!("{:?}", self.screen));
-        use iced::widget::{container, row};
+        use iced::widget::{container, row, text};
         use iced::Length;
 
         // Always show sidebar on the left.
@@ -19300,6 +19433,16 @@ impl IcedChat {
             },
             Screen::Gallery => crate::component_gallery::view_gallery(),
         };
+
+        // BORU-UI-11: when inspection mode is enabled, tag the sidebar and
+        // main panel with their component IDs so hovering/clicking them shows
+        // the component name and can jump the inspector to its section. When
+        // disabled, `inspect_region` returns the content untouched — no mouse
+        // areas are added and normal clicks pass through exactly as before.
+        #[cfg(feature = "dev-ui")]
+        let sidebar = self.inspect_region(crate::inspector::ComponentId::Sidebar, sidebar);
+        #[cfg(feature = "dev-ui")]
+        let main_panel = self.inspect_region(self.component_id_for_screen(), main_panel);
 
         // Responsive sidebar width – clamps to 288–320 px based on window width.
         // BORU-UI-09: read from the LIVE active theme so the Inspector's
@@ -19401,12 +19544,19 @@ impl IcedChat {
             base
         };
 
+        // BORU-UI-11: while inspection mode is on and the cursor is over a
+        // supported component, float a small overlay pill at the top of the
+        // app showing the hovered component's ID/name. The pill is a plain
+        // non-interactive container, so it never intercepts clicks; it just
+        // makes the hovered component visible even when the inspector panel
+        // is closed. Applied to the final element (after dialogs) so it never
+        // changes the `base` container the dialog functions expect.
         #[cfg(feature = "video-playback")]
         if self.inline_video_expanded {
             return self.view_expanded_inline_video(base);
         }
 
-        if self.incoming_call.is_some() {
+        let result = if self.incoming_call.is_some() {
             self.view_incoming_call_overlay(base)
         } else if self.connection_details_dialog.is_some() {
             self.view_connection_details_dialog(base)
@@ -19430,7 +19580,44 @@ impl IcedChat {
             self.view_image_lightbox(base, entry_index)
         } else {
             base.into()
-        }
+        };
+
+        #[cfg(feature = "dev-ui")]
+        let result = if self.inspect_ui_enabled && self.inspect_hover.is_some() {
+            let hover = self.inspect_hover.unwrap();
+            let pill = container(
+                text(format!("🔍 {}", hover.label()))
+                    .size(12.0)
+                    .color(Color::WHITE),
+            )
+            .padding(iced::Padding::from(4.0))
+            .style(move |_| container::Style {
+                background: Some(iced::Background::Color(Color::from_rgb(0.1, 0.45, 0.28))),
+                border: iced::Border {
+                    color: Color::from_rgb(0.8, 0.95, 0.85),
+                    width: 1.0,
+                    radius: iced::border::Radius::from(12.0),
+                },
+                ..Default::default()
+            });
+            let top = container(pill)
+                .width(iced::Length::Fill)
+                .align_x(iced::Alignment::Center)
+                .padding(iced::Padding {
+                    top: 8.0,
+                    ..Default::default()
+                });
+            iced::widget::Stack::new()
+                .push(result)
+                .push(top)
+                .width(iced::Length::Fill)
+                .height(iced::Length::Fill)
+                .into()
+        } else {
+            result
+        };
+
+        result
     }
 
     // ── Home-rail card selectors (fine-grained state slices) ─────────────
@@ -35691,4 +35878,119 @@ fn inspector_section_collapse_is_view_local_state() {
     );
     assert_eq!(app.active_theme, theme_before, "collapse is view-local only");
 }
+
+#[cfg(feature = "dev-ui")]
+#[test]
+fn inspector_inspect_ui_toggle_hover_select_via_messages() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    // Inspection mode is OFF by default — no mouse wrappers, so normal
+    // clicks are never intercepted unless the developer explicitly enables
+    // the 'Inspect UI' toggle (BORU-UI-11).
+    assert!(!app.inspect_ui_enabled, "inspection mode off by default");
+    assert!(app.inspect_hover.is_none());
+    assert!(app.inspect_selected.is_none());
+
+    // Hover before enabling is ignored (the guard in update_inspector).
+    let task = app.update(AppMessage::Inspector(
+        crate::inspector::InspectorMsg::InspectHover(Some(
+            crate::inspector::ComponentId::Sidebar,
+        )),
+    ));
+    drop(task);
+    assert!(app.inspect_hover.is_none(), "hover ignored while disabled");
+
+    // Enable via the panel toggle.
+    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetInspectUi(
+        true,
+    )));
+    drop(task);
+    assert!(app.inspect_ui_enabled, "inspection mode enabled");
+
+    // Hover now tracks the component under the cursor.
+    let task = app.update(AppMessage::Inspector(
+        crate::inspector::InspectorMsg::InspectHover(Some(
+            crate::inspector::ComponentId::Sidebar,
+        )),
+    ));
+    drop(task);
+    assert_eq!(
+        app.inspect_hover,
+        Some(crate::inspector::ComponentId::Sidebar),
+        "hover tracks the sidebar region"
+    );
+
+    // Selecting a component (click) jumps the inspector to its section:
+    // expands it and records the selection for the highlight + status line.
+    let task = app.update(AppMessage::Inspector(
+        crate::inspector::InspectorMsg::InspectSelect(crate::inspector::ComponentId::Sidebar),
+    ));
+    drop(task);
+    assert_eq!(
+        app.inspect_selected,
+        Some(crate::inspector::ComponentId::Sidebar),
+        "selection recorded"
+    );
+    assert!(
+        !app.inspector_draft
+            .collapsed_sections
+            .contains(&crate::inspector::SectionId::Sidebar),
+        "selecting Sidebar expanded the Sidebar section"
+    );
+
+    // Disabling clears hover/selection so no stale component stays
+    // highlighted.
+    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetInspectUi(
+        false,
+    )));
+    drop(task);
+    assert!(!app.inspect_ui_enabled);
+    assert!(app.inspect_hover.is_none(), "hover cleared on disable");
+    assert!(app.inspect_selected.is_none(), "selection cleared on disable");
 }
+
+#[cfg(feature = "dev-ui")]
+#[test]
+fn inspector_inspect_select_jumps_to_component_section() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    // Enable inspection and select Chat — the inspector must expand the Chat
+    // section and keep other state untouched.
+    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetInspectUi(
+        true,
+    )));
+    drop(task);
+
+    let theme_before = app.active_theme;
+    let task = app.update(AppMessage::Inspector(
+        crate::inspector::InspectorMsg::InspectSelect(crate::inspector::ComponentId::Chat),
+    ));
+    drop(task);
+    assert_eq!(
+        app.inspect_selected,
+        Some(crate::inspector::ComponentId::Chat)
+    );
+    assert!(
+        !app.inspector_draft
+            .collapsed_sections
+            .contains(&crate::inspector::SectionId::Chat),
+        "Chat section expanded on select"
+    );
+    assert_eq!(app.active_theme, theme_before, "selection is view-local only");
+}
+
+#[cfg(feature = "dev-ui")]
+#[test]
+fn inspector_component_id_screen_mapping_is_total() {
+    // Every Screen maps to a supported component id (BORU-UI-11). The mapping
+    // drives which section the inspector jumps to when the main panel of that
+    // screen is selected.
+    let (_runtime, app, _local, _peer) = build_join_request_test_app();
+    // component_id_for_screen covers the initial screen (ChatList → Home).
+    assert_eq!(
+        app.component_id_for_screen(),
+        crate::inspector::ComponentId::Home
+    );
+}
+}
+

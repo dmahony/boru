@@ -229,7 +229,6 @@ impl SectionId {
             SectionId::Motion => "Motion",
         }
     }
-
     /// The config groups this section owns. `Global` owns all four global
     /// token families; every other section owns exactly its typed group.
     /// Used by `reset_section` so Reset Section clears exactly this
@@ -254,6 +253,137 @@ impl SectionId {
             SectionId::Motion => config.motion = None,
         }
     }
+}
+
+/// Dev-only identity of a visible app component (BORU-UI-11).
+///
+/// The inspection mode lets the developer hover/click a supported component
+/// to discover its component ID/name and jump the inspector to the section
+/// that controls it. Each [`ComponentId`] maps 1:1 to the inspector
+/// [`SectionId`] whose fields drive that component's appearance.
+///
+/// This is pure development metadata — it exists only under the `dev-ui`
+/// cargo feature and never affects release behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ComponentId {
+    /// Left navigation sidebar / global shell.
+    Sidebar,
+    /// Home dashboard (chat list empty state).
+    Home,
+    /// Chat message list + composer.
+    Chat,
+    /// File sharing / download manager screens.
+    Attachments,
+    /// Public room directory / groups.
+    Rooms,
+    /// Tunnel management UI.
+    Tunnels,
+    /// Dialog overlays (room settings, create room, invite, etc.).
+    Dialogs,
+    /// Call screens (outgoing / active / incoming).
+    Calls,
+    /// Settings / generic controls.
+    Controls,
+}
+
+impl ComponentId {
+    /// Human-readable component name shown while inspecting.
+    pub fn label(self) -> &'static str {
+        match self {
+            ComponentId::Sidebar => "Sidebar",
+            ComponentId::Home => "Home",
+            ComponentId::Chat => "Chat",
+            ComponentId::Attachments => "Attachments",
+            ComponentId::Rooms => "Rooms",
+            ComponentId::Tunnels => "Tunnels",
+            ComponentId::Dialogs => "Dialogs",
+            ComponentId::Calls => "Calls",
+            ComponentId::Controls => "Controls",
+        }
+    }
+
+    /// The inspector section that controls this component's appearance.
+    pub fn section(self) -> SectionId {
+        match self {
+            ComponentId::Sidebar => SectionId::Sidebar,
+            ComponentId::Home => SectionId::Home,
+            ComponentId::Chat => SectionId::Chat,
+            ComponentId::Attachments => SectionId::Attachments,
+            ComponentId::Rooms => SectionId::Rooms,
+            ComponentId::Tunnels => SectionId::Tunnels,
+            ComponentId::Dialogs => SectionId::Dialogs,
+            ComponentId::Calls => SectionId::Calls,
+            ComponentId::Controls => SectionId::Controls,
+        }
+    }
+}
+
+/// Scrollable ID of the inspector panel — used to jump to a section when a
+/// component is selected in inspection mode (BORU-UI-11).
+pub const INSPECTOR_SCROLL_ID: &str = "boru-inspector-scroll";
+
+// ── Section scroll estimation (BORU-UI-11) ──────────────────────────────
+//
+// The inspector panel is a fixed-width scrollable column of sections. When a
+// component is selected in inspection mode we scroll the panel so the
+// component's section header lands near the top. Iced does not expose the
+// rendered y-position of a child inside a scrollable, so we estimate it from
+// the section structure: approximate per-row heights for the fixed panel
+// width, summed in `SECTIONS` order. The estimate only needs to be close
+// enough to bring the right section into view.
+
+/// Approximate height of the panel chrome above the first section
+/// (panel heading + reset row + top spacer).
+const INSPECTOR_TOP_CHROME: f32 = 24.0 + 24.0 + 6.0;
+/// Approximate height of a collapsible section header row.
+const SECTION_HEADER_H: f32 = 26.0;
+/// Approximate height of a sub-group header row.
+const SUBGROUP_HEADER_H: f32 = 16.0;
+/// Approximate height of a float field row (label + slider + input).
+const FLOAT_ROW_H: f32 = 48.0;
+/// Approximate height of a bool field row (single toggler line).
+const BOOL_ROW_H: f32 = 26.0;
+/// Approximate height of a colour field row (label + hex input).
+const COLOR_ROW_H: f32 = 46.0;
+/// Approximate inter-row / inter-group spacing.
+const ROW_GAP: f32 = 4.0;
+
+/// Estimated y-offset (px) of a section header inside the inspector
+/// scrollable, accounting for currently collapsed sections. Pure function so
+/// it can be unit-tested; used to scroll the panel to a selected component's
+/// section in inspection mode.
+pub fn section_scroll_offset(section: SectionId, collapsed: &HashSet<SectionId>) -> f32 {
+    let mut y = INSPECTOR_TOP_CHROME;
+    for s in SECTIONS {
+        if s.id == section {
+            break;
+        }
+        y += section_estimated_height(s, collapsed.contains(&s.id));
+    }
+    y
+}
+
+/// Estimated rendered height of one inspector section.
+fn section_estimated_height(section: &InspectorSection, is_collapsed: bool) -> f32 {
+    let mut h = SECTION_HEADER_H;
+    if is_collapsed {
+        return h;
+    }
+    let multi = section.groups.len() > 1;
+    for group in section.groups {
+        if multi {
+            h += SUBGROUP_HEADER_H + ROW_GAP;
+        }
+        for field in group.fields {
+            h += match field.kind() {
+                FieldKind::Float => FLOAT_ROW_H,
+                FieldKind::Bool => BOOL_ROW_H,
+                FieldKind::Color => COLOR_ROW_H,
+            } + ROW_GAP;
+        }
+        h += ROW_GAP;
+    }
+    h + ROW_GAP
 }
 
 impl ThemeField {
@@ -909,6 +1039,16 @@ pub enum InspectorMsg {
     FloatTextChanged { field: ThemeField, text: String },
     /// Hex/RGBA text input changed; apply when it parses.
     ColorTextChanged { field: ThemeField, text: String },
+    /// BORU-UI-11: toggle inspection mode ('Inspect UI' switch in the panel).
+    /// When enabled, hovering/clicking supported components reports their
+    /// component ID and selecting one jumps the inspector to its section.
+    SetInspectUi(bool),
+    /// BORU-UI-11: the cursor entered/exited a supported component region.
+    /// `Some(id)` on enter, `None` on exit (mouse_area on_enter/on_exit).
+    InspectHover(Option<ComponentId>),
+    /// BORU-UI-11: a supported component was clicked while inspection mode is
+    /// enabled. Jumps the inspector to the component's section.
+    InspectSelect(ComponentId),
 }
 
 /// Draft text for the inspector's text inputs. Kept so a half-typed value
@@ -1206,21 +1346,32 @@ pub const SECTIONS: &[InspectorSection] = &[
 /// in-progress text input state, `dark_mode` selects panel styling. The
 /// returned element emits [`InspectorMsg`] wrapped in
 /// [`AppMessage::Inspector`].
+///
+/// BORU-UI-11 adds the 'Inspect UI' toggle: `inspect_enabled` is the current
+/// inspection-mode state, `inspect_hover` the component under the cursor
+/// (None when the cursor left every supported region), and `inspect_selected`
+/// the last component the developer clicked. The panel renders the toggle and
+/// a status line so the developer always sees the active component ID/name.
 pub fn view_inspector(
     theme: &BoruTheme,
     draft: &InspectorDraft,
     dark_mode: bool,
+    inspect_enabled: bool,
+    inspect_hover: Option<ComponentId>,
+    inspect_selected: Option<ComponentId>,
 ) -> Element<'static, AppMessage> {
     let mut col = iced::widget::Column::new()
         .push(panel_heading(dark_mode))
+        .push(inspect_ui_row(inspect_enabled, inspect_hover, inspect_selected, dark_mode))
         .push(reset_actions_row(dark_mode))
         .push(Space::new().height(Length::Fixed(6.0)))
         .spacing(2.0);
 
     for section in SECTIONS {
         let collapsed = draft.collapsed_sections.contains(&section.id);
+        let highlighted = inspect_selected.map(|c| c.section()) == Some(section.id);
         col = col
-            .push(section_header(section, collapsed, dark_mode))
+            .push(section_header(section, collapsed, highlighted, dark_mode))
             .push(Space::new().height(Length::Fixed(2.0)));
         if collapsed {
             continue;
@@ -1240,13 +1391,62 @@ pub fn view_inspector(
         col = col.push(Space::new().height(Length::Fixed(8.0)));
     }
 
-    let panel = container(scrollable(col).width(Length::Fill).height(Length::Fill))
-        .width(Length::Fixed(INSPECTOR_PANEL_WIDTH))
-        .height(Length::Fill)
-        .padding(10)
-        .style(move |t| panel_style(t, dark_mode));
+    let panel = container(
+        scrollable(col)
+            .id(INSPECTOR_SCROLL_ID)
+            .width(Length::Fill)
+            .height(Length::Fill),
+    )
+    .width(Length::Fixed(INSPECTOR_PANEL_WIDTH))
+    .height(Length::Fill)
+    .padding(10)
+    .style(move |t| panel_style(t, dark_mode));
 
     panel.into()
+}
+
+/// Row with the 'Inspect UI' toggle + status line (BORU-UI-11).
+///
+/// The toggle flips inspection mode: when enabled, hovering a supported
+/// component shows its component ID/name and clicking it jumps the inspector
+/// to the relevant section. The status line always shows the current hover /
+/// selected component so the developer sees the active component ID.
+fn inspect_ui_row(
+    enabled: bool,
+    hover: Option<ComponentId>,
+    selected: Option<ComponentId>,
+    dark_mode: bool,
+) -> Element<'static, AppMessage> {
+    let tg = toggler(enabled)
+        .label("Inspect UI")
+        .on_toggle(move |v| AppMessage::Inspector(InspectorMsg::SetInspectUi(v)));
+
+    let status = if enabled {
+        match (hover, selected) {
+            (Some(h), _) => format!("{} — click to jump", h.label()),
+            (None, Some(s)) => format!("Selected: {}", s.label()),
+            (None, None) => "Hover a component to identify it".to_string(),
+        }
+    } else {
+        "Off — clicks pass through normally".to_string()
+    };
+
+    let status_text = text(status)
+        .size(9.0)
+        .color(if dark_mode {
+            Color::from_rgb(0.65, 0.75, 0.7)
+        } else {
+            Color::from_rgb(0.2, 0.45, 0.3)
+        });
+
+    iced::widget::Column::new()
+        .push(
+            row![tg, Space::new().width(Length::Fill)]
+                .align_y(Alignment::Center),
+        )
+        .push(status_text)
+        .spacing(2.0)
+        .into()
 }
 
 /// Row with the Reset All action (BORU-UI-10).
@@ -1276,9 +1476,11 @@ fn reset_actions_row(dark_mode: bool) -> Element<'static, AppMessage> {
 }
 
 /// Collapsible component section header with a per-section Reset action.
+/// `highlighted` (BORU-UI-11) marks the section selected via inspection mode.
 fn section_header(
     section: &InspectorSection,
     collapsed: bool,
+    highlighted: bool,
     dark_mode: bool,
 ) -> Element<'static, AppMessage> {
     let chevron = if collapsed { "▸" } else { "▾" };
@@ -1292,7 +1494,13 @@ fn section_header(
             Space::new().width(Length::Fixed(4.0)),
             text(section.label.to_uppercase())
                 .size(11.0)
-                .color(if dark_mode {
+                .color(if highlighted {
+                    if dark_mode {
+                        Color::from_rgb(1.0, 0.85, 0.4)
+                    } else {
+                        Color::from_rgb(0.75, 0.5, 0.0)
+                    }
+                } else if dark_mode {
                     Color::from_rgb(0.7, 0.85, 0.75)
                 } else {
                     Color::from_rgb(0.1, 0.45, 0.28)
@@ -1797,5 +2005,102 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn component_id_registry_maps_to_existing_section() {
+        // BORU-UI-11: every supported component maps to an inspector section
+        // that actually exists in the panel, so selecting a component always
+        // jumps to a real section.
+        let all_sections: HashSet<SectionId> = SECTIONS.iter().map(|s| s.id).collect();
+        let components = [
+            ComponentId::Sidebar,
+            ComponentId::Home,
+            ComponentId::Chat,
+            ComponentId::Attachments,
+            ComponentId::Rooms,
+            ComponentId::Tunnels,
+            ComponentId::Dialogs,
+            ComponentId::Calls,
+            ComponentId::Controls,
+        ];
+        for component in components {
+            assert!(
+                all_sections.contains(&component.section()),
+                "{component:?} maps to {:?} which is not in SECTIONS",
+                component.section()
+            );
+            assert!(!component.label().is_empty(), "{component:?} has empty label");
+        }
+    }
+
+    #[test]
+    fn component_id_section_mapping_is_consistent_with_sections() {
+        // BORU-UI-11: the section a component maps to must own at least one
+        // field, otherwise "jump to section" would point at an empty group.
+        for component in [
+            ComponentId::Sidebar,
+            ComponentId::Home,
+            ComponentId::Chat,
+            ComponentId::Attachments,
+            ComponentId::Rooms,
+            ComponentId::Tunnels,
+            ComponentId::Dialogs,
+            ComponentId::Calls,
+            ComponentId::Controls,
+        ] {
+            let section = component.section();
+            let fields: usize = SECTIONS
+                .iter()
+                .find(|s| s.id == section)
+                .map(|s| s.groups.iter().map(|g| g.fields.len()).sum())
+                .unwrap_or(0);
+            assert!(fields > 0, "{component:?} section {section:?} has no fields");
+        }
+    }
+
+    #[test]
+    fn section_scroll_offset_is_monotonic_across_sections() {
+        // BORU-UI-11: offsets must increase in SECTIONS order so scrolling to
+        // a section header brings the right section into view.
+        let collapsed = HashSet::new();
+        let mut previous = section_scroll_offset(SECTIONS[0].id, &collapsed);
+        for section in &SECTIONS[1..] {
+            let offset = section_scroll_offset(section.id, &collapsed);
+            assert!(
+                offset > previous,
+                "{} offset {offset} not > previous {previous}",
+                section.label
+            );
+            previous = offset;
+        }
+    }
+
+    #[test]
+    fn section_scroll_offset_handles_collapsed_sections() {
+        // BORU-UI-11: collapsing an earlier section shortens the content, so
+        // a later section's offset shrinks accordingly.
+        let empty = HashSet::new();
+        let mut collapsed = HashSet::new();
+        collapsed.insert(SectionId::Global);
+        let global_collapsed = section_scroll_offset(SectionId::Chat, &collapsed);
+        let global_expanded = section_scroll_offset(SectionId::Chat, &empty);
+        assert!(
+            global_collapsed < global_expanded,
+            "collapsing Global should move Chat up ({global_collapsed} vs {global_expanded})"
+        );
+    }
+
+    #[test]
+    fn section_scroll_offset_lands_last_section_inside_panel() {
+        // BORU-UI-11: the estimate for the final section should stay within
+        // a plausible panel height (a few thousand px), guarding against the
+        // estimator running away.
+        let collapsed = HashSet::new();
+        let last = section_scroll_offset(SECTIONS[SECTIONS.len() - 1].id, &collapsed);
+        assert!(
+            last > INSPECTOR_TOP_CHROME && last < 10_000.0,
+            "last section offset {last} out of expected band"
+        );
     }
 }
