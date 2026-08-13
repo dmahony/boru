@@ -848,6 +848,201 @@ impl PublicRoomAdvertisement {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The withdrawal / tombstone payload (BORU-DIR-09, PDF Task 3.3)
+// ---------------------------------------------------------------------------
+
+/// Current withdrawal payload version.
+///
+/// Independent from [`ADVERTISEMENT_PAYLOAD_VERSION`] (the advertisement
+/// metadata model version) and from the control-plane envelope version.
+pub const WITHDRAWAL_PAYLOAD_VERSION: u8 = 1;
+
+/// Domain-separation tag for the room-withdrawal publisher signature
+/// (BORU-DIR-09). A signature over this tag can never verify as a signature
+/// over any other Boru protocol object family (room advertisements, chat
+/// messages, mailbox acks, ...).
+///
+/// The signed-bytes layout follows
+/// [`crate::protocol_signing::canonical_signed_bytes`]:
+/// `postcard((protocol, version, (publisher, withdrawal_version, room_id,
+/// owner_peer_id, timestamp_secs)))`.
+pub const WITHDRAWAL_SIGNING_PROTOCOL: &str = "boru/public-room-withdrawal/v1";
+
+/// A signed room withdrawal / tombstone (BORU-DIR-09, PDF Task 3.3).
+///
+/// Broadcast when a room is deleted, made unlisted, or intentionally
+/// removed from discovery. Directory clients remove the matching
+/// advertisement immediately **when the withdrawal verifies**; TTL expiry
+/// remains the safety net if the withdrawal is missed.
+///
+/// # Identity rules (same as advertisements, BORU-DIR-03)
+///
+/// * `signature` is an Ed25519 signature by the **publisher** — the node
+///   that sends the PUBLIC_ROOM_WITHDRAWAL control message, whose identity
+///   is the envelope's `sender_node_id` (see [`sign`](Self::sign) /
+///   [`verify_signed`](Self::verify_signed)).
+/// * A withdrawal is applied only when it verifies as signed by the room's
+///   **designated authority** — the key named in `owner_peer_id` (see
+///   [`is_authoritative_publisher`](Self::is_authoritative_publisher)),
+///   mirroring the canonical-metadata rule for advertisements. A
+///   withdrawal that fails verification, or verifies for a non-authority
+///   publisher, is discarded and removes nothing.
+/// * A withdrawal carries only `room_id` (the advertisement being
+///   withdrawn) plus the authority identity — no member lists, history,
+///   previews, invite secrets, or attachment content.
+///
+/// # Wire compatibility
+///
+/// `signature` is the last field with `#[serde(default)]`; older clients
+/// decode the known prefix and ignore it, and a missing signature means the
+/// withdrawal is untrusted (never applied).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicRoomWithdrawal {
+    /// Withdrawal payload version ([`WITHDRAWAL_PAYLOAD_VERSION`]).
+    pub withdrawal_version: u8,
+    /// The room being withdrawn — its stable gossip [`TopicId`] raw bytes,
+    /// matching the `room_id` of the advertisement(s) to remove.
+    pub room_id: TopicId,
+    /// The room's designated authority — raw iroh Ed25519 public key bytes.
+    /// Only a withdrawal signed by this key may be applied (same
+    /// authoritative identity rule as canonical advertisements).
+    pub owner_peer_id: [u8; 32],
+    /// Unix epoch seconds when the withdrawal was created (the envelope
+    /// also carries a timestamp; this one is signed so the payload is
+    /// self-contained).
+    pub timestamp_secs: u64,
+    /// Publisher Ed25519 signature (see [`sign`](Self::sign) /
+    /// [`verify_signed`](Self::verify_signed)). `None` (or any value that
+    /// does not verify for the claimed publisher) means the withdrawal is
+    /// **untrusted** and must never remove anything.
+    ///
+    /// Stored as `Vec<u8>` (always exactly
+    /// [`SIGNATURE_LEN`](crate::protocol_signing::SIGNATURE_LEN) = 64 bytes
+    /// when present) because postcard's serde support in this codebase does
+    /// not deserialize `[u8; 64]`; verification validates the length and
+    /// fails closed on anything else.
+    #[serde(default)]
+    pub signature: Option<Vec<u8>>,
+}
+
+impl PublicRoomWithdrawal {
+    /// Build a minimal unsigned withdrawal for a room by its authority.
+    ///
+    /// Convenience for publishers that fill the timestamp and call
+    /// [`sign`](Self::sign) before broadcast.
+    pub fn minimal(room_id: TopicId, owner_peer_id: [u8; 32]) -> Self {
+        Self {
+            withdrawal_version: WITHDRAWAL_PAYLOAD_VERSION,
+            room_id,
+            owner_peer_id,
+            timestamp_secs: 0,
+            signature: None,
+        }
+    }
+
+    /// The canonical bytes a publisher signs and a receiver recomputes for
+    /// verification (BORU-DIR-09).
+    ///
+    /// Follows the crate-wide [`crate::protocol_signing`] framing:
+    /// `postcard((protocol, version, fields))`. Embedding the publisher's
+    /// public key makes the signature self-describing: it can only ever
+    /// verify for the key that produced it, so a cached withdrawal cannot
+    /// be silently re-attributed to a different node.
+    ///
+    /// Serialisation is deterministic and infallible for in-memory values.
+    pub fn signing_bytes(&self, publisher: &PublicKey) -> Vec<u8> {
+        crate::protocol_signing::canonical_signed_bytes(
+            WITHDRAWAL_SIGNING_PROTOCOL,
+            self.withdrawal_version as u16,
+            &(
+                *publisher.as_bytes(),
+                self.withdrawal_version,
+                self.room_id,
+                self.owner_peer_id,
+                self.timestamp_secs,
+            ),
+        )
+        .expect("withdrawal canonical signing bytes cannot fail")
+    }
+
+    /// Sign this withdrawal with the **publisher's** node key (BORU-DIR-09).
+    ///
+    /// The publisher is the node that will send the withdrawal — the
+    /// control-plane envelope's `sender_node_id`. For a withdrawal to be
+    /// applied it must also be the room's designated authority
+    /// (`owner_peer_id`); see [`is_authoritative_publisher`](Self::is_authoritative_publisher).
+    pub fn sign(&mut self, publisher: &SecretKey) {
+        let public = publisher.public();
+        let bytes = self.signing_bytes(&public);
+        self.signature = Some(publisher.sign(&bytes).to_bytes().to_vec());
+    }
+
+    /// Verify this withdrawal against the **claimed publisher** — the
+    /// control-plane envelope's `sender_node_id` (BORU-DIR-09, PDF Task
+    /// 3.3 step 2).
+    ///
+    /// Returns [`AdvertisementAuth::Verified`] only when a signature is
+    /// present and valid for `claimed_publisher`. A missing signature is
+    /// [`AdvertisementAuth::MissingSignature`] (untrusted — never applied);
+    /// a present-but-invalid signature is
+    /// [`AdvertisementAuth::InvalidSignature`] (forged/tampered — discard).
+    /// Never panics: a malformed signature (wrong length) simply fails
+    /// verification.
+    pub fn verify_signed(&self, claimed_publisher: &PublicKey) -> AdvertisementAuth {
+        let Some(signature) = &self.signature else {
+            return AdvertisementAuth::MissingSignature;
+        };
+        let bytes = self.signing_bytes(claimed_publisher);
+        if crate::protocol_signing::verify(claimed_publisher, signature, &bytes) {
+            AdvertisementAuth::Verified {
+                publisher: *claimed_publisher,
+            }
+        } else {
+            AdvertisementAuth::InvalidSignature
+        }
+    }
+
+    /// Whether `publisher` is the **designated room authority** for the
+    /// withdrawn room — i.e. the publisher's key equals `owner_peer_id`.
+    ///
+    /// This is the same authority rule used for advertisements (BORU-DIR-03):
+    /// a withdrawal is applied only when it verifies as signed by the room
+    /// authority ([`AdvertisementAuth::Verified`] AND
+    /// [`is_authoritative_publisher`](Self::is_authoritative_publisher)).
+    /// A verified-but-non-authority publisher's withdrawal is discarded —
+    /// it cannot remove the room's canonical advertisement.
+    pub fn is_authoritative_publisher(&self, publisher: &PublicKey) -> bool {
+        publisher.as_bytes() == &self.owner_peer_id
+    }
+
+    /// Validate this withdrawal against `bounds`.
+    ///
+    /// Returns `Ok(())` for a bounded, metadata-only withdrawal;
+    /// `Err(violation)` with the specific bound that was exceeded. Never
+    /// panics. The withdrawal is deliberately tiny (fixed-size identity
+    /// fields + optional 64-byte signature), so the only checks are that
+    /// the authority is a real iroh key and the encoded payload stays
+    /// within the same bound as advertisements.
+    pub fn validate(&self, bounds: &AdvertisementBounds) -> Result<(), AdvertisementViolation> {
+        // Authority identity must be a real iroh key (garbage-proof).
+        if iroh_base::PublicKey::from_bytes(&self.owner_peer_id).is_err() {
+            return Err(AdvertisementViolation::InvalidOwnerPeerId);
+        }
+        // Total encoded size bound (compact + bounded).
+        let encoded_len = postcard::to_stdvec(self)
+            .map(|v| v.len())
+            .unwrap_or(usize::MAX);
+        if encoded_len > bounds.max_encoded_len {
+            return Err(AdvertisementViolation::EncodedTooLarge {
+                len: encoded_len,
+                max: bounds.max_encoded_len,
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Normalized, validated room metadata entered by a creator in the UI
 /// (BORU-DIR-05, PDF Task 2.2).
 ///
@@ -1880,6 +2075,131 @@ mod tests {
                 true,
             ),
             VisibilitySwitchOutcome::Forbidden
+        );
+    }
+
+    // ── BORU-DIR-09 (PDF Task 3.3): withdrawal / tombstone ────────────
+
+    fn full_withdrawal() -> PublicRoomWithdrawal {
+        PublicRoomWithdrawal {
+            withdrawal_version: WITHDRAWAL_PAYLOAD_VERSION,
+            room_id: topic(0x11),
+            owner_peer_id: key(0x22),
+            timestamp_secs: 1_700_000_000,
+            signature: None,
+        }
+    }
+
+    /// A publisher-signed withdrawal verifies as
+    /// [`AdvertisementAuth::Verified`] for that publisher, and only for
+    /// that publisher.
+    #[test]
+    fn signed_withdrawal_verifies_for_publisher() {
+        let publisher = secret_key(0x22); // matches full_withdrawal()'s owner
+        let mut withdrawal = full_withdrawal();
+        assert_eq!(
+            withdrawal.verify_signed(&publisher.public()),
+            AdvertisementAuth::MissingSignature
+        );
+        withdrawal.sign(&publisher);
+        assert_eq!(
+            withdrawal.verify_signed(&publisher.public()),
+            AdvertisementAuth::Verified {
+                publisher: publisher.public()
+            }
+        );
+
+        // A different key cannot claim the withdrawal (spoofed publisher).
+        let stranger = secret_key(0x33);
+        assert_eq!(
+            withdrawal.verify_signed(&stranger.public()),
+            AdvertisementAuth::InvalidSignature
+        );
+    }
+
+    /// A withdrawal verifies only for the room authority named in
+    /// `owner_peer_id` — the same authoritative identity rule used for
+    /// canonical advertisements (BORU-DIR-03). A verified-but-non-authority
+    /// publisher must not be able to withdraw a room.
+    #[test]
+    fn withdrawal_requires_authoritative_publisher() {
+        let owner = secret_key(0x22);
+        let member = secret_key(0x33);
+
+        let mut withdrawal = full_withdrawal();
+        withdrawal.owner_peer_id = owner.public().as_bytes().to_owned();
+        withdrawal.sign(&owner);
+        assert_eq!(
+            withdrawal.verify_signed(&owner.public()),
+            AdvertisementAuth::Verified {
+                publisher: owner.public()
+            }
+        );
+        assert!(
+            withdrawal.is_authoritative_publisher(&owner.public()),
+            "owner is the designated room authority"
+        );
+
+        // A member endorsement-style signature verifies but is NOT the
+        // authority — the withdrawal must be discarded, never applied.
+        let mut member_withdrawal = full_withdrawal();
+        member_withdrawal.owner_peer_id = owner.public().as_bytes().to_owned();
+        member_withdrawal.sign(&member);
+        assert_eq!(
+            member_withdrawal.verify_signed(&member.public()),
+            AdvertisementAuth::Verified {
+                publisher: member.public()
+            }
+        );
+        assert!(
+            !member_withdrawal.is_authoritative_publisher(&member.public()),
+            "non-authority publisher must not be treated as the room authority"
+        );
+    }
+
+    /// A withdrawal for one room cannot be replayed against another room:
+    /// the room id is inside the signed framing.
+    #[test]
+    fn withdrawal_is_bound_to_room_id() {
+        let owner = secret_key(0x22);
+        let mut withdrawal = full_withdrawal();
+        withdrawal.sign(&owner);
+        let signature = withdrawal.signature.clone().unwrap();
+
+        let mut other = full_withdrawal();
+        other.room_id = topic(0x99);
+        other.signature = Some(signature);
+        assert_eq!(
+            other.verify_signed(&owner.public()),
+            AdvertisementAuth::InvalidSignature,
+            "replaying a withdrawal for a different room must fail"
+        );
+    }
+
+    /// A valid withdrawal is compact and passes the same bounds as
+    /// advertisements.
+    #[test]
+    fn withdrawal_validates_and_is_compact() {
+        let mut withdrawal = full_withdrawal();
+        withdrawal.sign(&secret_key(0x22));
+        let bounds = AdvertisementBounds::default();
+        assert!(withdrawal.validate(&bounds).is_ok());
+        let encoded = postcard::to_stdvec(&withdrawal).unwrap();
+        assert!(
+            encoded.len() < 200,
+            "withdrawal should be tiny, got {} bytes",
+            encoded.len()
+        );
+    }
+
+    /// An invalid authority key fails validation.
+    #[test]
+    fn withdrawal_rejects_invalid_owner_key() {
+        let mut withdrawal = full_withdrawal();
+        withdrawal.owner_peer_id = [0x02; 32]; // not a valid ed25519 point
+        assert_eq!(
+            withdrawal.validate(&AdvertisementBounds::default()),
+            Err(AdvertisementViolation::InvalidOwnerPeerId)
         );
     }
 }

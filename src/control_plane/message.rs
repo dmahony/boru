@@ -129,6 +129,15 @@ pub enum ControlMessageType {
     /// history, or grants permission. Fully separate from peer presence and
     /// from normal chat messages.
     PublicRoomAdvertisement = 5,
+    /// A room-withdrawal / tombstone — "this public room is no longer
+    /// advertised" (BORU-DIR-09, PDF Phase 3 Task 3.3). Broadcast when a
+    /// room is deleted, made unlisted, or intentionally removed from
+    /// discovery so directory clients can remove the matching advertisement
+    /// immediately instead of waiting for the advertisement TTL. Carries a
+    /// signed payload authenticated with the same authoritative identity
+    /// rules as advertisements; TTL expiry remains the safety net if the
+    /// withdrawal is missed.
+    PublicRoomWithdrawal = 6,
 }
 
 impl ControlMessageType {
@@ -142,6 +151,7 @@ impl ControlMessageType {
             3 => Some(Self::DiagnosticHint),
             4 => Some(Self::Extensions),
             5 => Some(Self::PublicRoomAdvertisement),
+            6 => Some(Self::PublicRoomWithdrawal),
             _ => None,
         }
     }
@@ -254,6 +264,16 @@ pub struct DiagnosticHintPayload {
 pub type PublicRoomAdvertisementPayload =
     crate::control_plane::advertisement::PublicRoomAdvertisement;
 
+/// PUBLIC_ROOM_WITHDRAWAL payload (BORU-DIR-09, PDF Phase 3 Task 3.3).
+///
+/// A room-withdrawal / tombstone: \"this public room is no longer
+/// advertised\". Metadata only — it names the room being withdrawn and the
+/// room's designated authority; directory clients remove the matching
+/// advertisement immediately **when the withdrawal verifies** (the same
+/// authoritative identity rules as advertisements, BORU-DIR-03), and TTL
+/// expiry remains the safety net if the withdrawal is missed.
+pub type PublicRoomWithdrawalPayload = crate::control_plane::advertisement::PublicRoomWithdrawal;
+
 /// Typed payload carried by a [`ControlEnvelope`].
 ///
 /// The payload enum is self-describing on the wire (postcard variant tag),
@@ -285,6 +305,11 @@ pub enum ControlPayload {
     /// (BORU-DIR-01, PDF Phase 1 Task 1.1). Metadata only; the advertised
     /// metadata model is defined by BORU-DIR-02 (PDF Task 1.2).
     PublicRoomAdvertisement(PublicRoomAdvertisementPayload),
+    /// [`PublicRoomWithdrawalPayload`] — a room-withdrawal / tombstone
+    /// (BORU-DIR-09, PDF Phase 3 Task 3.3). Metadata only; carries the room
+    /// being withdrawn plus the room's designated authority, authenticated
+    /// with the same authoritative identity rules as advertisements.
+    PublicRoomWithdrawal(PublicRoomWithdrawalPayload),
 }
 
 impl ControlPayload {
@@ -297,6 +322,7 @@ impl ControlPayload {
             Self::DiagnosticHint(_) => ControlMessageType::DiagnosticHint,
             Self::Extensions(_) => ControlMessageType::Extensions,
             Self::PublicRoomAdvertisement(_) => ControlMessageType::PublicRoomAdvertisement,
+            Self::PublicRoomWithdrawal(_) => ControlMessageType::PublicRoomWithdrawal,
         }
     }
 }
@@ -440,6 +466,26 @@ impl ControlEnvelope {
             sequence,
             timestamp_secs,
             ControlPayload::PublicRoomAdvertisement(advert),
+        )
+    }
+
+    /// Convenience constructor for a PUBLIC_ROOM_WITHDRAWAL envelope
+    /// (BORU-DIR-09, PDF Phase 3 Task 3.3). Carries a typed, bounded
+    /// room-withdrawal / tombstone authenticated with the same
+    /// authoritative identity rules as advertisements; directory clients
+    /// remove the matching advertisement when it verifies, and TTL expiry
+    /// remains the safety net if it is missed.
+    pub fn public_room_withdrawal(
+        sender_node_id: PublicKey,
+        sequence: u64,
+        timestamp_secs: u64,
+        withdrawal: crate::control_plane::advertisement::PublicRoomWithdrawal,
+    ) -> Self {
+        Self::new(
+            sender_node_id,
+            sequence,
+            timestamp_secs,
+            ControlPayload::PublicRoomWithdrawal(withdrawal),
         )
     }
 
@@ -853,6 +899,9 @@ mod tests {
         assert_eq!(ControlMessageType::DiagnosticHint.to_u8(), 3);
         assert_eq!(ControlMessageType::Extensions.to_u8(), 4);
         assert_eq!(ControlMessageType::PublicRoomAdvertisement.to_u8(), 5);
+        // BORU-DIR-09 (PDF Task 3.3): PUBLIC_ROOM_WITHDRAWAL took the next
+        // stable tag — never renumber existing tags.
+        assert_eq!(ControlMessageType::PublicRoomWithdrawal.to_u8(), 6);
         assert_eq!(
             ControlMessageType::from_u8(0),
             Some(ControlMessageType::Hello)
@@ -869,7 +918,11 @@ mod tests {
             ControlMessageType::from_u8(5),
             Some(ControlMessageType::PublicRoomAdvertisement)
         );
-        assert_eq!(ControlMessageType::from_u8(6), None);
+        assert_eq!(
+            ControlMessageType::from_u8(6),
+            Some(ControlMessageType::PublicRoomWithdrawal)
+        );
+        assert_eq!(ControlMessageType::from_u8(7), None);
         assert_eq!(ControlMessageType::from_u8(255), None);
     }
 

@@ -560,6 +560,9 @@ pub fn handle_net_event_for_topic(
                 Message::RoomAdvertisement { .. } => {
                     // Room advertisements are handled at the frontend layer.
                 }
+                Message::RoomWithdrawal { .. } => {
+                    // Room withdrawals are handled at the frontend layer.
+                }
                 Message::EncryptedGroupMessage { .. } => {
                     // Encrypted group messages are handled at the group encryption
                     // layer once the membership/ordering modules are wired in.

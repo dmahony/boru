@@ -7215,6 +7215,32 @@ impl IcedChat {
                 if matches!(&self.screen, Screen::Chat { topic: t } if t == &topic) {
                     self.screen = Screen::ChatList;
                 }
+                // BORU-DIR-09 (PDF Task 3.3): if the deleted room was
+                // advertised in the public room directory, emit a withdrawal
+                // so remote directories remove it immediately, and drop the
+                // local advertisement entry. TTL expiry remains the safety
+                // net if the withdrawal is missed.
+                if self.advertised_rooms.remove(&topic) {
+                    let local_author = self.local_public;
+                    let _ = self.directory_store.lock().map(|mut store| {
+                        store.withdraw(topic, local_author)
+                    });
+                    if let Some(storage) = self.storage.as_ref() {
+                        if let Err(err) = storage.with_conn(|conn| {
+                            conn.execute(
+                                "DELETE FROM directory_ads WHERE topic = ?1 AND author = ?2",
+                                rusqlite::params![topic.as_bytes(), local_author.as_bytes()],
+                            )
+                            .map_err(n0_error::AnyError::from_std)?;
+                            Ok(())
+                        }) {
+                            warn!("failed to delete directory advertisement: {err}");
+                        }
+                    }
+                    self.broadcast_room_withdrawal(topic);
+                    self.public_rooms_sidebar_revision =
+                        self.public_rooms_sidebar_revision.wrapping_add(1);
+                }
                 iced::Task::none()
             }
 

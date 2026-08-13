@@ -245,6 +245,31 @@ impl DirectoryStore {
         self.ads.remove(&(topic, author)).is_some()
     }
 
+    /// Apply a verified room withdrawal (BORU-DIR-09, PDF Task 3.3).
+    ///
+    /// Directory clients call this when a withdrawal **verifies**: it
+    /// removes the matching advertisement — the one `author` published for
+    /// `topic` — immediately, instead of waiting for the advertisement TTL.
+    ///
+    /// # Authority rule
+    ///
+    /// A withdrawal is keyed by `(topic, author)` exactly like the
+    /// advertisement itself, so it can only ever remove the advertisement
+    /// the **verified signer** published. A spoofed or misattributed
+    /// withdrawal (wrong key, replayed for a different room) removes
+    /// nothing here and can never remove an unrelated author's listing.
+    ///
+    /// TTL expiry remains the safety net: an advertisement whose withdrawal
+    /// is missed is still evicted by [`evict_expired`](Self::evict_expired)
+    /// once its `expires_after_secs` elapses without a refresh.
+    ///
+    /// Returns `true` when an advertisement was actually removed — callers
+    /// use this to refresh UI state (e.g. bump the directory sidebar
+    /// revision) only when something changed.
+    pub fn withdraw(&mut self, topic: TopicId, author: PublicKey) -> bool {
+        self.remove(topic, author)
+    }
+
     /// Remove advertisements older than `max_age`.
     ///
     /// Legacy fixed-window eviction.  Prefer [`evict_expired`](Self::evict_expired),
@@ -349,13 +374,13 @@ mod tests {
     }
 
     fn make_public_key(id: u8) -> PublicKey {
-        for candidate in id..=u8::MAX {
-            let bytes = [candidate; 32];
-            if let Ok(key) = PublicKey::from_bytes(&bytes) {
-                return key;
-            }
-        }
-        panic!("no valid test public key found");
+        // Derive from a secret-key seed so every id maps to a distinct,
+        // always-valid key (ed25519 `SecretKey::from_bytes` is infallible
+        // and accepts any 32 bytes). The previous "first valid candidate >=
+        // id" scan could collide: some 32-byte patterns are not valid ed25519
+        // points (e.g. [0x2b; 32]), so `make_public_key(43)` and
+        // `make_public_key(44)` could return the SAME key.
+        iroh::SecretKey::from_bytes(&[id; 32]).public()
     }
 
     fn make_ad(room_name: &str, topic: TopicId) -> RoomAdvertisement {
@@ -469,6 +494,85 @@ mod tests {
         assert_eq!(store.len(), 1);
         assert_eq!(store.list_active()[0].1, author_b);
         assert!(!store.remove(topic, author_a));
+    }
+
+    // ── BORU-DIR-09 (PDF Task 3.3): withdrawal / tombstone ────────────
+
+    /// A verified withdrawal removes the matching advertisement immediately
+    /// — intentional unlisting must be faster than waiting for the TTL
+    /// (PDF Task 3.3 acceptance criterion).
+    #[test]
+    fn directory_store_withdrawal_removes_matching_ad() {
+        let mut store = DirectoryStore::new();
+        let topic = make_topic(1);
+        let author = make_public_key(42);
+
+        store.upsert(make_ad("room", topic), author);
+        assert!(
+            store.contains(topic, author),
+            "ad present before withdrawal"
+        );
+
+        assert!(
+            store.withdraw(topic, author),
+            "withdrawal of the matching (topic, author) removes the ad"
+        );
+        assert!(!store.contains(topic, author), "ad removed immediately");
+        assert!(store.list_active().is_empty());
+        // A second withdrawal for the same pair is a no-op (idempotent).
+        assert!(!store.withdraw(topic, author));
+    }
+
+    /// A spoofed / misattributed withdrawal cannot remove an unrelated
+    /// advertisement: it is keyed by (topic, author) exactly like the ad,
+    /// so it can only ever remove what the verified signer published
+    /// (PDF Task 3.3: "Spoofed withdrawals cannot remove unrelated rooms").
+    #[test]
+    fn directory_store_withdrawal_cannot_remove_unrelated_rooms() {
+        let mut store = DirectoryStore::new();
+        let topic = make_topic(1);
+        let other_topic = make_topic(2);
+        let owner = make_public_key(42);
+        let stranger = make_public_key(43);
+
+        store.upsert(make_ad("owner-room", topic), owner);
+        store.upsert(make_ad("stranger-endorsement", topic), stranger);
+
+        // The owner's withdrawal removes only the owner's own ad — the
+        // stranger's independent endorsement stays.
+        assert!(store.withdraw(topic, owner));
+        assert!(!store.contains(topic, owner));
+        assert!(
+            store.contains(topic, stranger),
+            "other author's ad untouched"
+        );
+
+        // A withdrawal for a room the signer never advertised removes
+        // nothing.
+        assert!(!store.withdraw(topic, make_public_key(44)));
+        assert!(!store.withdraw(other_topic, owner));
+    }
+
+    /// TTL remains the final cleanup mechanism: an advertisement whose
+    /// withdrawal is missed (never arrives / is dropped) still leaves the
+    /// directory when its `expires_after_secs` elapses without a refresh
+    /// (PDF Task 3.3 step 5).
+    #[test]
+    fn directory_store_missed_withdrawal_still_expires_via_ttl() {
+        let mut store = DirectoryStore::new();
+        let topic = make_topic(1);
+        let author = make_public_key(42);
+        let mut ad = make_ad("no-withdrawal-room", topic);
+        ad.expires_after_secs = 1; // 1-second TTL for the test
+
+        store.upsert(ad, author);
+        assert_eq!(store.list_active().len(), 1, "fresh ad is active");
+
+        // No withdrawal arrives — the ad is still live until its TTL.
+        std::thread::sleep(Duration::from_millis(1_200));
+        let evicted = store.evict_expired();
+        assert_eq!(evicted, vec![(topic, author)], "TTL eviction still applies");
+        assert!(store.list_active().is_empty());
     }
 
     #[test]

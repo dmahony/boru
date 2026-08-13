@@ -224,6 +224,31 @@ pub enum Message {
         #[serde(default)]
         gif: crate::gif_provider::SharedGif,
     },
+    /// Broadcast a room withdrawal / tombstone into the directory topic
+    /// (BORU-DIR-09, PDF Task 3.3).
+    ///
+    /// When a room is deleted, made unlisted, or intentionally removed from
+    /// discovery, the advertiser broadcasts this so directory clients can
+    /// remove the matching advertisement immediately instead of waiting for
+    /// the advertisement TTL. TTL expiry remains the safety net if the
+    /// withdrawal is missed.
+    ///
+    /// Carries only the room's stable gossip topic — the advertisement
+    /// being withdrawn — plus an Ed25519 signature by the withdrawing
+    /// node's key so receivers can authenticate it (the same authoritative
+    /// identity rule as [`Message::RoomAdvertisement`]: a withdrawal only
+    /// ever removes the matching advertisement published by the signer).
+    RoomWithdrawal {
+        /// The room's gossip [`TopicId`] — the advertisement being
+        /// withdrawn.
+        topic: TopicId,
+        /// Ed25519 signature over the canonical withdrawal framing by the
+        /// withdrawing node's key, so receivers can verify authenticity.
+        /// Signed with [`sign_room_withdrawal`] and checked with
+        /// [`verify_room_withdrawal`].
+        #[serde(default)]
+        signature: Vec<u8>,
+    },
 }
 
 /// Deserialize a `u64`, defaulting to `0` when the wire buffer is exhausted.
@@ -434,6 +459,52 @@ pub fn verify_advertisement(ad: &RoomAdvertisement, signature: &[u8], author: Pu
         Err(_) => return false,
     };
     crate::protocol_signing::verify_canonical_or_legacy(&author, signature, &canonical, &legacy)
+}
+
+/// Canonical protocol tag for signed room withdrawals (BORU-DIR-09,
+/// PDF Task 3.3).
+///
+/// A signature over this tag can never verify as a signature over any
+/// other Boru protocol object family (room advertisements, chat messages,
+/// mailbox acks, ...).
+pub const ROOM_WITHDRAWAL_PROTOCOL: &str = "boru/room-withdrawal";
+
+/// Version of the signed room-withdrawal payload layout (BORU-DIR-09).
+pub const ROOM_WITHDRAWAL_VERSION: u16 = 1;
+
+/// Sign a room withdrawal with the withdrawing node's secret key.
+///
+/// Returns the Ed25519 signature bytes that [`verify_room_withdrawal`] can
+/// check. The signature covers the canonical framing
+/// (`boru/room-withdrawal` / 1 / `topic`), so the withdrawn room identity
+/// is authenticated — a receiver can prove which node withdrew the room.
+pub fn sign_room_withdrawal(topic: &TopicId, sk: &SecretKey) -> Vec<u8> {
+    let canonical = crate::protocol_signing::canonical_signed_bytes(
+        ROOM_WITHDRAWAL_PROTOCOL,
+        ROOM_WITHDRAWAL_VERSION,
+        topic,
+    )
+    .expect("postcard withdrawal encoding cannot fail");
+    sk.sign(&canonical).to_bytes().to_vec()
+}
+
+/// Verify an Ed25519 signature over a room withdrawal.
+///
+/// Returns `true` only when `author`'s public key verifies the signature
+/// over the canonical withdrawal framing for `topic`. A missing or
+/// malformed signature (wrong length) simply fails verification — never a
+/// panic. The caller decides what the verified author may remove: the
+/// withdrawal applies only to the advertisement **that author** published
+/// for the room, so a spoofed withdrawal cannot remove unrelated rooms.
+pub fn verify_room_withdrawal(topic: &TopicId, signature: &[u8], author: PublicKey) -> bool {
+    let Ok(canonical) = crate::protocol_signing::canonical_signed_bytes(
+        ROOM_WITHDRAWAL_PROTOCOL,
+        ROOM_WITHDRAWAL_VERSION,
+        topic,
+    ) else {
+        return false;
+    };
+    crate::protocol_signing::verify(&author, signature, &canonical)
 }
 
 const SIGNATURE_LENGTH: usize = iroh::Signature::LENGTH;

@@ -1110,7 +1110,7 @@ fn main() -> Result<()> {
             tokio::sync::mpsc::channel::<DiscoveredPeersUpdate>(64);
         // Create the directory room channel for UI display.
         let (directory_room_tx, directory_room_rx_tmp) =
-            tokio::sync::mpsc::channel::<app::DirectoryRoomUpdate>(64);
+            tokio::sync::mpsc::channel::<app::DirectoryRoomEvent>(64);
 
         // ── Shared member-discovery DHT client ───────────────────────────
         // One `distributed_topic_tracker::Dht` handle is created (when DHT is
@@ -1396,7 +1396,23 @@ fn main() -> Result<()> {
                                 if let Message::RoomAdvertisement { ad, .. } = message {
                                     info!(from=%from, topic=%ad.topic, name=%ad.room_name,
                                         "received room advertisement");
-                                    let _ = dir_tx.try_send(app::DirectoryRoomUpdate(ad, from));
+                                    let _ = dir_tx.try_send(app::DirectoryRoomEvent::Advertisement(ad, from));
+                                } else if let Message::RoomWithdrawal { topic, signature } = message {
+                                    // BORU-DIR-09 (PDF Task 3.3): a verified
+                                    // withdrawal removes the matching
+                                    // advertisement immediately; TTL expiry
+                                    // remains the safety net if it is missed.
+                                    if boru_core::chat_core::verify_room_withdrawal(
+                                        &topic, &signature, from,
+                                    ) {
+                                        info!(from=%from, topic=%topic,
+                                            "received verified room withdrawal");
+                                        let _ = dir_tx
+                                            .try_send(app::DirectoryRoomEvent::Withdrawal(topic, from));
+                                    } else {
+                                        debug!(from=%from, topic=%topic,
+                                            "dropped unverifiable room withdrawal");
+                                    }
                                 } else {
                                     debug!(?message, "directory: non-ad message");
                                 }

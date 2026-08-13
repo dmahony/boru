@@ -159,6 +159,10 @@ pub enum AdvertViolation {
     /// A PUBLIC_ROOM_ADVERTISEMENT payload violates the room-advertisement
     /// metadata bounds or privacy guardrails (BORU-DIR-02).
     Advertisement(crate::control_plane::advertisement::AdvertisementViolation),
+    /// A PUBLIC_ROOM_WITHDRAWAL payload violates the metadata bounds
+    /// (BORU-DIR-09, PDF Task 3.3). The withdrawal is tiny by design; this
+    /// catches a garbage authority key or an oversized encoded payload.
+    Withdrawal(crate::control_plane::advertisement::AdvertisementViolation),
 }
 
 /// The minimal-advertisement whitelist policy (PDF Task 1.3 steps 1–2).
@@ -281,6 +285,9 @@ impl ControlAdvertPolicy {
             ControlPayload::PublicRoomAdvertisement(payload) => payload
                 .validate(&self.advertisement_bounds)
                 .map_err(AdvertViolation::Advertisement),
+            ControlPayload::PublicRoomWithdrawal(payload) => payload
+                .validate(&self.advertisement_bounds)
+                .map_err(AdvertViolation::Withdrawal),
         }
     }
 }
@@ -984,6 +991,60 @@ mod tests {
         assert!(
             policy.check(&advert).is_ok(),
             "a bounded metadata-only room advertisement must be accepted"
+        );
+    }
+
+    /// BORU-DIR-09: a PUBLIC_ROOM_WITHDRAWAL envelope passes the
+    /// minimal-content whitelist when it carries a bounded, metadata-only
+    /// withdrawal (tiny identity fields + optional signature).
+    #[test]
+    fn policy_accepts_public_room_withdrawal() {
+        let policy = ControlAdvertPolicy::default();
+        let peer = key(0x01);
+        let withdrawal = ControlEnvelope::public_room_withdrawal(
+            peer,
+            1,
+            1_700_000_000,
+            crate::control_plane::advertisement::PublicRoomWithdrawal::minimal(
+                crate::proto::state::TopicId::from_bytes([0x62; 32]),
+                {
+                    let mut seed = [0u8; 32];
+                    seed[0] = 0x02;
+                    iroh_base::SecretKey::from_bytes(&seed)
+                        .public()
+                        .as_bytes()
+                        .to_owned()
+                },
+            ),
+        );
+        assert!(
+            policy.check(&withdrawal).is_ok(),
+            "a bounded metadata-only room withdrawal must be accepted"
+        );
+    }
+
+    /// BORU-DIR-09: a PUBLIC_ROOM_WITHDRAWAL carrying a garbage authority
+    /// key is rejected by the minimal-content policy — it never reaches the
+    /// directory client as an actionable withdrawal.
+    #[test]
+    fn policy_rejects_withdrawal_with_invalid_owner_key() {
+        let policy = ControlAdvertPolicy::default();
+        let peer = key(0x07);
+        let mut withdrawal = crate::control_plane::advertisement::PublicRoomWithdrawal::minimal(
+            crate::proto::state::TopicId::from_bytes([0x62; 32]),
+            [0x02; 32], // not a valid iroh Ed25519 key
+        );
+        withdrawal.owner_peer_id = [0x02; 32];
+        let envelope = ControlEnvelope::public_room_withdrawal(peer, 2, 1_700_000_000, withdrawal);
+        let err = policy.check(&envelope).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AdvertViolation::Withdrawal(
+                    crate::control_plane::advertisement::AdvertisementViolation::InvalidOwnerPeerId
+                )
+            ),
+            "garbage withdrawal authority key must be rejected, got {err:?}"
         );
     }
 

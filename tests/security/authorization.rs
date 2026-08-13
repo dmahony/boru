@@ -12,7 +12,9 @@
 use std::sync::Arc;
 
 use boru_core::backfill::BackfillAuthorizer;
-use boru_core::chat_core::{verify_advertisement, DEFAULT_ADVERT_TTL_SECS};
+use boru_core::chat_core::{
+    sign_room_withdrawal, verify_advertisement, verify_room_withdrawal, DEFAULT_ADVERT_TTL_SECS,
+};
 use boru_core::file_access_protocol::{
     sign_download_descriptor, verify_download_descriptor, BlobFormat, DescriptorVerification,
 };
@@ -501,4 +503,43 @@ fn room_advertisement_signature_matrix() {
         &sig[..sig.len() - 1],
         author.public()
     ));
+}
+
+// ── Room withdrawal signature matrix (BORU-DIR-09, PDF Task 3.3) ────────
+
+#[test]
+fn room_withdrawal_signature_matrix() {
+    let author = SecretKey::generate();
+    let other = SecretKey::generate();
+    let topic = group_id();
+    let sig = sign_room_withdrawal(&topic, &author);
+
+    // Correct author → verifies.
+    assert!(verify_room_withdrawal(&topic, &sig, author.public()));
+
+    // Wrong connected peer → fails (a spoofed withdrawal cannot attribute
+    // itself to the real advertiser).
+    assert!(!verify_room_withdrawal(&topic, &sig, other.public()));
+
+    // Withdrawing a different room than the one signed → fails (cannot
+    // reuse a withdrawal to remove an unrelated room).
+    let other_topic = TopicId::from_bytes([9u8; 32]);
+    assert!(!verify_room_withdrawal(&other_topic, &sig, author.public()));
+
+    // Tampered signature → fails.
+    let mut tampered = sig.clone();
+    if let Some(b) = tampered.first_mut() {
+        *b ^= 0x01;
+    }
+    assert!(!verify_room_withdrawal(&topic, &tampered, author.public()));
+
+    // Wrong-length signature → fails cleanly (no panic).
+    assert!(!verify_room_withdrawal(
+        &topic,
+        &sig[..sig.len() - 1],
+        author.public()
+    ));
+
+    // Empty signature → fails cleanly (no panic).
+    assert!(!verify_room_withdrawal(&topic, &[], author.public()));
 }

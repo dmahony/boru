@@ -299,6 +299,20 @@ pub enum ControlEvent {
     /// presence ([`ControlEvent::Received`] still carries PRESENCE
     /// envelopes) and from normal chat messages.
     RoomAdvertisement(RoomAdvertisementEvent),
+    /// A PUBLIC_ROOM_WITHDRAWAL envelope was received, verified, and decoded
+    /// into its typed room-withdrawal payload (BORU-DIR-09, PDF Phase 3
+    /// Task 3.3).
+    ///
+    /// This is the service-boundary decode path for withdrawals: the
+    /// payload is interpreted **here** — inside the discovery/control-plane
+    /// service — and surfaced to subscribers as a typed
+    /// [`RoomWithdrawalEvent`]. Only a withdrawal that verifies as signed
+    /// by the room's designated authority is emitted; a spoofed,
+    /// untrusted, or non-authoritative withdrawal is discarded at the
+    /// receive gate and never reaches this event. Subscribers remove the
+    /// matching advertisement immediately; TTL expiry remains the safety
+    /// net if the withdrawal is missed.
+    RoomWithdrawal(RoomWithdrawalEvent),
 }
 
 /// A decoded PUBLIC_ROOM_ADVERTISEMENT (BORU-DIR-01/02).
@@ -326,6 +340,30 @@ pub struct RoomAdvertisementEvent {
     pub auth: AdvertisementAuth,
     /// The typed advertisement payload (BORU-DIR-02 metadata model).
     pub advert: crate::control_plane::advertisement::PublicRoomAdvertisement,
+}
+
+/// A decoded, **verified** PUBLIC_ROOM_WITHDRAWAL (BORU-DIR-09).
+///
+/// Carries the envelope metadata (sender, sequence, timestamp) plus the
+/// typed withdrawal payload. Only a withdrawal that verified as signed by
+/// the room's designated authority is emitted (the same authoritative
+/// identity rules as advertisements, BORU-DIR-03): a spoofed, untrusted, or
+/// non-authoritative withdrawal is discarded at the receive gate and never
+/// reaches this event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoomWithdrawalEvent {
+    /// The node that published the withdrawal (envelope sender) — also the
+    /// room's designated authority (`owner_peer_id`), which is why it was
+    /// emitted.
+    pub sender_node_id: PublicKey,
+    /// Per-sender sequence counter (dedup key part).
+    pub sequence: u64,
+    /// Unix epoch seconds when the withdrawal was created.
+    pub timestamp_secs: u64,
+    /// The typed withdrawal payload. `auth` is always
+    /// [`AdvertisementAuth::Verified`] for this event — the payload was
+    /// verified and the publisher was the room authority before emission.
+    pub withdrawal: crate::control_plane::advertisement::PublicRoomWithdrawal,
 }
 
 /// Outcome of [`DiscoveryService::handle_incoming`].
@@ -381,6 +419,17 @@ pub enum IncomingOutcome {
     /// with. Discarded — never enters the directory view, never affects
     /// gossip or chat processing.
     AdvertisementAuthRejected,
+    /// A PUBLIC_ROOM_WITHDRAWAL frame was dropped because its publisher
+    /// signature did not verify against the envelope's claimed sender
+    /// (BORU-DIR-09, PDF Task 3.3): the withdrawal was forged, tampered
+    /// with, or unsigned. Discarded — it can never remove an advertisement.
+    WithdrawalAuthRejected,
+    /// A PUBLIC_ROOM_WITHDRAWAL frame verified for its publisher, but that
+    /// publisher is **not** the room's designated authority
+    /// (`owner_peer_id`) — a verified-but-spoofed withdrawal attempt
+    /// (BORU-DIR-09, same authoritative identity rules as advertisements).
+    /// Discarded — it can never remove the room's advertisement.
+    WithdrawalNotAuthoritative,
 }
 
 /// Outcome of [`PeerRegistry::upsert`].
@@ -1073,6 +1122,45 @@ impl ControlAnnounceHandle {
             .map_err(|source| e!(DiscoveryServiceError::Api { source }))?;
         Ok(AnnounceOutcome::Announced)
     }
+
+    /// Announce a PUBLIC_ROOM_WITHDRAWAL control-plane envelope carrying
+    /// `withdrawal` (BORU-DIR-09, PDF Phase 3 Task 3.3).
+    ///
+    /// The caller is responsible for building the withdrawal and signing it
+    /// with its node key ([`PublicRoomWithdrawal::sign`]) — the service
+    /// does not hold a secret key. An unsigned withdrawal is still
+    /// broadcast, but receivers discard it (never applied); a signed one
+    /// lets receivers attribute the payload to this node and apply it only
+    /// when this node is the room's designated authority (`owner_peer_id`).
+    ///
+    /// The same room-advertisement throttle bounds the rate, and the
+    /// sequence is allocated only when a broadcast actually happens. The
+    /// broadcast is a control-plane envelope — never a chat message, never
+    /// a join.
+    async fn announce_room_withdrawal(
+        &self,
+        withdrawal: crate::control_plane::advertisement::PublicRoomWithdrawal,
+    ) -> Result<AnnounceOutcome, DiscoveryServiceError> {
+        if !self.advert_throttle.try_announce() {
+            debug!(
+                "discovery: room-withdrawal announcement throttled",
+            );
+            return Ok(AnnounceOutcome::Throttled);
+        }
+        let sequence = self.next_sequence();
+        let bytes = ControlEnvelope::public_room_withdrawal(
+            self.local_node,
+            sequence,
+            unix_now_secs(),
+            withdrawal,
+        )
+        .encode();
+        self.sender
+            .broadcast(Bytes::from(bytes))
+            .await
+            .map_err(|source| e!(DiscoveryServiceError::Api { source }))?;
+        Ok(AnnounceOutcome::Announced)
+    }
 }
 
 /// Current unix epoch seconds; `0` (unknown) on clock failure, which the
@@ -1424,6 +1512,62 @@ impl ReceiveCore {
                                     advert: advert.clone(),
                                 },
                             ));
+                            return IncomingOutcome::ControlMessage;
+                        }
+                    }
+                }
+                // BORU-DIR-09 (PDF Task 3.3): a PUBLIC_ROOM_WITHDRAWAL
+                // envelope is interpreted into its typed payload here — at
+                // the discovery/control-plane service boundary — and
+                // emitted as the dedicated `ControlEvent::RoomWithdrawal`
+                // event, never as a generic `Received` envelope.
+                //
+                // The same authoritative identity rules as advertisements
+                // (BORU-DIR-03) apply before a withdrawal may be applied:
+                // * Invalid or missing signature → forged/tampered/untrusted:
+                //   DISCARD. It can never remove an advertisement.
+                // * Verified but NOT signed by the room's designated
+                //   authority (`owner_peer_id`) → verified-but-spoofed
+                //   withdrawal attempt: DISCARD.
+                // * Verified AND authoritative → emitted as
+                //   `ControlEvent::RoomWithdrawal`; directory clients
+                //   remove the matching advertisement immediately. TTL
+                //   expiry remains the safety net if it is missed.
+                if let ControlPayload::PublicRoomWithdrawal(withdrawal) = &envelope.payload {
+                    let auth = withdrawal.verify_signed(&envelope.sender_node_id);
+                    match auth {
+                        AdvertisementAuth::InvalidSignature | AdvertisementAuth::MissingSignature => {
+                            self.counters.record_malformed_discovery_packet();
+                            warn!(
+                                sender = %envelope.sender_node_id.fmt_short(),
+                                sequence = envelope.sequence,
+                                "discovery: room withdrawal signature verification failed; dropped",
+                            );
+                            return IncomingOutcome::WithdrawalAuthRejected;
+                        }
+                        AdvertisementAuth::Verified { .. } => {
+                            if !withdrawal.is_authoritative_publisher(&envelope.sender_node_id) {
+                                warn!(
+                                    sender = %envelope.sender_node_id.fmt_short(),
+                                    sequence = envelope.sequence,
+                                    "discovery: room withdrawal signed by non-authority publisher; dropped",
+                                );
+                                return IncomingOutcome::WithdrawalNotAuthoritative;
+                            }
+                            info!(
+                                sender = %envelope.sender_node_id.fmt_short(),
+                                sequence = envelope.sequence,
+                                room = %withdrawal.room_id,
+                                "discovery: public-room withdrawal received and verified",
+                            );
+                            let _ = self
+                                .control_events_tx
+                                .send(ControlEvent::RoomWithdrawal(RoomWithdrawalEvent {
+                                    sender_node_id: envelope.sender_node_id,
+                                    sequence: envelope.sequence,
+                                    timestamp_secs: envelope.timestamp_secs,
+                                    withdrawal: withdrawal.clone(),
+                                }));
                             return IncomingOutcome::ControlMessage;
                         }
                     }
@@ -2134,6 +2278,28 @@ impl DiscoveryService {
         }
         self.control_announce
             .announce_room_advertisement(advert)
+            .await
+    }
+
+    /// Announce a PUBLIC_ROOM_WITHDRAWAL control-plane envelope carrying
+    /// `withdrawal` (BORU-DIR-09, PDF Phase 3 Task 3.3).
+    ///
+    /// The caller builds the withdrawal and signs it with its node key
+    /// ([`PublicRoomWithdrawal::sign`](crate::control_plane::advertisement::PublicRoomWithdrawal::sign))
+    /// so receivers can attribute the payload to this node — the service
+    /// itself never holds a secret key. An unsigned withdrawal is still
+    /// broadcast but receivers discard it (never applied).
+    ///
+    /// The room-advertisement throttle bounds the rate; the broadcast is a
+    /// control-plane envelope, never a chat message. Directory clients
+    /// remove the matching advertisement when the withdrawal verifies;
+    /// TTL expiry remains the safety net if it is missed.
+    pub async fn announce_room_withdrawal(
+        &self,
+        withdrawal: crate::control_plane::advertisement::PublicRoomWithdrawal,
+    ) -> Result<AnnounceOutcome, DiscoveryServiceError> {
+        self.control_announce
+            .announce_room_withdrawal(withdrawal)
             .await
     }
 
@@ -5966,6 +6132,227 @@ mod tests {
             AnnounceOutcome::Announced
         );
         let _ = cmd_rx;
+    }
+
+    // ── BORU-DIR-09 (PDF Task 3.3): withdrawal / tombstone ────────────
+
+    /// A valid withdrawal signed by the room authority is emitted as the
+    /// dedicated `ControlEvent::RoomWithdrawal` event — the signal
+    /// directory clients consume to remove the matching advertisement
+    /// immediately.
+    #[tokio::test]
+    async fn handle_incoming_verified_room_withdrawal_emits_dedicated_event() {
+        let local = test_key(0xAA);
+        let owner = test_key(0xBB);
+        let service = test_service(local);
+        let mut events = service.control_events();
+
+        let mut withdrawal =
+            crate::control_plane::advertisement::PublicRoomWithdrawal::minimal(
+                crate::proto::state::TopicId::from_bytes([0x41; 32]),
+                owner.as_bytes().to_owned(),
+            );
+        withdrawal.sign(&test_secret_key(0xBB));
+
+        let bytes = ControlEnvelope::public_room_withdrawal(owner, 21, 1_700_000_000, withdrawal)
+            .encode();
+        let outcome = service.handle_incoming(&bytes, owner);
+        assert_eq!(outcome, IncomingOutcome::ControlMessage);
+
+        let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("timed out waiting for room withdrawal event")
+            .expect("control event channel closed");
+        match event {
+            ControlEvent::RoomWithdrawal(w) => {
+                assert_eq!(w.sender_node_id, owner);
+                assert_eq!(w.sequence, 21);
+                assert_eq!(w.timestamp_secs, 1_700_000_000);
+                assert_eq!(
+                    w.withdrawal.room_id,
+                    crate::proto::state::TopicId::from_bytes([0x41; 32])
+                );
+                assert!(
+                    w.withdrawal.signature.is_some(),
+                    "the emitted withdrawal carries its signature"
+                );
+            }
+            other => panic!("expected RoomWithdrawal, got {other:?}"),
+        }
+
+        // The peer registry is NOT touched by withdrawals either.
+        assert_eq!(service.peer_count(), 0);
+    }
+
+    /// A tampered withdrawal (payload mutated after signing) is DISCARDED
+    /// at the receive gate: [`IncomingOutcome::WithdrawalAuthRejected`], no
+    /// event — it can never remove an advertisement.
+    #[tokio::test]
+    async fn handle_incoming_tampered_room_withdrawal_rejected() {
+        let local = test_key(0xAA);
+        let owner = test_key(0xBB);
+        let service = test_service(local);
+        let mut events = service.control_events();
+
+        let mut withdrawal =
+            crate::control_plane::advertisement::PublicRoomWithdrawal::minimal(
+                crate::proto::state::TopicId::from_bytes([0x41; 32]),
+                owner.as_bytes().to_owned(),
+            );
+        withdrawal.sign(&test_secret_key(0xBB));
+        // Tamper WITHOUT re-signing: the signature is now stale.
+        withdrawal.room_id = crate::proto::state::TopicId::from_bytes([0x99; 32]);
+
+        let bytes = ControlEnvelope::public_room_withdrawal(owner, 22, 1_700_000_000, withdrawal)
+            .encode();
+        let outcome = service.handle_incoming(&bytes, owner);
+        assert_eq!(
+            outcome,
+            IncomingOutcome::WithdrawalAuthRejected,
+            "a tampered withdrawal must be discarded"
+        );
+        assert_eq!(service.peer_count(), 0);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), events.recv())
+                .await
+                .is_err(),
+            "tampered withdrawal must not emit an event"
+        );
+    }
+
+    /// An unsigned withdrawal is untrusted and discarded — a withdrawal
+    /// can never remove an advertisement without a valid signature.
+    #[tokio::test]
+    async fn handle_incoming_unsigned_room_withdrawal_rejected() {
+        let local = test_key(0xAA);
+        let owner = test_key(0xBB);
+        let service = test_service(local);
+        let mut events = service.control_events();
+
+        let withdrawal = crate::control_plane::advertisement::PublicRoomWithdrawal::minimal(
+            crate::proto::state::TopicId::from_bytes([0x41; 32]),
+            owner.as_bytes().to_owned(),
+        );
+
+        let bytes =
+            ControlEnvelope::public_room_withdrawal(owner, 23, 1_700_000_000, withdrawal).encode();
+        let outcome = service.handle_incoming(&bytes, owner);
+        assert_eq!(
+            outcome,
+            IncomingOutcome::WithdrawalAuthRejected,
+            "an unsigned withdrawal must be discarded"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), events.recv())
+                .await
+                .is_err(),
+            "unsigned withdrawal must not emit an event"
+        );
+    }
+
+    /// A withdrawal signed by a NON-authority member verifies for its
+    /// publisher but is NOT the room's designated authority — the
+    /// verified-but-spoofed withdrawal is discarded and can never remove
+    /// the room's advertisement (same authoritative identity rules as
+    /// advertisements, BORU-DIR-03).
+    #[tokio::test]
+    async fn handle_incoming_non_authoritative_room_withdrawal_rejected() {
+        let local = test_key(0xAA);
+        let owner = test_key(0xBB);
+        let member = test_key(0xCC); // a room member, not the authority
+        let service = test_service(local);
+        let mut events = service.control_events();
+
+        let mut withdrawal =
+            crate::control_plane::advertisement::PublicRoomWithdrawal::minimal(
+                crate::proto::state::TopicId::from_bytes([0x41; 32]),
+                owner.as_bytes().to_owned(),
+            );
+        // The MEMBER signs, but the room authority is `owner`.
+        withdrawal.sign(&test_secret_key(0xCC));
+
+        let bytes =
+            ControlEnvelope::public_room_withdrawal(member, 24, 1_700_000_000, withdrawal).encode();
+        let outcome = service.handle_incoming(&bytes, member);
+        assert_eq!(
+            outcome,
+            IncomingOutcome::WithdrawalNotAuthoritative,
+            "a verified-but-non-authority withdrawal must be discarded"
+        );
+        assert_eq!(service.peer_count(), 0);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), events.recv())
+                .await
+                .is_err(),
+            "non-authoritative withdrawal must not emit an event"
+        );
+    }
+
+    /// `announce_room_withdrawal` broadcasts a PUBLIC_ROOM_WITHDRAWAL
+    /// control-plane envelope carrying the signed withdrawal — never a
+    /// chat message, never a legacy discovery message.
+    #[tokio::test]
+    async fn announce_room_withdrawal_broadcasts_signed_envelope() {
+        let local = test_key(0xAA);
+        let (cmd_tx, mut cmd_rx) = irpc_mpsc::channel::<Command>(64);
+        let (_ev_tx, ev_rx) = irpc_mpsc::channel::<Event>(64);
+        let sender = GossipSender::new(cmd_tx);
+        let receiver = GossipReceiver::new(ev_rx);
+        let service = DiscoveryService::from_subscription(test_topic(), sender, receiver, local);
+
+        // Owner == publisher == local node.
+        let mut withdrawal =
+            crate::control_plane::advertisement::PublicRoomWithdrawal::minimal(
+                crate::proto::state::TopicId::from_bytes([0x41; 32]),
+                local.as_bytes().to_owned(),
+            );
+        withdrawal.sign(&test_secret_key(0xAA));
+        assert_eq!(
+            service
+                .announce_room_withdrawal(withdrawal.clone())
+                .await
+                .unwrap(),
+            AnnounceOutcome::Announced
+        );
+
+        let command = tokio::time::timeout(Duration::from_secs(5), cmd_rx.recv())
+            .await
+            .expect("timed out waiting for room withdrawal broadcast")
+            .expect("channel receive failed")
+            .expect("channel closed before broadcast");
+        let Command::Broadcast(bytes) = command else {
+            panic!("expected Broadcast command, got {command:?}");
+        };
+        assert!(bytes.starts_with(&CONTROL_PLANE_MAGIC));
+        assert!(
+            postcard::from_bytes::<DiscoveryMessage>(&bytes).is_err(),
+            "a room withdrawal must never decode as a legacy DiscoveryMessage"
+        );
+        match ControlEnvelope::decode(&bytes).expect("control envelope decodes") {
+            ControlPlaneDecode::Message(env) => {
+                assert_eq!(env.sender_node_id, local);
+                assert_eq!(
+                    env.message_type,
+                    ControlMessageType::PublicRoomWithdrawal
+                );
+                let ControlPayload::PublicRoomWithdrawal(payload) = &env.payload else {
+                    panic!(
+                        "expected PublicRoomWithdrawal payload, got {:?}",
+                        env.payload
+                    );
+                };
+                assert!(
+                    payload.signature.is_some(),
+                    "the announced withdrawal must be signed"
+                );
+                assert_eq!(
+                    payload.verify_signed(&local),
+                    AdvertisementAuth::Verified { publisher: local },
+                    "receivers can attribute the announced withdrawal to this node"
+                );
+            }
+            other => panic!("expected decoded envelope, got {other:?}"),
+        }
     }
 
     /// `send_control` serialises a control-plane envelope (magic `BC`) and

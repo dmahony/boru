@@ -175,7 +175,9 @@ use crate::ui_components::{
     sidebar_empty_state, text_input_field, Avatar, SidebarSectionHeader,
 };
 use crate::{fmt_relay_mode, Message, NetEvent, SignedMessage, Ticket};
-use boru_core::chat_core::{verify_advertisement, RoomAdvertisement, RoomInvitation, DIAGNOSTICS};
+use boru_core::chat_core::{
+    verify_advertisement, verify_room_withdrawal, RoomAdvertisement, RoomInvitation, DIAGNOSTICS,
+};
 use boru_core::diagnostics::DiagnosticEventKind;
 use boru_core::diagnostics::FailureLayer;
 use boru_core::diagnostics::GuiActionError;
@@ -4777,7 +4779,7 @@ pub struct IcedChat {
     pub(crate) directory_store: Arc<StdMutex<DirectoryStore>>,
     /// Channel for receiving room advertisements from the background directory
     /// subscription task.
-    directory_room_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<DirectoryRoomUpdate>>>,
+    directory_room_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<DirectoryRoomEvent>>>,
     /// Topics already queued for automatic subscription after discovery.
     auto_subscribed_rooms: HashSet<TopicId>,
 }
@@ -5117,7 +5119,20 @@ pub struct DiscoveredPeersUpdate {
 ///
 /// Paired with the author's [`PublicKey`] so the receiver can verify the
 /// signature before storing in the [`DirectoryStore`].
-pub struct DirectoryRoomUpdate(pub RoomAdvertisement, pub PublicKey);
+/// Messages received from the dedicated directory gossip subscription in
+/// main.rs and drained by the app on `ConnMonitorTick`.
+///
+/// - [`DirectoryRoomEvent::Advertisement`] carries a verified room
+///   advertisement (upsert into [`DirectoryStore`]).
+/// - [`DirectoryRoomEvent::Withdrawal`] carries a **verified** room
+///   withdrawal (BORU-DIR-09, PDF Task 3.3): remove the matching
+///   advertisement (`topic`, `author`) immediately. The signature was
+///   verified by the directory receiver loop before the event was sent;
+///   TTL expiry remains the safety net if a withdrawal is missed.
+pub enum DirectoryRoomEvent {
+    Advertisement(RoomAdvertisement, PublicKey),
+    Withdrawal(TopicId, PublicKey),
+}
 
 fn apply_discovered_peers_update(peers: &mut Vec<PublicKey>, update: DiscoveredPeersUpdate) {
     peers.retain(|peer| !update.removed.contains(peer));
@@ -6308,6 +6323,13 @@ pub enum AppMessage {
     DeleteDirectoryRoom(TopicId),
     /// A room advertisement was received from the directory gossip topic.
     DirectoryRoomUpdate(RoomAdvertisement, PublicKey),
+    /// A **verified** room withdrawal was received from the directory
+    /// gossip topic (BORU-DIR-09, PDF Task 3.3): remove the matching
+    /// advertisement (`topic`, `author`) immediately. The signature was
+    /// already verified by the directory receiver loop before this message
+    /// was sent; TTL expiry remains the safety net if a withdrawal is
+    /// missed.
+    DirectoryRoomWithdrawal(TopicId, PublicKey),
 
     // ── Terminal tab ──
     /// Event from the embedded terminal backend (feature `terminal`).
@@ -7372,7 +7394,7 @@ impl IcedChat {
         discovered_peers_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<DiscoveredPeersUpdate>>>,
         reconnect_ready_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<PublicKey>>>,
         reconnect_handle: Option<boru_core::control_plane::reconnect::ReconnectHandle>,
-        directory_room_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<DirectoryRoomUpdate>>>,
+        directory_room_rx: Arc<Mutex<tokio::sync::mpsc::Receiver<DirectoryRoomEvent>>>,
         dht: Option<distributed_topic_tracker::Dht>,
         private_dht_disabled: bool,
         iced_diagnostics: IcedMessageJournal,
@@ -10103,6 +10125,7 @@ impl IcedChat {
             AppMessage::DirectoryRoomJoin(..) => "DirectoryRoomJoin",
             AppMessage::DeleteDirectoryRoom(_) => "DeleteDirectoryRoom",
             AppMessage::DirectoryRoomUpdate(..) => "DirectoryRoomUpdate",
+            AppMessage::DirectoryRoomWithdrawal(..) => "DirectoryRoomWithdrawal",
             AppMessage::ToggleDetailsPanel => "ToggleDetailsPanel",
             AppMessage::ToggleMemberList => "ToggleMemberList",
             #[cfg(not(feature = "video-playback"))]
@@ -11147,9 +11170,7 @@ impl IcedChat {
                     tracker.shutdown_shared();
                 }
                 // Remove the local directory entry so the room disappears
-                // from the PUBLIC ROOMS sidebar immediately. There is no
-                // withdrawal/tombstone message yet (BORU-DIR-09); remote
-                // directories drop the advertisement after TTL expiry.
+                // from the PUBLIC ROOMS sidebar immediately.
                 let local_author = self.local_public;
                 let _ = self
                     .directory_store
@@ -11167,11 +11188,16 @@ impl IcedChat {
                         warn!("failed to delete directory advertisement: {err}");
                     }
                 }
+                // BORU-DIR-09 (PDF Task 3.3): emit a withdrawal so remote
+                // directories remove the advertisement immediately instead
+                // of waiting for TTL expiry. TTL remains the safety net if
+                // the withdrawal is missed.
+                self.broadcast_room_withdrawal(topic);
                 self.public_rooms_sidebar_revision =
                     self.public_rooms_sidebar_revision.wrapping_add(1);
                 self.refresh_sidebar_counts();
                 self.push_activity(
-                    "You unlisted a public room — it will leave other directories after the advertisement TTL (no withdrawal message yet).",
+                    "You unlisted a public room — a withdrawal was broadcast so other directories remove it immediately.",
                     ActivityKind::Generic,
                 );
                 iced::Task::none()
@@ -11186,6 +11212,34 @@ impl IcedChat {
                 iced::Task::none()
             }
         }
+    }
+
+    /// Broadcast a signed room withdrawal for `topic` over the directory
+    /// gossip topic (BORU-DIR-09, PDF Task 3.3). Fire-and-forget: remote
+    /// directories remove the matching advertisement when the withdrawal
+    /// verifies; TTL expiry remains the safety net if it is missed.
+    fn broadcast_room_withdrawal(&self, topic: TopicId) {
+        let Some(dir_sender) = self.directory_sender.clone() else {
+            debug!(%topic, "room withdrawal: no directory sender yet; remote directories rely on TTL expiry");
+            return;
+        };
+        let sk = self.secret_key.clone();
+        self.runtime_handle.spawn(async move {
+            let msg = crate::Message::RoomWithdrawal {
+                topic,
+                signature: boru_core::chat_core::sign_room_withdrawal(&topic, &sk),
+            };
+            match SignedMessage::sign_and_encode(&sk, &msg) {
+                Ok(encoded) => {
+                    if let Err(e) = dir_sender.broadcast(encoded).await {
+                        debug!(%topic, error = %e, "room withdrawal broadcast failed (TTL remains the safety net)");
+                    }
+                }
+                Err(e) => {
+                    debug!(%topic, error = %e, "room withdrawal signing failed (TTL remains the safety net)");
+                }
+            }
+        });
     }
 
     /// Build the immediate-broadcast task for a discoverable room's fresh
@@ -14395,6 +14449,19 @@ impl IcedChat {
             | AppMessage::DirectoryRoomJoin(_)
             | AppMessage::DeleteDirectoryRoom(_)
             | AppMessage::DirectoryRoomUpdate(..) => self.update_discover(message),
+            // BORU-DIR-09 (PDF Task 3.3): a verified withdrawal removes the
+            // matching advertisement immediately. In the live app the
+            // withdrawal arrives through the directory channel and is
+            // drained on ConnMonitorTick; this arm covers programmatic /
+            // test delivery of the same semantic event.
+            AppMessage::DirectoryRoomWithdrawal(topic, from) => {
+                let removed = self.directory_store.lock().unwrap().withdraw(topic, from);
+                if removed {
+                    self.public_rooms_sidebar_revision =
+                        self.public_rooms_sidebar_revision.wrapping_add(1);
+                }
+                iced::Task::none()
+            }
             AppMessage::OpenFriendProfile(_) => self.update_contacts(message),
             AppMessage::CloseFriendProfile => self.update_contacts(message),
             AppMessage::ToggleFriendProfileMenu => self.update_contacts(message),
@@ -15946,7 +16013,9 @@ impl IcedChat {
                 {
                     let mut dir_guard = self.directory_room_rx.try_lock();
                     if let Ok(ref mut rx) = dir_guard {
-                        while let Ok(DirectoryRoomUpdate(ad, from)) = rx.try_recv() {
+                        while let Ok(item) = rx.try_recv() {
+                            match item {
+                            DirectoryRoomEvent::Advertisement(ad, from) => {
                             info!(from = %from, topic = %ad.topic, "received room advertisement");
                             // PUBLIC-02: surface genuinely new public-room
                             // announcements in the home screen's Recent
@@ -15994,6 +16063,25 @@ impl IcedChat {
                                     self.discovered_peers.clone(),
                                 ),
                             ));
+                            }
+                            // BORU-DIR-09 (PDF Task 3.3): a verified room
+                            // withdrawal removes the matching advertisement
+                            // immediately — the receiver loop already
+                            // verified the withdrawal signature before
+                            // sending this message. TTL expiry remains the
+                            // safety net if a withdrawal is missed.
+                            DirectoryRoomEvent::Withdrawal(topic, from) => {
+                                let removed = self
+                                    .directory_store
+                                    .lock()
+                                    .unwrap()
+                                    .withdraw(topic, from);
+                                if removed {
+                                    info!(from = %from, topic = %topic, "room advertisement withdrawn");
+                                    directory_changed = true;
+                                }
+                            }
+                            }
                         }
                     }
                 }
@@ -16884,6 +16972,42 @@ impl IcedChat {
             } else {
                 trace!(
                     "RoomAdvertisement signature verification failed from {}",
+                    from.fmt_short()
+                );
+            }
+            return None;
+        }
+
+        // ── RoomWithdrawal handling (BORU-DIR-09, PDF Task 3.3) ──
+        // A verified withdrawal removes the matching advertisement
+        // immediately; TTL expiry remains the safety net if it is missed.
+        if let NetEvent::Message {
+            from,
+            message: Message::RoomWithdrawal {
+                topic: withdrawn_topic,
+                signature,
+            },
+            ..
+        } = event
+        {
+            if verify_room_withdrawal(withdrawn_topic, signature, *from) {
+                let removed = self
+                    .directory_store
+                    .lock()
+                    .unwrap()
+                    .withdraw(*withdrawn_topic, *from);
+                if removed {
+                    self.public_rooms_sidebar_revision =
+                        self.public_rooms_sidebar_revision.wrapping_add(1);
+                    trace!(
+                        "removed RoomAdvertisement from {} for room {}",
+                        from.fmt_short(),
+                        withdrawn_topic
+                    );
+                }
+            } else {
+                trace!(
+                    "RoomWithdrawal signature verification failed from {}",
                     from.fmt_short()
                 );
             }
@@ -18943,7 +19067,7 @@ impl std::hash::Hash for DiscoveredPeersRxHandle {
 
 /// Wrapper for the directory room channel (bounded mpsc).
 #[expect(dead_code)]
-struct DirectoryRoomRxHandle(Arc<Mutex<tokio::sync::mpsc::Receiver<DirectoryRoomUpdate>>>);
+struct DirectoryRoomRxHandle(Arc<Mutex<tokio::sync::mpsc::Receiver<DirectoryRoomEvent>>>);
 
 impl std::hash::Hash for DirectoryRoomRxHandle {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
@@ -25119,7 +25243,7 @@ mod tests {
             tokio::sync::mpsc::channel::<DiscoveredPeersUpdate>(1);
         let (_, dummy_reconnect_rx) = tokio::sync::mpsc::channel::<PublicKey>(1);
         let dummy_reconnect_rx = Arc::new(Mutex::new(dummy_reconnect_rx));
-        let (_, dummy_directory_rx) = tokio::sync::mpsc::channel::<DirectoryRoomUpdate>(1);
+        let (_, dummy_directory_rx) = tokio::sync::mpsc::channel::<DirectoryRoomEvent>(1);
         let dummy_directory_rx = Arc::new(Mutex::new(dummy_directory_rx));
         let (_, dummy_call_rx) = tokio::sync::mpsc::channel::<CallEvent>(1);
         let dummy_call_rx = Arc::new(Mutex::new(dummy_call_rx));
@@ -25319,7 +25443,7 @@ mod tests {
             tokio::sync::mpsc::channel::<DiscoveredPeersUpdate>(1);
         let (_, dummy_reconnect_rx) = tokio::sync::mpsc::channel::<PublicKey>(1);
         let dummy_reconnect_rx = Arc::new(Mutex::new(dummy_reconnect_rx));
-        let (_, dummy_directory_rx) = tokio::sync::mpsc::channel::<DirectoryRoomUpdate>(1);
+        let (_, dummy_directory_rx) = tokio::sync::mpsc::channel::<DirectoryRoomEvent>(1);
         let dummy_directory_rx = Arc::new(Mutex::new(dummy_directory_rx));
         let (_, dummy_call_rx) = tokio::sync::mpsc::channel::<CallEvent>(1);
         let dummy_call_rx = Arc::new(Mutex::new(dummy_call_rx));
@@ -29972,7 +30096,7 @@ mod tests {
         // Replace the app's directory channel with a live one so the test can
         // feed announcements through the same path main.rs's directory
         // receiver uses (dir_tx → directory_room_rx → ConnMonitorTick drain).
-        let (dir_tx, dir_rx) = tokio::sync::mpsc::channel::<DirectoryRoomUpdate>(8);
+        let (dir_tx, dir_rx) = tokio::sync::mpsc::channel::<DirectoryRoomEvent>(8);
         app.directory_room_rx = Arc::new(Mutex::new(dir_rx));
 
         let author = SecretKey::generate().public();
@@ -29989,7 +30113,7 @@ mod tests {
 
         // First announcement: accepted and inserted into the directory.
         dir_tx
-            .try_send(DirectoryRoomUpdate(ad.clone(), author))
+            .try_send(DirectoryRoomEvent::Advertisement(ad.clone(), author))
             .expect("feed announcement");
         let task = app.update(AppMessage::ConnMonitorTick);
         drop(task);
@@ -30006,7 +30130,7 @@ mod tests {
         // Re-broadcast of the SAME room from the SAME author (periodic tick
         // fallback): must not create a second entry.
         dir_tx
-            .try_send(DirectoryRoomUpdate(ad.clone(), author))
+            .try_send(DirectoryRoomEvent::Advertisement(ad.clone(), author))
             .expect("feed re-announcement");
         let task = app.update(AppMessage::ConnMonitorTick);
         drop(task);
@@ -30027,7 +30151,7 @@ mod tests {
         // row per author — assert the store keeps both without collapsing.
         let author2 = SecretKey::generate().public();
         dir_tx
-            .try_send(DirectoryRoomUpdate(ad.clone(), author2))
+            .try_send(DirectoryRoomEvent::Advertisement(ad.clone(), author2))
             .expect("feed second author");
         let task = app.update(AppMessage::ConnMonitorTick);
         drop(task);
@@ -30037,6 +30161,127 @@ mod tests {
             assert_eq!(store.list_active().len(), 2);
             assert!(store.contains(topic, author2));
         }
+    }
+
+    // ── BORU-DIR-09 (PDF Task 3.3): room withdrawals ─────────────────
+    // A verified withdrawal removes the matching advertisement
+    // immediately; TTL expiry remains the safety net if it is missed.
+
+    /// A verified withdrawal for (topic, author) removes the matching
+    /// advertisement from the directory on the next drain.
+    #[test]
+    fn directory_room_withdrawal_removes_matching_advertisement() {
+        let (_runtime, mut app) = build_prewarm_test_app();
+
+        let (dir_tx, dir_rx) = tokio::sync::mpsc::channel::<DirectoryRoomEvent>(8);
+        app.directory_room_rx = Arc::new(Mutex::new(dir_rx));
+
+        let author = SecretKey::generate().public();
+        let topic = TopicId::from_bytes([0xAB; 32]);
+        let ad = RoomAdvertisement {
+            room_name: "Lounge".to_string(),
+            description: String::new(),
+            topic,
+            ticket: boru_core::chat_core::Ticket::new(topic, vec![]).to_string(),
+            member_count: 0,
+            last_activity: 0,
+            expires_after_secs: ADVERT_TTL_SECS,
+        };
+
+        dir_tx
+            .try_send(DirectoryRoomEvent::Advertisement(ad.clone(), author))
+            .expect("feed announcement");
+        let task = app.update(AppMessage::ConnMonitorTick);
+        drop(task);
+        assert!(
+            app.directory_store.lock().unwrap().contains(topic, author),
+            "advertisement present before withdrawal"
+        );
+
+        // Verified withdrawal (signature checked by the receiver loop in
+        // main.rs before this event is sent) removes the entry immediately.
+        dir_tx
+            .try_send(DirectoryRoomEvent::Withdrawal(topic, author))
+            .expect("feed withdrawal");
+        let task = app.update(AppMessage::ConnMonitorTick);
+        drop(task);
+
+        {
+            let store = app.directory_store.lock().unwrap();
+            assert!(
+                !store.contains(topic, author),
+                "withdrawal removed the matching advertisement"
+            );
+            assert_eq!(store.list_active().len(), 0);
+        }
+    }
+
+    /// A spoofed withdrawal (different author) cannot remove another
+    /// author's advertisement — even for the same room topic.
+    #[test]
+    fn directory_room_withdrawal_cannot_remove_other_authors_ad() {
+        let (_runtime, mut app) = build_prewarm_test_app();
+
+        let (dir_tx, dir_rx) = tokio::sync::mpsc::channel::<DirectoryRoomEvent>(8);
+        app.directory_room_rx = Arc::new(Mutex::new(dir_rx));
+
+        let owner = SecretKey::generate().public();
+        let stranger = SecretKey::generate().public();
+        let topic = TopicId::from_bytes([0xCD; 32]);
+        let ad = RoomAdvertisement {
+            room_name: "Lounge".to_string(),
+            description: String::new(),
+            topic,
+            ticket: boru_core::chat_core::Ticket::new(topic, vec![]).to_string(),
+            member_count: 0,
+            last_activity: 0,
+            expires_after_secs: ADVERT_TTL_SECS,
+        };
+
+        dir_tx
+            .try_send(DirectoryRoomEvent::Advertisement(ad.clone(), owner))
+            .expect("feed owner announcement");
+        let task = app.update(AppMessage::ConnMonitorTick);
+        drop(task);
+        assert!(app.directory_store.lock().unwrap().contains(topic, owner));
+
+        // A withdrawal from an author who never advertised the room is
+        // verified by the receiver loop but removes nothing.
+        dir_tx
+            .try_send(DirectoryRoomEvent::Withdrawal(topic, stranger))
+            .expect("feed spoofed withdrawal");
+        let task = app.update(AppMessage::ConnMonitorTick);
+        drop(task);
+
+        {
+            let store = app.directory_store.lock().unwrap();
+            assert!(
+                store.contains(topic, owner),
+                "spoofed withdrawal cannot remove the owner's advertisement"
+            );
+            assert_eq!(store.list_active().len(), 1);
+        }
+    }
+
+    /// A withdrawal for a room nobody advertised is a no-op (no spurious
+    /// directory churn).
+    #[test]
+    fn directory_room_withdrawal_for_unadvertised_room_is_noop() {
+        let (_runtime, mut app) = build_prewarm_test_app();
+
+        let (dir_tx, dir_rx) = tokio::sync::mpsc::channel::<DirectoryRoomEvent>(8);
+        app.directory_room_rx = Arc::new(Mutex::new(dir_rx));
+
+        let author = SecretKey::generate().public();
+        let topic = TopicId::from_bytes([0xEF; 32]);
+
+        dir_tx
+            .try_send(DirectoryRoomEvent::Withdrawal(topic, author))
+            .expect("feed withdrawal");
+        let task = app.update(AppMessage::ConnMonitorTick);
+        drop(task);
+
+        assert_eq!(app.directory_store.lock().unwrap().list_active().len(), 0);
     }
 
     // ── PUBLIC-03: new-user recent-activity entries ─────────────────────
