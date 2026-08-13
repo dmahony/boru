@@ -426,8 +426,11 @@ impl IcedChat {
         use iced::widget::{button, container, scrollable, space, Column, Row, Space};
         use iced::{Alignment, Color, Length};
 
-        const CATALOGUE_ROW_HEIGHT: f32 = 52.0;
-        const OVERSCAN: f32 = 800.0;
+        // BORU-UI-03: row height / overscan come from the typed theme
+        // (mode-independent geometry).
+        let room_theme = crate::theme::BoruTheme::default().rooms;
+        let catalogue_row_height = room_theme.catalogue_row_height;
+        let overscan = room_theme.overscan;
 
         let display_name = &dep.display_name;
 
@@ -488,14 +491,17 @@ impl IcedChat {
                             c.b *= 0.85;
                             c
                         }
-                        _ => Color::from_rgb(0.4, 0.4, 0.4),
+                        _ => {
+                            crate::theme::BoruTheme::for_theme(theme).colors.tag_text
+                        }
                     };
+                    let b = crate::theme::BoruTheme::for_theme(theme);
                     let bg = match status {
                         iced::widget::button::Status::Hovered => Some(iced::Background::Color(
-                            Color::from_rgba(0.3, 0.3, 0.3, 0.06),
+                            b.colors.tag_bg,
                         )),
                         iced::widget::button::Status::Pressed => Some(iced::Background::Color(
-                            Color::from_rgba(0.3, 0.3, 0.3, 0.12),
+                            b.colors.tag_bg_pressed,
                         )),
                         _ => None,
                     };
@@ -504,7 +510,7 @@ impl IcedChat {
                         background: bg,
                         border: iced::Border {
                             color: border_muted(theme),
-                            width: 1.0,
+                            width: b.borders.hairline,
                             radius: SPACE_6.into(),
                         },
                         ..Default::default()
@@ -538,7 +544,7 @@ impl IcedChat {
                     .style(container_surface),
                 );
             } else {
-                let total_h = files.len() as f32 * CATALOGUE_ROW_HEIGHT;
+                let total_h = files.len() as f32 * catalogue_row_height;
                 let catalogue_scroll_offset = dep.catalogue_scroll_offset_bits as f32 / 100.0;
                 let catalogue_viewport_height = dep.catalogue_viewport_height_bits as f32 / 100.0;
 
@@ -548,11 +554,11 @@ impl IcedChat {
                     let view_top = so;
                     let view_bot = so + catalogue_viewport_height.max(200.0);
 
-                    let range_top = (view_top - OVERSCAN).max(0.0);
-                    let range_bot = (view_bot + OVERSCAN).min(total_h);
+                    let range_top = (view_top - overscan).max(0.0);
+                    let range_bot = (view_bot + overscan).min(total_h);
 
-                    let first_idx = (range_top / CATALOGUE_ROW_HEIGHT) as usize;
-                    let mut last_idx = (range_bot / CATALOGUE_ROW_HEIGHT) as usize;
+                    let first_idx = (range_top / catalogue_row_height) as usize;
+                    let mut last_idx = (range_bot / catalogue_row_height) as usize;
 
                     if last_idx >= files.len() {
                         last_idx = files.len().saturating_sub(1);
@@ -561,8 +567,8 @@ impl IcedChat {
                         last_idx = first_idx;
                     }
 
-                    let top_space_h = first_idx as f32 * CATALOGUE_ROW_HEIGHT;
-                    let bottom_start = (last_idx + 1) as f32 * CATALOGUE_ROW_HEIGHT;
+                    let top_space_h = first_idx as f32 * catalogue_row_height;
+                    let bottom_start = (last_idx + 1) as f32 * catalogue_row_height;
                     let bottom_h = (total_h - bottom_start).max(0.0);
 
                     // Top spacer
@@ -591,7 +597,7 @@ impl IcedChat {
                     // Initial render before any viewport event — render first screenful
                     let initial_count = 20.min(files.len());
                     let _top_space_h = 0.0;
-                    let bottom_h = (total_h - initial_count as f32 * CATALOGUE_ROW_HEIGHT).max(0.0);
+                    let bottom_h = (total_h - initial_count as f32 * catalogue_row_height).max(0.0);
 
                     for row in &files[..initial_count] {
                         file_rows = file_rows.push(Self::render_catalogue_row(row, dep.dark_mode, peer));
@@ -703,8 +709,12 @@ impl IcedChat {
                         Row::new()
                             .push(
                                 iced::widget::progress_bar(0.0..=1.0, pct as f32 / 100.0)
-                                    .length(Length::Fixed(80.0))
-                                    .girth(Length::Fixed(6.0)),
+                                    .length(Length::Fixed(
+                                        crate::theme::BoruTheme::default().rooms.progress_length,
+                                    ))
+                                    .girth(Length::Fixed(
+                                        crate::theme::BoruTheme::default().rooms.progress_girth,
+                                    )),
                             )
                             .push(
                                 crate::fonts::type_role_text(
@@ -1093,7 +1103,7 @@ impl IcedChat {
                             text_color: muted,
                             border: iced::Border {
                                 color: border,
-                                width: 1.0,
+                                width: crate::theme::BoruTheme::for_theme(_t).borders.hairline,
                                 radius: SPACE_6.into(),
                             },
                             ..Default::default()
@@ -1405,7 +1415,7 @@ impl IcedChat {
                 border: iced::Border {
                     radius: SPACE_8.into(),
                     color: border_muted(&theme),
-                    width: 1.0,
+                    width: crate::theme::BoruTheme::for_theme(t).borders.hairline,
                 },
                 ..Default::default()
             })
@@ -1456,12 +1466,18 @@ impl IcedChat {
             let mut menu_col = Column::new()
                 .spacing(SPACE_2)
                 .padding(SPACE_4)
-                .width(Length::Fixed(200.0));
+                .width(Length::Fixed(
+                    crate::theme::BoruTheme::default().rooms.banner_width,
+                ));
 
             for (label, msg) in &menu_items {
                 let is_destructive = *label == "Remove Friend" || *label == "Block Friend";
                 let item = button(text(*label).size(TYPO_SM).color(if is_destructive {
-                    Color::from_rgb(0.8, 0.2, 0.2)
+                    // BORU-UI-03: the destructive red rgb(0.8,0.2,0.2) is
+                    // captured by ColorTokens::request_declined in both modes.
+                    crate::theme::BoruTheme::for_theme(&Self::theme_from_dark(dark_mode))
+                        .colors
+                        .request_declined
                 } else {
                     text_remote_body(&Self::theme_from_dark(dark_mode))
                 }))
@@ -1488,14 +1504,17 @@ impl IcedChat {
             }
 
             let menu_panel = container(menu_col)
-                .style(move |t| iced::widget::container::Style {
-                    background: Some(iced::Background::Color(bg_surface(t))),
-                    border: iced::Border {
-                        color: border_muted(t),
-                        width: 1.0,
-                        radius: SPACE_8.into(),
-                    },
-                    ..Default::default()
+                .style(move |t| {
+                    let b = crate::theme::BoruTheme::for_theme(t);
+                    iced::widget::container::Style {
+                        background: Some(iced::Background::Color(bg_surface(t))),
+                        border: iced::Border {
+                            color: border_muted(t),
+                            width: b.borders.hairline,
+                            radius: b.radii.sm.into(),
+                        },
+                        ..Default::default()
+                    }
                 })
                 .padding(SPACE_4);
 
@@ -1949,30 +1968,36 @@ impl IcedChat {
                     .on_press(AppMessage::BrowsePeerCatalogue(peer))
                     .padding([SPACE_8, SPACE_16])
                     .width(Length::Fill)
-                    .style(move |t, _status| iced::widget::button::Style {
-                        background: Some(iced::Background::Color(bg_surface(t))),
-                        text_color: text_remote_body(&Self::theme_from_dark(dark_mode)),
-                        border: iced::Border {
-                            color: border_muted(t),
-                            width: 1.0,
-                            radius: SPACE_6.into(),
-                        },
-                        ..Default::default()
+                    .style(move |t, _status| {
+                        let b = crate::theme::BoruTheme::for_theme(t);
+                        iced::widget::button::Style {
+                            background: Some(iced::Background::Color(bg_surface(t))),
+                            text_color: text_remote_body(&Self::theme_from_dark(dark_mode)),
+                            border: iced::Border {
+                                color: border_muted(t),
+                                width: b.borders.hairline,
+                                radius: SPACE_6.into(),
+                            },
+                            ..Default::default()
+                        }
                     }),
             )
             .push(
                 button(text("Voice").size(TYPO_SM))
                     .padding([SPACE_8, SPACE_16])
                     .width(Length::Fill)
-                    .style(move |t, _status| iced::widget::button::Style {
-                        background: Some(iced::Background::Color(bg_surface(t))),
-                        text_color: Self::muted_color(dark_mode),
-                        border: iced::Border {
-                            color: border_muted(t),
-                            width: 1.0,
-                            radius: SPACE_6.into(),
-                        },
-                        ..Default::default()
+                    .style(move |t, _status| {
+                        let b = crate::theme::BoruTheme::for_theme(t);
+                        iced::widget::button::Style {
+                            background: Some(iced::Background::Color(bg_surface(t))),
+                            text_color: Self::muted_color(dark_mode),
+                            border: iced::Border {
+                                color: border_muted(t),
+                                width: b.borders.hairline,
+                                radius: SPACE_6.into(),
+                            },
+                            ..Default::default()
+                        }
                     }),
             )
             .spacing(SPACE_8);
