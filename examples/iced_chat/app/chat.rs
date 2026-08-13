@@ -132,13 +132,14 @@ impl IcedChat {
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .on_press(AppMessage::ToggleChatOptions)
-                .style(move |t, _status| iced::widget::button::Style {
-                    background: Some(iced::Background::Color(if matches!(t, iced::Theme::Dark) {
-                        Color::from_rgba(0.0, 0.0, 0.0, 0.45)
-                    } else {
-                        Color::from_rgba(0.0, 0.0, 0.0, 0.25)
-                    })),
-                    ..Default::default()
+                .style(move |t, _status| {
+                    let b = crate::theme::BoruTheme::for_theme(t);
+                    iced::widget::button::Style {
+                        background: Some(iced::Background::Color(
+                            b.colors.chat_overlay_backdrop,
+                        )),
+                        ..Default::default()
+                    }
                 });
 
             let options_panel = self.view_chat_options_popover();
@@ -164,13 +165,14 @@ impl IcedChat {
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .on_press(AppMessage::ToggleChatSearch)
-                .style(move |t, _status| iced::widget::button::Style {
-                    background: Some(iced::Background::Color(if matches!(t, iced::Theme::Dark) {
-                        Color::from_rgba(0.0, 0.0, 0.0, 0.35)
-                    } else {
-                        Color::from_rgba(0.0, 0.0, 0.0, 0.15)
-                    })),
-                    ..Default::default()
+                .style(move |t, _status| {
+                    let b = crate::theme::BoruTheme::for_theme(t);
+                    iced::widget::button::Style {
+                        background: Some(iced::Background::Color(
+                            b.colors.chat_search_backdrop,
+                        )),
+                        ..Default::default()
+                    }
                 });
 
             let search_panel = self.view_chat_search_panel();
@@ -202,13 +204,14 @@ impl IcedChat {
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .on_press(AppMessage::ToggleHelp)
-                .style(move |t, _status| iced::widget::button::Style {
-                    background: Some(iced::Background::Color(if matches!(t, iced::Theme::Dark) {
-                        Color::from_rgba(0.0, 0.0, 0.0, 0.55)
-                    } else {
-                        Color::from_rgba(0.0, 0.0, 0.0, 0.35)
-                    })),
-                    ..Default::default()
+                .style(move |t, _status| {
+                    let b = crate::theme::BoruTheme::for_theme(t);
+                    iced::widget::button::Style {
+                        background: Some(iced::Background::Color(
+                            b.colors.dialog_backdrop,
+                        )),
+                        ..Default::default()
+                    }
                 });
 
             let help_panel = widget::container(self.view_help())
@@ -223,7 +226,7 @@ impl IcedChat {
                         ..Default::default()
                     },
                     shadow: iced::Shadow {
-                        color: Color::from_rgba(0.0, 0.0, 0.0, 0.3),
+                        color: crate::theme::BoruTheme::for_theme(t).colors.panel_shadow,
                         offset: iced::Vector::new(0.0, 4.0),
                         blur_radius: 24.0,
                     },
@@ -252,13 +255,14 @@ impl IcedChat {
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .on_press(AppMessage::ToggleMemberList)
-                .style(move |t, _status| iced::widget::button::Style {
-                    background: Some(iced::Background::Color(if matches!(t, iced::Theme::Dark) {
-                        Color::from_rgba(0.0, 0.0, 0.0, 0.45)
-                    } else {
-                        Color::from_rgba(0.0, 0.0, 0.0, 0.25)
-                    })),
-                    ..Default::default()
+                .style(move |t, _status| {
+                    let b = crate::theme::BoruTheme::for_theme(t);
+                    iced::widget::button::Style {
+                        background: Some(iced::Background::Color(
+                            b.colors.chat_overlay_backdrop,
+                        )),
+                        ..Default::default()
+                    }
                 });
 
             let member_list_panel = widget::container(self.view_group_member_list())
@@ -945,7 +949,7 @@ impl IcedChat {
                             .color(text_muted(&theme)),
                         ]
                         .spacing(SPACE_2)
-                        .width(iced::Length::Fixed(150.0)),
+                        .width(thumb.gif_thumbnail_width),
                     )
                     .on_press(AppMessage::SendGif(gif.clone()))
                     .padding(SPACE_4)
@@ -1015,6 +1019,7 @@ impl IcedChat {
         use iced::widget::{button, column, container, row, text};
         use iced::{Alignment, Length};
 
+        let btheme = self.boru_theme();
         let topic_hex = self.topic.to_string();
         let short_topic = &topic_hex[..8.min(topic_hex.len())];
         let conversation = self
@@ -1079,7 +1084,11 @@ impl IcedChat {
             let theme_for_initials = self.theme();
             let is_dark = matches!(theme_for_initials, iced::Theme::Dark);
             let letter_color = crate::presentation::initials_color(&room_name, is_dark);
-            let group_avatar = container(text(display_initials).size(TYPO_SM).color(letter_color))
+            let group_avatar = container(
+                text(display_initials)
+                    .size(btheme.typography.chat_sender)
+                    .color(letter_color),
+            )
                 .width(Length::Fixed(AVATAR_CHAT_HEADER))
                 .height(Length::Fixed(AVATAR_CHAT_HEADER))
                 .center_x(Length::Fixed(AVATAR_CHAT_HEADER))
@@ -1150,7 +1159,11 @@ impl IcedChat {
                     let theme_for_initials = self.theme();
                     let is_dark = matches!(theme_for_initials, iced::Theme::Dark);
                     let letter_color = crate::presentation::initials_color(&room_name, is_dark);
-                    container(text(initials).size(TYPO_SM).color(letter_color))
+                    container(
+                        text(initials)
+                            .size(btheme.typography.chat_sender)
+                            .color(letter_color),
+                    )
                         .width(Length::Fixed(AVATAR_CHAT_HEADER))
                         .height(Length::Fixed(AVATAR_CHAT_HEADER))
                         .center_x(Length::Fixed(AVATAR_CHAT_HEADER))
@@ -1632,7 +1645,7 @@ impl IcedChat {
                     radius: SPACE_12.into(),
                 },
                 shadow: iced::Shadow {
-                    color: iced::Color::from_rgba(0.0, 0.0, 0.0, 0.3),
+                    color: crate::theme::BoruTheme::for_theme(t).colors.panel_shadow,
                     offset: iced::Vector::new(0.0, 4.0),
                     blur_radius: 24.0,
                 },
@@ -1647,6 +1660,8 @@ impl IcedChat {
     pub(crate) fn view_group_member_list(&self) -> iced::Element<'_, AppMessage> {
         use iced::widget::{button, column, container, row, text, Space};
         use iced::{Alignment, Length};
+
+        let btheme = self.boru_theme();
 
         // Resolve the group via conversation store -> group_id -> storage -> list_group_members.
         let group_members: Option<Vec<(String, String, bool)>> = (|| {
@@ -1739,7 +1754,11 @@ impl IcedChat {
                         let letter_color = crate::presentation::initials_color(&name, dark);
 
                         let avatar =
-                            container(text(display_initials).size(TYPO_XS).color(letter_color))
+                            container(
+                                text(display_initials)
+                                    .size(btheme.typography.chat_metadata)
+                                    .color(letter_color),
+                            )
                                 .width(Length::Fixed(28.0))
                                 .height(Length::Fixed(28.0))
                                 .center_x(Length::Fixed(28.0))
@@ -1814,7 +1833,7 @@ impl IcedChat {
                     ..Default::default()
                 },
                 shadow: iced::Shadow {
-                    color: iced::Color::from_rgba(0.0, 0.0, 0.0, 0.3),
+                    color: crate::theme::BoruTheme::for_theme(t).colors.panel_shadow,
                     offset: iced::Vector::new(0.0, 4.0),
                     blur_radius: 24.0,
                 },
@@ -2012,7 +2031,7 @@ impl IcedChat {
                     radius: SPACE_12.into(),
                 },
                 shadow: iced::Shadow {
-                    color: iced::Color::from_rgba(0.0, 0.0, 0.0, 0.3),
+                    color: crate::theme::BoruTheme::for_theme(t).colors.panel_shadow,
                     offset: iced::Vector::new(0.0, 4.0),
                     blur_radius: 24.0,
                 },
@@ -2868,6 +2887,7 @@ impl IcedChat {
         let image_entry_count = lc.image_entry_count;
 
         let theme = self.theme();
+        let btheme = self.boru_theme();
 
         // ── Empty state ──
         if self.entries.is_empty() {
@@ -3309,7 +3329,7 @@ impl IcedChat {
                 if let Some(ref title) = preview.title {
                     preview_children.push(
                         text(title)
-                            .size(TYPO_SM)
+                            .size(btheme.typography.chat_sender)
                             .font(crate::fonts::TypeRole::ChatMessage.font())
                             .wrapping(Wrapping::WordOrGlyph)
                             .color(accent_primary(&theme))
@@ -3319,7 +3339,7 @@ impl IcedChat {
                 if let Some(ref desc) = preview.description {
                     preview_children.push(
                         text(desc)
-                            .size(TYPO_XS)
+                            .size(btheme.typography.chat_metadata)
                             .font(crate::fonts::TypeRole::ChatMessage.font())
                             .wrapping(Wrapping::WordOrGlyph)
                             .color(text_muted(&theme))
@@ -3339,7 +3359,7 @@ impl IcedChat {
                     let display_url = link_preview::truncate_url(img_url, 60);
                     preview_children.push(
                         text(display_url)
-                            .size(TYPO_XXS)
+                            .size(btheme.typography.chat_metadata)
                             .font(crate::fonts::TypeRole::ChatMessage.font())
                             .wrapping(Wrapping::WordOrGlyph)
                             .color(text_muted(&theme))
@@ -3353,7 +3373,7 @@ impl IcedChat {
                             Column::new()
                                 .push(
                                     text(link_preview::truncate_url(&preview.url, 60))
-                                        .size(TYPO_XXS)
+                                        .size(btheme.typography.chat_metadata)
                                         .font(crate::fonts::TypeRole::ChatMessage.font())
                                         .color(text_muted(&theme)),
                                 )
@@ -3374,7 +3394,7 @@ impl IcedChat {
                     const SP: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
                     let s = SP[self.splash_spinner_frame % SP.len()];
                     text(format!("{s} Loading preview…"))
-                        .size(TYPO_XS)
+                        .size(btheme.typography.chat_metadata)
                         .font(crate::fonts::TypeRole::ChatMessage.font())
                         .color(text_muted(&theme))
                 });
@@ -3417,7 +3437,11 @@ impl IcedChat {
                     .unwrap_or_else(|| "?".to_string());
                 let dark = matches!(self.theme(), iced::Theme::Dark);
                 let letter_color = crate::presentation::initials_color(name, dark);
-                container(text(initial).size(TYPO_SM).color(letter_color))
+                container(
+                    text(initial)
+                        .size(btheme.typography.chat_sender)
+                        .color(letter_color),
+                )
                     .width(Length::Fixed(AVATAR_MSG))
                     .height(Length::Fixed(AVATAR_MSG))
                     .center_x(Length::Fixed(AVATAR_MSG))
@@ -3469,7 +3493,7 @@ impl IcedChat {
                             .push(
                                 container(
                                     text(&entry.body)
-                                        .size(TYPO_XS)
+                                        .size(btheme.typography.chat_metadata)
                                         .font(crate::fonts::TypeRole::ChatMessage.font())
                                         .color(text_muted(&theme))
                                         .wrapping(Wrapping::WordOrGlyph),
@@ -3686,7 +3710,7 @@ impl IcedChat {
                     .push(
                         text(reactions_text)
                             .color(text_muted(&theme))
-                            .size(TYPO_SM)
+                            .size(btheme.typography.chat_sender)
                             .font(crate::fonts::TypeRole::ChatMessage.font())
                             .wrapping(Wrapping::WordOrGlyph)
                             .width(Length::Fill),
@@ -3902,7 +3926,7 @@ impl IcedChat {
                 iced::Element::from(text("…").size(TYPO_MD))
             } else {
                 iced::Element::from(
-                    icon_svg(ICON_SEND, 18.0)
+                    icon_svg(ICON_SEND, IconSize::Sm.px())
                         .style(|_t, _s| iced::widget::svg::Style {
                             color: Some(iced::Color::WHITE),
                         }),
@@ -4084,17 +4108,22 @@ impl IcedChat {
         ))
             .on_press(AppMessage::ReportBug)
             .padding([SPACE_6, SPACE_12])
-            .style(|t, status| iced::widget::button::Style {
-                background: Some(iced::Background::Color(bg_surface(t))),
-                border: iced::Border {
-                    color: border_muted(t),
-                    width: 1.0,
-                    radius: SPACE_8.into(),
-                },
-                text_color: text_muted_style(t)
-                    .color
-                    .unwrap_or(iced::Color::from_rgb(0.6, 0.6, 0.6)),
-                ..Default::default()
+            .style(|t, status| {
+                let b = crate::theme::BoruTheme::for_theme(t);
+                iced::widget::button::Style {
+                    background: Some(iced::Background::Color(bg_surface(t))),
+                    border: iced::Border {
+                        color: border_muted(t),
+                        width: b.borders.hairline,
+                        radius: b.radii.sm.into(),
+                    },
+                    // BORU-UI-03: the muted fallback grey rgb(0.6,0.6,0.6) is
+                    // captured by ColorTokens::glyph_muted_dark in both modes.
+                    text_color: text_muted_style(t)
+                        .color
+                        .unwrap_or(b.colors.glyph_muted_dark),
+                    ..Default::default()
+                }
             });
 
         let footer = Column::new()

@@ -117,6 +117,15 @@ pub struct ColorTokens {
     pub dialog_backdrop: Color,
     /// Incoming-call dialog backdrop (currently a heavier 0.72 alpha).
     pub incoming_call_backdrop: Color,
+    /// Chat-screen overlay backdrop — chat options & member-list panels
+    /// (light rgba(0,0,0,0.25), dark rgba(0,0,0,0.45); chat.rs:137/257).
+    pub chat_overlay_backdrop: Color,
+    /// Chat search-panel backdrop (light rgba(0,0,0,0.15), dark
+    /// rgba(0,0,0,0.35); chat.rs:169).
+    pub chat_search_backdrop: Color,
+    /// Elevated-panel drop shadow colour (rgba(0,0,0,0.30), both modes;
+    /// chat.rs:226/1635/1817/2015).
+    pub panel_shadow: Color,
     /// Incoming-call dialog panel background rgb(0.12,0.13,0.17).
     pub dialog_panel_bg: Color,
     /// Incoming-call dialog panel border rgb(0.35,0.38,0.45).
@@ -307,6 +316,9 @@ impl ColorTokens {
             soft_tint_alpha: 0.08,
             dialog_backdrop: Color::from_rgba(0.0, 0.0, 0.0, 0.35),
             incoming_call_backdrop: Color::from_rgba(0.0, 0.0, 0.0, 0.72),
+            chat_overlay_backdrop: Color::from_rgba(0.0, 0.0, 0.0, 0.25),
+            chat_search_backdrop: Color::from_rgba(0.0, 0.0, 0.0, 0.15),
+            panel_shadow: Color::from_rgba(0.0, 0.0, 0.0, 0.30),
             dialog_panel_bg: Color::from_rgb(0.12, 0.13, 0.17),
             dialog_panel_border: Color::from_rgb(0.35, 0.38, 0.45),
             media_frame_bg: Color::from_rgb(0.055, 0.06, 0.07),
@@ -422,6 +434,9 @@ impl ColorTokens {
             dialog_backdrop: Color::from_rgba(0.0, 0.0, 0.0, 0.55),
             // Theme-independent surfaces stay the same in dark mode.
             incoming_call_backdrop: Color::from_rgba(0.0, 0.0, 0.0, 0.72),
+            chat_overlay_backdrop: Color::from_rgba(0.0, 0.0, 0.0, 0.45),
+            chat_search_backdrop: Color::from_rgba(0.0, 0.0, 0.0, 0.35),
+            panel_shadow: Color::from_rgba(0.0, 0.0, 0.0, 0.30),
             dialog_panel_bg: Color::from_rgb(0.12, 0.13, 0.17),
             dialog_panel_border: Color::from_rgb(0.35, 0.38, 0.45),
             media_frame_bg: Color::from_rgb(0.055, 0.06, 0.07),
@@ -1926,5 +1941,26 @@ mod tests {
         // Controls (audit §3.12)
         assert_eq!(theme.controls.header_height, 52.0);
         assert_eq!(theme.controls.slider_width, 160.0);
+        // Chat overlay backdrops + panel shadow (audit §3.3 raw rgba values)
+        assert_eq!(
+            theme.colors.chat_overlay_backdrop,
+            iced::Color::from_rgba(0.0, 0.0, 0.0, 0.25)
+        );
+        assert_eq!(
+            theme.colors.chat_search_backdrop,
+            iced::Color::from_rgba(0.0, 0.0, 0.0, 0.15)
+        );
+        assert_eq!(
+            theme.colors.panel_shadow,
+            iced::Color::from_rgba(0.0, 0.0, 0.0, 0.30)
+        );
+        assert_eq!(
+            BoruTheme::dark().colors.chat_overlay_backdrop,
+            iced::Color::from_rgba(0.0, 0.0, 0.0, 0.45)
+        );
+        assert_eq!(
+            BoruTheme::dark().colors.chat_search_backdrop,
+            iced::Color::from_rgba(0.0, 0.0, 0.0, 0.35)
+        );
     }
 }
