@@ -6408,6 +6408,14 @@ pub enum AppMessage {
     CloseGroups,
     /// Join a room from the directory.
     DirectoryRoomJoin(RoomAdvertisement),
+    /// BORU-DIR-16 (PDF Task 6.1): the user pressed Join on a Discover
+    /// room card. Carries the advertised room's stable topic id bytes
+    /// (`room_id` — the room's gossip [`TopicId`]). The handler validates
+    /// protocol compatibility from the directory cache, then dispatches
+    /// the existing public-room join path (`OpenRoom`), which creates the
+    /// local conversation record exactly once and subscribes through
+    /// normal room-topic logic.
+    DirectoryRoomJoinById([u8; 32]),
     /// Delete a locally-created room advertisement from the directory.
     DeleteDirectoryRoom(TopicId),
     /// A room advertisement was received from the directory gossip topic.
@@ -10224,6 +10232,7 @@ impl IcedChat {
             AppMessage::OpenGroups => "OpenGroups",
             AppMessage::CloseGroups => "CloseGroups",
             AppMessage::DirectoryRoomJoin(..) => "DirectoryRoomJoin",
+            AppMessage::DirectoryRoomJoinById(_) => "DirectoryRoomJoinById",
             AppMessage::DeleteDirectoryRoom(_) => "DeleteDirectoryRoom",
             AppMessage::DirectoryRoomUpdate(..) => "DirectoryRoomUpdate",
             AppMessage::DirectoryRoomWithdrawal(..) => "DirectoryRoomWithdrawal",
@@ -13399,6 +13408,19 @@ impl IcedChat {
                         entry.archived = false;
                         self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
                     }
+                } else {
+                    // BORU-DIR-16 (PDF Task 6.1 step 5): a successful join
+                    // from the directory creates the local conversation
+                    // record exactly once. The control-plane directory
+                    // never materializes entries on discovery (PDF Core
+                    // rule: "Do not persist discovered rooms as
+                    // conversations until the user actually joins"), so
+                    // there is nothing to unarchive here — create the
+                    // record now that the join succeeded, using the
+                    // advertised metadata. If the room is not a directory
+                    // room (e.g. legacy ticket join with no prior entry),
+                    // this is a no-op.
+                    self.ensure_directory_joined_record(topic);
                 }
 
                 // Record RoomJoined diagnostic event so diagnostic evidence
@@ -14600,6 +14622,7 @@ impl IcedChat {
             | AppMessage::DiscoverSortChanged(_)
             | AppMessage::DiscoverClearFilters
             | AppMessage::DirectoryRoomJoin(_)
+            | AppMessage::DirectoryRoomJoinById(_)
             | AppMessage::DeleteDirectoryRoom(_)
             | AppMessage::DirectoryRoomUpdate(..) => self.update_discover(message),
             // BORU-DIR-09 (PDF Task 3.3): a verified withdrawal removes the
@@ -31187,6 +31210,236 @@ mod tests {
         assert!(app.discover_search_query.is_empty());
         assert!(!app.discover_filter_compatible);
         assert!(app.discover_selected_tags.is_empty());
+    }
+
+    // ── BORU-DIR-16 (PDF Task 6.1): join only after explicit user action ──
+    // The Join button on a room card invokes the normal public-room join
+    // path (OpenRoom). Seeing a room never subscribes to it; joining
+    // creates one local room record and one intended subscription; failed
+    // joins leave the directory entry intact and report a useful error.
+
+    /// Build a `RoomDirectory` with a single compatible advertisement.
+    fn directory_with_compatible_room(
+        room_id: TopicId,
+        name: &str,
+    ) -> boru_core::room_directory::RoomDirectory {
+        let mut dir = boru_core::room_directory::RoomDirectory::new();
+        let owner = SecretKey::generate().public();
+        let mut advert =
+            boru_core::control_plane::advertisement::PublicRoomAdvertisement::minimal(
+                room_id,
+                name.to_string(),
+                *owner.as_bytes(),
+            );
+        advert.room_protocol_version = boru_core::public_room::PROTOCOL_VERSION;
+        dir.apply_advertisement(
+            advert,
+            owner,
+            boru_core::control_plane::advertisement::AdvertisementAuth::Verified {
+                publisher: owner,
+            },
+            1,
+            1000,
+        );
+        dir
+    }
+
+    /// Seeing a room (building the Discover browse surface over a cache
+    /// with an advertisement) never subscribes to it and never creates a
+    /// conversation record — the directory is a pure browse surface (PDF
+    /// Core rule / Task 5.1 acceptance).
+    #[test]
+    fn discover_view_never_subscribes_or_creates_record() {
+        let (_runtime, mut app) = build_prewarm_test_app();
+        let room_id = TopicId::from_bytes([0x61; 32]);
+        let dir = directory_with_compatible_room(room_id, "Lounge");
+        app.room_directory = Some(Arc::new(StdMutex::new(dir)));
+
+        // Building the browse surface must not mutate membership.
+        let dep = app.discover_dependency();
+        let _screen = IcedChat::view_discover_content(&dep);
+
+        assert!(
+            app.conversations.is_empty(),
+            "opening Discover must not create any subscription"
+        );
+        assert!(
+            app.conversation_store.find(&room_id).is_none(),
+            "opening Discover must not create a conversation record"
+        );
+        assert_eq!(
+            dep.rooms.len(),
+            1,
+            "the advertised room is visible in the browse surface"
+        );
+    }
+
+    /// `directory_join_target` resolves a compatible room to its normal
+    /// join topic, and blocks known-incompatible rooms with a useful
+    /// explanation (PDF Task 6.1 step 2) before any subscription.
+    #[test]
+    fn directory_join_target_blocks_incompatible_rooms() {
+        let (_runtime, app) = build_prewarm_test_app();
+
+        // Compatible room → Ok(topic).
+        let compatible_id = TopicId::from_bytes([0x62; 32]);
+        let dir = directory_with_compatible_room(compatible_id, "Compatible Room");
+        let mut app = app;
+        app.room_directory = Some(Arc::new(StdMutex::new(dir)));
+        assert_eq!(
+            app.directory_join_target(*compatible_id.as_bytes()),
+            Ok(compatible_id)
+        );
+
+        // UpgradeRequired room → Err with a useful message.
+        let mut dir = boru_core::room_directory::RoomDirectory::new();
+        let owner = SecretKey::generate().public();
+        let mut advert =
+            boru_core::control_plane::advertisement::PublicRoomAdvertisement::minimal(
+                compatible_id,
+                "Future Room".to_string(),
+                *owner.as_bytes(),
+            );
+        advert.room_protocol_version = boru_core::public_room::PROTOCOL_VERSION + 1;
+        dir.apply_advertisement(
+            advert,
+            owner,
+            boru_core::control_plane::advertisement::AdvertisementAuth::Verified {
+                publisher: owner,
+            },
+            1,
+            1000,
+        );
+        app.room_directory = Some(Arc::new(StdMutex::new(dir)));
+        let err = app
+            .directory_join_target(*compatible_id.as_bytes())
+            .expect_err("upgrade-required room must be blocked");
+        assert!(
+            err.contains("newer"),
+            "block reason explains the upgrade requirement: {err}"
+        );
+    }
+
+    /// A blocked (known-incompatible) join reports a useful error, returns
+    /// no subscription task, and leaves the directory entry intact.
+    #[test]
+    fn directory_join_incompatible_reports_error_and_keeps_entry() {
+        let (_runtime, mut app) = build_prewarm_test_app();
+        let room_id = TopicId::from_bytes([0x63; 32]);
+        let mut dir = boru_core::room_directory::RoomDirectory::new();
+        let owner = SecretKey::generate().public();
+        let mut advert =
+            boru_core::control_plane::advertisement::PublicRoomAdvertisement::minimal(
+                room_id,
+                "Incompatible Room".to_string(),
+                *owner.as_bytes(),
+            );
+        advert.room_protocol_version = boru_core::public_room::PROTOCOL_VERSION + 1;
+        dir.apply_advertisement(
+            advert,
+            owner,
+            boru_core::control_plane::advertisement::AdvertisementAuth::Verified {
+                publisher: owner,
+            },
+            1,
+            1000,
+        );
+        app.room_directory = Some(Arc::new(StdMutex::new(dir)));
+
+        let task = app.update(AppMessage::DirectoryRoomJoinById(*room_id.as_bytes()));
+        drop(task);
+
+        // Useful error surfaced.
+        assert!(
+            app.entries
+                .iter()
+                .any(|e| e.body.contains("Cannot join room") && e.body.contains("newer")),
+            "blocked join must surface a useful error"
+        );
+        // Directory entry intact — a failed join never removes it.
+        let dir = app.room_directory.as_ref().unwrap().lock().unwrap();
+        assert!(
+            dir.get(&room_id).is_some(),
+            "failed join leaves the directory entry intact"
+        );
+        // No conversation record was created for the blocked room.
+        assert!(app.conversation_store.find(&room_id).is_none());
+    }
+
+    /// A successful join creates the local conversation record exactly
+    /// once from the advertised metadata; a second call (re-open) is a
+    /// no-op — never a duplicate.
+    #[test]
+    fn directory_join_creates_exactly_one_conversation_record() {
+        let (_runtime, mut app) = build_prewarm_test_app();
+        let room_id = TopicId::from_bytes([0x64; 32]);
+        let dir = directory_with_compatible_room(room_id, "Lounge");
+        app.room_directory = Some(Arc::new(StdMutex::new(dir)));
+
+        assert!(
+            app.ensure_directory_joined_record(room_id),
+            "first successful join creates the record"
+        );
+        assert!(
+            !app.ensure_directory_joined_record(room_id),
+            "second call is a no-op — exactly one record"
+        );
+
+        let entries: Vec<_> = app
+            .conversation_store
+            .iter()
+            .filter(|e| e.topic == room_id)
+            .collect();
+        assert_eq!(entries.len(), 1, "exactly one local conversation record");
+        assert_eq!(entries[0].name, "Lounge", "advertised name is used");
+        assert_eq!(
+            entries[0].visibility,
+            boru_core::control_plane::advertisement::RoomVisibility::PublicDiscoverable,
+            "directory rooms are discoverable by visibility"
+        );
+    }
+
+    /// A non-directory room (e.g. a direct chat topic) is never
+    /// materialized by the join-record helper — directory joins must not
+    /// fabricate records for rooms that were never advertised.
+    #[test]
+    fn directory_join_record_helper_ignores_non_directory_rooms() {
+        let (_runtime, mut app) = build_prewarm_test_app();
+        let non_directory = TopicId::from_bytes([0x65; 32]);
+        assert!(
+            !app.ensure_directory_joined_record(non_directory),
+            "non-directory topic is not materialized"
+        );
+        assert!(app.conversation_store.find(&non_directory).is_none());
+    }
+
+    /// A failed join (RoomJoinFailed from the async subscribe path) does
+    /// not touch the directory cache — the entry survives and the error
+    /// is reported to the user.
+    #[test]
+    fn directory_join_failure_leaves_entry_intact() {
+        let (_runtime, mut app) = build_prewarm_test_app();
+        let room_id = TopicId::from_bytes([0x66; 32]);
+        let dir = directory_with_compatible_room(room_id, "Lounge");
+        app.room_directory = Some(Arc::new(StdMutex::new(dir)));
+
+        let generation = app.room_generation;
+        let task = app.update(AppMessage::RoomJoinFailed {
+            error: "timed out waiting for a peer".to_string(),
+            generation,
+        });
+        drop(task);
+
+        let dir = app.room_directory.as_ref().unwrap().lock().unwrap();
+        assert!(
+            dir.get(&room_id).is_some(),
+            "failed join leaves the directory entry intact"
+        );
+        assert!(
+            app.chat_list_error.contains("Failed to join room"),
+            "useful error is reported: {}",
+            app.chat_list_error
+        );
     }
 
     // ── BORU-DIR-09 (PDF Task 3.3): room withdrawals ─────────────────

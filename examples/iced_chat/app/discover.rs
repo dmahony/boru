@@ -1218,9 +1218,10 @@ impl IcedChat {
     ///
     /// A minimal advertisement (empty description, no tags, no count) still
     /// renders a correct card: every optional field degrades to nothing.
-    /// The action button is rendered but not yet wired (Join wiring is
-    /// BORU-DIR-16; opening the directory never changes membership — PDF
-    /// Task 5.1).
+    /// The action button is wired (BORU-DIR-16): Join dispatches the
+    /// directory join path, Open dispatches the normal room-open path —
+    /// opening the directory itself never changes membership (PDF Task
+    /// 5.1).
     #[allow(clippy::too_many_lines)]
     pub(crate) fn render_discover_room_card(
         room: &DiscoverRoomRow,
@@ -1237,18 +1238,28 @@ impl IcedChat {
             .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
             .width(Length::Fill);
 
+        // BORU-DIR-16 (PDF Task 6.1): the action button only *appears*
+        // here; pressing it is the ONLY way the directory changes local
+        // membership. The advertised room_id IS the room's gossip topic
+        // (the deterministic identity from topic_derivation), so joining
+        // routes through the normal public-room join path (OpenRoom),
+        // which creates the conversation record exactly once and
+        // subscribes via normal room-topic logic.
+        let topic = TopicId::from_bytes(room.room_id);
         let action: iced::Element<'static, AppMessage> = match room.offered_action {
             boru_core::room_directory::RoomAction::Join => button(
                 text(discover_action_label(room.offered_action))
                     .size(TYPO_XS)
                     .color(Color::WHITE),
             )
+            .on_press(AppMessage::DirectoryRoomJoinById(room.room_id))
             .padding([SPACE_4, SPACE_10])
             .style(BUTTON_PRIMARY)
             .into(),
             boru_core::room_directory::RoomAction::Open => button(
                 text(discover_action_label(room.offered_action)).size(TYPO_XS),
             )
+            .on_press(AppMessage::OpenRoom(topic))
             .padding([SPACE_4, SPACE_10])
             .style(BUTTON_GHOST_BG)
             .into(),
@@ -2286,6 +2297,30 @@ impl IcedChat {
                     }
                 }
             }
+            AppMessage::DirectoryRoomJoinById(room_id) => {
+                // BORU-DIR-16 (PDF Task 6.1): explicit Join from the
+                // Discover card. The advertisement is metadata, never an
+                // authorization (PDF Task 6.1 step 4) — the directory
+                // only proves a room was advertised. Joining is initiated
+                // only here (the user pressed Join) and only after the
+                // cache's protocol-compatibility verdict is checked (PDF
+                // Task 6.1 step 2: block or explain known-incompatible
+                // rooms before attempting a subscription). The normal
+                // public-room join path (OpenRoom) then subscribes via
+                // room-topic logic and, on success, creates the local
+                // conversation record exactly once.
+                match self.directory_join_target(room_id) {
+                    Ok(topic) => {
+                        info!(topic = %topic, "joining room from directory (explicit user action)");
+                        iced::Task::done(AppMessage::OpenRoom(topic))
+                    }
+                    Err(reason) => {
+                        warn!(reason = %reason, "directory join blocked");
+                        self.push_system(format!("Cannot join room: {reason}"));
+                        iced::Task::none()
+                    }
+                }
+            }
             AppMessage::DeleteDirectoryRoom(topic) => {
                 let local_author = self.local_public;
                 let removed = self
@@ -2736,6 +2771,121 @@ impl IcedChat {
 }
 
 impl IcedChat {
+    /// BORU-DIR-16 (PDF Task 6.1): resolve a Discover-card Join click
+    /// into the normal public-room join path.
+    ///
+    /// The advertisement itself is never treated as authorization (PDF
+    /// Task 6.1 step 4). The Join button only renders for rooms whose
+    /// cache verdict is `Join` (compatible + not joined), but the handler
+    /// re-validates against the live cache so a stale render can never
+    /// subscribe to a known-incompatible room (PDF Task 6.1 step 2).
+    ///
+    /// The advertised `room_id` IS the room's gossip topic (the
+    /// deterministic identity from `topic_derivation::public_room_topic`
+    /// — see the advertisement docs), so joining routes through the
+    /// existing `OpenRoom` slow path, which subscribes via normal
+    /// room-topic logic and creates the conversation record exactly once
+    /// on success. No ticket exchange is needed: public discoverable
+    /// rooms are joined by subscribing to their advertised topic, and
+    /// bootstrap peers come from the normal OpenRoom path (discovered
+    /// peers + saved RoomStore).
+    ///
+    /// Returns `Ok(topic)` when the join may proceed, or `Err(reason)`
+    /// with a user-facing explanation when it must be blocked.
+    pub(crate) fn directory_join_target(&self, room_id: [u8; 32]) -> Result<TopicId, String> {
+        use boru_core::room_directory::RoomCompatibility;
+
+        let topic = TopicId::from_bytes(room_id);
+
+        // Prefer the bounded control-plane cache (the Discover source of
+        // truth). The legacy directory-store fallback (tests / discovery
+        // service unavailable) carries no compatibility metadata — the
+        // browse surface treats those rows as compatible.
+        let compat = match &self.room_directory {
+            Some(dir) => dir.lock().unwrap().get(&topic).map(|e| e.compatibility),
+            None => None,
+        };
+
+        match compat {
+            Some(RoomCompatibility::UpgradeRequired) => {
+                Err("this room requires a newer version of Boru".to_string())
+            }
+            Some(RoomCompatibility::Unsupported) => {
+                Err("this room uses an unsupported protocol version".to_string())
+            }
+            // Compatible, Unknown, or legacy fallback: proceed to the
+            // normal join path.
+            _ => Ok(topic),
+        }
+    }
+
+    /// Look up the current advertisement for a directory room, preferring
+    /// the bounded control-plane cache (the Discover source of truth) and
+    /// falling back to the legacy directory store (tests / discovery
+    /// service unavailable). Used after a successful join to seed the
+    /// local conversation record from advertised metadata (BORU-DIR-16,
+    /// PDF Task 6.1 step 5).
+    pub(crate) fn directory_advert_for_topic(
+        &self,
+        topic: &TopicId,
+    ) -> Option<boru_core::control_plane::advertisement::PublicRoomAdvertisement> {
+        if let Some(dir) = &self.room_directory {
+            if let Some(entry) = dir.lock().unwrap().get(topic) {
+                return Some(entry.advert.clone());
+            }
+        }
+        // Legacy fallback: the old directory-store advertisement
+        // (relay-scoped directory gossip topic). The legacy store has no
+        // control-plane advert shape, so rebuild a minimal one.
+        let store = self.directory_store.lock().unwrap();
+        store
+            .list_active()
+            .into_iter()
+            .find(|(ad, _)| ad.topic == *topic)
+            .map(|(ad, _)| {
+                let mut advert =
+                    boru_core::control_plane::advertisement::PublicRoomAdvertisement::minimal(
+                        ad.topic,
+                        ad.room_name,
+                        [0u8; 32],
+                    );
+                advert.short_description = ad.description;
+                advert.approximate_member_count = Some(ad.member_count);
+                advert
+            })
+    }
+
+    /// BORU-DIR-16 (PDF Task 6.1 step 5): after a successful join, create
+    /// or update the local conversation record exactly once using the
+    /// advertised metadata. The control-plane directory never materializes
+    /// entries on discovery (PDF Core rule), so a directory join has no
+    /// prior record to unarchive — the record is created here, and only
+    /// here, when `RoomOpened` confirms the subscription succeeded.
+    ///
+    /// Idempotent by construction: when a record already exists (a
+    /// re-open of a joined room, a legacy archived entry, etc.) this is a
+    /// no-op, so it can never duplicate a conversation record. Rooms that
+    /// are not directory rooms (direct chats, private ticket rooms)
+    /// return `false` and leave the store untouched.
+    ///
+    /// Returns `true` when a record was created.
+    pub(crate) fn ensure_directory_joined_record(&mut self, topic: TopicId) -> bool {
+        if self.conversation_store.find(&topic).is_some() {
+            return false;
+        }
+        let Some(ad) = self.directory_advert_for_topic(&topic) else {
+            return false;
+        };
+        let mut entry = ConversationEntry::new(topic, "", ad.room_name);
+        entry.visibility = ad.visibility;
+        entry.description = ad.short_description;
+        entry.tags = ad.tags;
+        self.conversation_store.upsert(entry);
+        self.chats_sidebar_revision = self.chats_sidebar_revision.wrapping_add(1);
+        info!(topic = %topic, "created conversation record for directory-joined room");
+        true
+    }
+
     /// BORU-CP-08: direct topics the local user is already entitled to
     /// restore after `peer` becomes reachable again.
     ///
