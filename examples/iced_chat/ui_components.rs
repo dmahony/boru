@@ -51,12 +51,12 @@ use crate::presentation;
 /// counts and status labels from application state, so it can be reused by
 /// responsive layouts without coupling it to `IcedChat`.
 pub fn connection_footer<'a>(
-    health_label: &'a str,
+    health_label: String,
     health_color: fn(&Theme) -> Color,
     direct_peers: usize,
     relayed_peers: usize,
     neighbor_count: usize,
-    encryption_status: &'a str,
+    encryption_status: String,
 ) -> Element<'a, AppMessage> {
     let mesh_icon = Icon::Mesh
         .build()
@@ -456,13 +456,13 @@ pub fn button_icon_ghost_style(theme: &Theme, status: button::Status) -> button:
 // ═══════════════════════════════════════════════════════════════════════
 
 /// A filled primary button with label and optional icon.
-pub fn primary_button<'a>(
-    label: &'a str,
+pub fn primary_button(
+    label: impl Into<String>,
     on_press: Option<AppMessage>,
     disabled: bool,
-) -> Element<'a, AppMessage> {
+) -> Element<'static, AppMessage> {
     let btn = button(
-        text(label)
+        text(label.into())
             .font(TypeRole::ButtonLabel.font())
             .size(TypeRole::ButtonLabel.size_px()),
     )
@@ -479,12 +479,12 @@ pub fn primary_button<'a>(
 }
 
 /// A primary button with a leading icon.
-pub fn primary_button_icon<'a>(
+pub fn primary_button_icon(
     icon: Icon,
-    label: &'a str,
+    label: impl Into<String>,
     on_press: Option<AppMessage>,
     disabled: bool,
-) -> Element<'a, AppMessage> {
+) -> Element<'static, AppMessage> {
     let row = Row::new()
         .push(
             icon.build()
@@ -498,7 +498,7 @@ pub fn primary_button_icon<'a>(
                 .height(Length::Shrink),
         )
         .push(
-            text(label)
+            text(label.into())
                 .font(TypeRole::ButtonLabel.font())
                 .size(TypeRole::ButtonLabel.size_px())
                 .color(Color::WHITE),
@@ -523,13 +523,13 @@ pub fn primary_button_icon<'a>(
 // ═══════════════════════════════════════════════════════════════════════
 
 /// An outline secondary button.
-pub fn secondary_button<'a>(
-    label: &'a str,
+pub fn secondary_button(
+    label: impl Into<String>,
     on_press: Option<AppMessage>,
     disabled: bool,
-) -> Element<'a, AppMessage> {
+) -> Element<'static, AppMessage> {
     let btn = button(
-        text(label)
+        text(label.into())
             .font(TypeRole::ButtonLabel.font())
             .size(TypeRole::ButtonLabel.size_px()),
     )
@@ -1236,7 +1236,7 @@ impl<Message: 'static> Avatar<Message> {
                 // status is never communicated by colour alone (UI-19).
                 iced_tooltip::Tooltip::new(
                     status_dot::<Message>(StatusDotKind::Online, dot_size),
-                    text("Online")
+                    text(crate::i18n::t("common.online"))
                         .size(TypeRole::Metadata.size_px())
                         .font(TypeRole::Metadata.font()),
                     iced_tooltip::Position::Top,
@@ -1962,12 +1962,9 @@ pub struct TabStrip<Message> {
 impl<'a, Message: Clone + 'a> TabStrip<Message> {
     /// Create a tab strip with labelled tabs, each with its own message.
     /// The first tab is active by default.
-    pub fn new(tabs: Vec<(&'a str, Message)>) -> Self {
+    pub fn new(tabs: Vec<(String, Message)>) -> Self {
         Self {
-            tabs: tabs
-                .into_iter()
-                .map(|(label, msg)| (label.to_string(), msg))
-                .collect(),
+            tabs,
             active_index: 0,
         }
     }
@@ -2623,7 +2620,7 @@ impl InlineError {
             );
             row = row.push(
                 button(
-                    text("Retry")
+                    text(crate::i18n::t("common.retry"))
                         .font(TypeRole::ButtonLabel.font())
                         .size(TypeRole::ButtonLabel.size_px()),
                 )
@@ -3198,9 +3195,9 @@ mod tests {
 
     #[test]
     fn tab_strip_stores_tabs() {
-        let tabs: Vec<(&str, AppMessage)> = vec![
-            ("Tab 1", AppMessage::Noop),
-            ("Tab 2", AppMessage::Noop),
+        let tabs: Vec<(String, AppMessage)> = vec![
+            ("Tab 1".to_string(), AppMessage::Noop),
+            ("Tab 2".to_string(), AppMessage::Noop),
         ];
         let strip = TabStrip::<AppMessage>::new(tabs);
         assert_eq!(strip.tabs.len(), 2);
@@ -3209,17 +3206,17 @@ mod tests {
 
     #[test]
     fn tab_strip_active_clamped() {
-        let tabs: Vec<(&str, AppMessage)> = vec![("A", AppMessage::Noop)];
+        let tabs: Vec<(String, AppMessage)> = vec![("A".to_string(), AppMessage::Noop)];
         let strip = TabStrip::<AppMessage>::new(tabs).active(5);
         assert_eq!(strip.active_index, 0); // clamped to 0
     }
 
     #[test]
     fn tab_strip_builds_without_panic() {
-        let tabs: Vec<(&str, AppMessage)> = vec![
-            ("First", AppMessage::Noop),
-            ("Second", AppMessage::Noop),
-            ("Third", AppMessage::Noop),
+        let tabs: Vec<(String, AppMessage)> = vec![
+            ("First".to_string(), AppMessage::Noop),
+            ("Second".to_string(), AppMessage::Noop),
+            ("Third".to_string(), AppMessage::Noop),
         ];
         let el: Element<'static, AppMessage> =
             TabStrip::<AppMessage>::new(tabs).active(1).build(&Theme::Light);

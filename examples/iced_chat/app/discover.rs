@@ -981,7 +981,7 @@ impl IcedChat {
                 button(
                     Row::new()
                         .push(icon_svg(ICON_CHAT, TYPO_SM))
-                        .push(text(" Back").size(TYPO_SM))
+                        .push(text(crate::i18n::t("common.back")).size(TYPO_SM))
                         .spacing(SPACE_4)
                         .align_y(Alignment::Center),
                 )
@@ -989,7 +989,7 @@ impl IcedChat {
                 .padding([SPACE_6, SPACE_12])
                 .style(BUTTON_GHOST_BG),
             )
-            .push(text("Public Rooms").size(TYPO_LG))
+            .push(text(crate::i18n::t("discover.public_rooms_title")).size(TYPO_LG))
             .spacing(SPACE_8)
             .align_y(Alignment::Center);
 
@@ -1007,13 +1007,13 @@ impl IcedChat {
                 container(
                     Column::new()
                         .push(
-                            text("No public rooms discovered yet.")
+                            text(crate::i18n::t("discover.no_public_rooms_yet"))
                                 .size(TYPO_MD)
                                 .style(text_muted_style),
                         )
                         .push(Space::new().height(SPACE_8))
                         .push(
-                            text("Rooms appear here when they are discovered on the Boru network.")
+                            text(crate::i18n::t("discover.rooms_appear_hint"))
                                 .size(TYPO_SM)
                                 .style(text_muted_style),
                         )
@@ -1740,7 +1740,7 @@ impl IcedChat {
         let name_element: iced::Element<'static, AppMessage> = if dep.friend_profile_renaming {
             row![]
                 .push(
-                    text_input("Friend's name…", &dep.friend_profile_rename_input)
+                    text_input(&crate::i18n::t("discover.friend_name_placeholder"), &dep.friend_profile_rename_input)
                         .on_input(AppMessage::FriendRenameInputChanged)
                         .on_submit(AppMessage::FriendRenameConfirm)
                         .size(TYPO_MD)
@@ -1868,9 +1868,9 @@ impl IcedChat {
 
         // ── Shared Files section ──
         let shared_files_label = row![]
-            .push(text("Shared Files").size(TYPO_SM).width(Length::Fill))
+            .push(text(crate::i18n::t("discover.shared_files")).size(TYPO_SM).width(Length::Fill))
             .push(
-                button(text("Browse").size(TYPO_XS))
+                button(text(crate::i18n::t("files.browse_short")).size(TYPO_XS))
                     .on_press(AppMessage::BrowsePeerCatalogue(peer))
                     .padding([SPACE_2, SPACE_6])
                     .style(move |t, _status| iced::widget::button::Style {
@@ -1889,7 +1889,7 @@ impl IcedChat {
         let shared_files_body = if has_catalogue {
             row![]
                 .push(
-                    text("Files available")
+                    text(crate::i18n::t("discover.files_available"))
                         .size(TYPO_XS)
                         .style(text_muted_style),
                 )
@@ -1897,7 +1897,7 @@ impl IcedChat {
         } else {
             row![]
                 .push(
-                    text("No shared files.")
+                    text(crate::i18n::t("discover.no_shared_files"))
                         .size(TYPO_XS)
                         .style(text_muted_style),
                 )
@@ -1915,10 +1915,10 @@ impl IcedChat {
         .style(container_surface);
 
         // ── Recent Messages section ──
-        let recent_header = text("Recent Messages").size(TYPO_SM).width(Length::Fill);
+        let recent_header = text(crate::i18n::t("discover.recent_messages")).size(TYPO_SM).width(Length::Fill);
 
         let recent_body: iced::Element<'static, AppMessage> = if recent_messages.is_empty() {
-            text("No recent messages.")
+            text(crate::i18n::t("discover.no_recent_messages"))
                 .size(TYPO_XS)
                 .style(text_muted_style)
                 .into()
@@ -1961,7 +1961,7 @@ impl IcedChat {
         // ── Action buttons ──
         let actions = row![]
             .push(
-                button(text("Message").size(TYPO_SM))
+                button(text(crate::i18n::t("common.message")).size(TYPO_SM))
                     .on_press(AppMessage::OpenFriendChat(peer))
                     .padding([SPACE_8, SPACE_16])
                     .width(Length::Fill)
@@ -1976,7 +1976,7 @@ impl IcedChat {
                     }),
             )
             .push(
-                button(text("Files").size(TYPO_SM))
+                button(text(crate::i18n::t("common.files")).size(TYPO_SM))
                     .on_press(AppMessage::BrowsePeerCatalogue(peer))
                     .padding([SPACE_8, SPACE_16])
                     .width(Length::Fill)
@@ -1995,7 +1995,7 @@ impl IcedChat {
                     }),
             )
             .push(
-                button(text("Voice").size(TYPO_SM))
+                button(text(crate::i18n::t("common.voice")).size(TYPO_SM))
                     .padding([SPACE_8, SPACE_16])
                     .width(Length::Fill)
                     .style(move |t, _status| {
@@ -2042,17 +2042,17 @@ impl IcedChat {
 
                 // Status badge: Connected (direct/relay), Failed, or Expired
                 if expired {
-                    card = card.push(text("Expired").size(TYPO_XS).color(text_muted(&theme)));
+                    card = card.push(text(crate::i18n::t("common.expired")).size(TYPO_XS).color(text_muted(&theme)));
                 } else if state.connection_failed {
-                    card = card.push(text("Failed").size(TYPO_XS).color(color_error(&theme)));
+                    card = card.push(text(crate::i18n::t("common.failed")).size(TYPO_XS).color(color_error(&theme)));
                 } else if state.connected {
                     let route = state.route_label.as_deref();
                     card = card.push(
                         text(match route {
-                            Some("Direct") => "Connected · Direct".to_string(),
-                            Some("Relay") => "Connected · Relay".to_string(),
-                            Some(other) if !other.is_empty() => format!("Connected · {other}"),
-                            _ => "Connected".to_string(),
+                            Some("Direct") => crate::i18n::t("discover.connected_direct"),
+                            Some("Relay") => crate::i18n::t("discover.connected_relay"),
+                            Some(other) if !other.is_empty() => crate::i18n::t_args("discover.connected_route", &[("route", other)]),
+                            _ => crate::i18n::t("common.connected"),
                         })
                         .size(TYPO_XS)
                         .color(accent_green(&theme)),
@@ -2063,7 +2063,7 @@ impl IcedChat {
 
                 if let Some(display) = &state.local_addr {
                     card = card.push(
-                        text(format!("Available at: {display}"))
+                        text(crate::i18n::t_args("discover.available_at", &[("addr", display)]))
                             .size(TYPO_XS)
                             .style(text_muted_style),
                     );
@@ -2075,7 +2075,7 @@ impl IcedChat {
                     );
                 } else {
                     card = card.push(
-                        text("This shared service has expired.")
+                        text(crate::i18n::t("discover.service_expired"))
                             .size(TYPO_XS)
                             .style(text_muted_style),
                     );
@@ -2085,7 +2085,7 @@ impl IcedChat {
                 if state.connected {
                     if is_http {
                         actions = actions.push(
-                            button(text("Open").size(TYPO_XS))
+                            button(text(crate::i18n::t("common.open")).size(TYPO_XS))
                                 .on_press(AppMessage::OpenReceivedTunnel(tunnel_id))
                                 .padding([SPACE_2, SPACE_8])
                                 .style(move |t, _status| iced::widget::button::Style {
@@ -2100,18 +2100,18 @@ impl IcedChat {
                         );
                     }
                     actions = actions.push(
-                        button(text("Copy Address").size(TYPO_XS))
+                        button(text(crate::i18n::t("discover.copy_address")).size(TYPO_XS))
                             .on_press(AppMessage::CopyReceivedTunnelAddress(tunnel_id))
                             .padding([SPACE_2, SPACE_8]),
                     );
                     actions = actions.push(
-                        button(text("Disconnect").size(TYPO_XS))
+                        button(text(crate::i18n::t("common.disconnect")).size(TYPO_XS))
                             .on_press(AppMessage::DisconnectReceivedTunnel(tunnel_id))
                             .padding([SPACE_2, SPACE_8]),
                     );
                 } else if !expired {
                     actions = actions.push(
-                        button(text("Connect").size(TYPO_XS))
+                        button(text(crate::i18n::t("common.connect")).size(TYPO_XS))
                             .on_press(AppMessage::ConnectReceivedTunnel(tunnel_id))
                             .padding([SPACE_2, SPACE_8])
                             .style(move |t, _status| iced::widget::button::Style {
@@ -2142,7 +2142,7 @@ impl IcedChat {
 
             let shared_services_section = container(
                 Column::new()
-                    .push(text("Shared Services").size(TYPO_SM).width(Length::Fill))
+                    .push(text(crate::i18n::t("discover.shared_services")).size(TYPO_SM).width(Length::Fill))
                     .push(Space::new().height(SPACE_4))
                     .push(services_col)
                     .spacing(SPACE_2),

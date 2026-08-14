@@ -176,20 +176,25 @@ pub(crate) struct RecentActivityCardData {
 }
 
 /// Empty-state copy for the Online Peers rail card (UI-HOME-16 spec copy).
-pub(crate) const ONLINE_PEERS_EMPTY_MESSAGE: &str =
-    "No peers are online right now. Connected peers will appear here.";
+pub(crate) fn online_peers_empty_message() -> String {
+    crate::i18n::t("home.online_peers_empty")
+}
 
 /// Empty-state copy for the Recent Activity rail card (UI-HOME-16 spec copy).
-pub(crate) const RECENT_ACTIVITY_EMPTY_MESSAGE: &str =
-    "No recent activity. Network events will appear here.";
+pub(crate) fn recent_activity_empty_message() -> String {
+    crate::i18n::t("home.recent_activity_empty")
+}
 
 /// Empty-state copy for the Tunnels rail card (UI-HOME-08 spec copy).
-pub(crate) const TUNNELS_EMPTY_MESSAGE: &str =
-    "No active tunnels. Create or join a tunnel to securely route traffic.";
+pub(crate) fn tunnels_empty_message() -> String {
+    crate::i18n::t("home.tunnels_empty")
+}
 
 /// Empty-state copy for the Recent events section of the Mesh Health card
 /// (UI-HOME-16: retain the connection summary above, explain the empty feed).
-pub(crate) const MESH_EVENTS_EMPTY_MESSAGE: &str = "No recent mesh events";
+pub(crate) fn mesh_events_empty_message() -> String {
+    crate::i18n::t("home.mesh_events_empty")
+}
 
 /// One Recent Activity row. `timestamp` is kept stable so an unchanged buffer
 /// compares equal across frames — only `tick` makes the card rebuild for
@@ -482,7 +487,7 @@ impl IcedChat {
                     .push(
                         crate::fonts::type_role_text(
                             crate::fonts::TypeRole::SupportingText,
-                            ONLINE_PEERS_EMPTY_MESSAGE,
+                            online_peers_empty_message(),
                         )
                         .color(text_muted(&theme))
                         .width(Length::Fill)
@@ -510,7 +515,7 @@ impl IcedChat {
             .into()
         };
 
-        crate::card_shell::CardShell::new("Online Peers", vec![])
+        crate::card_shell::CardShell::new(crate::i18n::t("home.online_peers"), vec![])
             .count(dep.rows.len())
             .count_total(dep.total_friends)
             .on_view_all(AppMessage::OpenFriendRequests)
@@ -619,7 +624,7 @@ impl IcedChat {
             })
             .collect();
 
-        CardShell::new("Recent Activity", activity_rows)
+        CardShell::new(crate::i18n::t("home.recent_activity"), activity_rows)
             .count(dep.total)
             .empty_icon(
                 icon_svg(ICON_ACTIVITY, TYPO_SM).style(move |t, _| {
@@ -628,7 +633,7 @@ impl IcedChat {
                     }
                 }).into(),
             )
-            .empty_message(RECENT_ACTIVITY_EMPTY_MESSAGE)
+            .empty_message(recent_activity_empty_message())
             .compact_header(dep.compact_header)
             .max_height(180.0)
             .background_opacity(f32::from_bits(dep.home_menu_item_opacity_bits))
@@ -663,7 +668,7 @@ impl IcedChat {
                     .push(
                         crate::fonts::type_role_text(
                             crate::fonts::TypeRole::SupportingText,
-                            ONLINE_PEERS_EMPTY_MESSAGE,
+                            online_peers_empty_message(),
                         )
                         .color(text_muted(&theme))
                         .width(Length::Fill)
@@ -796,7 +801,7 @@ impl IcedChat {
                     .push(
                         crate::fonts::type_role_text(
                             crate::fonts::TypeRole::SupportingText,
-                            RECENT_ACTIVITY_EMPTY_MESSAGE,
+                            recent_activity_empty_message(),
                         )
                         .color(text_muted(&theme))
                         .width(Length::Fill)
@@ -1003,12 +1008,12 @@ impl IcedChat {
         // "Create tunnel" (the dialog the copy points at) instead of the
         // misleading "View all"; the destination is unchanged.
         let header_action_label = if dep.rows.is_empty() {
-            "Create tunnel"
+            crate::i18n::t("tunnels.create")
         } else {
-            "View all"
+            crate::i18n::t("common.view_all")
         };
 
-        let mut shell = crate::card_shell::CardShell::new("Tunnels", tunnel_rows)
+        let mut shell = crate::card_shell::CardShell::new(crate::i18n::t("home.tunnels"), tunnel_rows)
             .count(dep.rows.len())
             .header_action(header_action_label, AppMessage::ShowCreateTunnelDialog)
             .empty_icon(
@@ -1018,7 +1023,7 @@ impl IcedChat {
                     }
                 }).into(),
             )
-            .empty_message(TUNNELS_EMPTY_MESSAGE)
+            .empty_message(tunnels_empty_message())
             .compact_header(dep.compact_header)
             .card_radius(btheme.radii.card)
             .background_opacity(f32::from_bits(dep.home_menu_item_opacity_bits));
@@ -1041,11 +1046,11 @@ impl IcedChat {
     /// list is empty (the dialog the empty copy points at), "View all"
     /// once live tunnels exist. The destination is the same in both cases
     /// (`ShowCreateTunnelDialog`).
-    pub(crate) fn tunnels_header_action_label(rows: usize) -> &'static str {
+    pub(crate) fn tunnels_header_action_label(rows: usize) -> String {
         if rows == 0 {
-            "Create tunnel"
+            crate::i18n::t("tunnels.create")
         } else {
-            "View all"
+            crate::i18n::t("common.view_all")
         }
     }
 
@@ -1145,25 +1150,23 @@ impl IcedChat {
                     ["\u{280B}", "\u{2819}", "\u{2839}", "\u{2838}"];
                 let dot = RECONNECT_DOTS
                     [(dep.main_screen_reconnect_frame as usize) % RECONNECT_DOTS.len()];
-                format!("Starting Boru {dot}")
+                crate::i18n::t_args("home.starting", &[("dot", dot)])
             }
-            HomeConnectionVariant::Connecting => {
-                "Connecting \u{2014} waiting for peers\u{2026}".to_string()
-            }
-            HomeConnectionVariant::Ready => "Boru is connected".to_string(),
+            HomeConnectionVariant::Connecting => crate::i18n::t("home.connecting"),
+            HomeConnectionVariant::Ready => crate::i18n::t("home.ready"),
             HomeConnectionVariant::Degraded => {
                 let reason = match &mesh_health {
                     MeshHealth::Degraded(r) => r.clone(),
                     _ => String::new(),
                 };
-                format!("Mesh degraded \u{2014} {reason}")
+                crate::i18n::t_args("home.degraded", &[("reason", &reason)])
             }
             HomeConnectionVariant::Offline => {
                 let reason = match &mesh_health {
                     MeshHealth::Offline(r) => r.clone(),
                     _ => String::new(),
                 };
-                format!("Boru is offline \u{2014} {reason}")
+                crate::i18n::t_args("home.offline", &[("reason", &reason)])
             }
         };
         let show_retry = matches!(variant, HomeConnectionVariant::Offline);
@@ -1181,7 +1184,7 @@ impl IcedChat {
         let greeting = crate::fonts::type_role_text_themed(
             &btheme,
             crate::fonts::TypeRole::DisplayHeading,
-            format!("Good {}", dep.time_of_day_greeting),
+            crate::i18n::t_args("home.greeting", &[("time", &dep.time_of_day_greeting)]),
         )
         .color(crate::design_tokens::text_primary(&theme))
         .width(Length::Fill)
@@ -1190,7 +1193,7 @@ impl IcedChat {
         // (16 px; the canonical `body` role is 15 px, plan band 15–17 px).
         let welcome_line = crate::fonts::type_role_text(
             crate::fonts::TypeRole::Body,
-            "Your Boru node is online and ready.",
+            crate::i18n::t("home.welcome"),
         )
         .size(btheme.typography.home_subtitle)
         .color(text_secondary(&theme))
@@ -1239,12 +1242,11 @@ impl IcedChat {
         // the watchdog clears "Starting up...", "Connecting to room...",
         // "Connected to room..." and "Subscribing to..." once the mesh is
         // Good, so the log stays truthful.
-        let (health_label, health_color): (&str, fn(&iced::Theme) -> Color) =
-            match &mesh_health {
-                MeshHealth::Good => ("Healthy", accent_green),
-                MeshHealth::Degraded(_) => ("Degraded", color_warning),
-                MeshHealth::Offline(_) => ("Offline", color_error),
-            };
+        let (health_label, health_color): (String, fn(&iced::Theme) -> Color) = match &mesh_health {
+            MeshHealth::Good => (crate::i18n::t("status.healthy"), accent_green),
+            MeshHealth::Degraded(_) => (crate::i18n::t("status.degraded"), color_warning),
+            MeshHealth::Offline(_) => (crate::i18n::t("status.offline"), color_error),
+        };
         let mesh_has_peers = dep.has_peer_connections;
         let mesh_relay_reachable = dep.sender_ready || mesh_has_peers;
         let mesh_variant =
@@ -1256,51 +1258,63 @@ impl IcedChat {
             String,
         ) = match mesh_variant {
             HomeConnectionVariant::Starting => {
-                (ICON_RETRY, color_warning, "Starting up…".to_string())
+                (ICON_RETRY, color_warning, crate::i18n::t("status.starting_up"))
             }
             HomeConnectionVariant::Connecting => (
                 ICON_RETRY,
                 color_warning,
-                "Connecting — waiting for peers…".to_string(),
+                crate::i18n::t("home.connecting"),
             ),
-            HomeConnectionVariant::Ready => (ICON_CHECK, accent_green, "Connected".to_string()),
+            HomeConnectionVariant::Ready => (ICON_CHECK, accent_green, crate::i18n::t("common.connected")),
             HomeConnectionVariant::Degraded => {
                 let reason = match &mesh_health {
                     MeshHealth::Degraded(r) => r.clone(),
                     _ => String::new(),
                 };
-                (ICON_MESH, color_warning, format!("Degraded — {reason}"))
+                (ICON_MESH, color_warning, crate::i18n::t_args("status.degraded_reason", &[("reason", &reason)]))
             }
             HomeConnectionVariant::Offline => {
                 let reason = match &mesh_health {
                     MeshHealth::Offline(r) => r.clone(),
                     _ => String::new(),
                 };
-                (ICON_OFFLINE, color_error, format!("Offline — {reason}"))
+                (ICON_OFFLINE, color_error, crate::i18n::t_args("status.offline_reason", &[("reason", &reason)]))
             }
         };
 
         // Secondary line: current peer counts, plus connection time once the
         // mesh is healthy (mesh_connected_at is maintained by the watchdog).
         let status_detail = match mesh_variant {
-            HomeConnectionVariant::Starting => "Establishing the mesh…".to_string(),
-            HomeConnectionVariant::Connecting => {
-                "Waiting for peers to join the mesh".to_string()
-            }
+            HomeConnectionVariant::Starting => crate::i18n::t("status.establishing_mesh"),
+            HomeConnectionVariant::Connecting => crate::i18n::t("status.waiting_for_peers"),
             _ => {
-                let mut parts = vec![format!(
-                    "{} direct · {} relayed · {} neighbors",
-                    dep.direct_peers,
-                    dep.relayed_peers,
-                    dep.neighbors_len,
+                let mut parts = vec![crate::i18n::t_args(
+                    "status.direct_relay_neighbors",
+                    &[
+                        ("direct", &dep.direct_peers.to_string()),
+                        ("relayed", &dep.relayed_peers.to_string()),
+                        ("neighbors", &dep.neighbors_len.to_string()),
+                    ],
                 )];
                 if let Some(secs) = dep.connected_age_secs {
                     let duration = if secs < 60 {
-                        format!("connected {secs}s")
+                        crate::i18n::t_args("status.connected_secs", &[("secs", &secs.to_string())])
                     } else if secs < 3600 {
-                        format!("connected {}m {}s", secs / 60, secs % 60)
+                        crate::i18n::t_args(
+                            "status.connected_min_sec",
+                            &[
+                                ("mins", &(secs / 60).to_string()),
+                                ("secs", &(secs % 60).to_string()),
+                            ],
+                        )
                     } else {
-                        format!("connected {}h {}m", secs / 3600, (secs % 3600) / 60)
+                        crate::i18n::t_args(
+                            "status.connected_hr_min",
+                            &[
+                                ("hrs", &(secs / 3600).to_string()),
+                                ("mins", &((secs % 3600) / 60).to_string()),
+                            ],
+                        )
                     };
                     parts.push(duration);
                 }
@@ -1353,16 +1367,16 @@ impl IcedChat {
 
         let mesh_body = mesh_status_row;
 
-        let mesh_card = CardShell::new("Mesh Health", vec![])
+        let mesh_card = CardShell::new(crate::i18n::t("home.mesh_health"), vec![])
             .title_case(false)
             .header_icon(icon_svg(ICON_MESH, TYPO_MD).style(move |t, _| {
                 iced::widget::svg::Style {
                     color: Some(health_color(t)),
                 }
             }).into())
-            .subtitle("Current connection status")
-            .status_badge(health_label, mesh_badge_kind)
-            .header_action("View details", AppMessage::OpenConnectionDetails)
+            .subtitle(crate::i18n::t("home.mesh_health_subtitle"))
+            .status_badge(health_label.as_str(), mesh_badge_kind)
+            .header_action(crate::i18n::t("home.view_details"), AppMessage::OpenConnectionDetails)
             .compact_header(compact_header)
             .body(mesh_body.into())
             .card_radius(btheme.radii.card)
@@ -1396,7 +1410,7 @@ impl IcedChat {
                 .push(
                     crate::fonts::type_role_text(
                         crate::fonts::TypeRole::ButtonLabel,
-                        "Download Manager",
+                        crate::i18n::t("home.download_manager"),
                     ),
                 )
                 .spacing(SPACE_4)
@@ -1546,9 +1560,9 @@ impl IcedChat {
         // always transports over QUIC (encrypted), so we report "QUIC encrypted"
         // only when a peer connection exists, avoiding a blanket E2E claim.
         let encryption_label = if dep.direct_peers > 0 || dep.relayed_peers > 0 {
-            "QUIC encrypted"
+            crate::i18n::t("status.quic_encrypted")
         } else {
-            "Idle"
+            crate::i18n::t("status.idle")
         };
         let footer = connection_footer(
             health_label,
