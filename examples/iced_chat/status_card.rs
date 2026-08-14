@@ -144,6 +144,11 @@ pub(crate) struct StatusCardDependency {
     /// the same "Card" token the other home cards use so the inspector's
     /// Card radius slider changes it immediately.
     pub(crate) card_radius: f32,
+    /// BORU-LAYOUT-03: card sizing constraints (min content height, tier
+    /// breakpoints, mesh hide/text-min widths, padding, icon-text and
+    /// text-graph gaps, divider geometry) from the layout model
+    /// (`home.card_sizing`). Defaults reproduce the module constants.
+    pub(crate) sizing: crate::layout::HomeCardSizing,
 }
 
 /// Render the full connection status card.
@@ -152,12 +157,12 @@ pub(crate) fn view_status_card(
 ) -> iced::Element<'static, AppMessage> {
     let accent = variant_accent(dep.variant);
     let indicator = status_indicator(dep.variant);
-    let tier = layout_tier(dep.content_width);
+    let tier = layout_tier(dep.content_width, dep.sizing);
 
     let (heading_size, support_size) = heading_sizes(tier);
 
     let heading = status_heading(dep, heading_size);
-    let divider = status_divider(accent);
+    let divider = status_divider(accent, dep.sizing);
     let supporting =
         fonts::type_role_text_lh(TypeRole::Body, crate::i18n::t("status.peer_to_peer"), 1.4)
             .size(support_size)
@@ -177,12 +182,12 @@ pub(crate) fn view_status_card(
     // keeps the fixed per-tier size. Below STATUS_CARD_MESH_HIDE_CONTENT
     // the mesh is not rendered at all (spec §13 — the card must still
     // communicate status perfectly without the decoration).
-    let network: iced::Element<'static, AppMessage> = if mesh_rendered(dep.content_width) {
+    let network: iced::Element<'static, AppMessage> = if mesh_rendered(dep.content_width, dep.sizing) {
         match tier {
             Tier::Full | Tier::Medium => {
-                network_mesh(dep, tier, horizontal_mesh_width(dep.content_width, tier))
+                network_mesh(dep, tier, horizontal_mesh_width(dep.content_width, tier, dep.sizing))
             }
-            Tier::Narrow => network_mesh(dep, tier, network_size(tier).0),
+            Tier::Narrow => network_mesh(dep, tier, network_size(tier, dep.sizing).0),
         }
     } else {
         Space::new()
@@ -214,14 +219,14 @@ pub(crate) fn view_status_card(
             // bands (Full ≈24px icon-text, 24–32px text-graph).
             let (icon_text_gap, text_graph_gap, dd_gap, dp_gap) = match tier {
                 Tier::Full => (
-                    STATUS_ICON_TEXT_GAP_FULL,
-                    STATUS_TEXT_GRAPH_GAP_FULL,
+                    dep.sizing.status_icon_text_gap_full,
+                    dep.sizing.status_text_graph_gap_full,
                     6.0,
                     10.0,
                 ),
                 _ => (
-                    STATUS_ICON_TEXT_GAP_MEDIUM,
-                    STATUS_TEXT_GRAPH_GAP_MEDIUM,
+                    dep.sizing.status_icon_text_gap_medium,
+                    dep.sizing.status_text_graph_gap_medium,
                     6.0,
                     10.0,
                 ),
@@ -265,7 +270,7 @@ pub(crate) fn view_status_card(
                 .push(
                     Space::new()
                         .width(Length::Fixed(0.0))
-                        .height(Length::Fixed(STATUS_CARD_MIN_CONTENT_HEIGHT)),
+                        .height(Length::Fixed(dep.sizing.status_card_min_content_height)),
                 )
                 .push(info)
                 .push(Space::new().width(Length::Fixed(text_graph_gap)))
@@ -295,7 +300,7 @@ pub(crate) fn view_status_card(
             // The decorative mesh is optional below MODE B and hidden
             // entirely below STATUS_CARD_MESH_HIDE_CONTENT (spec §12/13);
             // only add its gap when it is actually rendered.
-            if mesh_rendered(dep.content_width) {
+            if mesh_rendered(dep.content_width, dep.sizing) {
                 column = column
                     .push(Space::new().height(Length::Fixed(28.0)))
                     .push(network);
@@ -322,7 +327,7 @@ pub(crate) fn view_status_card(
     // card's height always equal to its own content, never a taller
     // sibling, the right rail, or the outer Fill chain.
     container(body)
-        .padding([design_tokens::SPACE_8, STATUS_CARD_PADDING_X])
+        .padding([design_tokens::SPACE_8, dep.sizing.status_card_padding_x])
         .width(Length::Fill)
         .height(Length::Shrink)
         .style(move |_t| {
@@ -353,10 +358,10 @@ enum Tier {
     Narrow,
 }
 
-fn layout_tier(content_width: f32) -> Tier {
-    if content_width >= STATUS_CARD_MEDIUM_CONTENT {
+fn layout_tier(content_width: f32, sizing: crate::layout::HomeCardSizing) -> Tier {
+    if content_width >= sizing.status_card_medium_content {
         Tier::Full
-    } else if content_width >= STATUS_CARD_NARROW_CONTENT {
+    } else if content_width >= sizing.status_card_narrow_content {
         Tier::Medium
     } else {
         Tier::Narrow
@@ -367,8 +372,9 @@ fn layout_tier(content_width: f32) -> Tier {
 /// width. Spec §13: below ~520px the mesh is hidden entirely (the
 /// `@container (max-width: 520px) { .network-graphic { display: none; } }`
 /// equivalent) — the card must still communicate status without it.
-fn mesh_rendered(content_width: f32) -> bool {
-    content_width >= STATUS_CARD_MESH_HIDE_CONTENT
+/// BORU-LAYOUT-03: the hide threshold comes from the layout model.
+fn mesh_rendered(content_width: f32, sizing: crate::layout::HomeCardSizing) -> bool {
+    content_width >= sizing.status_card_mesh_hide_content
 }
 
 /// Accent colour for the current variant: green when connected, amber
@@ -506,14 +512,15 @@ fn status_heading(dep: &StatusCardDependency, size: f32) -> iced::Element<'stati
 /// CONN-11: widened to ~44px and slightly desaturated so it reads as a
 /// deliberate accent aligned under the heading text (it shares the text
 /// column's left edge), while staying subordinate to the status message
-/// (spec §17 — decorative elements must not compete).
-fn status_divider(accent: Color) -> iced::Element<'static, AppMessage> {
-    // BORU-UI-03: divider geometry (44 × 3 px, 1.5 radius) comes from
-    // `HomeTheme::status_divider_*` in the typed theme.
+/// (spec §17 — decorative elements must not compete). BORU-LAYOUT-03:
+/// the divider geometry comes from the layout model
+/// (`home.card_sizing.status_divider_*`), defaulting to the same values
+/// `HomeTheme::status_divider_*` supplied before.
+fn status_divider(accent: Color, sizing: crate::layout::HomeCardSizing) -> iced::Element<'static, AppMessage> {
     let status = crate::theme::BoruTheme::default().home;
     container(Space::new().width(Length::Fill).height(Length::Fill))
-        .width(Length::Fixed(status.status_divider_width))
-        .height(Length::Fixed(status.status_divider_height))
+        .width(Length::Fixed(sizing.status_divider_width))
+        .height(Length::Fixed(sizing.status_divider_height))
         .style(move |_t| container::Style {
             background: Some(Background::Color(with_alpha(accent, 0.45))),
             border: Border {
@@ -618,10 +625,10 @@ fn actions_row(show_retry: bool, show_details: bool) -> iced::Element<'static, A
 /// mesh is only *rendered* when [`mesh_rendered`] is true — below
 /// [`STATUS_CARD_MESH_HIDE_CONTENT`] the graphic is dropped entirely, so
 /// this nominal size is never laid out at those widths.
-fn network_size(tier: Tier) -> (f32, f32) {
+fn network_size(tier: Tier, sizing: crate::layout::HomeCardSizing) -> (f32, f32) {
     match tier {
-        Tier::Full => (STATUS_CARD_MESH_MAX_WIDTH, 135.0),
-        Tier::Medium => (STATUS_CARD_MESH_MAX_WIDTH, 108.0),
+        Tier::Full => (sizing.status_card_mesh_max_width, 135.0),
+        Tier::Medium => (sizing.status_card_mesh_max_width, 108.0),
         Tier::Narrow => (190.0, 100.0),
     }
 }
@@ -635,25 +642,28 @@ fn network_size(tier: Tier) -> (f32, f32) {
 /// to `[0, STATUS_CARD_MESH_MAX_WIDTH]`. When space is tight the mesh
 /// shrinks (and can reach 0) instead of starving the heading (spec
 /// section 11 priority order: heading > description > pill > graph).
-fn horizontal_mesh_width(content_width: f32, tier: Tier) -> f32 {
+fn horizontal_mesh_width(
+    content_width: f32,
+    tier: Tier,
+    sizing: crate::layout::HomeCardSizing,
+) -> f32 {
     let (text_min, icon_text_gap, text_graph_gap) = match tier {
         Tier::Full => (
-            STATUS_CARD_TEXT_MIN_WIDTH,
-            STATUS_ICON_TEXT_GAP_FULL,
-            STATUS_TEXT_GRAPH_GAP_FULL,
+            sizing.status_card_text_min_width,
+            sizing.status_icon_text_gap_full,
+            sizing.status_text_graph_gap_full,
         ),
         _ => (
-            STATUS_CARD_TEXT_MIN_WIDTH_MEDIUM,
-            STATUS_ICON_TEXT_GAP_MEDIUM,
-            STATUS_TEXT_GRAPH_GAP_MEDIUM,
+            sizing.status_card_text_min_width_medium,
+            sizing.status_icon_text_gap_medium,
+            sizing.status_text_graph_gap_medium,
         ),
     };
     // Card inner width = content width minus the card's horizontal padding.
-    let inner = (content_width - 2.0 * STATUS_CARD_PADDING_X).max(0.0);
-    let fixed =
-        design_tokens::STATUS_INDICATOR_SIZE + icon_text_gap + text_graph_gap;
+    let inner = (content_width - 2.0 * sizing.status_card_padding_x).max(0.0);
+    let fixed = design_tokens::STATUS_INDICATOR_SIZE + icon_text_gap + text_graph_gap;
     let space = (inner - fixed).max(0.0);
-    (space - text_min).clamp(0.0, STATUS_CARD_MESH_MAX_WIDTH)
+    (space - text_min).clamp(0.0, sizing.status_card_mesh_max_width)
 }
 
 /// Build the native canvas peer-to-peer mesh at the given width (the
@@ -663,7 +673,7 @@ fn network_mesh(
     tier: Tier,
     width: f32,
 ) -> iced::Element<'static, AppMessage> {
-    let (_, h) = network_size(tier);
+    let (_, h) = network_size(tier, dep.sizing);
     canvas(NetworkMesh {
         pulse: dep.pulse_frame % STATUS_CARD_PULSE_PHASES,
         animate: dep.animate_mesh,
@@ -852,6 +862,9 @@ mod tests {
 
     #[test]
     fn layout_tiers_are_ordered_and_consistent() {
+        // BORU-LAYOUT-03: tier selection reads the layout model's defaults,
+        // which are pinned to the module constants by layout.rs tests.
+        let s = crate::layout::HomeCardSizing::default();
         assert!(
             STATUS_CARD_MEDIUM_CONTENT > STATUS_CARD_NARROW_CONTENT,
             "MODE A boundary must sit above the MODE B/C boundary"
@@ -860,23 +873,26 @@ mod tests {
             STATUS_CARD_NARROW_CONTENT > STATUS_CARD_MESH_HIDE_CONTENT,
             "the MODE B/C boundary (560) must sit above the mesh-hide width (520)"
         );
-        assert_eq!(layout_tier(STATUS_CARD_MEDIUM_CONTENT), Tier::Full);
-        assert_eq!(layout_tier(STATUS_CARD_MEDIUM_CONTENT - 1.0), Tier::Medium);
-        assert_eq!(layout_tier(STATUS_CARD_NARROW_CONTENT), Tier::Medium);
-        assert_eq!(layout_tier(STATUS_CARD_NARROW_CONTENT - 1.0), Tier::Narrow);
+        assert_eq!(layout_tier(STATUS_CARD_MEDIUM_CONTENT, s), Tier::Full);
+        assert_eq!(layout_tier(STATUS_CARD_MEDIUM_CONTENT - 1.0, s), Tier::Medium);
+        assert_eq!(layout_tier(STATUS_CARD_NARROW_CONTENT, s), Tier::Medium);
+        assert_eq!(layout_tier(STATUS_CARD_NARROW_CONTENT - 1.0, s), Tier::Narrow);
         // The mesh-hide width lives INSIDE the Narrow (MODE C) band — the
         // mesh disappears before the stacked layout ever gives up.
-        assert_eq!(layout_tier(STATUS_CARD_MESH_HIDE_CONTENT), Tier::Narrow);
-        assert_eq!(layout_tier(0.0), Tier::Narrow);
+        assert_eq!(layout_tier(STATUS_CARD_MESH_HIDE_CONTENT, s), Tier::Narrow);
+        assert_eq!(layout_tier(0.0, s), Tier::Narrow);
         // The minimum supported window width (1024) must land in the
         // medium tier, where the three regions stay visible. CONN-02: the
         // tier input is the card's REAL width — at 1024 the rail stacks, so
         // the card spans the full content width (679 px) — never the raw
         // window-derived dashboard width.
         assert_eq!(
-            layout_tier(crate::design_tokens::status_card_content_width(
-                crate::design_tokens::home_content_width(1024.0)
-            )),
+            layout_tier(
+                crate::design_tokens::status_card_content_width(
+                    crate::design_tokens::home_content_width(1024.0)
+                ),
+                s
+            ),
             Tier::Medium
         );
     }
@@ -906,7 +922,7 @@ mod tests {
             card_width >= STATUS_CARD_NARROW_CONTENT,
             "card real width {card_width} must stay in the readable Medium band"
         );
-        assert_eq!(layout_tier(card_width), Tier::Medium);
+        assert_eq!(layout_tier(card_width, crate::layout::HomeCardSizing::default()), Tier::Medium);
     }
 
     #[test]
@@ -947,16 +963,17 @@ mod tests {
 
     #[test]
     fn min_height_and_network_sizes_are_positive() {
+        let s = crate::layout::HomeCardSizing::default();
         assert!(STATUS_CARD_MIN_CONTENT_HEIGHT > 0.0);
         for tier in [Tier::Full, Tier::Medium, Tier::Narrow] {
-            let (w, h) = network_size(tier);
+            let (w, h) = network_size(tier, s);
             assert!(w > 0.0 && h > 0.0, "{tier:?} network size must be positive");
         }
         // CONN-05: the horizontal tiers' nominal mesh width must respect
         // the 170px bound (spec §5 graph 150-180px — CONN-05 tuned the
         // exact size; this card never exceeds the bound).
         for tier in [Tier::Full, Tier::Medium] {
-            let (w, _) = network_size(tier);
+            let (w, _) = network_size(tier, s);
             assert!(
                 w <= STATUS_CARD_MESH_MAX_WIDTH + f32::EPSILON,
                 "{tier:?} mesh width {w} exceeds the {STATUS_CARD_MESH_MAX_WIDTH}px bound"
@@ -981,7 +998,8 @@ mod tests {
             759.0, 760.0, 800.0, 900.0, 1024.0, 1215.0,
         ];
         for width in widths {
-            let tier = layout_tier(width);
+            let s = crate::layout::HomeCardSizing::default();
+            let tier = layout_tier(width, s);
             if tier == Tier::Narrow {
                 // Stacked layout — no horizontal text minimum applies.
                 continue;
@@ -998,7 +1016,7 @@ mod tests {
                     STATUS_TEXT_GRAPH_GAP_MEDIUM,
                 ),
             };
-            let mesh_w = horizontal_mesh_width(width, tier);
+            let mesh_w = horizontal_mesh_width(width, tier, s);
             let inner = width - 2.0 * STATUS_CARD_PADDING_X;
             let text_w =
                 inner - design_tokens::STATUS_INDICATOR_SIZE - icon_gap - graph_gap - mesh_w;
@@ -1021,7 +1039,8 @@ mod tests {
         // mesh must shrink well below its cap so the text keeps its
         // minimum — the spec's priority order (heading > description >
         // pill > graph).
-        let tight = horizontal_mesh_width(560.0, Tier::Medium);
+        let s = crate::layout::HomeCardSizing::default();
+        let tight = horizontal_mesh_width(560.0, Tier::Medium, s);
         assert!(
             tight > 0.0 && tight < STATUS_CARD_MESH_MAX_WIDTH,
             "at 560px the mesh should shrink ({tight}px) but stay visible"
@@ -1038,7 +1057,7 @@ mod tests {
         );
         // At a wide Full tier the mesh hits its cap and the text takes all
         // remaining space.
-        let wide = horizontal_mesh_width(1215.0, Tier::Full);
+        let wide = horizontal_mesh_width(1215.0, Tier::Full, s);
         assert!(
             (wide - STATUS_CARD_MESH_MAX_WIDTH).abs() < 0.01,
             "at 1215px the mesh should be capped at {STATUS_CARD_MESH_MAX_WIDTH}px, got {wide}px"
@@ -1055,17 +1074,18 @@ mod tests {
             "the mesh-hide width must sit inside the MODE C (narrow) band"
         );
         // The mesh is rendered from the hide boundary upward...
-        assert!(mesh_rendered(STATUS_CARD_MESH_HIDE_CONTENT));
-        assert!(mesh_rendered(STATUS_CARD_NARROW_CONTENT));
-        assert!(mesh_rendered(STATUS_CARD_MEDIUM_CONTENT));
+        let s = crate::layout::HomeCardSizing::default();
+        assert!(mesh_rendered(STATUS_CARD_MESH_HIDE_CONTENT, s));
+        assert!(mesh_rendered(STATUS_CARD_NARROW_CONTENT, s));
+        assert!(mesh_rendered(STATUS_CARD_MEDIUM_CONTENT, s));
         // ...and hidden below it (400/450/500/519 are all sub-520).
-        assert!(!mesh_rendered(STATUS_CARD_MESH_HIDE_CONTENT - 1.0));
-        assert!(!mesh_rendered(500.0));
-        assert!(!mesh_rendered(400.0));
-        assert!(!mesh_rendered(0.0));
+        assert!(!mesh_rendered(STATUS_CARD_MESH_HIDE_CONTENT - 1.0, s));
+        assert!(!mesh_rendered(500.0, s));
+        assert!(!mesh_rendered(400.0, s));
+        assert!(!mesh_rendered(0.0, s));
         // The hide width is a MODE C width: stacked layout, no horizontal
         // text minimum, no mesh.
-        assert_eq!(layout_tier(STATUS_CARD_MESH_HIDE_CONTENT), Tier::Narrow);
+        assert_eq!(layout_tier(STATUS_CARD_MESH_HIDE_CONTENT, s), Tier::Narrow);
     }
 
     #[test]

@@ -63,9 +63,11 @@ const ACTIONS: &[QuickAction] = &[
 /// Light-green circular icon tile (HOME-02 compact: 40 px container).
 ///
 /// Mirrors the `icon_tile` look (soft brand-green background, centered
-/// icon) at the compact size the HOME-02 cards call for.
-fn quick_action_icon<'a>(icon: Icon) -> Element<'a, AppMessage> {
-    let tile = crate::theme::BoruTheme::default().home.quick_action_icon_size; // 40 px (HOME-02 compact)
+/// icon) at the compact size the HOME-02 cards call for. BORU-LAYOUT-03:
+/// the tile diameter comes from the layout model's
+/// `home.card_sizing.quick_action_icon_size` (default 40 px, the same
+/// value `HomeTheme::quick_action_icon_size` supplied before).
+fn quick_action_icon<'a>(icon: Icon, tile: f32) -> Element<'a, AppMessage> {
     container(icon.build().size(IconSize::Lg).build())
         .width(Length::Fixed(tile))
         .height(Length::Fixed(tile))
@@ -111,9 +113,10 @@ pub fn quick_action_card<'a>(
     theme: &Theme,
     opacity: f32,
     card_radius: f32,
+    icon_size: f32,
 ) -> Element<'a, AppMessage> {
     let content = Column::new()
-        .push(quick_action_icon(action.icon))
+        .push(quick_action_icon(action.icon, icon_size))
         // HOME-02: icon→title gap tightened from SPACE_16 to SPACE_8 so the
         // four cards sit noticeably closer together vertically.
         .push(Space::new().height(Length::Fixed(SPACE_8)))
@@ -242,18 +245,16 @@ fn quick_action_card_style(
 /// Content width is the home dashboard's available width after the sidebar,
 /// divider and page padding are removed (`design_tokens::home_content_width`),
 /// so the grid never starves on narrow windows with a fixed 288 px sidebar.
-/// Breakpoints keep four columns only where cards are wide enough to stay
-/// readable; the grid drops to two-by-two before cards become too narrow,
-/// and to one column at the minimum supported width. This matches the
-/// design system's "Large ≥ 1440 px → full four-column quick actions"
-/// (window 1440 → content ~1071 px ≥ HOME_QUICK_FOUR_COL_CONTENT).
-pub fn grid_columns_for(content_width: f32) -> usize {
-    if content_width >= crate::design_tokens::HOME_QUICK_FOUR_COL_CONTENT {
-        4
-    } else if content_width >= crate::design_tokens::HOME_QUICK_ONE_COL_CONTENT {
-        2
+/// BORU-LAYOUT-03: the column counts and their content-width breakpoints come
+/// from the layout model (`home.quick_actions`); the defaults reproduce the
+/// design-system behaviour (4 columns ≥ 1000 px, 2 columns ≥ 520 px, 1 below).
+pub fn grid_columns_for(content_width: f32, layout: crate::layout::QuickActionsLayout) -> usize {
+    if content_width >= layout.four_col_breakpoint {
+        layout.columns_wide
+    } else if content_width >= layout.two_col_breakpoint {
+        layout.columns_mid
     } else {
-        1
+        layout.columns_narrow
     }
 }
 
@@ -263,8 +264,10 @@ pub fn quick_action_grid<'a>(
     theme: &Theme,
     opacity: f32,
     card_radius: f32,
+    layout: crate::layout::QuickActionsLayout,
+    icon_size: f32,
 ) -> Element<'a, AppMessage> {
-    let columns = grid_columns_for(content_width);
+    let columns = grid_columns_for(content_width, layout);
 
     let mut rows: Vec<Element<'a, AppMessage>> = Vec::new();
     for actions in ACTIONS.chunks(columns) {
@@ -276,7 +279,7 @@ pub fn quick_action_grid<'a>(
             .align_y(Alignment::Start)
             .width(Length::Fill);
         for action in actions {
-            row = row.push(quick_action_card(action, theme, opacity, card_radius));
+            row = row.push(quick_action_card(action, theme, opacity, card_radius, icon_size));
         }
         rows.push(row.into());
     }
@@ -359,23 +362,27 @@ mod tests {
         // on wide layouts (window ≥ 1440 → content ≥ 1000, matching
         // DESIGN_SYSTEM.md "Large"), two-by-two before cards get too narrow
         // (content 520–999), one column at the minimum supported width
-        // (content < 520, e.g. an 800×600 window).
+        // (content < 520, e.g. an 800×600 window). BORU-LAYOUT-03: the
+        // counts/breakpoints come from the layout model's defaults (which
+        // are pinned to the design tokens by layout.rs tests).
         use crate::design_tokens::home_content_width;
+        use crate::layout::QuickActionsLayout;
+        let layout = QuickActionsLayout::default();
         // Window 1920/1600/1440 → content ~1551/1231/1071 → 4 columns.
-        assert_eq!(grid_columns_for(home_content_width(1920.0)), 4);
-        assert_eq!(grid_columns_for(home_content_width(1600.0)), 4);
-        assert_eq!(grid_columns_for(home_content_width(1440.0)), 4);
+        assert_eq!(grid_columns_for(home_content_width(1920.0), layout), 4);
+        assert_eq!(grid_columns_for(home_content_width(1600.0), layout), 4);
+        assert_eq!(grid_columns_for(home_content_width(1440.0), layout), 4);
         // Medium: content 520–999 (e.g. 1280×800 and 1024×720 windows).
-        assert_eq!(grid_columns_for(home_content_width(1280.0)), 2);
-        assert_eq!(grid_columns_for(home_content_width(1024.0)), 2);
+        assert_eq!(grid_columns_for(home_content_width(1280.0), layout), 2);
+        assert_eq!(grid_columns_for(home_content_width(1024.0), layout), 2);
         // Narrow: content < 520 → one quick action per row.
-        assert_eq!(grid_columns_for(home_content_width(800.0)), 1);
-        assert_eq!(grid_columns_for(home_content_width(640.0)), 1);
+        assert_eq!(grid_columns_for(home_content_width(800.0), layout), 1);
+        assert_eq!(grid_columns_for(home_content_width(640.0), layout), 1);
         // Boundary checks on the content-width thresholds themselves.
-        assert_eq!(grid_columns_for(1000.0), 4);
-        assert_eq!(grid_columns_for(999.0), 2);
-        assert_eq!(grid_columns_for(520.0), 2);
-        assert_eq!(grid_columns_for(519.0), 1);
+        assert_eq!(grid_columns_for(1000.0, layout), 4);
+        assert_eq!(grid_columns_for(999.0, layout), 2);
+        assert_eq!(grid_columns_for(520.0, layout), 2);
+        assert_eq!(grid_columns_for(519.0, layout), 1);
     }
 
     #[test]
@@ -383,14 +390,34 @@ mod tests {
         // Every content width maps to exactly one of the three supported
         // counts.
         use crate::design_tokens::home_content_width;
+        use crate::layout::QuickActionsLayout;
+        let layout = QuickActionsLayout::default();
         for window in (320..=1920).step_by(16) {
             let content = home_content_width(window as f32);
-            let columns = grid_columns_for(content);
+            let columns = grid_columns_for(content, layout);
             assert!(
                 columns == 1 || columns == 2 || columns == 4,
                 "window {window} (content {content:.0}) produced unexpected column count {columns}"
             );
         }
+    }
+
+    #[test]
+    fn grid_columns_respect_layout_overrides() {
+        // BORU-LAYOUT-03: the layout model can change both the counts and
+        // the breakpoints; the grid must follow them.
+        use crate::layout::QuickActionsLayout;
+        let layout = QuickActionsLayout {
+            columns_wide: 3,
+            columns_mid: 2,
+            columns_narrow: 1,
+            four_col_breakpoint: 800.0,
+            two_col_breakpoint: 400.0,
+        };
+        assert_eq!(grid_columns_for(1000.0, layout), 3);
+        assert_eq!(grid_columns_for(799.0, layout), 2);
+        assert_eq!(grid_columns_for(500.0, layout), 2);
+        assert_eq!(grid_columns_for(399.0, layout), 1);
     }
 
     #[test]

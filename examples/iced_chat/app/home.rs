@@ -49,6 +49,11 @@ pub(crate) struct ChatListDependency {
     /// BORU-UI-07: bumps whenever the live theme is replaced so iced::lazy
     /// cannot retain a subtree built with the previous theme.
     pub(crate) theme_revision: u64,
+    /// BORU-LAYOUT-03: bumps whenever the live layout is replaced so
+    /// iced::lazy cannot retain a home subtree built with the previous
+    /// LayoutConfig (the home layout itself is captured separately by the
+    /// renderer's closure and re-read when this revision changes).
+    pub(crate) layout_revision: u64,
     pub(crate) window_width_bits: u32,
     pub(crate) mesh_health: MeshHealthSnapshot,
     pub(crate) main_screen_reconnect_frame: u32,
@@ -646,9 +651,12 @@ impl IcedChat {
     /// The peers section shows up to [`PEOPLE_PEERS_MAX`] online friends with
     /// avatar + name + presence; a restrained divider separates it from the
     /// recent activity feed (up to [`PEOPLE_ACTIVITY_MAX`] rows).
+    /// BORU-LAYOUT-03: card-sizing constraints (peers body min height,
+    /// activity row height, empty-activity height) come from the layout model.
     pub(crate) fn view_people_activity_card(
         dep: &PeopleActivityCardData,
         btheme: crate::theme::BoruTheme,
+        layout: crate::layout::HomeLayout,
     ) -> iced::Element<'static, AppMessage> {
         use iced::widget::{button, container, Column, Row, Space};
         use iced::{Alignment, Length};
@@ -679,7 +687,7 @@ impl IcedChat {
                     .width(Length::Fill),
             )
             .width(Length::Fill)
-            .height(Length::Fixed(btheme.home.peers_body_min))
+            .height(Length::Fixed(layout.card_sizing.peers_body_min))
             .align_y(Alignment::Center)
             .into()
         } else {
@@ -761,11 +769,11 @@ impl IcedChat {
                 .collect();
             let row_count = dep.online.rows.len().min(PEOPLE_PEERS_MAX);
             let body_height = if row_count == 0 {
-                btheme.home.peers_body_min
+                layout.card_sizing.peers_body_min
             } else {
                 let content = row_count as f32 * btheme.lists.peer_row_height
                     + (row_count as f32 - 1.0) * btheme.spacing.space_2;
-                content.max(btheme.home.peers_body_min)
+                content.max(layout.card_sizing.peers_body_min)
             };
             Column::with_children(peer_rows)
                 .spacing(SPACE_2)
@@ -812,7 +820,7 @@ impl IcedChat {
                     .width(Length::Fill),
             )
             .width(Length::Fill)
-            .height(Length::Fixed(crate::theme::BoruTheme::for_theme(&theme).home.hero_gap))
+            .height(Length::Fixed(layout.gaps.hero_gap))
             .align_y(Alignment::Center)
             .into()
         } else {
@@ -838,7 +846,7 @@ impl IcedChat {
                             .push(
                                 Space::new()
                                     .width(Length::Fixed(0.0))
-                                    .height(Length::Fixed(btheme.home.activity_row_height)),
+                                    .height(Length::Fixed(layout.card_sizing.activity_row_height)),
                             )
                             .push(icon_svg(activity_icon, TYPO_SM).style(move |t, _| {
                                 iced::widget::svg::Style {
@@ -1061,7 +1069,15 @@ impl IcedChat {
     pub(crate) fn view_main_empty_state(&self) -> iced::Element<'_, AppMessage> {
         let dep = self.chat_list_dependency();
         let btheme = self.boru_theme();
-        iced::widget::lazy(dep, move |dep| Self::view_chat_list_content(dep, btheme)).into()
+        // BORU-LAYOUT-03: the live home layout is captured alongside the
+        // dependency. `layout_revision` in the lazy key forces a rebuild
+        // when the layout is replaced, so the closure re-reads the NEW
+        // layout (mirror of how `theme_revision` + `btheme` interact).
+        let home_layout = self.boru_layout().home.clone();
+        iced::widget::lazy(dep, move |dep| {
+            Self::view_chat_list_content(dep, btheme, home_layout.clone())
+        })
+        .into()
     }
 
     /// Builds the ChatList (home / empty-state) screen's renderable snapshot.
@@ -1091,6 +1107,7 @@ impl IcedChat {
         ChatListDependency {
             dark_mode: self.dark_mode,
             theme_revision: self.theme_revision,
+            layout_revision: self.layout_revision,
             window_width_bits: (self.window_width * 100.0) as u32,
             mesh_health: MeshHealthSnapshot::from(&self.mesh_health),
             main_screen_reconnect_frame: self.main_screen_reconnect_frame as u32,
@@ -1114,10 +1131,13 @@ impl IcedChat {
 
     /// Static renderer for the ChatList (home / empty-state) screen, driven by
     /// [`ChatListDependency`] so `iced::widget::lazy` can cache the whole
-    /// screen while any of its rendered slices is unchanged.
+    /// screen while any of its rendered slices is unchanged. BORU-LAYOUT-03:
+    /// the structural arrangement comes from the layout model (`home.*`); the
+    /// defaults reproduce today's appearance exactly.
     pub(crate) fn view_chat_list_content(
         dep: &ChatListDependency,
         btheme: crate::theme::BoruTheme,
+        layout: crate::layout::HomeLayout,
     ) -> iced::Element<'static, AppMessage> {
         use iced::widget::{button, container, row, Column, Row, Space};
         use iced::{Alignment, Length};
@@ -1131,6 +1151,23 @@ impl IcedChat {
         let content_width = crate::design_tokens::home_content_width(window_width);
         let compact_header =
             content_width < crate::design_tokens::HOME_COMPACT_HEADER_CONTENT;
+
+        // ── BORU-LAYOUT-03: section order / visibility from the model ──
+        // `layout.visible_sections()` = `section_order` minus
+        // `hidden_sections`. In Grid mode the left (main) column holds the
+        // non-rail sections and the right rail holds PeopleActivity/Tunnels;
+        // each column renders its sections in model order. In List mode the
+        // whole set stacks in model order in one column. The default order
+        // (Hero, MeshHealth, QuickActions, PeopleActivity, Tunnels) renders
+        // byte-for-byte like the pre-layout code.
+        let visible_sections = layout.visible_sections();
+        let is_rail_section = |s: crate::layout::HomeSection| {
+            matches!(
+                s,
+                crate::layout::HomeSection::PeopleActivity
+                    | crate::layout::HomeSection::Tunnels
+            )
+        };
 
         // HOME-01: opacity of home menu/action card backgrounds over the
         // home background image (1.0 = fully opaque; lower = translucent).
@@ -1229,6 +1266,7 @@ impl IcedChat {
                 dimmed_mesh: !matches!(variant, HomeConnectionVariant::Ready),
                 home_menu_opacity,
                 card_radius: btheme.radii.card,
+                sizing: layout.card_sizing,
             });
 
         // ── Mesh Health card ──
@@ -1392,6 +1430,8 @@ impl IcedChat {
             &theme,
             home_menu_opacity,
             btheme.radii.card,
+            layout.quick_actions,
+            layout.card_sizing.quick_action_icon_size,
         );
 
         // DLMGR-01: home entry point — a compact outline button beside the
@@ -1445,21 +1485,14 @@ impl IcedChat {
         // the peers section and the activity feed. The combined dependency
         // changes when either slice changes, so the merged card rebuilds
         // correctly via `iced::widget::lazy`.
+        let people_layout = layout.clone();
         let people_activity_card =
             iced::widget::lazy(dep.people_activity.clone(), move |card_dep| {
-                Self::view_people_activity_card(card_dep, btheme)
+                Self::view_people_activity_card(card_dep, btheme, people_layout.clone())
             });
         let tunnels_card = iced::widget::lazy(dep.tunnels.clone(), move |card_dep| {
             Self::view_tunnels_card(card_dep, btheme)
         });
-
-        // Right rail: 20 px vertical card gaps (UI-HOME-02: 20–24 px).
-        let right_col = Column::new()
-            .push(people_activity_card)
-            .push(Space::new().height(Length::Fixed(SPACE_20)))
-            .push(tunnels_card)
-            .spacing(0)
-            .width(Length::Fill);
 
         // ── Page header: greeting + welcome + Download Manager ──
         // UI-HOME-15: on narrow content the Download Manager stacks under
@@ -1477,7 +1510,7 @@ impl IcedChat {
                         .spacing(0)
                         .width(Length::Fill),
                 )
-                .push(Space::new().height(Length::Fixed(SPACE_12)))
+                .push(Space::new().height(Length::Fixed(layout.gaps.compact_header_stack_gap)))
                 .push(download_manager_btn)
                 .spacing(0)
                 .width(Length::Fill)
@@ -1499,28 +1532,72 @@ impl IcedChat {
             .into()
         };
 
-        // ── Main content: hero + mesh + actions left, activity rail right ──
-        // Two-thirds content + one-third activity rail (plan §4): main
-        // ~66.7% / right ~33.3% with a 24 px column gap. Below the stack
-        // breakpoint the rail collapses BELOW the left column instead of
-        // compressing its cards. UI-HOME-15: the breakpoint is content-width
-        // based (window minus sidebar/divider/padding), so the fixed 288 px
-        // sidebar never forces an early stack.
-        let rail_stacked =
-            content_width < crate::design_tokens::HOME_TWO_COL_CONTENT;
-        let card_gap = btheme.home.quick_action_gap; // 20 px vertical card gap (plan: 20–24 px)
+        // ── Main content: section order / grid from the layout model ──
+        // BORU-LAYOUT-03: every visible section renders exactly once, in
+        // `layout.visible_sections()` order. Grid mode splits the set into
+        // the main column (Hero/MeshHealth/QuickActions) and the right rail
+        // (PeopleActivity/Tunnels), each in model order; below the stack
+        // breakpoint the rail stacks under the main column (the pre-layout
+        // behaviour). List mode stacks the whole set in one column. The
+        // default order + values reproduce today's layout byte-for-byte.
+        let main_sections: Vec<crate::layout::HomeSection> = visible_sections
+            .iter()
+            .copied()
+            .filter(|s| !is_rail_section(*s))
+            .collect();
+        let rail_sections: Vec<crate::layout::HomeSection> = visible_sections
+            .iter()
+            .copied()
+            .filter(|s| is_rail_section(*s))
+            .collect();
+        let list_mode = matches!(layout.mode, crate::layout::HomeLayoutMode::List);
 
-        let left_col = Column::new()
-            .push(hero_card)
-            .push(Space::new().height(Length::Fixed(card_gap)))
-            .push(mesh_card)
-            .push(Space::new().height(Length::Fixed(card_gap)))
-            .push(action_grid)
-            .spacing(0)
-            .width(Length::Fill);
+        // Consume the built section elements in model order (each visible
+        // section appears in exactly one list below, so `remove` never
+        // misses). BTreeMap keeps the type Hash/Eq-free; sections hidden by
+        // the model are simply never consumed and dropped.
+        let mut section_elements: std::collections::BTreeMap<
+            crate::layout::HomeSection,
+            iced::Element<'static, AppMessage>,
+        > = std::collections::BTreeMap::new();
+        section_elements.insert(crate::layout::HomeSection::Hero, hero_card);
+        section_elements.insert(crate::layout::HomeSection::MeshHealth, mesh_card);
+        section_elements.insert(crate::layout::HomeSection::QuickActions, action_grid);
+        section_elements.insert(
+            crate::layout::HomeSection::PeopleActivity,
+            people_activity_card.into(),
+        );
+        section_elements.insert(crate::layout::HomeSection::Tunnels, tunnels_card.into());
 
-        let main_content: iced::Element<'_, AppMessage> = if rail_stacked {
-            // Narrow: left-column cards first, then the activity rail below.
+        let card_gap = layout.gaps.card_gap; // 20 px vertical card gap (plan: 20–24 px)
+        let mut column_from_sections = |list: &[crate::layout::HomeSection]| {
+            let mut col = Column::new().spacing(0).width(Length::Fill);
+            for (i, section) in list.iter().enumerate() {
+                if i > 0 {
+                    col = col.push(Space::new().height(Length::Fixed(card_gap)));
+                }
+                col = col.push(
+                    section_elements
+                        .remove(section)
+                        .expect("visible section element built above"),
+                );
+            }
+            col
+        };
+
+        let main_content: iced::Element<'_, AppMessage> = if list_mode {
+            // Single stacked column in model order (all visible sections).
+            column_from_sections(&visible_sections).into()
+        } else if main_sections.is_empty() {
+            // No main-column sections visible — the rail owns the page.
+            column_from_sections(&rail_sections).into()
+        } else if rail_sections.is_empty() {
+            // No rail sections visible — the main column spans full width.
+            column_from_sections(&main_sections).into()
+        } else if content_width < layout.grid.stack_breakpoint {
+            // Narrow: main-column cards first, then the activity rail below.
+            let left_col = column_from_sections(&main_sections);
+            let right_col = column_from_sections(&rail_sections);
             Column::new()
                 .push(left_col)
                 .push(Space::new().height(Length::Fixed(card_gap)))
@@ -1537,16 +1614,20 @@ impl IcedChat {
             // never resizes a Shrink-height child to match a sibling, so
             // opening the rail cannot force the status card taller. The
             // card's own container in status_card.rs pins the same guard.
+            // BORU-LAYOUT-03: the main/rail FillPortion split and the
+            // column gap come from the layout model (`home.grid`).
+            let left_col = column_from_sections(&main_sections);
+            let right_col = column_from_sections(&rail_sections);
             Row::new()
                 .push(
                     container(left_col)
-                        .width(Length::FillPortion(2))
+                        .width(Length::FillPortion(layout.grid.main_portion))
                         .height(Length::Shrink),
                 )
-                .push(Space::new().width(Length::Fixed(SPACE_24)))
+                .push(Space::new().width(Length::Fixed(layout.grid.column_gap)))
                 .push(
                     container(right_col)
-                        .width(Length::FillPortion(1))
+                        .width(Length::FillPortion(layout.grid.rail_portion))
                         .height(Length::Shrink),
                 )
                 .spacing(0)
@@ -1576,20 +1657,26 @@ impl IcedChat {
         // ── Assemble: centred dashboard canvas with responsive padding ──
         // Horizontal 32 px at large widths, 28 px elsewhere; top 28 px below
         // the application header; bottom at least 32 px (UI-HOME-02 plan).
+        // BORU-LAYOUT-03: the paddings come from the layout model
+        // (`home.padding`), defaulting to those same values. The content
+        // width math (`home_content_width`) still uses the design-token
+        // constants so the responsive breakpoints stay unchanged; the
+        // responsive task (BORU-LAYOUT-04) will drive it from the model.
         let h_padding = if crate::design_tokens::is_large(window_width) {
-            SPACE_32
+            layout.padding.horizontal_large
         } else {
-            SPACE_28
+            layout.padding.horizontal_default
         };
 
         // POLISH-05: page header → dashboard gap bumped from SPACE_28 to
         // ~40 px — roughly 12 px more breathing room between the
-        // \"Welcome to Boru\" subtitle and the card grid.
+        // \"Welcome to Boru\" subtitle and the card grid. BORU-LAYOUT-03:
+        // the gap comes from the layout model (`home.gaps`).
         let col = Column::new()
             .push(page_header)
-            .push(Space::new().height(Length::Fixed(SPACE_28 + SPACE_12)))
+            .push(Space::new().height(Length::Fixed(layout.gaps.header_dashboard_gap)))
             .push(main_content)
-            .push(Space::new().height(Length::Fixed(SPACE_16)))
+            .push(Space::new().height(Length::Fixed(layout.gaps.footer_gap)))
             .push(footer)
             .spacing(0)
             .width(Length::Fill);
@@ -1597,7 +1684,8 @@ impl IcedChat {
         // Cap the dashboard width (~1480 px) and centre it in the available
         // content region; vertical page scrolling stays on gutter_scrollable.
         // The max-width only binds on very wide windows (e.g. 1920), where it
-        // keeps the grid from stretching edge-to-edge.
+        // keeps the grid from stretching edge-to-edge. BORU-LAYOUT-03: the
+        // cap comes from the layout model (`home.max_content_width`).
         // UI-HOME-11: the dashboard content container uses Shrink height so
         // the cards + footer take only their natural height instead of
         // stretching to fill the viewport — no giant empty white space on
@@ -1605,9 +1693,12 @@ impl IcedChat {
         // scrollable bounds + horizontal centering.
         let canvas = container(
             container(col)
-                .padding(iced::Padding::from([SPACE_28, h_padding]).bottom(SPACE_32))
+                .padding(
+                    iced::Padding::from([layout.padding.top, h_padding])
+                        .bottom(layout.padding.bottom),
+                )
                 .width(Length::Fill)
-                .max_width(crate::design_tokens::DASHBOARD_MAX_WIDTH)
+                .max_width(layout.max_content_width)
                 .height(Length::Shrink),
         )
         .width(Length::Fill)

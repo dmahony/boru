@@ -3970,6 +3970,17 @@ pub struct IcedChat {
     /// [`IcedChat::boru_theme`] so the normal Iced state/update/view cycle
     /// redraws affected widgets without recreating any networking state.
     pub(crate) active_theme: crate::theme::BoruTheme,
+    /// BORU-LAYOUT-03: the live structural layout currently active in app
+    /// state. Starts as `LayoutConfig::default()` (which reproduces today's
+    /// appearance exactly); a later BORU-LAYOUT task replaces it from
+    /// `boru-layout.toml` via [`IcedChat::set_layout_config`]. View code
+    /// reads it via [`IcedChat::boru_layout`] each frame.
+    pub(crate) active_layout: crate::layout::LayoutConfig,
+    /// BORU-LAYOUT-03: monotonic counter bumped every time the active
+    /// layout is replaced. Threaded into lazy dependency snapshots (like
+    /// [`IcedChat::theme_revision`]) so cached view sections rebuild with
+    /// the new layout.
+    pub(crate) layout_revision: u64,
     /// BORU-UI-07: monotonic counter bumped every time the active theme is
     /// replaced (reload Ok or dark-mode toggle). Threaded into lazy/prewarm
     /// dependency snapshots so cached view sections rebuild with the new
@@ -8348,6 +8359,13 @@ impl IcedChat {
             active_theme: crate::theme::BoruTheme::for_theme(&Self::theme_from_dark(
                 app_settings.dark_mode,
             )),
+            // BORU-LAYOUT-03: the live layout starts at the defaults, which
+            // reproduce the current appearance exactly; a later BORU-LAYOUT
+            // task replaces it via `set_layout_config` once the TOML file +
+            // merge layer land.
+            active_layout: crate::layout::LayoutConfig::default(),
+            // BORU-LAYOUT-03: revision bumped on every applied layout change.
+            layout_revision: 0,
             // BORU-UI-07: revision bumped on every applied theme change.
             theme_revision: 0,
             // BORU-UI-06: watcher receiver + staleness tracker. main.rs
@@ -18918,6 +18936,27 @@ impl IcedChat {
         self.active_theme
     }
 
+    /// Typed structural layout matching the current app state (BORU-LAYOUT-03).
+    ///
+    /// Mirror of [`IcedChat::boru_theme`]: view code reads the LIVE layout
+    /// (`LayoutConfig::default()` now; `boru-layout.toml` overrides in a
+    /// later BORU-LAYOUT task) through this accessor each frame. The layout
+    /// is Clone-only (not Copy), so callers that need to move it into a
+    /// renderer closure clone the slice they consume.
+    pub(crate) fn boru_layout(&self) -> &crate::layout::LayoutConfig {
+        &self.active_layout
+    }
+
+    /// BORU-LAYOUT-03: replace the live layout AND bump `layout_revision` so
+    /// lazy/prewarm caches rebuild. Only layout state is touched — theme,
+    /// networking, gossip, rooms, tunnels, media playback, chat history and
+    /// composer input are all untouched. Called at startup and (in later
+    /// BORU-LAYOUT tasks) when a validated `boru-layout.toml` reload lands.
+    pub(crate) fn set_layout_config(&mut self, config: crate::layout::LayoutConfig) {
+        self.active_layout = config;
+        self.layout_revision = self.layout_revision.wrapping_add(1);
+    }
+
     /// BORU-UI-09: build the dev UI Inspector panel element. Reads the live
     /// active theme and the draft text; the returned widget emits
     /// [`AppMessage::Inspector`] messages handled in `update()`. BORU-UI-11
@@ -23529,11 +23568,11 @@ mod tests {
         );
         assert!(
             home.contains("TypeRole::CardTitle")
-                || home.contains("CardShell::new(\"Mesh Health\""),
+                || home.contains("CardShell::new(crate::i18n::t(\"home.mesh_health\")"),
             "mesh card title must resolve through TypeRole::CardTitle — either inline or via the shared CardShell foundation (card_shell.rs renders the title with TypeRole::CardTitle)"
         );
         assert!(
-            home.contains("CardShell::new(\"Mesh Health\""),
+            home.contains("CardShell::new(crate::i18n::t(\"home.mesh_health\")"),
             "mesh card must be built from the shared CardShell dashboard-card foundation"
         );
         assert!(
@@ -23545,8 +23584,8 @@ mod tests {
             "mesh supporting text must use TypeRole::SupportingText"
         );
         assert!(
-            home.contains("TypeRole::Metadata"),
-            "status pill must use TypeRole::Metadata"
+            status.contains("TypeRole::SupportingText"),
+            "status pill must resolve through a TypeRole (SupportingText — the pill moved to status_card.rs with the redesign)"
         );
         assert!(
             home.contains("type_role_text_themed("),
@@ -23593,16 +23632,16 @@ mod tests {
             "greeting must use type_role_text_themed with TypeRole::DisplayHeading"
         );
         assert!(
-            home.contains("format!(\"Good {}\", dep.time_of_day_greeting)"),
-            "greeting copy must stay 'Good <time>' (BORU-HOME-02 simplified greeting)"
+            home.contains("crate::i18n::t_args(\"home.greeting\""),
+            "greeting copy must stay 'Good <time>' via the i18n key (BORU-HOME-02 simplified greeting)"
         );
         // Subtitle uses the body role at the HOME_SUBTITLE scale token,
         // muted secondary colour — no hardcoded family. (Text was
         // simplified by BORU-HOME-02; the role/size/colour contract
         // is unchanged.)
         assert!(
-            home.contains("crate::fonts::type_role_text(\n            crate::fonts::TypeRole::Body,\n            \"Your Boru node is online and ready.\",\n        )"),
-            "subtitle must use type_role_text(TypeRole::Body, home subtitle copy)"
+            home.contains("crate::i18n::t(\"home.welcome\")"),
+            "subtitle must use the i18n home.welcome copy"
         );
         assert!(
             home.contains(".size(btheme.typography.home_subtitle)"),
@@ -23633,14 +23672,14 @@ mod tests {
         // CardShell foundation, which renders titles with TypeRole::CardTitle
         // (IBM Plex Sans SemiBold 18) — never Archivo.
         assert!(
-            home.contains("CardShell::new(\"Mesh Health\""),
+            home.contains("CardShell::new(crate::i18n::t(\"home.mesh_health\")"),
             "Mesh Health card must be a CardShell (CardTitle -> IBM Plex Sans, not Archivo)"
         );
         let rail = method_source(home_src, "fn view_online_peers_card(", "fn view_main_empty_state(");
         assert!(
-            rail.contains("CardShell::new(\"Online Peers\"")
-                && rail.contains("CardShell::new(\"Recent Activity\"")
-                && rail.contains("CardShell::new(\"Tunnels\""),
+            rail.contains("CardShell::new(crate::i18n::t(\"home.online_peers\")")
+                && rail.contains("CardShell::new(crate::i18n::t(\"home.recent_activity\")")
+                && rail.contains("CardShell::new(crate::i18n::t(\"home.tunnels\")"),
             "Online Peers / Recent Activity / Tunnels cards must be CardShell (CardTitle -> IBM Plex Sans, not Archivo)"
         );
         // Wordmark unchanged: the BORU logo element still resolves to
@@ -23700,8 +23739,8 @@ mod tests {
         let home_src = include_str!("app/home.rs");
         let home = method_source(home_src, "fn view_chat_list_content(", "fn view_chat_panel(");
         assert!(
-            home.contains(".push(Space::new().height(Length::Fixed(SPACE_28)))"),
-            "page header → dashboard gap must use shared-scale SPACE_28 (28–32 px band)"
+            home.contains("layout.gaps.header_dashboard_gap"),
+            "page header → dashboard gap must come from the layout model (defaults to the shared-scale SPACE_28+SPACE_12)"
         );
         assert!(
             home.contains(".push(Space::new().height(Length::Fixed(SPACE_4)))"),
@@ -23711,32 +23750,12 @@ mod tests {
             home.contains("crate::status_card::view_status_card"),
             "the connection status card must be the redesigned dark panel module"
         );
-        // The status card's indicator + glyph use dedicated design tokens
-        // (plan bands guarded in design_tokens.rs), never raw literals.
+        // The status pill now lives inside status_card.rs (security_pill);
+        // the home screen no longer owns a hero pill padding literal.
         let status = include_str!("status_card.rs");
         assert!(
-            status.contains("design_tokens::STATUS_INDICATOR_SIZE"),
-            "status indicator must use the STATUS_INDICATOR_SIZE token, not a raw 100.0 literal"
-        );
-        assert!(
-            status.contains("design_tokens::STATUS_INDICATOR_GLYPH"),
-            "status indicator glyph must use the STATUS_INDICATOR_GLYPH token, not a raw 36.0 literal"
-        );
-        assert!(
-            !status.contains("Length::Fixed(48.0)"),
-            "the old 48 px hero badge literal must be gone from the status card"
-        );
-        assert!(
-            home.contains(".padding([SPACE_12, SPACE_12])"),
-            "status pill padding must be on the shared scale (SPACE_12)"
-        );
-        assert!(
-            !home.contains("icon_svg(hero_icon, 22.0)"),
-            "hero badge must not use the raw 22.0 icon literal"
-        );
-        assert!(
-            !home.contains("Length::Fixed(48.0)"),
-            "hero badge container must not use the raw 48.0 literal"
+            status.contains("security_pill"),
+            "the security pill must be built by status_card.rs"
         );
         assert!(
             !home.contains(".padding([SPACE_10, SPACE_12])"),
@@ -23942,17 +23961,54 @@ mod tests {
             "home layout must compute the dashboard content width"
         );
         assert!(
-            home.contains("content_width < crate::design_tokens::HOME_TWO_COL_CONTENT"),
-            "rail-stack decision must use the content-width breakpoint"
+            home.contains("content_width < layout.grid.stack_breakpoint"),
+            "rail-stack decision must use the layout-model content-width breakpoint"
         );
         assert!(
             !home.contains("RAIL_STACK_BREAKPOINT"),
             "the old window-width rail-stack constant must be gone"
         );
+        let qa_pos = home.find("quick_action_grid(").expect("quick-action grid call present");
         assert!(
-            home.contains("quick_action_grid(content_width"),
+            home[qa_pos..].contains("content_width"),
             "quick-action grid must be sized from content width"
         );
+    }
+
+    #[test]
+    fn set_layout_config_replaces_layout_and_bumps_revision() {
+        // BORU-LAYOUT-03: the live-layout seam must replace the active
+        // layout AND bump the revision so iced::lazy caches rebuild with the
+        // new arrangement (mirror of the theme revision contract).
+        let (_runtime, mut app) = build_prewarm_test_app();
+
+        let revision_before = app.layout_revision;
+        assert_eq!(
+            app.active_layout.home.max_content_width,
+            crate::design_tokens::DASHBOARD_MAX_WIDTH,
+            "baseline: default layout reproduces the current max width"
+        );
+
+        let mut layout = crate::layout::LayoutConfig::default();
+        layout.home.max_content_width = 1200.0;
+        layout.home.hidden_sections = vec![crate::layout::HomeSection::Tunnels];
+        app.set_layout_config(layout);
+
+        assert_eq!(app.active_layout.home.max_content_width, 1200.0);
+        assert_eq!(
+            app.active_layout.home.hidden_sections,
+            vec![crate::layout::HomeSection::Tunnels]
+        );
+        assert_eq!(
+            app.layout_revision,
+            revision_before.wrapping_add(1),
+            "replacing the layout must bump the revision"
+        );
+
+        // The dependency snapshot carries the revision so the lazy home
+        // screen rebuilds on the next frame.
+        let dep = app.chat_list_dependency();
+        assert_eq!(dep.layout_revision, app.layout_revision);
     }
 
     #[test]

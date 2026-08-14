@@ -29,12 +29,15 @@
 //! ## Status
 //!
 //! Schema complete (BORU-LAYOUT-02): typed leaf structs + defaults + the
-//! [`LayoutOverrides`] partial-override mirror. TOML parsing/merge/watcher
-//! are BORU-LAYOUT-03/06; wiring into views is BORU-LAYOUT-03+.
-//! `#![allow(dead_code)]` guards the unwired model until then; remove it
-//! once views consume `LayoutConfig`.
+//! [`LayoutOverrides`] partial-override mirror. BORU-LAYOUT-03 wires the
+//! `home.*` group into `app/home.rs` (section order/visibility, grid/list
+//! mode, columns, max width, padding/gaps, card sizing); the remaining
+//! groups (sidebar, chat, component, tables, responsive) are wired by later
+//! tasks. TOML parsing/merge/watcher are later BORU-LAYOUT tasks.
+//! `#![allow(dead_code)]` guards the still-unwired groups; drop it once
+//! every group is consumed by a view.
 
-#![allow(dead_code)] // unwired model; drop once BORU-LAYOUT-03+ wires views to LayoutConfig
+#![allow(dead_code)] // unwired groups remain until later BORU-LAYOUT tasks consume them
 
 use std::collections::BTreeMap;
 
@@ -144,6 +147,19 @@ impl Default for HomeLayout {
             gaps: HomeGaps::default(),
             card_sizing: HomeCardSizing::default(),
         }
+    }
+}
+
+impl HomeLayout {
+    /// Sections that render on the home dashboard, in vertical order:
+    /// [`HomeLayout::section_order`] with every [`HomeLayout::hidden_sections`]
+    /// entry removed (BORU-LAYOUT-03: the view renders exactly this list).
+    pub fn visible_sections(&self) -> Vec<HomeSection> {
+        self.section_order
+            .iter()
+            .copied()
+            .filter(|s| !self.hidden_sections.contains(s))
+            .collect()
     }
 }
 
@@ -1295,6 +1311,40 @@ mod tests {
     use crate::theme::BoruTheme;
 
     // ── Default = current appearance ──────────────────────────────────
+
+    #[test]
+    fn home_visible_sections_filters_hidden_and_keeps_order() {
+        let h = HomeLayout::default();
+        assert_eq!(
+            h.visible_sections(),
+            vec![
+                HomeSection::Hero,
+                HomeSection::MeshHealth,
+                HomeSection::QuickActions,
+                HomeSection::PeopleActivity,
+                HomeSection::Tunnels,
+            ]
+        );
+        // Hidden sections are skipped; the remaining order is preserved.
+        let hidden = HomeLayout {
+            section_order: vec![
+                HomeSection::Tunnels,
+                HomeSection::Hero,
+                HomeSection::PeopleActivity,
+                HomeSection::MeshHealth,
+            ],
+            hidden_sections: vec![HomeSection::Hero],
+            ..Default::default()
+        };
+        assert_eq!(
+            hidden.visible_sections(),
+            vec![
+                HomeSection::Tunnels,
+                HomeSection::PeopleActivity,
+                HomeSection::MeshHealth,
+            ]
+        );
+    }
 
     #[test]
     fn home_defaults_reproduce_current_appearance() {
