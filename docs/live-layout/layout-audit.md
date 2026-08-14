@@ -189,11 +189,22 @@ theme.rs test-module pattern), so the two sources can never drift apart.
 
 ## 7. Follow-ups for later tasks
 
-- **BORU-LAYOUT-02 (design layout schema):** finish typed structs + defaults +
-  partial-override shape (Option leaves or merge layer) + default-value unit tests.
+- **BORU-LAYOUT-02 (design layout schema) — DONE (t_0dedf19e).** Typed
+  structs complete: `HomeLayout` now also carries the status-card fields the
+  audit mapped (`status_card_min_content_height`, `status_card_medium/narrow/
+  mesh_hide_content`, `status_card_text_min_width` — read from
+  `status_card.rs` consts so they can't drift). The partial-override shape is
+  `LayoutOverrides` + per-group `*Overrides` mirrors (all `Option<T>` leaves,
+  same organisation as `theme_config.rs`); a missing key falls back to
+  `LayoutConfig::default()` at merge time. Default-value unit tests
+  (`layout.rs` `mod tests`) assert every leaf against `design_tokens.rs` /
+  `card_shell.rs` / `status_card.rs` / `theme.rs` so the sources can never
+  drift apart.
 - **BORU-LAYOUT-03 (home layout wiring):** wire `home.*` into `app/home.rs` view;
   section order/visibility becomes data-driven; grid columns read from
-  `home.grid`/`home.quick_actions`; breakpoints from `responsive`.
+  `home.grid`/`home.quick_actions`; breakpoints from `responsive`. Also add
+  the TOML parse + merge layer that consumes `LayoutOverrides` (mirror
+  `theme_config.rs` / `theme_merge.rs`).
 - **Component layout task:** wire `component.*` (thumbnail position, metadata
   alignment, button placement, card orientation) into media/file cards.
 - **Layout config file + watcher:** `boru-layout.toml` parsing, merge, validation,

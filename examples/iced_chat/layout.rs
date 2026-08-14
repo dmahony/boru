@@ -28,11 +28,13 @@
 //!
 //! ## Status
 //!
-//! Skeleton only — intentionally NOT wired into views yet (BORU-LAYOUT-02/03
-//! define the full schema and integrate it). `#![allow(dead_code)]` guards the
-//! unwired model until then; remove it once views consume `LayoutConfig`.
+//! Schema complete (BORU-LAYOUT-02): typed leaf structs + defaults + the
+//! [`LayoutOverrides`] partial-override mirror. TOML parsing/merge/watcher
+//! are BORU-LAYOUT-03/06; wiring into views is BORU-LAYOUT-03+.
+//! `#![allow(dead_code)]` guards the unwired model until then; remove it
+//! once views consume `LayoutConfig`.
 
-#![allow(dead_code)] // unwired skeleton; drop once BORU-LAYOUT-03+ wires views to LayoutConfig
+#![allow(dead_code)] // unwired model; drop once BORU-LAYOUT-03+ wires views to LayoutConfig
 
 use std::collections::BTreeMap;
 
@@ -276,6 +278,19 @@ pub struct HomeCardSizing {
     pub activity_row_height: f32,
     /// Quick-action icon container diameter (40 px).
     pub quick_action_icon_size: f32,
+    /// Status card minimum content height (`STATUS_CARD_MIN_CONTENT_HEIGHT` = 110 px).
+    pub status_card_min_content_height: f32,
+    /// Status card content width at/above which the Full tier applies
+    /// (`STATUS_CARD_MEDIUM_CONTENT` = 760 px).
+    pub status_card_medium_content: f32,
+    /// Status card content width at/above which the Medium tier applies
+    /// (`STATUS_CARD_NARROW_CONTENT` = 560 px).
+    pub status_card_narrow_content: f32,
+    /// Status card content width below which the decorative mesh is hidden
+    /// (`STATUS_CARD_MESH_HIDE_CONTENT` = 520 px).
+    pub status_card_mesh_hide_content: f32,
+    /// Status card text-column minimum width (`STATUS_CARD_TEXT_MIN_WIDTH` = 260 px).
+    pub status_card_text_min_width: f32,
     /// Status card text-column minimum width, Medium tier (260 px).
     pub status_card_text_min_width_medium: f32,
     /// Status card decorative mesh max width (170 px).
@@ -302,6 +317,11 @@ impl Default for HomeCardSizing {
             peers_body_min: 128.0,
             activity_row_height: 32.0,
             quick_action_icon_size: 40.0,
+            status_card_min_content_height: crate::status_card::STATUS_CARD_MIN_CONTENT_HEIGHT,
+            status_card_medium_content: crate::status_card::STATUS_CARD_MEDIUM_CONTENT,
+            status_card_narrow_content: crate::status_card::STATUS_CARD_NARROW_CONTENT,
+            status_card_mesh_hide_content: crate::status_card::STATUS_CARD_MESH_HIDE_CONTENT,
+            status_card_text_min_width: crate::status_card::STATUS_CARD_TEXT_MIN_WIDTH,
             status_card_text_min_width_medium: 260.0,
             status_card_mesh_max_width: 170.0,
             status_card_padding_x: crate::design_tokens::SPACE_24,
@@ -896,5 +916,799 @@ impl Default for ScreenLayout {
             max_content_width: crate::design_tokens::CONTENT_MAX_WIDTH,
             columns: 1,
         }
+    }
+}
+
+// ── Partial overrides (PDF Task 2: "Support defaults and partial overrides") ──
+//
+// Every concrete group above has a matching `*Overrides` mirror here where
+// each leaf is `Option<T>` — the same organisation as `theme_config.rs` for
+// `BoruTheme`. A missing key (a `None` leaf, or a missing group) falls back
+// to the corresponding [`LayoutConfig::default`] value at merge time
+// (BORU-LAYOUT-03). This file defines the model only; the TOML file,
+// merge and watcher come in BORU-LAYOUT-03/06.
+
+/// Root partial-override file model. Every group optional; a missing group
+/// means "no overrides" and the merge step falls back to
+/// [`LayoutConfig::default`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LayoutOverrides {
+    /// Home dashboard overrides.
+    pub home: Option<HomeOverrides>,
+    /// Sidebar shell overrides.
+    pub sidebar: Option<SidebarOverrides>,
+    /// Chat screen overrides.
+    pub chat: Option<ChatOverrides>,
+    /// Component-placement overrides.
+    pub component: Option<ComponentOverrides>,
+    /// Data-table overrides.
+    pub tables: Option<TablesOverrides>,
+    /// Responsive-breakpoint overrides.
+    pub responsive: Option<ResponsiveOverrides>,
+    /// Per-screen overrides for future screens (stable screen-id keys).
+    pub screens: BTreeMap<String, ScreenOverrides>,
+}
+
+// ── Flat override-group macro ─────────────────────────────────────────
+//
+// Mirrors `theme_config.rs::config_group!`: generates a struct whose leaves
+// are all `Option<T>`, so a partial file deserializes to `None` leaves and
+// the merge falls back to the layout defaults. Field names MUST match the
+// concrete layout struct so BORU-LAYOUT-03 can merge without a mapping table.
+
+macro_rules! layout_override_group {
+    ($(#[$doc:meta])* $name:ident { $($field:ident: $ty:ty),* $(,)? }) => {
+        $(#[$doc])*
+        #[derive(Debug, Clone, Default, PartialEq)]
+        pub struct $name {
+            $(pub $field: Option<$ty>,)*
+        }
+    };
+}
+
+// ── Home overrides ────────────────────────────────────────────────────
+
+/// Home dashboard partial overrides.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HomeOverrides {
+    /// Override the section order.
+    pub section_order: Option<Vec<HomeSection>>,
+    /// Override which sections are hidden.
+    pub hidden_sections: Option<Vec<HomeSection>>,
+    /// Override grid/list presentation mode.
+    pub mode: Option<HomeLayoutMode>,
+    /// Override the main/rail grid split.
+    pub grid: Option<HomeGridOverrides>,
+    /// Override quick-action column counts / breakpoints.
+    pub quick_actions: Option<QuickActionsOverrides>,
+    /// Override max dashboard canvas width.
+    pub max_content_width: Option<f32>,
+    /// Override dashboard padding.
+    pub padding: Option<HomePaddingOverrides>,
+    /// Override section/card gaps.
+    pub gaps: Option<HomeGapsOverrides>,
+    /// Override card sizing constraints.
+    pub card_sizing: Option<HomeCardSizingOverrides>,
+}
+
+layout_override_group! {
+    /// Home grid split overrides.
+    HomeGridOverrides {
+        main_portion: u16,
+        rail_portion: u16,
+        column_gap: f32,
+        stack_breakpoint: f32,
+    }
+}
+
+layout_override_group! {
+    /// Quick-action grid overrides.
+    QuickActionsOverrides {
+        columns_wide: usize,
+        columns_mid: usize,
+        columns_narrow: usize,
+        four_col_breakpoint: f32,
+        two_col_breakpoint: f32,
+    }
+}
+
+layout_override_group! {
+    /// Dashboard canvas padding overrides.
+    HomePaddingOverrides {
+        top: f32,
+        bottom: f32,
+        horizontal_large: f32,
+        horizontal_default: f32,
+    }
+}
+
+layout_override_group! {
+    /// Home gap overrides.
+    HomeGapsOverrides {
+        card_gap: f32,
+        hero_gap: f32,
+        header_dashboard_gap: f32,
+        footer_gap: f32,
+        compact_header_stack_gap: f32,
+    }
+}
+
+layout_override_group! {
+    /// Home card-sizing overrides.
+    HomeCardSizingOverrides {
+        peers_body_min: f32,
+        activity_row_height: f32,
+        quick_action_icon_size: f32,
+        status_card_min_content_height: f32,
+        status_card_medium_content: f32,
+        status_card_narrow_content: f32,
+        status_card_mesh_hide_content: f32,
+        status_card_text_min_width: f32,
+        status_card_text_min_width_medium: f32,
+        status_card_mesh_max_width: f32,
+        status_card_padding_x: f32,
+        status_icon_text_gap_full: f32,
+        status_icon_text_gap_medium: f32,
+        status_text_graph_gap_full: f32,
+        status_text_graph_gap_medium: f32,
+        status_divider_width: f32,
+        status_divider_height: f32,
+    }
+}
+
+// ── Sidebar overrides ─────────────────────────────────────────────────
+
+/// Sidebar shell partial overrides.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SidebarOverrides {
+    /// Override the target sidebar width.
+    pub width: Option<f32>,
+    /// Override the minimum responsive width.
+    pub width_min: Option<f32>,
+    /// Override the maximum responsive width.
+    pub width_max: Option<f32>,
+    /// Override the horizontal inset.
+    pub inset: Option<f32>,
+    /// Override the section order.
+    pub section_order: Option<Vec<SidebarSection>>,
+    /// Override which sections are hidden.
+    pub hidden_sections: Option<Vec<SidebarSection>>,
+    /// Override padding regions.
+    pub padding: Option<SidebarPaddingOverrides>,
+    /// Override row heights.
+    pub row_heights: Option<SidebarRowHeightsOverrides>,
+}
+
+layout_override_group! {
+    /// Sidebar padding-region overrides.
+    SidebarPaddingOverrides {
+        brand_top: f32,
+        brand_bottom: f32,
+        identity_top: f32,
+        identity_bottom: f32,
+        section_top: f32,
+        utility_top: f32,
+        utility_bottom: f32,
+        row_x: f32,
+        join_top: f32,
+        join_bottom: f32,
+    }
+}
+
+layout_override_group! {
+    /// Sidebar / dashboard row-height overrides.
+    SidebarRowHeightsOverrides {
+        conversation_row: f32,
+        peer_row: f32,
+        peer_panel_max_height: f32,
+        default_list_max_height: f32,
+    }
+}
+
+// ── Chat overrides ────────────────────────────────────────────────────
+
+/// Chat screen partial overrides.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ChatOverrides {
+    /// Override the bubble max width.
+    pub bubble_max_width: Option<f32>,
+    /// Override the bubble width ratio.
+    pub bubble_width_ratio: Option<f32>,
+    /// Override the message content max width.
+    pub message_max_width: Option<f32>,
+    /// Override the inline image preview max width.
+    pub image_preview_max_width: Option<f32>,
+    /// Override the inline image preview max height.
+    pub image_preview_max_height: Option<f32>,
+    /// Override the context-menu width.
+    pub context_menu_width: Option<f32>,
+    /// Override the details-panel width.
+    pub details_panel_width: Option<f32>,
+    /// Override the emoji picker geometry.
+    pub emoji_picker: Option<PickerOverrides>,
+    /// Override the GIF picker geometry.
+    pub gif_picker: Option<GifPickerOverrides>,
+    /// Override the screen-share viewer box.
+    pub screen_share: Option<ScreenShareOverrides>,
+    /// Override the composer bar.
+    pub composer: Option<ComposerOverrides>,
+    /// Override the member-list panel.
+    pub member_list: Option<MemberListOverrides>,
+}
+
+layout_override_group! {
+    /// Fixed-size picker panel overrides.
+    PickerOverrides {
+        width: f32,
+        scroll_height: f32,
+    }
+}
+
+layout_override_group! {
+    /// GIF picker overrides.
+    GifPickerOverrides {
+        width: f32,
+        scroll_height: f32,
+        thumbnail_width: f32,
+        thumbnail_height: f32,
+    }
+}
+
+layout_override_group! {
+    /// Screen-share viewer box overrides.
+    ScreenShareOverrides {
+        width: f32,
+        height: f32,
+    }
+}
+
+/// Composer bar partial overrides.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ComposerOverrides {
+    /// Override the button order (input stays between leading/trailing).
+    pub button_order: Option<Vec<ComposerButton>>,
+    /// Override row spacing.
+    pub spacing: Option<f32>,
+    /// Override bar padding.
+    pub padding: Option<f32>,
+}
+
+layout_override_group! {
+    /// Member-list panel overrides.
+    MemberListOverrides {
+        width: f32,
+        max_height: f32,
+        name_portion: u16,
+        role_portion: u16,
+    }
+}
+
+// ── Component overrides (PDF Task 5) ──────────────────────────────────
+
+/// Component-placement partial overrides.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ComponentOverrides {
+    /// Override thumbnail position.
+    pub thumbnail_position: Option<ThumbnailPosition>,
+    /// Override metadata alignment.
+    pub metadata_alignment: Option<MetadataAlignment>,
+    /// Override button placement.
+    pub button_placement: Option<ButtonPlacement>,
+    /// Override card orientation.
+    pub card_orientation: Option<CardOrientation>,
+    /// Override video card sizing.
+    pub video: Option<VideoCardOverrides>,
+}
+
+layout_override_group! {
+    /// Video attachment card sizing overrides.
+    VideoCardOverrides {
+        narrow_breakpoint: f32,
+        medium_breakpoint: f32,
+        play_overlay_size: f32,
+        header_filename_max_width: f32,
+        controls_slider_width: f32,
+    }
+}
+
+// ── Tables overrides ──────────────────────────────────────────────────
+
+/// Data-table partial overrides.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TablesOverrides {
+    /// File-dashboard table column overrides.
+    pub file_table: Option<FileTableOverrides>,
+    /// Sharing-table column overrides.
+    pub shared_table: Option<SharedTableOverrides>,
+}
+
+layout_override_group! {
+    /// File-dashboard table column-width overrides.
+    FileTableOverrides {
+        size_col: f32,
+        source_col: f32,
+        ago_col: f32,
+        peer_col: f32,
+        started_col: f32,
+        state_col: f32,
+        direction_col: f32,
+        event_col: f32,
+        details_col: f32,
+        download_started_col: f32,
+        download_state_col: f32,
+        activity_ago_col: f32,
+    }
+}
+
+layout_override_group! {
+    /// Sharing-table column-width overrides.
+    SharedTableOverrides {
+        shared_with: f32,
+        size: f32,
+        shared_on: f32,
+        downloads: f32,
+        actions: f32,
+    }
+}
+
+// ── Responsive overrides (PDF Task 4) ─────────────────────────────────
+
+layout_override_group! {
+    /// Responsive breakpoint / viewport-tier overrides.
+    ResponsiveOverrides {
+        viewport_ref_width: f32,
+        viewport_ref_height: f32,
+        viewport_min_width: f32,
+        viewport_min_height: f32,
+        viewport_lg_width: f32,
+        viewport_lg_height: f32,
+        viewport_xl_width: f32,
+        viewport_xl_height: f32,
+        content_max_width: f32,
+        home_illustration_full_content: f32,
+        home_illustration_hide_content: f32,
+        home_compact_header_content: f32,
+    }
+}
+
+// ── Future-screen overrides (extension point) ─────────────────────────
+
+/// Per-screen partial overrides registered under [`LayoutOverrides::screens`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ScreenOverrides {
+    /// Override the ordered section ids.
+    pub section_order: Option<Vec<String>>,
+    /// Override which section ids are hidden.
+    pub hidden_sections: Option<Vec<String>>,
+    /// Override the canvas max width.
+    pub max_content_width: Option<f32>,
+    /// Override the primary grid column count.
+    pub columns: Option<usize>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::card_shell;
+    use crate::design_tokens;
+    use crate::status_card;
+    use crate::theme::BoruTheme;
+
+    // ── Default = current appearance ──────────────────────────────────
+
+    #[test]
+    fn home_defaults_reproduce_current_appearance() {
+        let h = HomeLayout::default();
+
+        // Section order: left column then right rail.
+        assert_eq!(
+            h.section_order,
+            vec![
+                HomeSection::Hero,
+                HomeSection::MeshHealth,
+                HomeSection::QuickActions,
+                HomeSection::PeopleActivity,
+                HomeSection::Tunnels,
+            ]
+        );
+        assert!(
+            h.hidden_sections.is_empty(),
+            "all sections visible by default"
+        );
+        assert_eq!(h.mode, HomeLayoutMode::Grid);
+        assert_eq!(h.max_content_width, design_tokens::DASHBOARD_MAX_WIDTH);
+
+        // Grid split + stack breakpoint.
+        assert_eq!(h.grid.main_portion, 2);
+        assert_eq!(h.grid.rail_portion, 1);
+        assert_eq!(h.grid.column_gap, design_tokens::SPACE_24);
+        assert_eq!(h.grid.stack_breakpoint, design_tokens::HOME_TWO_COL_CONTENT);
+
+        // Quick-action column counts + breakpoints.
+        assert_eq!(h.quick_actions.columns_wide, 4);
+        assert_eq!(h.quick_actions.columns_mid, 2);
+        assert_eq!(h.quick_actions.columns_narrow, 1);
+        assert_eq!(
+            h.quick_actions.four_col_breakpoint,
+            design_tokens::HOME_QUICK_FOUR_COL_CONTENT
+        );
+        assert_eq!(
+            h.quick_actions.two_col_breakpoint,
+            design_tokens::HOME_QUICK_ONE_COL_CONTENT
+        );
+
+        // Padding + gaps.
+        assert_eq!(h.padding.top, design_tokens::SPACE_28);
+        assert_eq!(h.padding.bottom, design_tokens::SPACE_32);
+        assert_eq!(h.padding.horizontal_large, design_tokens::SPACE_32);
+        assert_eq!(h.padding.horizontal_default, design_tokens::SPACE_28);
+        assert_eq!(h.gaps.card_gap, design_tokens::SPACE_20);
+        assert_eq!(h.gaps.hero_gap, BoruTheme::default().home.hero_gap);
+        assert_eq!(
+            h.gaps.header_dashboard_gap,
+            design_tokens::SPACE_28 + design_tokens::SPACE_12
+        );
+        assert_eq!(h.gaps.footer_gap, design_tokens::SPACE_16);
+        assert_eq!(h.gaps.compact_header_stack_gap, design_tokens::SPACE_12);
+
+        // Card sizing constraints.
+        assert_eq!(h.card_sizing.peers_body_min, 128.0);
+        assert_eq!(h.card_sizing.activity_row_height, 32.0);
+        assert_eq!(h.card_sizing.quick_action_icon_size, 40.0);
+        assert_eq!(
+            h.card_sizing.status_card_min_content_height,
+            status_card::STATUS_CARD_MIN_CONTENT_HEIGHT
+        );
+        assert_eq!(
+            h.card_sizing.status_card_medium_content,
+            status_card::STATUS_CARD_MEDIUM_CONTENT
+        );
+        assert_eq!(
+            h.card_sizing.status_card_narrow_content,
+            status_card::STATUS_CARD_NARROW_CONTENT
+        );
+        assert_eq!(
+            h.card_sizing.status_card_mesh_hide_content,
+            status_card::STATUS_CARD_MESH_HIDE_CONTENT
+        );
+        assert_eq!(
+            h.card_sizing.status_card_text_min_width,
+            status_card::STATUS_CARD_TEXT_MIN_WIDTH
+        );
+        assert_eq!(h.card_sizing.status_card_text_min_width_medium, 260.0);
+        assert_eq!(
+            h.card_sizing.status_card_mesh_max_width,
+            status_card::STATUS_CARD_MESH_MAX_WIDTH
+        );
+        assert_eq!(
+            h.card_sizing.status_card_padding_x,
+            status_card::STATUS_CARD_PADDING_X
+        );
+        assert_eq!(h.card_sizing.status_icon_text_gap_full, 24.0);
+        assert_eq!(h.card_sizing.status_icon_text_gap_medium, 20.0);
+        assert_eq!(h.card_sizing.status_text_graph_gap_full, 24.0);
+        assert_eq!(h.card_sizing.status_text_graph_gap_medium, 24.0);
+        assert_eq!(h.card_sizing.status_divider_width, 44.0);
+        assert_eq!(h.card_sizing.status_divider_height, 3.0);
+    }
+
+    #[test]
+    fn sidebar_defaults_reproduce_current_appearance() {
+        let s = SidebarLayout::default();
+        assert_eq!(s.width, design_tokens::SIDEBAR_WIDTH);
+        assert_eq!(s.width_min, design_tokens::SIDEBAR_WIDTH_MIN);
+        assert_eq!(s.width_max, design_tokens::SIDEBAR_WIDTH_MAX);
+        assert_eq!(s.inset, design_tokens::SIDEBAR_INSET);
+        assert_eq!(
+            s.section_order,
+            vec![
+                SidebarSection::Chats,
+                SidebarSection::Groups,
+                SidebarSection::Friends,
+                SidebarSection::Discover,
+                SidebarSection::PublicRooms,
+                SidebarSection::Requests,
+            ]
+        );
+        assert!(
+            s.hidden_sections.is_empty(),
+            "all sections visible by default"
+        );
+
+        let theme = BoruTheme::default();
+        assert_eq!(s.padding.brand_top, theme.sidebar.padding.brand_top);
+        assert_eq!(s.padding.brand_bottom, theme.sidebar.padding.brand_bottom);
+        assert_eq!(s.padding.identity_top, theme.sidebar.padding.identity_top);
+        assert_eq!(
+            s.padding.identity_bottom,
+            theme.sidebar.padding.identity_bottom
+        );
+        assert_eq!(s.padding.section_top, theme.sidebar.padding.section_top);
+        assert_eq!(s.padding.utility_top, theme.sidebar.padding.utility_top);
+        assert_eq!(
+            s.padding.utility_bottom,
+            theme.sidebar.padding.utility_bottom
+        );
+        assert_eq!(s.padding.row_x, theme.sidebar.padding.row_x);
+        assert_eq!(s.padding.join_top, theme.sidebar.padding.join_top);
+        assert_eq!(s.padding.join_bottom, theme.sidebar.padding.join_bottom);
+
+        assert_eq!(s.row_heights.conversation_row, card_shell::CARD_ROW_HEIGHT);
+        assert_eq!(s.row_heights.peer_row, card_shell::PEER_ROW_HEIGHT);
+        assert_eq!(
+            s.row_heights.peer_panel_max_height,
+            design_tokens::PEER_PANEL_MAX_HEIGHT
+        );
+        assert_eq!(
+            s.row_heights.default_list_max_height,
+            card_shell::DEFAULT_LIST_MAX_HEIGHT
+        );
+    }
+
+    #[test]
+    fn chat_defaults_reproduce_current_appearance() {
+        let c = ChatLayout::default();
+        assert_eq!(c.bubble_max_width, design_tokens::CHAT_BUBBLE_MAX_WIDTH);
+        assert_eq!(c.bubble_width_ratio, design_tokens::CHAT_BUBBLE_WIDTH_RATIO);
+        assert_eq!(c.message_max_width, design_tokens::MESSAGE_MAX_WIDTH);
+        assert_eq!(
+            c.image_preview_max_width,
+            design_tokens::IMAGE_PREVIEW_MAX_WIDTH
+        );
+        assert_eq!(
+            c.image_preview_max_height,
+            design_tokens::IMAGE_PREVIEW_MAX_HEIGHT
+        );
+
+        let theme = BoruTheme::default();
+        assert_eq!(c.context_menu_width, theme.chat.context_menu_width);
+        assert_eq!(c.details_panel_width, design_tokens::DETAILS_PANEL_WIDTH);
+        assert_eq!(c.emoji_picker.width, theme.chat.emoji_picker_width);
+        assert_eq!(
+            c.emoji_picker.scroll_height,
+            theme.chat.emoji_picker_scroll_height
+        );
+        assert_eq!(c.gif_picker.width, theme.chat.gif_picker_width);
+        assert_eq!(
+            c.gif_picker.scroll_height,
+            theme.chat.gif_picker_scroll_height
+        );
+        assert_eq!(c.gif_picker.thumbnail_width, theme.chat.gif_thumbnail_width);
+        assert_eq!(
+            c.gif_picker.thumbnail_height,
+            theme.chat.gif_thumbnail_height
+        );
+        assert_eq!(c.screen_share.width, theme.chat.screen_share_w);
+        assert_eq!(c.screen_share.height, theme.chat.screen_share_h);
+
+        assert_eq!(
+            c.composer.button_order,
+            vec![
+                ComposerButton::Attach,
+                ComposerButton::Folder,
+                ComposerButton::Gif,
+                ComposerButton::Emoji,
+                ComposerButton::Send,
+            ]
+        );
+        assert_eq!(c.composer.spacing, design_tokens::SPACE_6);
+        assert_eq!(c.composer.padding, design_tokens::SPACE_4);
+
+        assert_eq!(c.member_list.width, 300.0);
+        assert_eq!(c.member_list.max_height, 500.0);
+        assert_eq!(c.member_list.name_portion, 3);
+        assert_eq!(c.member_list.role_portion, 1);
+    }
+
+    #[test]
+    fn component_defaults_reproduce_current_appearance() {
+        let c = ComponentLayout::default();
+        assert_eq!(c.thumbnail_position, ThumbnailPosition::Left);
+        assert_eq!(c.metadata_alignment, MetadataAlignment::Start);
+        assert_eq!(c.button_placement, ButtonPlacement::Below);
+        assert_eq!(c.card_orientation, CardOrientation::Horizontal);
+
+        let theme = BoruTheme::default();
+        assert_eq!(
+            c.video.narrow_breakpoint,
+            theme.attachments.video.narrow_breakpoint
+        );
+        assert_eq!(
+            c.video.medium_breakpoint,
+            theme.attachments.video.medium_breakpoint
+        );
+        assert_eq!(
+            c.video.play_overlay_size,
+            theme.attachments.video.play_overlay_size
+        );
+        assert_eq!(
+            c.video.header_filename_max_width,
+            theme.attachments.video.header_filename_max_width
+        );
+        assert_eq!(
+            c.video.controls_slider_width,
+            theme.attachments.video.controls_slider_width
+        );
+    }
+
+    #[test]
+    fn tables_defaults_reproduce_current_appearance() {
+        let t = TablesLayout::default();
+        let theme = BoruTheme::default();
+        let ft = theme.attachments.file_table;
+        assert_eq!(t.file_table.size_col, ft.size_col);
+        assert_eq!(t.file_table.source_col, ft.source_col);
+        assert_eq!(t.file_table.ago_col, ft.ago_col);
+        assert_eq!(t.file_table.peer_col, ft.peer_col);
+        assert_eq!(t.file_table.started_col, ft.started_col);
+        assert_eq!(t.file_table.state_col, ft.state_col);
+        assert_eq!(t.file_table.direction_col, ft.direction_col);
+        assert_eq!(t.file_table.event_col, ft.event_col);
+        assert_eq!(t.file_table.details_col, ft.details_col);
+        assert_eq!(t.file_table.download_started_col, ft.download_started_col);
+        assert_eq!(t.file_table.download_state_col, ft.download_state_col);
+        assert_eq!(t.file_table.activity_ago_col, ft.activity_ago_col);
+
+        let st = theme.attachments.shared_table;
+        assert_eq!(t.shared_table.shared_with, st.shared_with);
+        assert_eq!(t.shared_table.size, st.size);
+        assert_eq!(t.shared_table.shared_on, st.shared_on);
+        assert_eq!(t.shared_table.downloads, st.downloads);
+        assert_eq!(t.shared_table.actions, st.actions);
+    }
+
+    #[test]
+    fn responsive_defaults_reproduce_current_appearance() {
+        let r = ResponsiveLayout::default();
+        assert_eq!(r.viewport_ref_width, design_tokens::VIEWPORT_REF_WIDTH);
+        assert_eq!(r.viewport_ref_height, design_tokens::VIEWPORT_REF_HEIGHT);
+        assert_eq!(r.viewport_min_width, design_tokens::VIEWPORT_MIN_WIDTH);
+        assert_eq!(r.viewport_min_height, design_tokens::VIEWPORT_MIN_HEIGHT);
+        assert_eq!(r.viewport_lg_width, design_tokens::VIEWPORT_LG_WIDTH);
+        assert_eq!(r.viewport_lg_height, design_tokens::VIEWPORT_LG_HEIGHT);
+        assert_eq!(r.viewport_xl_width, design_tokens::VIEWPORT_XL_WIDTH);
+        assert_eq!(r.viewport_xl_height, design_tokens::VIEWPORT_XL_HEIGHT);
+        assert_eq!(r.content_max_width, design_tokens::CONTENT_MAX_WIDTH);
+        assert_eq!(
+            r.home_illustration_full_content,
+            design_tokens::HOME_ILLUSTRATION_FULL_CONTENT
+        );
+        assert_eq!(
+            r.home_illustration_hide_content,
+            design_tokens::HOME_ILLUSTRATION_HIDE_CONTENT
+        );
+        assert_eq!(
+            r.home_compact_header_content,
+            design_tokens::HOME_COMPACT_HEADER_CONTENT
+        );
+    }
+
+    #[test]
+    fn screens_extension_point_is_empty_by_default() {
+        let l = LayoutConfig::default();
+        assert!(
+            l.screens.is_empty(),
+            "no future screens registered by default"
+        );
+        // A future screen starts from a sensible skeleton.
+        let s = ScreenLayout::default();
+        assert!(s.section_order.is_empty());
+        assert!(s.hidden_sections.is_empty());
+        assert_eq!(s.max_content_width, design_tokens::CONTENT_MAX_WIDTH);
+        assert_eq!(s.columns, 1);
+    }
+
+    // ── Partial overrides: default = no changes ───────────────────────
+
+    #[test]
+    fn overrides_default_to_no_changes() {
+        let o = LayoutOverrides::default();
+        assert!(o.home.is_none());
+        assert!(o.sidebar.is_none());
+        assert!(o.chat.is_none());
+        assert!(o.component.is_none());
+        assert!(o.tables.is_none());
+        assert!(o.responsive.is_none());
+        assert!(o.screens.is_empty(), "no per-screen overrides by default");
+    }
+
+    #[test]
+    fn overrides_missing_leaf_falls_back_to_default() {
+        // A partial override with one leaf set leaves every other leaf
+        // `None` — the merge layer (BORU-LAYOUT-03) treats `None` as
+        // "keep the default", so a missing key falls back to defaults.
+        let o = HomeOverrides {
+            max_content_width: Some(1200.0),
+            ..Default::default()
+        };
+        assert_eq!(o.max_content_width, Some(1200.0));
+        assert!(o.section_order.is_none());
+        assert!(o.grid.is_none());
+        assert!(o.gaps.is_none());
+        assert!(o.card_sizing.is_none());
+
+        // Root with only the home group supplied.
+        let root = LayoutOverrides {
+            home: Some(o),
+            ..Default::default()
+        };
+        assert!(root.sidebar.is_none());
+        assert!(root.chat.is_none());
+        assert_eq!(root.home.as_ref().unwrap().max_content_width, Some(1200.0));
+    }
+
+    #[test]
+    fn overrides_enums_and_vectors_are_typed() {
+        // The override shape must carry the same typed enum/vector values
+        // as the concrete model (compile-time check + fallback semantics).
+        let home = HomeOverrides {
+            section_order: Some(vec![HomeSection::Tunnels, HomeSection::Hero]),
+            hidden_sections: Some(vec![HomeSection::QuickActions]),
+            mode: Some(HomeLayoutMode::List),
+            ..Default::default()
+        };
+        assert_eq!(home.mode, Some(HomeLayoutMode::List));
+        assert_eq!(
+            home.section_order,
+            Some(vec![HomeSection::Tunnels, HomeSection::Hero])
+        );
+
+        let comp = ComponentOverrides {
+            thumbnail_position: Some(ThumbnailPosition::Top),
+            metadata_alignment: Some(MetadataAlignment::Center),
+            button_placement: Some(ButtonPlacement::Overlay),
+            card_orientation: Some(CardOrientation::Vertical),
+            ..Default::default()
+        };
+        assert_eq!(comp.thumbnail_position, Some(ThumbnailPosition::Top));
+        assert_eq!(comp.card_orientation, Some(CardOrientation::Vertical));
+
+        let composer = ComposerOverrides {
+            button_order: Some(vec![ComposerButton::Send, ComposerButton::Gif]),
+            ..Default::default()
+        };
+        assert_eq!(
+            composer.button_order,
+            Some(vec![ComposerButton::Send, ComposerButton::Gif])
+        );
+
+        let chat = ChatOverrides {
+            composer: Some(composer),
+            ..Default::default()
+        };
+        assert_eq!(
+            chat.composer.as_ref().unwrap().button_order,
+            Some(vec![ComposerButton::Send, ComposerButton::Gif])
+        );
+        assert!(
+            chat.emoji_picker.is_none(),
+            "missing nested group falls back"
+        );
+    }
+
+    #[test]
+    fn overrides_screens_map_supports_per_screen_keys() {
+        let mut screens = BTreeMap::new();
+        screens.insert(
+            "settings".to_string(),
+            ScreenOverrides {
+                columns: Some(2),
+                ..Default::default()
+            },
+        );
+        let root = LayoutOverrides {
+            screens,
+            ..Default::default()
+        };
+        let s = root
+            .screens
+            .get("settings")
+            .expect("settings screen present");
+        assert_eq!(s.columns, Some(2));
+        assert!(s.section_order.is_none());
+        assert!(
+            root.screens.get("files").is_none(),
+            "missing screen key falls back"
+        );
     }
 }
