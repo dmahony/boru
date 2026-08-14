@@ -32,8 +32,8 @@ pub use platform::{
     capture_dimensions, create_capture_source, ActiveCapture, CAPTURE_FPS,
 };
 pub use protocol::{
-    ControlMessage, Hello, InboundMedia, Permission, ScreenShareProtocol, SCREEN_SHARE_ALPN,
-    SCREEN_SHARE_PROTOCOL_VERSION, MAX_INPUT_CODE,
+    ControlMessage, Hello, InboundMedia, Permission, ScreenShareMessage, ScreenShareProtocol,
+    SCREEN_SHARE_ALPN, SCREEN_SHARE_PROTOCOL_VERSION, MAX_INPUT_CODE, MAX_SCREEN_SHARE_MESSAGE,
 };
 pub use permissions::{Capability, ControlToken, RequestRateLimiter, SessionPermissions};
 pub use remote_input::{
