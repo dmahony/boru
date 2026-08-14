@@ -547,13 +547,13 @@ fn card_header(
     let menu_open = ui.share_menu_open;
     let title_block = Column::new()
         .push(
-            text("Files I'm Sharing")
+            text(crate::i18n::t("shared.by_me_title"))
                 .size(TypeRole::CardTitle.size_px())
                 .font(TypeRole::CardTitle.font())
                 .color(design_tokens::text_primary(theme)),
         )
         .push(
-            text("Local files and folders you've made available to peers.")
+            text(crate::i18n::t("shared.by_me_subtitle"))
                 .size(TypeRole::SupportingText.size_px())
                 .font(TypeRole::SupportingText.font())
                 .style(text_muted_style),
@@ -571,7 +571,7 @@ fn card_header(
                     .build(),
             )
             .push(
-                text("Share Files or Folder")
+                text(crate::i18n::t("shared.share_files_or_folder"))
                     .size(TypeRole::ButtonLabel.size_px())
                     .font(TypeRole::ButtonLabel.font()),
             )
@@ -1013,7 +1013,7 @@ fn recipient_chip(
 
 fn all_friends_chip(theme: &Theme) -> Element<'static, AppMessage> {
     container(
-        text("All friends")
+        text(crate::i18n::t("shared.all_friends"))
             .size(TypeRole::Metadata.size_px())
             .font(TypeRole::Metadata.font())
             .color(design_tokens::text_secondary(theme)),
@@ -1155,16 +1155,13 @@ fn stop_sharing_confirmation(
     let hash = row.content_hash.clone();
     let prompt_block = Column::new()
         .push(
-            text("Stop sharing this item?")
+            text(crate::i18n::t("shared.stop_confirm"))
                 .size(TypeRole::BodyEmphasised.size_px())
                 .font(TypeRole::BodyEmphasised.font())
                 .color(design_tokens::text_primary(theme)),
         )
         .push(
-            text(
-                "Peers with active downloads may lose access mid-transfer. \
-                 The file is removed from your shared list; local copies are not deleted.",
-            )
+            text(crate::i18n::t("shared.stop_confirm_hint"))
             .size(TypeRole::SupportingText.size_px())
             .font(TypeRole::SupportingText.font())
             .color(design_tokens::text_secondary(theme)),
@@ -1174,7 +1171,7 @@ fn stop_sharing_confirmation(
         .align_x(Alignment::Start);
 
     let cancel = button(
-        text("Cancel")
+        text(crate::i18n::t("common.cancel"))
             .size(TypeRole::ButtonLabel.size_px())
             .font(TypeRole::ButtonLabel.font()),
     )
@@ -1194,7 +1191,7 @@ fn stop_sharing_confirmation(
             ..Default::default()
         });
     let confirm = button(
-        text("Stop sharing")
+        text(crate::i18n::t("shared.stop_sharing"))
             .size(TypeRole::ButtonLabel.size_px())
             .font(TypeRole::ButtonLabel.font()),
     )
@@ -1300,14 +1297,14 @@ fn details_panel(
         .spacing(design_tokens::SPACE_4)
         .width(Length::Fill);
     access = access.push(
-        text("Access")
+        text(crate::i18n::t("shared.access"))
             .size(TypeRole::Metadata.size_px())
             .font(TypeRole::Metadata.font())
             .color(design_tokens::text_muted(theme)),
     );
     if !row.has_explicit_recipients && row.recipients.is_empty() {
         access = access.push(
-            text("Visible to all friends (no explicit grants).")
+            text(crate::i18n::t("shared.access_visible_all"))
                 .size(TypeRole::SupportingText.size_px())
                 .font(TypeRole::SupportingText.font())
                 .color(design_tokens::text_secondary(theme)),
@@ -1315,9 +1312,9 @@ fn details_panel(
     } else {
         for recipient in &row.recipients {
             let (state_label, state_color) = match recipient.access {
-                RecipientAccess::Allowed => ("Can access", design_tokens::color_success(theme)),
-                RecipientAccess::Expired => ("Expired", design_tokens::text_muted(theme)),
-                RecipientAccess::Denied => ("Blocked", design_tokens::destructive(theme)),
+                RecipientAccess::Allowed => (crate::i18n::t("shared.can_access"), design_tokens::color_success(theme)),
+                RecipientAccess::Expired => (crate::i18n::t("common.expired"), design_tokens::text_muted(theme)),
+                RecipientAccess::Denied => (crate::i18n::t("shared.blocked"), design_tokens::destructive(theme)),
             };
             // Hoisted out of the style closure below: the closure must only
             // capture the Copy `Color`, never a borrow of `recipient`, so the
@@ -1379,7 +1376,7 @@ fn details_panel(
                     .push(Space::new().width(Length::Fixed(design_tokens::SPACE_8)))
                     .push(
                         button(
-                            text("Revoke")
+                            text(crate::i18n::t("common.revoke"))
                                 .size(TypeRole::ButtonLabel.size_px())
                                 .font(TypeRole::ButtonLabel.font()),
                         )
@@ -1410,7 +1407,7 @@ fn details_panel(
     }
 
     let close = button(
-        text("Close")
+        text(crate::i18n::t("common.close"))
             .size(TypeRole::ButtonLabel.size_px())
             .font(TypeRole::ButtonLabel.font()),
     )
@@ -1435,7 +1432,7 @@ fn details_panel(
             .push(
                 Row::new()
                     .push(
-                        text("Details")
+                        text(crate::i18n::t("common.details"))
                             .size(TypeRole::BodyEmphasised.size_px())
                             .font(TypeRole::BodyEmphasised.font())
                             .color(design_tokens::text_primary(theme)),
@@ -1479,14 +1476,14 @@ fn empty_body(theme: &Theme) -> Element<'static, AppMessage> {
         )
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_16)))
         .push(
-            text("You haven't shared any files yet.")
+            text(crate::i18n::t("shared.empty_title"))
                 .size(TypeRole::Body.size_px())
                 .font(TypeRole::Body.font())
                 .color(design_tokens::text_secondary(theme)),
         )
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_4)))
         .push(
-            text("Use the Share button in chat or your profile to make files available.")
+            text(crate::i18n::t("shared.empty_hint"))
                 .size(TypeRole::SupportingText.size_px())
                 .font(TypeRole::SupportingText.font())
                 .color(design_tokens::text_muted(theme)),
@@ -1547,7 +1544,7 @@ fn error_body(theme: &Theme, message: String) -> Element<'static, AppMessage> {
         )
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_16)))
         .push(
-            text("File sharing storage is unavailable")
+            text(crate::i18n::t("shared.storage_unavailable"))
                 .size(TypeRole::Body.size_px())
                 .font(TypeRole::Body.font())
                 .color(design_tokens::text_primary(theme)),

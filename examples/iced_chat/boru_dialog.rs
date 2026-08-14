@@ -42,8 +42,8 @@ pub const BORU_DIALOG_WIDTH_LARGE: f32 = 760.0;
 
 /// Reusable modal dialog shell.
 pub struct BoruDialog<'a, Message> {
-    title: &'a str,
-    subtitle: Option<&'a str>,
+    title: String,
+    subtitle: Option<String>,
     body: Vec<Element<'a, Message>>,
     width: f32,
     /// When set, the body is wrapped in a `scrollable` capped at this height
@@ -52,12 +52,12 @@ pub struct BoruDialog<'a, Message> {
     /// Close button in the header (optional).
     on_close: Option<Message>,
     /// Secondary (Cancel) footer action: `(label, message)`.
-    secondary: Option<(&'a str, Message)>,
+    secondary: Option<(String, Message)>,
     /// Whether the secondary footer action is enabled (defaults to true).
     /// Disabled buttons render without `on_press` (iced disabled state).
     secondary_enabled: bool,
     /// Primary (Create / Continue / Start / Save) footer action: `(label, message)`.
-    primary: Option<(&'a str, Message)>,
+    primary: Option<(String, Message)>,
     /// Whether the primary footer action is enabled (defaults to true).
     /// Callers set this to `false` until required inputs are valid, and while
     /// a submit is in flight, so the button renders disabled.
@@ -68,9 +68,9 @@ pub struct BoruDialog<'a, Message> {
 
 impl<'a, Message: Clone + 'a> BoruDialog<'a, Message> {
     /// Start a dialog with the given header title.
-    pub fn new(title: &'a str) -> Self {
+    pub fn new(title: impl Into<String>) -> Self {
         Self {
-            title,
+            title: title.into(),
             subtitle: None,
             body: Vec::new(),
             width: BORU_DIALOG_WIDTH_STANDARD,
@@ -85,8 +85,8 @@ impl<'a, Message: Clone + 'a> BoruDialog<'a, Message> {
     }
 
     /// Set an optional subtitle shown under the title in the header.
-    pub fn subtitle(mut self, subtitle: &'a str) -> Self {
-        self.subtitle = Some(subtitle);
+    pub fn subtitle(mut self, subtitle: impl Into<String>) -> Self {
+        self.subtitle = Some(subtitle.into());
         self
     }
 
@@ -116,14 +116,14 @@ impl<'a, Message: Clone + 'a> BoruDialog<'a, Message> {
     }
 
     /// Set the secondary footer action (typically Cancel / back).
-    pub fn secondary(mut self, label: &'a str, message: Message) -> Self {
-        self.secondary = Some((label, message));
+    pub fn secondary(mut self, label: impl Into<String>, message: Message) -> Self {
+        self.secondary = Some((label.into(), message));
         self
     }
 
     /// Set the primary footer action (Create / Continue / Start / Save).
-    pub fn primary(mut self, label: &'a str, message: Message) -> Self {
-        self.primary = Some((label, message));
+    pub fn primary(mut self, label: impl Into<String>, message: Message) -> Self {
+        self.primary = Some((label.into(), message));
         self
     }
 
@@ -287,9 +287,9 @@ fn close_button<'a, Message: Clone + 'a>(message: Message) -> Element<'a, Messag
 /// hover), which is how "primary disabled until valid" and "loading"
 /// states are expressed.
 fn footer_row<'a, Message: Clone + 'a>(
-    secondary: Option<(&'a str, Message)>,
+    secondary: Option<(String, Message)>,
     secondary_enabled: bool,
-    primary: Option<(&'a str, Message)>,
+    primary: Option<(String, Message)>,
     primary_enabled: bool,
 ) -> Element<'a, Message> {
     let mut row = Row::new()

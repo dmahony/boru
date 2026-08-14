@@ -158,9 +158,10 @@ pub(crate) fn view_status_card(
 
     let heading = status_heading(dep, heading_size);
     let divider = status_divider(accent);
-    let supporting = fonts::type_role_text_lh(TypeRole::Body, "Peer to peer.", 1.4)
-        .size(support_size)
-        .color(design_tokens::STATUS_SECONDARY_TEXT);
+    let supporting =
+        fonts::type_role_text_lh(TypeRole::Body, crate::i18n::t("status.peer_to_peer"), 1.4)
+            .size(support_size)
+            .color(design_tokens::STATUS_SECONDARY_TEXT);
 
     let footer = if dep.show_retry || dep.show_details {
         actions_row(dep.show_retry, dep.show_details)
@@ -482,7 +483,7 @@ fn status_heading(dep: &StatusCardDependency, size: f32) -> iced::Element<'stati
             Span::<()>::new("Boru\u{00A0}")
                 .font(TypeRole::DisplayHeading.font())
                 .color(design_tokens::STATUS_CONNECTED),
-            Span::<()>::new("is connected")
+            Span::<()>::new(crate::i18n::t("status.connected_tail"))
                 .font(TypeRole::DisplayHeading.font())
                 .color(design_tokens::STATUS_PRIMARY_TEXT),
         ])
@@ -548,7 +549,7 @@ pub(crate) fn security_pill() -> iced::Element<'static, AppMessage> {
             .push(
                 fonts::type_role_text(
                     TypeRole::SupportingText,
-                    "Secure  \u{2022}  Decentralized  \u{2022}  Private",
+                    crate::i18n::t("status.security_pill"),
                 )
                 .color(design_tokens::STATUS_CONNECTED)
                 // Nowrap: the pill text must never wrap onto a second
@@ -586,16 +587,22 @@ fn actions_row(show_retry: bool, show_details: bool) -> iced::Element<'static, A
     let mut row = Row::new().spacing(design_tokens::SPACE_8);
     if show_retry {
         row = row.push(
-            button(fonts::type_role_text(TypeRole::ButtonLabel, "Retry"))
-                .on_press(AppMessage::RetryConnection)
+            button(fonts::type_role_text(
+                TypeRole::ButtonLabel,
+                crate::i18n::t("home.retry"),
+            ))
+            .on_press(AppMessage::RetryConnection)
                 .padding([design_tokens::SPACE_6, design_tokens::SPACE_12])
                 .style(crate::app::BUTTON_PRIMARY),
         );
     }
     if show_details {
         row = row.push(
-            button(fonts::type_role_text(TypeRole::ButtonLabel, "Details"))
-                .on_press(AppMessage::OpenConnectionDetails)
+            button(fonts::type_role_text(
+                TypeRole::ButtonLabel,
+                crate::i18n::t("home.details"),
+            ))
+            .on_press(AppMessage::OpenConnectionDetails)
                 .padding([design_tokens::SPACE_6, design_tokens::SPACE_12])
                 .style(crate::app::BUTTON_OUTLINE),
         );
