@@ -138,6 +138,12 @@ pub(crate) struct StatusCardDependency {
     /// Home menu background opacity setting (0..=1); the card background
     /// participates like every other home card.
     pub(crate) home_menu_opacity: f32,
+    /// Card container radius (px) from the LIVE theme
+    /// (`BoruTheme::radii.card`, BORU-UI-03). The status card is
+    /// colour-theme-independent by design, but its corner radius follows
+    /// the same "Card" token the other home cards use so the inspector's
+    /// Card radius slider changes it immediately.
+    pub(crate) card_radius: f32,
 }
 
 /// Render the full connection status card.
@@ -298,6 +304,7 @@ pub(crate) fn view_status_card(
     };
 
     let opacity = dep.home_menu_opacity.clamp(0.0, 1.0);
+    let card_radius = dep.card_radius;
 
     // Outer padding: vertical and horizontal both SPACE_24 (24 px), inside
     // the spec §5 24–28 px band (CONN-04 trimmed the vertical, CONN-05
@@ -328,7 +335,7 @@ pub(crate) fn view_status_card(
                 border: Border {
                     color: design_tokens::STATUS_CARD_BORDER,
                     width: 1.0,
-                    radius: design_tokens::STATUS_CARD_RADIUS.into(),
+                    radius: card_radius.into(),
                 },
                 shadow: design_tokens::status_card_shadow(),
                 ..Default::default()

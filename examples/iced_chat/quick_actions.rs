@@ -110,6 +110,7 @@ pub fn quick_action_card<'a>(
     action: &'a QuickAction,
     theme: &Theme,
     opacity: f32,
+    card_radius: f32,
 ) -> Element<'a, AppMessage> {
     let content = Column::new()
         .push(quick_action_icon(action.icon))
@@ -160,7 +161,7 @@ pub fn quick_action_card<'a>(
         // Content-driven height: no fixed box, no hidden overflow — the
         // card grows to contain icon + title + full description.
         .width(Length::Fill)
-        .style(move |t, s| quick_action_card_style(t, s, opacity))
+        .style(move |t, s| quick_action_card_style(t, s, opacity, card_radius))
         .into()
 }
 
@@ -174,6 +175,7 @@ fn quick_action_card_style(
     theme: &Theme,
     status: button::Status,
     opacity: f32,
+    card_radius: f32,
 ) -> iced::widget::button::Style {
     let surface = design_tokens::surface(theme);
     let hover = design_tokens::surface_hover(theme);
@@ -225,7 +227,7 @@ fn quick_action_card_style(
         border: iced::Border {
             color: border_color,
             width: 1.0,
-            radius: design_tokens::RADIUS_CARD.into(),
+            radius: card_radius.into(),
         },
         shadow,
         ..Default::default()
@@ -257,6 +259,7 @@ pub fn quick_action_grid<'a>(
     content_width: f32,
     theme: &Theme,
     opacity: f32,
+    card_radius: f32,
 ) -> Element<'a, AppMessage> {
     let columns = grid_columns_for(content_width);
 
@@ -270,7 +273,7 @@ pub fn quick_action_grid<'a>(
             .align_y(Alignment::Start)
             .width(Length::Fill);
         for action in actions {
-            row = row.push(quick_action_card(action, theme, opacity));
+            row = row.push(quick_action_card(action, theme, opacity, card_radius));
         }
         rows.push(row.into());
     }

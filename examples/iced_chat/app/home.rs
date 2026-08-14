@@ -517,6 +517,7 @@ impl IcedChat {
             .compact_header(dep.compact_header)
             .body(body)
             .background_opacity(f32::from_bits(dep.home_menu_item_opacity_bits))
+            .card_radius(btheme.radii.card)
             .build(&theme)
     }
 
@@ -631,6 +632,7 @@ impl IcedChat {
             .compact_header(dep.compact_header)
             .max_height(180.0)
             .background_opacity(f32::from_bits(dep.home_menu_item_opacity_bits))
+            .card_radius(btheme.radii.card)
             .build(&theme)
     }
 
@@ -903,11 +905,15 @@ impl IcedChat {
             .compact_header(dep.online.compact_header)
             .body(body.into())
             .background_opacity(f32::from_bits(dep.online.home_menu_item_opacity_bits))
+            .card_radius(btheme.radii.card)
             .build(&theme)
     }
 
     /// Build the Tunnels card subtree (memoized via lazy).
-    pub(crate) fn view_tunnels_card(dep: &TunnelsCardData) -> iced::Element<'static, AppMessage> {
+    pub(crate) fn view_tunnels_card(
+        dep: &TunnelsCardData,
+        btheme: crate::theme::BoruTheme,
+    ) -> iced::Element<'static, AppMessage> {
         use iced::widget::{button, container, row, Column, Space};
         use iced::{Alignment, Length};
 
@@ -1014,6 +1020,7 @@ impl IcedChat {
             )
             .empty_message(TUNNELS_EMPTY_MESSAGE)
             .compact_header(dep.compact_header)
+            .card_radius(btheme.radii.card)
             .background_opacity(f32::from_bits(dep.home_menu_item_opacity_bits));
 
         // BORU-HOME-06: when tunnels exist, size the list body to fit all
@@ -1218,6 +1225,7 @@ impl IcedChat {
                     && matches!(variant, HomeConnectionVariant::Ready),
                 dimmed_mesh: !matches!(variant, HomeConnectionVariant::Ready),
                 home_menu_opacity,
+                card_radius: btheme.radii.card,
             });
 
         // ── Mesh Health card ──
@@ -1357,12 +1365,20 @@ impl IcedChat {
             .header_action("View details", AppMessage::OpenConnectionDetails)
             .compact_header(compact_header)
             .body(mesh_body.into())
+            .card_radius(btheme.radii.card)
             .background_opacity(home_menu_opacity)
             .build(&theme);
 
         // ── Quick actions: four equal, full-card targets (Figure 3) ──
-        let action_grid =
-            crate::quick_actions::quick_action_grid(content_width, &theme, home_menu_opacity);
+        // BORU-UI-03: card radius comes from the LIVE theme
+        // (`btheme.radii.card`) so the inspector's "Card" radius slider
+        // changes the action cards immediately.
+        let action_grid = crate::quick_actions::quick_action_grid(
+            content_width,
+            &theme,
+            home_menu_opacity,
+            btheme.radii.card,
+        );
 
         // DLMGR-01: home entry point — a compact outline button beside the
         // status pill opens the Download Manager (all active transfers in
@@ -1420,7 +1436,7 @@ impl IcedChat {
                 Self::view_people_activity_card(card_dep, btheme)
             });
         let tunnels_card = iced::widget::lazy(dep.tunnels.clone(), move |card_dep| {
-            Self::view_tunnels_card(card_dep)
+            Self::view_tunnels_card(card_dep, btheme)
         });
 
         // Right rail: 20 px vertical card gaps (UI-HOME-02: 20–24 px).

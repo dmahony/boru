@@ -142,6 +142,12 @@ pub struct CardShell<'a, Message> {
     /// card can sit translucently over a home-screen background image.
     /// `None` keeps the default fully-opaque `card_style` surface.
     background_opacity: Option<f32>,
+    /// Optional card container radius (px) from the LIVE theme
+    /// (`BoruTheme::radii.card`, BORU-UI-03). `None` falls back to the
+    /// static `design_tokens::RADIUS_CARD` so non-home callers keep the
+    /// existing appearance unchanged; Home passes the live value so the
+    /// inspector's "Card" radius slider changes the shell immediately.
+    card_radius: Option<f32>,
 }
 
 impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
@@ -169,6 +175,7 @@ impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
             children,
             compact_header: false,
             background_opacity: None,
+            card_radius: None,
         }
     }
 
@@ -278,6 +285,17 @@ impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
     /// only; other screens leave the default `None`.
     pub fn background_opacity(mut self, opacity: f32) -> Self {
         self.background_opacity = Some(opacity.clamp(0.0, 1.0));
+        self
+    }
+
+    /// Override the card container radius (px) from the LIVE theme.
+    ///
+    /// BORU-UI-03: Home passes `btheme.radii.card` so the inspector's
+    /// "Card" radius slider changes the shell immediately. When unset the
+    /// shell keeps the static `design_tokens::RADIUS_CARD` appearance, so
+    /// non-home callers are unaffected.
+    pub fn card_radius(mut self, radius: f32) -> Self {
+        self.card_radius = Some(radius);
         self
     }
 
@@ -472,12 +490,16 @@ impl<'a, Message: Clone + 'a> CardShell<'a, Message> {
         }
 
         let background_opacity = self.background_opacity;
+        let card_radius = self.card_radius;
         container(content_col)
             // ~24 px internal padding on all sides (plan: 22–28 px band).
             .padding([design_tokens::SPACE_24, design_tokens::SPACE_24])
             .width(Length::Fill)
             .style(move |t| {
                 let mut style = design_tokens::card_style(t);
+                if let Some(radius) = card_radius {
+                    style.border.radius = radius.into();
+                }
                 if let Some(opacity) = background_opacity {
                     if let Some(Background::Color(c)) = &mut style.background {
                         c.a *= opacity;

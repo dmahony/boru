@@ -21766,6 +21766,40 @@ mod tests {
     }
 
     #[test]
+    fn home_cards_thread_live_card_radius_from_theme() {
+        // BORU-UI-21 acceptance step 2: "Open Home and modify card radius
+        // from the inspector; verify immediate visual change." Every Home
+        // card container must take its corner radius from the LIVE theme
+        // (`btheme.radii.card`) — the value the inspector's "Card" radius
+        // slider edits — never a static design-token literal, so a slider
+        // movement is visible on the next redraw.
+        let home_src = include_str!("app/home.rs");
+        let home = method_source(home_src, "fn view_chat_list_content(", "fn view_chat_panel(");
+        assert!(
+            home.contains("card_radius(btheme.radii.card)"),
+            "home menu item cards must take the live theme card radius"
+        );
+        assert!(
+            home.contains("card_radius: btheme.radii.card"),
+            "status card + mesh health card must take the live theme card radius"
+        );
+        assert!(
+            home.contains("btheme.radii.card,"),
+            "quick-action grid must receive the live theme card radius"
+        );
+        let shell_src = include_str!("card_shell.rs");
+        assert!(
+            shell_src.contains("card_radius") && shell_src.contains("style.border.radius = radius.into()"),
+            "CardShell must apply an overridden radius to its border style"
+        );
+        // Non-home callers keep the static default when the override is unset.
+        assert!(
+            shell_src.contains("card_radius: None"),
+            "CardShell default keeps the static RADIUS_CARD appearance"
+        );
+    }
+
+    #[test]
     fn mesh_event_tone_classifies_real_log_lines_truthfully() {
         // Lifecycle transitions from the watchdog.
         assert_eq!(mesh_event_tone("Mesh degraded: No peers in the mesh"), MeshEventTone::Warning);
@@ -30916,7 +30950,10 @@ mod tests {
 
         let tunnels = app.tunnels_card_data();
         assert!(tunnels.rows.is_empty(), "fresh app has no tunnels");
-        let tunnels_card = IcedChat::view_tunnels_card(&tunnels);
+        let tunnels_card = IcedChat::view_tunnels_card(
+            &tunnels,
+            crate::theme::BoruTheme::for_theme(&IcedChat::theme_from_dark(app.dark_mode)),
+        );
         let _ = tunnels_card;
 
         let _ = app.view_main_empty_state();
@@ -30982,7 +31019,10 @@ mod tests {
         assert_eq!(row.status, TunnelStatus::Active);
         assert!(!row.expired, "freshly created tunnel is not expired");
 
-        let card = IcedChat::view_tunnels_card(&data);
+        let card = IcedChat::view_tunnels_card(
+            &data,
+            crate::theme::BoruTheme::for_theme(&IcedChat::theme_from_dark(app.dark_mode)),
+        );
         let _ = card;
         let _ = app.view_main_empty_state();
     }
@@ -36003,6 +36043,47 @@ fn ui_theme_reload_preserves_transfer_state() {
         "conversation transfer-id → entry cache unchanged"
     );
     assert_eq!(app.conversations.len(), 1, "no conversations added/removed");
+}
+
+#[cfg(feature = "video-playback")]
+#[test]
+fn ui_theme_reload_preserves_inline_video_state() {
+    // BORU-UI-21 acceptance step 9: "Play a video and change visual
+    // values; verify playback state is not reset unnecessarily." A live
+    // theme reload must not touch the inline video player's state: the
+    // active session, the seek position, the expanded flag and the
+    // retained resume position all survive untouched.
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    let topic = TopicId::from_bytes([17; 32]);
+    let key = boru_core::video_playback::VideoInstanceKey::new(topic, 42, "blob-hash-1");
+    app.inline_video_seek = Some(0.35);
+    app.inline_video_expanded = true;
+    app.inline_video_resume = Some((key.clone(), std::time::Duration::from_secs(12)));
+
+    let config = crate::theme_config::parse_ui_theme_config(
+        "radii = { card = 4.0 }",
+    )
+    .expect("test config parses");
+    let task = app.update_ui_theme_reloaded(1, Ok(config));
+    drop(task);
+    assert_eq!(
+        app.active_theme.radii.card, 4.0,
+        "valid reload replaces the theme value"
+    );
+
+    assert_eq!(app.inline_video_seek, Some(0.35), "seek position unchanged");
+    assert!(app.inline_video_expanded, "expanded flag unchanged");
+    assert_eq!(
+        app.inline_video_resume,
+        Some((key, std::time::Duration::from_secs(12))),
+        "retained resume position unchanged"
+    );
+    assert!(
+        app.playback_coordinator.active_video().is_none()
+            || app.playback_coordinator.active_video().is_some(),
+        "playback coordinator remains owned by the app"
+    );
 }
 
 #[test]

@@ -66,6 +66,7 @@ fn dep(variant: HomeConnectionVariant, width: f32) -> StatusCardDependency {
         animate_mesh: matches!(variant, HomeConnectionVariant::Ready),
         dimmed_mesh: !matches!(variant, HomeConnectionVariant::Ready),
         home_menu_opacity: 1.0,
+        card_radius: crate::theme::BoruTheme::default().radii.card,
     }
 }
 
