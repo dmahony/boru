@@ -24,11 +24,14 @@
 //! - **Layout only.** This file never carries theme tokens, networking,
 //!   chat, file transfer, video, tunnel, lobby, room or persistence
 //!   behaviour. Only validated layouts are applied (BORU-LAYOUT-06 rejects
-//!   unparseable files; full validation rules land in BORU-LAYOUT-07).
+//!   unparseable files; BORU-LAYOUT-07 adds semantic validation — duplicate
+//!   section ids in the order/visibility lists are rejected and the last
+//!   known-good layout is retained).
 //!
 //! The sample file (`boru-layout.example.toml`, repo root) documents every
 //! group with valid units and ranges.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::layout::LayoutOverrides;
@@ -57,6 +60,10 @@ pub enum LayoutConfigError {
         line: Option<usize>,
         column: Option<usize>,
     },
+    /// The file parsed but failed semantic validation (BORU-LAYOUT-07):
+    /// duplicate section ids in the section order / visibility lists.
+    /// `issues` lists every problem found, human-readable.
+    Validation { path: PathBuf, issues: Vec<String> },
 }
 
 impl std::fmt::Display for LayoutConfigError {
@@ -74,6 +81,14 @@ impl std::fmt::Display for LayoutConfigError {
                     path.display()
                 )
             }
+            LayoutConfigError::Validation { path, issues } => {
+                write!(
+                    f,
+                    "invalid dev layout override {}: {}",
+                    path.display(),
+                    issues.join("; ")
+                )
+            }
         }
     }
 }
@@ -83,6 +98,8 @@ impl std::error::Error for LayoutConfigError {
         match self {
             LayoutConfigError::Io { source, .. } => Some(source),
             LayoutConfigError::Parse { source, .. } => Some(source),
+            // Validation issues are plain strings, no underlying error.
+            LayoutConfigError::Validation { .. } => None,
         }
     }
 }
@@ -94,6 +111,9 @@ pub enum LayoutReloadErrorKind {
     Io,
     /// The file exists but is not valid TOML / not a valid layout config.
     Parse,
+    /// The file parsed but failed semantic validation (duplicate section
+    /// ids in the section order / visibility lists).
+    Validation,
 }
 
 /// Clone-able structured summary of a layout load failure.
@@ -148,6 +168,13 @@ impl LayoutReloadError {
                 line: *line,
                 column: *column,
             },
+            LayoutConfigError::Validation { path, .. } => LayoutReloadError {
+                path: path.clone(),
+                kind: LayoutReloadErrorKind::Validation,
+                message: err.to_string(),
+                line: None,
+                column: None,
+            },
         }
     }
 }
@@ -180,6 +207,98 @@ pub fn parse_layout_config(text: &str) -> Result<LayoutOverrides, toml::de::Erro
     toml::from_str(text)
 }
 
+/// Validate one section-id pair (an order list + a hidden list) for
+/// duplicates (BORU-LAYOUT-07 / PDF Task 7).
+///
+/// Three mistakes are rejected:
+///
+/// - a section id repeated **inside** the order list,
+/// - a section id repeated **inside** the hidden list,
+/// - a section id present in **both** lists (contradictory visibility).
+///
+/// `T` is the section id type (`HomeSection`, `SidebarSection`, or
+/// `String` for future screens); its `Debug` spelling matches the TOML
+/// spelling (`Tunnels`, `Requests`, …), so the messages read naturally.
+/// Issues are appended to `issues`; an empty list means this pair is fine.
+fn validate_section_ids<T: Ord + std::fmt::Debug>(
+    order_path: &str,
+    hidden_path: &str,
+    order: Option<&[T]>,
+    hidden: Option<&[T]>,
+    issues: &mut Vec<String>,
+) {
+    if let Some(order) = order {
+        let mut seen = BTreeSet::new();
+        for (index, id) in order.iter().enumerate() {
+            if !seen.insert(id) {
+                issues.push(format!(
+                    "{order_path}: duplicate section id {id:?} at index {index}"
+                ));
+            }
+        }
+    }
+    if let Some(hidden) = hidden {
+        let mut seen = BTreeSet::new();
+        for (index, id) in hidden.iter().enumerate() {
+            if !seen.insert(id) {
+                issues.push(format!(
+                    "{hidden_path}: duplicate section id {id:?} at index {index}"
+                ));
+            }
+        }
+    }
+    if let (Some(order), Some(hidden)) = (order, hidden) {
+        let hidden_set: BTreeSet<&T> = hidden.iter().collect();
+        for id in order {
+            if hidden_set.contains(id) {
+                issues.push(format!(
+                    "{order_path}: section id {id:?} is also listed in {hidden_path}"
+                ));
+            }
+        }
+    }
+}
+
+/// Validate the semantic invariants of parsed layout overrides
+/// (BORU-LAYOUT-07 / PDF Task 7).
+///
+/// Numeric ranges are clamped during merge; this pass rejects *structural*
+/// mistakes that cannot be clamped — duplicate section ids in the section
+/// order / visibility lists of `home`, `sidebar` and every future screen.
+/// Returns a list of human-readable issues; empty means the overrides are
+/// structurally valid.
+pub fn validate_layout_overrides(overrides: &LayoutOverrides) -> Vec<String> {
+    let mut issues = Vec::new();
+    if let Some(home) = &overrides.home {
+        validate_section_ids(
+            "home.section_order",
+            "home.hidden_sections",
+            home.section_order.as_deref(),
+            home.hidden_sections.as_deref(),
+            &mut issues,
+        );
+    }
+    if let Some(sidebar) = &overrides.sidebar {
+        validate_section_ids(
+            "sidebar.section_order",
+            "sidebar.hidden_sections",
+            sidebar.section_order.as_deref(),
+            sidebar.hidden_sections.as_deref(),
+            &mut issues,
+        );
+    }
+    for (screen_id, screen) in &overrides.screens {
+        validate_section_ids(
+            &format!("screens.{screen_id}.section_order"),
+            &format!("screens.{screen_id}.hidden_sections"),
+            screen.section_order.as_deref(),
+            screen.hidden_sections.as_deref(),
+            &mut issues,
+        );
+    }
+    issues
+}
+
 /// Load layout overrides from `<data_dir>/boru-layout.toml`.
 ///
 /// - **Missing file** → `Ok(LayoutOverrides::default())` (empty overrides;
@@ -187,6 +306,9 @@ pub fn parse_layout_config(text: &str) -> Result<LayoutOverrides, toml::de::Erro
 /// - **Unreadable file** (permissions etc.) → `Err(LayoutConfigError::Io)`.
 /// - **Malformed file** → `Err(LayoutConfigError::Parse)` with line/column;
 ///   the caller keeps the last known-good layout and logs the error.
+/// - **Structurally invalid file** (duplicate section ids) →
+///   `Err(LayoutConfigError::Validation)` with every issue listed; the
+///   caller keeps the last known-good layout just like a parse error.
 pub fn load_layout_config(data_dir: &Path) -> Result<LayoutOverrides, LayoutConfigError> {
     let path = data_dir.join(LAYOUT_CONFIG_FILE_NAME);
     let text = match std::fs::read_to_string(&path) {
@@ -196,15 +318,20 @@ pub fn load_layout_config(data_dir: &Path) -> Result<LayoutOverrides, LayoutConf
         }
         Err(source) => return Err(LayoutConfigError::Io { path, source }),
     };
-    parse_layout_config(&text).map_err(|source| {
+    let overrides = parse_layout_config(&text).map_err(|source| {
         let (line, column) = toml_line_col(&text, source.span());
         LayoutConfigError::Parse {
-            path,
+            path: path.clone(),
             source,
             line,
             column,
         }
-    })
+    })?;
+    let issues = validate_layout_overrides(&overrides);
+    if !issues.is_empty() {
+        return Err(LayoutConfigError::Validation { path, issues });
+    }
+    Ok(overrides)
 }
 
 #[cfg(test)]
@@ -421,5 +548,179 @@ home_columns = { narrow = 1, desktop = 2, ultra_wide = 4 }
         let text = toml::to_string(&cfg).expect("serializes");
         let again = parse_layout_config(&text).expect("re-parses");
         assert_eq!(again, cfg);
+    }
+
+    // ── BORU-LAYOUT-07: semantic validation (duplicate section ids) ──────
+
+    #[test]
+    fn clean_config_passes_validation() {
+        let cfg = parse_layout_config(
+            r#"
+[home]
+section_order = ["Hero", "MeshHealth"]
+hidden_sections = ["Tunnels"]
+
+[sidebar]
+section_order = ["Chats", "Friends"]
+
+[screens.settings]
+section_order = ["header", "body"]
+"#,
+        )
+        .expect("parses");
+        assert!(
+            validate_layout_overrides(&cfg).is_empty(),
+            "a clean config has no validation issues"
+        );
+    }
+
+    #[test]
+    fn duplicate_home_section_order_rejected() {
+        let cfg = parse_layout_config(
+            r#"
+[home]
+section_order = ["Tunnels", "Hero", "Tunnels"]
+"#,
+        )
+        .expect("parses");
+        let issues = validate_layout_overrides(&cfg);
+        assert_eq!(issues.len(), 1, "issues: {issues:?}");
+        assert!(issues[0].contains("home.section_order"), "{}", issues[0]);
+        assert!(issues[0].contains("Tunnels"), "{}", issues[0]);
+        assert!(issues[0].contains("duplicate"), "{}", issues[0]);
+    }
+
+    #[test]
+    fn duplicate_hidden_sections_rejected() {
+        let cfg = parse_layout_config(
+            r#"
+[home]
+hidden_sections = ["Tunnels", "Tunnels"]
+"#,
+        )
+        .expect("parses");
+        let issues = validate_layout_overrides(&cfg);
+        assert_eq!(issues.len(), 1, "issues: {issues:?}");
+        assert!(
+            issues[0].contains("home.hidden_sections"),
+            "{}",
+            issues[0]
+        );
+    }
+
+    #[test]
+    fn section_in_order_and_hidden_rejected() {
+        // A section id appearing in BOTH lists is contradictory visibility —
+        // rejected like any other duplicate id.
+        let cfg = parse_layout_config(
+            r#"
+[home]
+section_order = ["Hero", "Tunnels"]
+hidden_sections = ["Tunnels"]
+"#,
+        )
+        .expect("parses");
+        let issues = validate_layout_overrides(&cfg);
+        assert_eq!(issues.len(), 1, "issues: {issues:?}");
+        assert!(issues[0].contains("Tunnels"), "{}", issues[0]);
+        assert!(
+            issues[0].contains("hidden_sections"),
+            "{}",
+            issues[0]
+        );
+    }
+
+    #[test]
+    fn duplicate_sidebar_section_order_rejected() {
+        let cfg = parse_layout_config(
+            r#"
+[sidebar]
+section_order = ["Chats", "Chats", "Friends"]
+"#,
+        )
+        .expect("parses");
+        let issues = validate_layout_overrides(&cfg);
+        assert_eq!(issues.len(), 1, "issues: {issues:?}");
+        assert!(
+            issues[0].contains("sidebar.section_order"),
+            "{}",
+            issues[0]
+        );
+    }
+
+    #[test]
+    fn duplicate_screen_section_ids_rejected() {
+        let cfg = parse_layout_config(
+            r#"
+[screens.settings]
+section_order = ["header", "body", "header"]
+"#,
+        )
+        .expect("parses");
+        let issues = validate_layout_overrides(&cfg);
+        assert_eq!(issues.len(), 1, "issues: {issues:?}");
+        assert!(
+            issues[0].contains("screens.settings.section_order"),
+            "{}",
+            issues[0]
+        );
+    }
+
+    #[test]
+    fn multiple_duplicate_issues_all_reported() {
+        // Every offending list is reported, not just the first.
+        let cfg = parse_layout_config(
+            r#"
+[home]
+section_order = ["Tunnels", "Tunnels"]
+hidden_sections = ["Hero", "Hero"]
+
+[sidebar]
+section_order = ["Chats", "Chats"]
+"#,
+        )
+        .expect("parses");
+        let issues = validate_layout_overrides(&cfg);
+        assert_eq!(issues.len(), 3, "issues: {issues:?}");
+    }
+
+    #[test]
+    fn load_duplicate_sections_reports_validation_error() {
+        let dir = std::env::temp_dir().join(format!("boru-layout-dup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp data dir");
+        std::fs::write(
+            dir.join(LAYOUT_CONFIG_FILE_NAME),
+            "[home]\nsection_order = [\"Tunnels\", \"Tunnels\"]\n",
+        )
+        .expect("write duplicate config");
+
+        let err = load_layout_config(&dir).expect_err("duplicates must fail load");
+        match &err {
+            LayoutConfigError::Validation { issues, .. } => {
+                assert_eq!(issues.len(), 1);
+                assert!(issues[0].contains("duplicate"), "{}", issues[0]);
+            }
+            other => panic!("expected Validation error, got {other:?}"),
+        }
+        assert!(
+            err.to_string().contains(LAYOUT_CONFIG_FILE_NAME),
+            "{}",
+            err
+        );
+
+        // The Clone-able projection reports the Validation kind so the app
+        // can keep the last known-good layout exactly like a parse error.
+        let reload = LayoutReloadError::from_layout_error(&err);
+        assert_eq!(reload.kind, LayoutReloadErrorKind::Validation);
+        assert!(
+            reload.message.contains("duplicate"),
+            "{}",
+            reload.message
+        );
+        assert_eq!(reload.line, None);
+        assert_eq!(reload.column, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

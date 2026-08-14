@@ -19211,6 +19211,21 @@ impl IcedChat {
                     generation,
                     "boru-layout.toml reloaded; merging + applying live layout"
                 );
+                // BORU-LAYOUT-07: semantic validation (duplicate section
+                // ids) is enforced at the load layer AND re-checked here,
+                // so an invalid override set can never be applied no matter
+                // how it reached the update loop. A validation failure is
+                // treated exactly like a parse failure: keep the last
+                // known-good layout and log every issue.
+                let issues = crate::layout_config::validate_layout_overrides(&overrides);
+                if !issues.is_empty() {
+                    tracing::warn!(
+                        generation,
+                        issues = ?issues,
+                        "boru-layout.toml failed validation; keeping last known-good layout"
+                    );
+                    return iced::Task::none();
+                }
                 let (merged, warnings) = crate::layout_merge::merge_layout_config(
                     &crate::layout::LayoutConfig::default(),
                     &overrides,
@@ -36570,6 +36585,88 @@ fn layout_reload_clamps_unsafe_values_with_warning() {
     );
     // The merge still bumped the revision (a layout was applied).
     assert_eq!(app.layout_revision, 1);
+}
+
+#[test]
+fn layout_reload_validation_rejects_duplicates_keeps_previous() {
+    // BORU-LAYOUT-07: duplicate section ids fail semantic validation and
+    // the last known-good layout is retained — never partially applied,
+    // never a crash.
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    // First a valid reload lands a new max content width…
+    let overrides = crate::layout_config::parse_layout_config(
+        "[home]\nmax_content_width = 1200.0\n",
+    )
+    .expect("test config parses");
+    let task = app.update_layout_reloaded(1, Ok(overrides));
+    drop(task);
+    assert_eq!(app.active_layout.home.max_content_width, 1200.0);
+    let revision_after_ok = app.layout_revision;
+
+    // …then an override set with duplicate section ids must be rejected:
+    // the layout stays exactly as it was (the duplicates parse fine — serde
+    // accepts them — so this exercises the app-seam validation pass).
+    let dup = crate::layout_config::parse_layout_config(
+        "[home]\nsection_order = [\"Tunnels\", \"Tunnels\"]\n",
+    )
+    .expect("duplicate list still parses (validation is separate)");
+    assert!(
+        !crate::layout_config::validate_layout_overrides(&dup).is_empty(),
+        "the test fixture must actually fail validation"
+    );
+    let task = app.update_layout_reloaded(2, Ok(dup));
+    drop(task);
+
+    assert_eq!(
+        app.active_layout.home.max_content_width, 1200.0,
+        "duplicate section ids must not be applied"
+    );
+    assert_eq!(
+        app.active_layout.home.section_order,
+        crate::layout::LayoutConfig::default().home.section_order,
+        "the default section order is untouched"
+    );
+    assert_eq!(
+        app.layout_revision, revision_after_ok,
+        "a rejected reload does not bump the layout revision"
+    );
+}
+
+#[test]
+fn layout_reload_validation_error_keeps_last_known_good_layout() {
+    // BORU-LAYOUT-07: a structured Validation error (watcher boundary)
+    // keeps the last known-good layout exactly like a Parse error.
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    let overrides = crate::layout_config::parse_layout_config(
+        "[home]\nmax_content_width = 1100.0\n",
+    )
+    .expect("test config parses");
+    let task = app.update_layout_reloaded(1, Ok(overrides));
+    drop(task);
+    assert_eq!(app.active_layout.home.max_content_width, 1100.0);
+
+    let bad = crate::layout_config::LayoutReloadError {
+        path: std::path::PathBuf::from("boru-layout.toml"),
+        kind: crate::layout_config::LayoutReloadErrorKind::Validation,
+        message: "invalid dev layout override boru-layout.toml: \
+                  home.section_order: duplicate section id \"Tunnels\" at index 1"
+            .to_string(),
+        line: None,
+        column: None,
+    };
+    let task = app.update_layout_reloaded(2, Err(bad));
+    drop(task);
+
+    assert_eq!(
+        app.active_layout.home.max_content_width, 1100.0,
+        "validation error keeps the last known-good layout"
+    );
+    assert_eq!(
+        app.layout_revision, 1,
+        "a rejected reload does not bump the layout revision"
+    );
 }
 
 // ── BORU-UI-09: dev UI Inspector (dev-ui feature only) ────────────────

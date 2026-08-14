@@ -269,6 +269,44 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A file that parses but contains duplicate section ids yields a
+    /// structured *Validation* error — the app keeps the last known-good
+    /// layout (BORU-LAYOUT-07 acceptance: duplicates are rejected, never
+    /// silently applied).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn watcher_reports_duplicate_sections_as_validation_error() {
+        let dir = std::env::temp_dir().join(format!("boru-layout-watch5-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp data dir");
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        spawn_layout_watcher(dir.clone(), tx).expect("spawn watcher");
+
+        let path = dir.join(LAYOUT_CONFIG_FILE_NAME);
+        std::fs::write(&path, "[home]\nsection_order = [\"Tunnels\", \"Tunnels\"]\n")
+            .expect("write duplicate config");
+
+        let msg = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("timed out waiting for reload message")
+            .expect("channel closed");
+        let err = msg
+            .result
+            .expect_err("duplicate section ids must be reported as an error");
+        assert_eq!(
+            err.kind,
+            crate::layout_config::LayoutReloadErrorKind::Validation,
+            "duplicate section ids are a Validation error"
+        );
+        assert!(
+            err.message.contains("duplicate"),
+            "message names the problem: {}",
+            err.message
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A deleted file reloads the default (empty) layout — deleting
     /// boru-layout.toml restores today's baseline arrangement.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

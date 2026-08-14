@@ -21,8 +21,10 @@
 //!   padding, absurd widths, zero column counts, non-finite floats) are
 //!   clamped or replaced by the field default, mirroring
 //!   `theme_merge.rs`; every adjustment is reported as a developer warning
-//!   string so the caller can log it. Full validation rules (duplicate
-//!   section ids, cross-field invariants) land in BORU-LAYOUT-07.
+//!   string so the caller can log it. Semantic validation (duplicate
+//!   section ids in the order/visibility lists) lives in
+//!   `layout_config::validate_layout_overrides` (BORU-LAYOUT-07) and runs
+//!   before merge — this module never sees an invalid section list.
 //! - **Backward compatible.** Older partial layout files (fewer groups /
 //!   fewer fields) deserialize to `None` leaves and merge unchanged;
 //!   unknown fields are ignored by serde.
@@ -1330,5 +1332,66 @@ columns_wide = 999
             .iter()
             .any(|w| w.contains("home.max_content_width")));
         assert!(warnings.iter().any(|w| w.contains("columns_wide")));
+    }
+
+    #[test]
+    fn negative_gaps_and_out_of_range_card_sizes_clamped() {
+        // BORU-LAYOUT-07 scope: negative gaps and out-of-range card sizes
+        // are clamped to sane bounds, never applied verbatim.
+        let (merged, warnings) = merge_toml(
+            r#"
+[home.gaps]
+card_gap = -8.0
+
+[home.card_sizing]
+activity_row_height = -1.0
+quick_action_icon_size = 1.0e8
+status_card_text_min_width = 0.0
+"#,
+        );
+        assert_eq!(merged.home.gaps.card_gap, 0.0);
+        assert_eq!(merged.home.card_sizing.activity_row_height, 0.0);
+        assert_eq!(
+            merged.home.card_sizing.quick_action_icon_size, MAX_SIZE_PX,
+            "absurd icon size clamps to the max"
+        );
+        assert_eq!(
+            merged.home.card_sizing.status_card_text_min_width,
+            LayoutConfig::default()
+                .home
+                .card_sizing
+                .status_card_text_min_width,
+            "zero positive size falls back to the default"
+        );
+        assert_eq!(warnings.len(), 4, "warnings: {warnings:?}");
+    }
+
+    #[test]
+    fn screens_columns_out_of_range_clamped() {
+        // Screen-level columns follow the same clamp as home columns.
+        let (merged, warnings) = merge_toml(
+            r#"
+[screens.settings]
+columns = 0
+"#,
+        );
+        assert_eq!(
+            merged.screens.get("settings").expect("settings screen").columns,
+            1,
+            "zero columns falls back to the screen default (ScreenLayout::default)"
+        );
+        assert_eq!(warnings.len(), 1);
+
+        let (merged, warnings) = merge_toml(
+            r#"
+[screens.settings]
+columns = 999
+"#,
+        );
+        assert_eq!(
+            merged.screens.get("settings").expect("settings screen").columns,
+            MAX_COLUMNS
+        );
+        assert_eq!(warnings.len(), 1);
     }
 }
