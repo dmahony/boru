@@ -44,6 +44,7 @@ text.
 | `mainline` | `patched/mainline` | MIT | raptorswing (2021) |
 | `n0-mainline` | `patched/n0-mainline` | MIT OR Apache-2.0 | raptorswing (2021) |
 | `iced_tiny_skia` | `patched/iced_tiny_skia` | MIT | iced contributors |
+| `p2panda-encryption` | `patched/p2panda-encryption` | MIT OR Apache-2.0 | p2panda contributors |
 | `noq-proto` | `noq-proto-patched` | MIT OR Apache-2.0 | quinn developers (2018–2025), N0, Inc. (2025) |
 
 ## 3. Rust dependency tree (source dependencies)
@@ -149,4 +150,85 @@ Note: the CI `cargo_deny` job's `check` also runs the advisory check. As of
 (RUSTSEC-2023-0089, RUSTSEC-2024-0370, RUSTSEC-2026-0150, RUSTSEC-2026-0173,
 RUSTSEC-2026-0207, RUSTSEC-2026-0208, RUSTSEC-2026-0212) in existing
 dependencies — these are pre-existing findings independent of the licence
-gate and are triaged separately.
+gate and are triaged in section 7.
+
+## 7. RustSec advisory triage (2026-08-14, BORU-SS-02-followup)
+
+`cargo deny --workspace --all-features check -Dwarnings` also runs the
+rustsec advisory check. The failures found on 2026-08-14 and their
+disposition:
+
+| Advisory | Type | Crate (version) | Path in | Disposition |
+|---|---|---|---|---|
+| RUSTSEC-2026-0207 | vulnerability | libcrux-sha3 0.0.8 | hpke-rs → p2panda-encryption (group encryption) | **FIXED**: hpke-rs 0.7.0 → libcrux-sha3 0.0.10 |
+| RUSTSEC-2026-0208 | vulnerability | libcrux-sha3 0.0.8 | hpke-rs → p2panda-encryption (group encryption) | **FIXED**: hpke-rs 0.7.0 → libcrux-sha3 0.0.10 |
+| RUSTSEC-2026-0212 | vulnerability | libcrux-secrets 0.0.5 | libcrux-traits → libcrux-sha3 → hpke-rs | **FIXED**: hpke-rs 0.7.0 → libcrux-traits 0.0.8 → libcrux-secrets 0.0.6 |
+| RUSTSEC-2023-0089 | unmaintained | atomic-polyfill 1.0.3 | heapless 0.7.17 → postcard | justified ignore (see below) |
+| RUSTSEC-2024-0370 | unmaintained | proc-macro-error 0.4.12 | genawaiter-proc-macro → genawaiter → bao-tree (iroh-blobs) | justified ignore (see below) |
+| RUSTSEC-2026-0173 | unmaintained | proc-macro-error2 2.0.1 | hax-lib-macros (cfg(hax) only) → libcrux-sha3 | justified ignore (see below) |
+| RUSTSEC-2026-0150 | unmaintained | audiopus_sys 0.2.2 | opus (voice-calls feature, optional) | justified ignore (see below) |
+| RUSTSEC-2026-0206 | unmaintained | rustybuzz 0.20.1 | usvg → resvg (iced GUI) | justified ignore (see below) |
+| RUSTSEC-2026-0192 | unmaintained | ttf-parser 0.25.1 | fontdb/cosmic-text/rustybuzz (iced GUI) | justified ignore (see below) |
+
+### Vulnerability fixes (libcrux / hpke-rs)
+
+The three vulnerability advisories are all in the libcrux crypto stack that
+powers `p2panda-encryption` → `hpke-rs` (boru's group-encryption ratchet).
+Upstream fixes exist:
+
+- `libcrux-sha3 0.0.10` fixes RUSTSEC-2026-0207 (incorrect incremental
+  portable SHAKE output) and RUSTSEC-2026-0208 (AVX2 SHAKE-256 panic).
+- `libcrux-secrets 0.0.6` fixes RUSTSEC-2026-0212 (aarch64 constant-time
+  swap/select).
+
+The blocker: `p2panda-encryption 0.7.0` (crates.io) pins `hpke-rs ^0.6.1`,
+and `hpke-rs 0.6.1` pins `libcrux-sha3 ^0.0.8` (semver `^0.0.8` means
+`<0.0.9`, so the 0.0.10 fix is out of range). `hpke-rs 0.7.0` pins
+`libcrux-sha3 =0.0.10` (and pulls `libcrux-traits 0.0.8` →
+`libcrux-secrets 0.0.6`), but requires `p2panda-encryption` to widen its
+constraint.
+
+Fix applied (matching upstream p2panda git main, which made the same bump
+with **no source change** — verified: the hpke-rs API used by p2panda —
+`Hpke::new/seal/open`, `HpkePublicKey::new`, `HpkePrivateKey::new`, `Mode` —
+is identical in 0.6.1 and 0.7.0):
+
+- Vendored `p2panda-encryption 0.7.0` (exact crates.io source) into
+  `patched/p2panda-encryption` with only the `hpke-rs` / `hpke-rs-crypto` /
+  `hpke-rs-rust-crypto` version constraints bumped `0.6.1 → 0.7.0`; wired
+  via `[patch.crates-io]` (see comment in `Cargo.toml`).
+- `cargo update` resolved: hpke-rs 0.7.0, hpke-rs-crypto 0.7.0,
+  hpke-rs-rust-crypto 0.7.0, libcrux-sha3 0.0.10, libcrux-secrets 0.0.6,
+  libcrux-traits 0.0.8, libcrux-intrinsics 0.0.8, hax-lib 0.3.7.
+
+Verification: `cargo deny --workspace --all-features check -Dwarnings` →
+`advisories ok, bans ok, licenses ok, sources ok` (exit 0); full
+`--all-features` build and `group_encryption` lib test suite (100 tests)
+pass on DEBSRV.
+
+### Justified ignores (unmaintained, no fix)
+
+Each entry in `deny.toml` `[advisories].ignore` carries an inline reason;
+summary of why each is acceptable:
+
+- **RUSTSEC-2023-0089 atomic-polyfill** — target-gated to no-atomic
+  embedded targets (avr, riscv32i/imc, thumbv6m, xtensa-esp32s2). Boru
+  ships x86_64/aarch64/wasm32/android/armv7 — never compiled. No upgrade
+  (heapless 0.7.17 pinned by postcard 1.1.3, both latest).
+- **RUSTSEC-2024-0370 proc-macro-error** — build-time proc-macro helper via
+  genawaiter-proc-macro (genawaiter → bao-tree `validate`, enabled by
+  iroh-blobs). Never linked into the runtime binary; no fork exists.
+- **RUSTSEC-2026-0173 proc-macro-error2** — `cfg(hax)`-gated inside
+  hax-lib-macros (formal-verification toolchain); never compiled in normal
+  builds.
+- **RUSTSEC-2026-0150 audiopus_sys** — C shim behind `opus` (optional
+  `voice-calls` feature, not in default); CMake 4.0 build break does not
+  affect CI (CMake 3.x); no maintained drop-in replacement.
+- **RUSTSEC-2026-0206 rustybuzz** — pinned by iced 0.14's SVG stack
+  (usvg/resvg); upstream moved to skrifa but no iced-0.14-compatible
+  upgrade exists.
+- **RUSTSEC-2026-0192 ttf-parser** — pinned by iced 0.14's text stack
+  (fontdb/cosmic-text/rustybuzz); same skrifa migration situation.
+
+None of these are vulnerabilities; all are maintenance-only advisories with
+no patched release, and none affect boru's shipped runtime behaviour.

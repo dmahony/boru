@@ -18,8 +18,54 @@
 # denied pedantically (exact SPDX expression required, e.g. "GPL-3.0-only").
 
 [advisories]
+# ── Justified ignores (triage 2026-08-14, BORU-SS-02-followup t_ba039db1) ──
+# Every entry below is an *unmaintained* advisory (NOT a vulnerability) with no
+# patched release. Each is justified: crate not compiled on any boru target,
+# or a pinned build-time/proc-macro helper, or a C shim behind an optional
+# feature. Vulnerability advisories (RUSTSEC-2026-0207/0208/0212 libcrux) were
+# FIXED by upgrading hpke-rs 0.7.0 (vendored p2panda-encryption), not ignored.
 ignore = [
+    # RUSTSEC-2024-0436 — pre-existing ignore, kept (was in deny.toml before
+    # BORU-SS-02; yanked/notice advisory on a transitive dep, no action needed).
     "RUSTSEC-2024-0436",
+    # RUSTSEC-2023-0089 — atomic-polyfill is unmaintained but is only compiled
+    # on targets WITHOUT native atomics (avr, riscv32i/imc, thumbv6m,
+    # xtensa-esp32s2). Boru ships x86_64/aarch64/wasm32/android/armv7 — none
+    # need it. It enters the lock only via heapless 0.7.17 (pinned by postcard
+    # 1.1.3, the latest postcard). No upgrade path; never compiled here.
+    { id = "RUSTSEC-2023-0089", reason = "atomic-polyfill (via heapless 0.7.17 -> postcard 1.1.3) is target-gated to no-atomic embedded targets (avr/riscv32i/imc/thumbv6m/xtensa-esp32s2); never compiled on any boru build target. Unmaintained advisory only, no fix exists." },
+    # RUSTSEC-2024-0370 — proc-macro-error 0.4.12 is unmaintained (no release
+    # since 2021, no maintained fork). It is a *proc-macro helper* pulled by
+    # genawaiter-proc-macro (genawaiter 0.99.1 -> bao-tree validate feature,
+    # enabled by iroh-blobs 0.103). Build-time-only; the proc-macro code is not
+    # linked into the runtime binary. Replacing genawaiter would mean forking
+    # the iroh-blobs/bao-tree stack — out of scope for an advisory triage.
+    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error 0.4.12 is a build-time proc-macro helper via genawaiter-proc-macro (genawaiter -> bao-tree 'validate', enabled by iroh-blobs 0.103). Unmaintained with no fork; never linked into the runtime binary. No fix exists." },
+    # RUSTSEC-2026-0173 — proc-macro-error2 2.0.1 is only a dependency of
+    # hax-lib-macros under the custom `cfg(hax)` gate (formal-verification
+    # toolchain). Normal builds never enable that cfg, so the crate is never
+    # compiled. It appears in the lock via hax-lib-macros -> libcrux-sha3 ->
+    # hpke-rs (the crypto chain, now upgraded to libcrux-sha3 0.0.10).
+    { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 is cfg(hax)-gated (hax formal-verification toolchain) inside hax-lib-macros; never compiled in boru builds. Unmaintained advisory only, no fix exists." },
+    # RUSTSEC-2026-0150 — audiopus_sys 0.2.2 (C shim behind the `opus` crate,
+    # voice-calls feature) is unmaintained and breaks on CMake 4.0. boru's
+    # voice-calls is an OPTIONAL feature (not in default) using the latest
+    # opus 0.3.1; CI/ubuntu-latest uses CMake 3.x so it still builds. There is
+    # no maintained drop-in replacement crate with the same API (opus-rs is a
+    # pure-Rust reimplementation, not a drop-in). Replacing the codec backend
+    # is a feature-level change, out of scope for advisory triage.
+    { id = "RUSTSEC-2026-0150", reason = "audiopus_sys (via opus 0.3.1, optional voice-calls feature, not in default) is an unmaintained C shim; CMake 4.0 build break does not affect CI (CMake 3.x). No maintained drop-in replacement; replacing the codec backend is a feature change, not an advisory fix." },
+    # RUSTSEC-2026-0206 — rustybuzz 0.20.1 is unmaintained (upstream moved to
+    # skrifa). It is pinned by the iced 0.14 GUI stack (usvg/resvg SVG text
+    # shaping). No upgrade exists within iced 0.14; replacing it requires
+    # forking/upgrading the whole iced render stack. Unmaintained advisory
+    # only — no vulnerability in boru's usage.
+    { id = "RUSTSEC-2026-0206", reason = "rustybuzz 0.20.1 is pinned by iced 0.14's SVG stack (usvg/resvg); upstream moved to skrifa but no iced-0.14-compatible upgrade exists. Unmaintained advisory only; replacing requires a full iced stack upgrade, out of scope." },
+    # RUSTSEC-2026-0192 — ttf-parser 0.25.1 is unmaintained (upstream moved to
+    # skrifa). It is pinned by the iced 0.14 text stack (fontdb/cosmic-text/
+    # rustybuzz + ab_glyph/owned_ttf_parser). No upgrade exists within iced
+    # 0.14. Unmaintained advisory only — no vulnerability in boru's usage.
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser 0.25.1 is pinned by iced 0.14's text stack (fontdb/cosmic-text/rustybuzz); upstream moved to skrifa but no iced-0.14-compatible upgrade exists. Unmaintained advisory only; replacing requires a full iced stack upgrade, out of scope." },
 ]
 
 [bans]

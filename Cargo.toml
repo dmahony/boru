@@ -462,6 +462,18 @@ irpc = { path = "patched/irpc" }
 mainline = { path = "patched/mainline" }
 n0-mainline = { path = "patched/n0-mainline" }
 
+# ── p2panda-encryption 0.7.0: hpke-rs 0.6.1 → 0.7.0 (libcrux advisory fixes) ──
+# p2panda-encryption 0.7.0 (crates.io) pins hpke-rs ^0.6.1, which pins
+# libcrux-sha3 ^0.0.8 (<0.0.9) and libcrux-secrets 0.0.5 — all three carrying
+# RUSTSEC-2026-0207 / RUSTSEC-2026-0208 / RUSTSEC-2026-0212 (incorrect SHAKE
+# output, AVX2 SHAKE-256 panic, aarch64 constant-time swap). Upstream p2panda
+# fixed this by bumping hpke-rs to 0.7.0 (which pins libcrux-sha3 =0.0.10 and
+# pulls libcrux-traits 0.0.8 → libcrux-secrets 0.0.6) with NO source change —
+# the API p2panda uses (Hpke::new/seal/open, HpkePublicKey/PrivateKey::new,
+# Mode) is unchanged. This vendored copy is crates.io 0.7.0 source with only
+# the hpke-rs dependency constraints bumped, mirroring p2panda git main.
+p2panda-encryption = { path = "patched/p2panda-encryption" }
+
 # ── iced_tiny_skia 0.14.0 geometry-clip double-transform fix ──────────
 # The 0.14.0 tiny-skia render loop computes the group clip bounds as
 # `clip_bounds * transformation * scale_factor`, but `draw_primitive_group`
