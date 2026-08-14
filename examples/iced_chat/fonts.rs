@@ -95,6 +95,14 @@ pub const PUBLIC_SANS: &str = "Public Sans";
 /// Inter Tight → Arial Narrow → generic sans-serif).
 pub const ARIAL_NARROW: &str = "Arial Narrow";
 
+/// All bundled family names in `FontFamilyKey::ALL` order — a `'static`
+/// slice for pickers (BORU-UI-16).
+pub const FAMILY_NAMES: [&str; 5] = [INTER_TIGHT, PUBLIC_SANS, FIGTREE, JETBRAINS_MONO, RALEWAY];
+
+/// All registered weight labels in `FontWeightKey::ALL` order — a `'static`
+/// slice for pickers (BORU-UI-16).
+pub const WEIGHT_LABELS: [&str; 5] = ["Normal", "Medium", "Semibold", "Bold", "ExtraBold"];
+
 // ── Font constructors ────────────────────────────────────────────────
 
 /// Return a `Font` for Figtree at the given weight.
@@ -150,6 +158,184 @@ pub fn public_sans(weight: Weight) -> Font {
         weight,
         stretch: iced::font::Stretch::Normal,
         style: iced::font::Style::Normal,
+    }
+}
+
+// ── Font family / weight keys (BORU-UI-16) ────────────────────────────
+//
+// Small Copy enums the theme uses to make font family choices and weight
+// mappings live-editable. The keys only ever name the bundled families and
+// the registered static weights; `FontFamilyKey::from_name` returns `None`
+// for anything else so the config merge can log + fall back gracefully.
+
+/// The bundled font families, in role-group order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FontFamilyKey {
+    /// Inter Tight — display/page headings.
+    InterTight,
+    /// Public Sans — general app UI / body.
+    PublicSans,
+    /// Figtree — chat messages, sender, metadata, composer.
+    Figtree,
+    /// JetBrains Mono — technical values.
+    JetBrainsMono,
+    /// Raleway — brand wordmark.
+    Raleway,
+}
+
+impl FontFamilyKey {
+    /// All bundled families, in a stable order for pickers / previews.
+    pub const ALL: [FontFamilyKey; 5] = [
+        Self::InterTight,
+        Self::PublicSans,
+        Self::Figtree,
+        Self::JetBrainsMono,
+        Self::Raleway,
+    ];
+
+    /// The `Family::Name` string for this key.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::InterTight => INTER_TIGHT,
+            Self::PublicSans => PUBLIC_SANS,
+            Self::Figtree => FIGTREE,
+            Self::JetBrainsMono => JETBRAINS_MONO,
+            Self::Raleway => RALEWAY,
+        }
+    }
+
+    /// Parse a family name string into a key. `None` for any name that is
+    /// not one of the bundled families — the config merge uses this to
+    /// detect an unavailable font and fall back (with a warning).
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            INTER_TIGHT => Some(Self::InterTight),
+            PUBLIC_SANS => Some(Self::PublicSans),
+            FIGTREE => Some(Self::Figtree),
+            JETBRAINS_MONO => Some(Self::JetBrainsMono),
+            RALEWAY => Some(Self::Raleway),
+            _ => None,
+        }
+    }
+
+    /// Whether this family is one of the bundled families (always true for
+    /// the enum — kept as a single place to answer "is this font
+    /// available?" so resolution can log + fall back if that ever changes).
+    pub fn is_bundled(self) -> bool {
+        matches!(
+            self,
+            Self::InterTight
+                | Self::PublicSans
+                | Self::Figtree
+                | Self::JetBrainsMono
+                | Self::Raleway
+        )
+    }
+
+    /// Build the bundled `Font` for this family at the given weight.
+    pub fn font(self, weight: FontWeightKey) -> Font {
+        match self {
+            Self::InterTight => inter_tight(weight.iced()),
+            Self::PublicSans => public_sans(weight.iced()),
+            Self::Figtree => figtree(weight.iced()),
+            Self::JetBrainsMono => jetbrains_mono(weight.iced()),
+            Self::Raleway => raleway_extra_bold(),
+        }
+    }
+}
+
+/// The registered static weights, mapped to the bundled font files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FontWeightKey {
+    /// 400 — Regular.
+    Normal,
+    /// 500 — Medium.
+    Medium,
+    /// 600 — SemiBold.
+    Semibold,
+    /// 700 — Bold.
+    Bold,
+    /// 800 — ExtraBold.
+    ExtraBold,
+}
+
+impl FontWeightKey {
+    /// All registered weights, in ascending order for pickers.
+    pub const ALL: [FontWeightKey; 5] = [
+        Self::Normal,
+        Self::Medium,
+        Self::Semibold,
+        Self::Bold,
+        Self::ExtraBold,
+    ];
+
+    /// Convert to the iced weight used by `Font`.
+    pub fn iced(self) -> Weight {
+        match self {
+            Self::Normal => Weight::Normal,
+            Self::Medium => Weight::Medium,
+            Self::Semibold => Weight::Semibold,
+            Self::Bold => Weight::Bold,
+            Self::ExtraBold => Weight::ExtraBold,
+        }
+    }
+
+    /// Convert an iced weight to a key, if it is one of the registered ones.
+    pub fn from_iced(weight: Weight) -> Option<Self> {
+        match weight {
+            Weight::Normal => Some(Self::Normal),
+            Weight::Medium => Some(Self::Medium),
+            Weight::Semibold => Some(Self::Semibold),
+            Weight::Bold => Some(Self::Bold),
+            Weight::ExtraBold => Some(Self::ExtraBold),
+            _ => None,
+        }
+    }
+
+    /// Parse a weight-name string into a key. `None` for names that are not
+    /// registered static weights — the config merge uses this to log + fall
+    /// back gracefully.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "Normal" | "normal" | "400" => Some(Self::Normal),
+            "Medium" | "medium" | "500" => Some(Self::Medium),
+            "Semibold" | "semibold" | "SemiBold" | "600" => Some(Self::Semibold),
+            "Bold" | "bold" | "700" => Some(Self::Bold),
+            "ExtraBold" | "extrabold" | "Extra Bold" | "800" => Some(Self::ExtraBold),
+            _ => None,
+        }
+    }
+
+    /// Human label for pickers / previews.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Normal => "Normal",
+            Self::Medium => "Medium",
+            Self::Semibold => "Semibold",
+            Self::Bold => "Bold",
+            Self::ExtraBold => "ExtraBold",
+        }
+    }
+
+    /// Whether this weight is one of the static instances registered for the
+    /// given family at startup (BORU-UI-16 fallback check). A mapping that
+    /// asks a family for a weight it does not bundle would otherwise render
+    /// with a synthesised / missing glyph, so resolution falls back instead.
+    pub fn is_registered_for(self, family: FontFamilyKey) -> bool {
+        match family {
+            // Inter Tight: only Bold (700) is bundled.
+            FontFamilyKey::InterTight => matches!(self, Self::Bold),
+            // Public Sans: 400 / 500 / 600.
+            FontFamilyKey::PublicSans => {
+                matches!(self, Self::Normal | Self::Medium | Self::Semibold)
+            }
+            // Figtree: 400 / 500 / 600.
+            FontFamilyKey::Figtree => matches!(self, Self::Normal | Self::Medium | Self::Semibold),
+            // JetBrains Mono: 400 / 500.
+            FontFamilyKey::JetBrainsMono => matches!(self, Self::Normal | Self::Medium),
+            // Raleway: ExtraBold (800) only.
+            FontFamilyKey::Raleway => matches!(self, Self::ExtraBold),
+        }
     }
 }
 
@@ -376,6 +562,36 @@ impl TypeRole {
         }
     }
 
+    /// The bundled-family key for this role's default family.
+    pub fn family_key(self) -> FontFamilyKey {
+        match self.family_name() {
+            INTER_TIGHT => FontFamilyKey::InterTight,
+            PUBLIC_SANS => FontFamilyKey::PublicSans,
+            FIGTREE => FontFamilyKey::Figtree,
+            JETBRAINS_MONO => FontFamilyKey::JetBrainsMono,
+            RALEWAY => FontFamilyKey::Raleway,
+            _ => FontFamilyKey::PublicSans,
+        }
+    }
+
+    /// The registered-weight key for this role's default weight.
+    pub fn weight_key(self) -> FontWeightKey {
+        FontWeightKey::from_iced(self.weight()).unwrap_or(FontWeightKey::Normal)
+    }
+
+    /// Default relative line height for this role (BORU-UI-16).
+    ///
+    /// The plan asks for display headings ~1.2 and body copy ~1.45; chat
+    /// message bodies use 1.45 and everything else uses iced's default 1.3.
+    /// These defaults reproduce the current UI exactly.
+    pub fn default_line_height(self) -> f32 {
+        match self {
+            Self::DisplayHeading | Self::PageTitle | Self::BrandWordmark => 1.2,
+            Self::ChatMessage => 1.45,
+            _ => 1.3,
+        }
+    }
+
     /// Short human label for previews / docs.
     pub fn label(self) -> &'static str {
         match self {
@@ -435,6 +651,88 @@ pub fn type_role_text_lh<'a>(
     text(content)
         .font(role.font())
         .size(role.size_px())
+        .line_height(text::LineHeight::Relative(line_height))
+}
+
+// ── Theme-aware typography resolution (BORU-UI-16) ───────────────────
+//
+// The theme holds *choices* — which bundled family each role group uses,
+// which weight each role uses, and each role's relative line-height. These
+// helpers turn a role + theme into a concrete iced `Font` / size /
+// line-height **without reloading font files**. Fonts are loaded once at
+// startup (`load_fonts`); changing a family/weight mapping only rebuilds the
+// `Font` struct, which Iced resolves against already-registered families.
+//
+// Fallback policy: if a configured family/weight name is not one of the
+// bundled static instances, we log once and fall back to the role's built-in
+// default so the UI never renders with an unresolvable font. The merge step
+// (`theme_merge.rs`) validates config names earlier, so this is a second
+// defensive net rather than the primary one.
+
+/// Resolve the theme's font for a role (family + weight) with graceful
+/// fallback to the role's built-in font if the mapping is unavailable.
+/// Never loads font data — only constructs an iced `Font`.
+pub fn resolve_theme_font(theme: &crate::theme::BoruTheme, role: TypeRole) -> iced::Font {
+    let family_key = theme.typography.family_for(role);
+    let weight_key = theme.typography.weight_for(role);
+    if !family_key.is_bundled() {
+        tracing::warn!(
+            family = family_key.name(),
+            role = ?role,
+            "typography: configured family is not bundled; falling back to role default"
+        );
+        return role.font();
+    }
+    if !weight_key.is_registered_for(family_key) {
+        tracing::warn!(
+            weight = weight_key.label(),
+            family = family_key.name(),
+            role = ?role,
+            "typography: configured weight not registered for family; falling back to role default"
+        );
+        return role.font();
+    }
+    family_key.font(weight_key)
+}
+
+/// Resolve the theme's size (px) for a role.
+pub fn resolve_theme_size(theme: &crate::theme::BoruTheme, role: TypeRole) -> f32 {
+    theme.typography.size_for(role)
+}
+
+/// Resolve the theme's relative line-height for a role.
+pub fn resolve_theme_line_height(theme: &crate::theme::BoruTheme, role: TypeRole) -> f32 {
+    theme.typography.line_height_for(role)
+}
+
+/// Build a theme-aware text widget for a canonical role: font family,
+/// weight, size and line-height all come from the live theme
+/// (BORU-UI-16), falling back to the role's built-in font when a mapping
+/// is unavailable. Changing theme typography in the inspector updates
+/// every widget built through this helper without any font reload.
+pub fn type_role_text_themed<'a>(
+    theme: &crate::theme::BoruTheme,
+    role: TypeRole,
+    content: impl text::IntoFragment<'a>,
+) -> text::Text<'a, iced::Theme, iced::Renderer> {
+    text(content)
+        .font(resolve_theme_font(theme, role))
+        .size(resolve_theme_size(theme, role))
+        .line_height(text::LineHeight::Relative(resolve_theme_line_height(theme, role)))
+}
+
+/// Build a theme-aware text widget for a canonical role with an explicit
+/// relative line-height override (kept for sites that tune line-height
+/// independently of the theme token, e.g. status cards).
+pub fn type_role_text_lh_themed<'a>(
+    theme: &crate::theme::BoruTheme,
+    role: TypeRole,
+    content: impl text::IntoFragment<'a>,
+    line_height: f32,
+) -> text::Text<'a, iced::Theme, iced::Renderer> {
+    text(content)
+        .font(resolve_theme_font(theme, role))
+        .size(resolve_theme_size(theme, role))
         .line_height(text::LineHeight::Relative(line_height))
 }
 
@@ -828,5 +1126,85 @@ mod tests {
         for s in [XL, LG, MD, SM, XS, XXS] {
             assert!(s > 0.0, "size {s} must be positive");
         }
+    }
+
+    #[test]
+    fn family_key_from_name_rejects_unknown_fonts() {
+        // BORU-UI-16: an unavailable / unconfigured family name must
+        // resolve to `None` so the config merge can log + fall back.
+        assert_eq!(FontFamilyKey::from_name("Figtree"), Some(FontFamilyKey::Figtree));
+        assert_eq!(FontFamilyKey::from_name("Public Sans"), Some(FontFamilyKey::PublicSans));
+        assert_eq!(FontFamilyKey::from_name("Inter Tight"), Some(FontFamilyKey::InterTight));
+        assert_eq!(
+            FontFamilyKey::from_name("JetBrains Mono"),
+            Some(FontFamilyKey::JetBrainsMono)
+        );
+        assert_eq!(FontFamilyKey::from_name("Raleway"), Some(FontFamilyKey::Raleway));
+        // Unknown / not-bundled names must NOT map to a key.
+        assert_eq!(FontFamilyKey::from_name("Comic Sans"), None);
+        assert_eq!(FontFamilyKey::from_name("Helvetica Neue"), None);
+        assert_eq!(FontFamilyKey::from_name(""), None);
+    }
+
+    #[test]
+    fn weight_key_from_name_rejects_unknown_weights() {
+        // BORU-UI-16: an unknown weight name falls back instead of being
+        // silently mapped to a synthetic weight.
+        assert_eq!(FontWeightKey::from_name("Normal"), Some(FontWeightKey::Normal));
+        assert_eq!(FontWeightKey::from_name("Semibold"), Some(FontWeightKey::Semibold));
+        assert_eq!(FontWeightKey::from_name("ExtraBold"), Some(FontWeightKey::ExtraBold));
+        assert_eq!(FontWeightKey::from_name("Heavy"), None);
+        assert_eq!(FontWeightKey::from_name("Light"), None);
+        assert_eq!(FontWeightKey::from_name(""), None);
+    }
+
+    #[test]
+    fn registered_weights_match_bundled_static_files() {
+        // BORU-UI-16: the fallback check must agree with what `load_fonts`
+        // actually registers — a weight a family does not bundle must not
+        // be considered available.
+        assert!(FontWeightKey::Bold.is_registered_for(FontFamilyKey::InterTight));
+        assert!(!FontWeightKey::Normal.is_registered_for(FontFamilyKey::InterTight));
+        assert!(FontWeightKey::Normal.is_registered_for(FontFamilyKey::PublicSans));
+        assert!(FontWeightKey::Semibold.is_registered_for(FontFamilyKey::PublicSans));
+        assert!(!FontWeightKey::Bold.is_registered_for(FontFamilyKey::PublicSans));
+        assert!(FontWeightKey::Normal.is_registered_for(FontFamilyKey::Figtree));
+        assert!(FontWeightKey::Medium.is_registered_for(FontFamilyKey::Figtree));
+        assert!(!FontWeightKey::Bold.is_registered_for(FontFamilyKey::Figtree));
+        assert!(FontWeightKey::Normal.is_registered_for(FontFamilyKey::JetBrainsMono));
+        assert!(!FontWeightKey::Semibold.is_registered_for(FontFamilyKey::JetBrainsMono));
+        assert!(FontWeightKey::ExtraBold.is_registered_for(FontFamilyKey::Raleway));
+        assert!(!FontWeightKey::Normal.is_registered_for(FontFamilyKey::Raleway));
+        // Every role's default weight is registered for its default family.
+        for role in TypeRole::ALL {
+            assert!(
+                role.weight_key().is_registered_for(role.family_key()),
+                "{role:?} default weight {} not registered for {}",
+                role.weight_key().label(),
+                role.family_key().name()
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_theme_font_falls_back_when_mapping_unavailable() {
+        // BORU-UI-16: a theme mapping that asks a family for a weight it
+        // does not bundle falls back to the role's built-in font instead of
+        // rendering with a synthesised / missing glyph.
+        let mut theme = crate::theme::BoruTheme::default();
+        // ChatMessage is Figtree by default; force a family+weight combo
+        // that is NOT registered (Inter Tight only bundles Bold).
+        theme.typography.chat_family = FontFamilyKey::InterTight;
+        theme.typography.chat_message_weight = FontWeightKey::Normal;
+        let font = resolve_theme_font(&theme, TypeRole::ChatMessage);
+        assert_eq!(font, TypeRole::ChatMessage.font());
+        // A registered mapping resolves to the bundled family font.
+        let mut ok = crate::theme::BoruTheme::default();
+        ok.typography.chat_family = FontFamilyKey::Figtree;
+        ok.typography.chat_message_weight = FontWeightKey::Normal;
+        assert_eq!(
+            resolve_theme_font(&ok, TypeRole::ChatMessage),
+            figtree(Weight::Normal)
+        );
     }
 }

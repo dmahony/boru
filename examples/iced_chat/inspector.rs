@@ -35,7 +35,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use iced::widget::{button, container, row, scrollable, slider, text, text_input, toggler, Space};
+use iced::widget::{
+    button, container, pick_list, row, scrollable, slider, text, text_input, toggler, Space,
+};
 use iced::{Alignment, Color, Element, Length};
 
 use crate::app::AppMessage;
@@ -54,6 +56,9 @@ pub enum FieldKind {
     Bool,
     /// Colour (rendered as a hex/RGBA text field + swatch).
     Color,
+    /// Discrete choice from a fixed list (rendered as a pick_list).
+    /// BORU-UI-16: font family and weight mappings.
+    Choice,
 }
 
 /// Identifies one editable leaf of the typed theme.
@@ -103,6 +108,44 @@ pub enum ThemeField {
     TypeHomeSubtitle,
     TypeDialogTitle,
     TypeDialogSubtitle,
+    // ── BORU-UI-16: font family choices per role group (Choice) ──
+    TypeDisplayFamily,
+    TypeUiFamily,
+    TypeChatFamily,
+    TypeTechnicalFamily,
+    TypeBrandFamily,
+    // ── BORU-UI-16: weight mapping per canonical role (Choice) ──
+    TypeDisplayHeadingWeight,
+    TypePageTitleWeight,
+    TypeSectionTitleWeight,
+    TypeCardTitleWeight,
+    TypeBodyWeight,
+    TypeBodyEmphasisedWeight,
+    TypeButtonLabelWeight,
+    TypeSupportingTextWeight,
+    TypeMetadataWeight,
+    TypeChatMessageWeight,
+    TypeChatSenderWeight,
+    TypeChatMetadataWeight,
+    TypeComposerTextWeight,
+    TypeTechnicalValueWeight,
+    TypeBrandWordmarkWeight,
+    // ── BORU-UI-16: line-height mapping per canonical role (Float) ──
+    TypeDisplayHeadingLineHeight,
+    TypePageTitleLineHeight,
+    TypeSectionTitleLineHeight,
+    TypeCardTitleLineHeight,
+    TypeBodyLineHeight,
+    TypeBodyEmphasisedLineHeight,
+    TypeButtonLabelLineHeight,
+    TypeSupportingTextLineHeight,
+    TypeMetadataLineHeight,
+    TypeChatMessageLineHeight,
+    TypeChatSenderLineHeight,
+    TypeChatMetadataLineHeight,
+    TypeComposerTextLineHeight,
+    TypeTechnicalValueLineHeight,
+    TypeBrandWordmarkLineHeight,
     // ── Spacing (SpacingTokens) ──
     Space4,
     Space8,
@@ -345,6 +388,8 @@ const FLOAT_ROW_H: f32 = 48.0;
 const BOOL_ROW_H: f32 = 26.0;
 /// Approximate height of a colour field row (label + hex input).
 const COLOR_ROW_H: f32 = 46.0;
+/// Approximate height of a choice field row (label + pick_list).
+const CHOICE_ROW_H: f32 = 46.0;
 /// Approximate inter-row / inter-group spacing.
 const ROW_GAP: f32 = 4.0;
 
@@ -379,6 +424,7 @@ fn section_estimated_height(section: &InspectorSection, is_collapsed: bool) -> f
                 FieldKind::Float => FLOAT_ROW_H,
                 FieldKind::Bool => BOOL_ROW_H,
                 FieldKind::Color => COLOR_ROW_H,
+                FieldKind::Choice => CHOICE_ROW_H,
             } + ROW_GAP;
         }
         h += ROW_GAP;
@@ -429,6 +475,41 @@ impl ThemeField {
             TypeHomeSubtitle => "Home subtitle",
             TypeDialogTitle => "Dialog title",
             TypeDialogSubtitle => "Dialog subtitle",
+            TypeDisplayFamily => "Display font family",
+            TypeUiFamily => "UI font family",
+            TypeChatFamily => "Chat font family",
+            TypeTechnicalFamily => "Technical font family",
+            TypeBrandFamily => "Brand font family",
+            TypeDisplayHeadingWeight => "Display heading weight",
+            TypePageTitleWeight => "Page title weight",
+            TypeSectionTitleWeight => "Section title weight",
+            TypeCardTitleWeight => "Card title weight",
+            TypeBodyWeight => "Body weight",
+            TypeBodyEmphasisedWeight => "Body emphasised weight",
+            TypeButtonLabelWeight => "Button label weight",
+            TypeSupportingTextWeight => "Supporting text weight",
+            TypeMetadataWeight => "Metadata weight",
+            TypeChatMessageWeight => "Chat message weight",
+            TypeChatSenderWeight => "Chat sender weight",
+            TypeChatMetadataWeight => "Chat metadata weight",
+            TypeComposerTextWeight => "Composer weight",
+            TypeTechnicalValueWeight => "Technical value weight",
+            TypeBrandWordmarkWeight => "Wordmark weight",
+            TypeDisplayHeadingLineHeight => "Display heading line height",
+            TypePageTitleLineHeight => "Page title line height",
+            TypeSectionTitleLineHeight => "Section title line height",
+            TypeCardTitleLineHeight => "Card title line height",
+            TypeBodyLineHeight => "Body line height",
+            TypeBodyEmphasisedLineHeight => "Body emphasised line height",
+            TypeButtonLabelLineHeight => "Button label line height",
+            TypeSupportingTextLineHeight => "Supporting text line height",
+            TypeMetadataLineHeight => "Metadata line height",
+            TypeChatMessageLineHeight => "Chat message line height",
+            TypeChatSenderLineHeight => "Chat sender line height",
+            TypeChatMetadataLineHeight => "Chat metadata line height",
+            TypeComposerTextLineHeight => "Composer line height",
+            TypeTechnicalValueLineHeight => "Technical value line height",
+            TypeBrandWordmarkLineHeight => "Wordmark line height",
             Space4 => "Space 4",
             Space8 => "Space 8",
             Space12 => "Space 12",
@@ -536,7 +617,42 @@ impl ThemeField {
             | TypeComposerText
             | TypeHomeSubtitle
             | TypeDialogTitle
-            | TypeDialogSubtitle => SectionId::Global,
+            | TypeDialogSubtitle
+            | TypeDisplayFamily
+            | TypeUiFamily
+            | TypeChatFamily
+            | TypeTechnicalFamily
+            | TypeBrandFamily
+            | TypeDisplayHeadingWeight
+            | TypePageTitleWeight
+            | TypeSectionTitleWeight
+            | TypeCardTitleWeight
+            | TypeBodyWeight
+            | TypeBodyEmphasisedWeight
+            | TypeButtonLabelWeight
+            | TypeSupportingTextWeight
+            | TypeMetadataWeight
+            | TypeChatMessageWeight
+            | TypeChatSenderWeight
+            | TypeChatMetadataWeight
+            | TypeComposerTextWeight
+            | TypeTechnicalValueWeight
+            | TypeBrandWordmarkWeight
+            | TypeDisplayHeadingLineHeight
+            | TypePageTitleLineHeight
+            | TypeSectionTitleLineHeight
+            | TypeCardTitleLineHeight
+            | TypeBodyLineHeight
+            | TypeBodyEmphasisedLineHeight
+            | TypeButtonLabelLineHeight
+            | TypeSupportingTextLineHeight
+            | TypeMetadataLineHeight
+            | TypeChatMessageLineHeight
+            | TypeChatSenderLineHeight
+            | TypeChatMetadataLineHeight
+            | TypeComposerTextLineHeight
+            | TypeTechnicalValueLineHeight
+            | TypeBrandWordmarkLineHeight => SectionId::Global,
             Space4 | Space8 | Space12 | Space16 | Space20 | Space24 | Space32 | Space40
             | ControlHeight => SectionId::Global,
             RadiusSm | RadiusMd | RadiusLg | RadiusXl | RadiusCard | RadiusPill | RadiusDialog => {
@@ -569,6 +685,27 @@ impl ThemeField {
         use ThemeField::*;
         match self {
             HomeShowActivityFeed => FieldKind::Bool,
+            // BORU-UI-16: family choices + weight mappings are discrete.
+            TypeDisplayFamily
+            | TypeUiFamily
+            | TypeChatFamily
+            | TypeTechnicalFamily
+            | TypeBrandFamily
+            | TypeDisplayHeadingWeight
+            | TypePageTitleWeight
+            | TypeSectionTitleWeight
+            | TypeCardTitleWeight
+            | TypeBodyWeight
+            | TypeBodyEmphasisedWeight
+            | TypeButtonLabelWeight
+            | TypeSupportingTextWeight
+            | TypeMetadataWeight
+            | TypeChatMessageWeight
+            | TypeChatSenderWeight
+            | TypeChatMetadataWeight
+            | TypeComposerTextWeight
+            | TypeTechnicalValueWeight
+            | TypeBrandWordmarkWeight => FieldKind::Choice,
             ColorCanvas
             | ColorSidebar
             | ColorSurface
@@ -606,6 +743,22 @@ impl ThemeField {
             }
             TypeButtonLabel | TypeSupportingText | TypeMetadata | TypeChatMetadata => (8.0, 24.0),
             TypeDialogSubtitle => (10.0, 24.0),
+            // BORU-UI-16: relative line-height multipliers.
+            TypeDisplayHeadingLineHeight
+            | TypePageTitleLineHeight
+            | TypeSectionTitleLineHeight
+            | TypeCardTitleLineHeight
+            | TypeBodyLineHeight
+            | TypeBodyEmphasisedLineHeight
+            | TypeButtonLabelLineHeight
+            | TypeSupportingTextLineHeight
+            | TypeMetadataLineHeight
+            | TypeChatMessageLineHeight
+            | TypeChatSenderLineHeight
+            | TypeChatMetadataLineHeight
+            | TypeComposerTextLineHeight
+            | TypeTechnicalValueLineHeight
+            | TypeBrandWordmarkLineHeight => (0.5, 4.0),
             Space4 | Space8 | Space12 | Space16 | Space20 | Space24 | Space32 | Space40 => {
                 (0.0, 64.0)
             }
@@ -675,6 +828,21 @@ pub fn read_float(theme: &BoruTheme, field: ThemeField) -> f32 {
         TypeHomeSubtitle => theme.typography.home_subtitle,
         TypeDialogTitle => theme.typography.dialog_title,
         TypeDialogSubtitle => theme.typography.dialog_subtitle,
+        TypeDisplayHeadingLineHeight => theme.typography.display_heading_line_height,
+        TypePageTitleLineHeight => theme.typography.page_title_line_height,
+        TypeSectionTitleLineHeight => theme.typography.section_title_line_height,
+        TypeCardTitleLineHeight => theme.typography.card_title_line_height,
+        TypeBodyLineHeight => theme.typography.body_line_height,
+        TypeBodyEmphasisedLineHeight => theme.typography.body_emphasised_line_height,
+        TypeButtonLabelLineHeight => theme.typography.button_label_line_height,
+        TypeSupportingTextLineHeight => theme.typography.supporting_text_line_height,
+        TypeMetadataLineHeight => theme.typography.metadata_line_height,
+        TypeChatMessageLineHeight => theme.typography.chat_message_line_height,
+        TypeChatSenderLineHeight => theme.typography.chat_sender_line_height,
+        TypeChatMetadataLineHeight => theme.typography.chat_metadata_line_height,
+        TypeComposerTextLineHeight => theme.typography.composer_text_line_height,
+        TypeTechnicalValueLineHeight => theme.typography.technical_value_line_height,
+        TypeBrandWordmarkLineHeight => theme.typography.brand_wordmark_line_height,
         Space4 => theme.spacing.space_4,
         Space8 => theme.spacing.space_8,
         Space12 => theme.spacing.space_12,
@@ -736,12 +904,19 @@ pub fn read_float(theme: &BoruTheme, field: ThemeField) -> f32 {
         ControlHeaderHeight => theme.controls.header_height,
         ControlSliderWidth => theme.controls.slider_width,
         MotionSidebarFadeFrames => theme.motion.sidebar_fade_frames as f32,
-        // Bool fields have no float read; the caller checks `kind()` first.
+        // Bool / Colour / Choice fields have no float read; the caller
+        // checks `kind()` first.
         HomeShowActivityFeed | ColorCanvas | ColorSidebar | ColorSurface | ColorSurfaceSelected
         | ColorSurfaceHover | ColorSurfacePressed | ColorSurfaceSecondary | ColorInputBg
         | ColorBorderMuted | ColorBorderStrong | ColorTextPrimary | ColorTextSecondary
         | ColorTextMuted | ColorPrimary | ColorPrimaryHover | ColorPrimaryPressed | ColorPrimarySoft
-        | ColorSuccess | ColorDanger | ColorWarning | ColorFocus | ColorDialogBackdrop => 0.0,
+        | ColorSuccess | ColorDanger | ColorWarning | ColorFocus | ColorDialogBackdrop
+        | TypeDisplayFamily | TypeUiFamily | TypeChatFamily | TypeTechnicalFamily | TypeBrandFamily
+        | TypeDisplayHeadingWeight | TypePageTitleWeight | TypeSectionTitleWeight
+        | TypeCardTitleWeight | TypeBodyWeight | TypeBodyEmphasisedWeight | TypeButtonLabelWeight
+        | TypeSupportingTextWeight | TypeMetadataWeight | TypeChatMessageWeight
+        | TypeChatSenderWeight | TypeChatMetadataWeight | TypeComposerTextWeight
+        | TypeTechnicalValueWeight | TypeBrandWordmarkWeight => 0.0,
     }
 }
 
@@ -813,6 +988,29 @@ pub fn apply_float(config: &mut UiThemeConfig, field: ThemeField, value: f32) ->
         TypeHomeSubtitle => set(&mut cfg_typography(config).home_subtitle),
         TypeDialogTitle => set(&mut cfg_typography(config).dialog_title),
         TypeDialogSubtitle => set(&mut cfg_typography(config).dialog_subtitle),
+        TypeDisplayHeadingLineHeight => {
+            set(&mut cfg_typography(config).display_heading_line_height)
+        }
+        TypePageTitleLineHeight => set(&mut cfg_typography(config).page_title_line_height),
+        TypeSectionTitleLineHeight => set(&mut cfg_typography(config).section_title_line_height),
+        TypeCardTitleLineHeight => set(&mut cfg_typography(config).card_title_line_height),
+        TypeBodyLineHeight => set(&mut cfg_typography(config).body_line_height),
+        TypeBodyEmphasisedLineHeight => {
+            set(&mut cfg_typography(config).body_emphasised_line_height)
+        }
+        TypeButtonLabelLineHeight => set(&mut cfg_typography(config).button_label_line_height),
+        TypeSupportingTextLineHeight => {
+            set(&mut cfg_typography(config).supporting_text_line_height)
+        }
+        TypeMetadataLineHeight => set(&mut cfg_typography(config).metadata_line_height),
+        TypeChatMessageLineHeight => set(&mut cfg_typography(config).chat_message_line_height),
+        TypeChatSenderLineHeight => set(&mut cfg_typography(config).chat_sender_line_height),
+        TypeChatMetadataLineHeight => set(&mut cfg_typography(config).chat_metadata_line_height),
+        TypeComposerTextLineHeight => set(&mut cfg_typography(config).composer_text_line_height),
+        TypeTechnicalValueLineHeight => {
+            set(&mut cfg_typography(config).technical_value_line_height)
+        }
+        TypeBrandWordmarkLineHeight => set(&mut cfg_typography(config).brand_wordmark_line_height),
         Space4 => set(&mut cfg_spacing(config).space_4),
         Space8 => set(&mut cfg_spacing(config).space_8),
         Space12 => set(&mut cfg_spacing(config).space_12),
@@ -882,7 +1080,13 @@ pub fn apply_float(config: &mut UiThemeConfig, field: ThemeField, value: f32) ->
         | ColorSurfaceHover | ColorSurfacePressed | ColorSurfaceSecondary | ColorInputBg
         | ColorBorderMuted | ColorBorderStrong | ColorTextPrimary | ColorTextSecondary
         | ColorTextMuted | ColorPrimary | ColorPrimaryHover | ColorPrimaryPressed | ColorPrimarySoft
-        | ColorSuccess | ColorDanger | ColorWarning | ColorFocus | ColorDialogBackdrop => {}
+        | ColorSuccess | ColorDanger | ColorWarning | ColorFocus | ColorDialogBackdrop
+        | TypeDisplayFamily | TypeUiFamily | TypeChatFamily | TypeTechnicalFamily | TypeBrandFamily
+        | TypeDisplayHeadingWeight | TypePageTitleWeight | TypeSectionTitleWeight
+        | TypeCardTitleWeight | TypeBodyWeight | TypeBodyEmphasisedWeight | TypeButtonLabelWeight
+        | TypeSupportingTextWeight | TypeMetadataWeight | TypeChatMessageWeight
+        | TypeChatSenderWeight | TypeChatMetadataWeight | TypeComposerTextWeight
+        | TypeTechnicalValueWeight | TypeBrandWordmarkWeight => {}
     }
     Ok(())
 }
@@ -934,6 +1138,143 @@ pub fn apply_color(
         ColorDialogBackdrop => set(&mut cfg_colors(config).dialog_backdrop),
         _ => {}
     }
+    Ok(())
+}
+
+// ── Choice fields (BORU-UI-16: font family + weight mappings) ─────────
+
+impl ThemeField {
+    /// The selectable options for a Choice field (family names / weight
+    /// labels). The value's serialised name is the option's string.
+    pub fn choices(self) -> &'static [&'static str] {
+        use ThemeField::*;
+        match self {
+            TypeDisplayFamily
+            | TypeUiFamily
+            | TypeChatFamily
+            | TypeTechnicalFamily
+            | TypeBrandFamily => &crate::fonts::FAMILY_NAMES,
+            TypeDisplayHeadingWeight
+            | TypePageTitleWeight
+            | TypeSectionTitleWeight
+            | TypeCardTitleWeight
+            | TypeBodyWeight
+            | TypeBodyEmphasisedWeight
+            | TypeButtonLabelWeight
+            | TypeSupportingTextWeight
+            | TypeMetadataWeight
+            | TypeChatMessageWeight
+            | TypeChatSenderWeight
+            | TypeChatMetadataWeight
+            | TypeComposerTextWeight
+            | TypeTechnicalValueWeight
+            | TypeBrandWordmarkWeight => &crate::fonts::WEIGHT_LABELS,
+            _ => &[],
+        }
+    }
+}
+
+/// Read the current value of a Choice field as the selected option string.
+pub fn read_choice(theme: &BoruTheme, field: ThemeField) -> &'static str {
+    use ThemeField::*;
+    match field {
+        TypeDisplayFamily => theme.typography.display_family.name(),
+        TypeUiFamily => theme.typography.ui_family.name(),
+        TypeChatFamily => theme.typography.chat_family.name(),
+        TypeTechnicalFamily => theme.typography.technical_family.name(),
+        TypeBrandFamily => theme.typography.brand_family.name(),
+        TypeDisplayHeadingWeight => theme.typography.display_heading_weight.label(),
+        TypePageTitleWeight => theme.typography.page_title_weight.label(),
+        TypeSectionTitleWeight => theme.typography.section_title_weight.label(),
+        TypeCardTitleWeight => theme.typography.card_title_weight.label(),
+        TypeBodyWeight => theme.typography.body_weight.label(),
+        TypeBodyEmphasisedWeight => theme.typography.body_emphasised_weight.label(),
+        TypeButtonLabelWeight => theme.typography.button_label_weight.label(),
+        TypeSupportingTextWeight => theme.typography.supporting_text_weight.label(),
+        TypeMetadataWeight => theme.typography.metadata_weight.label(),
+        TypeChatMessageWeight => theme.typography.chat_message_weight.label(),
+        TypeChatSenderWeight => theme.typography.chat_sender_weight.label(),
+        TypeChatMetadataWeight => theme.typography.chat_metadata_weight.label(),
+        TypeComposerTextWeight => theme.typography.composer_text_weight.label(),
+        TypeTechnicalValueWeight => theme.typography.technical_value_weight.label(),
+        TypeBrandWordmarkWeight => theme.typography.brand_wordmark_weight.label(),
+        _ => "",
+    }
+}
+
+/// Apply a Choice edit to the stored config. `value` is the selected option
+/// string (family name / weight label) — validated against the known keys
+/// so the merge never sees an unknown family/weight.
+pub fn apply_choice(
+    config: &mut UiThemeConfig,
+    field: ThemeField,
+    value: &str,
+) -> Result<(), String> {
+    use ThemeField::*;
+    if !matches!(field.kind(), FieldKind::Choice) {
+        return Err(format!("{} is not a choice field", field.label()));
+    }
+    let set = |slot: &mut Option<String>| *slot = Some(value.to_string());
+    match field {
+        TypeDisplayFamily => {
+            crate::fonts::FontFamilyKey::from_name(value).ok_or_else(|| {
+                format!("{}: unknown font family {value:?}", field.label())
+            })?;
+            set(&mut cfg_typography(config).display_family);
+        }
+        TypeUiFamily => {
+            crate::fonts::FontFamilyKey::from_name(value).ok_or_else(|| {
+                format!("{}: unknown font family {value:?}", field.label())
+            })?;
+            set(&mut cfg_typography(config).ui_family);
+        }
+        TypeChatFamily => {
+            crate::fonts::FontFamilyKey::from_name(value).ok_or_else(|| {
+                format!("{}: unknown font family {value:?}", field.label())
+            })?;
+            set(&mut cfg_typography(config).chat_family);
+        }
+        TypeTechnicalFamily => {
+            crate::fonts::FontFamilyKey::from_name(value).ok_or_else(|| {
+                format!("{}: unknown font family {value:?}", field.label())
+            })?;
+            set(&mut cfg_typography(config).technical_family);
+        }
+        TypeBrandFamily => {
+            crate::fonts::FontFamilyKey::from_name(value).ok_or_else(|| {
+                format!("{}: unknown font family {value:?}", field.label())
+            })?;
+            set(&mut cfg_typography(config).brand_family);
+        }
+        TypeDisplayHeadingWeight => set_weight(&mut cfg_typography(config).display_heading_weight, value, field)?,
+        TypePageTitleWeight => set_weight(&mut cfg_typography(config).page_title_weight, value, field)?,
+        TypeSectionTitleWeight => set_weight(&mut cfg_typography(config).section_title_weight, value, field)?,
+        TypeCardTitleWeight => set_weight(&mut cfg_typography(config).card_title_weight, value, field)?,
+        TypeBodyWeight => set_weight(&mut cfg_typography(config).body_weight, value, field)?,
+        TypeBodyEmphasisedWeight => set_weight(&mut cfg_typography(config).body_emphasised_weight, value, field)?,
+        TypeButtonLabelWeight => set_weight(&mut cfg_typography(config).button_label_weight, value, field)?,
+        TypeSupportingTextWeight => set_weight(&mut cfg_typography(config).supporting_text_weight, value, field)?,
+        TypeMetadataWeight => set_weight(&mut cfg_typography(config).metadata_weight, value, field)?,
+        TypeChatMessageWeight => set_weight(&mut cfg_typography(config).chat_message_weight, value, field)?,
+        TypeChatSenderWeight => set_weight(&mut cfg_typography(config).chat_sender_weight, value, field)?,
+        TypeChatMetadataWeight => set_weight(&mut cfg_typography(config).chat_metadata_weight, value, field)?,
+        TypeComposerTextWeight => set_weight(&mut cfg_typography(config).composer_text_weight, value, field)?,
+        TypeTechnicalValueWeight => set_weight(&mut cfg_typography(config).technical_value_weight, value, field)?,
+        TypeBrandWordmarkWeight => set_weight(&mut cfg_typography(config).brand_wordmark_weight, value, field)?,
+        _ => return Err(format!("{} is not a choice field", field.label())),
+    }
+    Ok(())
+}
+
+/// Validate a weight label and store it in the config slot.
+fn set_weight(
+    slot: &mut Option<String>,
+    value: &str,
+    field: ThemeField,
+) -> Result<(), String> {
+    crate::fonts::FontWeightKey::from_name(value)
+        .ok_or_else(|| format!("{}: unknown weight {value:?}", field.label()))?;
+    *slot = Some(value.to_string());
     Ok(())
 }
 
@@ -1033,6 +1374,9 @@ pub enum InspectorMsg {
     ResetAll,
     /// Slider changed a continuous float value.
     SetFloat { field: ThemeField, value: f32 },
+    /// BORU-UI-16: pick_list changed a discrete choice (font family /
+    /// weight mapping). `value` is the selected option string.
+    SetChoice { field: ThemeField, value: String },
     /// Toggle changed an optional visual feature.
     SetBool { field: ThemeField, value: bool },
     /// Numeric text input changed; apply when it parses.
@@ -1195,6 +1539,56 @@ pub const SECTIONS: &[InspectorSection] = &[
                     ThemeField::TypeHomeSubtitle,
                     ThemeField::TypeDialogTitle,
                     ThemeField::TypeDialogSubtitle,
+                ],
+            },
+            FieldGroup {
+                label: "Typography — font families",
+                fields: &[
+                    ThemeField::TypeDisplayFamily,
+                    ThemeField::TypeUiFamily,
+                    ThemeField::TypeChatFamily,
+                    ThemeField::TypeTechnicalFamily,
+                    ThemeField::TypeBrandFamily,
+                ],
+            },
+            FieldGroup {
+                label: "Typography — weights",
+                fields: &[
+                    ThemeField::TypeDisplayHeadingWeight,
+                    ThemeField::TypePageTitleWeight,
+                    ThemeField::TypeSectionTitleWeight,
+                    ThemeField::TypeCardTitleWeight,
+                    ThemeField::TypeBodyWeight,
+                    ThemeField::TypeBodyEmphasisedWeight,
+                    ThemeField::TypeButtonLabelWeight,
+                    ThemeField::TypeSupportingTextWeight,
+                    ThemeField::TypeMetadataWeight,
+                    ThemeField::TypeChatMessageWeight,
+                    ThemeField::TypeChatSenderWeight,
+                    ThemeField::TypeChatMetadataWeight,
+                    ThemeField::TypeComposerTextWeight,
+                    ThemeField::TypeTechnicalValueWeight,
+                    ThemeField::TypeBrandWordmarkWeight,
+                ],
+            },
+            FieldGroup {
+                label: "Typography — line heights",
+                fields: &[
+                    ThemeField::TypeDisplayHeadingLineHeight,
+                    ThemeField::TypePageTitleLineHeight,
+                    ThemeField::TypeSectionTitleLineHeight,
+                    ThemeField::TypeCardTitleLineHeight,
+                    ThemeField::TypeBodyLineHeight,
+                    ThemeField::TypeBodyEmphasisedLineHeight,
+                    ThemeField::TypeButtonLabelLineHeight,
+                    ThemeField::TypeSupportingTextLineHeight,
+                    ThemeField::TypeMetadataLineHeight,
+                    ThemeField::TypeChatMessageLineHeight,
+                    ThemeField::TypeChatSenderLineHeight,
+                    ThemeField::TypeChatMetadataLineHeight,
+                    ThemeField::TypeComposerTextLineHeight,
+                    ThemeField::TypeTechnicalValueLineHeight,
+                    ThemeField::TypeBrandWordmarkLineHeight,
                 ],
             },
             FieldGroup {
@@ -1808,6 +2202,7 @@ fn field_row(
         FieldKind::Float => float_row(theme, draft, field, dark_mode),
         FieldKind::Bool => bool_row(theme, draft, field, dark_mode),
         FieldKind::Color => color_row(theme, draft, field, dark_mode),
+        FieldKind::Choice => choice_row(theme, draft, field, dark_mode),
     }
 }
 
@@ -1906,6 +2301,39 @@ fn color_row(
                 .align_y(Alignment::Center),
         )
         .push(input)
+        .spacing(2.0)
+        .into()
+}
+
+/// Row for a discrete Choice field (font family / weight mapping,
+/// BORU-UI-16). Renders a labelled pick_list with the current selection.
+fn choice_row(
+    theme: &BoruTheme,
+    _draft: &InspectorDraft,
+    field: ThemeField,
+    dark_mode: bool,
+) -> Element<'static, AppMessage> {
+    let options = field.choices().to_vec();
+    let selected = read_choice(theme, field);
+
+    let label = text(field.label()).size(11.0).color(muted_text(dark_mode));
+
+    let list = pick_list(options, Some(selected), move |choice: &str| {
+        AppMessage::Inspector(InspectorMsg::SetChoice {
+            field,
+            value: choice.to_string(),
+        })
+    })
+    .width(Length::Fill)
+    .padding([2, 6])
+    .text_size(11.0);
+
+    iced::widget::Column::new()
+        .push(
+            row![label, Space::new().width(Length::Fill)]
+                .align_y(Alignment::Center),
+        )
+        .push(list)
         .spacing(2.0)
         .into()
 }
@@ -2042,6 +2470,11 @@ mod tests {
                             apply_color(&mut cfg, *field, parse_hex_rgba("#123456").unwrap())
                                 .unwrap_or_else(|e| panic!("{field:?}: {e}"));
                         }
+                        FieldKind::Choice => {
+                            let first = field.choices().first().copied().unwrap_or("");
+                            apply_choice(&mut cfg, *field, first)
+                                .unwrap_or_else(|e| panic!("{field:?}: {e}"));
+                        }
                     }
                 }
             }
@@ -2135,6 +2568,11 @@ mod tests {
                         }
                         FieldKind::Color => {
                             apply_color(&mut cfg, *field, parse_hex_rgba("#123456").unwrap())
+                                .unwrap_or_else(|e| panic!("{field:?}: {e}"));
+                        }
+                        FieldKind::Choice => {
+                            let first = field.choices().first().copied().unwrap_or("");
+                            apply_choice(&mut cfg, *field, first)
                                 .unwrap_or_else(|e| panic!("{field:?}: {e}"));
                         }
                     }

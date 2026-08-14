@@ -579,7 +579,12 @@ impl Default for ColorTokens {
 // Sizes mirror `fonts.rs` — `TypeRole::size_px()` for the 15 canonical
 // roles plus the legacy `sizes` module (`HOME_SUBTITLE`, `DIALOG_TITLE`,
 // `DIALOG_SUBTITLE`) and the audit-listed raw sizes (sidebar name, section
-// label, badge, call text). Families/weights stay owned by `TypeRole`.
+// label, badge, call text). BORU-UI-16 adds the *family choice* per role
+// group (display/UI/chat/technical/brand — Boru bundles five families) and
+// per-role weight + line-height mappings so typography can be live-edited
+// through the inspector without reloading font files (the bundled files
+// are loaded once at startup; the theme only changes which already-loaded
+// family/weight a role resolves to).
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TypographyTokens {
@@ -619,10 +624,54 @@ pub struct TypographyTokens {
     pub call_avatar_glyph: f32,
     pub call_avatar_glyph_large: f32,
     pub call_pip_label: f32,
+    // ── BORU-UI-16: family choice per role group ──
+    /// Family for display/heading roles (default Inter Tight).
+    pub display_family: crate::fonts::FontFamilyKey,
+    /// Family for UI/body roles (default Public Sans).
+    pub ui_family: crate::fonts::FontFamilyKey,
+    /// Family for chat/message roles (default Figtree).
+    pub chat_family: crate::fonts::FontFamilyKey,
+    /// Family for technical values (default JetBrains Mono).
+    pub technical_family: crate::fonts::FontFamilyKey,
+    /// Family for the brand wordmark (default Raleway).
+    pub brand_family: crate::fonts::FontFamilyKey,
+    // ── BORU-UI-16: weight mapping per canonical role ──
+    pub display_heading_weight: crate::fonts::FontWeightKey,
+    pub page_title_weight: crate::fonts::FontWeightKey,
+    pub section_title_weight: crate::fonts::FontWeightKey,
+    pub card_title_weight: crate::fonts::FontWeightKey,
+    pub body_weight: crate::fonts::FontWeightKey,
+    pub body_emphasised_weight: crate::fonts::FontWeightKey,
+    pub button_label_weight: crate::fonts::FontWeightKey,
+    pub supporting_text_weight: crate::fonts::FontWeightKey,
+    pub metadata_weight: crate::fonts::FontWeightKey,
+    pub chat_message_weight: crate::fonts::FontWeightKey,
+    pub chat_sender_weight: crate::fonts::FontWeightKey,
+    pub chat_metadata_weight: crate::fonts::FontWeightKey,
+    pub composer_text_weight: crate::fonts::FontWeightKey,
+    pub technical_value_weight: crate::fonts::FontWeightKey,
+    pub brand_wordmark_weight: crate::fonts::FontWeightKey,
+    // ── BORU-UI-16: line-height mapping per canonical role ──
+    pub display_heading_line_height: f32,
+    pub page_title_line_height: f32,
+    pub section_title_line_height: f32,
+    pub card_title_line_height: f32,
+    pub body_line_height: f32,
+    pub body_emphasised_line_height: f32,
+    pub button_label_line_height: f32,
+    pub supporting_text_line_height: f32,
+    pub metadata_line_height: f32,
+    pub chat_message_line_height: f32,
+    pub chat_sender_line_height: f32,
+    pub chat_metadata_line_height: f32,
+    pub composer_text_line_height: f32,
+    pub technical_value_line_height: f32,
+    pub brand_wordmark_line_height: f32,
 }
 
 impl Default for TypographyTokens {
     fn default() -> Self {
+        use crate::fonts::{FontFamilyKey, FontWeightKey, TypeRole};
         Self {
             display_heading: 32.0,
             page_title: 28.0,
@@ -653,6 +702,134 @@ impl Default for TypographyTokens {
             call_avatar_glyph: 36.0,
             call_avatar_glyph_large: 44.0,
             call_pip_label: 18.0,
+            display_family: FontFamilyKey::InterTight,
+            ui_family: FontFamilyKey::PublicSans,
+            chat_family: FontFamilyKey::Figtree,
+            technical_family: FontFamilyKey::JetBrainsMono,
+            brand_family: FontFamilyKey::Raleway,
+            display_heading_weight: TypeRole::DisplayHeading.weight_key(),
+            page_title_weight: TypeRole::PageTitle.weight_key(),
+            section_title_weight: TypeRole::SectionTitle.weight_key(),
+            card_title_weight: TypeRole::CardTitle.weight_key(),
+            body_weight: TypeRole::Body.weight_key(),
+            body_emphasised_weight: TypeRole::BodyEmphasised.weight_key(),
+            button_label_weight: TypeRole::ButtonLabel.weight_key(),
+            supporting_text_weight: TypeRole::SupportingText.weight_key(),
+            metadata_weight: TypeRole::Metadata.weight_key(),
+            chat_message_weight: TypeRole::ChatMessage.weight_key(),
+            chat_sender_weight: TypeRole::ChatSender.weight_key(),
+            chat_metadata_weight: TypeRole::ChatMetadata.weight_key(),
+            composer_text_weight: TypeRole::ComposerText.weight_key(),
+            technical_value_weight: TypeRole::TechnicalValue.weight_key(),
+            brand_wordmark_weight: TypeRole::BrandWordmark.weight_key(),
+            display_heading_line_height: TypeRole::DisplayHeading.default_line_height(),
+            page_title_line_height: TypeRole::PageTitle.default_line_height(),
+            section_title_line_height: TypeRole::SectionTitle.default_line_height(),
+            card_title_line_height: TypeRole::CardTitle.default_line_height(),
+            body_line_height: TypeRole::Body.default_line_height(),
+            body_emphasised_line_height: TypeRole::BodyEmphasised.default_line_height(),
+            button_label_line_height: TypeRole::ButtonLabel.default_line_height(),
+            supporting_text_line_height: TypeRole::SupportingText.default_line_height(),
+            metadata_line_height: TypeRole::Metadata.default_line_height(),
+            chat_message_line_height: TypeRole::ChatMessage.default_line_height(),
+            chat_sender_line_height: TypeRole::ChatSender.default_line_height(),
+            chat_metadata_line_height: TypeRole::ChatMetadata.default_line_height(),
+            composer_text_line_height: TypeRole::ComposerText.default_line_height(),
+            technical_value_line_height: TypeRole::TechnicalValue.default_line_height(),
+            brand_wordmark_line_height: TypeRole::BrandWordmark.default_line_height(),
+        }
+    }
+}
+
+impl TypographyTokens {
+    /// The bundled family choice for a role (BORU-UI-16).
+    ///
+    /// Maps the role to its role group: display/heading roles → the display
+    /// family, UI/body roles → the UI family, chat/message roles → the chat
+    /// family, technical values → the technical family, wordmark → brand.
+    pub fn family_for(&self, role: crate::fonts::TypeRole) -> crate::fonts::FontFamilyKey {
+        use crate::fonts::TypeRole;
+        match role {
+            TypeRole::DisplayHeading | TypeRole::PageTitle => self.display_family,
+            TypeRole::SectionTitle
+            | TypeRole::CardTitle
+            | TypeRole::Body
+            | TypeRole::BodyEmphasised
+            | TypeRole::ButtonLabel
+            | TypeRole::SupportingText
+            | TypeRole::Metadata => self.ui_family,
+            TypeRole::ChatMessage
+            | TypeRole::ChatSender
+            | TypeRole::ChatMetadata
+            | TypeRole::ComposerText => self.chat_family,
+            TypeRole::TechnicalValue => self.technical_family,
+            TypeRole::BrandWordmark => self.brand_family,
+        }
+    }
+
+    /// The weight mapping for a role (BORU-UI-16).
+    pub fn weight_for(&self, role: crate::fonts::TypeRole) -> crate::fonts::FontWeightKey {
+        use crate::fonts::TypeRole;
+        match role {
+            TypeRole::DisplayHeading => self.display_heading_weight,
+            TypeRole::PageTitle => self.page_title_weight,
+            TypeRole::SectionTitle => self.section_title_weight,
+            TypeRole::CardTitle => self.card_title_weight,
+            TypeRole::Body => self.body_weight,
+            TypeRole::BodyEmphasised => self.body_emphasised_weight,
+            TypeRole::ButtonLabel => self.button_label_weight,
+            TypeRole::SupportingText => self.supporting_text_weight,
+            TypeRole::Metadata => self.metadata_weight,
+            TypeRole::ChatMessage => self.chat_message_weight,
+            TypeRole::ChatSender => self.chat_sender_weight,
+            TypeRole::ChatMetadata => self.chat_metadata_weight,
+            TypeRole::ComposerText => self.composer_text_weight,
+            TypeRole::TechnicalValue => self.technical_value_weight,
+            TypeRole::BrandWordmark => self.brand_wordmark_weight,
+        }
+    }
+
+    /// The size mapping for a role (the canonical sizes).
+    pub fn size_for(&self, role: crate::fonts::TypeRole) -> f32 {
+        use crate::fonts::TypeRole;
+        match role {
+            TypeRole::DisplayHeading => self.display_heading,
+            TypeRole::PageTitle => self.page_title,
+            TypeRole::SectionTitle => self.section_title,
+            TypeRole::CardTitle => self.card_title,
+            TypeRole::Body => self.body,
+            TypeRole::BodyEmphasised => self.body_emphasised,
+            TypeRole::ButtonLabel => self.button_label,
+            TypeRole::SupportingText => self.supporting_text,
+            TypeRole::Metadata => self.metadata,
+            TypeRole::ChatMessage => self.chat_message,
+            TypeRole::ChatSender => self.chat_sender,
+            TypeRole::ChatMetadata => self.chat_metadata,
+            TypeRole::ComposerText => self.composer_text,
+            TypeRole::TechnicalValue => self.technical_value,
+            TypeRole::BrandWordmark => self.brand_wordmark,
+        }
+    }
+
+    /// The line-height mapping for a role (relative, BORU-UI-16).
+    pub fn line_height_for(&self, role: crate::fonts::TypeRole) -> f32 {
+        use crate::fonts::TypeRole;
+        match role {
+            TypeRole::DisplayHeading => self.display_heading_line_height,
+            TypeRole::PageTitle => self.page_title_line_height,
+            TypeRole::SectionTitle => self.section_title_line_height,
+            TypeRole::CardTitle => self.card_title_line_height,
+            TypeRole::Body => self.body_line_height,
+            TypeRole::BodyEmphasised => self.body_emphasised_line_height,
+            TypeRole::ButtonLabel => self.button_label_line_height,
+            TypeRole::SupportingText => self.supporting_text_line_height,
+            TypeRole::Metadata => self.metadata_line_height,
+            TypeRole::ChatMessage => self.chat_message_line_height,
+            TypeRole::ChatSender => self.chat_sender_line_height,
+            TypeRole::ChatMetadata => self.chat_metadata_line_height,
+            TypeRole::ComposerText => self.composer_text_line_height,
+            TypeRole::TechnicalValue => self.technical_value_line_height,
+            TypeRole::BrandWordmark => self.brand_wordmark_line_height,
         }
     }
 }
@@ -1514,6 +1691,41 @@ impl BoruTheme {
             Self::light()
         }
     }
+
+    /// Resolve the font for a canonical role from the live theme
+    /// (BORU-UI-16).
+    ///
+    /// Uses the role's family-group choice and weight mapping. If the
+    /// configured family is not one of the bundled families (should not
+    /// happen after merge validation, but guarded defensively), it logs a
+    /// warning and falls back to the role's `TypeRole` default font. This
+    /// never reloads font files — the bundled families are loaded once at
+    /// startup and the theme only picks which already-loaded family/weight
+    /// a role resolves to.
+    pub fn type_font(&self, role: crate::fonts::TypeRole) -> iced::Font {
+        let family = self.typography.family_for(role);
+        if !family.is_bundled() {
+            tracing::warn!(
+                family = family.name(),
+                role = role.label(),
+                "configured font family is not bundled; falling back to default font"
+            );
+            return role.font();
+        }
+        family.font(self.typography.weight_for(role))
+    }
+
+    /// Resolve the size for a canonical role from the live theme
+    /// (BORU-UI-16).
+    pub fn type_size(&self, role: crate::fonts::TypeRole) -> f32 {
+        self.typography.size_for(role)
+    }
+
+    /// Resolve the relative line height for a canonical role from the live
+    /// theme (BORU-UI-16).
+    pub fn type_line_height(&self, role: crate::fonts::TypeRole) -> f32 {
+        self.typography.line_height_for(role)
+    }
 }
 
 impl Default for BoruTheme {
@@ -1684,6 +1896,81 @@ mod tests {
         assert_eq!(t.home_subtitle, fonts::HOME_SUBTITLE);
         assert_eq!(t.dialog_title, fonts::DIALOG_TITLE);
         assert_eq!(t.dialog_subtitle, fonts::DIALOG_SUBTITLE);
+        // BORU-UI-16: family choices per role group match TypeRole families.
+        assert_eq!(t.display_family, TypeRole::DisplayHeading.family_key());
+        assert_eq!(t.ui_family, TypeRole::Body.family_key());
+        assert_eq!(t.chat_family, TypeRole::ChatMessage.family_key());
+        assert_eq!(t.technical_family, TypeRole::TechnicalValue.family_key());
+        assert_eq!(t.brand_family, TypeRole::BrandWordmark.family_key());
+    }
+
+    #[test]
+    fn typography_weights_match_type_role() {
+        // BORU-UI-16: the per-role weight mapping defaults equal the
+        // TypeRole weights so the live theme reproduces the baseline UI.
+        let t = TypographyTokens::default();
+        use crate::fonts::FontWeightKey;
+        let cases: &[(TypeRole, FontWeightKey)] = &[
+            (TypeRole::DisplayHeading, FontWeightKey::Bold),
+            (TypeRole::PageTitle, FontWeightKey::Bold),
+            (TypeRole::SectionTitle, FontWeightKey::Semibold),
+            (TypeRole::CardTitle, FontWeightKey::Semibold),
+            (TypeRole::Body, FontWeightKey::Normal),
+            (TypeRole::BodyEmphasised, FontWeightKey::Semibold),
+            (TypeRole::ButtonLabel, FontWeightKey::Semibold),
+            (TypeRole::SupportingText, FontWeightKey::Normal),
+            (TypeRole::Metadata, FontWeightKey::Normal),
+            (TypeRole::ChatMessage, FontWeightKey::Normal),
+            (TypeRole::ChatSender, FontWeightKey::Semibold),
+            (TypeRole::ChatMetadata, FontWeightKey::Normal),
+            (TypeRole::ComposerText, FontWeightKey::Normal),
+            (TypeRole::TechnicalValue, FontWeightKey::Normal),
+            (TypeRole::BrandWordmark, FontWeightKey::ExtraBold),
+        ];
+        for (role, expected) in cases {
+            assert_eq!(t.weight_for(*role), *expected, "{role:?} weight");
+        }
+    }
+
+    #[test]
+    fn typography_line_heights_match_type_role() {
+        // BORU-UI-16: per-role line-height defaults equal TypeRole's
+        // defaults (display 1.2, chat message 1.45, everything else 1.3).
+        let t = TypographyTokens::default();
+        for role in TypeRole::ALL {
+            assert_eq!(
+                t.line_height_for(role),
+                role.default_line_height(),
+                "{role:?} line height"
+            );
+        }
+    }
+
+    #[test]
+    fn type_font_resolves_from_theme_family_and_weight() {
+        // BORU-UI-16: `BoruTheme::type_font` builds the bundled font for
+        // the role's family-group choice + weight mapping.
+        let theme = BoruTheme::default();
+        assert_eq!(
+            theme.type_font(TypeRole::ChatMessage),
+            crate::fonts::figtree(iced::font::Weight::Normal)
+        );
+        assert_eq!(
+            theme.type_font(TypeRole::DisplayHeading),
+            crate::fonts::inter_tight(iced::font::Weight::Bold)
+        );
+        assert_eq!(
+            theme.type_font(TypeRole::TechnicalValue),
+            crate::fonts::jetbrains_mono(iced::font::Weight::Normal)
+        );
+        // A remapped family+weight changes the resolved font.
+        let mut remapped = theme;
+        remapped.typography.chat_family = crate::fonts::FontFamilyKey::PublicSans;
+        remapped.typography.chat_message_weight = crate::fonts::FontWeightKey::Semibold;
+        assert_eq!(
+            remapped.type_font(TypeRole::ChatMessage),
+            crate::fonts::public_sans(iced::font::Weight::Semibold)
+        );
     }
 
     #[test]

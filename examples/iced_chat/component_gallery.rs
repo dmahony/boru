@@ -123,8 +123,13 @@ fn effective_preview_width(state: &GalleryState, window_width: f32) -> f32 {
 
 /// Build the complete component gallery view with responsive preview
 /// controls (PDF Task 15). `window_width` bounds the simulated width so
-/// wide presets degrade gracefully on small windows.
-pub fn view_gallery(state: &GalleryState, window_width: f32) -> Element<'static, AppMessage> {
+/// wide presets degrade gracefully on small windows. `btheme` is the live
+/// merged theme so typography samples reflect inspector edits (BORU-UI-16).
+pub fn view_gallery(
+    state: &GalleryState,
+    window_width: f32,
+    btheme: &crate::theme::BoruTheme,
+) -> Element<'static, AppMessage> {
     let preview_width = effective_preview_width(state, window_width);
 
     // Full-width control bar, then the whole gallery re-laid out inside a
@@ -134,7 +139,7 @@ pub fn view_gallery(state: &GalleryState, window_width: f32) -> Element<'static,
         .push(responsive_preview_controls(state, preview_width))
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_16)))
         .push(
-            container(gallery_sections())
+            container(gallery_sections(btheme))
                 .padding(design_tokens::SPACE_24)
                 .width(Length::Fixed(preview_width))
                 .style(design_tokens::card_style),
@@ -215,7 +220,9 @@ fn responsive_preview_controls(
 }
 
 /// The static gallery sections (buttons, cards, bubbles, attachments, …).
-fn gallery_sections() -> Element<'static, AppMessage> {
+/// `btheme` is the live merged theme so the typography section reflects
+/// inspector edits (BORU-UI-16).
+fn gallery_sections(btheme: &crate::theme::BoruTheme) -> Element<'static, AppMessage> {
     Column::new()
         .push(gallery_heading("Component Gallery"))
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_16)))
@@ -306,8 +313,8 @@ fn gallery_sections() -> Element<'static, AppMessage> {
         .push(gallery_section("State Variants (PDF Task 14)"))
         .push(state_variants_gallery())
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
-        .push(gallery_section("Typography (UI-HOME-11)"))
-        .push(typography_gallery())
+        .push(gallery_section("Typography (UI-HOME-11 / BORU-UI-16)"))
+        .push(typography_gallery(btheme))
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_32)))
         .spacing(0)
         .into()
@@ -1836,10 +1843,9 @@ fn form_gallery() -> Element<'static, AppMessage> {
 // ── Typography preview (UI-HOME-11) ───────────────────────────────────
 
 /// Sample copy rendered for every canonical semantic role, plus a
-/// registered-weight demo for each bundled family.
-fn typography_gallery() -> Element<'static, AppMessage> {
-    use crate::fonts::type_role_text;
-
+/// registered-weight demo for each bundled family. `btheme` is the live
+/// merged theme so samples reflect inspector typography edits (BORU-UI-16).
+fn typography_gallery(btheme: &crate::theme::BoruTheme) -> Element<'static, AppMessage> {
     let sample = |role: TypeRole| -> Element<'static, AppMessage> {
         let sample_text: &'static str = match role {
             TypeRole::DisplayHeading => "Good evening, Ada — welcome back",
@@ -1880,13 +1886,13 @@ fn typography_gallery() -> Element<'static, AppMessage> {
         let caption = format!(
             "{}  ·  {}  ·  {}px  ·  {}",
             role.label(),
-            role.family_name(),
-            role.size_px() as u32,
+            btheme.typography.family_for(role).name(),
+            btheme.typography.size_for(role) as u32,
             family_weight
         );
         Column::new()
             .push(
-                type_role_text(role, sample_text)
+                crate::fonts::type_role_text_themed(btheme, role, sample_text)
                     .color(design_tokens::text_primary(&Theme::Light)),
             )
             .push(
@@ -2558,8 +2564,9 @@ mod tests {
     /// the fixture builders and production-component wiring.
     #[test]
     fn all_gallery_sections_build() {
-        let _ = view_gallery(&GalleryState::default(), 1280.0);
-        let _ = gallery_sections();
+        let btheme = crate::theme::BoruTheme::default();
+        let _ = view_gallery(&GalleryState::default(), 1280.0, &btheme);
+        let _ = gallery_sections(&btheme);
         let _ = name_variants_gallery();
         let _ = message_bubble_gallery();
         let _ = attachment_states_gallery();

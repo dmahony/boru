@@ -277,6 +277,53 @@ config_group! {
         call_avatar_glyph: f32,
         call_avatar_glyph_large: f32,
         call_pip_label: f32,
+        // ── BORU-UI-16: font family choices per role group ──
+        // Values are family-name strings ("Figtree", "Public Sans",
+        // "Inter Tight", "JetBrains Mono", "Raleway"). Unknown names are
+        // rejected at merge time with a warning and fall back to the
+        // bundled default family.
+        display_family: String,
+        ui_family: String,
+        chat_family: String,
+        technical_family: String,
+        brand_family: String,
+        // ── BORU-UI-16: weight mapping per canonical role ──
+        // Values are weight-name strings ("Normal", "Medium", "Semibold",
+        // "Bold", "ExtraBold"). Unknown names fall back to the role's
+        // TypeRole weight with a warning.
+        display_heading_weight: String,
+        page_title_weight: String,
+        section_title_weight: String,
+        card_title_weight: String,
+        body_weight: String,
+        body_emphasised_weight: String,
+        button_label_weight: String,
+        supporting_text_weight: String,
+        metadata_weight: String,
+        chat_message_weight: String,
+        chat_sender_weight: String,
+        chat_metadata_weight: String,
+        composer_text_weight: String,
+        technical_value_weight: String,
+        brand_wordmark_weight: String,
+        // ── BORU-UI-16: line-height mapping per canonical role ──
+        // Relative multipliers (1.0 = 1× the font size). Clamped to a sane
+        // 0.5..=4.0 band at merge time.
+        display_heading_line_height: f32,
+        page_title_line_height: f32,
+        section_title_line_height: f32,
+        card_title_line_height: f32,
+        body_line_height: f32,
+        body_emphasised_line_height: f32,
+        button_label_line_height: f32,
+        supporting_text_line_height: f32,
+        metadata_line_height: f32,
+        chat_message_line_height: f32,
+        chat_sender_line_height: f32,
+        chat_metadata_line_height: f32,
+        composer_text_line_height: f32,
+        technical_value_line_height: f32,
+        brand_wordmark_line_height: f32,
     }
 }
 
@@ -843,6 +890,13 @@ dialog_backdrop = [0.0, 0.0, 0.0, 0.35]
 [typography]
 body = 15.0
 page_title = 22.0
+chat_message = 15.0
+display_family = "Inter Tight"
+chat_family = "Figtree"
+chat_message_weight = "Normal"
+chat_sender_weight = "Semibold"
+chat_message_line_height = 1.45
+body_line_height = 1.45
 
 [spacing]
 space_8 = 8.0

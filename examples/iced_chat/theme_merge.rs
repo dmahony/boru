@@ -149,6 +149,68 @@ fn clamp_flag(_field: &str, v: bool, _default: bool, _warnings: &mut Vec<String>
     v
 }
 
+/// Line-height multipliers: relative 0.5..=4.0; non-finite or absurd values
+/// fall back to the field default (BORU-UI-16).
+const MIN_LINE_HEIGHT: f32 = 0.5;
+const MAX_LINE_HEIGHT: f32 = 4.0;
+
+fn clamp_line_height(field: &str, v: f32, default: f32, warnings: &mut Vec<String>) -> f32 {
+    if !v.is_finite() {
+        warnings.push(format!("{field}: {v} is not finite; using default {default}"));
+        return default;
+    }
+    if v < MIN_LINE_HEIGHT || v > MAX_LINE_HEIGHT {
+        warnings.push(format!(
+            "{field}: {v} is outside the sane line-height range [{MIN_LINE_HEIGHT}, {MAX_LINE_HEIGHT}]; clamped to {}",
+            v.clamp(MIN_LINE_HEIGHT, MAX_LINE_HEIGHT)
+        ));
+        return v.clamp(MIN_LINE_HEIGHT, MAX_LINE_HEIGHT);
+    }
+    v
+}
+
+/// Resolve a configured family-name string to a bundled `FontFamilyKey`.
+/// Unknown names (a font that is not bundled / unavailable) log a warning
+/// and fall back to the field default — graceful fallback per BORU-UI-16.
+fn clamp_family(
+    field: &str,
+    v: String,
+    default: crate::fonts::FontFamilyKey,
+    warnings: &mut Vec<String>,
+) -> crate::fonts::FontFamilyKey {
+    match crate::fonts::FontFamilyKey::from_name(v.trim()) {
+        Some(key) => key,
+        None => {
+            warnings.push(format!(
+                "{field}: unknown font family {v:?} is not bundled; using default {:?}",
+                default.name()
+            ));
+            default
+        }
+    }
+}
+
+/// Resolve a configured weight-name string to a registered
+/// `FontWeightKey`. Unknown names log a warning and fall back to the field
+/// default (BORU-UI-16).
+fn clamp_weight(
+    field: &str,
+    v: String,
+    default: crate::fonts::FontWeightKey,
+    warnings: &mut Vec<String>,
+) -> crate::fonts::FontWeightKey {
+    match crate::fonts::FontWeightKey::from_name(v.trim()) {
+        Some(key) => key,
+        None => {
+            warnings.push(format!(
+                "{field}: unknown weight {v:?}; using default {}",
+                default.label()
+            ));
+            default
+        }
+    }
+}
+
 /// Convert a config colour to `iced::Color`, clamping channels to 0..=1 and
 /// falling back to the default on NaN.
 fn clamp_color(field: &str, v: ColorValue, default: Color, warnings: &mut Vec<String>) -> Color {
@@ -184,8 +246,8 @@ macro_rules! merge_group {
         fn $fn(base: &$theme, cfg: &$cfg, warnings: &mut Vec<String>) -> $theme {
             $theme {
                 $(
-                    $field: match cfg.$field {
-                        Some(v) => $policy(concat!($prefix, ".", stringify!($field)), v, base.$field, warnings),
+                    $field: match cfg.$field.as_ref() {
+                        Some(v) => $policy(concat!($prefix, ".", stringify!($field)), v.clone(), base.$field, warnings),
                         None => base.$field,
                     },
                 )*
@@ -298,6 +360,41 @@ merge_group! {
         call_avatar_glyph: clamp_size_pos,
         call_avatar_glyph_large: clamp_size_pos,
         call_pip_label: clamp_size_pos,
+        display_family: clamp_family,
+        ui_family: clamp_family,
+        chat_family: clamp_family,
+        technical_family: clamp_family,
+        brand_family: clamp_family,
+        display_heading_weight: clamp_weight,
+        page_title_weight: clamp_weight,
+        section_title_weight: clamp_weight,
+        card_title_weight: clamp_weight,
+        body_weight: clamp_weight,
+        body_emphasised_weight: clamp_weight,
+        button_label_weight: clamp_weight,
+        supporting_text_weight: clamp_weight,
+        metadata_weight: clamp_weight,
+        chat_message_weight: clamp_weight,
+        chat_sender_weight: clamp_weight,
+        chat_metadata_weight: clamp_weight,
+        composer_text_weight: clamp_weight,
+        technical_value_weight: clamp_weight,
+        brand_wordmark_weight: clamp_weight,
+        display_heading_line_height: clamp_line_height,
+        page_title_line_height: clamp_line_height,
+        section_title_line_height: clamp_line_height,
+        card_title_line_height: clamp_line_height,
+        body_line_height: clamp_line_height,
+        body_emphasised_line_height: clamp_line_height,
+        button_label_line_height: clamp_line_height,
+        supporting_text_line_height: clamp_line_height,
+        metadata_line_height: clamp_line_height,
+        chat_message_line_height: clamp_line_height,
+        chat_sender_line_height: clamp_line_height,
+        chat_metadata_line_height: clamp_line_height,
+        composer_text_line_height: clamp_line_height,
+        technical_value_line_height: clamp_line_height,
+        brand_wordmark_line_height: clamp_line_height,
     }
 }
 
@@ -1156,5 +1253,84 @@ width = 123456.0
         assert!(warnings.iter().any(|w| w.contains("spacing.space_16")));
         assert!(warnings.iter().any(|w| w.contains("typography.body")));
         assert!(warnings.iter().any(|w| w.contains("sidebar.width")));
+    }
+
+    #[test]
+    fn unknown_font_family_falls_back_to_default() {
+        // BORU-UI-16: a configured family that is not bundled (unavailable)
+        // logs a warning and falls back to the field default — the UI never
+        // renders with an unresolvable font.
+        let (merged, warnings) = merge_toml(
+            r#"
+[typography]
+display_family = "Comic Sans"
+chat_family = "Papyrus"
+"#,
+        );
+        assert_eq!(merged.typography.display_family, crate::fonts::FontFamilyKey::InterTight);
+        assert_eq!(merged.typography.chat_family, crate::fonts::FontFamilyKey::Figtree);
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings[0].contains("typography.display_family"), "{}", warnings[0]);
+        assert!(warnings[1].contains("typography.chat_family"), "{}", warnings[1]);
+    }
+
+    #[test]
+    fn unknown_weight_falls_back_to_default() {
+        // BORU-UI-16: an unknown weight name logs a warning and falls back
+        // to the role's default weight.
+        let (merged, warnings) = merge_toml(
+            r#"
+[typography]
+chat_sender_weight = "Heavy"
+body_weight = "UltraLight"
+"#,
+        );
+        assert_eq!(merged.typography.chat_sender_weight, crate::fonts::FontWeightKey::Semibold);
+        assert_eq!(merged.typography.body_weight, crate::fonts::FontWeightKey::Normal);
+        assert_eq!(warnings.len(), 2);
+    }
+
+    #[test]
+    fn valid_family_and_weight_are_applied() {
+        // BORU-UI-16: a known family/weight mapping is applied verbatim.
+        let (merged, warnings) = merge_toml(
+            r#"
+[typography]
+chat_family = "Public Sans"
+chat_sender_weight = "Bold"
+"#,
+        );
+        assert_eq!(merged.typography.chat_family, crate::fonts::FontFamilyKey::PublicSans);
+        assert_eq!(merged.typography.chat_sender_weight, crate::fonts::FontWeightKey::Bold);
+        assert!(warnings.is_empty(), "expected no warnings, got {warnings:?}");
+    }
+
+    #[test]
+    fn line_height_out_of_range_clamped_and_nan_falls_back() {
+        // BORU-UI-16: line-height multipliers are clamped to the sane band
+        // (0.5..=4.0); non-finite values fall back to the default.
+        let (merged, warnings) = merge_toml(
+            r#"
+[typography]
+chat_message_line_height = 20.0
+body_line_height = 0.01
+"#,
+        );
+        assert_eq!(merged.typography.chat_message_line_height, 4.0);
+        assert_eq!(merged.typography.body_line_height, 0.5);
+        assert_eq!(warnings.len(), 2);
+
+        let mut cfg = UiThemeConfig::default();
+        cfg.typography = Some(TypographyConfig {
+            chat_message_line_height: Some(f32::NAN),
+            ..Default::default()
+        });
+        let (merged, warnings) = merge_ui_theme(&BoruTheme::default(), &cfg);
+        assert_eq!(
+            merged.typography.chat_message_line_height,
+            BoruTheme::default().typography.chat_message_line_height
+        );
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("typography.chat_message_line_height"), "{}", warnings[0]);
     }
 }

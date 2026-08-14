@@ -1167,11 +1167,14 @@ impl IcedChat {
 
         // ── Greeting (page header) ──
         // UI-HOME-12: display_heading — Archivo SemiCondensed Bold 32 px,
-        // 1.2 line height (via TypeRole::DisplayHeading).
-        let greeting = crate::fonts::type_role_text_lh(
+        // 1.2 line height (via TypeRole::DisplayHeading). BORU-UI-16:
+        // family/weight/line-height come from the live theme so the
+        // inspector can adjust them; the default matches the approved
+        // mapping exactly.
+        let greeting = crate::fonts::type_role_text_themed(
+            &btheme,
             crate::fonts::TypeRole::DisplayHeading,
             format!("Good {}", dep.time_of_day_greeting),
-            1.2,
         )
         .color(crate::design_tokens::text_primary(&theme))
         .width(Length::Fill)

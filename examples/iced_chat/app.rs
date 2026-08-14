@@ -19187,6 +19187,17 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
+            InspectorMsg::SetChoice { field, value } => {
+                // BORU-UI-16: pick_list edit for a font family / weight
+                // mapping. Apply immediately; the merge validates the chosen
+                // name and falls back gracefully if it is unknown.
+                let mut cfg = self.ui_theme_config.clone();
+                match crate::inspector::apply_choice(&mut cfg, field, &value) {
+                    Ok(()) => self.set_ui_theme_config(cfg),
+                    Err(e) => tracing::warn!(error = %e, "inspector: rejected choice edit"),
+                }
+                iced::Task::none()
+            }
             InspectorMsg::SetBool { field, value } => {
                 let mut cfg = self.ui_theme_config.clone();
                 match crate::inspector::apply_bool(&mut cfg, field, value) {
@@ -19535,6 +19546,7 @@ impl IcedChat {
             Screen::Gallery => crate::component_gallery::view_gallery(
                 &self.gallery_state,
                 self.window_width,
+                &self.boru_theme(),
             ),
         };
         // BORU-UI-11: when inspection mode is enabled, tag the sidebar and
@@ -23287,28 +23299,30 @@ mod tests {
     #[test]
     fn chat_timeline_uses_type_role_figtree_roles() {
         // UI-HOME-13: message bubbles, sender names and timestamps must use
-        // the central Figtree roles (TypeRole).
+        // the central Figtree roles (TypeRole). BORU-UI-16: the view resolves
+        // them through the live theme (`btheme.type_font` /
+        // `btheme.type_line_height`), which defaults to the same mapping.
         let src = include_str!("app.rs");
         let chat_src = include_str!("app/chat.rs");
         let timeline = method_source(chat_src, "fn view_chat_log(", "fn view_composer(");
         assert!(
-            timeline.contains("TypeRole::ChatMessage.font()"),
-            "chat message body must use TypeRole::ChatMessage.font()"
+            timeline.contains("TypeRole::ChatMessage"),
+            "chat message body must resolve through the TypeRole::ChatMessage role"
         );
         assert!(
-            timeline.contains("TypeRole::ChatSender.font()"),
-            "chat sender label must use TypeRole::ChatSender.font()"
+            timeline.contains("TypeRole::ChatSender"),
+            "chat sender label must use the TypeRole::ChatSender role"
         );
         assert!(
-            timeline.contains("TypeRole::ChatMetadata.font()"),
-            "chat metadata/timestamp must use TypeRole::ChatMetadata.font()"
+            timeline.contains("TypeRole::ChatMetadata"),
+            "chat metadata/timestamp must use the TypeRole::ChatMetadata role"
         );
         // The message body should carry the plan's ~1.45-1.5 relative line
-        // height (Figtree's natural metrics are close, but the plan asks for
-        // the explicit value so multi-line bubbles stay readable).
+        // height (the theme token defaults to 1.45, matching Figtree's
+        // natural metrics and the pre-theme explicit value).
         assert!(
-            timeline.contains("LineHeight::Relative(1.45)"),
-            "chat message body must use ~1.45 relative line height"
+            timeline.contains("type_line_height"),
+            "chat message body line height must come from the theme"
         );
     }
 
@@ -23316,13 +23330,14 @@ mod tests {
     fn composer_uses_type_role_composer_text_font() {
         // UI-HOME-13: the shared composer input and its placeholder must use
         // TypeRole::ComposerText (Figtree Regular), keeping the user's
-        // configurable text size.
+        // configurable text size. BORU-UI-16: the font resolves through the
+        // live theme, which defaults to the same role mapping.
         let src = include_str!("app.rs");
         let chat_src = include_str!("app/chat.rs");
         let composer = method_source(chat_src, "fn view_composer(", "fn view_help(");
         assert!(
-            composer.contains("TypeRole::ComposerText.font()"),
-            "composer input must use TypeRole::ComposerText.font()"
+            composer.contains("TypeRole::ComposerText"),
+            "composer input must use the TypeRole::ComposerText role"
         );
         assert!(
             composer.contains(".size(self.chat_text_size)"),
@@ -23354,8 +23369,8 @@ mod tests {
         // make sure the chrome-only call sites above did not displace the
         // message body roles.
         assert!(
-            log.contains("TypeRole::ChatMessage.font()"),
-            "chat message body must keep TypeRole::ChatMessage.font() (Figtree)"
+            log.contains("TypeRole::ChatMessage"),
+            "chat message body must keep resolving through TypeRole::ChatMessage (Figtree)"
         );
     }
 
@@ -23439,15 +23454,16 @@ mod tests {
             "status pill must use TypeRole::Metadata"
         );
         assert!(
-            home.contains("type_role_text_lh("),
-            "home screen must use the line-height helper (display 1.2 / body 1.45)"
+            home.contains("type_role_text_themed("),
+            "home screen must use the themed line-height helper (display 1.2 / body 1.45)"
         );
         // The helper itself applies the relative line height (fonts.rs) —
         // the literal lives in the helper, not in the call sites.
         let fonts_src = include_str!("fonts.rs");
         assert!(
-            fonts_src.contains("LineHeight::Relative(line_height)"),
-            "type_role_text_lh must apply a relative line height"
+            fonts_src.contains("LineHeight::Relative(line_height)")
+                || fonts_src.contains("LineHeight::Relative(resolve_theme_line_height"),
+            "type_role_text_lh / themed helper must apply a relative line height"
         );
         assert!(
             !home.contains("inter_tight("),
@@ -23474,25 +23490,28 @@ mod tests {
         let home_src = include_str!("app/home.rs");
         let home = method_source(home_src, "fn view_chat_list_content(", "fn view_chat_panel(");
         // Greeting resolves through DisplayHeading (Archivo SemiCondensed
-        // Bold 32) with the ~1.2 line-height helper.
+        // Bold 32) with the ~1.2 line-height helper. BORU-UI-16: it goes
+        // through the themed helper so the inspector can adjust it.
         assert!(
-            home.contains("type_role_text_lh(\n            crate::fonts::TypeRole::DisplayHeading,")
-                || home.contains("crate::fonts::type_role_text_lh(\n            crate::fonts::TypeRole::DisplayHeading,"),
-            "greeting must use type_role_text_lh with TypeRole::DisplayHeading"
+            home.contains("type_role_text_themed(\n            &btheme,\n            crate::fonts::TypeRole::DisplayHeading,")
+                || home.contains("crate::fonts::type_role_text_themed(\n            &btheme,\n            crate::fonts::TypeRole::DisplayHeading,"),
+            "greeting must use type_role_text_themed with TypeRole::DisplayHeading"
         );
         assert!(
-            home.contains("format!(\"Good {}, {display_name}\", dep.time_of_day_greeting)"),
-            "greeting copy must stay 'Good <time>, <display_name>'"
+            home.contains("format!(\"Good {}\", dep.time_of_day_greeting)"),
+            "greeting copy must stay 'Good <time>' (BORU-HOME-02 simplified greeting)"
         );
         // Subtitle uses the body role at the HOME_SUBTITLE scale token,
-        // muted secondary colour — no hardcoded family.
+        // muted secondary colour — no hardcoded family. (Text was
+        // simplified by BORU-HOME-02; the role/size/colour contract
+        // is unchanged.)
         assert!(
-            home.contains("crate::fonts::type_role_text(\n            crate::fonts::TypeRole::Body,\n            \"Welcome to Boru\",\n        )"),
-            "subtitle must use type_role_text(TypeRole::Body, \"Welcome to Boru\")"
+            home.contains("crate::fonts::type_role_text(\n            crate::fonts::TypeRole::Body,\n            \"Your Boru node is online and ready.\",\n        )"),
+            "subtitle must use type_role_text(TypeRole::Body, home subtitle copy)"
         );
         assert!(
-            home.contains(".size(crate::fonts::HOME_SUBTITLE)"),
-            "subtitle must use the HOME_SUBTITLE scale constant (16 px)"
+            home.contains(".size(btheme.typography.home_subtitle)"),
+            "subtitle must use the HOME_SUBTITLE theme token (16 px)"
         );
         assert!(
             home.contains(".color(text_secondary(&theme))"),
@@ -24325,9 +24344,13 @@ mod tests {
             "online-peer names must NOT use JetBrains Mono"
         );
         let chat_log = method_source(chat_src, "fn view_chat_log(", "fn view_composer(");
+        // BORU-UI-16: chat sender labels resolve through the live theme
+        // (`btheme.type_font(TypeRole::ChatSender)`), which defaults to the
+        // same Figtree SemiBold mapping — never JetBrains Mono.
         assert!(
-            chat_log.contains("TypeRole::ChatSender.font()"),
-            "chat sender labels must use TypeRole::ChatSender (Figtree)"
+            chat_log.contains("type_font(crate::fonts::TypeRole::ChatSender)")
+                || chat_log.contains("TypeRole::ChatSender.font()"),
+            "chat sender labels must resolve through TypeRole::ChatSender (Figtree)"
         );
         assert!(
             !chat_log.contains("TypeRole::TechnicalValue"),

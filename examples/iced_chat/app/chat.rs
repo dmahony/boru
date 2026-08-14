@@ -3151,8 +3151,8 @@ impl IcedChat {
                                 .push(status_icon)
                                 .push(
                                     text(label_text)
-                                        .size(crate::fonts::TypeRole::ChatSender.size_px())
-                                        .font(crate::fonts::TypeRole::ChatSender.font())
+                                        .size(btheme.type_size(crate::fonts::TypeRole::ChatSender))
+                                        .font(btheme.type_font(crate::fonts::TypeRole::ChatSender))
                                         .color(label_color),
                                 )
                                 .spacing(SPACE_4)
@@ -3164,8 +3164,8 @@ impl IcedChat {
                         .into()
                     } else {
                         text(label_text)
-                            .size(crate::fonts::TypeRole::ChatSender.size_px())
-                            .font(crate::fonts::TypeRole::ChatSender.font())
+                            .size(btheme.type_size(crate::fonts::TypeRole::ChatSender))
+                            .font(btheme.type_font(crate::fonts::TypeRole::ChatSender))
                             .color(label_color)
                             .into()
                     }
@@ -3177,8 +3177,8 @@ impl IcedChat {
                         let event_id = entry.event_id;
                         button(
                             text(label_text)
-                                .size(crate::fonts::TypeRole::ChatSender.size_px())
-                                .font(crate::fonts::TypeRole::ChatSender.font())
+                                .size(btheme.type_size(crate::fonts::TypeRole::ChatSender))
+                                .font(btheme.type_font(crate::fonts::TypeRole::ChatSender))
                                 .color(label_color),
                         )
                         .on_press(AppMessage::RetryOutgoingMessage(event_id))
@@ -3187,8 +3187,8 @@ impl IcedChat {
                         .into()
                     } else {
                         text(label_text)
-                            .size(crate::fonts::TypeRole::ChatSender.size_px())
-                            .font(crate::fonts::TypeRole::ChatSender.font())
+                            .size(btheme.type_size(crate::fonts::TypeRole::ChatSender))
+                            .font(btheme.type_font(crate::fonts::TypeRole::ChatSender))
                             .color(label_color)
                             .into()
                     }
@@ -3205,8 +3205,10 @@ impl IcedChat {
                 // single words) so the bubble never overflows its width cap.
                 text(&entry.body)
                     .size(self.chat_text_size)
-                    .font(crate::fonts::TypeRole::ChatMessage.font())
-                    .line_height(iced::widget::text::LineHeight::Relative(1.45))
+                    .font(btheme.type_font(crate::fonts::TypeRole::ChatMessage))
+                    .line_height(iced::widget::text::LineHeight::Relative(
+                        btheme.type_line_height(crate::fonts::TypeRole::ChatMessage),
+                    ))
                     .wrapping(Wrapping::WordOrGlyph)
                     .color(body_color)
                     .into()
@@ -3219,8 +3221,10 @@ impl IcedChat {
                             row = row.push(
                                 text(t)
                                     .size(self.chat_text_size)
-                                    .font(crate::fonts::TypeRole::ChatMessage.font())
-                                    .line_height(iced::widget::text::LineHeight::Relative(1.45))
+                                    .font(btheme.type_font(crate::fonts::TypeRole::ChatMessage))
+                                    .line_height(iced::widget::text::LineHeight::Relative(
+                                        btheme.type_line_height(crate::fonts::TypeRole::ChatMessage),
+                                    ))
                                     .wrapping(Wrapping::WordOrGlyph)
                                     .color(body_color),
                             );
@@ -3232,8 +3236,10 @@ impl IcedChat {
                                 button(
                                     text(display)
                                         .size(self.chat_text_size)
-                                        .font(crate::fonts::TypeRole::ChatMessage.font())
-                                        .line_height(iced::widget::text::LineHeight::Relative(1.45))
+                                        .font(btheme.type_font(crate::fonts::TypeRole::ChatMessage))
+                                        .line_height(iced::widget::text::LineHeight::Relative(
+                                            btheme.type_line_height(crate::fonts::TypeRole::ChatMessage),
+                                        ))
                                         .wrapping(Wrapping::WordOrGlyph)
                                         .color(accent_primary(&theme)),
                                 )
@@ -3300,8 +3306,8 @@ impl IcedChat {
                 ts_text.to_string()
             };
             let ts_el = text(metadata)
-                .size(crate::fonts::TypeRole::ChatMetadata.size_px())
-                .font(crate::fonts::TypeRole::ChatMetadata.font())
+                .size(btheme.type_size(crate::fonts::TypeRole::ChatMetadata))
+                .font(btheme.type_font(crate::fonts::TypeRole::ChatMetadata))
                 .color(text_muted(&theme));
 
             let mut bubble_col = Column::new()
@@ -3330,7 +3336,7 @@ impl IcedChat {
                     preview_children.push(
                         text(title)
                             .size(btheme.typography.chat_sender)
-                            .font(crate::fonts::TypeRole::ChatMessage.font())
+                            .font(btheme.type_font(crate::fonts::TypeRole::ChatMessage))
                             .wrapping(Wrapping::WordOrGlyph)
                             .color(accent_primary(&theme))
                             .into(),
@@ -3340,7 +3346,7 @@ impl IcedChat {
                     preview_children.push(
                         text(desc)
                             .size(btheme.typography.chat_metadata)
-                            .font(crate::fonts::TypeRole::ChatMessage.font())
+                            .font(btheme.type_font(crate::fonts::TypeRole::ChatMessage))
                             .wrapping(Wrapping::WordOrGlyph)
                             .color(text_muted(&theme))
                             .into(),
@@ -3360,7 +3366,7 @@ impl IcedChat {
                     preview_children.push(
                         text(display_url)
                             .size(btheme.typography.chat_metadata)
-                            .font(crate::fonts::TypeRole::ChatMessage.font())
+                            .font(btheme.type_font(crate::fonts::TypeRole::ChatMessage))
                             .wrapping(Wrapping::WordOrGlyph)
                             .color(text_muted(&theme))
                             .into(),
@@ -3374,7 +3380,7 @@ impl IcedChat {
                                 .push(
                                     text(link_preview::truncate_url(&preview.url, 60))
                                         .size(btheme.typography.chat_metadata)
-                                        .font(crate::fonts::TypeRole::ChatMessage.font())
+                                        .font(btheme.type_font(crate::fonts::TypeRole::ChatMessage))
                                         .color(text_muted(&theme)),
                                 )
                                 .push(Column::with_children(preview_children).spacing(SPACE_2))
@@ -3395,7 +3401,7 @@ impl IcedChat {
                     let s = SP[self.splash_spinner_frame % SP.len()];
                     text(format!("{s} Loading preview…"))
                         .size(btheme.typography.chat_metadata)
-                        .font(crate::fonts::TypeRole::ChatMessage.font())
+                        .font(btheme.type_font(crate::fonts::TypeRole::ChatMessage))
                         .color(text_muted(&theme))
                 });
             }
@@ -3494,7 +3500,7 @@ impl IcedChat {
                                 container(
                                     text(&entry.body)
                                         .size(btheme.typography.chat_metadata)
-                                        .font(crate::fonts::TypeRole::ChatMessage.font())
+                                        .font(btheme.type_font(crate::fonts::TypeRole::ChatMessage))
                                         .color(text_muted(&theme))
                                         .wrapping(Wrapping::WordOrGlyph),
                                 )
@@ -3711,7 +3717,7 @@ impl IcedChat {
                         text(reactions_text)
                             .color(text_muted(&theme))
                             .size(btheme.typography.chat_sender)
-                            .font(crate::fonts::TypeRole::ChatMessage.font())
+                            .font(btheme.type_font(crate::fonts::TypeRole::ChatMessage))
                             .wrapping(Wrapping::WordOrGlyph)
                             .width(Length::Fill),
                     )
@@ -3862,7 +3868,7 @@ impl IcedChat {
             .on_input(AppMessage::InputChanged)
             .on_submit(AppMessage::SendPressed)
             .size(self.chat_text_size)
-            .font(crate::fonts::TypeRole::ComposerText.font())
+            .font(btheme.type_font(crate::fonts::TypeRole::ComposerText))
             .width(Length::Fill)
             .padding(Padding::new(SPACE_8))
             .style(
