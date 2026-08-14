@@ -3995,6 +3995,16 @@ pub struct IcedChat {
     /// BORU-UI-06: generation tracker for reload staleness — results older
     /// than the last accepted generation are dropped in update().
     ui_theme_reload_tracker: crate::theme_watcher::ReloadTracker,
+    /// BORU-LAYOUT-06: receiver for debounced `boru-layout.toml` reload
+    /// messages. Set by main.rs when the layout watcher thread starts; `None`
+    /// in headless launches and tests (the subscription falls back to a
+    /// closed dummy receiver).
+    pub(crate) layout_rx:
+        Option<Arc<Mutex<tokio::sync::mpsc::Receiver<crate::layout_watcher::LayoutReloadMsg>>>>,
+    /// BORU-LAYOUT-06: generation tracker for layout reload staleness —
+    /// results older than the last accepted generation are dropped in
+    /// update().
+    layout_reload_tracker: crate::theme_watcher::ReloadTracker,
     /// BORU-UI-09: whether the dev UI Inspector panel is visible (Ctrl+Shift+D).
     /// Compiled only with the `dev-ui` cargo feature (release builds exclude
     /// the panel entirely).
@@ -6102,6 +6112,16 @@ pub enum AppMessage {
     UiThemeReloaded {
         generation: u64,
         result: Result<crate::theme_config::UiThemeConfig, crate::theme_config::ThemeReloadError>,
+    },
+    /// A debounced `boru-layout.toml` reload finished on the watcher thread
+    /// (BORU-LAYOUT-06). `generation` increases per reload; results older
+    /// than the last accepted generation are dropped in update(). The
+    /// parsed overrides are delivered here so the merge layer can apply
+    /// them to the live layout (keeping the last known-good layout on
+    /// parse errors).
+    LayoutReloaded {
+        generation: u64,
+        result: Result<crate::layout::LayoutOverrides, crate::layout_config::LayoutReloadError>,
     },
     /// BORU-UI-09: a dev UI Inspector panel message (Ctrl+Shift+D toggles
     /// the panel; sliders/inputs/toggles/colour fields emit edits). Compiled
@@ -8373,6 +8393,12 @@ impl IcedChat {
             // (and in tests/headless) the subscription uses a closed dummy.
             ui_theme_rx: None,
             ui_theme_reload_tracker: crate::theme_watcher::ReloadTracker::new(),
+            // BORU-LAYOUT-06: watcher receiver + staleness tracker. main.rs
+            // sets `layout_rx` when the dev layout watcher starts; `None` in
+            // headless launches and tests (the subscription falls back to a
+            // closed dummy receiver, so no reload can ever reach the loop).
+            layout_rx: None,
+            layout_reload_tracker: crate::theme_watcher::ReloadTracker::new(),
             // BORU-UI-09: inspector hidden by default; drafts empty until the
             // user edits a field.
             #[cfg(feature = "dev-ui")]
@@ -10250,6 +10276,7 @@ impl IcedChat {
 
             AppMessage::ToggleDark(_) => "ToggleDark",
             AppMessage::UiThemeReloaded { .. } => "UiThemeReloaded",
+            AppMessage::LayoutReloaded { .. } => "LayoutReloaded",
             #[cfg(feature = "dev-ui")]
             AppMessage::Inspector(_) => "Inspector",
             AppMessage::ToggleAccentColorPicker => "ToggleAccentColorPicker",
@@ -16796,6 +16823,10 @@ impl IcedChat {
             AppMessage::UiThemeReloaded { generation, result } => {
                 self.update_ui_theme_reloaded(generation, result)
             }
+            // ── Dev layout watcher (BORU-LAYOUT-06) ────────────────────
+            AppMessage::LayoutReloaded { generation, result } => {
+                self.update_layout_reloaded(generation, result)
+            }
             // ── Dev UI Inspector (BORU-UI-09) ───────────────────────
             #[cfg(feature = "dev-ui")]
             AppMessage::Inspector(msg) => self.update_inspector(msg),
@@ -18963,6 +18994,11 @@ impl IcedChat {
     pub(crate) fn set_layout_config(&mut self, config: crate::layout::LayoutConfig) {
         self.active_layout = config;
         self.layout_revision = self.layout_revision.wrapping_add(1);
+        // BORU-LAYOUT-06: layout changes also invalidate pre-warmed trees
+        // (the prewarm dependency snapshots do not embed layout_revision).
+        // Coalesced exactly like the theme path: the pending flag is
+        // consumed on the next idle tick, so one burst = one invalidation.
+        self.prewarm_invalidate_pending = true;
     }
 
     /// BORU-UI-09: build the dev UI Inspector panel element. Reads the live
@@ -19140,6 +19176,64 @@ impl IcedChat {
                     self.inspector_draft.reload_status =
                         crate::inspector::ThemeReloadStatus::Failed(e.message);
                 }
+            }
+        }
+        iced::Task::none()
+    }
+
+    /// Handle a debounced `boru-layout.toml` reload (BORU-LAYOUT-06).
+    ///
+    /// The layout watcher thread parsed the file away from the rendering
+    /// loop. Generation-based staleness filtering mirrors the theme watcher:
+    /// only the newest reload wins, older generations are dropped. A valid
+    /// parse is merged onto [`crate::layout::LayoutConfig::default()`] and
+    /// applied via `set_layout_config` (which bumps `layout_revision` so
+    /// lazy/prewarm caches rebuild). A parse/IO error keeps the last
+    /// known-good layout and is logged with the file path + line/column —
+    /// only validated layouts are ever applied.
+    fn update_layout_reloaded(
+        &mut self,
+        generation: u64,
+        result: Result<crate::layout::LayoutOverrides, crate::layout_config::LayoutReloadError>,
+    ) -> iced::Task<AppMessage> {
+        if !self.layout_reload_tracker.should_apply(generation) {
+            tracing::debug!(
+                generation,
+                "boru-layout.toml reload dropped (stale generation)"
+            );
+            return iced::Task::none();
+        }
+        self.layout_reload_tracker.mark_applied(generation);
+
+        match result {
+            Ok(overrides) => {
+                tracing::info!(
+                    generation,
+                    "boru-layout.toml reloaded; merging + applying live layout"
+                );
+                let (merged, warnings) = crate::layout_merge::merge_layout_config(
+                    &crate::layout::LayoutConfig::default(),
+                    &overrides,
+                );
+                for w in &warnings {
+                    tracing::warn!(override = %w, "boru-layout.toml layout override adjusted");
+                }
+                // BORU-LAYOUT-06: replacing the layout bumps `layout_revision`
+                // AND marks the prewarm cache stale, so the next idle tick
+                // invalidates pre-warmed trees and rebuilds with the new
+                // layout.
+                self.set_layout_config(merged);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    generation,
+                    path = %e.path.display(),
+                    kind = ?e.kind,
+                    line = ?e.line,
+                    column = ?e.column,
+                    error = %e.message,
+                    "boru-layout.toml reload failed; keeping last known-good layout"
+                );
             }
         }
         iced::Task::none()
@@ -20075,11 +20169,53 @@ impl std::hash::Hash for TransferProjectionHandle {
 /// Wrapper for the dev theme reload channel (BORU-UI-06). Used as the
 /// iced subscription identity so the stream restarts on re-subscribe.
 struct UiThemeRxHandle(Arc<Mutex<tokio::sync::mpsc::Receiver<crate::theme_watcher::UiThemeReloadMsg>>>);
-
 impl std::hash::Hash for UiThemeRxHandle {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         (Arc::as_ptr(&self.0) as usize).hash(state);
     }
+}
+
+/// Wrapper for the dev layout reload channel (BORU-LAYOUT-06). Used as the
+/// iced subscription identity so the stream restarts on re-subscribe.
+struct LayoutRxHandle(
+    Arc<Mutex<tokio::sync::mpsc::Receiver<crate::layout_watcher::LayoutReloadMsg>>>,
+);
+impl std::hash::Hash for LayoutRxHandle {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::sync::Arc::as_ptr(&self.0).hash(state);
+    }
+}
+
+/// Dev layout reload subscription (BORU-LAYOUT-06): a standalone stream that
+/// forwards `LayoutReloadMsg`s from the watcher thread into the update loop
+/// as `AppMessage::LayoutReloaded`. Mirrors the theme reload delivery; kept
+/// as its own subscription so the app-lifetime combined stream select does
+/// not need to grow.
+fn layout_subscription(
+    layout_rx: Option<Arc<Mutex<tokio::sync::mpsc::Receiver<crate::layout_watcher::LayoutReloadMsg>>>>,
+) -> iced::Subscription<AppMessage> {
+    // When the layout watcher is not running (dev-ui gate off, headless
+    // launch, tests), the fallback receiver is intentionally closed. Its
+    // one-shot stream ends immediately and stays ended because the recipe
+    // hash does not change — no reload message can ever reach the loop.
+    let layout_rx = layout_rx.unwrap_or_else(|| {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        drop(tx);
+        Arc::new(tokio::sync::Mutex::new(rx))
+    });
+    iced::Subscription::run_with(LayoutRxHandle(layout_rx), |handle| {
+        let layout_rx = Arc::clone(&handle.0);
+        Box::pin(n0_future::stream::unfold(layout_rx, |layout_rx| async move {
+            let msg = layout_rx.lock().await.recv().await?;
+            Some((
+                AppMessage::LayoutReloaded {
+                    generation: msg.generation,
+                    result: msg.result,
+                },
+                layout_rx,
+            ))
+        }))
+    })
 }
 
 /// Convert one channel item into an Iced message without performing any
@@ -20737,6 +20873,7 @@ impl IcedChat {
         gui_action_rx: Option<Arc<Mutex<tokio::sync::mpsc::Receiver<GuiActionRequest>>>>,
         transfer_rx: Arc<Mutex<TransferUpdateReceiver>>,
         ui_theme_rx: Option<Arc<Mutex<tokio::sync::mpsc::Receiver<crate::theme_watcher::UiThemeReloadMsg>>>>,
+        layout_rx: Option<Arc<Mutex<tokio::sync::mpsc::Receiver<crate::layout_watcher::LayoutReloadMsg>>>>,
         call_events_rx: Arc<Mutex<Receiver<CallEvent>>>,
         #[cfg(feature = "screen-sharing")]
         screen_share_events_rx: Option<Arc<Mutex<Receiver<SessionEvent>>>>,
@@ -20843,6 +20980,9 @@ impl IcedChat {
             },
         ));
         subs.push(call_subscription(call_events_rx));
+        // BORU-LAYOUT-06: dev layout reload channel. Mirrors the theme
+        // reload delivery; update_layout_reloaded merges + applies.
+        subs.push(layout_subscription(layout_rx));
         #[cfg(feature = "screen-sharing")]
         subs.push(screen_share_events_subscription(screen_share_events_rx));
         #[cfg(feature = "screen-sharing")]
@@ -36266,6 +36406,170 @@ fn ui_theme_reload_stale_generation_is_dropped() {
         revision_before.wrapping_add(1),
         "only the accepted reload bumps the revision"
     );
+}
+
+// ── BORU-LAYOUT-06: live layout reload (t_ba9342b7) ────────────────────
+//
+// The watcher (BORU-LAYOUT-06) delivers AppMessage::LayoutReloaded into the
+// update loop. update_layout_reloaded must replace ONLY layout state:
+// networking, gossip, rooms, tunnels, media, chat history, the selected
+// conversation, scroll position and composer input must all stay untouched.
+// A malformed/error reload keeps the last known-good layout (only validated
+// layouts are applied).
+
+#[test]
+fn layout_reload_replaces_only_layout_state() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    // Seed a selected conversation + composer + scroll state to prove the
+    // reload handler does not touch them.
+    let topic = TopicId::from_bytes([7; 32]);
+    app.topic = topic;
+    app.screen = Screen::Chat { topic };
+    app.composer_text = "unsent draft".to_string();
+    let mut conv = ConversationLive::new(topic);
+    conv.composer_text = "unsent draft".to_string();
+    conv.follow_latest = false;
+    conv.scroll_offset = 123.0;
+    app.conversations.insert(topic, conv);
+
+    let revision_before = app.layout_revision;
+    let layout_before = app.active_layout.clone();
+    assert_eq!(
+        layout_before.home.max_content_width,
+        crate::design_tokens::DASHBOARD_MAX_WIDTH,
+        "baseline: default layout reproduces the current max width"
+    );
+
+    // A valid reload with a home max-content-width override.
+    let overrides = crate::layout_config::parse_layout_config(
+        "[home]\nmax_content_width = 1200.0\n",
+    )
+    .expect("test config parses");
+    let task = app.update_layout_reloaded(1, Ok(overrides));
+    drop(task);
+
+    assert_eq!(
+        app.active_layout.home.max_content_width, 1200.0,
+        "valid reload replaces the active layout"
+    );
+    assert_ne!(app.active_layout, layout_before, "layout value changed");
+    assert_eq!(
+        app.layout_revision,
+        revision_before.wrapping_add(1),
+        "layout revision bumps so lazy/prewarm caches rebuild"
+    );
+
+    // Networking / conversation / composer / scroll state untouched.
+    assert_eq!(app.topic, topic, "selected conversation unchanged");
+    assert_eq!(app.screen, Screen::Chat { topic }, "screen unchanged");
+    assert_eq!(app.composer_text, "unsent draft", "composer unchanged");
+    let conv = app.conversations.get(&topic).expect("conversation kept");
+    assert_eq!(conv.composer_text, "unsent draft", "conv composer unchanged");
+    assert_eq!(conv.scroll_offset, 123.0, "scroll offset unchanged");
+    assert!(!conv.follow_latest, "follow_latest unchanged");
+    assert_eq!(app.conversations.len(), 1, "no conversations added/removed");
+}
+
+#[test]
+fn layout_reload_error_keeps_last_known_good_layout() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    app.composer_text = "draft survives".to_string();
+    let topic = TopicId::from_bytes([9; 32]);
+    app.topic = topic;
+    app.screen = Screen::Chat { topic };
+    let mut conv = ConversationLive::new(topic);
+    conv.scroll_offset = 42.0;
+    app.conversations.insert(topic, conv);
+
+    // First a valid reload lands a new max content width…
+    let overrides = crate::layout_config::parse_layout_config(
+        "[home]\nmax_content_width = 1200.0\n",
+    )
+    .expect("test config parses");
+    let task = app.update_layout_reloaded(1, Ok(overrides));
+    drop(task);
+    assert_eq!(app.active_layout.home.max_content_width, 1200.0);
+    let revision_after_ok = app.layout_revision;
+
+    // …then an error reload must NOT replace it.
+    let bad = crate::layout_config::LayoutReloadError {
+        path: std::path::PathBuf::from("boru-layout.toml"),
+        kind: crate::layout_config::LayoutReloadErrorKind::Parse,
+        message: "invalid dev layout override boru-layout.toml: TOML parse error at line 1, column 5"
+            .to_string(),
+        line: Some(1),
+        column: Some(5),
+    };
+    let task = app.update_layout_reloaded(2, Err(bad));
+    drop(task);
+
+    assert_eq!(
+        app.active_layout.home.max_content_width, 1200.0,
+        "error reload keeps the last known-good layout"
+    );
+    assert_eq!(
+        app.layout_revision, revision_after_ok,
+        "error reload does not bump the layout revision"
+    );
+    assert_eq!(app.composer_text, "draft survives", "composer untouched");
+    let conv = app.conversations.get(&topic).expect("conversation kept");
+    assert_eq!(conv.scroll_offset, 42.0, "scroll offset untouched");
+}
+
+#[test]
+fn layout_reload_stale_generation_is_dropped() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+    let revision_before = app.layout_revision;
+
+    // Accept generation 5…
+    let overrides = crate::layout_config::parse_layout_config(
+        "[home]\nmax_content_width = 1200.0\n",
+    )
+    .expect("test config parses");
+    let task = app.update_layout_reloaded(5, Ok(overrides));
+    drop(task);
+    assert_eq!(app.active_layout.home.max_content_width, 1200.0);
+
+    // …then a stale (older) generation must be dropped entirely.
+    let stale = crate::layout_config::parse_layout_config(
+        "[home]\nmax_content_width = 1400.0\n",
+    )
+    .expect("test config parses");
+    let task = app.update_layout_reloaded(4, Ok(stale));
+    drop(task);
+
+    assert_eq!(
+        app.active_layout.home.max_content_width, 1200.0,
+        "stale generation does not apply"
+    );
+    assert_eq!(
+        app.layout_revision,
+        revision_before.wrapping_add(1),
+        "only the accepted reload bumps the revision"
+    );
+}
+
+#[test]
+fn layout_reload_clamps_unsafe_values_with_warning() {
+    // BORU-LAYOUT-06: only validated layouts are applied — unsafe values
+    // (negative padding) are clamped by the merge and reported, never
+    // applied verbatim.
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+    let overrides = crate::layout_config::parse_layout_config(
+        "[home.padding]\ntop = -4.0\n",
+    )
+    .expect("test config parses");
+    let task = app.update_layout_reloaded(1, Ok(overrides));
+    drop(task);
+
+    assert_eq!(
+        app.active_layout.home.padding.top, 0.0,
+        "negative padding is clamped to zero, not applied"
+    );
+    // The merge still bumped the revision (a layout was applied).
+    assert_eq!(app.layout_revision, 1);
 }
 
 // ── BORU-UI-09: dev UI Inspector (dev-ui feature only) ────────────────

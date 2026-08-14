@@ -95,7 +95,7 @@ impl Default for LayoutConfig {
 /// Stable identity of a home-dashboard section. Baseline order matches
 /// `app/home.rs` `view_chat_list_content`: left column Hero → MeshHealth →
 /// QuickActions, right rail PeopleActivity → Tunnels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize)]
 pub enum HomeSection {
     /// Large connection status card (`status_card.rs`).
     Hero,
@@ -170,7 +170,7 @@ impl HomeLayout {
 }
 
 /// Grid/list presentation mode for the home dashboard.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
 pub enum HomeLayoutMode {
     /// Two-column dashboard grid (baseline): main column + right rail.
     #[default]
@@ -369,7 +369,7 @@ impl Default for HomeCardSizing {
 /// PUBLIC ROOMS, REQUESTS). The collapsed-state array index in the sidebar
 /// today is: Chats 0, Groups 1, Friends 2, Discover 3, Requests 4,
 /// PublicRooms 5.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize)]
 pub enum SidebarSection {
     Chats,
     Groups,
@@ -634,7 +634,7 @@ impl Default for ComposerLayout {
 
 /// A composer button slot. The text input is implicit and fixed between the
 /// leading and trailing button groups.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize)]
 pub enum ComposerButton {
     /// File attach button.
     Attach,
@@ -770,7 +770,7 @@ impl Default for ComponentLayout {
 }
 
 /// Thumbnail position relative to the card's text content.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Deserialize, serde::Serialize)]
 pub enum ThumbnailPosition {
     /// Thumbnail to the left of the text (baseline media cards).
     #[default]
@@ -786,7 +786,7 @@ pub enum ThumbnailPosition {
 }
 
 /// Horizontal alignment of metadata rows inside a card.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Deserialize, serde::Serialize)]
 pub enum MetadataAlignment {
     /// Aligned to the start (left in LTR; baseline).
     #[default]
@@ -798,7 +798,7 @@ pub enum MetadataAlignment {
 }
 
 /// Placement of action buttons relative to card content.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Deserialize, serde::Serialize)]
 pub enum ButtonPlacement {
     /// Buttons below the content (baseline).
     #[default]
@@ -810,7 +810,7 @@ pub enum ButtonPlacement {
 }
 
 /// Overall card orientation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Deserialize, serde::Serialize)]
 pub enum CardOrientation {
     /// Content flows horizontally — media left, text right (baseline
     /// video/download cards).
@@ -942,7 +942,7 @@ impl Default for SharedTableColumns {
 /// [`ResponsiveLayout`] (`narrow_max_width`, `ultra_wide_min_width`) so
 /// TOML can move them later; `tier_for_width` resolves a window width to
 /// one of these tiers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
 pub enum ViewportTier {
     /// Narrow window (below `narrow_max_width`, default < 360 px).
     Narrow,
@@ -984,7 +984,8 @@ impl<T: Copy> ByTier<T> {
 
 /// Partial-override mirror of [`ByTier`]: every leaf is `Option<T>` so a
 /// partial TOML file can override one tier and keep the others' defaults.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
 pub struct ByTierOverrides<T> {
     /// Override for the [`ViewportTier::Narrow`] leaf.
     pub narrow: Option<T>,
@@ -1145,7 +1146,8 @@ impl Default for ScreenLayout {
 /// Root partial-override file model. Every group optional; a missing group
 /// means "no overrides" and the merge step falls back to
 /// [`LayoutConfig::default`].
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
 pub struct LayoutOverrides {
     /// Home dashboard overrides.
     pub home: Option<HomeOverrides>,
@@ -1173,7 +1175,8 @@ pub struct LayoutOverrides {
 macro_rules! layout_override_group {
     ($(#[$doc:meta])* $name:ident { $($field:ident: $ty:ty),* $(,)? }) => {
         $(#[$doc])*
-        #[derive(Debug, Clone, Default, PartialEq)]
+        #[derive(Debug, Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+        #[serde(default)]
         pub struct $name {
             $(pub $field: Option<$ty>,)*
         }
@@ -1183,7 +1186,8 @@ macro_rules! layout_override_group {
 // ── Home overrides ────────────────────────────────────────────────────
 
 /// Home dashboard partial overrides.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
 pub struct HomeOverrides {
     /// Override the section order.
     pub section_order: Option<Vec<HomeSection>>,
@@ -1273,7 +1277,8 @@ layout_override_group! {
 // ── Sidebar overrides ─────────────────────────────────────────────────
 
 /// Sidebar shell partial overrides.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
 pub struct SidebarOverrides {
     /// Override the target sidebar width.
     pub width: Option<f32>,
@@ -1322,7 +1327,8 @@ layout_override_group! {
 // ── Chat overrides ────────────────────────────────────────────────────
 
 /// Chat screen partial overrides.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
 pub struct ChatOverrides {
     /// Override the bubble max width.
     pub bubble_max_width: Option<f32>,
@@ -1377,7 +1383,8 @@ layout_override_group! {
 }
 
 /// Composer bar partial overrides.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
 pub struct ComposerOverrides {
     /// Override the button order (input stays between leading/trailing).
     pub button_order: Option<Vec<ComposerButton>>,
@@ -1400,7 +1407,8 @@ layout_override_group! {
 // ── Component overrides (PDF Task 5) ──────────────────────────────────
 
 /// Component-placement partial overrides.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
 pub struct ComponentOverrides {
     /// Override thumbnail position.
     pub thumbnail_position: Option<ThumbnailPosition>,
@@ -1444,7 +1452,8 @@ layout_override_group! {
 // ── Tables overrides ──────────────────────────────────────────────────
 
 /// Data-table partial overrides.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
 pub struct TablesOverrides {
     /// File-dashboard table column overrides.
     pub file_table: Option<FileTableOverrides>,
@@ -1508,7 +1517,8 @@ layout_override_group! {
 // ── Future-screen overrides (extension point) ─────────────────────────
 
 /// Per-screen partial overrides registered under [`LayoutOverrides::screens`].
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
 pub struct ScreenOverrides {
     /// Override the ordered section ids.
     pub section_order: Option<Vec<String>>,

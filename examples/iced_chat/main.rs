@@ -28,6 +28,9 @@ mod gui_test_actions;
 mod i18n;
 mod icon_system;
 mod layout;
+mod layout_config;
+mod layout_merge;
+mod layout_watcher;
 mod link_preview;
 mod log_viewer;
 mod mcp_server;
@@ -596,6 +599,36 @@ fn main() -> Result<()> {
         );
         for w in &theme_warnings {
             warn!(override = %w, "boru-ui.toml theme override adjusted");
+        }
+    }
+
+    // BORU-LAYOUT-06: load dev layout overrides (boru-layout.toml) from the
+    // data dir under the SAME dev-ui gate as the theme file. Release builds
+    // without the feature never read it; the app uses `LayoutConfig::default()`
+    // only. A missing file still yields an empty config (defaults); a
+    // malformed file logs a developer error and keeps the default layout —
+    // startup never fails because of the file.
+    let layout_overrides = if dev_ui {
+        match layout_config::load_layout_config(&data_dir) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                warn!(error = %e, "boru-layout.toml layout overrides ignored; using default layout");
+                layout::LayoutOverrides::default()
+            }
+        }
+    } else {
+        debug!("live layout editor disabled (dev-ui gate off); boru-layout.toml not loaded");
+        layout::LayoutOverrides::default()
+    };
+    // BORU-LAYOUT-06: surface validation warnings for unsafe/nonsensical
+    // values (negative padding, zero column counts, absurd widths, …) exactly
+    // once at startup. The merge itself is pure; the warnings are reported
+    // here and on every reload.
+    if dev_ui {
+        let (_, layout_warnings) =
+            layout_merge::merge_layout_config(&layout::LayoutConfig::default(), &layout_overrides);
+        for w in &layout_warnings {
+            warn!(override = %w, "boru-layout.toml layout override adjusted");
         }
     }
 
@@ -1844,6 +1877,19 @@ fn main() -> Result<()> {
             // the empty default, so this is the identity merge — the app
             // uses `BoruTheme` defaults only.
             app.set_ui_theme_config(ui_theme_config);
+            // BORU-LAYOUT-06: route the startup layout through
+            // `set_layout_config` so the LIVE layout (`active_layout`) is the
+            // merged config (default + boru-layout.toml overrides) and the
+            // layout revision is initialized — view functions read
+            // `boru_layout()` from state from the very first frame. When the
+            // dev-ui gate is off, `layout_overrides` is the empty default, so
+            // this is the identity merge — the app uses
+            // `LayoutConfig::default()` only.
+            let (startup_layout, _layout_warnings) = layout_merge::merge_layout_config(
+                &layout::LayoutConfig::default(),
+                &layout_overrides,
+            );
+            app.set_layout_config(startup_layout);
             // BORU-UI-06/08: dev theme file watcher — observes boru-ui.toml,
             // debounces save storms, parses on a background thread and sends
             // AppMessage::UiThemeReloaded into the update loop. Only started
@@ -1859,6 +1905,18 @@ fn main() -> Result<()> {
                     theme_watcher::spawn_ui_theme_watcher(data_dir.clone(), ui_theme_tx)
                 {
                     warn!(error = %e, "boru-ui.toml watcher failed to start; live reload disabled");
+                }
+                // BORU-LAYOUT-06: dev layout file watcher — observes
+                // boru-layout.toml, debounces save storms, parses on a
+                // background thread and sends AppMessage::LayoutReloaded into
+                // the update loop. Same gate as the theme watcher; failure to
+                // start is non-fatal (live layout reload just stays off).
+                let (layout_tx, layout_rx) =
+                    tokio::sync::mpsc::channel::<layout_watcher::LayoutReloadMsg>(8);
+                app.layout_rx = Some(std::sync::Arc::new(tokio::sync::Mutex::new(layout_rx)));
+                if let Err(e) = layout_watcher::spawn_layout_watcher(data_dir.clone(), layout_tx)
+                {
+                    warn!(error = %e, "boru-layout.toml watcher failed to start; live reload disabled");
                 }
             }
             app.directory_store = shared_directory_store;
@@ -2010,6 +2068,7 @@ fn main() -> Result<()> {
                 state.gui_action_rx.clone(),
                 Arc::clone(&state.transfer_update_rx),
                 state.ui_theme_rx.clone(),
+                state.layout_rx.clone(),
                 Arc::clone(&state.call_events_rx),
                 #[cfg(feature = "screen-sharing")]
                 state.screen_share_events_rx.clone(),

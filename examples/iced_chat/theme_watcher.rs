@@ -57,10 +57,19 @@ pub struct UiThemeReloadMsg {
 
 /// Filter: is this notify event relevant to `boru-ui.toml`?
 ///
+/// Delegates to [`is_dev_config_event`] with the theme file path — the
+/// generic filter matches by file name, so the same machinery covers the
+/// layout watcher (`boru-layout.toml`, BORU-LAYOUT-06).
+pub fn is_ui_config_event(event: &Event, ui_config_path: &Path) -> bool {
+    is_dev_config_event(event, ui_config_path)
+}
+
+/// Filter: is this notify event relevant to a dev config file?
+///
 /// Only write / create / rename / remove events matter — access and pure
 /// metadata events are noise. Paths are matched by file name because a
 /// rename event carries both the old and the new path.
-pub fn is_ui_config_event(event: &Event, ui_config_path: &Path) -> bool {
+pub fn is_dev_config_event(event: &Event, config_path: &Path) -> bool {
     let relevant_kind = matches!(
         event.kind,
         EventKind::Create(_)
@@ -71,7 +80,7 @@ pub fn is_ui_config_event(event: &Event, ui_config_path: &Path) -> bool {
     if !relevant_kind {
         return false;
     }
-    let Some(file_name) = ui_config_path.file_name().and_then(|n| n.to_str()) else {
+    let Some(file_name) = config_path.file_name().and_then(|n| n.to_str()) else {
         return false;
     };
     event
@@ -154,8 +163,10 @@ impl ReloadTracker {
     }
 }
 
-/// Monotonic nanosecond timestamp, stable within one process.
-fn now_nanos() -> u64 {
+/// Monotonic nanosecond timestamp, stable within one process. Shared with
+/// the layout watcher (BORU-LAYOUT-06) so both debouncers use the same
+/// clock.
+pub(crate) fn now_nanos() -> u64 {
     use std::sync::OnceLock;
     static START: OnceLock<std::time::Instant> = OnceLock::new();
     let start = START.get_or_init(std::time::Instant::now);
