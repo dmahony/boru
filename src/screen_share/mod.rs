@@ -6,6 +6,7 @@
 
 pub mod adaptation;
 pub mod capture;
+pub mod channels;
 pub mod codec;
 pub mod host;
 pub mod permissions;
@@ -17,10 +18,17 @@ pub mod stats;
 pub mod transport;
 pub mod viewer;
 
+#[cfg(test)]
+mod media_path_bench;
+
 pub use capture::{
     CapturedFrame, CaptureConfig, CaptureSource, CaptureSourceId, CaptureSourceKind,
     DesktopCaptureBackend, DirtyRegion, FrameRect, FrameSink, PixelFormat, ScreenCapture,
     TestPatternCapture,
+};
+pub use channels::{
+    BoundedFrameQueue, ControlChannel, ControlOut, MediaChannel, DEFAULT_CONTROL_QUEUE_CAPACITY,
+    DEFAULT_MEDIA_QUEUE_CAPACITY,
 };
 pub use adaptation::{AdaptiveQuality, QualityDecision};
 pub use codec::{

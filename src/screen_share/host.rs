@@ -12,10 +12,14 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use super::{
+    channels::{
+        ControlChannel, ControlOut, MediaChannel, DEFAULT_CONTROL_QUEUE_CAPACITY,
+        DEFAULT_MEDIA_QUEUE_CAPACITY,
+    },
     codec::{CodecConfig, OpenH264Encoder, VideoEncoder},
     permissions::Capability,
     platform::{capture_dimensions, create_capture_source, CAPTURE_FPS},
-    protocol::{self, ControlMessage, SCREEN_SHARE_PROTOCOL_VERSION},
+    protocol::{self, ControlMessage, ScreenShareMessage, SCREEN_SHARE_PROTOCOL_VERSION},
     remote_input::{self, create_platform_backend, InputEvent, NormalizedPointer},
     session::{ScreenShareSessionId, SessionEvent, SessionManager, SessionState},
     transport::{read_unit, QuicScreenTransport, ReadUnit},
@@ -148,7 +152,26 @@ async fn run_host_session_inner(
             return;
         }
     };
-    if let Err(error) = transport.send_control(&ControlMessage::Hello(hello)).await {
+    // Separate logical channels (PDF Task 3.2): a reliable control channel and
+    // a dedicated bounded media channel. Chat traffic lives on a different
+    // QUIC connection (gossip), so it cannot block screen-share frames; these
+    // channels bound the queues inside the screen-share connection so stale
+    // frames can never accumulate without limit.
+    let control = match ControlChannel::new(transport.clone(), DEFAULT_CONTROL_QUEUE_CAPACITY) {
+        Ok(channel) => channel,
+        Err(error) => {
+            let _ = events.send(SessionEvent::Rejected { session_id, reason: error.to_string() }).await;
+            return;
+        }
+    };
+    let media = match MediaChannel::new(transport.clone(), DEFAULT_MEDIA_QUEUE_CAPACITY) {
+        Ok(channel) => channel,
+        Err(error) => {
+            let _ = events.send(SessionEvent::Rejected { session_id, reason: error.to_string() }).await;
+            return;
+        }
+    };
+    if let Err(error) = control.send(ControlOut::Legacy(ControlMessage::Hello(hello))).await {
         let _ = events.send(SessionEvent::Rejected { session_id, reason: error.to_string() }).await;
         return;
     }
@@ -180,13 +203,13 @@ async fn run_host_session_inner(
             cmd = commands.recv() => match cmd {
                 Some(HostCommand::GrantControl(capabilities)) => {
                     if let Some(message) = manager.grant_control(session_id, capabilities, events) {
-                        let _ = transport.send_control(&message).await;
+                        let _ = control.send(ControlOut::Legacy(message)).await;
                     }
                     false
                 }
                 Some(HostCommand::RevokeControl) => {
                     if let Some(message) = manager.revoke_control(session_id, events) {
-                        let _ = transport.send_control(&message).await;
+                        let _ = control.send(ControlOut::Legacy(message)).await;
                     }
                     false
                 }
@@ -202,7 +225,7 @@ async fn run_host_session_inner(
     }
     tracing::info!(session = ?session_id, "screen-share: host entering streaming");
     if stop.load(Ordering::Relaxed) {
-        let _ = transport.send_control(&ControlMessage::EndSession { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id }).await;
+        let _ = control.send(ControlOut::Legacy(ControlMessage::EndSession { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id })).await;
         return;
     }
     if manager.state(session_id) != Some(SessionState::Streaming) { return; }
@@ -222,10 +245,12 @@ async fn run_host_session_inner(
     tracing::info!(elapsed_ms = backend_started.elapsed().as_millis() as u64, "screen-share: host remote-input backend ready");
     let mut interval = tokio::time::interval(Duration::from_micros(1_000_000 / capture_fps as u64));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut media_drops: u64 = 0;
+    let mut keyframe_requests: u64 = 0;
     loop {
-        if stop.load(Ordering::Relaxed) {
+        if stop.load(Ordering::Relaxed) || media.failed() || control.failed() {
             backend.shutdown().await;
-            let _ = transport.send_control(&ControlMessage::EndSession { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id }).await;
+            let _ = control.send(ControlOut::Legacy(ControlMessage::EndSession { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id })).await;
             return;
         }
         tokio::select! {
@@ -255,11 +280,23 @@ async fn run_host_session_inner(
                             if let Some(response) = response { let _ = write_control_response(&mut send, &response).await; }
                             if manager.state(session_id) == Some(SessionState::Ended) { return; }
                         }
-                        Ok(ReadUnit::ScreenShare(message)) => {
-                            // Versioned lifecycle messages (BORU-SS-08) are not
-                            // consumed by the legacy host loop.
-                            tracing::debug!(?message, "screen-share: host ignored versioned message");
-                        }
+                        Ok(ReadUnit::ScreenShare(message)) => match message {
+                            // Keyframe requests travel on the reliable control
+                            // channel (PDF Task 3.2); force the encoder so the
+                            // next unit is independently decodable.
+                            ScreenShareMessage::KeyframeRequest { session_id: sid, .. } if sid == session_id => {
+                                keyframe_requests += 1;
+                                encoder.force_keyframe();
+                            }
+                            ScreenShareMessage::Error { session_id: sid, message: peer_error, .. } if sid == session_id => {
+                                tracing::warn!(error = %peer_error, "screen-share: host received peer error");
+                            }
+                            other => {
+                                // Other versioned lifecycle messages are not
+                                // consumed by the legacy host loop yet.
+                                tracing::debug!(?other, "screen-share: host ignored versioned message");
+                            }
+                        },
                         Ok(ReadUnit::Media(_, _)) => {}
                         Err(_) => return,
                     },
@@ -269,13 +306,13 @@ async fn run_host_session_inner(
             cmd = commands.recv() => match cmd {
                 Some(HostCommand::GrantControl(capabilities)) => {
                     if let Some(message) = manager.grant_control(session_id, capabilities, events) {
-                        let _ = transport.send_control(&message).await;
+                        let _ = control.send(ControlOut::Legacy(message)).await;
                     }
                 }
                 Some(HostCommand::RevokeControl) => {
                     backend.shutdown().await;
                     if let Some(message) = manager.revoke_control(session_id, events) {
-                        let _ = transport.send_control(&message).await;
+                        let _ = control.send(ControlOut::Legacy(message)).await;
                     }
                 }
                 None => return,
@@ -320,16 +357,23 @@ async fn run_host_session_inner(
                                     }
                                     tracing::info!(sequence = encoded.sequence, paths = ?stats_paths, "screen-share: host streaming path stats");
                                 }
-                                let send_started = std::time::Instant::now();
-                                let sent = transport.send_frame(&encoded).await;
-                                let send_elapsed = send_started.elapsed();
-                                if encoded.sequence == 0 || encoded.sequence % 150 == 0 {
-                                    tracing::info!(sequence = encoded.sequence, bytes = encoded.bytes.len(), elapsed_ms = send_elapsed.as_millis() as u64, "screen-share: host frame sent");
+                                // Hand the encoded frame to the bounded media
+                                // channel. send_frame never blocks the capture
+                                // loop: when the queue is full the oldest stale
+                                // frame is dropped (bounded memory + latest-frame
+                                // strategy) and the drop is counted.
+                                let sequence = encoded.sequence;
+                                let bytes_len = encoded.bytes.len();
+                                let dropped = media.send_frame(encoded).await;
+                                if dropped {
+                                    media_drops += 1;
                                 }
-                                if send_elapsed > Duration::from_secs(2) {
-                                    tracing::warn!(sequence = encoded.sequence, elapsed_ms = send_elapsed.as_millis() as u64, "screen-share: send_frame took abnormally long");
+                                if sequence == 0 || sequence % 150 == 0 {
+                                    tracing::info!(sequence, bytes = bytes_len, media_drops, keyframe_requests, "screen-share: host frame queued on media channel");
                                 }
-                                if sent.is_err() { return; }
+                                if media_drops > 0 && media_drops % 150 == 0 {
+                                    tracing::warn!(media_drops, "screen-share: host dropping stale media frames (queue full)");
+                                }
                             }
                             Err(error) => {
                                 tracing::warn!(error = %error, "screen-share: host encode failed");
