@@ -3736,6 +3736,14 @@ pub struct IcedChat {
     /// Responsive mode the pre-warm cache was built for; pre-warmed trees
     /// are invalidated when the window crosses a breakpoint.
     prewarm_window_mode: Option<ResponsiveMode>,
+    /// BORU-UI-19: theme edits (inspector slider storms, boru-ui.toml
+    /// reloads) set this flag instead of clearing `prewarm_cache` on every
+    /// event. The actual invalidation is coalesced into the next idle tick
+    /// (see `pre_warm_next_screen`), so a slider drag that emits dozens of
+    /// messages per second does not churn the prewarm cache. Correctness is
+    /// unaffected: `serve_prewarmed` already hash-checks `theme_revision`,
+    /// so a stale pre-warmed tree is never served after a theme change.
+    prewarm_invalidate_pending: bool,
 
     // ── Multi-conversation state ──
     /// Per-conversation runtime state. Each direct chat or group room
@@ -8045,6 +8053,7 @@ impl IcedChat {
             prewarming: false,
             idle_timer: IdleTimer::new(),
             prewarm_window_mode: None,
+            prewarm_invalidate_pending: false,
             dark_mode: app_settings.dark_mode,
             sound_enabled: app_settings.sound_enabled,
             share_direct_addresses: app_settings.share_direct_addresses,
@@ -19015,7 +19024,15 @@ impl IcedChat {
         self.ui_theme_config = config;
         self.recompute_active_theme();
         self.theme_revision = self.theme_revision.wrapping_add(1);
-        self.invalidate_prewarm(PREWARM_ORDER);
+        // BORU-UI-19: coalesce prewarm invalidation instead of clearing
+        // the cache on every theme edit. A slider drag emits dozens of
+        // InspectorMsg::SetFloat messages per second; clearing the cache
+        // each time would churn it (and the rebuilds are the expensive
+        // secondary work). The flag is consumed on the next idle tick, so
+        // one burst = one invalidation + rebuild cycle. Correctness is
+        // unaffected: `serve_prewarmed` hash-checks `theme_revision`, so a
+        // stale pre-warmed tree is never served after a theme change.
+        self.prewarm_invalidate_pending = true;
     }
 
     /// Handle a debounced `boru-ui.toml` reload (BORU-UI-06).
@@ -20801,6 +20818,16 @@ impl IcedChat {
         }
         if !self.idle_timer.is_idle() {
             return;
+        }
+        // BORU-UI-19: theme edits (inspector slider storms, boru-ui.toml
+        // reloads) only set the pending flag; the actual invalidation is
+        // coalesced here, once per idle period after the burst settles.
+        // This keeps the expensive prewarm rebuilds off the per-event
+        // slider path while leaving the visual feedback (active_theme +
+        // theme_revision) immediate.
+        if self.prewarm_invalidate_pending {
+            self.prewarm_invalidate_pending = false;
+            self.invalidate_prewarm(PREWARM_ORDER);
         }
         // Responsive mode is not part of the per-screen dependency snapshots
         // (except FileSharing's own band), so pre-warmed trees built for
@@ -26579,6 +26606,106 @@ mod tests {
         assert!(
             app.prewarm_cache.is_empty(),
             "invalidate_prewarm(PREWARM_ORDER) clears every screen"
+        );
+    }
+
+    #[test]
+    fn theme_change_defers_prewarm_invalidation_to_idle_tick() {
+        let _ = tracing_subscriber::fmt::try_init();
+        let (_runtime, mut app) = build_prewarm_test_app();
+        // Force the idle state so the first IdleTick builds immediately.
+        app.idle_timer.last_input =
+            std::time::Instant::now() - std::time::Duration::from_secs(3);
+
+        // Warm one screen so the prewarm cache is non-empty.
+        let _ = app.update(AppMessage::IdleTick);
+        assert_eq!(app.prewarm_cache.len(), 1, "one screen is warmed");
+
+        // BORU-UI-19: a theme change (inspector slider / file reload) must
+        // NOT clear the prewarm cache immediately — it only sets the pending
+        // flag, so a slider storm does not churn the cache per event.
+        let config = crate::theme_config::parse_ui_theme_config(
+            "sidebar = { width = 270.0 }",
+        )
+        .expect("test config parses");
+        app.set_ui_theme_config(config);
+        assert!(
+            app.prewarm_invalidate_pending,
+            "theme edit marks the prewarm invalidation as pending"
+        );
+        assert_eq!(
+            app.prewarm_cache.len(),
+            1,
+            "prewarm cache is NOT cleared on the theme edit itself"
+        );
+
+        // The next idle tick consumes the flag: it invalidates the stale
+        // entries and rebuilds the first PREWARM_ORDER screen.
+        app.idle_timer.last_input =
+            std::time::Instant::now() - std::time::Duration::from_secs(3);
+        let _ = app.update(AppMessage::IdleTick);
+        assert!(
+            !app.prewarm_invalidate_pending,
+            "idle tick consumes the pending invalidation"
+        );
+        assert_eq!(
+            app.prewarm_cache.len(),
+            1,
+            "one screen is warmed again after the coalesced invalidation"
+        );
+        // The rebuilt entry carries the NEW theme revision hash.
+        let (cached_hash, _) = app
+            .prewarm_cache
+            .get(&Screen::FileSharing)
+            .expect("FileSharing is the first warmed screen");
+        assert_eq!(*cached_hash, fxhash_of(&app.file_sharing_dependency()));
+    }
+
+    #[test]
+    fn theme_change_never_serves_stale_prewarmed_tree() {
+        let _ = tracing_subscriber::fmt::try_init();
+        let (_runtime, mut app) = build_prewarm_test_app();
+        app.idle_timer.last_input =
+            std::time::Instant::now() - std::time::Duration::from_secs(3);
+        let _ = app.update(AppMessage::IdleTick);
+        assert_eq!(app.prewarm_cache.len(), 1);
+
+        // Before the theme change, a matching dependency hash serves the
+        // cached tree (NOT the live fallback closure).
+        {
+            let live_marker: iced::Element<'_, AppMessage> =
+                iced::widget::text("LIVE").into();
+            let served = app.serve_prewarmed(Screen::FileSharing, || {
+                iced::widget::text("LIVE").into()
+            });
+            assert_ne!(
+                served.as_widget().tag(),
+                live_marker.as_widget().tag(),
+                "matching hash serves the cached tree, not the live fallback"
+            );
+        }
+
+        // Change the theme WITHOUT going through an idle tick (the pending
+        // flag is set but not yet consumed — the window could navigate now).
+        let config = crate::theme_config::parse_ui_theme_config(
+            "sidebar = { width = 300.0 }",
+        )
+        .expect("test config parses");
+        app.set_ui_theme_config(config);
+        assert!(app.prewarm_invalidate_pending);
+
+        // serve_prewarmed must NOT return the stale (old-theme) tree: the
+        // dependency hash includes theme_revision, so it falls back to the
+        // live closure. The served element is the marker, NOT the cached
+        // pre-warmed FileSharing tree.
+        let live_marker: iced::Element<'_, AppMessage> = iced::widget::text("LIVE").into();
+        let served = app.serve_prewarmed(Screen::FileSharing, || {
+            iced::widget::text("LIVE").into()
+        });
+        assert_eq!(
+            served.as_widget().tag(),
+            live_marker.as_widget().tag(),
+            "stale cached tree is NOT served after a theme change — live fallback used"
         );
     }
 
@@ -35982,6 +36109,52 @@ fn inspector_toggle_and_edit_updates_active_theme_via_messages() {
         app.inspector_draft.float_text.is_empty() && app.inspector_draft.color_text.is_empty(),
         "drafts cleared when the panel closes"
     );
+}
+
+#[cfg(feature = "dev-ui")]
+#[test]
+fn inspector_slider_edit_keeps_visual_feedback_immediate_and_defers_prewarm() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    // Warm a prewarm screen so the cache is non-empty, then verify a slider
+    // storm (BORU-UI-19) keeps the visual feedback immediate while deferring
+    // the expensive prewarm invalidation to the idle tick.
+    app.idle_timer.last_input =
+        std::time::Instant::now() - std::time::Duration::from_secs(3);
+    let _ = app.update(AppMessage::IdleTick);
+    assert_eq!(app.prewarm_cache.len(), 1, "one screen is pre-warmed");
+
+    // Simulate a slider drag: many SetFloat messages in a row.
+    for value in [270.0f32, 271.0, 272.0, 273.0, 274.0] {
+        let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetFloat {
+            field: crate::inspector::ThemeField::SidebarWidth,
+            value,
+        }));
+        drop(task);
+    }
+
+    // Visual feedback is immediate: the active theme reflects the last value
+    // and the revision bumps so the UI redraws on the next frame.
+    assert_eq!(
+        app.active_theme.sidebar.width, 274.0,
+        "slider drag applies the latest value immediately"
+    );
+    assert!(
+        app.prewarm_invalidate_pending,
+        "theme edits mark prewarm invalidation pending"
+    );
+    assert_eq!(
+        app.prewarm_cache.len(),
+        1,
+        "prewarm cache is NOT cleared per slider event (coalesced)"
+    );
+
+    // The next idle tick consumes the pending flag and rebuilds.
+    app.idle_timer.last_input =
+        std::time::Instant::now() - std::time::Duration::from_secs(3);
+    let _ = app.update(AppMessage::IdleTick);
+    assert!(!app.prewarm_invalidate_pending, "idle tick consumed the flag");
+    assert_eq!(app.prewarm_cache.len(), 1, "one screen rebuilt");
 }
 
 #[cfg(feature = "dev-ui")]
