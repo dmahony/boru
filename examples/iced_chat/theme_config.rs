@@ -175,6 +175,7 @@ config_group! {
         canvas: ColorValue,
         sidebar: ColorValue,
         surface: ColorValue,
+        surface_elevated: ColorValue,
         surface_selected: ColorValue,
         surface_hover: ColorValue,
         surface_pressed: ColorValue,
@@ -883,6 +884,7 @@ mod tests {
 canvas = "#F7F9F8"
 sidebar = "#FCFDFC"
 surface = "#FFFFFF"
+surface_elevated = "#FFFFFF"
 primary = [0.094, 0.498, 0.314]
 soft_tint_alpha = 0.08
 dialog_backdrop = [0.0, 0.0, 0.0, 0.35]
@@ -984,6 +986,15 @@ header_height = 52.0
             })
         );
         assert_eq!(colors.soft_tint_alpha, Some(0.08));
+        assert_eq!(
+            colors.surface_elevated,
+            Some(ColorValue {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0
+            })
+        );
         assert_eq!(
             colors.dialog_backdrop,
             Some(ColorValue {

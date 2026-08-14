@@ -61,6 +61,10 @@ pub struct ColorTokens {
     pub sidebar: Color,
     /// Card / dialog / white panel surface. Light #FFFFFF; dark rgb(0.16,0.16,0.24).
     pub surface: Color,
+    /// Elevated surface — dialogs, popovers, dropdowns that float above
+    /// `surface`. Light #FFFFFF; dark rgb(0.16,0.16,0.24) (same as `surface`
+    /// today; the token exists so elevated panels can be tuned independently).
+    pub surface_elevated: Color,
     /// Selected row / selection background. Light #ECEFED; dark rgb(0.16,0.23,0.34).
     pub surface_selected: Color,
     /// Hover background. Light #EFF3F1; dark rgb(0.20,0.20,0.30).
@@ -221,6 +225,7 @@ impl ColorTokens {
                 0xFC as f32 / 255.0,
             ),
             surface: Color::WHITE,
+            surface_elevated: Color::WHITE,
             surface_selected: Color::from_rgb(
                 0xEC as f32 / 255.0,
                 0xEF as f32 / 255.0,
@@ -417,6 +422,7 @@ impl ColorTokens {
             canvas: Color::from_rgb(0.10, 0.10, 0.18),
             sidebar: Color::from_rgb(0.16, 0.16, 0.24),
             surface: Color::from_rgb(0.16, 0.16, 0.24),
+            surface_elevated: Color::from_rgb(0.16, 0.16, 0.24),
             surface_selected: Color::from_rgb(0.16, 0.23, 0.34),
             surface_hover: Color::from_rgb(0.20, 0.20, 0.30),
             surface_pressed: Color::from_rgb(0.18, 0.18, 0.26),
@@ -565,6 +571,49 @@ impl ColorTokens {
             self.warning.b,
             self.soft_tint_alpha,
         )
+    }
+}
+
+// ── Canonical semantic tokens (PDF T17) ──────────────────────────────
+//
+// The PDF colour system names the core tokens `background`, `surface`,
+// `surface_elevated`, `surface_hover`, `text_primary`, `text_secondary`,
+// `border`, `accent`, `accent_hover`, `success`, `warning`, `danger`.
+// Most already exist as fields with the canonical name (`surface`,
+// `surface_elevated`, `surface_hover`, `text_primary`, `text_secondary`,
+// `success`, `warning`, `danger`). The four accessors below map the PDF
+// names onto the older field names so every canonical token is reachable
+// by its semantic name and components never invent raw literals:
+//
+// | PDF token       | backing field  |
+// |-----------------|----------------|
+// | `background`    | `canvas`       |
+// | `border`        | `border_muted` |
+// | `accent`        | `primary`      |
+// | `accent_hover`  | `primary_hover`|
+impl ColorTokens {
+    /// Canonical semantic token: application background (PDF T17).
+    /// Backed by `canvas`.
+    pub fn background(&self) -> Color {
+        self.canvas
+    }
+
+    /// Canonical semantic token: default border colour (PDF T17).
+    /// Backed by `border_muted`.
+    pub fn border(&self) -> Color {
+        self.border_muted
+    }
+
+    /// Canonical semantic token: primary accent colour (PDF T17).
+    /// Backed by `primary`.
+    pub fn accent(&self) -> Color {
+        self.primary
+    }
+
+    /// Canonical semantic token: accent hover state (PDF T17).
+    /// Backed by `primary_hover`.
+    pub fn accent_hover(&self) -> Color {
+        self.primary_hover
     }
 }
 
@@ -1788,6 +1837,7 @@ mod tests {
         assert_eq!(c.canvas, design_tokens::color_canvas(&t));
         assert_eq!(c.sidebar, design_tokens::color_sidebar(&t));
         assert_eq!(c.surface, design_tokens::surface(&t));
+        assert_eq!(c.surface_elevated, design_tokens::surface(&t));
         assert_eq!(c.surface_selected, design_tokens::surface_selected(&t));
         assert_eq!(c.surface_hover, design_tokens::surface_hover(&t));
         assert_eq!(c.surface_pressed, design_tokens::surface_pressed(&t));
@@ -1823,6 +1873,7 @@ mod tests {
         assert_eq!(c.canvas, design_tokens::color_canvas(&t));
         assert_eq!(c.sidebar, design_tokens::color_sidebar(&t));
         assert_eq!(c.surface, design_tokens::surface(&t));
+        assert_eq!(c.surface_elevated, design_tokens::surface(&t));
         assert_eq!(c.surface_selected, design_tokens::surface_selected(&t));
         assert_eq!(c.surface_hover, design_tokens::surface_hover(&t));
         assert_eq!(c.surface_pressed, design_tokens::surface_pressed(&t));
@@ -1849,6 +1900,23 @@ mod tests {
         assert_eq!(c.destructive_soft(), design_tokens::destructive_soft(&t));
         assert_eq!(c.success_soft(), design_tokens::success_soft(&t));
         assert_eq!(c.warning_soft(), design_tokens::warning_soft(&t));
+    }
+
+    #[test]
+    fn semantic_colour_tokens_map_to_backing_fields() {
+        // PDF T17: every canonical semantic colour token must resolve to a
+        // real ColorTokens value (fields or accessors) in both modes.
+        for c in [ColorTokens::light(), ColorTokens::dark()] {
+            // Tokens that exist as fields.
+            let _ = (c.surface, c.surface_elevated, c.surface_hover);
+            let _ = (c.text_primary, c.text_secondary);
+            let _ = (c.success, c.warning, c.danger);
+            // Tokens that exist as accessors over the older field names.
+            assert_eq!(c.background(), c.canvas);
+            assert_eq!(c.border(), c.border_muted);
+            assert_eq!(c.accent(), c.primary);
+            assert_eq!(c.accent_hover(), c.primary_hover);
+        }
     }
 
     #[test]

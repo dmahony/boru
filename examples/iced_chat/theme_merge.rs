@@ -261,6 +261,7 @@ merge_group! {
         canvas: clamp_color,
         sidebar: clamp_color,
         surface: clamp_color,
+        surface_elevated: clamp_color,
         surface_selected: clamp_color,
         surface_hover: clamp_color,
         surface_pressed: clamp_color,
@@ -939,6 +940,7 @@ mod tests {
             r##"
 [colors]
 canvas = "#112233"
+surface_elevated = "#445566"
 primary = [0.1, 0.2, 0.3]
 soft_tint_alpha = 0.25
 
@@ -1014,6 +1016,7 @@ header_height = 56.0
         assert!(warnings.is_empty(), "expected no warnings, got {warnings:?}");
 
         assert_eq!(merged.colors.canvas, Color::from_rgb(0x11 as f32 / 255.0, 0x22 as f32 / 255.0, 0x33 as f32 / 255.0));
+        assert_eq!(merged.colors.surface_elevated, Color::from_rgb(0x44 as f32 / 255.0, 0x55 as f32 / 255.0, 0x66 as f32 / 255.0));
         assert_eq!(merged.colors.primary, Color::from_rgba(0.1, 0.2, 0.3, 1.0));
         assert_eq!(merged.colors.soft_tint_alpha, 0.25);
         assert_eq!(merged.typography.body, 17.0);
@@ -1233,6 +1236,23 @@ width = 400.0
         // Geometry override lands; rest of geometry stays at base.
         assert_eq!(merged.sidebar.width, 400.0);
         assert_eq!(merged.sidebar.width_min, base.sidebar.width_min);
+    }
+
+    #[test]
+    fn merge_preserves_rgba_alpha_for_surfaces_and_borders() {
+        // PDF T17: RGBA/alpha must survive parse→merge for subtle
+        // backgrounds and borders.
+        let (merged, warnings) = merge_toml(
+            r#"
+[colors]
+surface_elevated = [0.9, 0.9, 0.95, 0.55]
+border_muted = [0.0, 0.0, 0.0, 0.12]
+"#,
+        );
+        assert!(warnings.is_empty(), "expected no warnings, got {warnings:?}");
+        let c = merged.colors;
+        assert_eq!(c.surface_elevated, Color::from_rgba(0.9, 0.9, 0.95, 0.55));
+        assert_eq!(c.border_muted, Color::from_rgba(0.0, 0.0, 0.0, 0.12));
     }
 
     #[test]

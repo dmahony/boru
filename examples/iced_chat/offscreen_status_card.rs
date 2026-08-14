@@ -103,7 +103,7 @@ fn render_card(dep: &StatusCardDependency, w: f32, h: f32, name: &str) {
     let rgba = renderer.screenshot(
         Size::new(w as u32, h as u32),
         1.0,
-        iced::Color::from_rgb(0.9686, 0.9765, 0.9725), // light canvas #F7F9F8
+        crate::theme::ColorTokens::light().canvas, // light canvas #F7F9F8
     );
     std::fs::create_dir_all(CAPTURE_DIR).unwrap();
     let path = format!("{CAPTURE_DIR}/{name}.png");

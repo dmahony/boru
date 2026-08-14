@@ -72,6 +72,7 @@ pub enum ThemeField {
     ColorCanvas,
     ColorSidebar,
     ColorSurface,
+    ColorSurfaceElevated,
     ColorSurfaceSelected,
     ColorSurfaceHover,
     ColorSurfacePressed,
@@ -440,6 +441,7 @@ impl ThemeField {
             ColorCanvas => "Canvas",
             ColorSidebar => "Sidebar",
             ColorSurface => "Surface",
+            ColorSurfaceElevated => "Surface (elevated)",
             ColorSurfaceSelected => "Surface (selected)",
             ColorSurfaceHover => "Surface (hover)",
             ColorSurfacePressed => "Surface (pressed)",
@@ -583,6 +585,7 @@ impl ThemeField {
             ColorCanvas
             | ColorSidebar
             | ColorSurface
+            | ColorSurfaceElevated
             | ColorSurfaceSelected
             | ColorSurfaceHover
             | ColorSurfacePressed
@@ -709,6 +712,7 @@ impl ThemeField {
             ColorCanvas
             | ColorSidebar
             | ColorSurface
+            | ColorSurfaceElevated
             | ColorSurfaceSelected
             | ColorSurfaceHover
             | ColorSurfacePressed
@@ -906,7 +910,8 @@ pub fn read_float(theme: &BoruTheme, field: ThemeField) -> f32 {
         MotionSidebarFadeFrames => theme.motion.sidebar_fade_frames as f32,
         // Bool / Colour / Choice fields have no float read; the caller
         // checks `kind()` first.
-        HomeShowActivityFeed | ColorCanvas | ColorSidebar | ColorSurface | ColorSurfaceSelected
+        HomeShowActivityFeed | ColorCanvas | ColorSidebar | ColorSurface | ColorSurfaceElevated
+        | ColorSurfaceSelected
         | ColorSurfaceHover | ColorSurfacePressed | ColorSurfaceSecondary | ColorInputBg
         | ColorBorderMuted | ColorBorderStrong | ColorTextPrimary | ColorTextSecondary
         | ColorTextMuted | ColorPrimary | ColorPrimaryHover | ColorPrimaryPressed | ColorPrimarySoft
@@ -927,6 +932,7 @@ pub fn read_color(theme: &BoruTheme, field: ThemeField) -> Color {
         ColorCanvas => theme.colors.canvas,
         ColorSidebar => theme.colors.sidebar,
         ColorSurface => theme.colors.surface,
+        ColorSurfaceElevated => theme.colors.surface_elevated,
         ColorSurfaceSelected => theme.colors.surface_selected,
         ColorSurfaceHover => theme.colors.surface_hover,
         ColorSurfacePressed => theme.colors.surface_pressed,
@@ -1076,7 +1082,8 @@ pub fn apply_float(config: &mut UiThemeConfig, field: ThemeField, value: f32) ->
             cfg_motion(config).sidebar_fade_frames = Some(frames);
         }
         // Non-float fields rejected above.
-        HomeShowActivityFeed | ColorCanvas | ColorSidebar | ColorSurface | ColorSurfaceSelected
+        HomeShowActivityFeed | ColorCanvas | ColorSidebar | ColorSurface | ColorSurfaceElevated
+        | ColorSurfaceSelected
         | ColorSurfaceHover | ColorSurfacePressed | ColorSurfaceSecondary | ColorInputBg
         | ColorBorderMuted | ColorBorderStrong | ColorTextPrimary | ColorTextSecondary
         | ColorTextMuted | ColorPrimary | ColorPrimaryHover | ColorPrimaryPressed | ColorPrimarySoft
@@ -1117,6 +1124,7 @@ pub fn apply_color(
         ColorCanvas => set(&mut cfg_colors(config).canvas),
         ColorSidebar => set(&mut cfg_colors(config).sidebar),
         ColorSurface => set(&mut cfg_colors(config).surface),
+        ColorSurfaceElevated => set(&mut cfg_colors(config).surface_elevated),
         ColorSurfaceSelected => set(&mut cfg_colors(config).surface_selected),
         ColorSurfaceHover => set(&mut cfg_colors(config).surface_hover),
         ColorSurfacePressed => set(&mut cfg_colors(config).surface_pressed),
@@ -1499,6 +1507,7 @@ pub const SECTIONS: &[InspectorSection] = &[
                     ThemeField::ColorCanvas,
                     ThemeField::ColorSidebar,
                     ThemeField::ColorSurface,
+                    ThemeField::ColorSurfaceElevated,
                     ThemeField::ColorSurfaceSelected,
                     ThemeField::ColorSurfaceHover,
                     ThemeField::ColorSurfacePressed,

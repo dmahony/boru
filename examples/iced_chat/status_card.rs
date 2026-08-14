@@ -28,6 +28,8 @@
 
 use iced::widget::canvas;
 use iced::widget::canvas::{Frame, Path, Stroke};
+
+use crate::theme::ColorTokens;
 use iced::widget::{button, container, Column, Row, Space};
 use iced::{Alignment, Background, Border, Color, Length, Radians, Rectangle};
 
@@ -100,18 +102,12 @@ const STATUS_TEXT_GRAPH_GAP_FULL: f32 = 24.0;
 const STATUS_TEXT_GRAPH_GAP_MEDIUM: f32 = 24.0;
 
 /// Amber accent for connecting / degraded states on the dark panel.
-const STATUS_WARNING: Color = Color::from_rgb(
-    0xE8 as f32 / 255.0,
-    0xA3 as f32 / 255.0,
-    0x3D as f32 / 255.0,
-);
+/// Mirrors the `ColorTokens::status_warning` semantic token.
+const STATUS_WARNING: Color = ColorTokens::light().status_warning;
 
 /// Red accent for the offline state on the dark panel.
-const STATUS_DANGER: Color = Color::from_rgb(
-    0xE5 as f32 / 255.0,
-    0x5B as f32 / 255.0,
-    0x5B as f32 / 255.0,
-);
+/// Mirrors the `ColorTokens::status_danger` semantic token.
+const STATUS_DANGER: Color = ColorTokens::light().status_danger;
 
 /// All inputs the status card needs to render. Built by `app.rs` from the
 /// same live selectors the old hero card consumed — nothing here invents

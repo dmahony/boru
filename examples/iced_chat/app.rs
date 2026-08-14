@@ -1154,7 +1154,7 @@ const BUTTON_GHOST: fn(&iced::Theme, iced::widget::button::Status) -> iced::widg
                     c.b *= 0.85;
                     c
                 }
-                _ => Color::from_rgb(0.5, 0.5, 0.5),
+                _ => crate::theme::BoruTheme::for_theme(theme).colors.glyph_disabled,
             },
             ..Default::default()
         }
@@ -1187,7 +1187,7 @@ pub(crate) const BUTTON_GHOST_BG: fn(
             c
         }
         iced::widget::button::Status::Disabled => text_muted(theme),
-        _ => Color::from_rgb(0.5, 0.5, 0.5),
+        _ => crate::theme::BoruTheme::for_theme(theme).colors.glyph_disabled,
     },
     border: iced::Border {
         radius: SPACE_4.into(),
@@ -1307,7 +1307,7 @@ pub(crate) const BUTTON_OUTLINE: fn(
                 c.b *= 0.85;
                 c
             }
-            _ => Color::from_rgb(0.5, 0.5, 0.5),
+            _ => crate::theme::BoruTheme::for_theme(theme).colors.glyph_disabled,
         },
         border: iced::Border {
             color: border_color,
