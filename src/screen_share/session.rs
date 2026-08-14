@@ -927,6 +927,59 @@ mod tests {
         );
         assert_eq!(manager.state(id), Some(SessionState::Streaming));
     }
+    /// PDF Task 9.1 / T5.3: a share defaults to view-only even after the
+    /// viewer accepts; remote control requires a separate explicit host grant.
+    #[test]
+    fn accept_never_grants_control_without_explicit_grant() {
+        let host = iroh::SecretKey::generate().public();
+        let viewer = iroh::SecretKey::generate().public();
+        let mut manager = SessionManager::default();
+        let id = ScreenShareSessionId::generate();
+        manager.start_invitation(id, host, viewer, 7);
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        manager.apply_remote(viewer, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id }, &tx);
+        assert_eq!(manager.state(id), Some(SessionState::Streaming));
+        let permissions = manager.permissions(id).unwrap();
+        // View-only: the viewer can see the screen but cannot inject input.
+        assert!(permissions.allows(id, viewer, Capability::ViewScreen));
+        assert!(!permissions.allows(id, viewer, Capability::ControlPointer));
+        assert!(!permissions.allows(id, viewer, Capability::ControlKeyboard));
+        assert!(permissions.token().is_none());
+        // Only an explicit host-side grant adds control capabilities.
+        assert!(manager.grant_control(id, vec![Capability::ControlPointer], &tx).is_some());
+        assert!(manager.permissions(id).unwrap().allows(id, viewer, Capability::ControlPointer));
+        assert!(!manager.permissions(id).unwrap().allows(id, viewer, Capability::ControlKeyboard));
+    }
+
+    /// A ControlRequest from the peer is surfaced as an event; it never
+    /// changes permissions by itself (the host UI must grant explicitly).
+    #[test]
+    fn control_request_requires_host_grant() {
+        let host = iroh::SecretKey::generate().public();
+        let viewer = iroh::SecretKey::generate().public();
+        let mut manager = SessionManager::default();
+        let id = ScreenShareSessionId::generate();
+        manager.start_invitation(id, host, viewer, 7);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        manager.apply_remote(viewer, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id }, &tx);
+        // Drain the Accepted emitted by the Accept before the RequestControl.
+        assert!(matches!(rx.try_recv(), Ok(SessionEvent::Accepted { session_id, .. }) if session_id == id));
+        assert!(manager.apply_remote(
+            viewer,
+            ControlMessage::RequestControl {
+                version: SCREEN_SHARE_PROTOCOL_VERSION,
+                session_id: id,
+                capabilities: vec![Capability::ControlPointer, Capability::ControlKeyboard],
+            },
+            &tx,
+        ).is_none());
+        // The event is emitted for the host UI, but permission state is
+        // unchanged — still view-only.
+        assert!(matches!(rx.try_recv(), Ok(SessionEvent::ControlRequest { session_id, .. }) if session_id == id));
+        assert!(!manager.permissions(id).unwrap().allows(id, viewer, Capability::ControlPointer));
+        assert!(!manager.permissions(id).unwrap().allows(id, viewer, Capability::ControlKeyboard));
+    }
+
     /// A stranger's Accept must never transition the session.
     #[test]
     fn remote_accept_from_wrong_peer_is_ignored() {

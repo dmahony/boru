@@ -112,13 +112,54 @@ pub async fn create_platform_backend(capture: (u32, u32)) -> Box<dyn RemoteInput
 pub struct LinuxPortalRemoteInput {
     connection: Option<zbus::Connection>,
     session: Option<zbus::zvariant::OwnedObjectPath>,
+    /// Bitmask of device types the portal user actually granted
+    /// (1 = pointer, 2 = keyboard). Empty when Start was denied or the
+    /// portal granted nothing — `apply` then fails closed so view-only
+    /// sharing keeps working (PDF Task 5.3).
+    granted_devices: u32,
     last: Option<(f64, f64)>,
+}
+
+/// Portal RemoteDesktop device-type bits (org.freedesktop.portal.RemoteDesktop
+/// `types` / `devices` values).
+pub const PORTAL_DEVICE_POINTER: u32 = 1;
+pub const PORTAL_DEVICE_KEYBOARD: u32 = 2;
+
+/// True when a portal `devices` bitmask grants the given capability.
+/// `ViewScreen` (not an input device) is never granted by the portal.
+pub fn device_mask_grants(devices: u32, capability: Capability) -> bool {
+    match capability {
+        Capability::ControlPointer => devices & PORTAL_DEVICE_POINTER != 0,
+        Capability::ControlKeyboard => devices & PORTAL_DEVICE_KEYBOARD != 0,
+        _ => false,
+    }
+}
+
+/// Extract the `devices` bitmask from a RemoteDesktop `Start` response body.
+///
+/// The reply is a dictionary `{ "devices": u32, ... }`. zvariant 5 does not
+/// implement `TryFrom<&Value>` for Vec/HashMap, so walk the Value enum
+/// directly (mirrors `extract_stream_node_id` in platform/linux.rs).
+pub fn parse_devices_mask(body: &zbus::zvariant::Value) -> Option<u32> {
+    use zbus::zvariant::Value;
+    let Value::Dict(dict) = body else { return None };
+    let devices_key = "devices".to_string();
+    let devices = dict.get::<String, Value>(&devices_key).ok()??;
+    match devices {
+        Value::U32(mask) => Some(mask),
+        _ => None,
+    }
 }
 
 #[cfg(target_os = "linux")]
 impl LinuxPortalRemoteInput {
-    /// Create the portal RemoteDesktop session and select pointer + keyboard
-    /// devices. Fails closed (Err) when no portal is reachable.
+    /// Timeout for the interactive `Start` call (the portal shows a device
+    /// consent dialog). Headless/denied environments fail closed.
+    pub const PORTAL_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+    /// Create the portal RemoteDesktop session, select pointer + keyboard
+    /// devices, and await the user's decision. Fails closed (Err) when no
+    /// portal is reachable or the user denies the Start dialog.
     pub async fn connect() -> Result<Self, ScreenShareError> {
         let connection = zbus::Connection::session().await.map_err(|e| ScreenShareError::new(format!("no session bus: {e}")))?;
         let portal = ("org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", "org.freedesktop.portal.RemoteDesktop");
@@ -127,16 +168,56 @@ impl LinuxPortalRemoteInput {
         let options: std::collections::HashMap<&str, zbus::zvariant::Value> = [("session_handle_token", zbus::zvariant::Value::from(token))].into_iter().collect();
         let reply = connection.call_method(Some(portal.0), portal.1, Some(portal.2), "CreateSession", &options).await.map_err(|e| ScreenShareError::new(format!("portal CreateSession failed: {e}")))?;
         let session: zbus::zvariant::OwnedObjectPath = reply.body().deserialize().map_err(|e| ScreenShareError::new(format!("portal session reply malformed: {e}")))?;
-        // SelectDevices(types = Pointer | Keyboard).
-        let types = 1u32 | 2u32;
+        // SelectDevices(types = Pointer | Keyboard) — per the portal spec the
+        // `types` bitmask lives inside the options vardict.
+        let types = PORTAL_DEVICE_POINTER | PORTAL_DEVICE_KEYBOARD;
         let device_options: std::collections::HashMap<&str, zbus::zvariant::Value> = [("types", zbus::zvariant::Value::U32(types))].into_iter().collect();
         let _ = connection.call_method(Some(portal.0), portal.1, Some(portal.2), "SelectDevices", &(session.clone(), device_options)).await.map_err(|e| ScreenShareError::new(format!("portal SelectDevices failed: {e}")))?;
-        // Start() with no parent window; the returned pipewire stream node is
-        // not needed for input injection.
+        // Start() is asynchronous: the reply is a Request object path and the
+        // real result (response code + granted `devices` bitmask) arrives on
+        // the Response signal of that object. Await it so we fail closed when
+        // the user denies remote input — view-only sharing must keep working
+        // (PDF Task 5.3).
         let start_options: std::collections::HashMap<&str, zbus::zvariant::Value> = std::collections::HashMap::new();
-        let _ = connection.call_method(Some(portal.0), portal.1, Some(portal.2), "Start", &(session.clone(), "", start_options)).await.map_err(|e| ScreenShareError::new(format!("portal Start failed: {e}")))?;
-        Ok(Self { connection: Some(connection), session: Some(session), last: None })
+        let request_path: zbus::zvariant::OwnedObjectPath = tokio::time::timeout(
+            Self::PORTAL_START_TIMEOUT,
+            connection.call_method(Some(portal.0), portal.1, Some(portal.2), "Start", &(session.clone(), "", start_options)),
+        )
+        .await
+        .map_err(|_| ScreenShareError::new("portal remote-desktop Start timed out (no response from the consent dialog)"))?
+        .map_err(|e| ScreenShareError::new(format!("portal Start failed: {e}")))?
+        .body()
+        .deserialize()
+        .map_err(|e| ScreenShareError::new(format!("portal Start request malformed: {e}")))?;
+        let request = zbus::Proxy::new(&connection, portal.0, request_path.as_str(), "org.freedesktop.portal.Request")
+            .await
+            .map_err(|e| ScreenShareError::new(format!("portal request proxy failed: {e}")))?;
+        let mut responses = request.receive_signal("Response").await.map_err(|e| ScreenShareError::new(format!("portal response subscription failed: {e}")))?;
+        let response = tokio::time::timeout(Self::PORTAL_START_TIMEOUT, n0_future::StreamExt::next(&mut responses))
+            .await
+            .map_err(|_| ScreenShareError::new("portal remote-desktop Start timed out waiting for the consent response"))?
+            .ok_or_else(|| ScreenShareError::new("portal response stream closed"))?;
+        let (response_code, body): (u32, zbus::zvariant::OwnedValue) = response
+            .body()
+            .deserialize()
+            .map_err(|e| ScreenShareError::new(format!("portal response malformed: {e}")))?;
+        if response_code != 0 {
+            return Err(ScreenShareError::new(format!("portal remote-desktop permission denied (code {response_code})")));
+        }
+        let granted_devices = parse_devices_mask(&body).unwrap_or(0);
+        if granted_devices & (PORTAL_DEVICE_POINTER | PORTAL_DEVICE_KEYBOARD) == 0 {
+            return Err(ScreenShareError::new("portal granted no input devices (remote control denied)"));
+        }
+        tracing::info!(granted_devices, "screen-share: portal remote-desktop session started");
+        Ok(Self { connection: Some(connection), session: Some(session), granted_devices, last: None })
     }
+}
+
+/// Every RemoteDesktop `Notify*` method takes an `options` vardict (`a{sv}`)
+/// between the session handle and the event payload (portal spec). All Boru
+/// events are sent with an empty dict.
+fn empty_options() -> std::collections::HashMap<&'static str, zbus::zvariant::Value<'static>> {
+    std::collections::HashMap::new()
 }
 
 #[cfg(target_os = "linux")]
@@ -144,6 +225,9 @@ impl LinuxPortalRemoteInput {
 impl RemoteInput for LinuxPortalRemoteInput {
     async fn apply(&mut self, event: InputEvent) -> Result<(), ScreenShareError> {
         let (Some(connection), Some(session)) = (&self.connection, &self.session) else { return Err(ScreenShareError::new("portal remote-desktop session is not connected")); };
+        if !device_mask_grants(self.granted_devices, event.capability) {
+            return Err(ScreenShareError::new("device type was not granted by the portal (view-only)"));
+        }
         let portal = ("org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", "org.freedesktop.portal.RemoteDesktop");
         match event.capability {
             Capability::ControlPointer => {
@@ -151,15 +235,16 @@ impl RemoteInput for LinuxPortalRemoteInput {
                 let (dx, dy) = match self.last { Some((lx, ly)) => (px - lx, py - ly), None => (0.0, 0.0) };
                 self.last = Some((px, py));
                 if dx != 0.0 || dy != 0.0 {
-                    let _ = connection.call_method(Some(portal.0), portal.1, Some(portal.2), "NotifyPointerMotion", &(session, dx, dy)).await.map_err(|e| ScreenShareError::new(format!("portal pointer motion failed: {e}")))?;
+                    let _ = connection.call_method(Some(portal.0), portal.1, Some(portal.2), "NotifyPointerMotion", &(session, empty_options(), dx, dy)).await.map_err(|e| ScreenShareError::new(format!("portal pointer motion failed: {e}")))?;
                 }
                 if event.code != 0 {
                     let state = if event.pressed { 1u32 } else { 0u32 };
-                    let _ = connection.call_method(Some(portal.0), portal.1, Some(portal.2), "NotifyPointerButton", &(session, event.code as i32, state)).await.map_err(|e| ScreenShareError::new(format!("portal pointer button failed: {e}")))?;
+                    let _ = connection.call_method(Some(portal.0), portal.1, Some(portal.2), "NotifyPointerButton", &(session, empty_options(), event.code as i32, state)).await.map_err(|e| ScreenShareError::new(format!("portal pointer button failed: {e}")))?;
                 }
             }
             Capability::ControlKeyboard => {
-                let _ = connection.call_method(Some(portal.0), portal.1, Some(portal.2), "NotifyKeyboardKeysym", &(session, event.code, event.pressed)).await.map_err(|e| ScreenShareError::new(format!("portal keyboard failed: {e}")))?;
+                let state = if event.pressed { 1u32 } else { 0u32 };
+                let _ = connection.call_method(Some(portal.0), portal.1, Some(portal.2), "NotifyKeyboardKeysym", &(session, empty_options(), event.code as i32, state)).await.map_err(|e| ScreenShareError::new(format!("portal keyboard failed: {e}")))?;
             }
             _ => return Err(ScreenShareError::new("capability is not supported by the portal backend")),
         }
@@ -171,6 +256,7 @@ impl RemoteInput for LinuxPortalRemoteInput {
         }
         self.connection = None;
         self.session = None;
+        self.granted_devices = 0;
     }
 }
 
@@ -315,5 +401,58 @@ mod tests {
         assert!(authorize_nonce(&permissions, session, peer, Capability::ControlPointer, [8; 16]).is_err());
         permissions.revoke_control();
         assert!(authorize_nonce(&permissions, session, peer, Capability::ControlPointer, [7; 16]).is_err());
+    }
+
+    /// Portal `devices` bitmask gating (PDF Task 5.3): pointer requires the
+    /// pointer bit, keyboard requires the keyboard bit, and a denied/empty
+    /// mask grants nothing — so view-only sharing keeps working when the
+    /// user denies remote input in the portal dialog.
+    #[test]
+    fn device_mask_grants_follows_portal_device_bits() {
+        assert!(device_mask_grants(PORTAL_DEVICE_POINTER, Capability::ControlPointer));
+        assert!(device_mask_grants(PORTAL_DEVICE_POINTER | PORTAL_DEVICE_KEYBOARD, Capability::ControlPointer));
+        assert!(device_mask_grants(PORTAL_DEVICE_POINTER | PORTAL_DEVICE_KEYBOARD, Capability::ControlKeyboard));
+        assert!(!device_mask_grants(PORTAL_DEVICE_POINTER, Capability::ControlKeyboard));
+        assert!(!device_mask_grants(0, Capability::ControlPointer));
+        assert!(!device_mask_grants(0, Capability::ControlKeyboard));
+        // ViewScreen is not an input device and is never portal-granted.
+        assert!(!device_mask_grants(PORTAL_DEVICE_POINTER | PORTAL_DEVICE_KEYBOARD, Capability::ViewScreen));
+        assert!(!device_mask_grants(0, Capability::ViewScreen));
+    }
+
+    /// Parse the `devices` bitmask out of a RemoteDesktop Start response body
+    /// (a `{ devices: u32 }` vardict). Missing/wrong-typed keys are None.
+    #[test]
+    fn parse_devices_mask_reads_start_response_body() {
+        use zbus::zvariant::{Dict, Signature, Value};
+        let mut dict = Dict::new(
+            &Signature::try_from("s").unwrap(),
+            &Signature::try_from("u").unwrap(),
+        );
+        dict.add("devices", 3u32).unwrap();
+        assert_eq!(parse_devices_mask(&Value::Dict(dict)), Some(3));
+
+        let mut only_pointer = Dict::new(
+            &Signature::try_from("s").unwrap(),
+            &Signature::try_from("u").unwrap(),
+        );
+        only_pointer.add("devices", 1u32).unwrap();
+        assert_eq!(parse_devices_mask(&Value::Dict(only_pointer)), Some(1));
+
+        let empty = Dict::new(
+            &Signature::try_from("s").unwrap(),
+            &Signature::try_from("u").unwrap(),
+        );
+        assert_eq!(parse_devices_mask(&Value::Dict(empty)), None);
+
+        let mut wrong_type = Dict::new(
+            &Signature::try_from("s").unwrap(),
+            &Signature::try_from("s").unwrap(),
+        );
+        wrong_type.add("devices", "denied").unwrap();
+        assert_eq!(parse_devices_mask(&Value::Dict(wrong_type)), None);
+
+        // Not a dict at all.
+        assert_eq!(parse_devices_mask(&Value::U32(3)), None);
     }
 }

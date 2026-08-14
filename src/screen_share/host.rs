@@ -21,7 +21,7 @@ use super::{
     platform::{capture_dimensions, create_capture_source, CAPTURE_FPS},
     protocol::{self, ControlMessage, ScreenShareMessage, SCREEN_SHARE_PROTOCOL_VERSION},
     reconnect::{retry_reconnect, ReconnectPolicy},
-    remote_input::{self, create_platform_backend, InputEvent, NormalizedPointer},
+    remote_input::{self, create_platform_backend, InputEvent, NormalizedPointer, RemoteInput},
     session::{ScreenShareSessionId, SessionEvent, SessionManager, SessionState},
     transport::{read_unit, QuicScreenTransport, ReadUnit},
     ScreenShareError, SCREEN_SHARE_ALPN,
@@ -240,10 +240,14 @@ async fn run_host_session_inner(
     if encode_width == 0 || encode_height == 0 { return; }
     let mut config = CodecConfig { width: encode_width, height: encode_height, target_fps: capture_fps, ..CodecConfig::default() };
     let Ok(mut encoder) = OpenH264Encoder::new(config) else { return };
-    tracing::info!("screen-share: host initializing remote-input backend");
-    let backend_started = std::time::Instant::now();
-    let mut backend = create_platform_backend((capture_width, capture_height)).await;
-    tracing::info!(elapsed_ms = backend_started.elapsed().as_millis() as u64, "screen-share: host remote-input backend ready");
+    // The remote-input backend is created LAZILY, only when the host
+    // explicitly grants control (PDF Task 9.1 / T5.3: "Remote control must be
+    // separately offered and explicitly accepted by the sharer"). A view-only
+    // share therefore never opens a RemoteDesktop portal session, never pops
+    // the portal consent dialog, and works even when remote-input permission
+    // is denied or the portal is absent — `create_platform_backend` fails
+    // closed to `UnavailableInputBackend` and input simply does nothing.
+    let mut backend: Option<Box<dyn RemoteInput>> = None;
     let mut interval = tokio::time::interval(Duration::from_micros(1_000_000 / capture_fps as u64));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut media_drops: u64 = 0;
@@ -259,7 +263,7 @@ async fn run_host_session_inner(
     let mut media = media;
     'streaming: loop {
         if stop.load(Ordering::Relaxed) {
-            backend.shutdown().await;
+            if let Some(mut backend) = backend.take() { backend.shutdown().await; }
             let _ = control.send(ControlOut::Legacy(ControlMessage::EndSession { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id })).await;
             return;
         }
@@ -278,7 +282,7 @@ async fn run_host_session_inner(
                     continue 'streaming;
                 }
                 None => {
-                    backend.shutdown().await;
+                    if let Some(mut backend) = backend.take() { backend.shutdown().await; }
                     let _ = control.send(ControlOut::Legacy(ControlMessage::EndSession { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id })).await;
                     return;
                 }
@@ -295,6 +299,10 @@ async fn run_host_session_inner(
                                 remote_input::authorize_nonce(permissions, sid, peer, capability, nonce).is_ok()
                             });
                             if !authorized { continue 'streaming; }
+                            // The backend exists iff control was granted; when
+                            // it was denied/unavailable (None) input is dropped
+                            // and the share continues view-only.
+                            let Some(backend) = backend.as_mut() else { continue 'streaming; };
                             match capability {
                                 Capability::ControlPointer => {
                                     if let Some((px, py)) = remote_input::normalize_to_capture(NormalizedPointer { x, y }, (capture_width, capture_height)) {
@@ -337,12 +345,26 @@ async fn run_host_session_inner(
             }
             cmd = commands.recv() => match cmd {
                 Some(HostCommand::GrantControl(capabilities)) => {
+                    // Remote control is opt-in (PDF Task 9.1 / T5.3): the
+                    // RemoteDesktop portal session is opened only when the
+                    // host user explicitly grants control, never for view-only
+                    // shares. If the portal is missing or the user denies the
+                    // portal dialog, `create_platform_backend` fails closed to
+                    // `UnavailableInputBackend` and the grant still proceeds
+                    // at the protocol level while input does nothing — the
+                    // share remains view-only and functional.
+                    if backend.is_none() {
+                        tracing::info!("screen-share: host opening remote-input backend (explicit control grant)");
+                        let backend_started = std::time::Instant::now();
+                        backend = Some(create_platform_backend((capture_width, capture_height)).await);
+                        tracing::info!(elapsed_ms = backend_started.elapsed().as_millis() as u64, "screen-share: host remote-input backend ready");
+                    }
                     if let Some(message) = manager.grant_control(session_id, capabilities, events) {
                         let _ = control.send(ControlOut::Legacy(message)).await;
                     }
                 }
                 Some(HostCommand::RevokeControl) => {
-                    backend.shutdown().await;
+                    if let Some(mut backend) = backend.take() { backend.shutdown().await; }
                     if let Some(message) = manager.revoke_control(session_id, events) {
                         let _ = control.send(ControlOut::Legacy(message)).await;
                     }
@@ -432,7 +454,7 @@ async fn run_host_session_inner(
                     media_drops = 0;
                 }
                 None => {
-                    backend.shutdown().await;
+                    if let Some(mut backend) = backend.take() { backend.shutdown().await; }
                     let _ = control.send(ControlOut::Legacy(ControlMessage::EndSession { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id })).await;
                     return;
                 }

@@ -55,8 +55,8 @@ pub use reconnect::{
 };
 pub use permissions::{Capability, ControlToken, RequestRateLimiter, SessionPermissions};
 pub use remote_input::{
-    authorize_input, authorize_nonce, map_pointer, normalize_to_capture, InputEvent,
-    NormalizedPointer, RemoteInput, UnavailableInputBackend,
+    authorize_input, authorize_nonce, device_mask_grants, map_pointer, normalize_to_capture,
+    parse_devices_mask, InputEvent, NormalizedPointer, RemoteInput, UnavailableInputBackend,
 };
 pub use session::{
     NegotiatedConfig, NegotiationError, NegotiationManager, NegotiationRole, NegotiationState,

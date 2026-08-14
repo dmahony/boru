@@ -436,6 +436,86 @@ pub fn detect_desktop_environment() -> DesktopEnvironment {
         .unwrap_or_default()
 }
 
+// ── Portal cursor modes (PDF Task 5.3) ──────────────────────────────────────
+//
+// xdg-desktop-portal ScreenCast lets the client request how the cursor is
+// drawn in the stream via the `cursor_mode` option of SelectSources
+// (available since interface version 2). The portal advertises the supported
+// modes in the `AvailableCursorModes` property; requesting a mode that is not
+// advertised makes the portal CLOSE the session, so we only ever request a
+// mode the portal advertises (verified against upstream docs, BORU-SS-15).
+
+/// Cursor mode bit values from `org.freedesktop.portal.ScreenCast`
+/// `AvailableCursorModes` / `cursor_mode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorMode {
+    /// 1: the cursor is not part of the screen cast stream.
+    Hidden = 1,
+    /// 2: the cursor is embedded as part of the stream buffers.
+    Embedded = 2,
+    /// 4: the cursor is sent as PipeWire stream metadata (not composited).
+    Metadata = 4,
+}
+
+impl CursorMode {
+    /// The portal bit value for this mode.
+    pub fn bit(self) -> u32 {
+        self as u32
+    }
+}
+
+/// Choose the cursor mode to request given the portal's advertised bitmask.
+///
+/// Boru's cursor strategy composites the cursor into captured frames (PDF
+/// Task 4.2 / BORU-SS-12), so `Embedded` is the natural Wayland equivalent:
+/// the compositor bakes the cursor into the PipeWire buffers and every viewer
+/// sees it with zero extra work. When the portal does not advertise
+/// `Embedded`, fall back to `Hidden` — never request a mode the portal
+/// advertises as unavailable (that closes the session).
+pub fn choose_cursor_mode(available: u32) -> CursorMode {
+    if available & CursorMode::Embedded.bit() != 0 {
+        CursorMode::Embedded
+    } else {
+        CursorMode::Hidden
+    }
+}
+
+/// Build the `SelectSources` options vardict: monitor source types plus the
+/// requested cursor mode when one was negotiated. Pure so it is unit-testable
+/// without a session bus.
+pub fn select_sources_options(
+    cursor_mode: Option<CursorMode>,
+) -> std::collections::HashMap<&'static str, zbus::zvariant::Value<'static>> {
+    let mut options: std::collections::HashMap<&str, zbus::zvariant::Value<'static>> =
+        [("types", zbus::zvariant::Value::U32(1))].into_iter().collect();
+    if let Some(mode) = cursor_mode {
+        options.insert("cursor_mode", zbus::zvariant::Value::U32(mode.bit()));
+    }
+    options
+}
+
+/// Query the ScreenCast `AvailableCursorModes` property via
+/// `org.freedesktop.DBus.Properties.Get`. Best-effort diagnostics; `None`
+/// when the portal is too old (property added in interface version 2) or the
+/// call fails — callers then default to `Hidden` without sending the option.
+async fn query_available_cursor_modes(connection: &zbus::Connection) -> Option<u32> {
+    let reply = connection
+        .call_method(
+            Some("org.freedesktop.portal.Desktop"),
+            "/org/freedesktop/portal/desktop",
+            Some("org.freedesktop.DBus.Properties"),
+            "Get",
+            &("org.freedesktop.portal.ScreenCast", "AvailableCursorModes"),
+        )
+        .await
+        .ok()?;
+    let value: zbus::zvariant::OwnedValue = reply.body().deserialize().ok()?;
+    match &*value {
+        zbus::zvariant::Value::U32(available) => Some(*available),
+        _ => None,
+    }
+}
+
 // ── Real XDG Desktop Portal ScreenCast + PipeWire capture ───────────────────
 //
 // ScreenCast flow (org.freedesktop.portal.ScreenCast on the session bus):
@@ -480,6 +560,10 @@ pub struct LinuxPortalCapture {
     portal_version: Option<u32>,
     /// Detected portal backend bus names (diagnostics / error context).
     backend: Option<String>,
+    /// Cursor mode negotiated with the portal (PDF Task 5.3). `Embedded`
+    /// means the compositor bakes the cursor into the PipeWire buffers;
+    /// `Hidden` means the stream has no cursor.
+    cursor_mode: CursorMode,
 }
 
 impl LinuxPortalCapture {
@@ -516,11 +600,15 @@ impl LinuxPortalCapture {
         );
         let portal_version = query_portal_version(&connection).await;
         let backend = detect_portal_backend(&connection).await;
+        let available_cursor_modes = query_available_cursor_modes(&connection).await;
+        let cursor_mode = available_cursor_modes.map(choose_cursor_mode).unwrap_or(CursorMode::Hidden);
         tracing::info!(
             session_type = ?session_type,
             desktop = ?environment,
             ?portal_version,
             backend = ?backend,
+            available_cursor_modes = ?available_cursor_modes,
+            ?cursor_mode,
             "screen-share: connecting to xdg-desktop-portal ScreenCast"
         );
 
@@ -551,13 +639,19 @@ impl LinuxPortalCapture {
             })?;
         let _ = machine.on_session_created();
 
-        // 2. SelectSources(types = Monitor). No `multiple` option: exactly one
-        // stream is requested, which every portal implementation supports.
-        // The desktop-environment permission dialog is NEVER bypassed — on
-        // Wayland the compositor shows its picker at Start, on X11 the portal
-        // auto-selects the primary monitor.
-        let select_options: std::collections::HashMap<&str, zbus::zvariant::Value> =
-            [("types", zbus::zvariant::Value::U32(1))].into_iter().collect();
+        // 2. SelectSources(types = Monitor [, cursor_mode]). No `multiple`
+        // option: exactly one stream is requested, which every portal
+        // implementation supports. The desktop-environment permission dialog
+        // is NEVER bypassed — on Wayland the compositor shows its picker at
+        // Start, on X11 the portal auto-selects the primary monitor.
+        // Cursor handling (PDF Task 5.3): request `Embedded` when the portal
+        // advertises it so the compositor bakes the cursor into the stream
+        // buffers (matching Boru's composite-into-frames strategy); otherwise
+        // omit the option entirely (portal default = Hidden). Requesting an
+        // unadvertised mode would close the session, so we only send the
+        // option when the portal told us it is available.
+        let cursor_option = available_cursor_modes.map(choose_cursor_mode);
+        let select_options = select_sources_options(cursor_option);
         connection
             .call_method(Some(portal.0), portal.1, Some(portal.2), "SelectSources", &(session.clone(), select_options))
             .await
@@ -673,6 +767,7 @@ impl LinuxPortalCapture {
             environment,
             portal_version,
             backend,
+            cursor_mode,
         })
     }
 
@@ -758,6 +853,13 @@ impl LinuxPortalCapture {
     /// Detected portal backend bus names, if any (diagnostics).
     pub fn portal_backend(&self) -> Option<&str> {
         self.backend.as_deref()
+    }
+
+    /// Cursor mode negotiated with the portal (PDF Task 5.3). `Embedded`
+    /// means the compositor bakes the cursor into the stream buffers;
+    /// `Hidden` (or a too-old portal) means the stream has no cursor.
+    pub fn cursor_mode(&self) -> CursorMode {
+        self.cursor_mode
     }
 }
 
@@ -1906,6 +2008,45 @@ mod tests {
         assert_eq!(classify_session_type("x11"), SessionType::X11);
         assert_eq!(classify_session_type(""), SessionType::Unknown);
         assert_eq!(classify_session_type("mir"), SessionType::Unknown);
+    }
+
+    /// Cursor-mode selection (PDF Task 5.3): Embedded is preferred when the
+    /// portal advertises it (compositor bakes the cursor into the stream,
+    /// matching the composite-into-frames strategy); otherwise Hidden.
+    #[test]
+    fn cursor_mode_prefers_embedded_when_advertised() {
+        // Embedded (2) advertised on its own or alongside others.
+        assert_eq!(choose_cursor_mode(2), CursorMode::Embedded);
+        assert_eq!(choose_cursor_mode(1 | 2 | 4), CursorMode::Embedded);
+        assert_eq!(choose_cursor_mode(2 | 4), CursorMode::Embedded);
+        // Only Hidden (1) or Metadata (4) advertised → Hidden fallback.
+        assert_eq!(choose_cursor_mode(1), CursorMode::Hidden);
+        assert_eq!(choose_cursor_mode(4), CursorMode::Hidden);
+        assert_eq!(choose_cursor_mode(0), CursorMode::Hidden);
+    }
+
+    /// The SelectSources options vardict carries types=Monitor plus the
+    /// negotiated cursor_mode when one is provided; omitting the option
+    /// leaves the portal default (Hidden) untouched.
+    #[test]
+    fn select_sources_options_include_cursor_mode_when_negotiated() {
+        let with_embedded = select_sources_options(Some(CursorMode::Embedded));
+        assert_eq!(with_embedded.get("types"), Some(&zbus::zvariant::Value::U32(1)));
+        assert_eq!(with_embedded.get("cursor_mode"), Some(&zbus::zvariant::Value::U32(2)));
+
+        let hidden = select_sources_options(Some(CursorMode::Hidden));
+        assert_eq!(hidden.get("cursor_mode"), Some(&zbus::zvariant::Value::U32(1)));
+
+        let none = select_sources_options(None);
+        assert_eq!(none.get("types"), Some(&zbus::zvariant::Value::U32(1)));
+        assert!(none.get("cursor_mode").is_none());
+    }
+
+    #[test]
+    fn cursor_mode_bits_match_portal_values() {
+        assert_eq!(CursorMode::Hidden.bit(), 1);
+        assert_eq!(CursorMode::Embedded.bit(), 2);
+        assert_eq!(CursorMode::Metadata.bit(), 4);
     }
 
     #[test]

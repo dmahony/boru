@@ -174,3 +174,81 @@ Real-session recipe additions for BORU-SS-14:
 Implemented from the xdg-desktop-portal D-Bus API documentation and PipeWire
 public headers/ABI only. No RustDesk code was consulted or reproduced; the
 flow follows the upstream `org.freedesktop.portal.ScreenCast` specification.
+
+## 7. Cursor modes and remote control (BORU-SS-15 / PDF Task 5.3)
+
+### 7.1 Portal cursor modes
+
+The ScreenCast portal lets the client request how the cursor appears in the
+stream via the `cursor_mode` option of `SelectSources` (interface version 2+;
+values: 1 = Hidden, 2 = Embedded, 4 = Metadata). Requesting a mode the portal
+does NOT advertise closes the session, so Boru queries the
+`AvailableCursorModes` property first and only sends an option it knows is
+supported:
+
+- `CursorMode` enum + `choose_cursor_mode(available)` — prefers `Embedded`
+  (compositor bakes the cursor into the PipeWire buffers, matching the
+  composite-into-frames strategy from PDF Task 4.2 / BORU-SS-12), falls back
+  to `Hidden` when Embedded is not advertised. `Metadata` is deliberately not
+  requested: it requires cursor-sprite handling on the viewer side, which is
+  PDF Phase 14 future work.
+- `select_sources_options(cursor_mode)` — pure builder for the options vardict
+  (unit-tested without a session bus).
+- `query_available_cursor_modes` — `org.freedesktop.DBus.Properties.Get` on
+  the ScreenCast `AvailableCursorModes` property, mirroring the existing
+  `query_portal_version`.
+- `LinuxPortalCapture` stores the negotiated mode and exposes it via
+  `cursor_mode()` so the host/UI can report whether the cursor is embedded in
+  the stream or absent. The mode is also logged at connect time.
+
+### 7.2 RemoteDesktop portal for remote input
+
+The Linux input backend (`remote_input::LinuxPortalRemoteInput`) now follows
+the RemoteDesktop portal contract correctly:
+
+- `Start` is asynchronous: the call returns a `Request` object path and the
+  real result arrives on the `Response` signal of that object. The backend now
+  awaits the Response (20 s timeout), checks the response code, and parses the
+  `devices` bitmask (1 = pointer, 2 = keyboard) the user actually granted.
+  If the user denies the dialog, the backend fails closed (`connect` returns
+  Err → `create_platform_backend` falls back to `UnavailableInputBackend`) so
+  view-only sharing keeps working.
+- Every `Notify*` method takes an `options` vardict (`a{sv}`) between the
+  session handle and the event payload — the earlier calls were missing it and
+  would have been rejected by the portal. `NotifyPointerMotion`, 
+  `NotifyPointerButton`, and `NotifyKeyboardKeysym` all pass the empty dict
+  now. `NotifyKeyboardKeysym` also passes the keycode as `i32` and the state
+  as `0/1` `u32` (portal spec), not a raw `bool`.
+- `apply` gates on the granted devices: pointer events require the pointer
+  bit, keyboard events require the keyboard bit; a denied capability returns
+  Err without touching the portal. `device_mask_grants` is the pure gate
+  (unit-tested).
+
+### 7.3 Lazy input backend (view-only never opens the portal)
+
+The host session (`host.rs`) creates the remote-input backend LAZILY, on the
+first explicit `GrantControl` command, instead of at streaming start. A
+view-only share therefore:
+
+- never creates a RemoteDesktop portal session and never pops the portal
+  consent dialog;
+- keeps working when remote-input permission is denied (no portal, dialog
+  denied, or portal grants no devices) — `create_platform_backend` fails
+  closed and the streaming loop simply drops input;
+- closes the backend on `RevokeControl` / session end / reconnect failure, so
+  input stops immediately when consent is revoked.
+
+This satisfies PDF Task 9.1 / Task 5.3: remote control is opt-in, separately
+offered and explicitly accepted by the sharer, and view-only sharing remains
+functional when remote-input permission is denied.
+
+### 7.4 What requires a real Wayland session (cannot run headless here)
+
+- The portal actually advertising Embedded and Boru requesting it (the
+  `SelectSources` options dict is unit-tested, but a live `AvailableCursorModes`
+  reply is not).
+- The RemoteDesktop Start dialog appearing only after the host clicks Grant,
+  and the `devices` bitmask reflecting the user's choice in a real portal.
+- The corrected `Notify*` signatures being accepted by a real portal backend
+  (GNOME maps `NotifyPointerMotion` to relative motion, KDE/wlroots map it per
+  their own backends).

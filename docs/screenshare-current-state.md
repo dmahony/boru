@@ -58,7 +58,7 @@ definitive file list:
 | `host.rs` | 348 | `run_host_session` (dial → Hello → negotiate → capture/encode/send), `HostCommand` | Implemented |
 | `viewer.rs` | 241 | `ViewerPipeline` (bounded receiver decode pipeline), `DecodedFrame` | Implemented |
 | `permissions.rs` | 117 | `Capability`, `ControlToken`, `RequestRateLimiter`, `SessionPermissions` | Implemented |
-| `remote_input.rs` | 319 | `InputEvent`, `RemoteInput` trait, Linux portal / Windows SendInput backends | Implemented |
+| `remote_input.rs` | ~440 | `InputEvent`, `RemoteInput` trait, Linux RemoteDesktop portal / Windows SendInput backends, `device_mask_grants` + `parse_devices_mask` gates (BORU-SS-15) | Implemented |
 | `adaptation.rs` | 89 | `AdaptiveQuality`, `QualityDecision` | **Implemented but UNUSED** (no production caller) |
 | `stats.rs` | 121 | `ScreenShareStats`, `ScreenShareStatsSnapshot` | Implemented (internal to viewer; not surfaced to UI) |
 | `platform/mod.rs` | 103 | Per-OS dispatch, `ActiveCapture`, `create_capture_source` | Implemented |
@@ -347,6 +347,41 @@ with a future DMA-BUF path):
   actionable messages (install PipeWire / is the desktop portal running?)
   with a typed kind — no panics.
 
+### 2.5 Wayland cursor modes + RemoteDesktop input (BORU-SS-15 / PDF Task 5.3)
+
+- **Portal cursor modes respected.** The ScreenCast `SelectSources` call now
+  requests `cursor_mode` (portal interface v2+). Boru queries
+  `AvailableCursorModes` first and only sends a mode the portal advertises —
+  requesting an unadvertised mode closes the session. `Embedded` (2) is
+  preferred: the compositor bakes the cursor into the PipeWire buffers,
+  matching the composite-into-frames strategy from BORU-SS-12; when the
+  portal only advertises `Hidden` (1), Boru falls back to it (no cursor in
+  the stream). `Metadata` (4) is deliberately not requested (viewer-side
+  cursor-sprite handling is Phase 14 future work). `CursorMode` +
+  `choose_cursor_mode` + `select_sources_options` are pure and unit-tested;
+  `LinuxPortalCapture::cursor_mode()` exposes the negotiated mode.
+- **RemoteDesktop portal input fixed to the real spec.** The previous
+  `LinuxPortalRemoteInput` fired `Start` and ignored the reply, and every
+  `Notify*` call was missing the mandatory `options` vardict (`a{sv}`) — the
+  portal would have rejected them. Now `connect()` awaits the async
+  `Start` `Response` signal (20 s timeout), checks the response code, and
+  parses the `devices` bitmask (1 = pointer, 2 = keyboard) the user actually
+  granted; a denied dialog fails closed. `NotifyPointerMotion`,
+  `NotifyPointerButton`, `NotifyKeyboardKeysym` pass the empty options dict
+  and correct types (`i32` keycode, `0/1` `u32` state). `apply` gates each
+  event on the granted device bits via the pure `device_mask_grants`
+  helper; `parse_devices_mask` extracts the bitmask from the Start response.
+- **Lazy input backend (explicit consent only).** `host.rs` creates the
+  remote-input backend on the first explicit `GrantControl` command, not at
+  streaming start. View-only shares never open a RemoteDesktop portal
+  session or pop the portal dialog, and keep working when remote-input
+  permission is denied (backend fails closed; input is dropped). The backend
+  is shut down on `RevokeControl`, session end, and reconnect failure.
+- **Explicit UI choice preserved.** The existing host-side consent flow
+  (viewer `RequestControl` → host UI grant buttons → `GrantControl`) remains
+  the only path to control; session tests assert Accept never grants control
+  and a `ControlRequest` never changes permissions by itself.
+
 ## 3. Dependency usage map (within the screen-share subsystem)
 
 | Dependency | Cargo.toml | Where used (file:line) | Purpose |
@@ -443,18 +478,16 @@ Notes:
 
 ## 5. Test coverage summary
 
-- **Unit tests:** 150 `#[test]` pass in `src/screen_share/` with
+- **Unit tests:** 157 `#[test]` pass in `src/screen_share/` with
   `--features screen-sharing` (includes codec 3, protocol 4, transport 3,
-  session 5, viewer 3, permissions 2, remote_input 4, adaptation 2,
-  capture 3, stats 1, mod 3 (incl. the error-kind mapping test added by
-  BORU-SS-14), coords 15, platform/linux 20 (incl. 11
-  portal-lifecycle / DE-detection tests added by BORU-SS-13),
-  platform/linux_pw 13 (SPA constant guard, advertised formats,
-  layout mapping, pod build/parse incl. a real-style negotiated pod,
-  renegotiated geometry, stride padding, 24-bit expansion, buffer/stride
-  rejection, error kind), platform/windows_common 10, plus the
-  channels/reconnect/session tests added by later BORU-SS tasks) — see
-  per-file table above.
+  session 7 [incl. 2 BORU-SS-15 explicit-grant tests], viewer 3,
+  permissions 2, remote_input 6 [incl. 2 BORU-SS-15 portal-gate tests],
+  adaptation 2, capture 3, stats 1, mod 3 (incl. the error-kind mapping
+  test added by BORU-SS-14), coords 15, platform/linux 23 [incl. 3
+  BORU-SS-15 cursor-mode tests and 11 portal-lifecycle / DE-detection
+  tests from BORU-SS-13], platform/linux_pw 13, platform/windows_common
+  10, plus the channels/reconnect/session tests added by later BORU-SS
+  tasks) — see per-file table above.
 - **End-to-end protocol test:** `protocol.rs:322-412`
   (`end_to_end_invite_accept_media_decode`) — two real iroh endpoints, Hello →
   Invitation → Accept → media → decode through `ViewerPipeline`.
@@ -477,8 +510,10 @@ Notes:
 | H.264 encode/decode (OpenH264) | Implemented |
 | QUIC transport (control + media) | Implemented |
 | Session negotiation state machine | Implemented |
-| Remote input (Linux portal / Windows SendInput) | Implemented |
+| Remote input (Linux RemoteDesktop portal / Windows SendInput) | Implemented |
 | Permissions / consent / rate limiting | Implemented |
+| Portal cursor modes (ScreenCast `cursor_mode`, BORU-SS-15) | Implemented |
+| Remote-control consent gating (view-only default, explicit grant, lazy backend, BORU-SS-15) | Implemented |
 | Viewer decode pipeline | Implemented |
 | Adaptive quality controller | Implemented but **unwired** (no production caller) |
 | Developer metrics/overlay | Counters implemented, **not surfaced** in UI |
