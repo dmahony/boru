@@ -431,8 +431,96 @@ mod tests {
     use super::*;
     use crate::layout::{
         ByTierOverrides, CardOrientation, ComposerButton, HomeLayoutMode, HomeSection,
-        LayoutOverrides, ThumbnailPosition,
+        LayoutConfig, LayoutOverrides, ThumbnailPosition,
     };
+    use crate::layout_merge::merge_layout_config;
+
+    // ── BORU-LAYOUT-10: the shipped example file must stay valid ───────
+
+    /// The repo-root `boru-layout.example.toml` (the documented example).
+    /// `include_str!` is relative to this source file
+    /// (`examples/iced_chat/layout_config.rs`), so `../..` reaches the repo
+    /// root where the example lives. The test fails to COMPILE if the file
+    /// is ever deleted or moved — exactly the guarantee the example needs.
+    const EXAMPLE_TOML: &str = include_str!("../../boru-layout.example.toml");
+
+    #[test]
+    fn example_file_parses_and_merges_without_errors() {
+        // BORU-LAYOUT-10: "Examples must parse cleanly against the schema
+        // (no invalid TOML in the shipped example)."
+        let cfg = parse_layout_config(EXAMPLE_TOML).expect("example file parses");
+
+        // Every documented section id must be structurally valid (no
+        // duplicates in order/visibility lists — BORU-LAYOUT-07).
+        let issues = validate_layout_overrides(&cfg);
+        assert!(
+            issues.is_empty(),
+            "example file must pass validation, got: {issues:?}"
+        );
+
+        // Merging onto the defaults must succeed with no developer
+        // warnings (every example value is inside the documented ranges),
+        // and the merged layout must reproduce the current appearance —
+        // the example documents the baseline, not a modified layout.
+        let (merged, warnings) = merge_layout_config(&LayoutConfig::default(), &cfg);
+        assert!(
+            warnings.is_empty(),
+            "example file must merge without clamps/fallbacks, got: {warnings:?}"
+        );
+        assert_eq!(
+            merged,
+            LayoutConfig::default(),
+            "example file values are the baseline and must reproduce the default layout"
+        );
+    }
+
+    #[test]
+    fn example_file_covers_every_documented_group() {
+        // BORU-LAYOUT-10: the example must document section order, columns,
+        // visibility, spacing and responsive settings. Spot-check that the
+        // shipped file actually exercises each required group.
+        let cfg = parse_layout_config(EXAMPLE_TOML).expect("example file parses");
+
+        let home = cfg.home.expect("home group documented");
+        assert!(
+            home.section_order.is_some(),
+            "section order must be documented"
+        );
+        assert!(home.hidden_sections.is_some(), "visibility must be documented");
+        assert!(home.mode.is_some(), "grid/list mode must be documented");
+        assert!(home.grid.is_some(), "home.grid columns must be documented");
+        assert!(
+            home.quick_actions.is_some(),
+            "quick-action columns must be documented"
+        );
+        assert!(home.padding.is_some(), "spacing (padding) must be documented");
+        assert!(home.gaps.is_some(), "spacing (gaps) must be documented");
+        assert!(
+            home.card_sizing.is_some(),
+            "card sizing must be documented"
+        );
+
+        let component = cfg.component.expect("component group documented");
+        assert!(
+            component.thumbnail_position.is_some()
+                && component.metadata_alignment.is_some()
+                && component.button_placement.is_some()
+                && component.card_orientation.is_some(),
+            "component placement leaves must be documented"
+        );
+
+        let responsive = cfg.responsive.expect("responsive group documented");
+        assert!(
+            responsive.narrow_max_width.is_some()
+                && responsive.ultra_wide_min_width.is_some(),
+            "responsive breakpoints must be documented"
+        );
+        let columns = responsive.home_columns.expect("per-breakpoint columns");
+        assert!(
+            columns.narrow.is_some() && columns.desktop.is_some() && columns.ultra_wide.is_some(),
+            "per-breakpoint column counts must be documented"
+        );
+    }
 
     #[test]
     fn parse_full_config_all_groups() {
