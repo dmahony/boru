@@ -6160,6 +6160,9 @@ pub enum AppMessage {
     /// BORU-UI-15: the gallery's custom-width slider moved (dev-ui only).
     #[cfg(feature = "dev-ui")]
     GalleryCustomWidth(f32),
+    /// BORU-LAYOUT-09: select a gallery layout-config preset (dev-ui only).
+    #[cfg(feature = "dev-ui")]
+    GalleryLayoutPreset(crate::component_gallery::GalleryLayoutPreset),
 
     // ── Shared file catalogue management ──
     /// Open the file picker to select a file for sharing.
@@ -10304,6 +10307,8 @@ impl IcedChat {
             AppMessage::GalleryPreset(_) => "GalleryPreset",
             #[cfg(feature = "dev-ui")]
             AppMessage::GalleryCustomWidth(_) => "GalleryCustomWidth",
+            #[cfg(feature = "dev-ui")]
+            AppMessage::GalleryLayoutPreset(_) => "GalleryLayoutPreset",
             AppMessage::AddSharedFile => "AddSharedFile",
             AppMessage::AddSharedFolder => "AddSharedFolder",
             AppMessage::SharedFolderPicked(_) => "SharedFolderPicked",
@@ -16966,6 +16971,12 @@ impl IcedChat {
             AppMessage::GalleryCustomWidth(width) => {
                 self.gallery_state.preset = crate::component_gallery::GalleryWidthPreset::Custom;
                 self.gallery_state.custom_width = width;
+                iced::Task::none()
+            }
+
+            #[cfg(feature = "dev-ui")]
+            AppMessage::GalleryLayoutPreset(preset) => {
+                self.gallery_state.layout_preset = preset;
                 iced::Task::none()
             }
 
@@ -37480,6 +37491,22 @@ fn gallery_responsive_preview_messages_update_state() {
         "Maximized preset applied after custom drag"
     );
     assert_eq!(app.gallery_state.custom_width, 777.0);
+
+    // BORU-LAYOUT-09: the layout-config preset switches the preview layout.
+    assert_eq!(
+        app.gallery_state.layout_preset,
+        crate::component_gallery::GalleryLayoutPreset::Default,
+        "gallery defaults to the Default layout preset"
+    );
+    let task = app.update(AppMessage::GalleryLayoutPreset(
+        crate::component_gallery::GalleryLayoutPreset::Narrow,
+    ));
+    drop(task);
+    assert_eq!(
+        app.gallery_state.layout_preset,
+        crate::component_gallery::GalleryLayoutPreset::Narrow,
+        "Narrow layout preset applied via message"
+    );
 }
 
 #[cfg(feature = "dev-ui")]

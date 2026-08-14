@@ -25,6 +25,12 @@ use crate::design_tokens;
 use crate::download_progress_view::view_download_progress;
 use crate::fonts::TypeRole;
 use crate::icon_system::{Icon, IconSize};
+use crate::layout::{
+    self, ButtonPlacement, ByTier, ByTierOverrides, CardOrientation, ComponentOverrides,
+    ComponentPlacement, ComponentPlacementOverrides, HomeGapsOverrides, HomeGridOverrides,
+    HomeLayoutMode, HomeOverrides, HomePaddingOverrides, HomeSection, LayoutConfig,
+    LayoutOverrides, MetadataAlignment, ResponsiveOverrides, ThumbnailPosition,
+};
 use crate::ui_components::{
     self, badge, card_header, date_separator, divider, elevated_card, empty_state,
     ghost_icon_button, icon_tile, primary_button, primary_button_icon, secondary_button,
@@ -73,6 +79,183 @@ impl GalleryWidthPreset {
     }
 }
 
+/// Layout-config presets the gallery preview can apply (BORU-LAYOUT-09 /
+/// PDF Task 9).
+///
+/// Each preset is a concrete [`LayoutConfig`] produced by merging preset
+/// [`LayoutOverrides`] onto [`LayoutConfig::default()`] — the same pure
+/// merge path `boru-layout.toml` uses (BORU-LAYOUT-06) — so the preview
+/// shows exactly what each configuration would do to the real home screen
+/// and to layout-aware components (download/video cards). The `Default`
+/// preset is the empty override set, i.e. `LayoutConfig::default()` and
+/// the current appearance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GalleryLayoutPreset {
+    /// Default layout — `LayoutConfig::default()` (current appearance).
+    Default,
+    /// Narrow-friendly: single column at every width, list mode, tight
+    /// gaps/padding, the Tunnels section hidden, compact video card.
+    Narrow,
+    /// Desktop reference: two-column grid, standard gaps, a wider main
+    /// column, and a side-placement video card (thumbnail left,
+    /// horizontal orientation).
+    Desktop,
+    /// Maximized / wide canvas: three-column grid at ultra-wide widths,
+    /// generous gaps and responsive padding, larger max content width.
+    Maximized,
+}
+
+impl GalleryLayoutPreset {
+    /// All presets in display order.
+    pub const ALL: [GalleryLayoutPreset; 4] = [
+        GalleryLayoutPreset::Default,
+        GalleryLayoutPreset::Narrow,
+        GalleryLayoutPreset::Desktop,
+        GalleryLayoutPreset::Maximized,
+    ];
+
+    /// Short label shown on the preset button.
+    pub const fn label(self) -> &'static str {
+        match self {
+            GalleryLayoutPreset::Default => "Default",
+            GalleryLayoutPreset::Narrow => "Narrow",
+            GalleryLayoutPreset::Desktop => "Desktop",
+            GalleryLayoutPreset::Maximized => "Maximized",
+        }
+    }
+
+    /// The concrete [`LayoutConfig`] this preset previews, derived from
+    /// preset overrides merged onto [`LayoutConfig::default()`]. Building
+    /// it is pure struct construction (no I/O); the gallery re-derives it
+    /// every frame so a preset change applies immediately.
+    pub fn layout_config(self) -> LayoutConfig {
+        let (merged, _warnings) =
+            crate::layout_merge::merge_layout_config(&LayoutConfig::default(), &self.overrides());
+        merged
+    }
+
+    /// The partial override set that defines this preset. `Default` is the
+    /// empty override set (the merge becomes the identity).
+    fn overrides(self) -> LayoutOverrides {
+        match self {
+            GalleryLayoutPreset::Default => LayoutOverrides::default(),
+
+            GalleryLayoutPreset::Narrow => LayoutOverrides {
+                home: Some(HomeOverrides {
+                    mode: Some(HomeLayoutMode::List),
+                    hidden_sections: Some(vec![HomeSection::Tunnels]),
+                    max_content_width: Some(640.0),
+                    grid: Some(HomeGridOverrides {
+                        main_portion: Some(1),
+                        rail_portion: Some(1),
+                        ..Default::default()
+                    }),
+                    padding: Some(HomePaddingOverrides {
+                        top: Some(16.0),
+                        bottom: Some(16.0),
+                        horizontal_large: Some(12.0),
+                        horizontal_default: Some(12.0),
+                    }),
+                    gaps: Some(HomeGapsOverrides {
+                        card_gap: Some(12.0),
+                        hero_gap: Some(24.0),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                component: Some(ComponentOverrides {
+                    video_card: Some(ComponentPlacementOverrides {
+                        thumbnail_position: Some(ThumbnailPosition::Top),
+                        metadata_alignment: Some(MetadataAlignment::Start),
+                        button_placement: Some(ButtonPlacement::Below),
+                        card_orientation: Some(CardOrientation::Vertical),
+                    }),
+                    ..Default::default()
+                }),
+                responsive: Some(ResponsiveOverrides {
+                    home_columns: Some(ByTierOverrides {
+                        narrow: Some(1),
+                        desktop: Some(1),
+                        ultra_wide: Some(1),
+                    }),
+                    home_padding_x: Some(ByTierOverrides {
+                        narrow: Some(12.0),
+                        desktop: Some(12.0),
+                        ultra_wide: Some(16.0),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+
+            GalleryLayoutPreset::Desktop => LayoutOverrides {
+                home: Some(HomeOverrides {
+                    max_content_width: Some(1280.0),
+                    grid: Some(HomeGridOverrides {
+                        main_portion: Some(3),
+                        rail_portion: Some(2),
+                        ..Default::default()
+                    }),
+                    gaps: Some(HomeGapsOverrides {
+                        card_gap: Some(16.0),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                component: Some(ComponentOverrides {
+                    video_card: Some(ComponentPlacementOverrides {
+                        thumbnail_position: Some(ThumbnailPosition::Left),
+                        metadata_alignment: Some(MetadataAlignment::Start),
+                        button_placement: Some(ButtonPlacement::Side),
+                        card_orientation: Some(CardOrientation::Horizontal),
+                    }),
+                    ..Default::default()
+                }),
+                responsive: Some(ResponsiveOverrides {
+                    home_columns: Some(ByTierOverrides {
+                        narrow: Some(1),
+                        desktop: Some(2),
+                        ultra_wide: Some(2),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+
+            GalleryLayoutPreset::Maximized => LayoutOverrides {
+                home: Some(HomeOverrides {
+                    max_content_width: Some(1920.0),
+                    padding: Some(HomePaddingOverrides {
+                        horizontal_large: Some(40.0),
+                        horizontal_default: Some(32.0),
+                        ..Default::default()
+                    }),
+                    gaps: Some(HomeGapsOverrides {
+                        card_gap: Some(28.0),
+                        hero_gap: Some(48.0),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                responsive: Some(ResponsiveOverrides {
+                    home_columns: Some(ByTierOverrides {
+                        narrow: Some(1),
+                        desktop: Some(2),
+                        ultra_wide: Some(3),
+                    }),
+                    home_padding_x: Some(ByTierOverrides {
+                        narrow: Some(20.0),
+                        desktop: Some(32.0),
+                        ultra_wide: Some(40.0),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        }
+    }
+}
+
 /// Interactive state behind the gallery's responsive preview controls
 /// (preset selection + custom-width slider). Owned by `IcedChat`, dev-ui
 /// only.
@@ -83,6 +266,8 @@ pub struct GalleryState {
     /// The slider value; retained so switching back to Custom keeps the
     /// last dragged width.
     pub custom_width: f32,
+    /// BORU-LAYOUT-09: the layout-config preset the preview applies.
+    pub layout_preset: GalleryLayoutPreset,
 }
 
 impl Default for GalleryState {
@@ -90,6 +275,7 @@ impl Default for GalleryState {
         Self {
             preset: GalleryWidthPreset::Desktop,
             custom_width: GalleryWidthPreset::Custom.width(),
+            layout_preset: GalleryLayoutPreset::Default,
         }
     }
 }
@@ -125,12 +311,18 @@ fn effective_preview_width(state: &GalleryState, window_width: f32) -> f32 {
 /// controls (PDF Task 15). `window_width` bounds the simulated width so
 /// wide presets degrade gracefully on small windows. `btheme` is the live
 /// merged theme so typography samples reflect inspector edits (BORU-UI-16).
+///
+/// BORU-LAYOUT-09 / PDF Task 9: the preview also applies a layout-config
+/// preset (see [`GalleryLayoutPreset`]) — the concrete [`LayoutConfig`]
+/// for the selected preset is threaded through every layout-aware
+/// component (download/video cards) and the Layout Preview mini-home.
 pub fn view_gallery(
     state: &GalleryState,
     window_width: f32,
     btheme: &crate::theme::BoruTheme,
 ) -> Element<'static, AppMessage> {
     let preview_width = effective_preview_width(state, window_width);
+    let layout = state.layout_preset.layout_config();
 
     // Full-width control bar, then the whole gallery re-laid out inside a
     // fixed-width frame so every production component responds to the
@@ -139,7 +331,7 @@ pub fn view_gallery(
         .push(responsive_preview_controls(state, preview_width))
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_16)))
         .push(
-            container(gallery_sections(btheme))
+            container(gallery_sections(btheme, &layout, preview_width))
                 .padding(design_tokens::SPACE_24)
                 .width(Length::Fixed(preview_width))
                 .style(design_tokens::card_style),
@@ -199,7 +391,7 @@ fn responsive_preview_controls(
         .size(TypeRole::Metadata.size_px())
         .color(design_tokens::text_primary(&Theme::Light));
 
-    Row::new()
+    let width_row = Row::new()
         .push(label)
         .push(Space::new().width(Length::Fixed(design_tokens::SPACE_8)))
         .push(preset_button(GalleryWidthPreset::Narrow))
@@ -215,17 +407,89 @@ fn responsive_preview_controls(
         .push(readout)
         .spacing(0)
         .align_y(Alignment::Center)
-        .wrap()
+        .wrap();
+
+    // BORU-LAYOUT-09: layout-config preset row. Each preset is a concrete
+    // LayoutConfig (same merge path as boru-layout.toml); the readout
+    // shows the resolved mode/columns/gap at the current preview width.
+    let layout_label = text("Layout:")
+        .font(TypeRole::Metadata.font())
+        .size(TypeRole::Metadata.size_px())
+        .color(design_tokens::text_muted(&Theme::Light));
+
+    let layout_preset_button = |preset: GalleryLayoutPreset| {
+        if state.layout_preset == preset {
+            primary_button(preset.label(), None, false)
+        } else {
+            secondary_button(
+                preset.label(),
+                Some(AppMessage::GalleryLayoutPreset(preset)),
+                false,
+            )
+        }
+    };
+
+    let layout = state.layout_preset.layout_config();
+    let columns = layout.responsive.home_columns_for_width(preview_width);
+    let mode = match layout.home.mode {
+        crate::layout::HomeLayoutMode::Grid => "grid",
+        crate::layout::HomeLayoutMode::List => "list",
+    };
+    let layout_readout = text(format!(
+        "{mode} · {columns} col · gap {}px · pad {}px",
+        layout.home.gaps.card_gap as u32,
+        layout.responsive.home_padding_x_for_width(preview_width) as u32,
+    ))
+    .font(TypeRole::Metadata.font())
+    .size(TypeRole::Metadata.size_px())
+    .color(design_tokens::text_primary(&Theme::Light));
+
+    let layout_row = Row::new()
+        .push(layout_label)
+        .push(Space::new().width(Length::Fixed(design_tokens::SPACE_8)))
+        .push(layout_preset_button(GalleryLayoutPreset::Default))
+        .push(Space::new().width(Length::Fixed(design_tokens::SPACE_4)))
+        .push(layout_preset_button(GalleryLayoutPreset::Narrow))
+        .push(Space::new().width(Length::Fixed(design_tokens::SPACE_4)))
+        .push(layout_preset_button(GalleryLayoutPreset::Desktop))
+        .push(Space::new().width(Length::Fixed(design_tokens::SPACE_4)))
+        .push(layout_preset_button(GalleryLayoutPreset::Maximized))
+        .push(Space::new().width(Length::Fixed(design_tokens::SPACE_16)))
+        .push(layout_readout)
+        .spacing(0)
+        .align_y(Alignment::Center)
+        .wrap();
+
+    Column::new()
+        .push(width_row)
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
+        .push(layout_row)
+        .spacing(0)
+        .align_x(Alignment::Start)
         .into()
 }
 
 /// The static gallery sections (buttons, cards, bubbles, attachments, …).
 /// `btheme` is the live merged theme so the typography section reflects
 /// inspector edits (BORU-UI-16).
-fn gallery_sections(btheme: &crate::theme::BoruTheme) -> Element<'static, AppMessage> {
+///
+/// BORU-LAYOUT-09 / PDF Task 9: `layout` is the concrete [`LayoutConfig`]
+/// of the selected gallery layout preset. It drives the Layout Preview
+/// mini-home section and the component placement of the download/video
+/// cards (the layout-aware production components), so every reusable
+/// component can be inspected under different layout configurations.
+fn gallery_sections(
+    btheme: &crate::theme::BoruTheme,
+    layout: &LayoutConfig,
+    preview_width: f32,
+) -> Element<'static, AppMessage> {
+    let video_placement = layout.component.video_card;
     Column::new()
         .push(gallery_heading("Component Gallery"))
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_16)))
+        .push(gallery_section("Layout Preview (BORU-LAYOUT-09)"))
+        .push(layout_preview_gallery(layout, preview_width))
+        .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
         .push(gallery_section("Buttons"))
         .push(button_gallery())
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
@@ -302,10 +566,10 @@ fn gallery_sections(btheme: &crate::theme::BoruTheme) -> Element<'static, AppMes
         .push(message_bubble_gallery())
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
         .push(gallery_section("Attachment States (PDF Task 14)"))
-        .push(attachment_states_gallery())
+        .push(attachment_states_gallery(video_placement, preview_width))
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
         .push(gallery_section("Video Cards & Aspect Ratios (PDF Task 14)"))
-        .push(video_card_gallery())
+        .push(video_card_gallery(video_placement, preview_width))
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_24)))
         .push(gallery_section("Available Widths (PDF Task 14)"))
         .push(width_variants_gallery())
@@ -348,6 +612,135 @@ fn state_label(label: &str) -> Element<'static, AppMessage> {
     text(owned)
         .size(TypeRole::Metadata.size_px())
         .color(design_tokens::text_muted(&Theme::Light))
+        .into()
+}
+
+// ── Layout preview (BORU-LAYOUT-09 / PDF Task 9) ──────────────────────
+
+/// Split the visible home sections into the main column and the right rail
+/// the way `app/home.rs` does: the rail holds the trailing sections
+/// (PeopleActivity, Tunnels by default) and everything before them goes to
+/// the main column. Only used in grid mode; list mode stacks everything in
+/// one column.
+fn split_home_sections(
+    visible: &[HomeSection],
+) -> (Vec<HomeSection>, Vec<HomeSection>) {
+    if visible.len() > 2 {
+        let split_at = visible.len() - 2;
+        (visible[..split_at].to_vec(), visible[split_at..].to_vec())
+    } else {
+        (visible.to_vec(), Vec::new())
+    }
+}
+
+/// A representative demo card for one home-dashboard section, built from
+/// the production `CardShell` component (the Figure 3 rail).
+fn home_section_demo(section: HomeSection) -> Element<'static, AppMessage> {
+    let theme = Theme::Light;
+    let (title, rows): (&str, Vec<(&str, &str)>) = match section {
+        HomeSection::Hero => (
+            "Hero",
+            vec![("Connection", "Direct QUIC"), ("Neighbors", "5")],
+        ),
+        HomeSection::MeshHealth => (
+            "Mesh Health",
+            vec![("Peers online", "3"), ("Relay", "Healthy")],
+        ),
+        HomeSection::QuickActions => (
+            "Quick Actions",
+            vec![("New chat", "Create"), ("Share file", "Send")],
+        ),
+        HomeSection::PeopleActivity => (
+            "People & Activity",
+            vec![("Alice", "online"), ("Bob", "idle")],
+        ),
+        HomeSection::Tunnels => (
+            "Tunnels",
+            vec![("Direct", "Active"), ("Relay", "Standby")],
+        ),
+    };
+    let rows: Vec<Element<'static, AppMessage>> = rows
+        .into_iter()
+        .map(|(label, meta)| card_shell_row(label, meta))
+        .collect();
+    CardShell::new(title, rows).count(2).build(&theme)
+}
+
+/// BORU-LAYOUT-09 / PDF Task 9: preview every reusable component under the
+/// selected layout configuration. This section renders a miniature home
+/// dashboard — one demo card per home section — arranged by the live
+/// `LayoutConfig`: section order/visibility (`home.section_order` /
+/// `home.hidden_sections`), grid vs list mode (`home.mode`), the per-tier
+/// column count resolved from the simulated preview width
+/// (`responsive.home_columns`), the main/rail split
+/// (`home.grid.main_portion`/`rail_portion`), section gaps (`home.gaps`)
+/// and the responsive canvas padding (`responsive.home_padding_x`). All
+/// values come from the same [`LayoutConfig`] the real home screen uses.
+fn layout_preview_gallery(
+    layout: &LayoutConfig,
+    preview_width: f32,
+) -> Element<'static, AppMessage> {
+    let home = &layout.home;
+    let visible = home.visible_sections();
+    let columns = layout.responsive.home_columns_for_width(preview_width);
+    let grid = home.mode == HomeLayoutMode::Grid && columns >= 2;
+    let card_gap = home.gaps.card_gap;
+    let canvas_pad_x = layout.responsive.home_padding_x_for_width(preview_width);
+
+    let body: Element<'static, AppMessage> = if grid {
+        let (main, rail) = split_home_sections(&visible);
+        let main_col = Column::new()
+            .spacing(card_gap)
+            .extend(main.iter().copied().map(home_section_demo))
+            .width(Length::FillPortion(home.grid.main_portion));
+        let rail_col = Column::new()
+            .spacing(card_gap)
+            .extend(rail.iter().copied().map(home_section_demo))
+            .width(Length::FillPortion(home.grid.rail_portion));
+        Row::new()
+            .push(main_col)
+            .push(Space::new().width(Length::Fixed(home.grid.column_gap)))
+            .push(rail_col)
+            .spacing(0)
+            .align_y(Alignment::Start)
+            .into()
+    } else {
+        Column::new()
+            .spacing(card_gap)
+            .extend(visible.iter().copied().map(home_section_demo))
+            .into()
+    };
+
+    let summary = format!(
+        "{} · {} col · gap {}px · pad {}px · {} sections",
+        if grid { "grid" } else { "list" },
+        columns,
+        card_gap as u32,
+        canvas_pad_x as u32,
+        visible.len(),
+    );
+
+    Column::new()
+        .push(state_label(&summary))
+        .push(
+            Space::new()
+                .width(Length::Shrink)
+                .height(Length::Fixed(4.0)),
+        )
+        .push(
+            container(body)
+                .padding(iced::Padding {
+                    top: home.padding.top,
+                    right: canvas_pad_x,
+                    bottom: home.padding.bottom,
+                    left: canvas_pad_x,
+                })
+                .width(Length::Fill)
+                .max_width(home.max_content_width)
+                .style(design_tokens::card_style),
+        )
+        .spacing(0)
+        .width(Length::Fill)
         .into()
 }
 
@@ -2225,9 +2618,17 @@ fn attachment_fixture(
 }
 
 /// Render one production download card inside a labelled frame.
+///
+/// BORU-LAYOUT-09: `placement` comes from the selected gallery layout
+/// preset's `component.video_card` (the same leaf the real chat log uses),
+/// so the card preview responds to layout configuration; `timeline_width`
+/// is the simulated preview width so the card also responds to the width
+/// preset (Compact vs Full control layouts).
 fn attachment_card(
     label: &str,
     attachment: &DownloadAttachment,
+    placement: ComponentPlacement,
+    timeline_width: f32,
 ) -> Element<'static, AppMessage> {
     let card = view_download_progress(
         0,
@@ -2235,10 +2636,8 @@ fn attachment_card(
         false,
         false,
         Some(1_752_000_000_000),
-        640.0,
-        // BORU-LAYOUT-05: the gallery shows the production component with
-        // its default placement.
-        crate::layout::ComponentPlacement::video_card_default(),
+        timeline_width,
+        placement,
     );
     Column::new()
         .push(state_label(label))
@@ -2253,7 +2652,10 @@ fn attachment_card(
         .into()
 }
 
-fn attachment_states_gallery() -> Element<'static, AppMessage> {
+fn attachment_states_gallery(
+    placement: ComponentPlacement,
+    timeline_width: f32,
+) -> Element<'static, AppMessage> {
     let pending = attachment_fixture(
         TransferKind::File,
         "QuarterlyReport.pdf",
@@ -2311,19 +2713,44 @@ fn attachment_states_gallery() -> Element<'static, AppMessage> {
     );
 
     Column::new()
-        .push(attachment_card("File — pending (Ready)", &pending))
+        .push(attachment_card("File — pending (Ready)", &pending, placement, timeline_width))
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
-        .push(attachment_card("File — downloading (Active)", &downloading))
+        .push(attachment_card(
+            "File — downloading (Active)",
+            &downloading,
+            placement,
+            timeline_width,
+        ))
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
-        .push(attachment_card("File — downloaded (Completed)", &downloaded))
+        .push(attachment_card(
+            "File — downloaded (Completed)",
+            &downloaded,
+            placement,
+            timeline_width,
+        ))
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
-        .push(attachment_card("File — error (Failed)", &error))
+        .push(attachment_card("File — error (Failed)", &error, placement, timeline_width))
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
-        .push(attachment_card("Image — pending", &image_pending))
+        .push(attachment_card(
+            "Image — pending",
+            &image_pending,
+            placement,
+            timeline_width,
+        ))
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
-        .push(attachment_card("Image — downloading", &image_downloading))
+        .push(attachment_card(
+            "Image — downloading",
+            &image_downloading,
+            placement,
+            timeline_width,
+        ))
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
-        .push(attachment_card("Image — downloaded", &image_downloaded))
+        .push(attachment_card(
+            "Image — downloaded",
+            &image_downloaded,
+            placement,
+            timeline_width,
+        ))
         .spacing(0)
         .into()
 }
@@ -2341,7 +2768,10 @@ fn video_fixture(
     att
 }
 
-fn video_card_gallery() -> Element<'static, AppMessage> {
+fn video_card_gallery(
+    placement: ComponentPlacement,
+    timeline_width: f32,
+) -> Element<'static, AppMessage> {
     let ready_16_9 = video_fixture(
         "presentation-recording.mp4",
         (1920, 1080),
@@ -2389,19 +2819,34 @@ fn video_card_gallery() -> Element<'static, AppMessage> {
 
     Column::new()
         .push(state_label("16:9 — ready to play"))
-        .push(attachment_card("16:9 (1920×1080)", &ready_16_9))
+        .push(attachment_card("16:9 (1920×1080)", &ready_16_9, placement, timeline_width))
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
         .push(state_label("Square — ready to play"))
-        .push(attachment_card("Square (1080×1080)", &ready_square))
+        .push(attachment_card(
+            "Square (1080×1080)",
+            &ready_square,
+            placement,
+            timeline_width,
+        ))
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
         .push(state_label("Vertical — ready to play"))
-        .push(attachment_card("Vertical (1080×1920)", &ready_vertical))
+        .push(attachment_card(
+            "Vertical (1080×1920)",
+            &ready_vertical,
+            placement,
+            timeline_width,
+        ))
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
         .push(state_label("Downloading (progress)"))
-        .push(attachment_card("Downloading", &downloading))
+        .push(attachment_card(
+            "Downloading",
+            &downloading,
+            placement,
+            timeline_width,
+        ))
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_8)))
         .push(state_label("Error (failed)"))
-        .push(attachment_card("Error", &error))
+        .push(attachment_card("Error", &error, placement, timeline_width))
         .spacing(0)
         .into()
 }
@@ -2546,17 +2991,127 @@ mod tests {
     /// tree without panicking. Building the tree is pure construction (no
     /// renderer, no layout) so this is a cheap guard against regressions in
     /// the fixture builders and production-component wiring.
+    ///
+    /// BORU-LAYOUT-09: the gallery also builds under every layout-config
+    /// preset, since each preset changes the concrete `LayoutConfig` the
+    /// sections are threaded with.
     #[test]
     fn all_gallery_sections_build() {
         let btheme = crate::theme::BoruTheme::default();
-        let _ = view_gallery(&GalleryState::default(), 1280.0, &btheme);
-        let _ = gallery_sections(&btheme);
+        for layout_preset in GalleryLayoutPreset::ALL {
+            let state = GalleryState {
+                layout_preset,
+                ..GalleryState::default()
+            };
+            let _ = view_gallery(&state, 1280.0, &btheme);
+        }
+        let layout = GalleryLayoutPreset::Desktop.layout_config();
+        let _ = gallery_sections(&btheme, &layout, 960.0);
         let _ = name_variants_gallery();
         let _ = message_bubble_gallery();
-        let _ = attachment_states_gallery();
-        let _ = video_card_gallery();
+        let _ = attachment_states_gallery(layout.component.video_card, 960.0);
+        let _ = video_card_gallery(layout.component.video_card, 960.0);
         let _ = width_variants_gallery();
         let _ = state_variants_gallery();
+    }
+
+    /// BORU-LAYOUT-09 / PDF Task 9: every layout preset resolves to a
+    /// concrete `LayoutConfig` — through the same merge path
+    /// `boru-layout.toml` uses — with the expected structural leaves.
+    /// `Default` reproduces the current appearance exactly.
+    #[test]
+    fn gallery_layout_presets_map_to_expected_configs() {
+        assert_eq!(
+            GalleryLayoutPreset::Default.layout_config(),
+            LayoutConfig::default(),
+            "Default preset is the current appearance"
+        );
+
+        // Narrow: list mode, single column at every width, tight gaps and
+        // the Tunnels section hidden.
+        let narrow = GalleryLayoutPreset::Narrow.layout_config();
+        assert_eq!(narrow.home.mode, HomeLayoutMode::List);
+        assert_eq!(
+            narrow.responsive.home_columns,
+            ByTier {
+                narrow: 1,
+                desktop: 1,
+                ultra_wide: 1,
+            }
+        );
+        assert_eq!(narrow.home.gaps.card_gap, 12.0);
+        assert!(narrow.home.hidden_sections.contains(&HomeSection::Tunnels));
+        assert_eq!(narrow.responsive.home_columns_for_width(1440.0), 1);
+
+        // Desktop: two-column grid at desktop+ widths and a side-placement
+        // video card (thumbnail left, horizontal, side buttons).
+        let desktop = GalleryLayoutPreset::Desktop.layout_config();
+        assert_eq!(desktop.home.mode, HomeLayoutMode::Grid);
+        assert_eq!(desktop.responsive.home_columns_for_width(960.0), 2);
+        assert_eq!(
+            desktop.component.video_card.thumbnail_position,
+            ThumbnailPosition::Left
+        );
+        assert_eq!(
+            desktop.component.video_card.card_orientation,
+            CardOrientation::Horizontal
+        );
+        assert_eq!(
+            desktop.component.video_card.button_placement,
+            ButtonPlacement::Side
+        );
+
+        // Maximized: wider responsive padding at ultra-wide widths and a
+        // three-column ultra-wide tier.
+        let maximized = GalleryLayoutPreset::Maximized.layout_config();
+        assert_eq!(maximized.responsive.home_padding_x_for_width(1440.0), 40.0);
+        assert_eq!(maximized.responsive.home_columns_for_width(1440.0), 3);
+    }
+
+    /// BORU-LAYOUT-09: the Layout Preview mini-home builds without
+    /// panicking for every layout preset at every width preset (narrow,
+    /// desktop, maximized) — the acceptance criteria's "every reusable
+    /// component previews under different layout configurations".
+    #[test]
+    fn layout_preview_builds_for_every_preset_and_width() {
+        for layout_preset in GalleryLayoutPreset::ALL {
+            let layout = layout_preset.layout_config();
+            for width in [360.0, 960.0, 1440.0] {
+                let _ = layout_preview_gallery(&layout, width);
+            }
+        }
+    }
+
+    /// BORU-LAYOUT-09: the main/rail split keeps the trailing sections
+    /// (PeopleActivity, Tunnels) in the rail and everything before them in
+    /// the main column, mirroring `app/home.rs`.
+    #[test]
+    fn home_section_split_matches_home_rail() {
+        let order = vec![
+            HomeSection::Hero,
+            HomeSection::MeshHealth,
+            HomeSection::QuickActions,
+            HomeSection::PeopleActivity,
+            HomeSection::Tunnels,
+        ];
+        let (main, rail) = split_home_sections(&order);
+        assert_eq!(
+            main,
+            vec![
+                HomeSection::Hero,
+                HomeSection::MeshHealth,
+                HomeSection::QuickActions,
+            ]
+        );
+        assert_eq!(rail, vec![HomeSection::PeopleActivity, HomeSection::Tunnels]);
+
+        // One or two sections: everything in the main column, empty rail.
+        let (main, rail) = split_home_sections(&[
+            HomeSection::Hero,
+            HomeSection::MeshHealth,
+        ]);
+        assert_eq!(main, vec![HomeSection::Hero, HomeSection::MeshHealth]);
+        assert!(rail.is_empty());
     }
 
     /// BORU-UI-15: the responsive preview presets map to the three required
@@ -2580,18 +3135,21 @@ mod tests {
         let state = GalleryState {
             preset: GalleryWidthPreset::Custom,
             custom_width: 5000.0,
+            ..GalleryState::default()
         };
         assert_eq!(state.width(), CUSTOM_WIDTH_MAX);
 
         let state = GalleryState {
             preset: GalleryWidthPreset::Custom,
             custom_width: 1.0,
+            ..GalleryState::default()
         };
         assert_eq!(state.width(), CUSTOM_WIDTH_MIN);
 
         let state = GalleryState {
             preset: GalleryWidthPreset::Custom,
             custom_width: 777.0,
+            ..GalleryState::default()
         };
         assert_eq!(state.width(), 777.0);
     }
@@ -2609,6 +3167,7 @@ mod tests {
         let state = GalleryState {
             preset: GalleryWidthPreset::Maximized,
             custom_width: 0.0,
+            ..GalleryState::default()
         };
         assert!(effective_preview_width(&state, 1200.0) < 1200.0);
         assert_eq!(effective_preview_width(&state, 1200.0), 1104.0);
