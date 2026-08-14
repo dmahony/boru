@@ -417,15 +417,20 @@ impl IcedChat {
                 if self.screen_share_control_active {
                     // Fixed 640x360 box matches the capture aspect exactly, so
                     // the mouse_area Point maps 1:1 to normalized coordinates.
+                    // Hoist the Copy dimensions into locals: the on_move
+                    // closure is returned as part of the widget, so it must
+                    // not borrow the function-local `btheme` (E0373).
+                    let screen_share_w = btheme.chat.screen_share_w;
+                    let screen_share_h = btheme.chat.screen_share_h;
                     let image = iced::widget::Image::new(handle.clone())
-                        .width(Length::Fixed(btheme.chat.screen_share_w))
-                        .height(Length::Fixed(btheme.chat.screen_share_h))
+                        .width(Length::Fixed(screen_share_w))
+                        .height(Length::Fixed(screen_share_h))
                         .content_fit(iced::ContentFit::Contain);
                     let last = self.screen_share_last_pointer_pos.unwrap_or((0.0, 0.0));
                     iced::widget::mouse_area(image)
-                        .on_move(|pos| AppMessage::ScreenSharePointerMove {
-                            x: (pos.x / btheme.chat.screen_share_w).clamp(0.0, 1.0),
-                            y: (pos.y / btheme.chat.screen_share_h).clamp(0.0, 1.0),
+                        .on_move(move |pos| AppMessage::ScreenSharePointerMove {
+                            x: (pos.x / screen_share_w).clamp(0.0, 1.0),
+                            y: (pos.y / screen_share_h).clamp(0.0, 1.0),
                         })
                         .on_press(AppMessage::ScreenSharePointerButton {
                             x: last.0,
