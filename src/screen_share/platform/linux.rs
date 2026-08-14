@@ -36,6 +36,10 @@ use crate::screen_share::{
     capture::FrameSink, CapturedFrame, PixelFormat, ScreenCapture, ScreenShareError,
     TestPatternCapture,
 };
+use super::linux_pw::{
+    build_format_pod, normalize_buffer, parse_format_pod, NegotiatedFormat, SPA_PARAM_Buffers,
+    SPA_PARAM_Format,
+};
 use x11rb::connection::Connection as _;
 use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat, ImageOrder};
 
@@ -444,23 +448,8 @@ pub fn detect_desktop_environment() -> DesktopEnvironment {
 // The PipeWire client is dlopen'd at runtime; all PipeWire objects live on a
 // dedicated thread so raw pointers never cross threads.
 
-/// Format state negotiated with the PipeWire stream. Read by the main thread.
-#[derive(Debug, Clone, Copy)]
-struct NegotiatedFormat {
-    width: u32,
-    height: u32,
-    pixel_format: PixelFormat,
-}
-
-impl Default for NegotiatedFormat {
-    fn default() -> Self {
-        Self {
-            width: 0,
-            height: 0,
-            pixel_format: PixelFormat::Bgra8,
-        }
-    }
-}
+// Negotiated stream geometry + wire layout live in `linux_pw::NegotiatedFormat`
+// (pure, unit-testable, shared with the future DMA-BUF path).
 
 /// The real Linux capture backend: portal consent + PipeWire stream.
 ///
@@ -516,8 +505,8 @@ impl LinuxPortalCapture {
             .await
             .map_err(|e| {
                 let _ = machine.on_failure(SessionFailure::NoSessionBus);
-                ScreenShareError::new(format!(
-                    "no session bus (session={session_type:?}, desktop={environment:?}): {e}"
+                ScreenShareError::missing_portal(format!(
+                    "no session bus — is xdg-desktop-portal available in this desktop session? (session={session_type:?}, desktop={environment:?}): {e}"
                 ))
             })?;
         let portal = (
@@ -839,14 +828,11 @@ impl ScreenCapture for LinuxPortalCapture {
         }
         if let Some(frame) = &latest {
             let mut fmt = self.format.lock().unwrap();
-            if fmt.width == 0 {
-                *fmt = NegotiatedFormat {
-                    width: frame.width,
-                    height: frame.height,
-                    pixel_format: frame.pixel_format,
-                };
-            }
-            if fmt.width != frame.width || fmt.height != frame.height {
+            // The wire layout is recorded by the stream's param callback;
+            // here we only track the normalized geometry for codec
+            // configuration. The first frame seeds the size; later frames
+            // with a different size model a display resolution change.
+            if fmt.width == 0 || fmt.width != frame.width || fmt.height != frame.height {
                 fmt.width = frame.width;
                 fmt.height = frame.height;
             }
@@ -1031,8 +1017,11 @@ impl PipeWireClient {
         // stream events borrow the same context for their whole lifetime,
         // which ends when the loop quits.
         unsafe {
-            let library = libloading::Library::new(PW_LIB)
-                .map_err(|e| ScreenShareError::new(format!("cannot load {PW_LIB}: {e}")))?;
+            let library = libloading::Library::new(PW_LIB).map_err(|e| {
+                ScreenShareError::missing_pipewire(format!(
+                    "cannot load {PW_LIB} — install PipeWire (e.g. `apt install pipewire`) or run inside a desktop session that provides it: {e}"
+                ))
+            })?;
             let pw = Pw::load(&library)?;
             let mut argc = 0i32;
             let mut argv: *mut *mut c_char = std::ptr::null_mut();
@@ -1040,25 +1029,29 @@ impl PipeWireClient {
 
             let main_loop = (pw.main_loop_new)(std::ptr::null());
             if main_loop.is_null() {
-                return Err(ScreenShareError::new("pw_main_loop_new failed"));
+                return Err(ScreenShareError::pipewire_connect(
+                    "pw_main_loop_new failed (PipeWire runtime problem)",
+                ));
             }
             let loop_ = (pw.main_loop_get_loop)(main_loop);
             let context = (pw.context_new)(loop_, std::ptr::null(), 0);
             if context.is_null() {
                 (pw.main_loop_destroy)(main_loop);
-                return Err(ScreenShareError::new("pw_context_new failed"));
+                return Err(ScreenShareError::pipewire_connect(
+                    "pw_context_new failed (PipeWire runtime problem)",
+                ));
             }
             let core = (pw.context_connect)(context, std::ptr::null_mut(), 0);
             if core.is_null() {
                 (pw.context_destroy)(context);
                 (pw.main_loop_destroy)(main_loop);
-                return Err(ScreenShareError::new(
-                    "pw_context_connect failed (is PipeWire running?)",
+                return Err(ScreenShareError::pipewire_connect(
+                    "pw_context_connect failed — no PipeWire server reachable (is `pipewire` running in this session?)",
                 ));
             }
 
             let props = make_stream_properties(&pw)?;
-            let params = build_format_params();
+            let params = build_format_pod();
 
             let ctx = Box::into_raw(Box::new(PipeWireCtx {
                 library,
@@ -1103,12 +1096,16 @@ impl PipeWireClient {
                 ((*ctx).pw.properties_free)(props);
                 drop(Box::from_raw(user_data));
                 drop(Box::from_raw(ctx));
-                return Err(ScreenShareError::new("pw_stream_new_simple failed"));
+                return Err(ScreenShareError::pipewire_connect(
+                    "pw_stream_new_simple failed (PipeWire runtime problem)",
+                ));
             }
             (*ctx).stream = stream;
 
-            // Advertise the formats we can consume: BGRx (preferred), BGRA,
-            // RGBA. The portal converts its native format to one of these.
+            // Advertise the formats we can consume (BGRx/RGBx/BGRA/RGBA and
+            // the 24-bit BGR/RGB, in preference order — see
+            // linux_pw::advertised_format_ids). The portal converts its
+            // native format to one of these.
             let flags = PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS;
             let result = ((*ctx).pw.stream_connect)(
                 stream,
@@ -1122,8 +1119,8 @@ impl PipeWireClient {
                 ((*ctx).pw.stream_destroy)(stream);
                 drop(Box::from_raw(user_data));
                 drop(Box::from_raw(ctx));
-                return Err(ScreenShareError::new(format!(
-                    "pw_stream_connect failed: {result}"
+                return Err(ScreenShareError::pipewire_connect(format!(
+                    "pw_stream_connect failed ({result}) — the portal node {node_id} could not be linked; is the portal stream still alive?"
                 )));
             }
 
@@ -1241,29 +1238,69 @@ unsafe extern "C" fn stream_state_changed(
     let _ = data;
 }
 
+/// Read a SPA pod as a byte slice for the duration of a stream callback.
+/// The declared body size is clamped so a corrupt pod cannot produce an
+/// unbounded slice.
+unsafe fn pod_bytes(param: *const c_void) -> Option<&'static [u8]> {
+    if param.is_null() {
+        return None;
+    }
+    let head = std::slice::from_raw_parts(param as *const u8, 8);
+    let total = u32::from_le_bytes(head[0..4].try_into().ok()?) as usize;
+    if total > 65536 {
+        return None;
+    }
+    Some(std::slice::from_raw_parts(param as *const u8, 8 + total))
+}
+
+// SPA_PARAM_* names mirror PipeWire's C enum (SPA_PARAM_Format, ...).
+#[allow(non_upper_case_globals)]
 unsafe extern "C" fn stream_param_changed(
     data: *mut c_void,
     id: u32,
     param: *const c_void,
 ) {
-    // SPA_PARAM_Format (4) carries the negotiated geometry/format.
-    if id != 4 || param.is_null() {
-        return;
-    }
     let user = data as *mut StreamUserData;
-    let Some((width, height, pixel_format)) = parse_format_pod(param) else {
-        return;
-    };
-    let mut fmt = (*user).format.lock().unwrap();
-    if fmt.width != width || fmt.height != height || fmt.pixel_format != pixel_format {
-        *fmt = NegotiatedFormat {
-            width,
-            height,
-            pixel_format,
-        };
-        let _ = (*user)
-            .event_tx
-            .try_send(PortalEvent::FormatChanged { width, height });
+    match id {
+        // SPA_PARAM_Format (4) carries the negotiated geometry/format. The
+        // portal re-sends it whenever the display resolution changes; each
+        // real change bumps the negotiation generation and emits
+        // FormatChanged so consumers can react (the host loop reconfigures
+        // the encoder from the frame geometry; this event is diagnostics +
+        // the generation counter).
+        SPA_PARAM_Format => {
+            let Some(bytes) = pod_bytes(param) else { return; };
+            let Some((width, height, layout)) = parse_format_pod(bytes) else {
+                return;
+            };
+            let mut fmt = (*user).format.lock().unwrap();
+            if fmt.width != width || fmt.height != height || fmt.layout != layout {
+                *fmt = NegotiatedFormat {
+                    width,
+                    height,
+                    layout,
+                    generation: fmt.generation.saturating_add(1),
+                };
+                tracing::info!(
+                    generation = fmt.generation,
+                    width,
+                    height,
+                    ?layout,
+                    "screen-share: pipewire stream renegotiated format"
+                );
+                let _ = (*user)
+                    .event_tx
+                    .try_send(PortalEvent::FormatChanged { width, height });
+            }
+        }
+        // SPA_PARAM_Buffers (5) is sent when PipeWire (re)allocates buffers
+        // for a new negotiated format. Buffers are copied out immediately in
+        // process(), so there is nothing to track; log for renegotiation
+        // diagnostics.
+        SPA_PARAM_Buffers => {
+            tracing::debug!("screen-share: pipewire buffers (re)allocated");
+        }
+        _ => {}
     }
 }
 
@@ -1279,34 +1316,48 @@ unsafe extern "C" fn stream_process(data: *mut c_void) {
     if !spa.is_null() && (*spa).n_datas > 0 {
         let dat = (*spa).datas;
         if !dat.is_null() && !(*dat).data.is_null() {
+            // CPU-mapped path: with PW_STREAM_FLAG_MAP_BUFFERS the data
+            // pointer is a valid CPU address for the whole mapped region
+            // (maxsize), whatever the backing memory type. A future DMA-BUF
+            // path reads (*dat).type_ == SPA_DATA_DmaBuf and (*dat).fd
+            // instead, and delivers a CapturedFrame with gpu_handle set.
             let chunk = (*dat).chunk;
             let offset = if chunk.is_null() { 0 } else { (*chunk).offset as usize };
-            let size = if chunk.is_null() || (*chunk).size == 0 {
-                (*dat).maxsize as usize
-            } else {
-                (*chunk).size as usize
-            };
-            let src = std::slice::from_raw_parts((*dat).data as *const u8, size);
-            let payload = src[offset.min(size)..].to_vec();
+            let stride = if chunk.is_null() { 0 } else { (*chunk).stride };
+            // SAFETY: `data` is a valid CPU mapping of maxsize bytes for the
+            // duration of the callback (MAP_BUFFERS guarantees this); the
+            // slice is only read by normalize_buffer, which bounds-checks.
+            let src = std::slice::from_raw_parts((*dat).data as *const u8, (*dat).maxsize as usize);
             let fmt = *(*user).format.lock().unwrap();
             if fmt.width > 0 && fmt.height > 0 {
-                let expected = fmt.width as usize * fmt.height as usize * 4;
-                if payload.len() >= expected {
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_micros() as u64;
-                    let frame = CapturedFrame {
-                        timestamp_us: now,
-                        width: fmt.width,
-                        height: fmt.height,
-                        pixel_format: fmt.pixel_format,
-                        stride: fmt.width * 4,
-                        pixels: payload[..expected].to_vec(),
-                        gpu_handle: None,
-                        dirty_region: None,
-                    };
-                    let _ = (*user).frame_tx.try_send(frame);
+                match normalize_buffer(src, offset, fmt.width, fmt.height, fmt.layout, stride) {
+                    Ok(pixels) => {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_micros() as u64;
+                        match CapturedFrame::cpu(
+                            now,
+                            fmt.width,
+                            fmt.height,
+                            fmt.layout.to_pixel_format(),
+                            pixels,
+                        ) {
+                            Ok(frame) => {
+                                let _ = (*user).frame_tx.try_send(frame);
+                            }
+                            Err(error) => {
+                                tracing::debug!(error = %error, "screen-share: pipewire frame rejected");
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        // A buffer that does not match the current negotiated
+                        // geometry (e.g. a stale buffer from before a
+                        // resolution-change renegotiation) is dropped; the
+                        // next buffer carries the new format.
+                        tracing::debug!(error = %error, "screen-share: pipewire buffer dropped");
+                    }
                 }
             }
         }
@@ -1319,160 +1370,10 @@ const PW_DIRECTION_INPUT: u32 = 0;
 const PW_STREAM_FLAG_AUTOCONNECT: u32 = 1 << 0;
 const PW_STREAM_FLAG_MAP_BUFFERS: u32 = 1 << 2;
 
-// SPA pod/type constants (spa/include/spa/param/param-types.h,
-// spa/include/spa/param/format.h, spa/include/spa/param/video/raw.h).
-const SPA_TYPE_Object: u32 = 16;
-const SPA_TYPE_Id: u32 = 3;
-const SPA_TYPE_Choice: u32 = 20;
-const SPA_TYPE_Rectangle: u32 = 10;
-const SPA_POD_OBJECT_TYPE_Format: u32 = 4;
-const SPA_FORMAT_mediaType: u32 = 0x10001;
-const SPA_FORMAT_mediaSubtype: u32 = 0x10002;
-const SPA_FORMAT_VIDEO_format: u32 = 0x20001;
-const SPA_FORMAT_VIDEO_size: u32 = 0x20003;
-const SPA_MEDIA_TYPE_VIDEO: u32 = 1;
-const SPA_MEDIA_SUBTYPE_RAW: u32 = 1;
-const SPA_VIDEO_FORMAT_BGRx: u32 = 7;
-const SPA_VIDEO_FORMAT_RGBA: u32 = 10;
-const SPA_VIDEO_FORMAT_BGRA: u32 = 11;
-
-/// Map a negotiated SPA video format id to the CPU pixel format we encode.
-fn spa_format_to_pixel_format(format_id: u32) -> Option<PixelFormat> {
-    match format_id {
-        SPA_VIDEO_FORMAT_BGRx | SPA_VIDEO_FORMAT_BGRA => Some(PixelFormat::Bgra8),
-        SPA_VIDEO_FORMAT_RGBA => Some(PixelFormat::Rgba8),
-        _ => None,
-    }
-}
-
-/// Build the SPA format object pod advertising BGRx/BGRA/RGBA.
-///
-/// Layout (all little-endian, 8-byte aligned):
-///   pod header { u32 body_size, u32 type = Object }
-///   object body { u32 type = ParamFormat, u32 id = Format }
-///   prop { u32 key, u32 flags, pod value }
-fn build_format_params() -> Vec<u8> {
-    let mut pod: Vec<u8> = Vec::new();
-    // Placeholder header: size patched once the body is known.
-    pod.extend_from_slice(&[0, 0, 0, 0]);
-    pod.extend_from_slice(&SPA_TYPE_Object.to_le_bytes());
-    pod.extend_from_slice(&SPA_POD_OBJECT_TYPE_Format.to_le_bytes());
-    pod.extend_from_slice(&4u32.to_le_bytes()); // id = SPA_PARAM_Format
-    push_prop_id(&mut pod, SPA_FORMAT_mediaType, SPA_MEDIA_TYPE_VIDEO);
-    push_prop_id(&mut pod, SPA_FORMAT_mediaSubtype, SPA_MEDIA_SUBTYPE_RAW);
-    push_prop_choice_id(
-        &mut pod,
-        SPA_FORMAT_VIDEO_format,
-        &[SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRA, SPA_VIDEO_FORMAT_RGBA],
-    );
-    push_prop_rectangle(&mut pod, SPA_FORMAT_VIDEO_size, 640, 360);
-    let body_size = pod.len() as u32 - 8;
-    pod[0..4].copy_from_slice(&body_size.to_le_bytes());
-    pod
-}
-
-fn push_prop_id(pod: &mut Vec<u8>, key: u32, value: u32) {
-    pod.extend_from_slice(&key.to_le_bytes());
-    pod.extend_from_slice(&0u32.to_le_bytes()); // flags
-    pod.extend_from_slice(&4u32.to_le_bytes()); // value pod body size
-    pod.extend_from_slice(&SPA_TYPE_Id.to_le_bytes());
-    pod.extend_from_slice(&value.to_le_bytes());
-    pod.extend_from_slice(&0u32.to_le_bytes()); // value padding
-}
-
-fn push_prop_rectangle(pod: &mut Vec<u8>, key: u32, width: u32, height: u32) {
-    pod.extend_from_slice(&key.to_le_bytes());
-    pod.extend_from_slice(&0u32.to_le_bytes()); // flags
-    pod.extend_from_slice(&8u32.to_le_bytes()); // value pod body size
-    pod.extend_from_slice(&SPA_TYPE_Rectangle.to_le_bytes());
-    pod.extend_from_slice(&width.to_le_bytes());
-    pod.extend_from_slice(&height.to_le_bytes());
-}
-
-fn push_prop_choice_id(pod: &mut Vec<u8>, key: u32, values: &[u32]) {
-    let n = values.len();
-    // Choice body: kind + flags + child Id pod + alternative values.
-    let value_body = 16 + 4 * n;
-    pod.extend_from_slice(&key.to_le_bytes());
-    pod.extend_from_slice(&0u32.to_le_bytes()); // flags
-    pod.extend_from_slice(&(value_body as u32).to_le_bytes());
-    pod.extend_from_slice(&SPA_TYPE_Choice.to_le_bytes());
-    pod.extend_from_slice(&0u32.to_le_bytes()); // choice type: Enum
-    pod.extend_from_slice(&0u32.to_le_bytes()); // choice flags
-    pod.extend_from_slice(&4u32.to_le_bytes()); // child pod size
-    pod.extend_from_slice(&SPA_TYPE_Id.to_le_bytes());
-    pod.extend_from_slice(&values[0].to_le_bytes()); // default = first format
-    for v in &values[1..] {
-        pod.extend_from_slice(&v.to_le_bytes());
-    }
-    // The value pod is 8-byte aligned before the next property.
-    while pod.len() % 8 != 0 {
-        pod.push(0);
-    }
-}
-
-/// Parse a SPA format object pod into (width, height, pixel_format).
-fn parse_format_pod(pod: *const c_void) -> Option<(u32, u32, PixelFormat)> {
-    if pod.is_null() {
-        return None;
-    }
-    // SAFETY: the pod is owned by PipeWire and stays valid for the callback.
-    let head = unsafe { std::slice::from_raw_parts(pod as *const u8, 8) };
-    if head.len() < 8 || u32::from_le_bytes(head[4..8].try_into().ok()?) != SPA_TYPE_Object {
-        return None;
-    }
-    let total = u32::from_le_bytes(head[0..4].try_into().ok()?) as usize;
-    // Clamp reads to the declared pod body so a short pod cannot overrun.
-    let body = unsafe { std::slice::from_raw_parts(pod.add(8) as *const u8, total) };
-    if body.len() < 8 {
-        return None;
-    }
-    // body[0..4] = object type (ParamFormat), body[4..8] = id; props follow.
-    let mut offset = 8usize;
-    let mut format_id: Option<u32> = None;
-    let mut size: Option<(u32, u32)> = None;
-    while offset + 16 <= body.len() {
-        let key = u32::from_le_bytes(body[offset..offset + 4].try_into().ok()?);
-        let value_body_size =
-            u32::from_le_bytes(body[offset + 8..offset + 12].try_into().ok()?) as usize;
-        let value_type = u32::from_le_bytes(body[offset + 12..offset + 16].try_into().ok()?);
-        // Value pod header: body size at offset+16, type at offset+20, data at
-        // offset+20; value data starts at offset+16.
-        let value_data = &body[offset + 16..];
-        match (key, value_type) {
-            (SPA_FORMAT_VIDEO_format, SPA_TYPE_Choice) => {
-                // choice body: type(4) flags(4) child pod(size+type) value...
-                // The chosen value is the child pod value (offset 16 within the
-                // choice value) when the child is an Id.
-                if value_body_size >= 20 && value_data.len() >= 20 {
-                    let child_type = u32::from_le_bytes(value_data[12..16].try_into().ok()?);
-                    if child_type == SPA_TYPE_Id {
-                        format_id = Some(u32::from_le_bytes(value_data[16..20].try_into().ok()?));
-                    }
-                }
-            }
-            (SPA_FORMAT_VIDEO_format, SPA_TYPE_Id) => {
-                if value_data.len() >= 4 {
-                    format_id = Some(u32::from_le_bytes(value_data[0..4].try_into().ok()?));
-                }
-            }
-            (SPA_FORMAT_VIDEO_size, SPA_TYPE_Rectangle) => {
-                if value_data.len() >= 8 {
-                    let w = u32::from_le_bytes(value_data[0..4].try_into().ok()?);
-                    let h = u32::from_le_bytes(value_data[4..8].try_into().ok()?);
-                    size = Some((w, h));
-                }
-            }
-            _ => {}
-        }
-        let value_pod_size = (8 + value_body_size + 7) & !7;
-        offset += 8 + value_pod_size;
-    }
-    let format_id = format_id?;
-    let (width, height) = size?;
-    let pixel_format = spa_format_to_pixel_format(format_id)?;
-    Some((width, height, pixel_format))
-}
+// SPA pod/type constants, the format advertisement pod builder, the
+// negotiated-format parser, and the CPU buffer normalization now live in
+// `linux_pw` (pure + unit-testable). The stream callbacks above use
+// `parse_format_pod` / `normalize_buffer` from there.
 
 /// Extract the first stream node id from a portal Start reply body.
 ///
@@ -1796,6 +1697,7 @@ pub const CAPTURE_FPS: u32 = DEMO_FPS;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::screen_share::platform::linux_pw;
 
     /// Drive a machine into the requested phase (used by teardown tests).
     fn machine_in_phase(phase: SessionPhase) -> PortalSessionMachine {
@@ -2016,15 +1918,18 @@ mod tests {
 
     #[test]
     fn format_pod_builder_produces_parsable_object() {
-        let pod = build_format_params();
+        let pod = build_format_pod();
         assert!(pod.len() > 32);
         // Header: body size + Object type.
-        assert_eq!(u32::from_le_bytes(pod[4..8].try_into().unwrap()), SPA_TYPE_Object);
-        let parsed = parse_format_pod(pod.as_ptr() as *const c_void);
+        assert_eq!(
+            u32::from_le_bytes(pod[4..8].try_into().unwrap()),
+            linux_pw::SPA_TYPE_Object
+        );
+        let parsed = parse_format_pod(&pod);
         // The pod advertises BGRx first; parse returns the first value.
-        let (width, height, pixel_format) = parsed.expect("pod must parse");
+        let (width, height, layout) = parsed.expect("pod must parse");
         assert_eq!((width, height), (640, 360));
-        assert_eq!(pixel_format, PixelFormat::Bgra8);
+        assert_eq!(layout, linux_pw::PwPixelLayout::Bgra8);
     }
 
     #[test]
@@ -2055,7 +1960,8 @@ mod tests {
 
     #[test]
     fn parse_rejects_non_object_pod() {
-        assert!(parse_format_pod(std::ptr::null()).is_none());
+        assert!(parse_format_pod(&[]).is_none());
+        assert!(parse_format_pod(&[0, 0, 0, 0, 1, 0, 0, 0]).is_none());
     }
 
     #[test]

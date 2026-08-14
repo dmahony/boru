@@ -120,7 +120,56 @@ wlroots compositor such as sway):
 4. Deny the picker on purpose and confirm the portal reports the rejection
    code in the error message.
 
-## 5. Licensing note
+## 5. PipeWire frame ingestion (BORU-SS-14 / PDF Task 5.2)
+
+What was implemented:
+
+- The dlopen PipeWire client now advertises and negotiates the common
+  RGB/BGR formats explicitly (BGRx, RGBx, BGRA, RGBA, BGR24, RGB24 in
+  preference order) via a corrected SPA format pod (the previous constants
+  did not match PipeWire's headers and would have been rejected at
+  `pw_stream_connect` / never parsed). The pod builder/parser, layout
+  mapping, and CPU row-copy live in the pure `platform/linux_pw.rs` module.
+- Frames are copied CPU-side honouring the chunk stride (row padding
+  dropped; 24-bit BGR/RGB expanded to BGRA8/RGBA8), so padded or
+  non-4-byte formats produce correct tightly-packed encoder input.
+- Stream renegotiation on display resolution change: the portal re-sends
+  `SPA_PARAM_Format`; the callback updates the negotiated format, bumps a
+  generation counter, logs `screen-share: pipewire stream renegotiated
+  format`, and emits `FormatChanged`. The host loop reconfigures the encoder
+  from the new frame geometry, so the share survives a resolution change.
+- Missing PipeWire / portal cases return typed `ScreenShareErrorKind`
+  errors with actionable messages (`PipeWireMissing`, `PortalMissing`,
+  `PipeWireConnect`, …) instead of panics.
+
+What still requires a real PipeWire session (cannot be exercised headless):
+
+- The portal actually choosing one of the advertised formats and delivering
+  a real `SPA_PARAM_Format` pod (unit tests cover both the advertisement
+  shape and a hand-built real-negotiation shape, but not the live portal).
+- Buffer flow through `stream_process` with real portal stride values
+  (typical sources use 4-byte-aligned rows; the copy handles arbitrary
+  strides, verified by unit tests).
+- A live resolution change (display renegotiation end-to-end: new params →
+  new buffers → new format → encoder reconfigure).
+- `pw_stream_connect` succeeding against a real portal node (the corrected
+  pod constants are what make this work; verified by unit tests only).
+
+Real-session recipe additions for BORU-SS-14:
+
+1. Start a share and confirm `screen-share: pipewire stream renegotiated
+   format` appears once with the real monitor geometry (this log only fires
+   when the parsed pod differs from the initial state — a portal that sends
+   the exact advertised 640x360 hint would not print it; change the display
+   resolution to force a renegotiation).
+2. Change the display resolution (or rotate the monitor) while sharing and
+   confirm the viewer keeps rendering at the new size without a session
+   restart, and that `host` logs the encoder reconfigure.
+3. With PipeWire stopped (`systemctl --user stop pipewire`), starting a
+   share should fail with the actionable `pw_context_connect failed — no
+   PipeWire server reachable` error (kind `PipeWireConnect`), not a panic.
+
+## 6. Licensing note
 
 Implemented from the xdg-desktop-portal D-Bus API documentation and PipeWire
 public headers/ABI only. No RustDesk code was consulted or reproduced; the

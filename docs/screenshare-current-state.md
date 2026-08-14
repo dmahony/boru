@@ -63,6 +63,7 @@ definitive file list:
 | `stats.rs` | 121 | `ScreenShareStats`, `ScreenShareStatsSnapshot` | Implemented (internal to viewer; not surfaced to UI) |
 | `platform/mod.rs` | 103 | Per-OS dispatch, `ActiveCapture`, `create_capture_source` | Implemented |
 | `platform/linux.rs` | 2109 | Portal/PipeWire capture (lifecycle machine + clean teardown) + X11 fallback + dlopen PipeWire client | Implemented |
+| `platform/linux_pw.rs` | ~620 | **Pure PipeWire format negotiation + CPU frame normalization (BORU-SS-14)**: SPA pod constants (verified against PipeWire headers), format advertisement pod builder, negotiated-format parser, SPA→`PixelFormat` layout mapping, stride-aware row copy with 24-bit RGB/BGR expansion, `NegotiatedFormat` with renegotiation generation counter | Implemented |
 | `platform/windows.rs` | 554 | WinRT Graphics Capture backend (`DesktopCaptureBackend`) | Implemented |
 | `platform/windows_common.rs` | 340 | Windows lifecycle state machine, HRESULT classification, monitor ids (Linux-tested) | Implemented |
 | `platform/macos.rs` | 1 | Placeholder comment only | **Stub** |
@@ -190,8 +191,12 @@ factory (`platform/mod.rs:83-95`), `capture_dimensions`
    async Request/Response handling, `extract_stream_node_id`,
    `query_portal_version`, `detect_portal_backend`) + a **dlopen-based
    PipeWire client** (`linux.rs:859-1211`: `Pw` ABI table, raw struct
-   mirrors, SPA pod builder/parser), feeding CPU frames through a background
-   `boru-pipewire-capture` thread.
+   mirrors), feeding CPU frames through a background
+   `boru-pipewire-capture` thread. The SPA format negotiation and buffer
+   normalization moved to the pure `linux_pw` module (BORU-SS-14, §2.4):
+   `stream_param_changed` handles renegotiation (generation counter +
+   `FormatChanged`), `stream_process` copies buffers row-by-row honouring
+   the chunk stride and expands 24-bit RGB/BGR.
 3. `PortalSessionMachine` (`linux.rs:145-357`) — pure D-Bus lifecycle state
    machine (Idle/Creating/Selecting/Starting/Streaming/Closing/Closed/Failed)
    with the D-Bus layer abstracted, plus desktop-environment detection
@@ -301,6 +306,47 @@ SelectSources → Start → PipeWire node acquisition → clean teardown:
 **platform/macos.rs** — 1-line placeholder (`macos.rs:1`). No capture backend;
 `ActiveCapture` on macOS is test-pattern only (`platform/mod.rs:27-30`).
 
+### 2.4 PipeWire frame ingestion + format negotiation (BORU-SS-14 / PDF Task 5.2)
+
+The portal's PipeWire node is consumed on the CPU-mapped path by the dlopen
+client in `platform/linux.rs`, with all negotiation/copy logic factored into
+the pure `platform/linux_pw.rs` module (unit-testable headless, and shared
+with a future DMA-BUF path):
+
+- **Explicit format negotiation.** The stream advertises, in preference
+  order, BGRx, RGBx, BGRA, RGBA, BGR24, RGB24 (`linux_pw::build_format_pod`).
+  The portal picks one and re-sends a `SPA_PARAM_Format` pod; the parser
+  accepts both the advertisement shape and the real negotiated shape (plain
+  Id/Rectangle or Choice-wrapped). Unknown formats (YUV, planar, 10-bit) are
+  rejected rather than misinterpreted.
+- **Correct SPA constants.** The original stub's SPA type/format constants
+  did not match PipeWire's headers (e.g. `SPA_TYPE_Object` was 16, real is
+  14; `SPA_VIDEO_FORMAT_BGRx` was 7, real is 8), which would make
+  `pw_stream_connect` reject the pod and every negotiated format parse fail.
+  BORU-SS-14 replaced them with the values from PipeWire's own MIT headers
+  (`spa/utils/type.h`, `spa/param/format.h`, `spa/param/param-types.h`,
+  `spa/param/video/raw.h`) and added a guard test pinning each value.
+- **CPU-mapped normalization.** `stream_process` copies each buffer
+  row-by-row honoring the chunk stride (`spa_chunk.stride`, falling back to
+  tight packing), drops row padding, and expands 24-bit BGR/RGB to
+  BGRA8/RGBA8 (alpha 255). The output is tightly packed, matching the
+  encoder's `pixels.len() == width*height*4` requirement. Buffers that do
+  not match the current negotiated geometry (stale buffers during
+  renegotiation) are dropped with a debug log instead of mis-shaped.
+- **Renegotiation.** The portal re-sends `SPA_PARAM_Format` when the display
+  resolution changes; `stream_param_changed` updates the shared
+  `NegotiatedFormat`, bumps a generation counter, logs, and emits
+  `PortalEvent::FormatChanged`. The host loop reconfigures the encoder from
+  the frame geometry (existing BORU-SS-03 logic at `host.rs`), so a
+  resolution change re-negotiates PipeWire params → buffers → format without
+  restarting the session.
+- **Typed runtime errors.** `ScreenShareError` now carries a
+  `ScreenShareErrorKind` (`PipeWireMissing`, `PortalMissing`,
+  `PipeWireConnect`, `FormatNegotiation`, `Stream`, `Generic`). PipeWire
+  library/server failures and the missing-session-bus case produce
+  actionable messages (install PipeWire / is the desktop portal running?)
+  with a typed kind — no panics.
+
 ## 3. Dependency usage map (within the screen-share subsystem)
 
 | Dependency | Cargo.toml | Where used (file:line) | Purpose |
@@ -397,13 +443,18 @@ Notes:
 
 ## 5. Test coverage summary
 
-- **Unit tests:** 136 `#[test]` pass in `src/screen_share/` with
+- **Unit tests:** 150 `#[test]` pass in `src/screen_share/` with
   `--features screen-sharing` (includes codec 3, protocol 4, transport 3,
   session 5, viewer 3, permissions 2, remote_input 4, adaptation 2,
-  capture 3, stats 1, mod 2, coords 15, platform/linux 20 (incl. 11
+  capture 3, stats 1, mod 3 (incl. the error-kind mapping test added by
+  BORU-SS-14), coords 15, platform/linux 20 (incl. 11
   portal-lifecycle / DE-detection tests added by BORU-SS-13),
-  platform/windows_common 10, plus the channels/reconnect/session tests added
-  by later BORU-SS tasks) — see per-file table above.
+  platform/linux_pw 13 (SPA constant guard, advertised formats,
+  layout mapping, pod build/parse incl. a real-style negotiated pod,
+  renegotiated geometry, stride padding, 24-bit expansion, buffer/stride
+  rejection, error kind), platform/windows_common 10, plus the
+  channels/reconnect/session tests added by later BORU-SS tasks) — see
+  per-file table above.
 - **End-to-end protocol test:** `protocol.rs:322-412`
   (`end_to_end_invite_accept_media_decode`) — two real iroh endpoints, Hello →
   Invitation → Accept → media → decode through `ViewerPipeline`.

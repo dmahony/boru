@@ -68,20 +68,88 @@ pub use transport::{decode_media, encode_media, LatestFrameQueue, MediaHeader, P
 pub use viewer::{DecodedFrame, ViewerPipeline};
 pub use stats::{ScreenShareStats, ScreenShareStatsSnapshot};
 
+/// Classification of a screen-sharing failure, used for diagnostics and
+/// actionable runtime errors (PDF Task 5.2: "clear runtime errors when
+/// PipeWire or a portal implementation is missing").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ScreenShareErrorKind {
+    /// Unclassified transport/session/codec failure.
+    Generic,
+    /// The PipeWire runtime library or server is missing/unreachable.
+    PipeWireMissing,
+    /// xdg-desktop-portal or the session bus is missing.
+    PortalMissing,
+    /// The PipeWire stream could not connect to the portal node.
+    PipeWireConnect,
+    /// Format negotiation produced an unusable result.
+    FormatNegotiation,
+    /// A stream/buffer-level failure (short buffer, bad stride, etc.).
+    Stream,
+}
+
 /// Error returned by a screen-sharing boundary.
+///
+/// Carries a stable, user-safe description plus a [`ScreenShareErrorKind`]
+/// so callers can react to missing-dependency conditions without parsing
+/// message text.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ScreenShareError(String);
+pub struct ScreenShareError {
+    message: String,
+    kind: ScreenShareErrorKind,
+}
 
 impl ScreenShareError {
     /// Construct an error with a stable, user-safe description.
     pub fn new(description: impl Into<String>) -> Self {
-        Self(description.into())
+        Self {
+            message: description.into(),
+            kind: ScreenShareErrorKind::Generic,
+        }
+    }
+
+    /// Construct a PipeWire-missing error (runtime library not loadable or
+    /// no PipeWire server). The message names the missing piece and the
+    /// action to take.
+    pub fn missing_pipewire(description: impl Into<String>) -> Self {
+        Self::new(description).with_kind(ScreenShareErrorKind::PipeWireMissing)
+    }
+
+    /// Construct a portal-missing error (no session bus or no
+    /// xdg-desktop-portal). The message names what is missing.
+    pub fn missing_portal(description: impl Into<String>) -> Self {
+        Self::new(description).with_kind(ScreenShareErrorKind::PortalMissing)
+    }
+
+    /// Construct a PipeWire stream-connect failure error.
+    pub fn pipewire_connect(description: impl Into<String>) -> Self {
+        Self::new(description).with_kind(ScreenShareErrorKind::PipeWireConnect)
+    }
+
+    /// Construct a format-negotiation failure error.
+    pub fn format_negotiation(description: impl Into<String>) -> Self {
+        Self::new(description).with_kind(ScreenShareErrorKind::FormatNegotiation)
+    }
+
+    /// Construct a stream/buffer-level failure error.
+    pub fn stream(description: impl Into<String>) -> Self {
+        Self::new(description).with_kind(ScreenShareErrorKind::Stream)
+    }
+
+    /// Set the error kind (builder-style; used internally).
+    pub fn with_kind(mut self, kind: ScreenShareErrorKind) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    /// The failure classification, for diagnostics and typed handling.
+    pub fn kind(&self) -> ScreenShareErrorKind {
+        self.kind
     }
 }
 
 impl std::fmt::Display for ScreenShareError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.0)
+        formatter.write_str(&self.message)
     }
 }
 
@@ -166,5 +234,39 @@ mod tests {
         let second = ScreenShareSession::for_conversation(42);
         assert_ne!(first.id(), second.id());
         assert_eq!(first.conversation_id(), second.conversation_id());
+    }
+
+    #[test]
+    fn screen_share_error_kinds_map_to_actionable_messages() {
+        // Typed constructors classify the failure so callers can react
+        // without parsing message text (PDF Task 5.2).
+        let pipewire = ScreenShareError::missing_pipewire(
+            "cannot load libpipewire-0.3.so.0 — install PipeWire",
+        );
+        assert_eq!(pipewire.kind(), ScreenShareErrorKind::PipeWireMissing);
+        assert!(pipewire.to_string().contains("libpipewire"));
+
+        let portal = ScreenShareError::missing_portal(
+            "no session bus — is xdg-desktop-portal available?",
+        );
+        assert_eq!(portal.kind(), ScreenShareErrorKind::PortalMissing);
+
+        let connect = ScreenShareError::pipewire_connect("pw_context_connect failed");
+        assert_eq!(connect.kind(), ScreenShareErrorKind::PipeWireConnect);
+
+        let negotiation = ScreenShareError::format_negotiation("unusable format");
+        assert_eq!(negotiation.kind(), ScreenShareErrorKind::FormatNegotiation);
+
+        let stream = ScreenShareError::stream("pipewire buffer too small");
+        assert_eq!(stream.kind(), ScreenShareErrorKind::Stream);
+
+        // The plain constructor stays Generic; the message is preserved.
+        let generic = ScreenShareError::new("transport error");
+        assert_eq!(generic.kind(), ScreenShareErrorKind::Generic);
+        assert_eq!(generic.to_string(), "transport error");
+
+        // Errors remain clone/equatable for state-machine comparison tests.
+        assert_eq!(pipewire, pipewire.clone());
+        assert_ne!(pipewire.kind(), portal.kind());
     }
 }

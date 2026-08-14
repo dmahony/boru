@@ -19,6 +19,11 @@ pub use linux::{
     DesktopEnvironment, LinuxPortalCapture, MachineError, PortalCapture, PortalEvent,
     PortalSessionMachine, PortalState, SessionFailure, SessionPhase, SessionType, CAPTURE_FPS,
 };
+
+/// Pure PipeWire format negotiation + CPU frame normalization (BORU-SS-14).
+/// Only the Linux backend uses it, but it is compiled on every target so the
+/// negotiation/copy logic is unit-testable wherever tests run.
+pub mod linux_pw;
 #[cfg(target_os = "macos")]
 pub mod macos;
 #[cfg(target_os = "windows")]
