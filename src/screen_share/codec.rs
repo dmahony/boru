@@ -192,7 +192,16 @@ impl VideoDecoder for OpenH264Decoder {
         let (width, height) = yuv.dimensions(); let mut rgb = vec![0; yuv.rgb8_len()]; yuv.write_rgb8(&mut rgb);
         let mut rgba = Vec::with_capacity(rgb.len() / 3 * 4);
         for pixel in rgb.chunks_exact(3) { rgba.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]); }
-        Ok(Some(CapturedFrame { timestamp_us: frame.timestamp_us, width: width as u32, height: height as u32, pixel_format: PixelFormat::Rgba8, pixels: rgba, gpu_handle: None }))
+        Ok(Some(CapturedFrame {
+            timestamp_us: frame.timestamp_us,
+            width: width as u32,
+            height: height as u32,
+            pixel_format: PixelFormat::Rgba8,
+            stride: width as u32 * 4,
+            pixels: rgba,
+            gpu_handle: None,
+            dirty_region: None,
+        }))
     }
     fn metadata(&self) -> CodecMetadata { self.metadata }
     fn reset(&mut self) -> Result<(), ScreenShareError> { self.decoder = openh264::decoder::Decoder::new().map_err(fail)?; self.waiting_for_keyframe = true; Ok(()) }

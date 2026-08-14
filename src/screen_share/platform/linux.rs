@@ -752,8 +752,10 @@ unsafe extern "C" fn stream_process(data: *mut c_void) {
                         width: fmt.width,
                         height: fmt.height,
                         pixel_format: fmt.pixel_format,
+                        stride: fmt.width * 4,
                         pixels: payload[..expected].to_vec(),
                         gpu_handle: None,
+                        dirty_region: None,
                     };
                     let _ = (*user).frame_tx.try_send(frame);
                 }

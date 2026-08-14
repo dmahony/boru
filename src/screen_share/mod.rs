@@ -17,7 +17,11 @@ pub mod stats;
 pub mod transport;
 pub mod viewer;
 
-pub use capture::{CapturedFrame, FrameSink, PixelFormat, ScreenCapture, TestPatternCapture};
+pub use capture::{
+    CapturedFrame, CaptureConfig, CaptureSource, CaptureSourceId, CaptureSourceKind,
+    DesktopCaptureBackend, DirtyRegion, FrameRect, FrameSink, PixelFormat, ScreenCapture,
+    TestPatternCapture,
+};
 pub use adaptation::{AdaptiveQuality, QualityDecision};
 pub use codec::{
     CodecConfig, CodecKind, CodecMetadata, EncodedFrame, OpenH264Decoder, OpenH264Encoder,
@@ -94,7 +98,8 @@ mod tests {
     impl VideoDecoder for FakeCodec {
         fn decode(&mut self, frame: &EncodedFrame) -> Result<Option<CapturedFrame>, ScreenShareError> {
             Ok(Some(CapturedFrame { timestamp_us: frame.timestamp_us, width: 1, height: 1,
-                pixel_format: PixelFormat::Bgra8, pixels: frame.bytes.clone(), gpu_handle: None }))
+                pixel_format: PixelFormat::Bgra8, stride: 4, pixels: frame.bytes.clone(),
+                gpu_handle: None, dirty_region: None }))
         }
         fn metadata(&self) -> CodecMetadata { <Self as VideoEncoder>::metadata(self) }
         fn reset(&mut self) -> Result<(), ScreenShareError> { Ok(()) }
@@ -118,8 +123,10 @@ mod tests {
                 width: 1,
                 height: 1,
                 pixel_format: PixelFormat::Bgra8,
+                stride: 4,
                 pixels: vec![1, 2, 3],
                 gpu_handle: None,
+                dirty_region: None,
             }),
         };
         let frame = capture.capture().unwrap().unwrap();

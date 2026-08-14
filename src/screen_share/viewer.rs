@@ -198,7 +198,8 @@ mod tests {
         fn decode(&mut self, frame: &EncodedFrame) -> Result<Option<CapturedFrame>, ScreenShareError> {
             self.outputs.pop_front().unwrap_or_else(|| Ok(Some(CapturedFrame {
                 timestamp_us: frame.timestamp_us, width: 2, height: 2,
-                pixel_format: PixelFormat::Rgba8, pixels: vec![1; 16], gpu_handle: None,
+                pixel_format: PixelFormat::Rgba8, stride: 8, pixels: vec![1; 16],
+                gpu_handle: None, dirty_region: None,
             })))
         }
         fn metadata(&self) -> crate::screen_share::CodecMetadata { panic!("unused") }
