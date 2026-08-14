@@ -1,0 +1,223 @@
+
+===== 1. rb test --lib --features net =====
+START 05:07:56
+test whisper::session_manager::tests::set_state_delivers_under_backpressure ... ok
+test whisper::session_manager::tests::test_collision_resolution ... ok
+test whisper::session_manager::tests::test_backoff_cancellation ... ok
+test whisper::session_manager::tests::test_disconnect_triggers_reconnect ... ok
+test whisper::session_manager::tests::test_self_dial_prevention ... ok
+test whisper::session_manager::tests::test_stop_session ... ok
+test whisper::tests::forward_event_delivers_under_backpressure ... ok
+test tunnel::tests::idle_tunnel_is_closed_after_configured_idle_period ... ok
+test whisper::tests::test_whisper_connect_and_disconnect ... ok
+test whisper::tests::test_whisper_basic_dm ... ok
+test whisper::tests::test_whisper_mailbox_envelope_and_ack_roundtrip ... ok
+test whisper::tests::whisper_protocol_is_handler ... ok
+test wire_compression::tests::compress_decompress_roundtrip ... ok
+test wire_compression::tests::decompress_rejects_garbage ... ok
+test wire_compression::tests::dictionary_compresses_representative_corpus ... ok
+test wire_compression::tests::gen_dictionary ... ignored
+test wire_compression::tests::gen_dictionary_and_analyze ... ignored
+test whisper::tests::test_whisper_rejects_unknown_and_blocked_peers ... ok
+test whisper::session_manager::tests::test_connected_event_resets_backoff ... ok
+test room_directory::tests::thousands_of_advertisements_are_bounded ... ok
+test image_optimizer::tests::test_optimize_large_image_downscales ... ok
+test image_optimizer::tests::test_optimize_size_reduction_ratio ... ok
+test image_optimizer::tests::test_optimize_rejects_low_quality_overflow ... ok
+test tunnel::forwarding::tests::active_tunnel_survives_beyond_old_lifetime_boundary has been running for over 60 seconds
+test tunnel::forwarding::tests::active_tunnel_survives_beyond_old_lifetime_boundary ... ok
+
+failures:
+
+---- storage::tests::docs_reference_current_schema_version stdout ----
+
+thread 'storage::tests::docs_reference_current_schema_version' (574728) panicked at src/storage.rs:6572:9:
+docs/message-storage-design.md does not state `CURRENT_SCHEMA_VERSION: u32 = 20` — update it when bumping the schema
+
+
+failures:
+    storage::tests::docs_reference_current_schema_version
+
+test result: FAILED. 2669 passed; 1 failed; 2 ignored; 0 measured; 0 filtered out; finished in 359.24s
+
+error: test failed, to rerun pass `--lib`
+RC=101
+
+===== 2. rb check --all-targets --features gui,video-playback,terminal,dev-ui (dev-ui ON) =====
+START 05:14:51
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/notification/service.rs:550:14
+    |
+550 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/perf_tracker.rs:177:14
+    |
+177 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/perf_tracker.rs:223:14
+    |
+223 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: `boru-core` (bin "boru" test) generated 322 warnings (141 duplicates) (run `cargo fix --bin "boru" -p boru-core --tests` to apply 68 suggestions)
+warning: variable does not need to be mutable
+    --> src/discovery_service.rs:7068:13
+     |
+7068 |         let mut advert = test_advert_signed(0xBB);
+     |             ----^^^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> src/discovery_service.rs:7100:13
+     |
+7100 |         let mut advert = test_advert_signed(0xBB);
+     |             ----^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: `boru-core` (lib test) generated 3 warnings (1 duplicate) (run `cargo fix --lib -p boru-core --tests` to apply 2 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 30.52s
+RC=0
+
+===== 3. rb check --all-targets --features gui,video-playback,terminal (dev-ui OFF) =====
+START 05:15:23
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/notification/service.rs:550:14
+    |
+550 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/perf_tracker.rs:177:14
+    |
+177 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/perf_tracker.rs:223:14
+    |
+223 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: `boru-core` (bin "boru" test) generated 337 warnings (188 duplicates) (run `cargo fix --bin "boru" -p boru-core --tests` to apply 32 suggestions)
+warning: variable does not need to be mutable
+    --> src/discovery_service.rs:7068:13
+     |
+7068 |         let mut advert = test_advert_signed(0xBB);
+     |             ----^^^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> src/discovery_service.rs:7100:13
+     |
+7100 |         let mut advert = test_advert_signed(0xBB);
+     |             ----^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: `boru-core` (lib test) generated 3 warnings (1 duplicate) (run `cargo fix --lib -p boru-core --tests` to apply 2 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 26.66s
+RC=0
+
+===== 4. rb check --release --bin boru --features gui,video-playback,terminal (release, dev disabled) =====
+START 05:15:52
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/notification/service.rs:315:14
+    |
+315 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/notification/service.rs:398:14
+    |
+398 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/notification/service.rs:414:14
+    |
+414 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/notification/service.rs:423:14
+    |
+423 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/notification/service.rs:530:14
+    |
+530 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: this lint expectation is unfulfilled
+   --> examples/iced_chat/notification/service.rs:543:14
+    |
+543 |     #[expect(dead_code)]
+    |              ^^^^^^^^^
+
+warning: `boru-core` (bin "boru") generated 318 warnings (run `cargo fix --bin "boru" -p boru-core` to apply 84 suggestions)
+    Finished `release` profile [optimized] target(s) in 1m 35s
+RC=0
+
+===== 5. rb test --bin boru --features gui,video-playback,terminal,dev-ui -- theme =====
+START 05:17:29
+test theme_config::tests::save_round_trip_merge_reproduces_same_theme ... ok
+test theme_merge::tests::merge_reports_multiple_warnings ... ok
+test theme_merge::tests::full_merge_applies_every_group ... ok
+test theme_merge::tests::nan_values_fall_back_to_default ... ok
+test theme_merge::tests::motion_frames_clamped ... ok
+test theme_merge::tests::negative_padding_clamped_to_zero ... ok
+test theme_merge::tests::older_partial_file_merges ... ok
+test theme_merge::tests::partial_merge_keeps_defaults_for_absent_fields ... ok
+test theme_merge::tests::unknown_fields_are_ignored ... ok
+test theme_merge::tests::unknown_font_family_falls_back_to_default ... ok
+test theme_merge::tests::unknown_weight_falls_back_to_default ... ok
+test theme_merge::tests::valid_family_and_weight_are_applied ... ok
+test theme_merge::tests::zero_font_size_falls_back_to_default ... ok
+test theme_regression::matrix_merge_with_defaults ... ok
+test theme_regression::matrix_malformed_toml ... ok
+test theme_regression::matrix_missing_file ... ok
+test theme_regression::matrix_parse_partial_config ... ok
+test theme_regression::matrix_out_of_range_values ... ok
+test theme_watcher::tests::debouncer_fires_once_after_quiet_window ... ok
+test theme_watcher::tests::debouncer_generations_increase_per_burst ... ok
+test theme_watcher::tests::debouncer_keeps_waiting_while_events_continue ... ok
+test theme_watcher::tests::is_ui_config_event_matches_filename_and_kinds ... ok
+test theme_watcher::tests::reload_tracker_drops_stale_results ... ok
+test theme_regression::matrix_parse_complete_config ... ok
+test theme_config::tests::save_ui_theme_config_writes_file_atomically ... ok
+test theme_regression::matrix_save_round_trip ... ok
+test theme_watcher::tests::watcher_reports_malformed_toml_as_error ... ok
+test theme_watcher::tests::watcher_rearms_for_subsequent_saves ... ok
+test theme_watcher::tests::watcher_sends_exactly_one_reload_per_save ... ok
+[2m2026-08-14T05:18:50.124291Z[0m [31mERROR[0m [2miroh::socket[0m[2m:[0m Endpoint dropped without calling `Endpoint::close`. Aborting ungracefully.
+test app::tests::ui_theme_reload_preserves_inline_video_state ... ok
+[2m2026-08-14T05:18:50.445433Z[0m [31mERROR[0m [2miroh::socket[0m[2m:[0m Endpoint dropped without calling `Endpoint::close`. Aborting ungracefully.
+test app::tests::ui_theme_reload_preserves_transfer_state ... ok
+[2m2026-08-14T05:18:51.617911Z[0m [31mERROR[0m [2miroh::socket[0m[2m:[0m Endpoint dropped without calling `Endpoint::close`. Aborting ungracefully.
+[2m2026-08-14T05:18:51.617951Z[0m [31mERROR[0m [2miroh::socket[0m[2m:[0m Endpoint dropped without calling `Endpoint::close`. Aborting ungracefully.
+test app::tests::ui_theme_reload_replaces_only_theme_state ... ok
+test app::tests::ui_theme_reload_stale_generation_is_dropped ... ok
+
+test result: ok. 99 passed; 0 failed; 0 ignored; 0 measured; 1331 filtered out; finished in 26.49s
+
+RC=0
+
+GATE RESULT: FAILURES PRESENT (see above)
+END 05:18:51
