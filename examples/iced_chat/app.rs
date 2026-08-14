@@ -36905,6 +36905,319 @@ fn layout_reload_validation_error_keeps_last_known_good_layout() {
     );
 }
 
+// ── BORU-LAYOUT-11: acceptance tests (t_e72002d1) ───────────────────
+//
+// PDF Task 11 acceptance criteria, mirrored 1:1 from the theme reload
+// tests above:
+//   * Changing TOML immediately rearranges the home screen.
+//   * Chats, transfers and playback continue uninterrupted.
+//   * Invalid TOML never crashes Boru.
+// The pure-seam half of the matrix lives in `layout_regression.rs`; these
+// tests drive the live app seam (`update_layout_reloaded`).
+
+#[test]
+fn layout_reload_rearranges_home_screen() {
+    // PDF Task 11 acceptance: "Changing TOML immediately rearranges the
+    // home screen." A single reload applies a full home rearrangement —
+    // section order, grid/list mode, column counts, gaps and max content
+    // width — bumps the revision (so lazy/prewarm caches rebuild) and
+    // leaves chat/composer/scroll state untouched.
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    let topic = TopicId::from_bytes([23; 32]);
+    app.topic = topic;
+    app.screen = Screen::Chat { topic };
+    app.composer_text = "draft survives".to_string();
+    let mut conv = ConversationLive::new(topic);
+    conv.composer_text = "draft survives".to_string();
+    conv.follow_latest = false;
+    conv.scroll_offset = 77.0;
+    app.conversations.insert(topic, conv);
+
+    let revision_before = app.layout_revision;
+
+    let overrides = crate::layout_config::parse_layout_config(
+        r#"
+[home]
+max_content_width = 1200.0
+mode = "List"
+section_order = ["Tunnels", "QuickActions", "Hero", "MeshHealth", "PeopleActivity"]
+
+[home.grid]
+main_portion = 3
+rail_portion = 1
+column_gap = 16.0
+
+[home.quick_actions]
+columns_wide = 6
+
+[home.gaps]
+card_gap = 12.0
+"#,
+    )
+    .expect("test config parses");
+    let task = app.update_layout_reloaded(1, Ok(overrides));
+    drop(task);
+
+    // The arrangement changed…
+    assert_eq!(app.active_layout.home.max_content_width, 1200.0);
+    assert_eq!(
+        app.active_layout.home.section_order,
+        vec![
+            crate::layout::HomeSection::Tunnels,
+            crate::layout::HomeSection::QuickActions,
+            crate::layout::HomeSection::Hero,
+            crate::layout::HomeSection::MeshHealth,
+            crate::layout::HomeSection::PeopleActivity,
+        ],
+        "section order rearranged"
+    );
+    assert_eq!(
+        app.active_layout.home.visible_sections(),
+        app.active_layout.home.section_order,
+        "rendered section list reflects the new order"
+    );
+    assert_eq!(
+        app.active_layout.home.mode,
+        crate::layout::HomeLayoutMode::List,
+        "grid/list mode switched"
+    );
+    assert_eq!(app.active_layout.home.grid.main_portion, 3, "grid split changed");
+    assert_eq!(app.active_layout.home.grid.rail_portion, 1);
+    assert_eq!(app.active_layout.home.grid.column_gap, 16.0, "column gap changed");
+    assert_eq!(
+        app.active_layout.home.quick_actions.columns_wide, 6,
+        "column count changed"
+    );
+    assert_eq!(app.active_layout.home.gaps.card_gap, 12.0, "card gap changed");
+    assert_eq!(
+        app.layout_revision,
+        revision_before.wrapping_add(1),
+        "reload bumps the revision so lazy/prewarm caches rebuild"
+    );
+
+    // …and chat/composer/scroll state is untouched.
+    assert_eq!(app.topic, topic, "selected conversation unchanged");
+    assert_eq!(app.screen, Screen::Chat { topic }, "screen unchanged");
+    assert_eq!(app.composer_text, "draft survives", "composer unchanged");
+    let conv = app.conversations.get(&topic).expect("conversation kept");
+    assert_eq!(conv.composer_text, "draft survives", "conv composer unchanged");
+    assert_eq!(conv.scroll_offset, 77.0, "scroll offset unchanged");
+    assert!(!conv.follow_latest, "follow_latest unchanged");
+    assert_eq!(app.conversations.len(), 1, "no conversations added/removed");
+}
+
+#[test]
+fn layout_reload_preserves_transfer_state() {
+    // PDF Task 11 acceptance: "Chats, transfers and playback continue
+    // uninterrupted." A live layout reload must not replace the in-flight
+    // download bookkeeping — the pending file, download entry index,
+    // active transfer id and the transfer-id → entry cache survive
+    // untouched (mirror of ui_theme_reload_preserves_transfer_state).
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    // Seed a selected conversation with an in-flight download at both the
+    // app level (legacy mirror used by the chat-log view) and the
+    // conversation level (multi-conversation home).
+    let topic = TopicId::from_bytes([13; 32]);
+    app.topic = topic;
+    app.screen = Screen::Chat { topic };
+    let transfer_id = TransferId::new(9001);
+    app.pending_file = Some(("report.pdf".to_string(), "ticket-abc".to_string()));
+    app.download_entry_index = Some(3);
+    app.active_download_transfer_id = Some(transfer_id);
+    app.transfer_id_to_index.insert(transfer_id, 3);
+
+    let mut conv = ConversationLive::new(topic);
+    conv.pending_file = Some(("report.pdf".to_string(), "ticket-abc".to_string()));
+    conv.download_entry_index = Some(3);
+    conv.active_download_transfer_id = Some(transfer_id);
+    conv.transfer_id_to_index.insert(transfer_id, 3);
+    app.conversations.insert(topic, conv);
+
+    // A valid layout reload changes ONLY the layout.
+    let overrides = crate::layout_config::parse_layout_config(
+        "[home]\nmax_content_width = 1200.0\n",
+    )
+    .expect("test config parses");
+    let task = app.update_layout_reloaded(1, Ok(overrides));
+    drop(task);
+    assert_eq!(
+        app.active_layout.home.max_content_width, 1200.0,
+        "valid reload replaces the layout"
+    );
+
+    // Transfer state untouched at the app level…
+    assert_eq!(
+        app.pending_file,
+        Some(("report.pdf".to_string(), "ticket-abc".to_string())),
+        "app pending_file unchanged"
+    );
+    assert_eq!(app.download_entry_index, Some(3), "app download index unchanged");
+    assert_eq!(
+        app.active_download_transfer_id,
+        Some(transfer_id),
+        "app active transfer id unchanged"
+    );
+    assert_eq!(
+        app.transfer_id_to_index.get(&transfer_id),
+        Some(&3),
+        "app transfer-id → entry cache unchanged"
+    );
+
+    // …and at the conversation level.
+    let conv = app.conversations.get(&topic).expect("conversation kept");
+    assert_eq!(
+        conv.pending_file,
+        Some(("report.pdf".to_string(), "ticket-abc".to_string())),
+        "conversation pending_file unchanged"
+    );
+    assert_eq!(
+        conv.download_entry_index, Some(3),
+        "conversation download index unchanged"
+    );
+    assert_eq!(
+        conv.active_download_transfer_id,
+        Some(transfer_id),
+        "conversation active transfer id unchanged"
+    );
+    assert_eq!(
+        conv.transfer_id_to_index.get(&transfer_id),
+        Some(&3),
+        "conversation transfer-id → entry cache unchanged"
+    );
+    assert_eq!(app.conversations.len(), 1, "no conversations added/removed");
+}
+
+#[cfg(feature = "video-playback")]
+#[test]
+fn layout_reload_preserves_inline_video_state() {
+    // PDF Task 11 acceptance: playback continues uninterrupted across a
+    // layout reload. The inline video player's state — seek position,
+    // expanded flag and retained resume position — survive untouched
+    // (mirror of ui_theme_reload_preserves_inline_video_state).
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    let topic = TopicId::from_bytes([17; 32]);
+    let key = boru_core::video_playback::VideoInstanceKey::new(topic, 42, "blob-hash-1");
+    app.inline_video_seek = Some(0.35);
+    app.inline_video_expanded = true;
+    app.inline_video_resume = Some((key.clone(), std::time::Duration::from_secs(12)));
+
+    let overrides = crate::layout_config::parse_layout_config(
+        "[home.gaps]\ncard_gap = 12.0\n",
+    )
+    .expect("test config parses");
+    let task = app.update_layout_reloaded(1, Ok(overrides));
+    drop(task);
+    assert_eq!(
+        app.active_layout.home.gaps.card_gap, 12.0,
+        "valid reload replaces the layout value"
+    );
+
+    assert_eq!(app.inline_video_seek, Some(0.35), "seek position unchanged");
+    assert!(app.inline_video_expanded, "expanded flag unchanged");
+    assert_eq!(
+        app.inline_video_resume,
+        Some((key, std::time::Duration::from_secs(12))),
+        "retained resume position unchanged"
+    );
+}
+
+#[test]
+fn layout_reload_invalid_toml_never_crashes() {
+    // PDF Task 11 acceptance: "Invalid TOML never crashes Boru." A hostile
+    // sequence — malformed file, duplicate section ids, out-of-range
+    // values, then a recovery — never panics, keeps the last known-good
+    // layout on every failure, and the app keeps running.
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+    app.composer_text = "draft survives".to_string();
+
+    // 1. A valid reload lands a new layout.
+    let overrides = crate::layout_config::parse_layout_config(
+        "[home]\nmax_content_width = 1200.0\n",
+    )
+    .expect("test config parses");
+    let task = app.update_layout_reloaded(1, Ok(overrides));
+    drop(task);
+    assert_eq!(app.active_layout.home.max_content_width, 1200.0);
+    let revision_after_ok = app.layout_revision;
+
+    // 2. A malformed file (structured Parse error) keeps it — no crash.
+    let bad = crate::layout_config::LayoutReloadError {
+        path: std::path::PathBuf::from("boru-layout.toml"),
+        kind: crate::layout_config::LayoutReloadErrorKind::Parse,
+        message: "invalid dev layout override boru-layout.toml: TOML parse error at line 1, column 5"
+            .to_string(),
+        line: Some(1),
+        column: Some(5),
+    };
+    let task = app.update_layout_reloaded(2, Err(bad));
+    drop(task);
+    assert_eq!(
+        app.active_layout.home.max_content_width, 1200.0,
+        "malformed reload keeps the last known-good layout"
+    );
+    assert_eq!(
+        app.layout_revision, revision_after_ok,
+        "a failed reload does not bump the layout revision"
+    );
+
+    // 3. Duplicate section ids fail validation — kept, no crash.
+    let dup = crate::layout_config::parse_layout_config(
+        "[home]\nsection_order = [\"Tunnels\", \"Tunnels\"]\n",
+    )
+    .expect("duplicate list still parses (validation is separate)");
+    let task = app.update_layout_reloaded(3, Ok(dup));
+    drop(task);
+    assert_eq!(
+        app.active_layout.home.max_content_width, 1200.0,
+        "duplicate section ids must not be applied"
+    );
+    assert_eq!(
+        app.layout_revision, revision_after_ok,
+        "a rejected reload does not bump the layout revision"
+    );
+
+    // 4. Out-of-range values are clamped, not applied — still no crash,
+    //    and this reload DOES land (clamping is a successful apply).
+    let clamped = crate::layout_config::parse_layout_config(
+        "[home.padding]\ntop = -4.0\n[home]\nmax_content_width = 1.0e9\n",
+    )
+    .expect("out-of-range config parses");
+    let task = app.update_layout_reloaded(4, Ok(clamped));
+    drop(task);
+    assert_eq!(
+        app.active_layout.home.padding.top, 0.0,
+        "negative padding clamped to zero, not applied"
+    );
+    assert_eq!(
+        app.active_layout.home.max_content_width, 4096.0,
+        "absurd width clamped to max, not applied"
+    );
+    assert_eq!(
+        app.layout_revision,
+        revision_after_ok.wrapping_add(1),
+        "a clamped reload still applies and bumps the revision"
+    );
+
+    // 5. Recovery: a subsequent valid reload applies normally.
+    let overrides = crate::layout_config::parse_layout_config(
+        "[home]\nmax_content_width = 1100.0\n",
+    )
+    .expect("test config parses");
+    let task = app.update_layout_reloaded(5, Ok(overrides));
+    drop(task);
+    assert_eq!(
+        app.active_layout.home.max_content_width, 1100.0,
+        "the app recovers after invalid input"
+    );
+    assert_eq!(
+        app.composer_text, "draft survives",
+        "composer untouched through the whole sequence"
+    );
+}
+
 // ── BORU-UI-09: dev UI Inspector (dev-ui feature only) ────────────────
 
 /// BORU-UI-18: merge warnings (values the merge had to clamp or replace)

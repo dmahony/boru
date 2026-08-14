@@ -33,6 +33,8 @@ mod layout_config;
 mod layout_inspector;
 mod layout_merge;
 mod layout_watcher;
+#[cfg(test)]
+mod layout_regression;
 mod link_preview;
 mod log_viewer;
 mod mcp_server;
