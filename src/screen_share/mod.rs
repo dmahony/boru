@@ -8,6 +8,7 @@ pub mod adaptation;
 pub mod capture;
 pub mod channels;
 pub mod codec;
+pub mod coords;
 pub mod host;
 pub mod permissions;
 pub mod platform;
@@ -26,6 +27,11 @@ pub use capture::{
     CapturedFrame, CaptureConfig, CaptureSource, CaptureSourceId, CaptureSourceKind,
     DesktopCaptureBackend, DirtyRegion, FrameRect, FrameSink, PixelFormat, ScreenCapture,
     TestPatternCapture,
+};
+pub use coords::{
+    composite_cursor, desktop_to_normalized, desktop_to_source, geometry_from_logical,
+    logical_to_physical, normalized_to_desktop, normalized_to_source, physical_to_logical,
+    source_to_desktop, CursorSprite, DesktopPoint, MonitorGeometry, NormalizedPoint, SourcePoint,
 };
 pub use channels::{
     BoundedFrameQueue, ControlChannel, ControlOut, MediaChannel, DEFAULT_CONTROL_QUEUE_CAPACITY,

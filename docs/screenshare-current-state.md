@@ -50,6 +50,7 @@ at snapshot commit:
 |---|---|---|---|
 | `mod.rs` | 142 | Subsystem boundary, re-exports, `ScreenShareError`, boundary unit tests | Implemented |
 | `capture.rs` | 232 | `PixelFormat`, `CapturedFrame`, `FrameSink`, `ScreenCapture` trait, `TestPatternCapture` | Implemented |
+| `coords.rs` | 232 | Pure desktop↔source↔normalized coordinate mapping, DPI helpers, cursor sprite compositing (BORU-SS-12) | Implemented |
 | `codec.rs` | 257 | `CodecConfig`, `EncodedFrame`, `VideoEncoder`/`VideoDecoder` traits, `OpenH264Encoder`/`Decoder` | Implemented |
 | `protocol.rs` | 413 | ALPN, `ControlMessage`, `Hello`, `Permission`, `ProtocolError`, `ScreenShareProtocol` (iroh handler) | Implemented |
 | `transport.rs` | 190 | `MediaHeader`, `encode_media`/`decode_media`, `LatestFrameQueue`, `QuicScreenTransport`, `read_unit` | Implemented |
@@ -219,6 +220,42 @@ x86_64-pc-windows-gnu --no-default-features --features screen-sharing`; the
 msvc target additionally needs a Windows MSVC toolchain for the C dependency
 build scripts and was not checkable on debsrv).
 
+### 2.2 Cursor strategy + coordinate model (BORU-SS-12 / PDF Task 4.2)
+
+**Cursor strategy decision: composite into captured frames on the host.**
+
+`Windows.Graphics.Capture` deliberately does not include the pointer in
+`Direct3D11CaptureFrame` surfaces. The Windows backend therefore queries the
+cursor with GDI (`GetCursorInfo` + `GetIconInfo` + `DrawIconEx`), rasterizes
+it into a small BGRA sprite, and alpha-blends it into the staged frame at the
+source-relative position before the encoder sees it
+(`composite_system_cursor` in `windows.rs`). This was chosen over a separate
+cursor stream because:
+
+- The existing pipeline (capture → BGRA8 CPU frame → OpenH264 → protocol →
+  viewer) renders frames as-is, so a composited cursor reaches every viewer
+  with **zero protocol or viewer changes**.
+- A separate representation (cursor shape + position messages, viewer-side
+  compositing) is listed in the reference PDF Phase 14 as a *future*
+  "cursor-shape optimization"; it would require new protocol messages, viewer
+  rendering, and cursor lifetime management — out of proportion for the
+  baseline.
+
+The pure mapping and blending live in `src/screen_share/coords.rs`
+(platform-independent, Linux-tested): `MonitorGeometry` carries a monitor's
+virtual-desktop origin (physical px, may be negative for monitors left of /
+above the primary), and `desktop_to_source` / `desktop_to_normalized` /
+`source_to_desktop` / `normalized_to_desktop` normalize coordinates against
+the **shared source** rather than the global desktop. `logical_to_physical`
+and `geometry_from_logical` cover mixed-DPI and scaling-percentage layouts
+(100%–200%). `CursorSprite` + `composite_cursor` perform hotspot-aware,
+clipped alpha blending. `CaptureSource` now carries an optional `geometry`
+field so the host knows where the shared monitor sits in the desktop.
+
+Tests (all Linux-runnable): negative-origin monitors, mixed-DPI layouts,
+scaling percentages, round-trips, cursor compositing/clipping/out-of-source
+(15 `coords` tests, plus the updated `monitor_source` geometry test).
+
 **platform/macos.rs** — 1-line placeholder (`macos.rs:1`). No capture backend;
 `ActiveCapture` on macOS is test-pattern only (`platform/mod.rs:27-30`).
 
@@ -318,10 +355,12 @@ Notes:
 
 ## 5. Test coverage summary
 
-- **Unit tests:** 41 `#[test]` in `src/screen_share/` (codec 3, protocol 4,
-  transport 3, session 5, viewer 3, permissions 2, remote_input 4,
-  adaptation 2, capture 3, stats 1, mod 2, platform/linux 9) — see per-file
-  table above.
+- **Unit tests:** 125 `#[test]` pass in `src/screen_share/` with
+  `--features screen-sharing` (includes codec 3, protocol 4, transport 3,
+  session 5, viewer 3, permissions 2, remote_input 4, adaptation 2,
+  capture 3, stats 1, mod 2, coords 15, platform/linux 9,
+  platform/windows_common 10, plus the channels/reconnect/session tests added
+  by later BORU-SS tasks) — see per-file table above.
 - **End-to-end protocol test:** `protocol.rs:322-412`
   (`end_to_end_invite_accept_media_decode`) — two real iroh endpoints, Hello →
   Invitation → Accept → media → decode through `ViewerPipeline`.

@@ -12,6 +12,24 @@
 //! in [`super::windows_common`]. All pure logic (state machine, HRESULT
 //! classification, source-id derivation) is unit-tested on Linux; only the
 //! WinRT calls here require real Windows hardware.
+//!
+//! # Cursor strategy (PDF T4.2)
+//!
+//! WinRT Graphics Capture does **not** composite the pointer into captured
+//! frames — `Direct3D11CaptureFrame` surfaces contain only the desktop
+//! content. Boru therefore composites the cursor into the frame on the host:
+//! [`composite_system_cursor`] queries the cursor shape/position with GDI
+//! (`GetCursorInfo` + `GetIconInfo` + `DrawIconEx`), rasterizes it into a
+//! small BGRA sprite, and alpha-blends it into the staged frame at the
+//! source-relative position (see [`crate::screen_share::coords`] for the
+//! decision rationale and the pure, Linux-tested mapping). This keeps the
+//! wire protocol and viewer unchanged — the cursor arrives as ordinary
+//! video.
+//!
+//! Monitor geometry (origin + physical size) is advertised with each
+//! [`CaptureSource`] so the host can normalize cursor and input coordinates
+//! against the shared source rather than the global desktop. Origins may be
+//! negative for monitors left of / above the primary.
 #![allow(missing_docs)]
 
 use std::collections::HashMap;
@@ -32,18 +50,24 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::Win32::Graphics::Gdi::{
-    EnumDisplayMonitors, GetMonitorInfoW, MonitorFromWindow, HDC, HMONITOR, MONITORINFOEXW,
+    CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, EnumDisplayMonitors,
+    GetMonitorInfoW, GetObjectW, MonitorFromWindow, SelectObject, BITMAP, BITMAPINFO,
+    BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HDC, HMONITOR, HGDIOBJ, MONITORINFOEXW,
     MONITOR_DEFAULTTOPRIMARY,
 };
 use windows::Win32::System::WinRT::Direct3D11::CreateDirect3D11DeviceFromDXGIDevice;
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
-use windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
+use windows::Win32::UI::WindowsAndMessaging::{
+    DrawIconEx, GetCursorInfo, GetDesktopWindow, GetIconInfo, CURSORINFO, CURSORINFO_FLAGS,
+    CURSOR_SHOWING, DI_NORMAL, ICONINFO,
+};
 
 use super::windows_common::{monitor_source, CaptureFailureKind};
 pub use super::windows_common::{GraphicsCaptureEvent, GraphicsCaptureState};
 use crate::screen_share::capture::{
     CaptureConfig, CaptureSource, CaptureSourceId, DesktopCaptureBackend, FrameSink,
 };
+use crate::screen_share::coords::{composite_cursor, CursorSprite, DesktopPoint, MonitorGeometry};
 use crate::screen_share::{CapturedFrame, PixelFormat, ScreenCapture, ScreenShareError};
 
 /// Number of buffered frames in the WinRT frame pool. Two lets the compositor
@@ -58,6 +82,9 @@ pub struct GraphicsCapture {
     events: VecDeque<GraphicsCaptureEvent>,
     sources: HashMap<CaptureSourceId, usize>,
     active_source: Option<CaptureSourceId>,
+    /// Virtual-desktop geometry of the active monitor, used to normalize
+    /// cursor coordinates against the shared source (PDF T4.2).
+    active_geometry: Option<MonitorGeometry>,
     pool: Option<Direct3D11CaptureFramePool>,
     session: Option<GraphicsCaptureSession>,
     item: Option<GraphicsCaptureItem>,
@@ -94,6 +121,7 @@ impl GraphicsCapture {
             events: VecDeque::new(),
             sources: HashMap::new(),
             active_source: None,
+            active_geometry: None,
             pool: None,
             session: None,
             item: None,
@@ -204,7 +232,13 @@ impl DesktopCaptureBackend for GraphicsCapture {
                     .into_iter()
                     .map(|(_, hmon)| {
                         let info = monitor_info(hmon);
-                        monitor_source(&info.device_name, info.rect_width, info.rect_height)
+                        let geometry = MonitorGeometry::new(
+                            info.left,
+                            info.top,
+                            info.rect_width,
+                            info.rect_height,
+                        );
+                        monitor_source(&info.device_name, geometry)
                     })
                     .collect()
             })
@@ -324,6 +358,12 @@ impl DesktopCaptureBackend for GraphicsCapture {
         self.state = next_state;
         self.format = Some((item_size.Width as u32, item_size.Height as u32));
         self.active_source = Some(source);
+        self.active_geometry = Some(MonitorGeometry::new(
+            info.left,
+            info.top,
+            info.rect_width,
+            info.rect_height,
+        ));
         self.pool = Some(pool);
         self.session = Some(session);
         self.item = Some(item);
@@ -476,6 +516,13 @@ impl DesktopCaptureBackend for GraphicsCapture {
             context.Unmap(staging, 0);
         }
         let _ = frame.Close();
+        // Composite the system cursor into the staged frame (PDF T4.2). WinRT
+        // Graphics Capture does not include the pointer; we draw it here at
+        // the source-relative position so the viewer sees it as ordinary
+        // video. Failures are non-fatal: the frame still goes out.
+        if let Some(geometry) = self.active_geometry {
+            let _ = composite_system_cursor(&mut pixels, width, height, &geometry);
+        }
         CapturedFrame::cpu(timestamp, width, height, PixelFormat::Bgra8, pixels).map(Some)
     }
 
@@ -489,6 +536,7 @@ impl DesktopCaptureBackend for GraphicsCapture {
         self.staging = None;
         self.staging_dimensions = None;
         self.active_source = None;
+        self.active_geometry = None;
         self.events.push_back(GraphicsCaptureEvent::Ended);
     }
 }
@@ -496,6 +544,9 @@ impl DesktopCaptureBackend for GraphicsCapture {
 /// Geometry + device name of one monitor, extracted from `GetMonitorInfoW`.
 struct MonitorInfo {
     device_name: String,
+    /// Virtual-desktop origin of the monitor (physical px; may be negative).
+    left: i32,
+    top: i32,
     rect_width: u32,
     rect_height: u32,
 }
@@ -509,6 +560,8 @@ fn monitor_info(hmon: HMONITOR) -> MonitorInfo {
     if ok.0 == 0 {
         return MonitorInfo {
             device_name: String::new(),
+            left: 0,
+            top: 0,
             rect_width: 0,
             rect_height: 0,
         };
@@ -519,6 +572,8 @@ fn monitor_info(hmon: HMONITOR) -> MonitorInfo {
     let device_name = utf16_to_string(&info.szDevice);
     MonitorInfo {
         device_name,
+        left: rect.left,
+        top: rect.top,
         rect_width: width,
         rect_height: height,
     }
@@ -531,6 +586,137 @@ fn monitor_attached(hmon: HMONITOR) -> bool {
     }
     let info = monitor_info(hmon);
     info.rect_width != 0 && info.rect_height != 0
+}
+
+/// Query the system cursor and composite it into a staged BGRA8 frame at the
+/// source-relative position (PDF T4.2).
+///
+/// WinRT Graphics Capture frames do not include the pointer, so the host
+/// draws it here: `GetCursorInfo` returns the cursor handle, visibility flag
+/// and desktop position; `GetIconInfo` returns the hotspot and bitmaps;
+/// `DrawIconEx` rasterizes the shape into a small DIB section whose BGRA
+/// pixels are then alpha-blended into the frame by the pure
+/// [`composite_cursor`] helper. The desktop position is normalized against
+/// the shared source via [`DesktopPoint`] + [`MonitorGeometry`], so monitors
+/// with negative origins map correctly.
+///
+/// Any GDI failure is non-fatal — the frame is still delivered without the
+/// cursor — matching the subsystem's "never panic on capture issues" rule.
+fn composite_system_cursor(
+    frame: &mut [u8],
+    width: u32,
+    height: u32,
+    geometry: &MonitorGeometry,
+) -> Result<(), ScreenShareError> {
+    let mut cursor_info = CURSORINFO::default();
+    cursor_info.cbSize = std::mem::size_of::<CURSORINFO>() as u32;
+    unsafe { GetCursorInfo(&mut cursor_info) }
+        .map_err(|e| ScreenShareError::new(format!("GetCursorInfo: {e}")))?;
+    // CURSOR_SHOWING (0x1) means the cursor is actually visible; without it
+    // (hidden cursor, touch input, remote session) there is nothing to draw.
+    // The flags type has no BitAnd impl in windows 0.58, so compare raw bits.
+    if cursor_info.flags.0 & CURSOR_SHOWING.0 == 0 {
+        return Ok(());
+    }
+    let mut icon_info = ICONINFO::default();
+    unsafe { GetIconInfo(cursor_info.hCursor, &mut icon_info) }
+        .map_err(|e| ScreenShareError::new(format!("GetIconInfo: {e}")))?;
+
+    // Rasterize the cursor into a DIB section sized to the cursor bitmap.
+    let mut bitmap = BITMAP::default();
+    let hbm = if !icon_info.hbmColor.is_invalid() {
+        icon_info.hbmColor
+    } else {
+        icon_info.hbmMask
+    };
+    let got = unsafe {
+        GetObjectW(
+            hbm,
+            std::mem::size_of::<BITMAP>() as i32,
+            Some((&mut bitmap as *mut BITMAP).cast()),
+        )
+    };
+    if got == 0 || bitmap.bmWidth <= 0 || bitmap.bmHeight <= 0 {
+        let _ = unsafe { DeleteObject(icon_info.hbmColor) };
+        let _ = unsafe { DeleteObject(icon_info.hbmMask) };
+        return Err(ScreenShareError::new(
+            "cursor bitmap has no usable dimensions",
+        ));
+    }
+    // For a monochrome cursor (hbmColor == null), hbmMask is twice the height
+    // (AND mask on top, XOR mask below); the color cursor's mask is the same
+    // size as the color bitmap.
+    let cursor_width = bitmap.bmWidth as u32;
+    let cursor_height = if icon_info.hbmColor.is_invalid() {
+        (bitmap.bmHeight / 2).max(1) as u32
+    } else {
+        bitmap.bmHeight as u32
+    };
+    if cursor_width > 256 || cursor_height > 256 {
+        let _ = unsafe { DeleteObject(icon_info.hbmColor) };
+        let _ = unsafe { DeleteObject(icon_info.hbmMask) };
+        return Err(ScreenShareError::new("cursor bitmap is unreasonably large"));
+    }
+
+    let dc = unsafe { CreateCompatibleDC(HDC::default()) };
+    let mut bmi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: cursor_width as i32,
+            biHeight: -(cursor_height as i32), // top-down
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..BITMAPINFOHEADER::default()
+        },
+        ..BITMAPINFO::default()
+    };
+    let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+    let dib = unsafe { CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0) }
+        .map_err(|e| {
+            let _ = unsafe { DeleteObject(icon_info.hbmColor) };
+            let _ = unsafe { DeleteObject(icon_info.hbmMask) };
+            let _ = unsafe { DeleteDC(dc) };
+            ScreenShareError::new(format!("CreateDIBSection: {e}"))
+        })?;
+    let previous = unsafe { SelectObject(dc, dib) };
+    let _ = unsafe {
+        DrawIconEx(
+            dc,
+            0,
+            0,
+            cursor_info.hCursor,
+            cursor_width as i32,
+            cursor_height as i32,
+            0,
+            None,
+            DI_NORMAL,
+        )
+    };
+    // Copy the DIB pixels (BGRA, top-down) into an owned sprite buffer.
+    let sprite_len = (cursor_width * cursor_height * 4) as usize;
+    let sprite_pixels =
+        unsafe { std::slice::from_raw_parts(bits as *const u8, sprite_len) }.to_vec();
+    let _ = unsafe { SelectObject(dc, previous) };
+    let _ = unsafe { DeleteObject(dib) };
+    let _ = unsafe { DeleteDC(dc) };
+    let _ = unsafe { DeleteObject(icon_info.hbmColor) };
+    let _ = unsafe { DeleteObject(icon_info.hbmMask) };
+
+    let sprite = CursorSprite::new(
+        cursor_width,
+        cursor_height,
+        icon_info.xHotspot,
+        icon_info.yHotspot,
+        sprite_pixels,
+    )
+    .map_err(|e| ScreenShareError::new(e.to_string()))?;
+    let cursor_pos = DesktopPoint {
+        x: cursor_info.ptScreenPos.x,
+        y: cursor_info.ptScreenPos.y,
+    };
+    composite_cursor(frame, width, height, cursor_pos, geometry, &sprite);
+    Ok(())
 }
 
 /// Enumerate all monitors into (stable id, handle) pairs.

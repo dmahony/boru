@@ -3,6 +3,7 @@
 
 use std::collections::VecDeque;
 
+use super::coords::MonitorGeometry;
 use super::ScreenShareError;
 
 /// Pixel layout of a normalized captured frame.
@@ -189,6 +190,16 @@ pub struct CaptureSource {
     pub width: u32,
     /// Native pixel height of the source.
     pub height: u32,
+    /// Virtual-desktop geometry of the source (physical pixels), when the
+    /// backend can describe where the source sits in the desktop layout.
+    ///
+    /// This is what lets the host normalize coordinates against the shared
+    /// source rather than the global desktop: a cursor at desktop
+    /// `(-960, 540)` on a monitor whose origin is `(-1920, 0)` is at
+    /// source-relative `(960, 540)`. Backends that cannot describe an origin
+    /// (e.g. the synthetic test pattern) leave this `None`, in which case the
+    /// source is treated as a primary-at-origin desktop.
+    pub geometry: Option<MonitorGeometry>,
 }
 
 /// Configuration for a capture session.
@@ -378,6 +389,7 @@ impl DesktopCaptureBackend for TestPatternCapture {
             title: "Test pattern (synthetic)".to_string(),
             width: self.width,
             height: self.height,
+            geometry: None,
         }])
     }
 

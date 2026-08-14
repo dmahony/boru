@@ -11,6 +11,7 @@
 //! are enforced by the same code path the hardware backend uses.
 
 use crate::screen_share::capture::{CaptureSource, CaptureSourceId, CaptureSourceKind};
+use crate::screen_share::coords::MonitorGeometry;
 
 /// Lifecycle of a Windows Graphics Capture session.
 ///
@@ -178,15 +179,19 @@ pub fn monitor_title(device_name: &str, width: u32, height: u32) -> String {
 /// Build a [`CaptureSource`] from enumerated monitor geometry.
 ///
 /// Pure helper so the source-advertisement shape (id, kind, title, native
-/// size) is unit-tested without WinRT; the Windows backend calls it from its
-/// `EnumDisplayMonitors` callback.
-pub fn monitor_source(device_name: &str, width: u32, height: u32) -> CaptureSource {
+/// size, desktop geometry) is unit-tested without WinRT; the Windows backend
+/// calls it from its `EnumDisplayMonitors` callback. The geometry carries the
+/// monitor's virtual-desktop origin (which may be negative for monitors left
+/// of / above the primary) so the host can normalize coordinates against the
+/// shared source.
+pub fn monitor_source(device_name: &str, geometry: MonitorGeometry) -> CaptureSource {
     CaptureSource {
         id: monitor_source_id(device_name),
         kind: CaptureSourceKind::Monitor,
-        title: monitor_title(device_name, width, height),
-        width,
-        height,
+        title: monitor_title(device_name, geometry.width, geometry.height),
+        width: geometry.width,
+        height: geometry.height,
+        geometry: Some(geometry),
     }
 }
 
@@ -322,10 +327,12 @@ mod tests {
 
     #[test]
     fn monitor_source_advertises_stable_geometry() {
-        let source = monitor_source(r"\\.\DISPLAY1", 1920, 1080);
-        assert_eq!(source.id, monitor_source_id(r"\\.\DISPLAY1"));
+        let geometry = MonitorGeometry::new(-1920, 0, 1920, 1080);
+        let source = monitor_source(r"\\\\.\\DISPLAY1", geometry);
+        assert_eq!(source.id, monitor_source_id(r"\\\\.\\DISPLAY1"));
         assert_eq!(source.kind, CaptureSourceKind::Monitor);
         assert_eq!((source.width, source.height), (1920, 1080));
+        assert_eq!(source.geometry, Some(geometry));
         assert!(source.title.contains("1920x1080"));
     }
 }
