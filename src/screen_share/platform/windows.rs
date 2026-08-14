@@ -1,19 +1,29 @@
 //! Windows Graphics Capture backend.
 //!
-//! The capture session is a real WinRT `Windows.Graphics.Capture` frame-pool
-//! session. Frames are retained as GPU surfaces until the encoder boundary;
-//! this avoids the test-pattern fallback and avoids an unnecessary CPU copy.
+//! Real WinRT `Windows.Graphics.Capture` monitor capture behind the
+//! platform-neutral [`DesktopCaptureBackend`] trait: source enumeration via
+//! `EnumDisplayMonitors`, a D3D11 device + frame-pool + capture session for
+//! the selected monitor, and GPU→CPU staging that avoids round-tripping
+//! through the GPU when the frame reaches the CPU-bound OpenH264 encoder.
+//!
+//! Typed failure handling (PDF T4.1): resize, monitor unplug, lock screen,
+//! minimized windows, and permission failures surface as
+//! [`CaptureFailureKind`] errors — never panics — via the shared classifier
+//! in [`super::windows_common`]. All pure logic (state machine, HRESULT
+//! classification, source-id derivation) is unit-tested on Linux; only the
+//! WinRT calls here require real Windows hardware.
 #![allow(missing_docs)]
 
+use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::ptr;
 
-use crate::screen_share::{capture::FrameSink, CapturedFrame, ScreenCapture, ScreenShareError};
 use windows::core::{factory, Interface};
 use windows::Graphics::Capture::{
     Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
 };
-
 use windows::Graphics::DirectX::{Direct3D11::IDirect3DDevice, DirectXPixelFormat};
+use windows::Win32::Foundation::{BOOL, LPARAM, RECT};
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0};
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_CPU_ACCESS_READ,
@@ -21,43 +31,50 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
 };
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
-use windows::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTOPRIMARY};
+use windows::Win32::Graphics::Gdi::{
+    EnumDisplayMonitors, GetMonitorInfoW, MonitorFromWindow, HDC, HMONITOR, MONITORINFOEXW,
+    MONITOR_DEFAULTTOPRIMARY,
+};
 use windows::Win32::System::WinRT::Direct3D11::CreateDirect3D11DeviceFromDXGIDevice;
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 use windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
 
-/// Lifecycle of a Windows Graphics Capture session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GraphicsCaptureState {
-    Idle,
-    Selecting,
-    Streaming,
-    Ending,
-    Ended,
-}
+use super::windows_common::{monitor_source, CaptureFailureKind};
+pub use super::windows_common::{GraphicsCaptureEvent, GraphicsCaptureState};
+use crate::screen_share::capture::{
+    CaptureConfig, CaptureSource, CaptureSourceId, DesktopCaptureBackend, FrameSink,
+};
+use crate::screen_share::{CapturedFrame, PixelFormat, ScreenCapture, ScreenShareError};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GraphicsCaptureEvent {
-    PickerOpened,
-    SourceSelected,
-    FormatChanged { width: u32, height: u32 },
-    SourceMinimized,
-    Ended,
-}
+/// Number of buffered frames in the WinRT frame pool. Two lets the compositor
+/// produce a frame while the previous one is being staged to CPU.
+const FRAME_POOL_BUFFERS: i32 = 2;
 
-/// A real WinRT frame-pool capture source.
+/// A real WinRT frame-pool capture source for one monitor.
 pub struct GraphicsCapture {
     state: GraphicsCaptureState,
     sink: FrameSink,
     format: Option<(u32, u32)>,
     events: VecDeque<GraphicsCaptureEvent>,
+    sources: HashMap<CaptureSourceId, usize>,
+    active_source: Option<CaptureSourceId>,
     pool: Option<Direct3D11CaptureFramePool>,
     session: Option<GraphicsCaptureSession>,
+    item: Option<GraphicsCaptureItem>,
     device: Option<ID3D11Device>,
     context: Option<ID3D11DeviceContext>,
+    winrt_device: Option<SendWinrtDevice>,
     staging: Option<ID3D11Texture2D>,
     staging_dimensions: Option<(u32, u32)>,
 }
+
+/// `IDirect3DDevice` is not declared `Send` by `windows-core`, but it wraps
+/// the same thread-safe D3D11 device that the crate already marks `Send`
+/// (`ID3D11Device`), and Graphics Capture only uses it to create/recreate the
+/// frame pool. The `DesktopCaptureBackend`/`ScreenCapture` traits require
+/// `Send`, so the WinRT device is held behind this wrapper.
+struct SendWinrtDevice(IDirect3DDevice);
+unsafe impl Send for SendWinrtDevice {}
 
 impl std::fmt::Debug for GraphicsCapture {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -75,111 +92,72 @@ impl GraphicsCapture {
             sink: FrameSink::new(queue_capacity)?,
             format: None,
             events: VecDeque::new(),
+            sources: HashMap::new(),
+            active_source: None,
             pool: None,
             session: None,
+            item: None,
             device: None,
             context: None,
+            winrt_device: None,
             staging: None,
             staging_dimensions: None,
         })
     }
 
-    /// Create a desktop capture for the primary monitor. The WinRT item,
-    /// D3D11 device, frame pool, and capture session are all created here;
-    /// callers can therefore distinguish an unavailable Windows capture API
-    /// from a running synthetic source.
+    /// Enumerate the current monitors into the private `sources` map.
+    fn refresh_sources(&mut self) -> Result<(), ScreenShareError> {
+        let monitors =
+            enumerate_monitors().map_err(|kind| ScreenShareError::new(kind.describe()))?;
+        self.sources = monitors
+            .into_iter()
+            .map(|(id, hmon)| (id, hmon.0 as usize))
+            .collect();
+        Ok(())
+    }
+
+    /// Create a desktop capture for the primary monitor. Retained for the
+    /// programmatic `create_capture_source` path: it enumerates monitors,
+    /// picks the primary one, and starts a session with the default config.
     pub fn try_create(queue_capacity: usize) -> Result<Self, ScreenShareError> {
         let mut capture = Self::new(queue_capacity)?;
-        let mut device = None;
-        let mut context = None;
-        unsafe {
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
-                None,
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                Some(&[D3D_FEATURE_LEVEL_11_0]),
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut context),
-            )
-            .map_err(|e| ScreenShareError::new(format!("D3D11CreateDevice: {e}")))?;
-        }
-        let device = device.ok_or_else(|| ScreenShareError::new("D3D11 returned no device"))?;
-        let context = context.ok_or_else(|| ScreenShareError::new("D3D11 returned no context"))?;
-        let dxgi: IDXGIDevice = device
-            .cast()
-            .map_err(|e| ScreenShareError::new(format!("D3D11 device cast: {e}")))?;
-        let inspectable = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi) }
-            .map_err(|e| ScreenShareError::new(format!("WinRT D3D device: {e}")))?;
-        let winrt_device: IDirect3DDevice = inspectable
-            .cast()
-            .map_err(|e| ScreenShareError::new(format!("WinRT D3D interface: {e}")))?;
-
-        let monitor = unsafe { MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY) };
-        let interop: IGraphicsCaptureItemInterop =
-            factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
-                .map_err(|e| ScreenShareError::new(format!("GraphicsCaptureItem factory: {e}")))?;
-        let item: GraphicsCaptureItem = unsafe { interop.CreateForMonitor(monitor) }
-            .map_err(|e| ScreenShareError::new(format!("GraphicsCaptureItem: {e}")))?;
-        let size = item
-            .Size()
-            .map_err(|e| ScreenShareError::new(format!("capture item size: {e}")))?;
-        if size.Width <= 0 || size.Height <= 0 {
-            return Err(ScreenShareError::new(
-                "primary monitor has no captureable area",
-            ));
-        }
-        let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
-            &winrt_device,
-            DirectXPixelFormat::B8G8R8A8UIntNormalized,
-            2,
-            size,
-        )
-        .map_err(|e| ScreenShareError::new(format!("frame pool: {e}")))?;
-        let session = pool
-            .CreateCaptureSession(&item)
-            .map_err(|e| ScreenShareError::new(format!("capture session: {e}")))?;
-        session
-            .StartCapture()
-            .map_err(|e| ScreenShareError::new(format!("StartCapture: {e}")))?;
-        capture.state = GraphicsCaptureState::Streaming;
-        capture.format = Some((size.Width as u32, size.Height as u32));
-        capture.pool = Some(pool);
-        capture.session = Some(session);
-        capture.device = Some(device);
-        capture.context = Some(context);
-        capture
-            .events
-            .push_back(GraphicsCaptureEvent::SourceSelected);
+        capture.refresh_sources()?;
+        let primary = unsafe { MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY) };
+        let primary_id = capture
+            .sources
+            .iter()
+            .find_map(|(id, hmon)| {
+                if *hmon == primary.0 as usize {
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| ScreenShareError::new("primary monitor not found in enumeration"))?;
+        capture.start(primary_id, CaptureConfig::default())?;
         Ok(capture)
     }
 
     pub fn begin_selection(&mut self) -> Result<(), ScreenShareError> {
-        if self.state != GraphicsCaptureState::Idle {
-            return Err(ScreenShareError::new(
-                "graphics capture session is already active",
-            ));
-        }
-        self.state = GraphicsCaptureState::Selecting;
+        self.state = self
+            .state
+            .begin_selection()
+            .map_err(|kind| ScreenShareError::new(kind.describe()))?;
         self.events.push_back(GraphicsCaptureEvent::PickerOpened);
         Ok(())
     }
     pub fn source_selected(&mut self) -> Result<(), ScreenShareError> {
-        if self.state != GraphicsCaptureState::Selecting {
-            return Err(ScreenShareError::new(
-                "graphics source was not being selected",
-            ));
-        }
-        self.state = GraphicsCaptureState::Streaming;
+        self.state = self
+            .state
+            .start()
+            .map_err(|kind| ScreenShareError::new(kind.describe()))?;
         self.events.push_back(GraphicsCaptureEvent::SourceSelected);
         Ok(())
     }
     pub fn push_surface(&mut self, frame: CapturedFrame) -> Result<(), ScreenShareError> {
-        if self.state != GraphicsCaptureState::Streaming {
+        if !self.state.is_streaming() {
             return Err(ScreenShareError::new(
-                "graphics frame received outside streaming state",
+                CaptureFailureKind::NotStarted.describe(),
             ));
         }
         self.sink.push(frame);
@@ -189,12 +167,7 @@ impl GraphicsCapture {
         self.events.push_back(GraphicsCaptureEvent::SourceMinimized);
     }
     pub fn close(&mut self) {
-        if let Some(pool) = self.pool.take() {
-            let _ = pool.Close();
-        }
-        self.session.take();
-        self.state = GraphicsCaptureState::Ended;
-        self.events.push_back(GraphicsCaptureEvent::Ended);
+        self.stop();
     }
     pub fn next_event(&mut self) -> Option<GraphicsCaptureEvent> {
         self.events.pop_front()
@@ -212,82 +185,389 @@ impl GraphicsCapture {
 
 impl ScreenCapture for GraphicsCapture {
     fn capture(&mut self) -> Result<Option<CapturedFrame>, ScreenShareError> {
-        if self.state != GraphicsCaptureState::Streaming {
+        // Preserve the pre-BORU-SS-11 contract: an idle/stopped backend
+        // yields "no frame", not an error (the host loop polls and treats
+        // errors as fatal). The DesktopCaptureBackend impl keeps the strict
+        // lifecycle for programmatic callers.
+        if !self.state.is_streaming() {
             return Ok(None);
         }
-        if let Some(pool) = &self.pool {
-            if let Ok(frame) = pool.TryGetNextFrame() {
-                let size = frame
-                    .ContentSize()
-                    .map_err(|e| ScreenShareError::new(format!("frame size: {e}")))?;
-                let timestamp = frame
-                    .SystemRelativeTime()
-                    .map(|t| t.Duration as u64 / 10)
-                    .unwrap_or(0);
-                let surface = frame
-                    .Surface()
-                    .map_err(|e| ScreenShareError::new(format!("frame surface: {e}")))?;
-                let texture: ID3D11Texture2D = surface
-                    .cast()
-                    .map_err(|e| ScreenShareError::new(format!("capture surface cast: {e}")))?;
-                let width = size.Width as u32;
-                let height = size.Height as u32;
-                let device = self
-                    .device
-                    .as_ref()
-                    .ok_or_else(|| ScreenShareError::new("capture device was released"))?;
-                let context = self
-                    .context
-                    .as_ref()
-                    .ok_or_else(|| ScreenShareError::new("capture context was released"))?;
-                if self.staging_dimensions != Some((width, height)) {
-                    let mut desc = D3D11_TEXTURE2D_DESC::default();
-                    unsafe {
-                        texture.GetDesc(&mut desc);
-                    }
-                    desc.Width = width;
-                    desc.Height = height;
-                    desc.Usage = D3D11_USAGE_STAGING;
-                    desc.BindFlags = 0;
-                    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
-                    desc.MiscFlags = 0;
-                    let mut staging = None;
-                    unsafe { device.CreateTexture2D(&desc, None, Some(&mut staging)) }
-                        .map_err(|e| ScreenShareError::new(format!("staging texture: {e}")))?;
-                    self.staging = staging;
-                    self.staging_dimensions = Some((width, height));
-                }
-                let staging = self
-                    .staging
-                    .as_ref()
-                    .ok_or_else(|| ScreenShareError::new("staging texture was not created"))?;
-                unsafe {
-                    context.CopyResource(staging, &texture);
-                }
-                let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-                unsafe { context.Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)) }
-                    .map_err(|e| ScreenShareError::new(format!("map capture frame: {e}")))?;
-                let row_bytes = width as usize * 4;
-                let mut pixels = vec![0u8; row_bytes * height as usize];
-                unsafe {
-                    for row in 0..height as usize {
-                        let source =
-                            (mapped.pData as *const u8).add(row * mapped.RowPitch as usize);
-                        let target = pixels.as_mut_ptr().add(row * row_bytes);
-                        std::ptr::copy_nonoverlapping(source, target, row_bytes);
-                    }
-                    context.Unmap(staging, 0);
-                }
-                return CapturedFrame::cpu(
-                    timestamp,
-                    width,
-                    height,
-                    crate::screen_share::PixelFormat::Bgra8,
-                    pixels,
-                )
-                .map(Some);
-            }
-        }
-        Ok(self.sink.pop_latest())
+        DesktopCaptureBackend::next_frame(self)
     }
+}
+
+impl DesktopCaptureBackend for GraphicsCapture {
+    fn list_sources(&self) -> Result<Vec<CaptureSource>, ScreenShareError> {
+        enumerate_monitors()
+            .map(|monitors| {
+                monitors
+                    .into_iter()
+                    .map(|(_, hmon)| {
+                        let info = monitor_info(hmon);
+                        monitor_source(&info.device_name, info.rect_width, info.rect_height)
+                    })
+                    .collect()
+            })
+            .map_err(|kind| ScreenShareError::new(kind.describe()))
+    }
+
+    fn start(
+        &mut self,
+        source: CaptureSourceId,
+        config: CaptureConfig,
+    ) -> Result<(), ScreenShareError> {
+        if config.target_fps == 0 {
+            return Err(ScreenShareError::new("target fps must be non-zero"));
+        }
+        let next_state = self
+            .state
+            .start()
+            .map_err(|kind| ScreenShareError::new(kind.describe()))?;
+        // Ensure the monitor map is populated (list_sources may not have been
+        // called yet).
+        if self.sources.is_empty() {
+            self.refresh_sources()?;
+        }
+        let hmon =
+            self.sources.get(&source).copied().ok_or_else(|| {
+                ScreenShareError::new(CaptureFailureKind::UnknownSource.describe())
+            })?;
+        let hmon = HMONITOR(hmon as *mut core::ffi::c_void);
+        let info = monitor_info(hmon);
+        if info.rect_width == 0 || info.rect_height == 0 {
+            return Err(ScreenShareError::new(
+                CaptureFailureKind::SourceUnavailable.describe(),
+            ));
+        }
+        let size = windows::Graphics::SizeInt32 {
+            Width: info.rect_width as i32,
+            Height: info.rect_height as i32,
+        };
+
+        // D3D11 device with BGRA support (Graphics Capture requires it).
+        let mut device = None;
+        let mut context = None;
+        unsafe {
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_HARDWARE,
+                None,
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                Some(&[D3D_FEATURE_LEVEL_11_0]),
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                Some(&mut context),
+            )
+        }
+        .map_err(|e| {
+            ScreenShareError::new(format!(
+                "{} (D3D11CreateDevice: {e})",
+                CaptureFailureKind::classify(e.code().0 as u32).describe()
+            ))
+        })?;
+        let device = device.ok_or_else(|| ScreenShareError::new("D3D11 returned no device"))?;
+        let context = context.ok_or_else(|| ScreenShareError::new("D3D11 returned no context"))?;
+        let dxgi: IDXGIDevice = device
+            .cast()
+            .map_err(|e| ScreenShareError::new(format!("D3D11 device cast: {e}")))?;
+        let inspectable = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi) }
+            .map_err(|e| ScreenShareError::new(format!("WinRT D3D device: {e}")))?;
+        let winrt_device: IDirect3DDevice = inspectable
+            .cast()
+            .map_err(|e| ScreenShareError::new(format!("WinRT D3D interface: {e}")))?;
+
+        let interop: IGraphicsCaptureItemInterop =
+            factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().map_err(|e| {
+                ScreenShareError::new(format!(
+                    "{} (GraphicsCaptureItem factory: {e})",
+                    CaptureFailureKind::classify(e.code().0 as u32).describe()
+                ))
+            })?;
+        let item: GraphicsCaptureItem = unsafe { interop.CreateForMonitor(hmon) }.map_err(|e| {
+            ScreenShareError::new(format!(
+                "{} (CreateForMonitor: {e})",
+                CaptureFailureKind::classify(e.code().0 as u32).describe()
+            ))
+        })?;
+        let item_size = item
+            .Size()
+            .map_err(|e| ScreenShareError::new(format!("capture item size: {e}")))?;
+        if item_size.Width <= 0 || item_size.Height <= 0 {
+            // The monitor exists but reports no captureable area: on a locked
+            // workstation Windows stops delivering frames and the item can
+            // shrink to zero.
+            let kind = if monitor_attached(hmon) {
+                CaptureFailureKind::ScreenLocked
+            } else {
+                CaptureFailureKind::SourceUnavailable
+            };
+            return Err(ScreenShareError::new(kind.describe()));
+        }
+        let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
+            &winrt_device,
+            DirectXPixelFormat::B8G8R8A8UIntNormalized,
+            FRAME_POOL_BUFFERS,
+            size,
+        )
+        .map_err(|e| ScreenShareError::new(format!("frame pool: {e}")))?;
+        let session = pool
+            .CreateCaptureSession(&item)
+            .map_err(|e| ScreenShareError::new(format!("capture session: {e}")))?;
+        session.StartCapture().map_err(|e| {
+            ScreenShareError::new(format!(
+                "{} (StartCapture: {e})",
+                CaptureFailureKind::classify(e.code().0 as u32).describe()
+            ))
+        })?;
+
+        self.state = next_state;
+        self.format = Some((item_size.Width as u32, item_size.Height as u32));
+        self.active_source = Some(source);
+        self.pool = Some(pool);
+        self.session = Some(session);
+        self.item = Some(item);
+        self.device = Some(device);
+        self.context = Some(context);
+        self.winrt_device = Some(SendWinrtDevice(winrt_device));
+        self.staging = None;
+        self.staging_dimensions = None;
+        self.events.push_back(GraphicsCaptureEvent::SourceSelected);
+        Ok(())
+    }
+
+    fn next_frame(&mut self) -> Result<Option<CapturedFrame>, ScreenShareError> {
+        self.state
+            .require_streaming()
+            .map_err(|kind| ScreenShareError::new(kind.describe()))?;
+        let Some(pool) = &self.pool else {
+            return Err(ScreenShareError::new(
+                CaptureFailureKind::NotStarted.describe(),
+            ));
+        };
+        let frame = match pool.TryGetNextFrame() {
+            Ok(frame) => frame,
+            // E_POINTER (0x80004003) is the normal "no new frame yet" result
+            // of TryGetNextFrame; the caller polls at CAPTURE_FPS.
+            Err(e) if e.code().0 as u32 == 0x8000_4003 => return Ok(None),
+            Err(e) => {
+                return Err(ScreenShareError::new(
+                    CaptureFailureKind::classify(e.code().0 as u32).describe(),
+                ));
+            }
+        };
+        let content = frame
+            .ContentSize()
+            .map_err(|e| ScreenShareError::new(format!("frame content size: {e}")))?;
+        if content.Width <= 0 || content.Height <= 0 {
+            // The frame reports no content: on a locked workstation Windows
+            // stops delivering frames (typed ScreenLocked); if the monitor
+            // itself is gone this is an unplug (typed SourceUnavailable).
+            let hmon = self
+                .active_source
+                .and_then(|id| self.sources.get(&id).copied())
+                .map(|raw| HMONITOR(raw as *mut core::ffi::c_void))
+                .unwrap_or(HMONITOR(ptr::null_mut()));
+            let kind = if monitor_attached(hmon) {
+                CaptureFailureKind::ScreenLocked
+            } else {
+                CaptureFailureKind::SourceUnavailable
+            };
+            let _ = frame.Close();
+            return Err(ScreenShareError::new(kind.describe()));
+        }
+        let width = content.Width as u32;
+        let height = content.Height as u32;
+
+        // Handle source resize: the frame pool is fixed-size, so when the
+        // monitor resolution changes we must recreate the pool and start a
+        // fresh capture session (Microsoft docs, Graphics Capture samples).
+        if self.format != Some((width, height)) {
+            let winrt_device = self
+                .winrt_device
+                .as_ref()
+                .map(|device| &device.0)
+                .ok_or_else(|| ScreenShareError::new("capture device was released"))?;
+            let item = self
+                .item
+                .as_ref()
+                .ok_or_else(|| ScreenShareError::new("capture item was released"))?;
+            pool.Recreate(
+                winrt_device,
+                DirectXPixelFormat::B8G8R8A8UIntNormalized,
+                FRAME_POOL_BUFFERS,
+                content,
+            )
+            .map_err(|e| ScreenShareError::new(format!("frame pool recreate: {e}")))?;
+            if let Some(old_session) = self.session.take() {
+                let _ = old_session.Close();
+            }
+            let session = pool
+                .CreateCaptureSession(item)
+                .map_err(|e| ScreenShareError::new(format!("capture session recreate: {e}")))?;
+            session.StartCapture().map_err(|e| {
+                ScreenShareError::new(format!(
+                    "{} (StartCapture after resize: {e})",
+                    CaptureFailureKind::classify(e.code().0 as u32).describe()
+                ))
+            })?;
+            self.session = Some(session);
+            self.format = Some((width, height));
+            self.staging = None;
+            self.staging_dimensions = None;
+            self.events
+                .push_back(GraphicsCaptureEvent::FormatChanged { width, height });
+        }
+
+        let surface = frame
+            .Surface()
+            .map_err(|e| ScreenShareError::new(format!("frame surface: {e}")))?;
+        let texture: ID3D11Texture2D = surface
+            .cast()
+            .map_err(|e| ScreenShareError::new(format!("capture surface cast: {e}")))?;
+        let device = self
+            .device
+            .as_ref()
+            .ok_or_else(|| ScreenShareError::new("capture device was released"))?;
+        let context = self
+            .context
+            .as_ref()
+            .ok_or_else(|| ScreenShareError::new("capture context was released"))?;
+        let timestamp = frame
+            .SystemRelativeTime()
+            .map(|t| t.Duration as u64 / 10)
+            .unwrap_or(0);
+
+        if self.staging_dimensions != Some((width, height)) {
+            let mut desc = D3D11_TEXTURE2D_DESC::default();
+            unsafe {
+                texture.GetDesc(&mut desc);
+            }
+            desc.Width = width;
+            desc.Height = height;
+            desc.Usage = D3D11_USAGE_STAGING;
+            desc.BindFlags = 0;
+            desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+            desc.MiscFlags = 0;
+            let mut staging = None;
+            unsafe { device.CreateTexture2D(&desc, None, Some(&mut staging)) }
+                .map_err(|e| ScreenShareError::new(format!("staging texture: {e}")))?;
+            self.staging = staging;
+            self.staging_dimensions = Some((width, height));
+        }
+        let staging = self
+            .staging
+            .as_ref()
+            .ok_or_else(|| ScreenShareError::new("staging texture was not created"))?;
+        unsafe {
+            context.CopyResource(staging, &texture);
+        }
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        unsafe { context.Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)) }
+            .map_err(|e| ScreenShareError::new(format!("map capture frame: {e}")))?;
+        let row_bytes = width as usize * 4;
+        let mut pixels = vec![0u8; row_bytes * height as usize];
+        unsafe {
+            for row in 0..height as usize {
+                let source = (mapped.pData as *const u8).add(row * mapped.RowPitch as usize);
+                let target = pixels.as_mut_ptr().add(row * row_bytes);
+                std::ptr::copy_nonoverlapping(source, target, row_bytes);
+            }
+            context.Unmap(staging, 0);
+        }
+        let _ = frame.Close();
+        CapturedFrame::cpu(timestamp, width, height, PixelFormat::Bgra8, pixels).map(Some)
+    }
+
+    fn stop(&mut self) {
+        self.state = self.state.stop();
+        if let Some(pool) = self.pool.take() {
+            let _ = pool.Close();
+        }
+        self.session.take();
+        self.item.take();
+        self.staging = None;
+        self.staging_dimensions = None;
+        self.active_source = None;
+        self.events.push_back(GraphicsCaptureEvent::Ended);
+    }
+}
+
+/// Geometry + device name of one monitor, extracted from `GetMonitorInfoW`.
+struct MonitorInfo {
+    device_name: String,
+    rect_width: u32,
+    rect_height: u32,
+}
+
+/// Query monitor geometry/device name, returning zeroes when the handle is
+/// no longer attached (so callers can distinguish unplug from lock).
+fn monitor_info(hmon: HMONITOR) -> MonitorInfo {
+    let mut info = MONITORINFOEXW::default();
+    info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+    let ok = unsafe { GetMonitorInfoW(hmon, (&mut info as *mut MONITORINFOEXW).cast()) };
+    if ok.0 == 0 {
+        return MonitorInfo {
+            device_name: String::new(),
+            rect_width: 0,
+            rect_height: 0,
+        };
+    }
+    let rect = info.monitorInfo.rcMonitor;
+    let width = (rect.right.saturating_sub(rect.left)).max(0) as u32;
+    let height = (rect.bottom.saturating_sub(rect.top)).max(0) as u32;
+    let device_name = utf16_to_string(&info.szDevice);
+    MonitorInfo {
+        device_name,
+        rect_width: width,
+        rect_height: height,
+    }
+}
+
+/// Whether the monitor handle still refers to an attached display.
+fn monitor_attached(hmon: HMONITOR) -> bool {
+    if hmon.0.is_null() {
+        return false;
+    }
+    let info = monitor_info(hmon);
+    info.rect_width != 0 && info.rect_height != 0
+}
+
+/// Enumerate all monitors into (stable id, handle) pairs.
+fn enumerate_monitors() -> Result<Vec<(CaptureSourceId, HMONITOR)>, CaptureFailureKind> {
+    let mut result: Vec<(CaptureSourceId, HMONITOR)> = Vec::new();
+    let data = &mut result as *mut Vec<(CaptureSourceId, HMONITOR)>;
+    let ok = unsafe {
+        EnumDisplayMonitors(
+            HDC::default(),
+            None,
+            Some(enum_monitor_proc),
+            LPARAM(data as isize),
+        )
+    };
+    if ok.0 == 0 {
+        return Err(CaptureFailureKind::Api(0));
+    }
+    Ok(result)
+}
+
+unsafe extern "system" fn enum_monitor_proc(
+    hmon: HMONITOR,
+    _hdc: HDC,
+    _rect: *mut RECT,
+    data: LPARAM,
+) -> BOOL {
+    let result = unsafe { &mut *(data.0 as *mut Vec<(CaptureSourceId, HMONITOR)>) };
+    let info = monitor_info(hmon);
+    if !info.device_name.is_empty() {
+        let id = super::windows_common::monitor_source_id(&info.device_name);
+        result.push((id, hmon));
+    }
+    BOOL(1)
+}
+
+/// Convert a NUL-terminated UTF-16 buffer to a Rust string.
+fn utf16_to_string(units: &[u16]) -> String {
+    let len = units.iter().position(|&u| u == 0).unwrap_or(units.len());
+    String::from_utf16_lossy(&units[..len])
 }

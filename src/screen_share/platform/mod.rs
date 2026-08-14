@@ -4,12 +4,18 @@
 #[cfg(target_os = "windows")]
 use crate::screen_share::capture::ScreenCapture;
 
+/// Platform-neutral logic shared by the Windows backend. Compiled on every
+/// target (including Linux) so the capture state machine, HRESULT
+/// classification, and monitor source-id derivation are unit-testable without
+/// Windows hardware.
+pub mod windows_common;
+
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::{
-    capture_dimensions, create_capture_source, ActiveCapture, CAPTURE_FPS, LinuxPortalCapture,
-    PortalCapture, PortalEvent, PortalState,
+    capture_dimensions, create_capture_source, ActiveCapture, LinuxPortalCapture, PortalCapture,
+    PortalEvent, PortalState, CAPTURE_FPS,
 };
 #[cfg(target_os = "macos")]
 pub mod macos;
@@ -17,6 +23,8 @@ pub mod macos;
 pub mod windows;
 #[cfg(target_os = "windows")]
 pub use windows::{GraphicsCapture, GraphicsCaptureEvent, GraphicsCaptureState};
+#[cfg(target_os = "windows")]
+pub use windows_common::CaptureFailureKind;
 
 #[cfg(target_os = "windows")]
 pub enum ActiveCapture {

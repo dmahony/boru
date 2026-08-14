@@ -62,7 +62,8 @@ at snapshot commit:
 | `stats.rs` | 121 | `ScreenShareStats`, `ScreenShareStatsSnapshot` | Implemented (internal to viewer; not surfaced to UI) |
 | `platform/mod.rs` | 103 | Per-OS dispatch, `ActiveCapture`, `create_capture_source` | Implemented |
 | `platform/linux.rs` | 1298 | Portal/PipeWire capture + X11 fallback + dlopen PipeWire client | Implemented |
-| `platform/windows.rs` | 293 | WinRT Graphics Capture backend | Implemented |
+| `platform/windows.rs` | 554 | WinRT Graphics Capture backend (`DesktopCaptureBackend`) | Implemented |
+| `platform/windows_common.rs` | 340 | Windows lifecycle state machine, HRESULT classification, monitor ids (Linux-tested) | Implemented |
 | `platform/macos.rs` | 1 | Placeholder comment only | **Stub** |
 
 ### 2.1 Per-module detail with file:line evidence
@@ -198,12 +199,25 @@ factory (`platform/mod.rs:83-95`), `capture_dimensions`
 order (portal → X11 → test-pattern, `linux.rs:1165-1181`). 9 unit tests incl.
 SPA pod round-trip and ZPixmap byte-order conversions.
 
-**platform/windows.rs** — real WinRT `Windows.Graphics.Capture` backend:
-`GraphicsCapture::try_create` builds D3D11 device + frame pool + session for
-the primary monitor (`windows.rs:91-157`), `capture()` pulls GPU surfaces,
-stages them to CPU (`windows.rs:213-292`). No Windows CI in this snapshot
-(module compiles under `--features screen-sharing` on Windows only; verified
-by release.yaml matrix).
+**platform/windows.rs** — real WinRT `Windows.Graphics.Capture` backend
+(BORU-SS-11 / PDF Task 4.1): `GraphicsCapture` implements the
+`DesktopCaptureBackend` trait — `list_sources` enumerates monitors via
+`EnumDisplayMonitors`/`GetMonitorInfoW` (`windows.rs:184-196`), `start`
+builds D3D11 device + frame pool + capture session for the selected monitor
+(`windows.rs:198-316`), `next_frame` pulls GPU surfaces and stages them to
+CPU with a reused staging texture (`windows.rs:318-444`), and `stop` tears
+down the session idempotently. Source resize is handled by recreating the
+frame pool (`pool.Recreate` + fresh capture session, `windows.rs:360-390`);
+monitor unplug / lock screen / permission failures are classified as typed
+`CaptureFailureKind` errors (never panics). The pure lifecycle state machine,
+HRESULT classification, and monitor source-id derivation live in
+`platform/windows_common.rs`, which is compiled and unit-tested on every
+target (10 tests on Linux). Hardware behaviour (resize/unplug/lock/consent)
+is only verifiable on real Windows; the module cross-compiles for
+`x86_64-pc-windows-gnu` (verified via `rb check --target
+x86_64-pc-windows-gnu --no-default-features --features screen-sharing`; the
+msvc target additionally needs a Windows MSVC toolchain for the C dependency
+build scripts and was not checkable on debsrv).
 
 **platform/macos.rs** — 1-line placeholder (`macos.rs:1`). No capture backend;
 `ActiveCapture` on macOS is test-pattern only (`platform/mod.rs:27-30`).
@@ -216,7 +230,7 @@ by release.yaml matrix).
 | `zbus` 5 (tokio) | `Cargo.toml:134` | `platform/linux.rs:193-270,931-945` (ScreenCast); `remote_input.rs:122-174` (RemoteDesktop) | xdg-desktop-portal D-Bus client |
 | `libloading` 0.8 | `Cargo.toml:138` | `platform/linux.rs:481-513,531-532` (`Pw::load`, `Library::new(PW_LIB)`) | dlopen `libpipewire-0.3.so.0` (no PipeWire dev headers needed) |
 | `windows-sys` 0.59 | `Cargo.toml:140` | `remote_input.rs:220-228` (`SendInput`, `GetSystemMetrics`) | Windows user-session input injection |
-| `windows` 0.58 | `Cargo.toml:143-156` | `platform/windows.rs:11-27,91-157,213-292` | WinRT Graphics Capture |
+| `windows` 0.58 | `Cargo.toml:143-156` | `platform/windows.rs` (WinRT Graphics Capture), `platform/windows_common.rs` (classifier, no WinRT imports) | WinRT Graphics Capture |
 | `x11rb` 0.13 | `Cargo.toml:160` | `platform/linux.rs:31-32,956-1055` | Direct X11 GetImage capture fallback |
 | `iroh` 1 (patched) | `Cargo.toml:111,457-463` | `protocol.rs:180-280` (ProtocolHandler/router), `transport.rs:118-163` (Connection/SendStream), `host.rs:24-25,98-155` (Endpoint::connect), `session.rs` + `permissions.rs` + `remote_input.rs` (PublicKey identity) | ALPN registration, QUIC dial/accept, control+media streams, peer identity |
 
