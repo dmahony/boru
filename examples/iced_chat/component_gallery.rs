@@ -2236,6 +2236,9 @@ fn attachment_card(
         false,
         Some(1_752_000_000_000),
         640.0,
+        // BORU-LAYOUT-05: the gallery shows the production component with
+        // its default placement.
+        crate::layout::ComponentPlacement::video_card_default(),
     );
     Column::new()
         .push(state_label(label))

@@ -108,6 +108,9 @@ impl IcedChat {
             // The expanded overlay fills the whole window, so the card sizes
             // against the tracked window width (Task 15 responsive band).
             self.window_width,
+            // BORU-LAYOUT-05: the expanded-video dialog is an app overlay, not
+            // a chat surface — it keeps the default video-card placement.
+            crate::layout::ComponentPlacement::video_card_default(),
         );
         let panel = container(
             column![

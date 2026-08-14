@@ -427,6 +427,7 @@ pub(crate) fn view_shared_by_me_card(
     theme: Theme,
     dark_mode: bool,
     thumbnails: &HashMap<String, Option<iced::widget::image::Handle>>,
+    placement: crate::layout::ComponentPlacement,
 ) -> Element<'static, AppMessage> {
     let body: Element<'static, AppMessage> = match &load_state {
         SharedByMeLoadState::Loading => skeleton_body(&theme),
@@ -435,7 +436,7 @@ pub(crate) fn view_shared_by_me_card(
             if rows.is_empty() {
                 empty_body(&theme)
             } else {
-                table_body(rows, ui, &theme, dark_mode, thumbnails)
+                table_body(rows, ui, &theme, dark_mode, thumbnails, placement)
             }
         }
     };
@@ -650,6 +651,7 @@ fn table_body(
     theme: &Theme,
     dark_mode: bool,
     thumbnails: &HashMap<String, Option<iced::widget::image::Handle>>,
+    placement: crate::layout::ComponentPlacement,
 ) -> Element<'static, AppMessage> {
     let mut children: Vec<Element<'static, AppMessage>> = Vec::with_capacity(rows.len() + 1);
     children.push(column_header(theme));
@@ -666,6 +668,7 @@ fn table_body(
                 theme,
                 dark_mode,
                 thumbnails,
+                placement,
             )
             .into(),
         );
@@ -714,8 +717,9 @@ fn view_row(
     theme: &Theme,
     dark_mode: bool,
     thumbnails: &HashMap<String, Option<iced::widget::image::Handle>>,
+    placement: crate::layout::ComponentPlacement,
 ) -> Element<'static, AppMessage> {
-    let name_cell = name_cell(row, theme, thumbnails);
+    let name_cell = name_cell(row, theme, thumbnails, placement);
     let shared_with_cell = shared_with_cell(row, theme, dark_mode);
     let shared = crate::theme::BoruTheme::for_theme(theme).attachments.shared_table;
     let size_cell = text(format_size(row.size_bytes))
@@ -740,18 +744,100 @@ fn view_row(
         actions_cell(row, menu_open, theme).into()
     };
 
-    let main_row = Row::new()
-        .push(name_cell)
-        .push(shared_with_cell)
-        .push(size_cell)
-        .push(shared_on_cell)
-        .push(downloads_cell)
-        .push(actions_cell)
-        .spacing(design_tokens::SPACE_8)
-        .align_y(Alignment::Center)
-        .width(Length::Fill);
+    // BORU-LAYOUT-05: the row's cells are laid out per the component
+    // placement. DEFAULT (Side + Horizontal + Start + Left) reproduces
+    // today's rendering exactly — the single trailing-action Row. Only an
+    // explicit config change takes the alternate branches.
+    let actions_on_side = matches!(
+        placement.button_placement,
+        crate::layout::ButtonPlacement::Side | crate::layout::ButtonPlacement::Overlay
+    );
 
-    let mut column = Column::new().push(main_row).spacing(0).width(Length::Fill);
+    // Compose the data row (name → downloads). The action cell is consumed
+    // in exactly one branch below — iced::Element is not Clone, so the
+    // orientation/placement combination decides where it lives.
+    let (data_row, action_slot): (
+        iced::Element<'static, AppMessage>,
+        Option<iced::Element<'static, AppMessage>>,
+    ) = match (placement.card_orientation, actions_on_side) {
+        // Horizontal + actions on the side (baseline): trailing action cell
+        // in the single row.
+        (crate::layout::CardOrientation::Horizontal, true) => (
+            Row::new()
+                .push(name_cell)
+                .push(shared_with_cell)
+                .push(size_cell)
+                .push(shared_on_cell)
+                .push(downloads_cell)
+                .push(actions_cell)
+                .spacing(design_tokens::SPACE_8)
+                .align_y(Alignment::Center)
+                .width(Length::Fill)
+                .into(),
+            None,
+        ),
+        // Horizontal + actions below: the row is the five data cells.
+        (crate::layout::CardOrientation::Horizontal, false) => (
+            Row::new()
+                .push(name_cell)
+                .push(shared_with_cell)
+                .push(size_cell)
+                .push(shared_on_cell)
+                .push(downloads_cell)
+                .spacing(design_tokens::SPACE_8)
+                .align_y(Alignment::Center)
+                .width(Length::Fill)
+                .into(),
+            Some(actions_cell),
+        ),
+        // Vertical + actions on the side: card-like stack with the trailing
+        // action cell as the last row. Overlay is not a meaningful surface
+        // in a table row; the trailing action menu is the closest equivalent.
+        (crate::layout::CardOrientation::Vertical, true) => (
+            Column::new()
+                .push(name_cell)
+                .push(shared_with_cell)
+                .push(size_cell)
+                .push(shared_on_cell)
+                .push(downloads_cell)
+                .push(actions_cell)
+                .spacing(design_tokens::SPACE_6)
+                .align_x(Alignment::Start)
+                .width(Length::Fill)
+                .into(),
+            None,
+        ),
+        // Vertical + actions below: the stack is the five data cells.
+        (crate::layout::CardOrientation::Vertical, false) => (
+            Column::new()
+                .push(name_cell)
+                .push(shared_with_cell)
+                .push(size_cell)
+                .push(shared_on_cell)
+                .push(downloads_cell)
+                .spacing(design_tokens::SPACE_6)
+                .align_x(Alignment::Start)
+                .width(Length::Fill)
+                .into(),
+            Some(actions_cell),
+        ),
+    };
+
+    let mut column = Column::new().push(data_row).spacing(0).width(Length::Fill);
+
+    // Button placement: Side/Overlay keep the actions inside the data row
+    // (the baseline); Below moves them to their own full-width row under
+    // the data.
+    if let Some(actions_cell) = action_slot {
+        column = column.push(
+            Row::new()
+                .push(Space::new().width(Length::Fill))
+                .push(actions_cell)
+                .spacing(design_tokens::SPACE_8)
+                .align_y(Alignment::Center)
+                .width(Length::Fill),
+        );
+    }
 
     if confirm_stop {
         column = column.push(stop_sharing_confirmation(row, theme));
@@ -786,6 +872,7 @@ fn name_cell(
     row: &SharedByMeRow,
     theme: &Theme,
     thumbnails: &HashMap<String, Option<iced::widget::image::Handle>>,
+    placement: crate::layout::ComponentPlacement,
 ) -> Element<'static, AppMessage> {
     // PAPIRUS-11: every row's icon is the central FileTypeIcon component
     // (same resolver/component as the chat cards, PAPIRUS-10) so the same
@@ -859,20 +946,64 @@ fn name_cell(
     // the file entry looked pushed too high relative to its icon (layout
     // regression fixed with the Papirus file-type icon work).  Wrapping
     // metadata can no longer push the icon down or run beside it.
-    let icon_and_name = Row::new()
-        .push(icon)
-        .push(Space::new().width(Length::Fixed(design_tokens::SPACE_8)))
-        .push(name_text)
-        .spacing(0)
-        .align_y(Alignment::Center)
-        .width(Length::Fill);
+    // BORU-LAYOUT-05: thumbnail position and metadata alignment come from
+    // the component placement. DEFAULT (Left + Start) reproduces today's
+    // rendering: icon beside the filename (left), start-aligned block.
+    let icon_el: iced::Element<'static, AppMessage> = icon.into();
+    let gap = || Space::new().width(Length::Fixed(design_tokens::SPACE_8));
+    let icon_and_name: iced::Element<'static, AppMessage> =
+        match placement.thumbnail_position {
+            crate::layout::ThumbnailPosition::Left => Row::new()
+                .push(icon_el)
+                .push(gap())
+                .push(name_text)
+                .spacing(0)
+                .align_y(Alignment::Center)
+                .width(Length::Fill)
+                .into(),
+            crate::layout::ThumbnailPosition::Right => Row::new()
+                .push(name_text)
+                .push(gap())
+                .push(icon_el)
+                .spacing(0)
+                .align_y(Alignment::Center)
+                .width(Length::Fill)
+                .into(),
+            crate::layout::ThumbnailPosition::Top => Column::new()
+                .push(icon_el)
+                .push(Space::new().height(Length::Fixed(design_tokens::SPACE_4)))
+                .push(name_text)
+                .spacing(0)
+                .align_x(Alignment::Start)
+                .width(Length::Fill)
+                .into(),
+            crate::layout::ThumbnailPosition::Bottom => Column::new()
+                .push(name_text)
+                .push(Space::new().height(Length::Fixed(design_tokens::SPACE_4)))
+                .push(icon_el)
+                .spacing(0)
+                .align_x(Alignment::Start)
+                .width(Length::Fill)
+                .into(),
+            crate::layout::ThumbnailPosition::Hidden => Row::new()
+                .push(name_text)
+                .spacing(0)
+                .align_y(Alignment::Center)
+                .width(Length::Fill)
+                .into(),
+        };
 
+    let block_alignment = match placement.metadata_alignment {
+        crate::layout::MetadataAlignment::Start => Alignment::Start,
+        crate::layout::MetadataAlignment::Center => Alignment::Center,
+        crate::layout::MetadataAlignment::End => Alignment::End,
+    };
     let name_block = Column::new()
         .push(icon_and_name)
         .push(meta_line)
         .spacing(design_tokens::SPACE_2)
         .width(Length::Fill)
-        .align_x(Alignment::Start);
+        .align_x(block_alignment);
 
     let with_tooltip: Element<'static, AppMessage> = if row.display_name.chars().count() > 44 {
         tooltip::Tooltip::new(
@@ -1817,6 +1948,7 @@ mod tests {
             theme.clone(),
             false,
             &thumbnails,
+            crate::layout::ComponentPlacement::shared_by_me_default(),
         );
         let _ = view_shared_by_me_card(
             &empty,
@@ -1825,6 +1957,7 @@ mod tests {
             theme.clone(),
             false,
             &thumbnails,
+            crate::layout::ComponentPlacement::shared_by_me_default(),
         );
         let _ = view_shared_by_me_card(
             &empty,
@@ -1833,6 +1966,7 @@ mod tests {
             theme.clone(),
             false,
             &thumbnails,
+            crate::layout::ComponentPlacement::shared_by_me_default(),
         );
 
         let mut rows = vec![
@@ -1875,6 +2009,7 @@ mod tests {
             theme.clone(),
             false,
             &thumbnails,
+            crate::layout::ComponentPlacement::shared_by_me_default(),
         );
 
         let mut ui_open = SharedByMeUiState::default();
@@ -1886,6 +2021,7 @@ mod tests {
             theme.clone(),
             true,
             &thumbnails,
+            crate::layout::ComponentPlacement::shared_by_me_default(),
         );
 
         ui_open.open_details(&rows[0].content_hash);
@@ -1896,6 +2032,7 @@ mod tests {
             theme.clone(),
             true,
             &thumbnails,
+            crate::layout::ComponentPlacement::shared_by_me_default(),
         );
 
         let mut ui_confirm = SharedByMeUiState::default();
@@ -1907,6 +2044,7 @@ mod tests {
             theme.clone(),
             true,
             &thumbnails,
+            crate::layout::ComponentPlacement::shared_by_me_default(),
         );
         rows.clear();
     }

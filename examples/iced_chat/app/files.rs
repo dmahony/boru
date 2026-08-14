@@ -181,6 +181,10 @@ pub(crate) struct SharedByMeCardDependency {
     pub(crate) sort: crate::dashboard_filters::SharedByMeSort,
     /// Thumbnail handles for image/video rows (hashed by presence only).
     pub(crate) thumbnails: SharedByMeThumbnails,
+    /// BORU-LAYOUT-05: placement read from the live layout model
+    /// (`component.shared_by_me`). Hashed so an applied layout change
+    /// rebuilds the cached table card.
+    pub(crate) component_placement: crate::layout::ComponentPlacement,
 }
 
 impl std::hash::Hash for SharedByMeCardDependency {
@@ -205,6 +209,7 @@ impl std::hash::Hash for SharedByMeCardDependency {
         self.ui.share_menu_open.hash(state);
         self.ui.sharing_status.hash(state);
         self.thumbnails.hash(state);
+        self.component_placement.hash(state);
         for row in &self.rows {
             row.id.hash(state);
             row.content_hash.hash(state);
@@ -3701,6 +3706,9 @@ impl IcedChat {
             load_state,
             sort: self.dashboard_shared_by_me_sort,
             thumbnails: SharedByMeThumbnails(self.shared_by_me_thumbnails.clone()),
+            // BORU-LAYOUT-05: the shared-by-me rows read their placement from
+            // the live layout model (`component.shared_by_me`).
+            component_placement: self.boru_layout().component.shared_by_me,
         }
     }
 
@@ -3756,6 +3764,7 @@ impl IcedChat {
                     theme,
                     dep.dark_mode,
                     &dep.thumbnails.0,
+                    dep.component_placement,
                 )
                 .into()
             };

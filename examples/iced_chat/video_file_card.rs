@@ -49,6 +49,7 @@ use super::download_progress_view::{
 use crate::design_tokens;
 use crate::file_type_icon::FileTypeIconSize;
 use crate::icon_system::{Icon, IconSize};
+use crate::layout::{ButtonPlacement, CardOrientation, ThumbnailPosition};
 use crate::ui_components::OverflowMenu;
 
 // ── Video presentation state ───────────────────────────────────────────
@@ -668,6 +669,13 @@ pub(crate) struct BoruVideoFileCard<'a> {
     /// the card fills the chat column at narrow widths, media caps shrink at
     /// medium/narrow widths, and the frame stays within the available space.
     timeline_width: f32,
+    /// BORU-LAYOUT-05: per-component placement read from the live layout
+    /// model (`LayoutConfig::component.video_card`). The default
+    /// (`ComponentPlacement::video_card_default()`) reproduces today's
+    /// rendering: media frame above the metadata, start-aligned metadata,
+    /// action buttons below, vertical card stack. Only an explicit config
+    /// change alters the arrangement.
+    placement: crate::layout::ComponentPlacement,
     #[cfg(feature = "video-playback")]
     player: Option<&'a Video>,
     preparing: bool,
@@ -703,12 +711,14 @@ impl<'a> BoruVideoFileCard<'a> {
         #[cfg(feature = "video-playback")] controls_visible: bool,
         received_at_ms: Option<i64>,
         timeline_width: f32,
+        placement: crate::layout::ComponentPlacement,
     ) -> Self {
         Self {
             entry_index,
             dark_mode,
             overflow_open,
             timeline_width,
+            placement,
             #[cfg(feature = "video-playback")]
             player,
             preparing,
@@ -747,7 +757,13 @@ impl<'a> BoruVideoFileCard<'a> {
 
         let header = self.header(attachment, &theme);
         let media = self.media_frame(attachment, error_color);
-        let status = self.status_metadata(attachment, &theme, tone, muted);
+        let status = self.status_metadata(
+            attachment,
+            &theme,
+            tone,
+            muted,
+            self.placement.metadata_alignment,
+        );
         let actions = self.actions(attachment);
 
         // Content sizing: the state-conditional sections (progress rows,
@@ -766,16 +782,101 @@ impl<'a> BoruVideoFileCard<'a> {
             Length::Fixed(media_sizing.width)
         };
 
-        let mut body = Column::new()
-            .push(header)
-            .push(
-                // Centre the media frame within the card so a portrait or
-                // square preview never hugs the left edge (VIDCARD-05).
-                container(media).width(Length::Fill).center_x(Length::Fill),
-            )
-            .push(status)
-            .push(actions)
-            .spacing(SPACE_12);
+        // BORU-LAYOUT-05: the default placement (Vertical + Top + Below +
+        // Start) reproduces today's rendering exactly — the same
+        // single-column composition as before this task: header, centred
+        // media frame, status metadata, action buttons. Only an explicit
+        // config change takes the alternate arrangement branches below.
+        // (Match arms are exclusive, so each element is consumed once.)
+        let placement = self.placement;
+        let mut body = Column::new().spacing(SPACE_12);
+        // Centre the media frame within the card so a portrait or square
+        // preview never hugs the left edge (VIDCARD-05). Built once: the
+        // default arm pushes it directly; the alternate arms wrap it into
+        // an Element for rearrangement.
+        let media_wrapper = container(media).width(Length::Fill).center_x(Length::Fill);
+        match (
+            placement.card_orientation,
+            placement.thumbnail_position,
+            placement.button_placement,
+        ) {
+            // DEFAULT — byte-identical to the pre-layout composition.
+            (CardOrientation::Vertical, ThumbnailPosition::Top, ButtonPlacement::Below) => {
+                body = body
+                    .push(header)
+                    .push(media_wrapper)
+                    .push(status)
+                    .push(actions);
+            }
+            // Alternate arrangements (explicit config only).
+            _ => {
+                let media_el: iced::Element<'a, AppMessage> = media_wrapper.into();
+                let status_el: iced::Element<'a, AppMessage> = status.into();
+                let header_el: iced::Element<'a, AppMessage> = header.into();
+                let actions_el: iced::Element<'a, AppMessage> = actions.into();
+
+                // Arrange media + status per card orientation / thumbnail
+                // position. The header stays the card's title bar in vertical
+                // orientation; in horizontal orientation it sits beside the
+                // media in the text column.
+                let content: iced::Element<'a, AppMessage> = match placement.card_orientation {
+                    CardOrientation::Vertical => {
+                        let mid: iced::Element<'a, AppMessage> = match placement.thumbnail_position {
+                            ThumbnailPosition::Top => {
+                                Column::new().push(media_el).push(status_el).spacing(SPACE_12).into()
+                            }
+                            ThumbnailPosition::Bottom => {
+                                Column::new().push(status_el).push(media_el).spacing(SPACE_12).into()
+                            }
+                            ThumbnailPosition::Left => {
+                                Row::new().push(media_el).push(status_el).spacing(SPACE_12).into()
+                            }
+                            ThumbnailPosition::Right => {
+                                Row::new().push(status_el).push(media_el).spacing(SPACE_12).into()
+                            }
+                            ThumbnailPosition::Hidden => status_el,
+                        };
+                        Column::new().push(header_el).push(mid).spacing(SPACE_12).into()
+                    }
+                    CardOrientation::Horizontal => {
+                        let text_col = Column::new().push(header_el).push(status_el).spacing(SPACE_12);
+                        match placement.thumbnail_position {
+                            // Media on the right of the text column.
+                            ThumbnailPosition::Right => {
+                                Row::new().push(text_col).push(media_el).spacing(SPACE_12).into()
+                            }
+                            // No thumbnail: the text column stands alone.
+                            ThumbnailPosition::Hidden => text_col.into(),
+                            // Left (and Top/Bottom, which degrade to Left in a
+                            // horizontal card): media on the left of the text.
+                            _ => Row::new().push(media_el).push(text_col).spacing(SPACE_12).into(),
+                        }
+                    }
+                };
+
+                // Actions per button placement. Overlay floats the buttons
+                // over the composed surface (Stack); when the media is hidden
+                // there is no surface to overlay onto, so it falls back to
+                // Below.
+                match placement.button_placement {
+                    ButtonPlacement::Below => {
+                        body = body.push(content).push(actions_el);
+                    }
+                    ButtonPlacement::Side => {
+                        body = body.push(Row::new().push(content).push(actions_el).spacing(SPACE_12));
+                    }
+                    ButtonPlacement::Overlay => {
+                        if placement.thumbnail_position == ThumbnailPosition::Hidden {
+                            body = body.push(content).push(actions_el);
+                        } else {
+                            body = body
+                                .push(iced::widget::Stack::new().push(content).push(actions_el));
+                        }
+                    }
+                }
+            }
+        }
+
         // Failure details — only the Failed state renders the bordered block
         // (content-sized). Other states omit it entirely: reserving a
         // fixed-height slot here left a large blank region inside every
@@ -1374,6 +1475,7 @@ impl<'a> BoruVideoFileCard<'a> {
         theme: &iced::Theme,
         tone: Color,
         muted: Color,
+        alignment: crate::layout::MetadataAlignment,
     ) -> iced::Element<'a, AppMessage> {
         let state = &attachment.state;
         let presentation = video_presentation_state(attachment);
@@ -1527,7 +1629,14 @@ impl<'a> BoruVideoFileCard<'a> {
         if let Some(detail) = detail_el {
             rows.push(content_slot(Length::Fill, detail));
         }
-        Column::with_children(rows).spacing(SPACE_6).into()
+        // BORU-LAYOUT-05: the metadata rows honour the component's metadata
+        // alignment (Start = baseline; Center/End only via explicit config).
+        let align_x = match alignment {
+            crate::layout::MetadataAlignment::Start => Alignment::Start,
+            crate::layout::MetadataAlignment::Center => Alignment::Center,
+            crate::layout::MetadataAlignment::End => Alignment::End,
+        };
+        Column::with_children(rows).spacing(SPACE_6).align_x(align_x).into()
     }
 
     #[cfg(feature = "video-playback")]
@@ -3138,6 +3247,7 @@ mod tests {
                 false,
                 Some(1_800_000_000_000_i64),
                 720.0,
+                crate::layout::ComponentPlacement::video_card_default(),
             );
             // player=None → the returned element is 'static-compatible.
             let mut element: iced::Element<'static, AppMessage> = card.view(&att);

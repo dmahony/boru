@@ -33,9 +33,13 @@
 //! `home.*` group into `app/home.rs` (section order/visibility, grid/list
 //! mode, columns, max width, padding/gaps, card sizing); BORU-LAYOUT-04
 //! wires the `responsive.*` group (viewport tiers, per-tier home column
-//! counts and per-tier horizontal padding) into the same view. The
-//! remaining groups (sidebar, chat, component, tables) are wired by later
-//! tasks. TOML parsing/merge/watcher are later BORU-LAYOUT tasks.
+//! counts and per-tier horizontal padding) into the same view;
+//! BORU-LAYOUT-05 wires the `component.*` group into the media/file card
+//! (`video_file_card.rs`) and the \"Files I'm Sharing\" rows
+//! (`shared_by_me_table.rs`) via per-component [`ComponentPlacement`]
+//! structs whose defaults reproduce each component's current rendering.
+//! The remaining groups (sidebar, chat, tables) are wired by later tasks.
+//! TOML parsing/merge/watcher are later BORU-LAYOUT tasks.
 //! `#![allow(dead_code)]` guards the still-unwired groups; drop it once
 //! every group is consumed by a view.
 
@@ -669,18 +673,84 @@ impl Default for MemberListLayout {
 
 // ── Component placement (PDF Task 5) ─────────────────────────────────
 
+/// Per-component placement: thumbnail position, metadata alignment, button
+/// placement and card orientation for one reusable component
+/// (BORU-LAYOUT-05).
+///
+/// Each wired component carries its own [`ComponentPlacement`] inside
+/// [`ComponentLayout`] so a TOML override can rearrange one component
+/// without touching the others. The leaf defaults reproduce each
+/// component's **current** rendering (the guardrail "defaults must
+/// reproduce the current appearance"); the global fallback leaves on
+/// [`ComponentLayout`] mirror the same vocabulary for components that do
+/// not (yet) have a dedicated struct.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ComponentPlacement {
+    /// Thumbnail position relative to the card's text content.
+    pub thumbnail_position: ThumbnailPosition,
+    /// Horizontal alignment of metadata rows inside the component.
+    pub metadata_alignment: MetadataAlignment,
+    /// Placement of action buttons relative to card content.
+    pub button_placement: ButtonPlacement,
+    /// Overall card orientation.
+    pub card_orientation: CardOrientation,
+}
+
+impl Default for ComponentPlacement {
+    fn default() -> Self {
+        Self {
+            thumbnail_position: ThumbnailPosition::Left,
+            metadata_alignment: MetadataAlignment::Start,
+            button_placement: ButtonPlacement::Below,
+            card_orientation: CardOrientation::Horizontal,
+        }
+    }
+}
+
+impl ComponentPlacement {
+    /// Baseline for the video/file attachment card (`video_file_card.rs`):
+    /// media frame above the status metadata in a vertical stack,
+    /// start-aligned metadata, action buttons below the content — exactly
+    /// today's rendering (`BoruVideoFileCard::view`).
+    pub(crate) fn video_card_default() -> Self {
+        Self {
+            thumbnail_position: ThumbnailPosition::Top,
+            card_orientation: CardOrientation::Vertical,
+            ..Self::default()
+        }
+    }
+
+    /// Baseline for the "Files I'm Sharing" rows
+    /// (`shared_by_me_table.rs`): thumbnail on the left of the name block,
+    /// start-aligned metadata, trailing action menu on the side of the row
+    /// — exactly today's rendering (`view_row` / `name_cell`).
+    pub(crate) fn shared_by_me_default() -> Self {
+        Self {
+            button_placement: ButtonPlacement::Side,
+            ..Self::default()
+        }
+    }
+}
+
 /// Per-component arrangement: thumbnail position, metadata alignment, button
 /// placement and card orientation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ComponentLayout {
-    /// Thumbnail position inside media cards (baseline: Left).
+    /// Global fallback thumbnail position (baseline: Left). Components with
+    /// a dedicated [`ComponentPlacement`] leaf (e.g. `video_card`,
+    /// `shared_by_me`) read their own struct; this leaf is the fallback
+    /// vocabulary for components without one.
     pub thumbnail_position: ThumbnailPosition,
-    /// Horizontal alignment of metadata rows inside cards (baseline: Start).
+    /// Global fallback metadata alignment (baseline: Start).
     pub metadata_alignment: MetadataAlignment,
-    /// Placement of action buttons relative to card content (baseline: Below).
+    /// Global fallback button placement (baseline: Below).
     pub button_placement: ButtonPlacement,
-    /// Overall card orientation (baseline: Horizontal).
+    /// Global fallback card orientation (baseline: Horizontal).
     pub card_orientation: CardOrientation,
+    /// Video/file attachment card placement (`video_file_card.rs`).
+    pub video_card: ComponentPlacement,
+    /// "Files I'm Sharing" row placement (`shared_by_me_table.rs`).
+    pub shared_by_me: ComponentPlacement,
     /// Video attachment card sizing (`video_file_card.rs`).
     pub video: VideoCardLayout,
 }
@@ -692,13 +762,15 @@ impl Default for ComponentLayout {
             metadata_alignment: MetadataAlignment::Start,
             button_placement: ButtonPlacement::Below,
             card_orientation: CardOrientation::Horizontal,
+            video_card: ComponentPlacement::video_card_default(),
+            shared_by_me: ComponentPlacement::shared_by_me_default(),
             video: VideoCardLayout::default(),
         }
     }
 }
 
 /// Thumbnail position relative to the card's text content.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ThumbnailPosition {
     /// Thumbnail to the left of the text (baseline media cards).
     #[default]
@@ -714,7 +786,7 @@ pub enum ThumbnailPosition {
 }
 
 /// Horizontal alignment of metadata rows inside a card.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum MetadataAlignment {
     /// Aligned to the start (left in LTR; baseline).
     #[default]
@@ -726,7 +798,7 @@ pub enum MetadataAlignment {
 }
 
 /// Placement of action buttons relative to card content.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ButtonPlacement {
     /// Buttons below the content (baseline).
     #[default]
@@ -738,7 +810,7 @@ pub enum ButtonPlacement {
 }
 
 /// Overall card orientation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum CardOrientation {
     /// Content flows horizontally — media left, text right (baseline
     /// video/download cards).
@@ -1338,8 +1410,24 @@ pub struct ComponentOverrides {
     pub button_placement: Option<ButtonPlacement>,
     /// Override card orientation.
     pub card_orientation: Option<CardOrientation>,
+    /// Override video/file attachment card placement.
+    pub video_card: Option<ComponentPlacementOverrides>,
+    /// Override "Files I'm Sharing" row placement.
+    pub shared_by_me: Option<ComponentPlacementOverrides>,
     /// Override video card sizing.
     pub video: Option<VideoCardOverrides>,
+}
+
+layout_override_group! {
+    /// Per-component placement overrides (PDF Task 5): a partial TOML file
+    /// can override one leaf (e.g. only `thumbnail_position`) and keep the
+    /// component's other placement leaves at their defaults.
+    ComponentPlacementOverrides {
+        thumbnail_position: ThumbnailPosition,
+        metadata_alignment: MetadataAlignment,
+        button_placement: ButtonPlacement,
+        card_orientation: CardOrientation,
+    }
 }
 
 layout_override_group! {
@@ -1688,6 +1776,37 @@ mod tests {
         assert_eq!(c.button_placement, ButtonPlacement::Below);
         assert_eq!(c.card_orientation, CardOrientation::Horizontal);
 
+        // BORU-LAYOUT-05: per-component placements reproduce each
+        // component's CURRENT rendering (not the global fallback).
+        assert_eq!(
+            c.video_card.thumbnail_position,
+            ThumbnailPosition::Top,
+            "video card renders its media frame above the metadata today"
+        );
+        assert_eq!(c.video_card.metadata_alignment, MetadataAlignment::Start);
+        assert_eq!(c.video_card.button_placement, ButtonPlacement::Below);
+        assert_eq!(
+            c.video_card.card_orientation,
+            CardOrientation::Vertical,
+            "video card is a vertical stack today"
+        );
+        assert_eq!(
+            c.shared_by_me.thumbnail_position,
+            ThumbnailPosition::Left,
+            "shared-by-me rows render the icon to the left of the name today"
+        );
+        assert_eq!(c.shared_by_me.metadata_alignment, MetadataAlignment::Start);
+        assert_eq!(
+            c.shared_by_me.button_placement,
+            ButtonPlacement::Side,
+            "shared-by-me rows keep the action menu on the side today"
+        );
+        assert_eq!(
+            c.shared_by_me.card_orientation,
+            CardOrientation::Horizontal,
+            "shared-by-me rows are horizontal rows today"
+        );
+
         let theme = BoruTheme::default();
         assert_eq!(
             c.video.narrow_breakpoint,
@@ -1709,6 +1828,70 @@ mod tests {
             c.video.controls_slider_width,
             theme.attachments.video.controls_slider_width
         );
+    }
+
+    #[test]
+    fn component_placement_each_leaf_is_configurable() {
+        // PDF Task 5 acceptance: thumbnail position, metadata alignment,
+        // button placement and card orientation must each be configurable
+        // via the layout model — per component and per leaf.
+        let base = ComponentPlacement::default();
+        assert_eq!(base.thumbnail_position, ThumbnailPosition::Left);
+        assert_eq!(base.metadata_alignment, MetadataAlignment::Start);
+        assert_eq!(base.button_placement, ButtonPlacement::Below);
+        assert_eq!(base.card_orientation, CardOrientation::Horizontal);
+
+        let video_card = ComponentPlacement {
+            thumbnail_position: ThumbnailPosition::Right,
+            metadata_alignment: MetadataAlignment::Center,
+            button_placement: ButtonPlacement::Overlay,
+            card_orientation: CardOrientation::Vertical,
+            ..base
+        };
+        assert_eq!(video_card.thumbnail_position, ThumbnailPosition::Right);
+        assert_eq!(video_card.metadata_alignment, MetadataAlignment::Center);
+        assert_eq!(video_card.button_placement, ButtonPlacement::Overlay);
+        assert_eq!(video_card.card_orientation, CardOrientation::Vertical);
+
+        let shared_by_me = ComponentPlacement {
+            thumbnail_position: ThumbnailPosition::Hidden,
+            metadata_alignment: MetadataAlignment::End,
+            button_placement: ButtonPlacement::Below,
+            card_orientation: CardOrientation::Vertical,
+            ..base
+        };
+        assert_eq!(shared_by_me.thumbnail_position, ThumbnailPosition::Hidden);
+        assert_eq!(shared_by_me.metadata_alignment, MetadataAlignment::End);
+        assert_eq!(shared_by_me.button_placement, ButtonPlacement::Below);
+        assert_eq!(shared_by_me.card_orientation, CardOrientation::Vertical);
+    }
+
+    #[test]
+    fn component_placements_are_independent_per_component() {
+        // Configuring one component must never leak into another: the video
+        // card and shared-by-me rows keep separate placement structs even
+        // when both default to the global fallback vocabulary.
+        let mut layout = ComponentLayout::default();
+        layout.video_card.thumbnail_position = ThumbnailPosition::Bottom;
+        layout.video_card.card_orientation = CardOrientation::Vertical;
+
+        assert_eq!(
+            layout.video_card.thumbnail_position,
+            ThumbnailPosition::Bottom
+        );
+        assert_eq!(
+            layout.shared_by_me.thumbnail_position,
+            ThumbnailPosition::Left,
+            "shared-by-me thumbnail is untouched by the video-card override"
+        );
+        assert_eq!(layout.shared_by_me.button_placement, ButtonPlacement::Side);
+        assert_eq!(
+            layout.shared_by_me.card_orientation,
+            CardOrientation::Horizontal
+        );
+        // The global fallback leaves stay at their PDF Task 5 defaults.
+        assert_eq!(layout.thumbnail_position, ThumbnailPosition::Left);
+        assert_eq!(layout.card_orientation, CardOrientation::Horizontal);
     }
 
     #[test]
@@ -1949,6 +2132,48 @@ mod tests {
         };
         assert_eq!(comp.thumbnail_position, Some(ThumbnailPosition::Top));
         assert_eq!(comp.card_orientation, Some(CardOrientation::Vertical));
+
+        // BORU-LAYOUT-05: per-component placement overrides are typed and
+        // optional — a partial file can override one leaf of one component.
+        let comp = ComponentOverrides {
+            video_card: Some(ComponentPlacementOverrides {
+                thumbnail_position: Some(ThumbnailPosition::Bottom),
+                ..Default::default()
+            }),
+            shared_by_me: Some(ComponentPlacementOverrides {
+                button_placement: Some(ButtonPlacement::Overlay),
+                ..Default::default()
+            }),
+            ..comp
+        };
+        assert_eq!(
+            comp.video_card
+                .as_ref()
+                .expect("video_card overrides present")
+                .thumbnail_position,
+            Some(ThumbnailPosition::Bottom)
+        );
+        assert!(
+            comp.video_card
+                .as_ref()
+                .expect("video_card overrides present")
+                .metadata_alignment
+                .is_none(),
+            "unset leaf falls back to the component default"
+        );
+        assert_eq!(
+            comp.shared_by_me
+                .as_ref()
+                .expect("shared_by_me overrides present")
+                .button_placement,
+            Some(ButtonPlacement::Overlay)
+        );
+        assert!(comp
+            .shared_by_me
+            .as_ref()
+            .expect("shared_by_me overrides present")
+            .card_orientation
+            .is_none());
 
         let composer = ComposerOverrides {
             button_order: Some(vec![ComposerButton::Send, ComposerButton::Gif]),

@@ -9332,6 +9332,10 @@ impl IcedChat {
             controls_visible,
             received_at_ms,
             timeline_width,
+            // BORU-LAYOUT-05: the video card reads its placement from the
+            // live layout model (`component.video_card`); the default
+            // reproduces today's rendering.
+            self.boru_layout().component.video_card,
         );
         #[cfg(not(feature = "video-playback"))]
         let dependency = (
@@ -9385,6 +9389,9 @@ impl IcedChat {
             expanded,
             received_at_ms,
             timeline_width,
+            // Non-feature builds have no live layout accessor in this static
+            // helper; the default placement reproduces today's rendering.
+            crate::layout::ComponentPlacement::video_card_default(),
         );
         #[cfg(not(feature = "video-playback"))]
         crate::download_progress_view::view_download_progress(
@@ -9394,6 +9401,7 @@ impl IcedChat {
             overflow_open,
             received_at_ms,
             timeline_width as f32,
+            crate::layout::ComponentPlacement::video_card_default(),
         )
     }
 
@@ -35688,6 +35696,7 @@ fn vr_create_tunnel_picker_port_validation() {
                 true,
                 Some(now_ms() as i64),
                 720.0,
+                crate::layout::ComponentPlacement::video_card_default(),
             );
             #[cfg(not(feature = "video-playback"))]
             let card = crate::video_file_card::BoruVideoFileCard::new(
@@ -35698,6 +35707,7 @@ fn vr_create_tunnel_picker_port_validation() {
                 false,
                 Some(now_ms() as i64),
                 720.0,
+                crate::layout::ComponentPlacement::video_card_default(),
             );
             let mut element = card.view(&attachment);
             render_element(&mut element, "video_file_card_light", 800, 420, false);

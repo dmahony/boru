@@ -798,6 +798,7 @@ pub fn view_download_progress(
     overflow_open: bool,
     received_at_ms: Option<i64>,
     timeline_width: f32,
+    placement: crate::layout::ComponentPlacement,
 ) -> iced::Element<'static, AppMessage> {
     #[cfg(feature = "video-playback")]
     {
@@ -813,6 +814,7 @@ pub fn view_download_progress(
             false,
             received_at_ms,
             timeline_width,
+            placement,
         )
     }
     #[cfg(not(feature = "video-playback"))]
@@ -826,6 +828,7 @@ pub fn view_download_progress(
             false,
             received_at_ms,
             timeline_width,
+            placement,
         )
     }
 }
@@ -843,6 +846,7 @@ pub fn view_download_progress_with_player<'a>(
     controls_visible: bool,
     received_at_ms: Option<i64>,
     timeline_width: f32,
+    placement: crate::layout::ComponentPlacement,
 ) -> iced::Element<'a, AppMessage> {
     view_download_progress_inner(
         entry_index,
@@ -856,6 +860,7 @@ pub fn view_download_progress_with_player<'a>(
         controls_visible,
         received_at_ms,
         timeline_width,
+        placement,
     )
 }
 
@@ -872,6 +877,7 @@ fn view_download_progress_inner<'a>(
     #[cfg(feature = "video-playback")] controls_visible: bool,
     received_at_ms: Option<i64>,
     timeline_width: f32,
+    placement: crate::layout::ComponentPlacement,
 ) -> iced::Element<'a, AppMessage> {
     // Video attachments render through the reusable BoruVideoFileCard
     // component (see video_file_card.rs); this function keeps handling the
@@ -890,6 +896,7 @@ fn view_download_progress_inner<'a>(
                 controls_visible,
                 received_at_ms,
                 timeline_width,
+                placement,
             )
             .view(attachment);
         }
@@ -903,6 +910,7 @@ fn view_download_progress_inner<'a>(
                 preparing,
                 received_at_ms,
                 timeline_width,
+                placement,
             )
             .view(attachment);
         }
@@ -2004,7 +2012,15 @@ mod tests {
             let att = generic_attachment_in(state);
             // Timeline width 800 → card fills the bubble column (fixed
             // width) in every state.
-            let mut element = view_download_progress(0, &att, false, false, None, 800.0);
+            let mut element = view_download_progress(
+                0,
+                &att,
+                false,
+                false,
+                None,
+                800.0,
+                crate::layout::ComponentPlacement::video_card_default(),
+            );
             measured.push(measure_outer_bounds(&mut element, (900.0, 1600.0)));
         }
 
