@@ -21045,6 +21045,18 @@ impl IcedChat {
                         Some((host_id.fmt_short().to_string(), session_id));
                 }
             }
+            SessionEvent::NegotiationInvitation { session_id, host_id, .. } => {
+                // Versioned negotiation offers (PDF Task 3.1) surface through
+                // the same invitation prompt as legacy Hello invitations; the
+                // host identity is what the recipient needs to decide.
+                if !self.screen_share_viewing
+                    && self.screen_share_host_state == ScreenShareHostState::Idle
+                    && self.screen_share_invite.is_none()
+                {
+                    self.screen_share_invite =
+                        Some((host_id.fmt_short().to_string(), session_id));
+                }
+            }
             SessionEvent::Accepted { .. } => {
                 if self.screen_share_host_state != ScreenShareHostState::Idle {
                     // Capture is active now — the persistent indicator stays on.

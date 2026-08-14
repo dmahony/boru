@@ -166,6 +166,13 @@ async fn run_host_session_inner(
                         manager.state(session_id) == Some(SessionState::Streaming)
                     }
                     Ok(ReadUnit::Media(_, _)) => false,
+                    Ok(ReadUnit::ScreenShare(message)) => {
+                        // Versioned negotiation/lifecycle messages are the
+                        // canonical protocol set (BORU-SS-08); the legacy
+                        // host loop does not consume them yet.
+                        tracing::debug!(?message, "screen-share: host ignored versioned message");
+                        false
+                    }
                     Err(_) => return,
                 },
                 Err(_) => return,
@@ -247,6 +254,11 @@ async fn run_host_session_inner(
                             let response = manager.apply_remote(peer, message, events);
                             if let Some(response) = response { let _ = write_control_response(&mut send, &response).await; }
                             if manager.state(session_id) == Some(SessionState::Ended) { return; }
+                        }
+                        Ok(ReadUnit::ScreenShare(message)) => {
+                            // Versioned lifecycle messages (BORU-SS-08) are not
+                            // consumed by the legacy host loop.
+                            tracing::debug!(?message, "screen-share: host ignored versioned message");
                         }
                         Ok(ReadUnit::Media(_, _)) => {}
                         Err(_) => return,

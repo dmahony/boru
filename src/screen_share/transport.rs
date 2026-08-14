@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use super::{codec::EncodedFrame, protocol::{self, ControlMessage, SCREEN_SHARE_PROTOCOL_VERSION}, ScreenShareError};
+use super::{codec::EncodedFrame, protocol::{self, ControlMessage, ScreenShareMessage, SCREEN_SHARE_PROTOCOL_VERSION}, ScreenShareError};
 
 /// Synchronous boundary used by capture/codec pipelines that do not know about QUIC.
 pub trait ScreenTransport: Send {
@@ -26,6 +26,8 @@ pub const MAX_MEDIA_HEADER: usize = 256;
 pub const MAX_LATE_SEQUENCE_DISTANCE: u64 = 120;
 const CONTROL_KIND: u8 = 0x01;
 const MEDIA_KIND: u8 = 0x02;
+/// Versioned protocol message (negotiation and lifecycle) frame kind.
+const SCREEN_SHARE_KIND: u8 = 0x03;
 
 /// Diagnostics describing the selected QUIC path. Transport behavior never
 /// depends on this value.
@@ -130,6 +132,17 @@ impl QuicScreenTransport {
         send.finish().map_err(|e| ScreenShareError::new(e.to_string()))?;
         Ok(())
     }
+    /// Send one versioned protocol message (negotiation/lifecycle) on a fresh
+    /// reliable stream, using the versioned message framing.
+    pub async fn send_screen_share(&self, message: &ScreenShareMessage) -> Result<(), ScreenShareError> {
+        let bytes = message.encode().map_err(|e| ScreenShareError::new(e.to_string()))?;
+        let (mut send, _) = self.connection.open_bi().await.map_err(|e| ScreenShareError::new(e.to_string()))?;
+        send.write_u8(SCREEN_SHARE_KIND).await.map_err(|e| ScreenShareError::new(e.to_string()))?;
+        send.write_u32(bytes.len() as u32).await.map_err(|e| ScreenShareError::new(e.to_string()))?;
+        send.write_all(&bytes).await.map_err(|e| ScreenShareError::new(e.to_string()))?;
+        send.finish().map_err(|e| ScreenShareError::new(e.to_string()))?;
+        Ok(())
+    }
     pub async fn send_frame(&self, frame: &EncodedFrame) -> Result<(), ScreenShareError> {
         let unit = encode_media(self.session_id, frame)?;
         self.counters.bytes_in_flight.fetch_add(unit.len() as u64, Ordering::Relaxed);
@@ -153,6 +166,12 @@ pub async fn read_unit(mut recv: iroh::endpoint::RecvStream) -> Result<ReadUnit,
             let mut bytes = vec![0; len]; recv.read_exact(&mut bytes).await.map_err(|e| ScreenShareError::new(e.to_string()))?;
             protocol::decode(&bytes).map(ReadUnit::Control).map_err(|e| ScreenShareError::new(e.to_string()))
         }
+        SCREEN_SHARE_KIND => {
+            let len = recv.read_u32().await.map_err(|e| ScreenShareError::new(e.to_string()))? as usize;
+            if len == 0 || len > super::protocol::MAX_SCREEN_SHARE_MESSAGE { return Err(ScreenShareError::new("screen-share message exceeds limit")); }
+            let mut bytes = vec![0; len]; recv.read_exact(&mut bytes).await.map_err(|e| ScreenShareError::new(e.to_string()))?;
+            ScreenShareMessage::decode(&bytes).map(ReadUnit::ScreenShare).map_err(|e| ScreenShareError::new(e.to_string()))
+        }
         MEDIA_KIND => {
             let rest = recv.read_to_end(MAX_MEDIA_FRAME + MAX_MEDIA_HEADER + 3).await.map_err(|e| ScreenShareError::new(e.to_string()))?;
             let mut unit = Vec::with_capacity(1 + rest.len()); unit.push(MEDIA_KIND); unit.extend_from_slice(&rest);
@@ -163,7 +182,7 @@ pub async fn read_unit(mut recv: iroh::endpoint::RecvStream) -> Result<ReadUnit,
 }
 
 #[derive(Debug)]
-pub enum ReadUnit { Control(ControlMessage), Media(MediaHeader, Vec<u8>) }
+pub enum ReadUnit { Control(ControlMessage), ScreenShare(ScreenShareMessage), Media(MediaHeader, Vec<u8>) }
 
 #[cfg(test)]
 mod tests {

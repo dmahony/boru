@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, Mutex};
 
-use super::session::{ScreenShareSessionId, SessionEvent, SessionManager};
+use super::session::{NegotiationManager, ScreenShareSessionId, SessionEvent, SessionManager};
 use super::transport::{MediaHeader, QuicScreenTransport, ReadUnit, MAX_MEDIA_FRAME};
 use super::permissions::{Capability, MAX_CAPABILITIES};
 use super::ScreenShareError;
@@ -28,6 +28,8 @@ pub const MAX_CODECS: usize = 16;
 pub const MAX_CODEC_NAME: usize = 32;
 /// Maximum reason text accepted from an untrusted peer.
 pub const MAX_REASON: usize = 256;
+/// Maximum resolutions advertised in one offer.
+pub const MAX_RESOLUTIONS: usize = 16;
 /// Maximum encoded screen-share protocol message. Control messages are small;
 /// this bound exists so a single `VideoPacket` (media payload) can be carried
 /// by a protocol message while still capping untrusted input.
@@ -185,7 +187,7 @@ pub fn decode(bytes: &[u8]) -> Result<ControlMessage, ProtocolError> {
 /// [`ControlMessage`], which remains the wire encoding used by the current
 /// session/host/viewer wiring. The negotiation and transport tasks that follow
 /// (session negotiation, channel separation) consume this versioned set.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ScreenShareMessage {
     /// Initiator → recipient: propose a screen-share session. No capture
     /// begins merely because this is received; the recipient must accept.
@@ -200,23 +202,33 @@ pub enum ScreenShareMessage {
         conversation_id: u64,
         /// Codec names, ordered by preference.
         codecs: Vec<String>,
-        /// Capture width in pixels.
-        width: u16,
-        /// Capture height in pixels.
-        height: u16,
-        /// Target frame rate in frames per second.
-        frame_rate: u16,
+        /// Supported capture resolutions, ordered by preference. Each entry
+        /// is `(width, height)` in pixels.
+        resolutions: Vec<(u16, u16)>,
+        /// Minimum acceptable frame rate in frames per second.
+        frame_rate_min: u16,
+        /// Maximum acceptable frame rate in frames per second.
+        frame_rate_max: u16,
         /// Target bitrate in bits per second.
         target_bitrate_bps: u32,
         /// Whether the initiator offers remote control for this session.
         remote_control: bool,
     },
-    /// Recipient → initiator: explicit consent for the named session.
+    /// Recipient → initiator: explicit consent for the named session,
+    /// carrying the mutually supported configuration the recipient selected.
     ScreenShareAccept {
         /// Wire protocol version.
         version: u16,
         /// Session being accepted.
         session_id: ScreenShareSessionId,
+        /// Selected codec (must appear in the offer's `codecs` list).
+        codec: String,
+        /// Selected capture width in pixels.
+        width: u16,
+        /// Selected capture height in pixels.
+        height: u16,
+        /// Selected frame rate in frames per second.
+        frame_rate: u16,
     },
     /// Recipient → initiator: explicit refusal or protocol failure.
     ScreenShareReject {
@@ -326,17 +338,24 @@ impl ScreenShareMessage {
     /// Validate untrusted wire data before applying it to session state.
     pub fn validate(&self) -> Result<(), ProtocolError> {
         let version = match self {
-            Self::ScreenShareOffer { version, session_id, codecs, width, height, frame_rate, target_bitrate_bps, .. } => {
+            Self::ScreenShareOffer { version, session_id, codecs, resolutions, frame_rate_min, frame_rate_max, target_bitrate_bps, .. } => {
                 if *session_id == ScreenShareSessionId::zero() { return Err(ProtocolError::Malformed("empty session id".into())); }
                 if codecs.is_empty() || codecs.len() > MAX_CODECS { return Err(ProtocolError::Malformed("invalid codec capability list".into())); }
                 if codecs.iter().any(|codec| codec.is_empty() || codec.len() > MAX_CODEC_NAME || !codec.is_ascii()) { return Err(ProtocolError::Malformed("invalid codec capability".into())); }
-                if *width == 0 || *height == 0 || *width > 16_384 || *height > 16_384 { return Err(ProtocolError::Malformed("invalid dimensions".into())); }
-                if *frame_rate == 0 || *frame_rate > 240 { return Err(ProtocolError::Malformed("invalid frame rate".into())); }
+                if resolutions.is_empty() || resolutions.len() > MAX_RESOLUTIONS { return Err(ProtocolError::Malformed("invalid resolution list".into())); }
+                if resolutions.iter().any(|(width, height)| *width == 0 || *height == 0 || *width > 16_384 || *height > 16_384) { return Err(ProtocolError::Malformed("invalid dimensions".into())); }
+                if *frame_rate_min == 0 || *frame_rate_max == 0 || *frame_rate_min > 240 || *frame_rate_max > 240 || *frame_rate_min > *frame_rate_max { return Err(ProtocolError::Malformed("invalid frame rate range".into())); }
                 if *target_bitrate_bps == 0 { return Err(ProtocolError::Malformed("invalid bitrate".into())); }
                 *version
             }
-            Self::ScreenShareAccept { version, session_id }
-            | Self::ScreenShareStarted { version, session_id }
+            Self::ScreenShareAccept { version, session_id, codec, width, height, frame_rate } => {
+                if *session_id == ScreenShareSessionId::zero() { return Err(ProtocolError::Malformed("empty session id".into())); }
+                if codec.is_empty() || codec.len() > MAX_CODEC_NAME || !codec.is_ascii() { return Err(ProtocolError::Malformed("invalid selected codec".into())); }
+                if *width == 0 || *height == 0 || *width > 16_384 || *height > 16_384 { return Err(ProtocolError::Malformed("invalid dimensions".into())); }
+                if *frame_rate == 0 || *frame_rate > 240 { return Err(ProtocolError::Malformed("invalid frame rate".into())); }
+                *version
+            }
+            Self::ScreenShareStarted { version, session_id }
             | Self::KeyframeRequest { version, session_id } => {
                 if *session_id == ScreenShareSessionId::zero() { return Err(ProtocolError::Malformed("empty session id".into())); }
                 *version
@@ -416,6 +435,7 @@ pub struct InboundMedia {
 #[derive(Debug, Clone)]
 pub struct ScreenShareProtocol {
     manager: Arc<Mutex<SessionManager>>,
+    negotiations: Arc<Mutex<NegotiationManager>>,
     events: mpsc::Sender<SessionEvent>,
     media_tx: mpsc::Sender<InboundMedia>,
     /// Inbound connections per session so the app can respond (Accept/Reject/
@@ -437,6 +457,7 @@ impl ScreenShareProtocol {
     ) -> Self {
         Self {
             manager: Arc::new(Mutex::new(SessionManager::default())),
+            negotiations: Arc::new(Mutex::new(NegotiationManager::default())),
             events,
             media_tx,
             connections: Arc::new(Mutex::new(HashMap::new())),
@@ -445,6 +466,9 @@ impl ScreenShareProtocol {
 
     /// Access the state machine for locally initiated sessions.
     pub fn manager(&self) -> Arc<Mutex<SessionManager>> { Arc::clone(&self.manager) }
+
+    /// Access the versioned negotiation state machine (PDF Task 3.1).
+    pub fn negotiations(&self) -> Arc<Mutex<NegotiationManager>> { Arc::clone(&self.negotiations) }
 
     /// Send one control message on the inbound connection for `session_id`.
     ///
@@ -467,52 +491,189 @@ impl ScreenShareProtocol {
         let transport = QuicScreenTransport::new(connection, *session_id.as_bytes())?;
         transport.send_control(&message).await
     }
+
+    /// Send one versioned protocol message on the inbound connection for
+    /// `session_id`. Used by the app to answer a versioned offer (Accept with
+    /// the selected configuration, or Reject) on the connection the offer
+    /// arrived on.
+    pub async fn send_screen_share(
+        &self,
+        session_id: ScreenShareSessionId,
+        message: ScreenShareMessage,
+    ) -> Result<(), ScreenShareError> {
+        let connection = {
+            let connections = self.connections.lock().await;
+            connections.get(&session_id).map(|(_, connection)| connection.clone())
+        };
+        let Some(connection) = connection else {
+            return Err(ScreenShareError::new(
+                "no inbound connection for screen-share session",
+            ));
+        };
+        let transport = QuicScreenTransport::new(connection, *session_id.as_bytes())?;
+        transport.send_screen_share(&message).await
+    }
 }
 
 impl iroh::protocol::ProtocolHandler for ScreenShareProtocol {
     async fn accept(&self, connection: iroh::endpoint::Connection) -> Result<(), iroh::protocol::AcceptError> {
         let stable_id = connection.stable_id();
+        let remote_id = connection.remote_id();
+        let mut timeout_tick = tokio::time::interval(std::time::Duration::from_secs(1));
+        timeout_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            let (mut send, recv) = connection.accept_bi().await.map_err(iroh::protocol::AcceptError::from)?;
-            let message = match super::transport::read_unit(recv).await {
-                Ok(ReadUnit::Control(message)) => message,
-                Ok(ReadUnit::Media(header, payload)) => {
-                    if header.sequence == 0 || header.sequence % 150 == 0 {
-                        tracing::info!(session = ?header.session_id, sequence = header.sequence, bytes = payload.len(), "screen-share: viewer received media");
-                    }
-                    let sequence = header.sequence;
-                    let dropped = self
-                        .media_tx
-                        .try_send(InboundMedia {
-                            session_id: ScreenShareSessionId::from_bytes(header.session_id),
-                            header,
-                            payload,
-                        })
-                        .is_err();
-                    if dropped {
-                        tracing::warn!(sequence, "screen-share: viewer media dropped (channel full)");
-                    }
-                    continue;
+            tokio::select! {
+                biased;
+                // Drive negotiation timeouts even when no stream is open: a
+                // pending offer must not wait forever for a decision.
+                _ = timeout_tick.tick() => {
+                    self.negotiations.lock().await.expire_pending(std::time::Instant::now(), &self.events);
                 }
-                Err(_error) => { let _ = send.reset(0u32.into()); continue; }
-            };
-            let response = { self.manager.lock().await.apply_remote(connection.remote_id(), message.clone(), &self.events) };
-            match &message {
-                ControlMessage::Hello(hello) => {
-                    // Keep the inbound connection so the app can respond to the
-                    // invitation (Accept/Reject) on the same connection.
-                    if response.is_none() {
-                        self.connections.lock().await.insert(hello.session_id, (stable_id, connection.clone()));
+                r = connection.accept_bi() => {
+                    let (mut send, recv) = match r {
+                        Ok(pair) => pair,
+                        // The peer is gone: close every negotiation with this
+                        // peer so the app never waits on a dead offer.
+                        Err(_) => {
+                            self.negotiations.lock().await.peer_disconnected(remote_id, &self.events);
+                            {
+                                let mut connections = self.connections.lock().await;
+                                connections.retain(|_, (_, conn)| conn.stable_id() != stable_id);
+                            }
+                            return Ok(());
+                        }
+                    };
+                    match super::transport::read_unit(recv).await {
+                        Ok(ReadUnit::Control(message)) => {
+                            let response = { self.manager.lock().await.apply_remote(remote_id, message.clone(), &self.events) };
+                            match &message {
+                                ControlMessage::Hello(hello) => {
+                                    // Keep the inbound connection so the app can respond to the
+                                    // invitation (Accept/Reject) on the same connection.
+                                    if response.is_none() {
+                                        self.connections.lock().await.insert(hello.session_id, (stable_id, connection.clone()));
+                                    }
+                                }
+                                ControlMessage::EndSession { session_id, .. } | ControlMessage::Reject { session_id, .. } => {
+                                    // The session ended or was refused; release its connection slot.
+                                    self.connections.lock().await.remove(session_id);
+                                }
+                                ControlMessage::Accept { .. } | ControlMessage::RequestControl { .. } | ControlMessage::GrantControl { .. } | ControlMessage::RevokeControl { .. } | ControlMessage::Input { .. } => {}
+                            }
+                            if let Some(response) = response { let _ = write_message(&mut send, &response).await; }
+                        }
+                        Ok(ReadUnit::ScreenShare(message)) => {
+                            self.handle_screen_share(remote_id, &connection, stable_id, message).await;
+                        }
+                        Ok(ReadUnit::Media(header, payload)) => {
+                            if header.sequence == 0 || header.sequence % 150 == 0 {
+                                tracing::info!(session = ?header.session_id, sequence = header.sequence, bytes = payload.len(), "screen-share: viewer received media");
+                            }
+                            let sequence = header.sequence;
+                            let dropped = self
+                                .media_tx
+                                .try_send(InboundMedia {
+                                    session_id: ScreenShareSessionId::from_bytes(header.session_id),
+                                    header,
+                                    payload,
+                                })
+                                .is_err();
+                            if dropped {
+                                tracing::warn!(sequence, "screen-share: viewer media dropped (channel full)");
+                            }
+                        }
+                        Err(_error) => { let _ = send.reset(0u32.into()); }
                     }
                 }
-                ControlMessage::EndSession { session_id, .. } | ControlMessage::Reject { session_id, .. } => {
-                    // The session ended or was refused; release its connection slot.
-                    self.connections.lock().await.remove(session_id);
-                }
-                ControlMessage::Accept { .. } | ControlMessage::RequestControl { .. } | ControlMessage::GrantControl { .. } | ControlMessage::RevokeControl { .. } | ControlMessage::Input { .. } => {}
             }
-            if let Some(response) = response { let _ = write_message(&mut send, &response).await; }
         }
+    }
+}
+
+impl ScreenShareProtocol {
+    /// Apply one versioned protocol message to the negotiation state machine,
+    /// keeping the inbound connection for app responses and writing any
+    /// protocol-level reply (duplicate offer rejection) back on `send`.
+    async fn handle_screen_share(
+        &self,
+        remote_id: iroh::PublicKey,
+        connection: &iroh::endpoint::Connection,
+        stable_id: usize,
+        message: ScreenShareMessage,
+    ) {
+        match message {
+            ScreenShareMessage::ScreenShareOffer { session_id, .. } => {
+                let result = {
+                    self.negotiations.lock().await
+                        .receive_offer(remote_id, message, NEGOTIATION_TIMEOUT, &self.events)
+                };
+                match result {
+                    Ok(()) => {
+                        // Keep the inbound connection so the app can answer the
+                        // offer (Accept/Reject) on the same connection.
+                        self.connections.lock().await.insert(session_id, (stable_id, connection.clone()));
+                    }
+                    Err(error) => {
+                        let reason = negotiation_reject_reason(&error);
+                        // Protocol-level replies go on a FRESH stream: the peer
+                        // opened the stream this message arrived on and reads
+                        // replies via accept_bi(), so writing on `send` would
+                        // strand the reply on a stream nobody reads.
+                        let _ = write_screen_share_new_stream(
+                            connection,
+                            &ScreenShareMessage::ScreenShareReject {
+                                version: SCREEN_SHARE_PROTOCOL_VERSION,
+                                session_id,
+                                reason,
+                            },
+                        ).await;
+                    }
+                }
+            }
+            ScreenShareMessage::ScreenShareAccept { session_id, .. } => {
+                let result = {
+                    self.negotiations.lock().await.handle_accept(remote_id, message, &self.events)
+                };
+                if let Err(error) = result {
+                    tracing::warn!(?session_id, ?error, "screen-share: versioned Accept rejected");
+                    let reason = negotiation_reject_reason(&error);
+                    let _ = write_screen_share_new_stream(
+                        connection,
+                        &ScreenShareMessage::ScreenShareReject {
+                            version: SCREEN_SHARE_PROTOCOL_VERSION,
+                            session_id,
+                            reason,
+                        },
+                    ).await;
+                }
+                self.connections.lock().await.remove(&session_id);
+            }
+            ScreenShareMessage::ScreenShareReject { session_id, .. } => {
+                let _ = { self.negotiations.lock().await.handle_reject(remote_id, message, &self.events) };
+                self.connections.lock().await.remove(&session_id);
+            }
+            ScreenShareMessage::ScreenShareStopped { session_id, .. } => {
+                self.connections.lock().await.remove(&session_id);
+            }
+            // Remaining lifecycle/media messages are handled by the host/viewer
+            // once streaming starts (BORU-SS-09+); the negotiation loop does
+            // not act on them.
+            _ => {}
+        }
+    }
+}
+
+/// Map a negotiation failure to a stable, user-safe reject reason.
+fn negotiation_reject_reason(error: &crate::screen_share::session::NegotiationError) -> String {
+    use crate::screen_share::session::NegotiationError as E;
+    match error {
+        E::UnknownSession => "session is not available".into(),
+        E::DuplicateOffer => "duplicate offer".into(),
+        E::Capacity => "too many concurrent negotiations".into(),
+        E::WrongState => "negotiation is not in the expected state".into(),
+        E::PeerMismatch => "offer identity does not match the connected peer".into(),
+        E::UnsupportedConfig(detail) => format!("selected configuration is not mutually supported: {detail}"),
+        E::EmptySessionId => "empty session id".into(),
     }
 }
 
@@ -523,6 +684,27 @@ async fn write_message(send: &mut iroh::endpoint::SendStream, message: &ControlM
     send.write_all(&bytes).await.map_err(|e| ProtocolError::Io(e.to_string()))?;
     send.finish().map_err(|e| ProtocolError::Io(e.to_string()))?;
     Ok(())
+}
+
+/// Write one versioned protocol message on an accepted stream, mirroring the
+/// transport's `SCREEN_SHARE_KIND` framing.
+async fn write_screen_share_message(send: &mut iroh::endpoint::SendStream, message: &ScreenShareMessage) -> Result<(), ProtocolError> {
+    let bytes = message.encode()?;
+    send.write_u8(0x03).await.map_err(|e| ProtocolError::Io(e.to_string()))?;
+    send.write_u32(bytes.len() as u32).await.map_err(|e| ProtocolError::Io(e.to_string()))?;
+    send.write_all(&bytes).await.map_err(|e| ProtocolError::Io(e.to_string()))?;
+    send.finish().map_err(|e| ProtocolError::Io(e.to_string()))?;
+    Ok(())
+}
+
+/// Open a fresh stream on `connection` and write one versioned protocol
+/// message on it. Protocol-level replies (a Reject for a bad offer) must go
+/// on a NEW stream: the peer opened the stream the request arrived on and is
+/// reading replies via `accept_bi()`, so writing on the request's own stream
+/// would strand the reply where nobody reads it.
+async fn write_screen_share_new_stream(connection: &iroh::endpoint::Connection, message: &ScreenShareMessage) -> Result<(), ProtocolError> {
+    let (mut send, _) = connection.open_bi().await.map_err(|e| ProtocolError::Io(e.to_string()))?;
+    write_screen_share_message(&mut send, message).await
 }
 
 /// A conservative timeout for negotiation streams.
@@ -555,9 +737,9 @@ mod tests {
 
     fn sid() -> ScreenShareSessionId { ScreenShareSessionId::from_bytes([7; 16]) }
     fn offer() -> ScreenShareMessage {
-        ScreenShareMessage::ScreenShareOffer { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid(), host_id: iroh::SecretKey::generate().public(), conversation_id: 7, codecs: vec!["h264".into()], width: 1920, height: 1080, frame_rate: 30, target_bitrate_bps: 2_000_000, remote_control: false }
+        ScreenShareMessage::ScreenShareOffer { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid(), host_id: iroh::SecretKey::generate().public(), conversation_id: 7, codecs: vec!["h264".into()], resolutions: vec![(1920, 1080), (1280, 720)], frame_rate_min: 15, frame_rate_max: 30, target_bitrate_bps: 2_000_000, remote_control: false }
     }
-    fn accept() -> ScreenShareMessage { ScreenShareMessage::ScreenShareAccept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid() } }
+    fn accept() -> ScreenShareMessage { ScreenShareMessage::ScreenShareAccept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid(), codec: "h264".into(), width: 1280, height: 720, frame_rate: 30 } }
     fn reject() -> ScreenShareMessage { ScreenShareMessage::ScreenShareReject { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid(), reason: "user declined".into() } }
     fn started() -> ScreenShareMessage { ScreenShareMessage::ScreenShareStarted { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid() } }
     fn stopped() -> ScreenShareMessage { ScreenShareMessage::ScreenShareStopped { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid(), reason: "host ended".into() } }
@@ -626,13 +808,18 @@ mod tests {
         }
         assert!(matches!(m.encode(), Err(ProtocolError::Malformed(_))));
         {
-            let ScreenShareMessage::ScreenShareOffer { width, .. } = &mut m else { panic!("wrong variant") };
-            *width = 0;
+            let ScreenShareMessage::ScreenShareOffer { resolutions, .. } = &mut m else { panic!("wrong variant") };
+            resolutions.clear();
         }
         assert!(matches!(m.encode(), Err(ProtocolError::Malformed(_))));
         {
-            let ScreenShareMessage::ScreenShareOffer { frame_rate, .. } = &mut m else { panic!("wrong variant") };
-            *frame_rate = 0;
+            let ScreenShareMessage::ScreenShareOffer { frame_rate_min, .. } = &mut m else { panic!("wrong variant") };
+            *frame_rate_min = 0;
+        }
+        assert!(matches!(m.encode(), Err(ProtocolError::Malformed(_))));
+        {
+            let ScreenShareMessage::ScreenShareOffer { frame_rate_max, .. } = &mut m else { panic!("wrong variant") };
+            *frame_rate_max = 10; // below the (restored) minimum of 15
         }
         assert!(matches!(m.encode(), Err(ProtocolError::Malformed(_))));
         {
@@ -642,10 +829,11 @@ mod tests {
         assert!(matches!(m.encode(), Err(ProtocolError::Malformed(_))));
         // Restore every mutated field so the offer encodes cleanly again.
         {
-            let ScreenShareMessage::ScreenShareOffer { session_id, width, frame_rate, codecs, .. } = &mut m else { panic!("wrong variant") };
+            let ScreenShareMessage::ScreenShareOffer { session_id, resolutions, frame_rate_min, frame_rate_max, codecs, .. } = &mut m else { panic!("wrong variant") };
             *session_id = sid();
-            *width = 1920;
-            *frame_rate = 30;
+            *resolutions = vec![(1920, 1080), (1280, 720)];
+            *frame_rate_min = 15;
+            *frame_rate_max = 30;
             *codecs = vec!["h264".into()];
         }
         assert!(m.encode().is_ok(), "restored offer must encode cleanly");
@@ -695,6 +883,57 @@ mod tests {
             *code = 0;
         }
         assert!(matches!(m.encode(), Err(ProtocolError::Malformed(_))));
+    }
+
+    /// The accept must carry a selected codec/resolution/fps and the offer
+    /// must carry a sane resolution list and frame-rate range; every new
+    /// field is validated on both encode and decode.
+    #[test]
+    fn negotiation_selection_fields_are_validated() {
+        let mut m = accept();
+        {
+            let ScreenShareMessage::ScreenShareAccept { codec, .. } = &mut m else { panic!("wrong variant") };
+            codec.clear();
+        }
+        assert!(matches!(m.encode(), Err(ProtocolError::Malformed(_))));
+        {
+            let ScreenShareMessage::ScreenShareAccept { width, .. } = &mut m else { panic!("wrong variant") };
+            *width = 0;
+        }
+        assert!(matches!(m.encode(), Err(ProtocolError::Malformed(_))));
+        {
+            let ScreenShareMessage::ScreenShareAccept { frame_rate, .. } = &mut m else { panic!("wrong variant") };
+            *frame_rate = 0;
+        }
+        assert!(matches!(m.encode(), Err(ProtocolError::Malformed(_))));
+        // Restore so the accept round-trips again.
+        {
+            let ScreenShareMessage::ScreenShareAccept { codec, width, frame_rate, .. } = &mut m else { panic!("wrong variant") };
+            *codec = "h264".into();
+            *width = 1280;
+            *frame_rate = 30;
+        }
+        assert!(m.encode().is_ok(), "restored accept must encode cleanly");
+
+        let mut m = offer();
+        {
+            let ScreenShareMessage::ScreenShareOffer { resolutions, .. } = &mut m else { panic!("wrong variant") };
+            resolutions.push((0, 0));
+        }
+        assert!(matches!(m.encode(), Err(ProtocolError::Malformed(_))));
+        {
+            let ScreenShareMessage::ScreenShareOffer { resolutions, frame_rate_min, frame_rate_max, .. } = &mut m else { panic!("wrong variant") };
+            resolutions.pop();
+            *frame_rate_min = 30;
+            *frame_rate_max = 15; // inverted range
+        }
+        assert!(matches!(m.encode(), Err(ProtocolError::Malformed(_))));
+        {
+            let ScreenShareMessage::ScreenShareOffer { frame_rate_min, frame_rate_max, .. } = &mut m else { panic!("wrong variant") };
+            *frame_rate_min = 15;
+            *frame_rate_max = 30;
+        }
+        assert!(m.encode().is_ok(), "restored offer must encode cleanly");
     }
 
     /// Full QUIC round trip: host dials the viewer, Hello → Invitation,
@@ -788,6 +1027,109 @@ mod tests {
         assert_eq!((decoded.width, decoded.height), (640, 360));
         assert_eq!(decoded.pixel_format, PixelFormat::Rgba8);
         assert_eq!(decoded.pixels.len(), 640 * 360 * 4);
+
+        router.shutdown().await.unwrap();
+    }
+
+    /// Versioned negotiation over real QUIC (PDF Task 3.1): the initiator
+    /// sends a ScreenShareOffer with codecs/resolutions/fps range, the
+    /// recipient's protocol handler emits a NegotiationInvitation and keeps
+    /// the inbound connection, the recipient answers with a mutually supported
+    /// ScreenShareAccept, and the initiator's negotiation reaches Accepted so
+    /// capture may begin. Also verifies a duplicate offer is answered with an
+    /// explicit ScreenShareReject.
+    #[tokio::test]
+    async fn end_to_end_versioned_negotiation_offer_accept() {
+        let viewer = iroh::Endpoint::bind(presets::Minimal).await.unwrap();
+        let (events_tx, mut events_rx) = mpsc::channel(32);
+        let negotiation_events_tx = events_tx.clone();
+        let (media_tx, _media_rx) = mpsc::channel(64);
+        let protocol = ScreenShareProtocol::with_channels(events_tx, media_tx);
+        let router = Router::builder(viewer.clone())
+            .accept(SCREEN_SHARE_ALPN, protocol.clone())
+            .spawn();
+
+        let host = iroh::Endpoint::bind(presets::Minimal).await.unwrap();
+        let host_pk = host.secret_key().public();
+        let connection = host.connect(viewer.addr(), SCREEN_SHARE_ALPN).await.unwrap();
+        let session_id = ScreenShareSessionId::generate();
+        let transport = QuicScreenTransport::new(connection.clone(), *session_id.as_bytes()).unwrap();
+
+        // Initiator records the offer in its OWN local manager (the host app
+        // does not share state with the recipient's protocol handler), then
+        // sends it over the wire.
+        let mut host_negotiations = crate::screen_share::session::NegotiationManager::new();
+        let offer = ScreenShareMessage::ScreenShareOffer {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id,
+            host_id: host_pk,
+            conversation_id: 7,
+            codecs: vec!["h264".into(), "vp8".into()],
+            resolutions: vec![(1920, 1080), (1280, 720)],
+            frame_rate_min: 15,
+            frame_rate_max: 30,
+            target_bitrate_bps: 2_000_000,
+            remote_control: false,
+        };
+        host_negotiations.start_offer(offer.clone(), viewer.secret_key().public(), NEGOTIATION_TIMEOUT).unwrap();
+        transport.send_screen_share(&offer).await.unwrap();
+
+        // Recipient: protocol handler emits a NegotiationInvitation.
+        let event = events_rx.recv().await.unwrap();
+        let SessionEvent::NegotiationInvitation { session_id: got_id, host_id, offer: got_offer, .. } = event else {
+            panic!("expected NegotiationInvitation, got {event:?}");
+        };
+        assert_eq!(got_id, session_id);
+        assert_eq!(host_id, host_pk);
+        let ScreenShareMessage::ScreenShareOffer { resolutions, .. } = &got_offer else { panic!("offer") };
+        assert_eq!(resolutions, &vec![(1920, 1080), (1280, 720)]);
+
+        // Recipient answers on the same inbound connection with an accept
+        // carrying a mutually supported configuration.
+        let selected = crate::screen_share::session::NegotiatedConfig::select(
+            &got_offer,
+            &["h264".to_string()],
+        )
+        .unwrap();
+        let accept = ScreenShareMessage::ScreenShareAccept {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id,
+            codec: selected.codec,
+            width: selected.width,
+            height: selected.height,
+            frame_rate: selected.frame_rate,
+        };
+        protocol.send_screen_share(session_id, accept.clone()).await.unwrap();
+
+        // Initiator reads the Accept and applies it; capture is then allowed.
+        let (mut send, recv) = connection.accept_bi().await.unwrap();
+        match read_unit(recv).await.unwrap() {
+            ReadUnit::ScreenShare(ScreenShareMessage::ScreenShareAccept { session_id: got, codec, width, height, frame_rate, .. }) => {
+                assert_eq!(got, session_id);
+                assert_eq!(codec, "h264");
+                assert_eq!((width, height), (1920, 1080));
+                assert_eq!(frame_rate, 30);
+            }
+            other => panic!("expected ScreenShareAccept, got {other:?}"),
+        }
+        drop(send);
+        {
+            host_negotiations.handle_accept(viewer.secret_key().public(), accept, &negotiation_events_tx).unwrap();
+        }
+        assert!(host_negotiations.can_start_capture(session_id), "capture allowed after explicit accept");
+
+        // Duplicate offer: the same session id is refused with an explicit
+        // ScreenShareReject rather than a silent state change.
+        transport.send_screen_share(&offer).await.unwrap();
+        let (mut send, recv) = connection.accept_bi().await.unwrap();
+        match read_unit(recv).await.unwrap() {
+            ReadUnit::ScreenShare(ScreenShareMessage::ScreenShareReject { session_id: id, reason, .. }) => {
+                assert_eq!(id, session_id);
+                assert_eq!(reason, "duplicate offer");
+            }
+            other => panic!("expected ScreenShareReject for duplicate, got {other:?}"),
+        }
+        drop(send);
 
         router.shutdown().await.unwrap();
     }

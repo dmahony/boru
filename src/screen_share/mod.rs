@@ -41,7 +41,9 @@ pub use remote_input::{
     NormalizedPointer, RemoteInput, UnavailableInputBackend,
 };
 pub use session::{
+    NegotiatedConfig, NegotiationError, NegotiationManager, NegotiationRole, NegotiationState,
     ScreenShareSession, ScreenShareSessionId, SessionEvent, SessionManager, SessionState,
+    MAX_ACTIVE_NEGOTIATIONS,
 };
 pub use transport::{decode_media, encode_media, LatestFrameQueue, MediaHeader, PathKind,
     QuicScreenTransport, ReadUnit, ScreenTransport, TransportCounters, MAX_MEDIA_FRAME};
