@@ -43,8 +43,8 @@ screen-sharing = ["net", "dep:openh264", "dep:zbus", "dep:libloading", "dep:wind
 
 ## 2. Module map (`src/screen_share/`)
 
-16 files, 5,962 lines (excluding tests). `wc -l` and the definitive file list
-at snapshot commit:
+18 files, ~6,100 lines (excluding tests; `wc -l` at this revision). The
+definitive file list:
 
 | Module | Lines | Role | Status |
 |---|---|---|---|
@@ -62,7 +62,7 @@ at snapshot commit:
 | `adaptation.rs` | 89 | `AdaptiveQuality`, `QualityDecision` | **Implemented but UNUSED** (no production caller) |
 | `stats.rs` | 121 | `ScreenShareStats`, `ScreenShareStatsSnapshot` | Implemented (internal to viewer; not surfaced to UI) |
 | `platform/mod.rs` | 103 | Per-OS dispatch, `ActiveCapture`, `create_capture_source` | Implemented |
-| `platform/linux.rs` | 1298 | Portal/PipeWire capture + X11 fallback + dlopen PipeWire client | Implemented |
+| `platform/linux.rs` | 2109 | Portal/PipeWire capture (lifecycle machine + clean teardown) + X11 fallback + dlopen PipeWire client | Implemented |
 | `platform/windows.rs` | 554 | WinRT Graphics Capture backend (`DesktopCaptureBackend`) | Implemented |
 | `platform/windows_common.rs` | 340 | Windows lifecycle state machine, HRESULT classification, monitor ids (Linux-tested) | Implemented |
 | `platform/macos.rs` | 1 | Placeholder comment only | **Stub** |
@@ -186,19 +186,28 @@ factory (`platform/mod.rs:83-95`), `capture_dimensions`
 1. `PortalCapture` — portal state machine + bounded frame queue
    (`linux.rs:46-143`), kept for API compatibility/tests.
 2. `LinuxPortalCapture` — the real backend: xdg-desktop-portal ScreenCast via
-   zbus (`linux.rs:192-273`: CreateSession → SelectSources → Start with
-   async Request/Response handling, `extract_stream_node_id` at
-   `linux.rs:931-945`) + a **dlopen-based PipeWire client**
-   (`linux.rs:358-764`: `Pw` ABI table at `linux.rs:445-513`, raw struct
-   mirrors `linux.rs:363-399`, SPA pod builder/parser `linux.rs:798-924`),
-   feeding CPU frames through a background `boru-pipewire-capture` thread
-   (`linux.rs:633-638`).
-3. `X11Capture` — direct X11 GetImage fallback via x11rb
-   (`linux.rs:956-1055`, `convert_zpixmap_rgba` at `linux.rs:1063-1108`).
+   zbus (`linux.rs:456-849`: CreateSession → SelectSources → Start with
+   async Request/Response handling, `extract_stream_node_id`,
+   `query_portal_version`, `detect_portal_backend`) + a **dlopen-based
+   PipeWire client** (`linux.rs:859-1211`: `Pw` ABI table, raw struct
+   mirrors, SPA pod builder/parser), feeding CPU frames through a background
+   `boru-pipewire-capture` thread.
+3. `PortalSessionMachine` (`linux.rs:145-357`) — pure D-Bus lifecycle state
+   machine (Idle/Creating/Selecting/Starting/Streaming/Closing/Closed/Failed)
+   with the D-Bus layer abstracted, plus desktop-environment detection
+   (`XDG_CURRENT_DESKTOP` / `XDG_SESSION_TYPE`: GNOME, KDE Plasma 6,
+   wlroots). `LinuxPortalCapture` keeps the live zbus connection + session
+   object path for the whole capture lifetime and tears down cleanly:
+   `close()` stops the PipeWire thread (bounded join via `PipeWireHandle`)
+   and calls `org.freedesktop.portal.Session.Close`; `Drop` does the same
+   best-effort. See `docs/screenshare-wayland-portal-verification.md`.
+4. `X11Capture` — direct X11 GetImage fallback via x11rb
+   (`linux.rs:1557-1656`, `convert_zpixmap_rgba`).
 
 `ActiveCapture::{Portal,X11,TestPattern}` + `create_capture_source` selection
-order (portal → X11 → test-pattern, `linux.rs:1165-1181`). 9 unit tests incl.
-SPA pod round-trip and ZPixmap byte-order conversions.
+order (portal → X11 → test-pattern). 20 unit tests incl. 11
+`PortalSessionMachine` lifecycle/teardown/DE-classification tests, SPA pod
+round-trip, and ZPixmap byte-order conversions.
 
 **platform/windows.rs** — real WinRT `Windows.Graphics.Capture` backend
 (BORU-SS-11 / PDF Task 4.1): `GraphicsCapture` implements the
@@ -255,6 +264,39 @@ field so the host knows where the shared monitor sits in the desktop.
 Tests (all Linux-runnable): negative-origin monitors, mixed-DPI layouts,
 scaling percentages, round-trips, cursor compositing/clipping/out-of-source
 (15 `coords` tests, plus the updated `monitor_source` geometry test).
+
+### 2.3 Portal session lifecycle + teardown (BORU-SS-13 / PDF Task 5.1)
+
+The xdg-desktop-portal ScreenCast flow
+(`src/screen_share/platform/linux.rs`) implements CreateSession →
+SelectSources → Start → PipeWire node acquisition → clean teardown:
+
+- **Lifecycle machine.** `PortalSessionMachine` is a pure state machine
+  (`Idle → Creating → Selecting → Starting → Streaming`, `Closing → Closed`,
+  terminal `Failed(SessionFailure)` states) with the D-Bus layer abstracted —
+  unit-tested on Linux without a session bus/portal/compositor. It enforces
+  call ordering, models every failure path (`NoSessionBus`,
+  `CreateSessionFailed`, `SelectSourcesFailed`, `StartFailed`,
+  `StartRejected(u32)`, `StartTimeout`, `ResponseStreamClosed`,
+  `MissingNodeId`), teardown (`begin_close`/`on_closed`), and
+  portal-initiated close (`on_portal_closed`).
+- **Connection kept alive.** `LinuxPortalCapture` now stores the live zbus
+  connection + session object path; previously the connection was dropped
+  right after `Start`, which can make xdg-desktop-portal tear the session
+  down server-side.
+- **Clean teardown.** `close()` stops the PipeWire capture thread
+  (`PipeWireHandle` calls `pw_main_loop_quit` — safe from any thread — and
+  waits on a bounded `recv_timeout`), calls
+  `org.freedesktop.portal.Session.Close`, and marks the machine `Closed`.
+  `Drop` repeats this best-effort (PipeWire stop synchronous; `Session.Close`
+  on a helper thread with its own tokio runtime).
+- **DE handling.** `XDG_SESSION_TYPE` + `XDG_CURRENT_DESKTOP` are classified
+  (GNOME / KDE Plasma 6 / wlroots-style compositors), the ScreenCast
+  interface version is queried, and portal backend bus names are listed —
+  all for diagnostics and actionable errors. The D-Bus flow itself is the
+  same across backends; the picker is never bypassed. Real-session
+  verification limits are documented in
+  `docs/screenshare-wayland-portal-verification.md`.
 
 **platform/macos.rs** — 1-line placeholder (`macos.rs:1`). No capture backend;
 `ActiveCapture` on macOS is test-pattern only (`platform/mod.rs:27-30`).
@@ -355,10 +397,11 @@ Notes:
 
 ## 5. Test coverage summary
 
-- **Unit tests:** 125 `#[test]` pass in `src/screen_share/` with
+- **Unit tests:** 136 `#[test]` pass in `src/screen_share/` with
   `--features screen-sharing` (includes codec 3, protocol 4, transport 3,
   session 5, viewer 3, permissions 2, remote_input 4, adaptation 2,
-  capture 3, stats 1, mod 2, coords 15, platform/linux 9,
+  capture 3, stats 1, mod 2, coords 15, platform/linux 20 (incl. 11
+  portal-lifecycle / DE-detection tests added by BORU-SS-13),
   platform/windows_common 10, plus the channels/reconnect/session tests added
   by later BORU-SS tasks) — see per-file table above.
 - **End-to-end protocol test:** `protocol.rs:322-412`
