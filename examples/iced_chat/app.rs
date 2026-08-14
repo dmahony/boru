@@ -35924,6 +35924,87 @@ fn ui_theme_reload_replaces_only_theme_state() {
     assert_eq!(app.conversations.len(), 1, "no conversations added/removed");
 }
 
+/// BORU-UI-20 (PDF Task 20): a live theme change must not replace transfer
+/// state — the in-flight download bookkeeping (pending file, download entry
+/// index, active transfer id and the transfer-id → entry cache) survives a
+/// valid `boru-ui.toml` reload untouched.
+#[test]
+fn ui_theme_reload_preserves_transfer_state() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    // Seed a selected conversation with an in-flight download at both the
+    // app level (legacy mirror used by the chat-log view) and the
+    // conversation level (multi-conversation home).
+    let topic = TopicId::from_bytes([13; 32]);
+    app.topic = topic;
+    app.screen = Screen::Chat { topic };
+    let transfer_id = TransferId::new(9001);
+    app.pending_file = Some(("report.pdf".to_string(), "ticket-abc".to_string()));
+    app.download_entry_index = Some(3);
+    app.active_download_transfer_id = Some(transfer_id);
+    app.transfer_id_to_index.insert(transfer_id, 3);
+
+    let mut conv = ConversationLive::new(topic);
+    conv.pending_file = Some(("report.pdf".to_string(), "ticket-abc".to_string()));
+    conv.download_entry_index = Some(3);
+    conv.active_download_transfer_id = Some(transfer_id);
+    conv.transfer_id_to_index.insert(transfer_id, 3);
+    app.conversations.insert(topic, conv);
+
+    // A valid reload changes ONLY the theme.
+    let config = crate::theme_config::parse_ui_theme_config(
+        "sidebar = { width = 270.0 }",
+    )
+    .expect("test config parses");
+    let task = app.update_ui_theme_reloaded(1, Ok(config));
+    drop(task);
+    assert_eq!(
+        app.active_theme.sidebar.width, 270.0,
+        "valid reload replaces the active theme"
+    );
+
+    // Transfer state untouched at the app level…
+    assert_eq!(
+        app.pending_file,
+        Some(("report.pdf".to_string(), "ticket-abc".to_string())),
+        "app pending_file unchanged"
+    );
+    assert_eq!(app.download_entry_index, Some(3), "app download index unchanged");
+    assert_eq!(
+        app.active_download_transfer_id,
+        Some(transfer_id),
+        "app active transfer id unchanged"
+    );
+    assert_eq!(
+        app.transfer_id_to_index.get(&transfer_id),
+        Some(&3),
+        "app transfer-id → entry cache unchanged"
+    );
+
+    // …and at the conversation level.
+    let conv = app.conversations.get(&topic).expect("conversation kept");
+    assert_eq!(
+        conv.pending_file,
+        Some(("report.pdf".to_string(), "ticket-abc".to_string())),
+        "conversation pending_file unchanged"
+    );
+    assert_eq!(
+        conv.download_entry_index, Some(3),
+        "conversation download index unchanged"
+    );
+    assert_eq!(
+        conv.active_download_transfer_id,
+        Some(transfer_id),
+        "conversation active transfer id unchanged"
+    );
+    assert_eq!(
+        conv.transfer_id_to_index.get(&transfer_id),
+        Some(&3),
+        "conversation transfer-id → entry cache unchanged"
+    );
+    assert_eq!(app.conversations.len(), 1, "no conversations added/removed");
+}
+
 #[test]
 fn ui_theme_reload_error_keeps_last_known_good_theme() {
     let (_runtime, mut app, _local, _peer) = build_join_request_test_app();

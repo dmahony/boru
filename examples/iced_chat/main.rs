@@ -41,6 +41,8 @@ mod theme;
 mod theme_config;
 mod theme_merge;
 mod theme_watcher;
+#[cfg(test)]
+mod theme_regression;
 #[cfg(feature = "dev-ui")]
 mod inspector;
 #[cfg(test)]
