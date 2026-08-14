@@ -32,7 +32,9 @@ use std::time::Duration;
 
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
-use crate::theme_config::{load_ui_theme_config, UiThemeConfig, UI_CONFIG_FILE_NAME};
+use crate::theme_config::{
+    load_ui_theme_config, ThemeReloadError, UiThemeConfig, UI_CONFIG_FILE_NAME,
+};
 
 /// Debounce window: editor saves emit a burst of write events; wait this
 /// long after the *last* event before triggering one reload.
@@ -40,16 +42,17 @@ pub const UI_THEME_DEBOUNCE: Duration = Duration::from_millis(300);
 
 /// Message sent from the watcher thread into the Iced update loop.
 ///
-/// `result` carries the freshly parsed config, or a developer-facing error
-/// string (the typed [`UiThemeConfigError`](crate::theme_config::UiThemeConfigError)
-/// is not `Clone`, and `AppMessage` derives `Clone`).
+/// `result` carries the freshly parsed config, or a structured developer
+/// error ([`ThemeReloadError`] — path, kind, parser line/column). The
+/// error is a `Clone` projection of the load error so it can ride inside
+/// `AppMessage` (which derives `Clone`).
 #[derive(Debug, Clone)]
 pub struct UiThemeReloadMsg {
     /// Monotonic reload generation. The app drops any message whose
     /// generation is not newer than the last one it applied.
     pub generation: u64,
-    /// Freshly parsed config, or an error description.
-    pub result: Result<UiThemeConfig, String>,
+    /// Freshly parsed config, or a structured developer error.
+    pub result: Result<UiThemeConfig, ThemeReloadError>,
 }
 
 /// Filter: is this notify event relevant to `boru-ui.toml`?
@@ -230,8 +233,10 @@ pub fn spawn_ui_theme_watcher(
 
                 // Parse away from the rendering path (this thread). A
                 // missing file yields an empty config (defaults) — deleting
-                // boru-ui.toml therefore reloads the default theme.
-                let result = load_ui_theme_config(&data_dir).map_err(|e| e.to_string());
+                // boru-ui.toml therefore reloads the default theme. Errors
+                // are projected into the Clone-able structured report so
+                // the app can log path + parser detail (BORU-UI-18).
+                let result = load_ui_theme_config(&data_dir).map_err(|e| ThemeReloadError::from_ui_error(&e));
                 if tx
                     .blocking_send(UiThemeReloadMsg { generation, result })
                     .is_err()
@@ -446,8 +451,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A malformed file yields an error result — the app keeps the last
-    /// known-good theme (BORU-UI-18's reporting builds on this).
+    /// A malformed file yields a structured error result — the app keeps
+    /// the last known-good theme (BORU-UI-18's reporting builds on this).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn watcher_reports_malformed_toml_as_error() {
         let dir = std::env::temp_dir().join(format!("boru-ui-watch3-{}", std::process::id()));
@@ -464,7 +469,22 @@ mod tests {
             .await
             .expect("timed out waiting for reload message")
             .expect("channel closed");
-        assert!(msg.result.is_err(), "malformed TOML must be reported as an error");
+        let err = msg
+            .result
+            .expect_err("malformed TOML must be reported as an error");
+        // BORU-UI-18: the structured report names the file and the failure
+        // kind so the app can log path + parser detail.
+        assert!(
+            err.path.ends_with(UI_CONFIG_FILE_NAME),
+            "error carries the file path: {}",
+            err.path.display()
+        );
+        assert_eq!(
+            err.kind,
+            crate::theme_config::ThemeReloadErrorKind::Parse,
+            "malformed TOML is a Parse error"
+        );
+        assert!(!err.message.is_empty(), "parser detail is present");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

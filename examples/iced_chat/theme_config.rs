@@ -736,9 +736,14 @@ pub enum UiThemeConfigError {
         source: std::io::Error,
     },
     /// The file exists but is not valid TOML / not a valid theme config.
+    /// `line`/`column` are 1-based positions of the offending byte span
+    /// (when the parser provides one — syntax errors do, some serde
+    /// type-mismatch errors do not).
     Parse {
         path: PathBuf,
         source: toml::de::Error,
+        line: Option<usize>,
+        column: Option<usize>,
     },
 }
 
@@ -754,7 +759,7 @@ impl std::fmt::Display for UiThemeConfigError {
                 "cannot read dev theme override {}: {source}",
                 path.display()
             ),
-            UiThemeConfigError::Parse { path, source } => {
+            UiThemeConfigError::Parse { path, source, .. } => {
                 // The toml error's Display already includes the offending
                 // line/column when the parser has a span (syntax errors);
                 // serde type-mismatch errors show the field/key path.
@@ -773,6 +778,101 @@ impl std::error::Error for UiThemeConfigError {
             UiThemeConfigError::Parse { source, .. } => Some(source),
         }
     }
+}
+
+/// Machine-readable category of a theme load failure (BORU-UI-18).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeReloadErrorKind {
+    /// The file exists but could not be read (permissions, I/O, …).
+    Io,
+    /// The file exists but is not valid TOML / not a valid theme config.
+    Parse,
+    /// The file does not exist (only for the inspector's explicit Reload
+    /// From Disk action — the startup/watcher path treats it as defaults).
+    NotFound,
+}
+
+/// Clone-able structured summary of a theme load failure.
+///
+/// [`UiThemeConfigError`] is the authoritative error (it holds the
+/// non-`Clone` `toml::de::Error`), but it cannot ride inside `AppMessage`
+/// (which derives `Clone`). This projection carries everything the
+/// developer needs — file path, error kind, a human-readable message (with
+/// parser detail where available) and 1-based line/column — across the
+/// watcher → app boundary and into the inspector's error list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThemeReloadError {
+    /// The offending dev theme file.
+    pub path: PathBuf,
+    /// Machine-readable failure category.
+    pub kind: ThemeReloadErrorKind,
+    /// Human-readable description: path + parser detail (line/column for
+    /// syntax errors, field/key path for serde type errors).
+    pub message: String,
+    /// 1-based line of the error when the parser provided a span.
+    pub line: Option<usize>,
+    /// 1-based column of the error when the parser provided a span.
+    pub column: Option<usize>,
+}
+
+impl std::fmt::Display for ThemeReloadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for ThemeReloadError {}
+
+impl ThemeReloadError {
+    /// Project a [`UiThemeConfigError`] into the Clone-able summary used at
+    /// the watcher → app boundary and in the inspector.
+    pub fn from_ui_error(err: &UiThemeConfigError) -> Self {
+        match err {
+            #[cfg(feature = "dev-ui")]
+            UiThemeConfigError::NotFound { path } => ThemeReloadError {
+                path: path.clone(),
+                kind: ThemeReloadErrorKind::NotFound,
+                message: err.to_string(),
+                line: None,
+                column: None,
+            },
+            UiThemeConfigError::Io { path, .. } => ThemeReloadError {
+                path: path.clone(),
+                kind: ThemeReloadErrorKind::Io,
+                message: err.to_string(),
+                line: None,
+                column: None,
+            },
+            UiThemeConfigError::Parse {
+                path, line, column, ..
+            } => ThemeReloadError {
+                path: path.clone(),
+                kind: ThemeReloadErrorKind::Parse,
+                message: err.to_string(),
+                line: *line,
+                column: *column,
+            },
+        }
+    }
+}
+
+/// Compute a 1-based (line, column) for a byte span into `text`.
+///
+/// The TOML parser exposes only a byte range ([`toml::de::Error::span`]);
+/// translating it to a human position requires the source text. `None`
+/// when the parser gave no span (some serde type-mismatch errors).
+fn toml_line_col(
+    text: &str,
+    span: Option<std::ops::Range<usize>>,
+) -> (Option<usize>, Option<usize>) {
+    let Some(span) = span else {
+        return (None, None);
+    };
+    let start = span.start.min(text.len());
+    let line = text[..start].bytes().filter(|b| *b == b'\n').count() + 1;
+    let line_start = text[..start].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let column = text[line_start..start].chars().count() + 1;
+    (Some(line), Some(column))
 }
 
 /// Parse theme overrides from a TOML string.
@@ -800,7 +900,15 @@ pub fn load_ui_theme_config(data_dir: &Path) -> Result<UiThemeConfig, UiThemeCon
         }
         Err(source) => return Err(UiThemeConfigError::Io { path, source }),
     };
-    parse_ui_theme_config(&text).map_err(|source| UiThemeConfigError::Parse { path, source })
+    parse_ui_theme_config(&text).map_err(|source| {
+        let (line, column) = toml_line_col(&text, source.span());
+        UiThemeConfigError::Parse {
+            path,
+            source,
+            line,
+            column,
+        }
+    })
 }
 
 /// Reload theme overrides from `<data_dir>/boru-ui.toml` for the
@@ -822,7 +930,15 @@ pub fn reload_ui_theme_config(data_dir: &Path) -> Result<UiThemeConfig, UiThemeC
         }
         Err(source) => return Err(UiThemeConfigError::Io { path, source }),
     };
-    parse_ui_theme_config(&text).map_err(|source| UiThemeConfigError::Parse { path, source })
+    parse_ui_theme_config(&text).map_err(|source| {
+        let (line, column) = toml_line_col(&text, source.span());
+        UiThemeConfigError::Parse {
+            path,
+            source,
+            line,
+            column,
+        }
+    })
 }
 
 // ── Save path (BORU-UI-12 / PDF Task 12) ────────────────────────────
@@ -1097,9 +1213,18 @@ play_overlay_size = 70.0
         let err = load_ui_theme_config(dir.path()).expect_err("malformed file is an error");
         let msg = err.to_string();
         match err {
-            UiThemeConfigError::Parse { path, source } => {
+            UiThemeConfigError::Parse {
+                path,
+                source,
+                line,
+                column,
+            } => {
                 assert!(path.ends_with(UI_CONFIG_FILE_NAME));
                 assert!(source.span().is_some());
+                // BORU-UI-18: structured line/column are computed from the
+                // parser's byte span for the developer error report.
+                assert!(line.is_some(), "line populated from the parser span");
+                assert!(column.is_some(), "column populated from the parser span");
             }
             other => panic!("expected Parse error, got {other:?}"),
         }
@@ -1278,7 +1403,7 @@ play_overlay_size = 70.0
         std::fs::write(dir.path().join(UI_CONFIG_FILE_NAME), "[sidebar\nwidth =")
             .expect("write malformed theme file");
         match reload_ui_theme_config(dir.path()) {
-            Err(UiThemeConfigError::Parse { path, source }) => {
+            Err(UiThemeConfigError::Parse { path, source, .. }) => {
                 assert!(path.ends_with(UI_CONFIG_FILE_NAME));
                 let msg = source.to_string();
                 assert!(
@@ -1287,6 +1412,86 @@ play_overlay_size = 70.0
                 );
             }
             other => panic!("expected Parse error, got {other:?}"),
+        }
+    }
+
+    // ── Structured developer error reporting (BORU-UI-18 / PDF Task 18) ─
+
+    /// The Clone-able `ThemeReloadError` projection carries path, kind and
+    /// the parser's line/column for a malformed file — the data the
+    /// watcher → app boundary and the inspector use to report the error.
+    #[test]
+    fn reload_error_projection_carries_path_kind_and_parser_position() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join(UI_CONFIG_FILE_NAME), "[sidebar\nwidth =")
+            .expect("write malformed theme file");
+        let err = load_ui_theme_config(dir.path()).expect_err("malformed file errors");
+
+        let info = ThemeReloadError::from_ui_error(&err);
+        assert!(info.path.ends_with(UI_CONFIG_FILE_NAME));
+        assert_eq!(info.kind, ThemeReloadErrorKind::Parse);
+        // The malformed file's first table header is never closed, so the
+        // parser reports the error on line 1.
+        assert_eq!(info.line, Some(1), "parser line position is reported");
+        assert!(
+            info.message.contains(UI_CONFIG_FILE_NAME),
+            "message names the file: {}",
+            info.message
+        );
+        assert!(
+            info.message.contains("line"),
+            "message carries parser line info: {}",
+            info.message
+        );
+
+        // The projection is Clone-able so it can ride inside AppMessage.
+        let cloned = info.clone();
+        assert_eq!(cloned, info);
+    }
+
+    /// An invalid colour value is a serde type error; the projection still
+    /// reports the file path, the parser position and the offending value
+    /// (the serde error names the field in its message text).
+    #[test]
+    fn reload_error_projection_invalid_colour_names_field() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join(UI_CONFIG_FILE_NAME),
+            "[colors]\ncanvas = \"#ZZZZZZ\"\n",
+        )
+        .expect("write invalid colour");
+        let err = load_ui_theme_config(dir.path()).expect_err("invalid colour errors");
+
+        let info = ThemeReloadError::from_ui_error(&err);
+        assert_eq!(info.kind, ThemeReloadErrorKind::Parse);
+        assert!(info.path.ends_with(UI_CONFIG_FILE_NAME));
+        // The serde custom error text names the offending value and the
+        // rendered context line shows the field (`canvas`).
+        assert!(
+            info.message.contains("canvas"),
+            "serde error names the offending field: {}",
+            info.message
+        );
+        assert!(
+            info.message.contains("ZZZZZZ"),
+            "serde error names the offending value: {}",
+            info.message
+        );
+    }
+
+    /// Io errors project to kind Io and keep the path.
+    #[test]
+    fn reload_error_projection_io_carries_path() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir(dir.path().join(UI_CONFIG_FILE_NAME))
+            .expect("create dir with file name");
+        match load_ui_theme_config(dir.path()) {
+            Ok(_) => { /* platform returned empty for a dir — acceptable */ }
+            Err(err) => {
+                let info = ThemeReloadError::from_ui_error(&err);
+                assert_eq!(info.kind, ThemeReloadErrorKind::Io);
+                assert!(info.path.ends_with(UI_CONFIG_FILE_NAME));
+            }
         }
     }
 

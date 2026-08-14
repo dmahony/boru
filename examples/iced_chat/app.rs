@@ -6082,7 +6082,7 @@ pub enum AppMessage {
     /// theme; this task only delivers + tracks staleness.
     UiThemeReloaded {
         generation: u64,
-        result: Result<crate::theme_config::UiThemeConfig, String>,
+        result: Result<crate::theme_config::UiThemeConfig, crate::theme_config::ThemeReloadError>,
     },
     /// BORU-UI-09: a dev UI Inspector panel message (Ctrl+Shift+D toggles
     /// the panel; sliders/inputs/toggles/colour fields emit edits). Compiled
@@ -18988,9 +18988,22 @@ impl IcedChat {
     /// and the stored `ui_theme_config` overrides. Called at startup (via
     /// [`Self::set_ui_theme_config`]) and on dark-mode toggle so the cached
     /// merged theme always reflects both the mode and the dev overrides.
+    ///
+    /// BORU-UI-18: every value the merge had to clamp or fall back (an
+    /// invalid colour channel, absurd width, unknown font) is logged as a
+    /// developer warning with the field name, and (dev-ui) recorded on the
+    /// inspector draft so the panel can show the adjustment.
     fn recompute_active_theme(&mut self) {
         let base = crate::theme::BoruTheme::for_theme(&self.theme());
-        self.active_theme = crate::theme_merge::merge_ui_theme(&base, &self.ui_theme_config).0;
+        let (merged, warnings) = crate::theme_merge::merge_ui_theme(&base, &self.ui_theme_config);
+        for w in &warnings {
+            tracing::warn!(field = %w, "boru-ui.toml value adjusted during merge");
+        }
+        #[cfg(feature = "dev-ui")]
+        {
+            self.inspector_draft.merge_warnings = warnings;
+        }
+        self.active_theme = merged;
     }
 
     /// BORU-UI-07: replace the stored dev-theme config AND the live merged
@@ -19016,10 +19029,18 @@ impl IcedChat {
     /// tunnels, media playback, chat history, the selected conversation,
     /// scroll position or composer input. On an error the last known-good
     /// theme stays active (BORU-UI-04/18).
+    ///
+    /// BORU-UI-18: a failed reload is logged with the structured developer
+    /// error (file path, failure kind, parser line/column where available)
+    /// and, in dev-ui builds, surfaced on the inspector's reload-status
+    /// line so the developer sees the parse error in the panel too.
     fn update_ui_theme_reloaded(
         &mut self,
         generation: u64,
-        result: Result<crate::theme_config::UiThemeConfig, String>,
+        result: Result<
+            crate::theme_config::UiThemeConfig,
+            crate::theme_config::ThemeReloadError,
+        >,
     ) -> iced::Task<AppMessage> {
         if !self.ui_theme_reload_tracker.should_apply(generation) {
             tracing::debug!(
@@ -19043,9 +19064,18 @@ impl IcedChat {
             Err(e) => {
                 tracing::warn!(
                     generation,
-                    error = %e,
+                    path = %e.path.display(),
+                    kind = ?e.kind,
+                    line = ?e.line,
+                    column = ?e.column,
+                    error = %e.message,
                     "boru-ui.toml reload failed; keeping last known-good theme"
                 );
+                #[cfg(feature = "dev-ui")]
+                {
+                    self.inspector_draft.reload_status =
+                        crate::inspector::ThemeReloadStatus::Failed(e.message);
+                }
             }
         }
         iced::Task::none()
@@ -35790,7 +35820,15 @@ fn ui_theme_reload_error_keeps_last_known_good_theme() {
     let revision_after_ok = app.theme_revision;
 
     // …then an error reload must NOT replace it.
-    let task = app.update_ui_theme_reloaded(2, Err("bad toml".to_string()));
+    let bad = crate::theme_config::ThemeReloadError {
+        path: std::path::PathBuf::from("boru-ui.toml"),
+        kind: crate::theme_config::ThemeReloadErrorKind::Parse,
+        message: "invalid dev theme override boru-ui.toml: TOML parse error at line 1, column 5"
+            .to_string(),
+        line: Some(1),
+        column: Some(5),
+    };
+    let task = app.update_ui_theme_reloaded(2, Err(bad));
     drop(task);
 
     assert_eq!(
@@ -35840,6 +35878,50 @@ fn ui_theme_reload_stale_generation_is_dropped() {
 }
 
 // ── BORU-UI-09: dev UI Inspector (dev-ui feature only) ────────────────
+
+/// BORU-UI-18: merge warnings (values the merge had to clamp or replace)
+/// are recorded on the inspector draft so the panel can show them.
+#[cfg(feature = "dev-ui")]
+#[test]
+fn inspector_records_merge_warnings_for_adjusted_values() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    // A clean config produces no warnings.
+    let clean = crate::theme_config::parse_ui_theme_config("sidebar = { width = 300.0 }")
+        .expect("clean config parses");
+    app.set_ui_theme_config(clean.clone());
+    assert!(
+        app.inspector_draft.merge_warnings.is_empty(),
+        "no warnings for in-range values"
+    );
+
+    // An out-of-range colour channel is clamped by the merge; the warning
+    // must be captured (and the theme must keep running, not panic).
+    let bad = crate::theme_config::parse_ui_theme_config(
+        "[colors]\nprimary = [9.0, 0.0, 0.0]\n",
+    )
+    .expect("out-of-range colour parses");
+    app.set_ui_theme_config(bad);
+    assert_eq!(
+        app.active_theme.colors.primary.r,
+        1.0,
+        "colour channel clamped to the valid range"
+    );
+    assert_eq!(
+        app.inspector_draft.merge_warnings.len(),
+        1,
+        "the clamp is reported to the inspector"
+    );
+    assert!(
+        app.inspector_draft.merge_warnings[0].contains("colors.primary"),
+        "warning names the field: {}",
+        app.inspector_draft.merge_warnings[0]
+    );
+
+    // A subsequent clean load clears the warnings.
+    app.set_ui_theme_config(clean);
+    assert!(app.inspector_draft.merge_warnings.is_empty());
+}
 
 #[cfg(feature = "dev-ui")]
 #[test]

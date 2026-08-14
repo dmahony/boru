@@ -1469,6 +1469,13 @@ pub struct InspectorDraft {
     /// BORU-UI-13: result of the last "Reload From Disk" action
     /// (view-local status line only — never part of the theme).
     pub reload_status: ThemeReloadStatus,
+    /// BORU-UI-18: field-level merge adjustments from the last theme
+    /// recompute (values that had to be clamped or replaced by defaults,
+    /// e.g. an out-of-range colour channel or an unknown font name). Set
+    /// by the app after every merge; rendered as a compact warnings list
+    /// in the panel. View-local display state only — never part of the
+    /// theme.
+    pub merge_warnings: Vec<String>,
 }
 
 // ── View ──────────────────────────────────────────────────────────────
@@ -1823,6 +1830,7 @@ pub fn view_inspector(
         .push(reset_actions_row(dark_mode))
         .push(save_theme_row(dark_mode, &draft.save_status))
         .push(reload_theme_row(dark_mode, &draft.reload_status))
+        .push(merge_warnings_row(dark_mode, &draft.merge_warnings))
         .push(gallery_row(dark_mode))
         .push(Space::new().height(Length::Fixed(6.0)))
         .spacing(2.0);
@@ -2077,6 +2085,51 @@ fn reload_theme_row(dark_mode: bool, status: &ThemeReloadStatus) -> Element<'sta
     ]
     .align_y(Alignment::Center)
     .into()
+}
+
+/// Compact list of the last merge's field-level adjustments (BORU-UI-18).
+///
+/// Shown only when the last theme merge had to clamp a value or fall back
+/// to a default (e.g. an out-of-range colour channel, an absurd width, an
+/// unknown font name). Each entry is the merge's warning string, which
+/// already names the field (`colors.primary: …`). View-local display state
+/// only — never part of the theme.
+fn merge_warnings_row(dark_mode: bool, warnings: &[String]) -> Element<'static, AppMessage> {
+    if warnings.is_empty() {
+        return Space::new().height(Length::Fixed(0.0)).into();
+    }
+    let heading = text(format!("⚠ {} value(s) adjusted on load", warnings.len()))
+        .size(9.0)
+        .color(if dark_mode {
+            Color::from_rgb(0.95, 0.75, 0.4)
+        } else {
+            Color::from_rgb(0.7, 0.45, 0.0)
+        });
+    let mut col = iced::widget::Column::new().push(heading).spacing(1.0);
+    for w in warnings.iter().take(4) {
+        let preview: String = w.chars().take(90).collect();
+        col = col.push(
+            text(format!("· {preview}"))
+                .size(8.0)
+                .color(if dark_mode {
+                    Color::from_rgb(0.8, 0.65, 0.45)
+                } else {
+                    Color::from_rgb(0.45, 0.3, 0.1)
+                }),
+        );
+    }
+    if warnings.len() > 4 {
+        col = col.push(
+            text(format!("· … {} more", warnings.len() - 4))
+                .size(8.0)
+                .color(if dark_mode {
+                    Color::from_rgb(0.6, 0.5, 0.4)
+                } else {
+                    Color::from_rgb(0.4, 0.35, 0.3)
+                }),
+        );
+    }
+    col.padding([2, 6]).into()
 }
 
 /// Collapsible component section header with a per-section Reset action.
