@@ -27,6 +27,7 @@ mod form_components;
 mod gui_test_actions;
 mod i18n;
 mod icon_system;
+mod layout;
 mod link_preview;
 mod log_viewer;
 mod mcp_server;
