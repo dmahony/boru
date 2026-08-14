@@ -141,10 +141,14 @@ Before opening a PR, confirm:
       feature or `src/screen_share/`): **no RustDesk (AGPL-3.0) code was
       copied** — no copied source, no line-for-line translations or
       mechanical ports, no copied comments/tests/constants, and no GPL/AGPL
-      dependency added to the compiled graph. Every implementation decision
-      cites an independent source (platform API docs, official
+      dependency added to the compiled graph. The licence gate
+      (`./scripts/check-licenses.sh`, CI `cargo_deny` job) must pass; adding
+      a copyleft dependency requires a reviewed
+      `[[licenses.exceptions]]` entry in `deny.toml`. Every implementation
+      decision cites an independent source (platform API docs, official
       specifications, permissively licensed libraries) in the PR
-      description. See `docs/screenshare-rustdesk-reference-policy.md`.
+      description. See `docs/screenshare-rustdesk-reference-policy.md` and
+      `THIRD_PARTY_NOTICES.md`.
 
 ## What to commit
 

@@ -1,3 +1,22 @@
+# cargo-deny configuration for Boru (boru-core).
+#
+# GATE: Boru's own source is MIT OR Apache-2.0. The compiled dependency
+# graph must stay permissively licensed. cargo-deny (>= 0.18.4) denies every
+# licence that is not explicitly listed under [licenses].allow — the allow
+# list IS the gate. A new GPL/AGPL (or LGPL/MPL/etc.) dependency therefore
+# FAILS `cargo deny check licenses` unless it has been explicitly reviewed
+# and listed under [[licenses.exceptions]] with a justification comment.
+#
+#   Local:  cargo deny check licenses --workspace --all-features
+#           (or ./scripts/check-licenses.sh)
+#   CI:     .github/workflows/ci.yaml  ->  cargo_deny job (check, -Dwarnings)
+#
+# Allow list verified against the real --all-features tree on 2026-08-14 on
+# DEBSRV: MPL-2.0 (iroh/portmapper/hpke-rs/attohttpc), IJG (nokhwa/mozjpeg),
+# CC0-1.0 (notify/iced/wgpu/naga), NCSA (libfuzzer-sys) were missing and are
+# now allowed. GNU licences (GPL/AGPL/LGPL/GFDL) are NOT in the list and are
+# denied pedantically (exact SPDX expression required, e.g. "GPL-3.0-only").
+
 [advisories]
 ignore = [
     "RUSTSEC-2024-0436",
@@ -17,12 +36,16 @@ allow = [
     "BSD-2-Clause",
     "BSD-3-Clause",
     "BSL-1.0",
+    "CC0-1.0", # notify (fs watcher), iced/wgpu/naga render stack, cryoglyph
     "CDLA-Permissive-2.0",
+    "IJG", # mozjpeg / mozjpeg-sys (nokhwa camera backend) — permissive libjpeg
     "ISC",
     "MIT",
-    "Zlib",
+    "MPL-2.0", # iroh, iroh-blobs, portmapper, hpke-rs, igd-next, attohttpc, p2panda-encryption
+    "NCSA", # libfuzzer-sys (fuzz/ target) — (MIT OR Apache-2.0) AND NCSA
     "Unicode-3.0",
     "Unlicense",
+    "Zlib",
 ]
 
 [[licenses.clarify]]
@@ -32,6 +55,17 @@ name = "ring"
 [[licenses.clarify.license-files]]
 hash = 3171872035
 path = "LICENSE"
+
+# ── Explicit-review exceptions ──────────────────────────────────────────
+# The ONLY way a copyleft dependency (GPL/AGPL/LGPL/MPL/...) may enter the
+# compiled graph: review it, then list it here with a justification comment.
+# Never add copyleft licences to `allow` above.
+#
+# [[licenses.exceptions]]
+# name = "example-gpl-crate"
+# version = "*"
+# licenses = ["GPL-3.0-only"]
+# reason = "Reviewed <date> by <owner>: <what it is used for and why it is acceptable>"
 
 [sources]
 allow-git = []
