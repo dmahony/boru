@@ -3,6 +3,15 @@
 Status: **binding policy** for the Boru screen-sharing work (BORU-SS task chain,
 phases 0-14 of `Boru_RustDesk_Reference_Screen_Sharing_Tasks.pdf`).
 
+Origin: Phase 0 / Task 0.1 ("Add a RustDesk reference policy") of
+`Boru_RustDesk_Reference_Screen_Sharing_Tasks.pdf` (attached to kanban task
+t_2d8629a8). First published in commit 6c22bff8 (archived BORU-SS chain) and
+refined by the canonical BORU-SS-01 chain (t_3d3d896e). The PDF's **Agent Rule**
+is binding on every agent in the chain: *"Do not optimize by copying RustDesk.
+When RustDesk exposes an edge case or useful technique, write a Boru
+requirement, find the relevant platform/API documentation, and implement the
+behavior independently. Preserve Boru's MIT/Apache-2.0 licensing flexibility."*
+
 RustDesk is used as an **engineering reference only**. Boru screen sharing is a
 native Boru subsystem built from Boru-owned code, upstream platform APIs,
 official documentation, and permissively licensed libraries. Boru's source
@@ -108,11 +117,15 @@ must be flagged for review before merging.
 
 ## 5. Screen-sharing PR checklist
 
-No screen-sharing-specific PR template exists in the repo yet (the general
-`Pull request checklist` in `docs/CONTRIBUTING.md` applies to all PRs). The
-following checklist item **must** be included in every screen-sharing PR, and
-should be added to a dedicated screen-sharing PR template if one is created
-later.
+No screen-sharing-specific PR template exists under `.github/` (only
+`dependabot.yml`, `ISSUE_TEMPLATE/`, `release-drafter.yml`, `workflows/`), so
+the checklist item lives in the general PR review gate that every Boru PR passes:
+the **Pull request checklist** in `docs/CONTRIBUTING.md`. PRs are reviewed on
+GitHub; reviewers see that checklist when opening the PR.
+
+The following item is part of the `docs/CONTRIBUTING.md` Pull request checklist
+and **must** be confirmed in every screen-sharing PR (any change touching the
+`screen-sharing` cargo feature or `src/screen_share/`):
 
 > - [ ] **No RustDesk code was copied.** This change contains no RustDesk
 >       (AGPL-3.0) source code, no line-for-line translations or mechanical

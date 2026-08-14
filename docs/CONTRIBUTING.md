@@ -137,6 +137,14 @@ Before opening a PR, confirm:
       `docs_reference_current_schema_version` test enforces this.
 - [ ] Exact, volatile metrics (file/line counts, byte sizes) are not added
       to long-lived docs — use qualitative descriptions or generated output.
+- [ ] If this PR touches **screen sharing** (the `screen-sharing` cargo
+      feature or `src/screen_share/`): **no RustDesk (AGPL-3.0) code was
+      copied** — no copied source, no line-for-line translations or
+      mechanical ports, no copied comments/tests/constants, and no GPL/AGPL
+      dependency added to the compiled graph. Every implementation decision
+      cites an independent source (platform API docs, official
+      specifications, permissively licensed libraries) in the PR
+      description. See `docs/screenshare-rustdesk-reference-policy.md`.
 
 ## What to commit
 
