@@ -1074,8 +1074,12 @@ impl IcedChat {
         // when the layout is replaced, so the closure re-reads the NEW
         // layout (mirror of how `theme_revision` + `btheme` interact).
         let home_layout = self.boru_layout().home.clone();
+        // BORU-LAYOUT-04: the responsive tier (thresholds + per-tier home
+        // column counts / padding) is captured the same way so the static
+        // renderer can resolve the active breakpoint from the window width.
+        let responsive = self.boru_layout().responsive;
         iced::widget::lazy(dep, move |dep| {
-            Self::view_chat_list_content(dep, btheme, home_layout.clone())
+            Self::view_chat_list_content(dep, btheme, home_layout.clone(), responsive)
         })
         .into()
     }
@@ -1133,11 +1137,16 @@ impl IcedChat {
     /// [`ChatListDependency`] so `iced::widget::lazy` can cache the whole
     /// screen while any of its rendered slices is unchanged. BORU-LAYOUT-03:
     /// the structural arrangement comes from the layout model (`home.*`); the
-    /// defaults reproduce today's appearance exactly.
+    /// defaults reproduce today's appearance exactly. BORU-LAYOUT-04: the
+    /// responsive tier (thresholds + per-tier home columns / padding) comes
+    /// from the `responsive.*` model group and is resolved from the window
+    /// width, so narrow / desktop / ultra-wide windows apply different column
+    /// counts — with the defaults reproducing the pre-responsive behaviour.
     pub(crate) fn view_chat_list_content(
         dep: &ChatListDependency,
         btheme: crate::theme::BoruTheme,
         layout: crate::layout::HomeLayout,
+        responsive: crate::layout::ResponsiveLayout,
     ) -> iced::Element<'static, AppMessage> {
         use iced::widget::{button, container, row, Column, Row, Space};
         use iced::{Alignment, Length};
@@ -1151,6 +1160,15 @@ impl IcedChat {
         let content_width = crate::design_tokens::home_content_width(window_width);
         let compact_header =
             content_width < crate::design_tokens::HOME_COMPACT_HEADER_CONTENT;
+
+        // ── BORU-LAYOUT-04: resolve the active viewport tier ──
+        // The tier thresholds (narrow_max_width / ultra_wide_min_width) and
+        // the per-tier home column counts / padding live in the model, so
+        // TOML can move them later. Defaults match the BORU-UI-15 gallery
+        // vocabulary: Narrow < 360 px, Desktop 360–1439 px, UltraWide ≥
+        // 1440 px — and reproduce the pre-responsive layout exactly.
+        let viewport_tier = responsive.tier_for_width(window_width);
+        let grid_columns = responsive.home_columns.for_tier(viewport_tier);
 
         // ── BORU-LAYOUT-03: section order / visibility from the model ──
         // `layout.visible_sections()` = `section_order` minus
@@ -1585,26 +1603,51 @@ impl IcedChat {
             col
         };
 
+        // ── BORU-LAYOUT-04: effective column count ──
+        // The responsive tier's per-tier column count (`grid_columns`,
+        // resolved from the window width above) combines with the
+        // pre-responsive content-width stack rule: the dashboard stacks to
+        // a single column in List mode, when the tier asks for one column,
+        // or when the content width is below the home grid's stack
+        // breakpoint. The default tier table (narrow 1 / desktop 2 /
+        // ultra-wide 2) with the default stack breakpoint (720) reproduces
+        // the pre-responsive behaviour at every window size.
+        let effective_columns = if list_mode || grid_columns <= 1
+            || content_width < layout.grid.stack_breakpoint
+        {
+            1
+        } else {
+            grid_columns
+        };
+
         let main_content: iced::Element<'_, AppMessage> = if list_mode {
             // Single stacked column in model order (all visible sections).
             column_from_sections(&visible_sections).into()
+        } else if effective_columns <= 1 {
+            // Narrow: main-column cards first, then the activity rail below.
+            if main_sections.is_empty() {
+                // No main-column sections visible — the rail owns the page.
+                column_from_sections(&rail_sections).into()
+            } else if rail_sections.is_empty() {
+                // No rail sections visible — the main column spans full width.
+                column_from_sections(&main_sections).into()
+            } else {
+                let left_col = column_from_sections(&main_sections);
+                let right_col = column_from_sections(&rail_sections);
+                Column::new()
+                    .push(left_col)
+                    .push(Space::new().height(Length::Fixed(card_gap)))
+                    .push(right_col)
+                    .spacing(0)
+                    .width(Length::Fill)
+                    .into()
+            }
         } else if main_sections.is_empty() {
             // No main-column sections visible — the rail owns the page.
             column_from_sections(&rail_sections).into()
         } else if rail_sections.is_empty() {
             // No rail sections visible — the main column spans full width.
             column_from_sections(&main_sections).into()
-        } else if content_width < layout.grid.stack_breakpoint {
-            // Narrow: main-column cards first, then the activity rail below.
-            let left_col = column_from_sections(&main_sections);
-            let right_col = column_from_sections(&rail_sections);
-            Column::new()
-                .push(left_col)
-                .push(Space::new().height(Length::Fixed(card_gap)))
-                .push(right_col)
-                .spacing(0)
-                .width(Length::Fill)
-                .into()
         } else {
             // Wide: two-column dashboard grid, both columns aligned top.
             // CONN-10 (spec §14 — no parent layout stretching): the left
@@ -1657,16 +1700,13 @@ impl IcedChat {
         // ── Assemble: centred dashboard canvas with responsive padding ──
         // Horizontal 32 px at large widths, 28 px elsewhere; top 28 px below
         // the application header; bottom at least 32 px (UI-HOME-02 plan).
-        // BORU-LAYOUT-03: the paddings come from the layout model
-        // (`home.padding`), defaulting to those same values. The content
-        // width math (`home_content_width`) still uses the design-token
-        // constants so the responsive breakpoints stay unchanged; the
-        // responsive task (BORU-LAYOUT-04) will drive it from the model.
-        let h_padding = if crate::design_tokens::is_large(window_width) {
-            layout.padding.horizontal_large
-        } else {
-            layout.padding.horizontal_default
-        };
+        // BORU-LAYOUT-03: top/bottom come from the layout model
+        // (`home.padding`). BORU-LAYOUT-04: the horizontal padding comes
+        // from the responsive tier's per-tier table (`responsive.home_padding_x`,
+        // resolved from the window width above) — its defaults are the same
+        // values as `home.padding.horizontal_large` / `horizontal_default`,
+        // so the default appearance is unchanged.
+        let h_padding = responsive.home_padding_x.for_tier(viewport_tier);
 
         // POLISH-05: page header → dashboard gap bumped from SPACE_28 to
         // ~40 px — roughly 12 px more breathing room between the

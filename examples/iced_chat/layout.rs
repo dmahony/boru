@@ -31,8 +31,10 @@
 //! Schema complete (BORU-LAYOUT-02): typed leaf structs + defaults + the
 //! [`LayoutOverrides`] partial-override mirror. BORU-LAYOUT-03 wires the
 //! `home.*` group into `app/home.rs` (section order/visibility, grid/list
-//! mode, columns, max width, padding/gaps, card sizing); the remaining
-//! groups (sidebar, chat, component, tables, responsive) are wired by later
+//! mode, columns, max width, padding/gaps, card sizing); BORU-LAYOUT-04
+//! wires the `responsive.*` group (viewport tiers, per-tier home column
+//! counts and per-tier horizontal padding) into the same view. The
+//! remaining groups (sidebar, chat, component, tables) are wired by later
 //! tasks. TOML parsing/merge/watcher are later BORU-LAYOUT tasks.
 //! `#![allow(dead_code)]` guards the still-unwired groups; drop it once
 //! every group is consumed by a view.
@@ -232,6 +234,11 @@ impl Default for QuickActionsLayout {
 }
 
 /// Dashboard canvas padding (`home.rs:1565-1569`, `home.rs:1594`).
+///
+/// BORU-LAYOUT-04: the live canvas's horizontal padding now comes from
+/// `ResponsiveLayout::home_padding_x` (per-tier table); these two
+/// horizontal slots remain as the historical two-tier model whose values
+/// the responsive defaults reference.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HomePadding {
     /// Top padding (`SPACE_28` = 28 px).
@@ -855,10 +862,71 @@ impl Default for SharedTableColumns {
 
 // ── Responsive (PDF Task 4) ──────────────────────────────────────────
 
+/// Viewport tier resolved from the current window width.
+///
+/// BORU-LAYOUT-04: the vocabulary matches the BORU-UI-15 responsive
+/// preview presets in `component_gallery.rs` — Narrow (360 px), Desktop
+/// (960 px), Maximized / ultra-wide (1440 px+). The thresholds live on
+/// [`ResponsiveLayout`] (`narrow_max_width`, `ultra_wide_min_width`) so
+/// TOML can move them later; `tier_for_width` resolves a window width to
+/// one of these tiers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ViewportTier {
+    /// Narrow window (below `narrow_max_width`, default < 360 px).
+    Narrow,
+    /// Typical desktop window (the reference viewport 1280 px falls here).
+    #[default]
+    Desktop,
+    /// Ultra-wide / maximized window (at/above `ultra_wide_min_width`,
+    /// default ≥ 1440 px).
+    UltraWide,
+}
+
+/// A value that varies per viewport tier.
+///
+/// BORU-LAYOUT-04: per-breakpoint column counts, padding and gaps are
+/// expressed as a three-leaf table resolved with [`ByTier::for_tier`] from
+/// the tier [`ResponsiveLayout::tier_for_width`] computes. The mirror
+/// [`ByTierOverrides`] carries the same leaves as `Option`s for the TOML
+/// partial-override layer (BORU-LAYOUT-06).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ByTier<T> {
+    /// Value for the [`ViewportTier::Narrow`] tier.
+    pub narrow: T,
+    /// Value for the [`ViewportTier::Desktop`] tier.
+    pub desktop: T,
+    /// Value for the [`ViewportTier::UltraWide`] tier.
+    pub ultra_wide: T,
+}
+
+impl<T: Copy> ByTier<T> {
+    /// Resolve the value for the given tier.
+    pub fn for_tier(&self, tier: ViewportTier) -> T {
+        match tier {
+            ViewportTier::Narrow => self.narrow,
+            ViewportTier::Desktop => self.desktop,
+            ViewportTier::UltraWide => self.ultra_wide,
+        }
+    }
+}
+
+/// Partial-override mirror of [`ByTier`]: every leaf is `Option<T>` so a
+/// partial TOML file can override one tier and keep the others' defaults.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ByTierOverrides<T> {
+    /// Override for the [`ViewportTier::Narrow`] leaf.
+    pub narrow: Option<T>,
+    /// Override for the [`ViewportTier::Desktop`] leaf.
+    pub desktop: Option<T>,
+    /// Override for the [`ViewportTier::UltraWide`] leaf.
+    pub ultra_wide: Option<T>,
+}
+
 /// Responsive breakpoints: viewport tiers (widths used by `design_tokens`
-/// `is_compact`/`is_medium`/`is_large`/`sidebar_width_for`) and the home
-/// content-width thresholds. Later tasks add per-tier column-count tables
-/// here (PDF Task 4).
+/// `is_compact`/`is_medium`/`is_large`/`sidebar_width_for`), the home
+/// content-width thresholds, and — BORU-LAYOUT-04 — the tier thresholds +
+/// per-tier home column counts and horizontal padding that make the layout
+/// responsive to the window width.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ResponsiveLayout {
     /// Reference viewport width (`VIEWPORT_REF_WIDTH` = 1280).
@@ -885,6 +953,52 @@ pub struct ResponsiveLayout {
     pub home_illustration_hide_content: f32,
     /// Compact card-header breakpoint (560 px).
     pub home_compact_header_content: f32,
+    /// Window width below which the [`ViewportTier::Narrow`] tier applies
+    /// (BORU-UI-15 gallery Narrow preset: 360 px).
+    pub narrow_max_width: f32,
+    /// Window width at/above which the [`ViewportTier::UltraWide`] tier
+    /// applies (BORU-UI-15 gallery Maximized preset: 1440 px+). Widths
+    /// between `narrow_max_width` and here resolve to Desktop.
+    pub ultra_wide_min_width: f32,
+    /// Per-tier home dashboard column counts: narrow 1 (stacked), desktop
+    /// 2 (main + rail), ultra-wide 2 (main + rail on a wider canvas).
+    pub home_columns: ByTier<usize>,
+    /// Per-tier home dashboard horizontal canvas padding. Defaults
+    /// reproduce the pre-responsive two-tier rule (`is_large` → 32 px,
+    /// otherwise 28 px) with the values of `HomePadding::horizontal_large`
+    /// / `horizontal_default`; the per-tier table supersedes those two
+    /// slots for the live canvas (BORU-LAYOUT-04).
+    pub home_padding_x: ByTier<f32>,
+}
+
+impl ResponsiveLayout {
+    /// Resolve the active viewport tier for a window width (px).
+    ///
+    /// Thresholds come from the model (`narrow_max_width`,
+    /// `ultra_wide_min_width`), so TOML can move them later. The defaults
+    /// reproduce the BORU-UI-15 gallery vocabulary: Narrow < 360 px,
+    /// Desktop 360–1439 px, UltraWide ≥ 1440 px.
+    pub fn tier_for_width(&self, width: f32) -> ViewportTier {
+        if width < self.narrow_max_width {
+            ViewportTier::Narrow
+        } else if width >= self.ultra_wide_min_width {
+            ViewportTier::UltraWide
+        } else {
+            ViewportTier::Desktop
+        }
+    }
+
+    /// Home dashboard column count for a window width: the per-tier
+    /// `home_columns` leaf for [`ResponsiveLayout::tier_for_width`].
+    pub fn home_columns_for_width(&self, width: f32) -> usize {
+        self.home_columns.for_tier(self.tier_for_width(width))
+    }
+
+    /// Home dashboard horizontal canvas padding for a window width: the
+    /// per-tier `home_padding_x` leaf for [`ResponsiveLayout::tier_for_width`].
+    pub fn home_padding_x_for_width(&self, width: f32) -> f32 {
+        self.home_padding_x.for_tier(self.tier_for_width(width))
+    }
 }
 
 impl Default for ResponsiveLayout {
@@ -902,6 +1016,18 @@ impl Default for ResponsiveLayout {
             home_illustration_full_content: crate::design_tokens::HOME_ILLUSTRATION_FULL_CONTENT,
             home_illustration_hide_content: crate::design_tokens::HOME_ILLUSTRATION_HIDE_CONTENT,
             home_compact_header_content: crate::design_tokens::HOME_COMPACT_HEADER_CONTENT,
+            narrow_max_width: 360.0,
+            ultra_wide_min_width: crate::design_tokens::VIEWPORT_LG_WIDTH,
+            home_columns: ByTier {
+                narrow: 1,
+                desktop: 2,
+                ultra_wide: 2,
+            },
+            home_padding_x: ByTier {
+                narrow: crate::design_tokens::SPACE_28,
+                desktop: crate::design_tokens::SPACE_28,
+                ultra_wide: crate::design_tokens::SPACE_32,
+            },
         }
     }
 }
@@ -1284,6 +1410,10 @@ layout_override_group! {
         home_illustration_full_content: f32,
         home_illustration_hide_content: f32,
         home_compact_header_content: f32,
+        narrow_max_width: f32,
+        ultra_wide_min_width: f32,
+        home_columns: ByTierOverrides<usize>,
+        home_padding_x: ByTierOverrides<f32>,
     }
 }
 
@@ -1630,6 +1760,113 @@ mod tests {
         assert_eq!(
             r.home_compact_header_content,
             design_tokens::HOME_COMPACT_HEADER_CONTENT
+        );
+
+        // BORU-LAYOUT-04: tier thresholds + per-tier columns/padding.
+        assert_eq!(r.narrow_max_width, 360.0);
+        assert_eq!(r.ultra_wide_min_width, design_tokens::VIEWPORT_LG_WIDTH);
+        assert_eq!(r.home_columns.narrow, 1);
+        assert_eq!(r.home_columns.desktop, 2);
+        assert_eq!(r.home_columns.ultra_wide, 2);
+        assert_eq!(r.home_padding_x.narrow, design_tokens::SPACE_28);
+        assert_eq!(r.home_padding_x.desktop, design_tokens::SPACE_28);
+        assert_eq!(r.home_padding_x.ultra_wide, design_tokens::SPACE_32);
+    }
+
+    #[test]
+    fn responsive_tier_resolution_matches_gallery_vocabulary() {
+        let r = ResponsiveLayout::default();
+        // Narrow: below narrow_max_width (360).
+        assert_eq!(r.tier_for_width(0.0), ViewportTier::Narrow);
+        assert_eq!(r.tier_for_width(359.0), ViewportTier::Narrow);
+        // Desktop: narrow_max_width ..< ultra_wide_min_width (1440).
+        assert_eq!(r.tier_for_width(360.0), ViewportTier::Desktop);
+        assert_eq!(r.tier_for_width(960.0), ViewportTier::Desktop);
+        assert_eq!(r.tier_for_width(1280.0), ViewportTier::Desktop);
+        assert_eq!(r.tier_for_width(1439.0), ViewportTier::Desktop);
+        // UltraWide: at/above ultra_wide_min_width (1440).
+        assert_eq!(r.tier_for_width(1440.0), ViewportTier::UltraWide);
+        assert_eq!(r.tier_for_width(1920.0), ViewportTier::UltraWide);
+    }
+
+    #[test]
+    fn responsive_home_columns_switch_by_tier() {
+        let r = ResponsiveLayout::default();
+        // Narrow windows collapse to a single stacked column.
+        assert_eq!(r.home_columns_for_width(320.0), 1);
+        assert_eq!(r.home_columns_for_width(359.0), 1);
+        // Desktop windows keep the two-column dashboard grid.
+        assert_eq!(r.home_columns_for_width(360.0), 2);
+        assert_eq!(r.home_columns_for_width(960.0), 2);
+        assert_eq!(r.home_columns_for_width(1280.0), 2);
+        // Ultra-wide windows keep two columns (main + rail on a wider canvas).
+        assert_eq!(r.home_columns_for_width(1440.0), 2);
+        assert_eq!(r.home_columns_for_width(1920.0), 2);
+    }
+
+    #[test]
+    fn responsive_home_padding_reproduces_previous_two_tier_rule() {
+        let r = ResponsiveLayout::default();
+        // BORU-LAYOUT-04 replaces the `is_large` two-tier padding choice
+        // with the per-tier table; the defaults must match the old rule at
+        // every width (32 px at/above the large threshold, 28 px below).
+        for width in [0.0, 360.0, 960.0, 1280.0, 1439.0] {
+            let expected = if design_tokens::is_large(width) {
+                design_tokens::SPACE_32
+            } else {
+                design_tokens::SPACE_28
+            };
+            assert_eq!(
+                r.home_padding_x_for_width(width),
+                expected,
+                "padding mismatch at width {width}"
+            );
+        }
+        assert_eq!(r.home_padding_x_for_width(1440.0), design_tokens::SPACE_32);
+        assert_eq!(r.home_padding_x_for_width(1920.0), design_tokens::SPACE_32);
+    }
+
+    #[test]
+    fn responsive_tier_thresholds_and_tables_are_overridable() {
+        // BORU-LAYOUT-04: thresholds + per-tier tables live in the model so
+        // TOML can override them later; a custom config resolves differently.
+        let r = ResponsiveLayout {
+            narrow_max_width: 500.0,
+            ultra_wide_min_width: 1000.0,
+            home_columns: ByTier {
+                narrow: 1,
+                desktop: 3,
+                ultra_wide: 4,
+            },
+            ..Default::default()
+        };
+        assert_eq!(r.tier_for_width(499.0), ViewportTier::Narrow);
+        assert_eq!(r.tier_for_width(500.0), ViewportTier::Desktop);
+        assert_eq!(r.tier_for_width(999.0), ViewportTier::Desktop);
+        assert_eq!(r.tier_for_width(1000.0), ViewportTier::UltraWide);
+        assert_eq!(r.home_columns_for_width(300.0), 1);
+        assert_eq!(r.home_columns_for_width(600.0), 3);
+        assert_eq!(r.home_columns_for_width(1200.0), 4);
+    }
+
+    #[test]
+    fn responsive_overrides_expose_new_tier_fields() {
+        let o = ResponsiveOverrides {
+            narrow_max_width: Some(400.0),
+            ultra_wide_min_width: Some(1500.0),
+            home_columns: Some(ByTierOverrides {
+                narrow: Some(1),
+                desktop: Some(2),
+                ultra_wide: Some(3),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(o.narrow_max_width, Some(400.0));
+        assert_eq!(o.ultra_wide_min_width, Some(1500.0));
+        assert_eq!(o.home_columns.as_ref().unwrap().ultra_wide, Some(3));
+        assert!(
+            o.home_padding_x.is_none(),
+            "missing tier group falls back to defaults"
         );
     }
 

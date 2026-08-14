@@ -23976,6 +23976,38 @@ mod tests {
     }
 
     #[test]
+    fn home_resolves_responsive_tier_from_window_width() {
+        // BORU-LAYOUT-04: the home view must resolve the active viewport
+        // tier from the window width (via the layout model's thresholds)
+        // and apply the per-tier home column count, so narrow / desktop /
+        // ultra-wide windows get different column counts. The tier comes
+        // from `responsive.*` (never a hard-coded window-width constant),
+        // and the pre-responsive content-width stack rule stays intact.
+        let home_src = include_str!("app/home.rs");
+        let home = method_source(home_src, "fn view_chat_list_content(", "fn view_chat_panel(");
+        assert!(
+            home.contains("responsive.tier_for_width(window_width)"),
+            "home must resolve the viewport tier from the window width"
+        );
+        assert!(
+            home.contains("responsive.home_columns.for_tier(viewport_tier)"),
+            "home must apply the per-tier column count"
+        );
+        assert!(
+            home.contains("responsive.home_padding_x.for_tier(viewport_tier)"),
+            "home must apply the per-tier horizontal padding"
+        );
+        assert!(
+            home.contains("content_width < layout.grid.stack_breakpoint"),
+            "the content-width stack rule must remain wired"
+        );
+        assert!(
+            !home.contains("RAIL_STACK_BREAKPOINT"),
+            "no raw window-width rail-stack constant may return"
+        );
+    }
+
+    #[test]
     fn set_layout_config_replaces_layout_and_bumps_revision() {
         // BORU-LAYOUT-03: the live-layout seam must replace the active
         // layout AND bump the revision so iced::lazy caches rebuild with the
