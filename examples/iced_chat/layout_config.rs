@@ -45,6 +45,13 @@ pub const LAYOUT_CONFIG_FILE_NAME: &str = "boru-layout.toml";
 /// parser.
 #[derive(Debug)]
 pub enum LayoutConfigError {
+    /// The file does not exist. [`load_layout_config`] treats this as
+    /// "no overrides" (Ok); the inspector's explicit "Reload Layout From
+    /// Disk" action reports it as an error so a missing file is not
+    /// silently mistaken for a successful reload.
+    NotFound {
+        path: PathBuf,
+    },
     /// The file exists but could not be read (permissions, I/O, …).
     Io {
         path: PathBuf,
@@ -69,9 +76,12 @@ pub enum LayoutConfigError {
 impl std::fmt::Display for LayoutConfigError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            LayoutConfigError::NotFound { path } => {
+                write!(f, "cannot find dev layout override file {}", path.display())
+            }
             LayoutConfigError::Io { path, source } => write!(
                 f,
-                "cannot read dev layout override {}: {source}",
+                "cannot read layout config {}: {source}",
                 path.display()
             ),
             LayoutConfigError::Parse { path, source, .. } => {
@@ -96,6 +106,7 @@ impl std::fmt::Display for LayoutConfigError {
 impl std::error::Error for LayoutConfigError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            LayoutConfigError::NotFound { .. } => None,
             LayoutConfigError::Io { source, .. } => Some(source),
             LayoutConfigError::Parse { source, .. } => Some(source),
             // Validation issues are plain strings, no underlying error.
@@ -107,6 +118,10 @@ impl std::error::Error for LayoutConfigError {
 /// Machine-readable category of a layout load failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutReloadErrorKind {
+    /// The file does not exist (only surfaced by the inspector's explicit
+    /// reload action — the watcher treats a missing file as "no
+    /// overrides").
+    NotFound,
     /// The file exists but could not be read (permissions, I/O, …).
     Io,
     /// The file exists but is not valid TOML / not a valid layout config.
@@ -152,6 +167,13 @@ impl LayoutReloadError {
     /// the watcher → app boundary.
     pub fn from_layout_error(err: &LayoutConfigError) -> Self {
         match err {
+            LayoutConfigError::NotFound { path } => LayoutReloadError {
+                path: path.clone(),
+                kind: LayoutReloadErrorKind::NotFound,
+                line: None,
+                column: None,
+                message: err.to_string(),
+            },
             LayoutConfigError::Io { path, .. } => LayoutReloadError {
                 path: path.clone(),
                 kind: LayoutReloadErrorKind::Io,
@@ -334,12 +356,82 @@ pub fn load_layout_config(data_dir: &Path) -> Result<LayoutOverrides, LayoutConf
     Ok(overrides)
 }
 
+// ── Save / reload path (BORU-LAYOUT-08 / PDF Task 8) ─────────────────
+//
+// The inspector edits the live layout through `set_layout_overrides` and
+// persists the current override set to `boru-layout.toml`. The file the
+// inspector writes is the same file the dev watcher reloads, so a saved
+// edit and an external file edit converge on one format.
+
+/// Serialize layout overrides to TOML text (only `Some` leaves are
+/// emitted, exactly like the load path expects).
+#[cfg(feature = "dev-ui")]
+pub fn layout_config_to_toml(config: &LayoutOverrides) -> Result<String, toml::ser::Error> {
+    toml::to_string_pretty(config)
+}
+
+/// Save layout overrides to `<data_dir>/boru-layout.toml` with an atomic
+/// write (temp file + rename). The dev watcher therefore never observes a
+/// partial file. Returns the final path.
+#[cfg(feature = "dev-ui")]
+pub fn save_layout_config(
+    data_dir: &Path,
+    config: &LayoutOverrides,
+) -> Result<PathBuf, String> {
+    let path = data_dir.join(LAYOUT_CONFIG_FILE_NAME);
+    let text = layout_config_to_toml(config).map_err(|e| {
+        format!("cannot serialize {}: {e}", path.display())
+    })?;
+    std::fs::create_dir_all(data_dir)
+        .map_err(|e| format!("cannot create {}: {e}", data_dir.display()))?;
+    let tmp = data_dir.join(format!(
+        "{}.{}.tmp",
+        LAYOUT_CONFIG_FILE_NAME,
+        std::process::id()
+    ));
+    std::fs::write(&tmp, text.as_bytes())
+        .map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, &path)
+        .map_err(|e| format!("cannot rename {} -> {}: {e}", tmp.display(), path.display()))?;
+    Ok(path)
+}
+
+/// Reload layout overrides from disk for the inspector's explicit
+/// "Reload Layout From Disk" action. Unlike [`load_layout_config`], a
+/// missing file is an error (the panel must distinguish "no file" from
+/// "reloaded defaults").
+#[cfg(feature = "dev-ui")]
+pub fn reload_layout_config(data_dir: &Path) -> Result<LayoutOverrides, LayoutConfigError> {
+    let path = data_dir.join(LAYOUT_CONFIG_FILE_NAME);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(LayoutConfigError::NotFound { path });
+        }
+        Err(source) => return Err(LayoutConfigError::Io { path, source }),
+    };
+    let overrides = parse_layout_config(&text).map_err(|source| {
+        let (line, column) = toml_line_col(&text, source.span());
+        LayoutConfigError::Parse {
+            path: path.clone(),
+            source,
+            line,
+            column,
+        }
+    })?;
+    let issues = validate_layout_overrides(&overrides);
+    if !issues.is_empty() {
+        return Err(LayoutConfigError::Validation { path, issues });
+    }
+    Ok(overrides)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::layout::{
-        ByTierOverrides, ComposerButton, HomeLayoutMode, HomeSection, LayoutOverrides,
-        ThumbnailPosition,
+        ByTierOverrides, CardOrientation, ComposerButton, HomeLayoutMode, HomeSection,
+        LayoutOverrides, ThumbnailPosition,
     };
 
     #[test]
@@ -722,5 +814,75 @@ section_order = ["Chats", "Chats"]
         assert_eq!(reload.column, None);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Save / reload path (BORU-LAYOUT-08 / PDF Task 8) ──────
+
+    #[cfg(feature = "dev-ui")]
+    #[test]
+    fn save_layout_config_writes_file_atomically_and_reload_round_trips() {
+        let dir = std::env::temp_dir().join(format!("boru-layout-save-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut cfg = LayoutOverrides::default();
+        cfg.home.get_or_insert_with(Default::default).mode = Some(HomeLayoutMode::List);
+        cfg.home.get_or_insert_with(Default::default).max_content_width = Some(1200.0);
+        cfg.component
+            .get_or_insert_with(Default::default)
+            .card_orientation = Some(CardOrientation::Vertical);
+
+        let path = save_layout_config(&dir, &cfg).expect("save succeeds");
+        assert_eq!(path.file_name().unwrap(), LAYOUT_CONFIG_FILE_NAME);
+
+        // The saved file parses back to the same overrides (round trip).
+        let text = std::fs::read_to_string(&path).expect("read saved file");
+        let parsed = parse_layout_config(&text).expect("saved file parses");
+        assert_eq!(parsed, cfg, "save -> load round trip must be lossless");
+
+        // The file contains the edited values and no temp sibling remains.
+        assert!(text.contains("max_content_width = 1200.0"), "{text}");
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "atomic write left no temp files: {leftovers:?}");
+
+        // Reload reproduces the same overrides.
+        let reloaded = reload_layout_config(&dir).expect("reload succeeds");
+        assert_eq!(reloaded, cfg);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(feature = "dev-ui")]
+    #[test]
+    fn reload_layout_config_missing_file_reports_not_found() {
+        let dir = std::env::temp_dir().join(format!("boru-layout-missing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let err = reload_layout_config(&dir).expect_err("missing file must be an error");
+        assert!(
+            matches!(err, LayoutConfigError::NotFound { .. }),
+            "expected NotFound, got {err:?}"
+        );
+        assert!(err.to_string().contains("cannot find"), "{}", err);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(feature = "dev-ui")]
+    #[test]
+    fn layout_config_to_toml_omits_none_leaves() {
+        let cfg = LayoutOverrides::default();
+        let text = layout_config_to_toml(&cfg).expect("serializes");
+        // Default overrides serialize to an empty (or near-empty) doc.
+        assert!(
+            !text.contains("max_content_width"),
+            "None leaves must not be emitted: {text}"
+        );
     }
 }

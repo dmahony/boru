@@ -3976,6 +3976,13 @@ pub struct IcedChat {
     /// `boru-layout.toml` via [`IcedChat::set_layout_config`]. View code
     /// reads it via [`IcedChat::boru_layout`] each frame.
     pub(crate) active_layout: crate::layout::LayoutConfig,
+    /// BORU-LAYOUT-08: the editable layout override set (what the inspector
+    /// edits and Save Layout serializes). Mirrors `ui_theme_config`: the
+    /// watcher replaces it on reload; the inspector mutates it; the merged
+    /// result is `active_layout`. Only layout state — never networking,
+    /// gossip, rooms, tunnels, media playback, chat history, the selected
+    /// conversation, scroll position or composer input.
+    pub(crate) layout_overrides: crate::layout::LayoutOverrides,
     /// BORU-LAYOUT-03: monotonic counter bumped every time the active
     /// layout is replaced. Threaded into lazy dependency snapshots (like
     /// [`IcedChat::theme_revision`]) so cached view sections rebuild with
@@ -8384,6 +8391,10 @@ impl IcedChat {
             // task replaces it via `set_layout_config` once the TOML file +
             // merge layer land.
             active_layout: crate::layout::LayoutConfig::default(),
+            // BORU-LAYOUT-08: the editable override set starts empty
+            // (defaults); main.rs replaces it via `set_layout_overrides`
+            // when `boru-layout.toml` is loaded.
+            layout_overrides: crate::layout::LayoutOverrides::default(),
             // BORU-LAYOUT-03: revision bumped on every applied layout change.
             layout_revision: 0,
             // BORU-UI-07: revision bumped on every applied theme change.
@@ -19001,6 +19012,32 @@ impl IcedChat {
         self.prewarm_invalidate_pending = true;
     }
 
+    /// BORU-LAYOUT-08: replace the editable layout override set AND the
+    /// live merged layout in one step, and bump the layout revision so
+    /// lazy/prewarm caches rebuild. This is the seam both the
+    /// `boru-layout.toml` watcher and the inspector's layout edits use
+    /// (mirror of [`IcedChat::set_ui_theme_config`]): defaults +
+    /// overrides → merged [`LayoutConfig`](crate::layout::LayoutConfig),
+    /// clamping warnings surfaced under `dev-ui`. Only layout state is
+    /// touched — networking, gossip, rooms, tunnels, media playback, chat
+    /// history, the selected conversation, scroll position and composer
+    /// input are all untouched.
+    pub(crate) fn set_layout_overrides(&mut self, overrides: crate::layout::LayoutOverrides) {
+        self.layout_overrides = overrides;
+        let (merged, warnings) = crate::layout_merge::merge_layout_config(
+            &crate::layout::LayoutConfig::default(),
+            &self.layout_overrides,
+        );
+        for w in &warnings {
+            tracing::warn!(override = %w, "layout override adjusted during merge");
+        }
+        #[cfg(feature = "dev-ui")]
+        {
+            self.inspector_draft.layout_merge_warnings = warnings;
+        }
+        self.set_layout_config(merged);
+    }
+
     /// BORU-UI-09: build the dev UI Inspector panel element. Reads the live
     /// active theme and the draft text; the returned widget emits
     /// [`AppMessage::Inspector`] messages handled in `update()`. BORU-UI-11
@@ -19010,6 +19047,7 @@ impl IcedChat {
     fn view_inspector_panel(&self) -> iced::Element<'_, AppMessage> {
         crate::inspector::view_inspector(
             &self.active_theme,
+            &self.active_layout,
             &self.inspector_draft,
             self.dark_mode,
             self.inspect_ui_enabled,
@@ -19226,18 +19264,15 @@ impl IcedChat {
                     );
                     return iced::Task::none();
                 }
-                let (merged, warnings) = crate::layout_merge::merge_layout_config(
-                    &crate::layout::LayoutConfig::default(),
-                    &overrides,
-                );
-                for w in &warnings {
-                    tracing::warn!(override = %w, "boru-layout.toml layout override adjusted");
-                }
-                // BORU-LAYOUT-06: replacing the layout bumps `layout_revision`
-                // AND marks the prewarm cache stale, so the next idle tick
-                // invalidates pre-warmed trees and rebuilds with the new
-                // layout.
-                self.set_layout_config(merged);
+                // BORU-LAYOUT-08: route the reload through
+                // `set_layout_overrides` so the editable override set in
+                // app state matches the file (the inspector reflects disk
+                // state). That seam re-merges defaults + overrides and
+                // logs any clamping warnings. BORU-LAYOUT-06: replacing
+                // the layout bumps `layout_revision` AND marks the prewarm
+                // cache stale, so the next idle tick invalidates
+                // pre-warmed trees and rebuilds with the new layout.
+                self.set_layout_overrides(overrides);
             }
             Err(e) => {
                 tracing::warn!(
@@ -19474,6 +19509,196 @@ impl IcedChat {
                     crate::inspector::INSPECTOR_SCROLL_ID,
                     iced::widget::operation::AbsoluteOffset { x: 0.0, y: offset },
                 )
+            }
+            // ── Layout (BORU-LAYOUT-08 / PDF Task 8) ────────────────
+            // Every layout edit applies to the stored `layout_overrides`
+            // through the pure `layout_inspector::apply_layout_*` mapping
+            // and then recomputes the live layout via
+            // `set_layout_overrides` — the same seam the
+            // `boru-layout.toml` watcher uses. Only layout/config state is
+            // touched; networking, gossip, rooms, tunnels, media, chat
+            // history, the selected conversation, scroll position and
+            // composer input are never mutated.
+            InspectorMsg::ToggleLayoutSection(section) => {
+                if !self
+                    .inspector_draft
+                    .collapsed_layout_sections
+                    .remove(&section)
+                {
+                    self.inspector_draft
+                        .collapsed_layout_sections
+                        .insert(section);
+                }
+                iced::Task::none()
+            }
+            InspectorMsg::ResetLayoutSection(section) => {
+                // One layout group back to defaults. Only the overrides
+                // are replaced (via the same seam as the watcher).
+                let mut overrides = self.layout_overrides.clone();
+                section.reset(&mut overrides);
+                // Clear drafts for fields in this section so stale text
+                // inputs do not outlive their values.
+                for sec in crate::layout_inspector::LAYOUT_SECTIONS {
+                    if sec.id == section {
+                        for g in sec.groups {
+                            for field in g.fields {
+                                self.inspector_draft
+                                    .layout_float_text
+                                    .remove(field);
+                                self.inspector_draft
+                                    .layout_int_text
+                                    .remove(field);
+                                self.inspector_draft
+                                    .layout_sections_text
+                                    .remove(field);
+                            }
+                        }
+                    }
+                }
+                self.set_layout_overrides(overrides);
+                tracing::debug!(?section, "UI Inspector: reset layout section");
+                iced::Task::none()
+            }
+            InspectorMsg::ResetLayoutAll => {
+                // Complete active layout back to defaults: clear every
+                // override group (an empty LayoutOverrides merges to
+                // LayoutConfig::default()).
+                self.inspector_draft.layout_float_text.clear();
+                self.inspector_draft.layout_int_text.clear();
+                self.inspector_draft.layout_sections_text.clear();
+                self.set_layout_overrides(crate::layout::LayoutOverrides::default());
+                tracing::debug!("UI Inspector: reset layout to defaults");
+                iced::Task::none()
+            }
+            InspectorMsg::SaveLayout => {
+                // Serialize the current editable layout overrides (only
+                // layout values — never non-layout state) to
+                // `<data_dir>/boru-layout.toml`. The write is atomic (temp
+                // + rename), so the dev watcher never sees a partial file;
+                // it will reload the same values, which is expected.
+                match crate::layout_config::save_layout_config(
+                    &self.data_dir,
+                    &self.layout_overrides,
+                ) {
+                    Ok(path) => {
+                        self.inspector_draft.layout_save_status =
+                            crate::layout_inspector::LayoutSaveStatus::Saved;
+                        tracing::info!(
+                            path = %path.display(),
+                            "UI Inspector: layout saved to boru-layout.toml"
+                        );
+                    }
+                    Err(e) => {
+                        self.inspector_draft.layout_save_status =
+                            crate::layout_inspector::LayoutSaveStatus::Failed(e.clone());
+                        tracing::warn!(error = %e, "UI Inspector: layout save failed");
+                    }
+                }
+                iced::Task::none()
+            }
+            InspectorMsg::ReloadLayoutFromDisk => {
+                // Discard unsaved layout changes and reload
+                // boru-layout.toml from disk through the same seam as the
+                // watcher (set_layout_overrides). A missing or invalid
+                // file keeps the current layout and reports the error in
+                // the panel status line.
+                match crate::layout_config::reload_layout_config(&self.data_dir) {
+                    Ok(overrides) => {
+                        self.inspector_draft.layout_float_text.clear();
+                        self.inspector_draft.layout_int_text.clear();
+                        self.inspector_draft.layout_sections_text.clear();
+                        self.inspector_draft.layout_reload_status =
+                            crate::layout_inspector::LayoutReloadStatus::Reloaded;
+                        self.set_layout_overrides(overrides);
+                        tracing::info!(
+                            path = %self.data_dir.join(crate::layout_config::LAYOUT_CONFIG_FILE_NAME).display(),
+                            "UI Inspector: reloaded boru-layout.toml from disk"
+                        );
+                    }
+                    Err(e) => {
+                        self.inspector_draft.layout_reload_status =
+                            crate::layout_inspector::LayoutReloadStatus::Failed(e.to_string());
+                        tracing::warn!(
+                            error = %e,
+                            "UI Inspector: layout reload from disk failed; keeping current layout"
+                        );
+                    }
+                }
+                iced::Task::none()
+            }
+            InspectorMsg::SetLayoutFloat { field, value } => {
+                self.inspector_draft.layout_float_text.remove(&field);
+                let mut overrides = self.layout_overrides.clone();
+                match crate::layout_inspector::apply_layout_float(
+                    &mut overrides,
+                    field,
+                    value,
+                ) {
+                    Ok(()) => self.set_layout_overrides(overrides),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "inspector: rejected layout float edit")
+                    }
+                }
+                iced::Task::none()
+            }
+            InspectorMsg::SetLayoutInt { field, value } => {
+                self.inspector_draft.layout_int_text.remove(&field);
+                let mut overrides = self.layout_overrides.clone();
+                match crate::layout_inspector::apply_layout_int(&mut overrides, field, value) {
+                    Ok(()) => self.set_layout_overrides(overrides),
+                    Err(e) => tracing::warn!(error = %e, "inspector: rejected layout int edit"),
+                }
+                iced::Task::none()
+            }
+            InspectorMsg::SetLayoutChoice { field, value } => {
+                let mut overrides = self.layout_overrides.clone();
+                match crate::layout_inspector::apply_layout_choice(&mut overrides, field, &value) {
+                    Ok(()) => self.set_layout_overrides(overrides),
+                    Err(e) => tracing::warn!(error = %e, "inspector: rejected layout choice edit"),
+                }
+                iced::Task::none()
+            }
+            InspectorMsg::LayoutFloatTextChanged { field, text } => {
+                self.inspector_draft.layout_float_text.insert(field, text.clone());
+                if let Ok(value) = text.trim().parse::<f32>() {
+                    let mut overrides = self.layout_overrides.clone();
+                    match crate::layout_inspector::apply_layout_float(&mut overrides, field, value)
+                    {
+                        Ok(()) => self.set_layout_overrides(overrides),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "inspector: rejected layout numeric input")
+                        }
+                    }
+                }
+                iced::Task::none()
+            }
+            InspectorMsg::LayoutIntTextChanged { field, text } => {
+                self.inspector_draft.layout_int_text.insert(field, text.clone());
+                if let Ok(value) = text.trim().parse::<i64>() {
+                    let mut overrides = self.layout_overrides.clone();
+                    match crate::layout_inspector::apply_layout_int(&mut overrides, field, value) {
+                        Ok(()) => self.set_layout_overrides(overrides),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "inspector: rejected layout int input")
+                        }
+                    }
+                }
+                iced::Task::none()
+            }
+            InspectorMsg::LayoutSectionsTextChanged { field, text } => {
+                // Section lists apply when every name parses; mid-typing
+                // states are kept as a draft and only logged at debug.
+                self.inspector_draft
+                    .layout_sections_text
+                    .insert(field, text.clone());
+                let mut overrides = self.layout_overrides.clone();
+                match crate::layout_inspector::apply_layout_sections(&mut overrides, field, &text) {
+                    Ok(()) => self.set_layout_overrides(overrides),
+                    Err(e) => {
+                        tracing::debug!(error = %e, "inspector: layout sections input not yet valid")
+                    }
+                }
+                iced::Task::none()
             }
         }
     }
@@ -36892,6 +37117,315 @@ fn inspector_reset_section_and_reset_all_via_messages() {
     assert!(
         app.inspector_draft.float_text.is_empty() && app.inspector_draft.color_text.is_empty(),
         "Reset All cleared all drafts"
+    );
+}
+
+#[cfg(feature = "dev-ui")]
+#[test]
+fn inspector_set_layout_float_updates_live_layout_and_bumps_revision() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+    let before_revision = app.layout_revision;
+
+    // Slider edit for a layout float: applies immediately and bumps the
+    // layout revision so lazy/prewarm caches rebuild.
+    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetLayoutFloat {
+        field: crate::layout_inspector::LayoutField::HomeMaxContentWidth,
+        value: 1200.0,
+    }));
+    drop(task);
+
+    assert_eq!(
+        app.active_layout.home.max_content_width, 1200.0,
+        "live layout reflects the edit"
+    );
+    assert_eq!(
+        app.layout_overrides
+            .home
+            .as_ref()
+            .expect("home override group")
+            .max_content_width,
+        Some(1200.0),
+        "editable override set reflects the edit"
+    );
+    assert!(
+        app.layout_revision > before_revision,
+        "layout revision bumped so cached views rebuild"
+    );
+    // Unrelated layout leaves stay at defaults.
+    assert_eq!(
+        app.active_layout.home.padding.top,
+        crate::layout::LayoutConfig::default().home.padding.top
+    );
+}
+
+#[cfg(feature = "dev-ui")]
+#[test]
+fn inspector_set_layout_choice_and_int_apply_immediately() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetLayoutChoice {
+        field: crate::layout_inspector::LayoutField::HomeMode,
+        value: "List".to_string(),
+    }));
+    drop(task);
+    assert_eq!(
+        app.active_layout.home.mode,
+        crate::layout::HomeLayoutMode::List
+    );
+
+    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetLayoutInt {
+        field: crate::layout_inspector::LayoutField::HomeGridRailPortion,
+        value: 2,
+    }));
+    drop(task);
+    assert_eq!(app.active_layout.home.grid.rail_portion, 2);
+}
+
+#[cfg(feature = "dev-ui")]
+#[test]
+fn inspector_layout_sections_text_applies_when_valid() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    // A partial list (mid-typing) does not apply — the draft is kept.
+    let task = app.update(AppMessage::Inspector(
+        crate::inspector::InspectorMsg::LayoutSectionsTextChanged {
+            field: crate::layout_inspector::LayoutField::HomeSectionOrder,
+            text: "Tunnels, Bogus".to_string(),
+        },
+    ));
+    drop(task);
+    assert_eq!(
+        app.active_layout.home.section_order,
+        crate::layout::LayoutConfig::default().home.section_order,
+        "invalid section list must not change the live layout"
+    );
+    assert!(
+        app.inspector_draft
+            .layout_sections_text
+            .contains_key(&crate::layout_inspector::LayoutField::HomeSectionOrder),
+        "draft keeps the half-typed text"
+    );
+
+    // A valid list applies immediately.
+    let task = app.update(AppMessage::Inspector(
+        crate::inspector::InspectorMsg::LayoutSectionsTextChanged {
+            field: crate::layout_inspector::LayoutField::HomeSectionOrder,
+            text: "Tunnels, Hero".to_string(),
+        },
+    ));
+    drop(task);
+    assert_eq!(
+        app.active_layout.home.section_order,
+        vec![
+            crate::layout::HomeSection::Tunnels,
+            crate::layout::HomeSection::Hero,
+        ]
+    );
+}
+
+#[cfg(feature = "dev-ui")]
+#[test]
+fn inspector_save_layout_writes_boru_layout_toml_and_reports_status() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    // Apply an edit, then Save Layout (BORU-LAYOUT-08).
+    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetLayoutFloat {
+        field: crate::layout_inspector::LayoutField::HomeMaxContentWidth,
+        value: 1200.0,
+    }));
+    drop(task);
+    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SaveLayout));
+    drop(task);
+
+    // Success is reported inside the developer panel.
+    assert_eq!(
+        app.inspector_draft.layout_save_status,
+        crate::layout_inspector::LayoutSaveStatus::Saved,
+        "save success shown in the panel status line"
+    );
+
+    // The file exists and contains exactly the edited override.
+    let path = app.data_dir.join(crate::layout_config::LAYOUT_CONFIG_FILE_NAME);
+    assert!(path.exists(), "boru-layout.toml written");
+    let text = std::fs::read_to_string(&path).expect("read saved layout");
+    assert!(
+        text.contains("max_content_width = 1200.0"),
+        "edited value persisted: {text}"
+    );
+    let cfg = crate::layout_config::parse_layout_config(&text).expect("saved file parses");
+    assert_eq!(
+        cfg.home.as_ref().expect("home group").max_content_width,
+        Some(1200.0),
+        "saved overrides match the editable layout"
+    );
+
+    // The reload path (what the dev watcher sees after the save)
+    // reproduces the same active layout.
+    let (merged, _) = crate::layout_merge::merge_layout_config(
+        &crate::layout::LayoutConfig::default(),
+        &cfg,
+    );
+    assert_eq!(
+        merged.home.max_content_width, app.active_layout.home.max_content_width,
+        "watcher reload of the saved file yields the same active layout"
+    );
+
+    // No temp sibling is left behind by the atomic write.
+    let leftovers: Vec<_> = std::fs::read_dir(&app.data_dir)
+        .expect("read data dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.contains(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "no temp files remain: {leftovers:?}");
+}
+
+#[cfg(feature = "dev-ui")]
+#[test]
+fn inspector_save_layout_failure_sets_failed_status() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    // Point the save at an unwritable location: replace data_dir with a
+    // path under a regular file so the atomic write cannot create the
+    // directory.
+    let blocker = app.data_dir.join("not-a-dir");
+    std::fs::write(&blocker, b"x").expect("create blocker file");
+    let original_data_dir = std::mem::replace(&mut app.data_dir, blocker.join("nested"));
+
+    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SaveLayout));
+    drop(task);
+
+    match &app.inspector_draft.layout_save_status {
+        crate::layout_inspector::LayoutSaveStatus::Failed(msg) => {
+            assert!(
+                msg.contains("cannot create"),
+                "failure explains the save error: {msg}"
+            );
+        }
+        other => panic!("expected Failed status, got {other:?}"),
+    }
+
+    // Restore so the app's Drop path (if any) still works.
+    app.data_dir = original_data_dir;
+}
+
+#[cfg(feature = "dev-ui")]
+#[test]
+fn inspector_reset_layout_section_and_all_restore_defaults() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetLayoutFloat {
+        field: crate::layout_inspector::LayoutField::HomeMaxContentWidth,
+        value: 1200.0,
+    }));
+    drop(task);
+    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetLayoutChoice {
+        field: crate::layout_inspector::LayoutField::ComponentCardOrientation,
+        value: "Vertical".to_string(),
+    }));
+    drop(task);
+
+    // Reset the Home section: only the home override group clears.
+    let task = app.update(AppMessage::Inspector(
+        crate::inspector::InspectorMsg::ResetLayoutSection(
+            crate::layout_inspector::LayoutSectionId::Home,
+        ),
+    ));
+    drop(task);
+    assert!(
+        app.layout_overrides.home.is_none(),
+        "home override group cleared"
+    );
+    assert_eq!(
+        app.active_layout.home.max_content_width,
+        crate::layout::LayoutConfig::default().home.max_content_width
+    );
+    assert_eq!(
+        app.active_layout.component.card_orientation,
+        crate::layout::CardOrientation::Vertical,
+        "unrelated section untouched"
+    );
+
+    // Reset All: complete active layout back to defaults.
+    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::ResetLayoutAll));
+    drop(task);
+    assert_eq!(
+        app.active_layout,
+        crate::layout::LayoutConfig::default(),
+        "Reset Layout All restored the complete default layout"
+    );
+    assert_eq!(
+        app.layout_overrides,
+        crate::layout::LayoutOverrides::default(),
+        "Reset Layout All cleared every override group"
+    );
+    assert!(
+        app.inspector_draft.layout_float_text.is_empty()
+            && app.inspector_draft.layout_int_text.is_empty()
+            && app.inspector_draft.layout_sections_text.is_empty(),
+        "Reset Layout All cleared all layout drafts"
+    );
+}
+
+#[cfg(feature = "dev-ui")]
+#[test]
+fn inspector_reload_layout_from_disk_discards_unsaved_changes_and_applies_disk_config() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    // Write a config to disk first (the reload target).
+    let cfg = crate::layout_config::parse_layout_config("[home]\nmax_content_width = 1100.0\n")
+        .expect("config parses");
+    crate::layout_config::save_layout_config(&app.data_dir, &cfg).expect("save succeeds");
+
+    // Apply an in-memory edit that is NOT saved to disk (unsaved change).
+    let task = app.update(AppMessage::Inspector(crate::inspector::InspectorMsg::SetLayoutFloat {
+        field: crate::layout_inspector::LayoutField::HomeMaxContentWidth,
+        value: 1200.0,
+    }));
+    drop(task);
+    assert_eq!(app.active_layout.home.max_content_width, 1200.0);
+
+    // Reload Layout From Disk replaces the in-memory edits.
+    let task = app.update(AppMessage::Inspector(
+        crate::inspector::InspectorMsg::ReloadLayoutFromDisk,
+    ));
+    drop(task);
+    assert_eq!(
+        app.inspector_draft.layout_reload_status,
+        crate::layout_inspector::LayoutReloadStatus::Reloaded
+    );
+    assert_eq!(
+        app.active_layout.home.max_content_width, 1100.0,
+        "disk config applied after reload"
+    );
+    assert!(
+        app.inspector_draft.layout_float_text.is_empty(),
+        "reload clears layout drafts"
+    );
+}
+
+#[cfg(feature = "dev-ui")]
+#[test]
+fn inspector_reload_layout_missing_file_reports_failed_status() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+    let task = app.update(AppMessage::Inspector(
+        crate::inspector::InspectorMsg::ReloadLayoutFromDisk,
+    ));
+    drop(task);
+    match &app.inspector_draft.layout_reload_status {
+        crate::layout_inspector::LayoutReloadStatus::Failed(msg) => {
+            assert!(
+                msg.contains("cannot find"),
+                "missing file names the problem: {msg}"
+            );
+        }
+        other => panic!("expected Failed status, got {other:?}"),
+    }
+    // The last known-good layout is retained.
+    assert_eq!(
+        app.active_layout,
+        crate::layout::LayoutConfig::default()
     );
 }
 

@@ -59,6 +59,12 @@ pub enum FieldKind {
     /// Discrete choice from a fixed list (rendered as a pick_list).
     /// BORU-UI-16: font family and weight mappings.
     Choice,
+    /// BORU-LAYOUT-08: whole number (column counts, FillPortion splits).
+    /// Theme fields never use it; layout fields do.
+    Int,
+    /// BORU-LAYOUT-08: ordered list of home section names. Theme fields
+    /// never use it; layout fields do.
+    Sections,
 }
 
 /// Identifies one editable leaf of the typed theme.
@@ -426,6 +432,10 @@ fn section_estimated_height(section: &InspectorSection, is_collapsed: bool) -> f
                 FieldKind::Bool => BOOL_ROW_H,
                 FieldKind::Color => COLOR_ROW_H,
                 FieldKind::Choice => CHOICE_ROW_H,
+                // Layout-only kinds are not used by the theme panel; the
+                // layout panel below does not participate in section
+                // scrolling, so the estimate is irrelevant.
+                FieldKind::Int | FieldKind::Sections => FLOAT_ROW_H,
             } + ROW_GAP;
         }
         h += ROW_GAP;
@@ -1411,6 +1421,51 @@ pub enum InspectorMsg {
     /// current theme is kept and the error is reported per BORU-UI-18
     /// (path + parser detail in the panel status line).
     ReloadFromDisk,
+    // ── Layout (BORU-LAYOUT-08 / PDF Task 8) ───────────────────
+    /// Toggle a layout section expanded/collapsed.
+    ToggleLayoutSection(crate::layout_inspector::LayoutSectionId),
+    /// Reset one layout section back to the layout defaults (BORU-LAYOUT-08).
+    ResetLayoutSection(crate::layout_inspector::LayoutSectionId),
+    /// Reset the complete active layout back to defaults.
+    ResetLayoutAll,
+    /// Slider changed a continuous float layout value.
+    SetLayoutFloat {
+        field: crate::layout_inspector::LayoutField,
+        value: f32,
+    },
+    /// Slider changed a whole-number layout value (columns, portions).
+    SetLayoutInt {
+        field: crate::layout_inspector::LayoutField,
+        value: i64,
+    },
+    /// Pick list changed a discrete layout choice. `value` is the option
+    /// string (the TOML spelling of the enum variant).
+    SetLayoutChoice {
+        field: crate::layout_inspector::LayoutField,
+        value: String,
+    },
+    /// Numeric text input for a layout float changed; apply when it parses.
+    LayoutFloatTextChanged {
+        field: crate::layout_inspector::LayoutField,
+        text: String,
+    },
+    /// Numeric text input for a layout int changed; apply when it parses.
+    LayoutIntTextChanged {
+        field: crate::layout_inspector::LayoutField,
+        text: String,
+    },
+    /// Section-list text input changed; apply when every name parses.
+    LayoutSectionsTextChanged {
+        field: crate::layout_inspector::LayoutField,
+        text: String,
+    },
+    /// Save the current editable layout overrides to `boru-layout.toml`
+    /// (atomic write, same format the dev watcher reloads).
+    SaveLayout,
+    /// Discard unsaved layout changes and reload `boru-layout.toml` from
+    /// disk. A missing/invalid file keeps the current layout and reports
+    /// the error in the panel status line.
+    ReloadLayoutFromDisk,
 }
 
 /// Result of the last Save Theme action (BORU-UI-12), shown as the panel's
@@ -1476,6 +1531,26 @@ pub struct InspectorDraft {
     /// in the panel. View-local display state only — never part of the
     /// theme.
     pub merge_warnings: Vec<String>,
+    // ── BORU-LAYOUT-08 layout panel state (view-local only) ────
+    /// Per-field numeric text for layout float fields.
+    pub layout_float_text: HashMap<crate::layout_inspector::LayoutField, String>,
+    /// Per-field numeric text for layout int fields.
+    pub layout_int_text: HashMap<crate::layout_inspector::LayoutField, String>,
+    /// Per-field text for layout section lists.
+    pub layout_sections_text: HashMap<crate::layout_inspector::LayoutField, String>,
+    /// Layout sections the user collapsed. View-local state only — never
+    /// part of the layout.
+    pub collapsed_layout_sections: HashSet<crate::layout_inspector::LayoutSectionId>,
+    /// Result of the last Save Layout action (view-local status line only
+    /// — never part of the layout).
+    pub layout_save_status: crate::layout_inspector::LayoutSaveStatus,
+    /// Result of the last Reload Layout From Disk action (view-local
+    /// status line only — never part of the layout).
+    pub layout_reload_status: crate::layout_inspector::LayoutReloadStatus,
+    /// BORU-LAYOUT-08: layout field-level merge adjustments from the last
+    /// layout recompute (values clamped or replaced by defaults). Set by
+    /// the app after every merge; rendered as a compact warnings list.
+    pub layout_merge_warnings: Vec<String>,
 }
 
 // ── View ──────────────────────────────────────────────────────────────
@@ -1806,7 +1881,8 @@ pub const SECTIONS: &[InspectorSection] = &[
 
 /// Build the inspector panel element.
 ///
-/// `theme` is the CURRENT active theme (display values), `draft` holds
+/// `theme` is the CURRENT active theme (display values), `layout` the
+/// CURRENT active structural layout (BORU-LAYOUT-08), `draft` holds
 /// in-progress text input state, `dark_mode` selects panel styling. The
 /// returned element emits [`InspectorMsg`] wrapped in
 /// [`AppMessage::Inspector`].
@@ -1818,6 +1894,7 @@ pub const SECTIONS: &[InspectorSection] = &[
 /// a status line so the developer always sees the active component ID/name.
 pub fn view_inspector(
     theme: &BoruTheme,
+    layout: &crate::layout::LayoutConfig,
     draft: &InspectorDraft,
     dark_mode: bool,
     inspect_enabled: bool,
@@ -1853,6 +1930,59 @@ pub fn view_inspector(
             }
             for field in group.fields {
                 col = col.push(field_row(theme, draft, *field, dark_mode));
+            }
+            col = col.push(Space::new().height(Length::Fixed(4.0)));
+        }
+        col = col.push(Space::new().height(Length::Fixed(8.0)));
+    }
+
+    // ── Layout (BORU-LAYOUT-08 / PDF Task 8) ───────────────────
+    // A second block of the panel: layout controls with their own
+    // save/reload/status rows and collapsible sections. The layout rows
+    // live in `layout_inspector.rs` (the pure read/apply mapping) and are
+    // rendered here so the whole panel stays in one scrollable column.
+    col = col
+        .push(crate::layout_inspector::layout_panel_heading(dark_mode))
+        .push(crate::layout_inspector::save_layout_row(
+            dark_mode,
+            &draft.layout_save_status,
+        ))
+        .push(crate::layout_inspector::reload_layout_row(
+            dark_mode,
+            &draft.layout_reload_status,
+        ))
+        .push(crate::layout_inspector::layout_merge_warnings_row(
+            dark_mode,
+            &draft.layout_merge_warnings,
+        ))
+        .push(Space::new().height(Length::Fixed(6.0)));
+
+    for section in crate::layout_inspector::LAYOUT_SECTIONS {
+        let collapsed = draft.collapsed_layout_sections.contains(&section.id);
+        col = col
+            .push(crate::layout_inspector::layout_section_header(
+                section,
+                collapsed,
+                dark_mode,
+            ))
+            .push(Space::new().height(Length::Fixed(2.0)));
+        if collapsed {
+            continue;
+        }
+        let multi = section.groups.len() > 1;
+        for group in section.groups {
+            if multi {
+                col = col
+                    .push(subgroup_header(group.label, dark_mode))
+                    .push(Space::new().height(Length::Fixed(2.0)));
+            }
+            for field in group.fields {
+                col = col.push(crate::layout_inspector::layout_field_row(
+                    layout,
+                    draft,
+                    *field,
+                    dark_mode,
+                ));
             }
             col = col.push(Space::new().height(Length::Fixed(4.0)));
         }
@@ -2265,6 +2395,11 @@ fn field_row(
         FieldKind::Bool => bool_row(theme, draft, field, dark_mode),
         FieldKind::Color => color_row(theme, draft, field, dark_mode),
         FieldKind::Choice => choice_row(theme, draft, field, dark_mode),
+        // Theme fields never use the layout-only kinds; the layout panel
+        // (layout_inspector) renders those rows itself.
+        FieldKind::Int | FieldKind::Sections => {
+            Space::new().height(Length::Fixed(0.0)).into()
+        }
     }
 }
 
@@ -2537,6 +2672,10 @@ mod tests {
                             apply_choice(&mut cfg, *field, first)
                                 .unwrap_or_else(|e| panic!("{field:?}: {e}"));
                         }
+                        // Layout-only kinds never occur on theme fields.
+                        FieldKind::Int | FieldKind::Sections => {
+                            panic!("{field:?} must not be a layout-only kind")
+                        }
                     }
                 }
             }
@@ -2636,6 +2775,10 @@ mod tests {
                             let first = field.choices().first().copied().unwrap_or("");
                             apply_choice(&mut cfg, *field, first)
                                 .unwrap_or_else(|e| panic!("{field:?}: {e}"));
+                        }
+                        // Layout-only kinds never occur on theme fields.
+                        FieldKind::Int | FieldKind::Sections => {
+                            panic!("{field:?} must not be a layout-only kind")
                         }
                     }
                 }

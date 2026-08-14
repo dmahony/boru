@@ -29,6 +29,8 @@ mod i18n;
 mod icon_system;
 mod layout;
 mod layout_config;
+#[cfg(feature = "dev-ui")]
+mod layout_inspector;
 mod layout_merge;
 mod layout_watcher;
 mod link_preview;
