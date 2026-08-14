@@ -1,4 +1,10 @@
 //! Replaceable codec boundary and the initial low-latency H.264 implementation.
+//!
+//! The [`VideoEncoder`] trait is the PDF Task 2.2 encoder abstraction: the five
+//! lifecycle operations — configure, encode, force_keyframe,
+//! reconfigure_bitrate, shutdown — plus the codec-agnostic [`CodecConfig`] and
+//! [`EncodedPacket`] types, so future hardware codecs (VA-API, NVENC, DXVA)
+//! can implement the same boundary without depending on OpenH264.
 #![allow(missing_docs)]
 
 use super::{capture::{CapturedFrame, PixelFormat}, ScreenShareError};
@@ -47,9 +53,13 @@ pub struct CodecMetadata { pub codec: CodecKind, pub config: CodecConfig, pub ge
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodecKind { H264 }
 
-/// Encoded screen frame passed to a transport.
+/// One encoded access unit (a keyframe or delta frame) passed to a transport.
+///
+/// Carries the timestamp, sequence number, keyframe flag, and the encoder
+/// generation/resolution it was produced with, so downstream consumers (the
+/// decoder and the protocol layer) never need codec-specific types.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EncodedFrame {
+pub struct EncodedPacket {
     pub timestamp_us: u64,
     pub sequence: u64,
     pub keyframe: bool,
@@ -59,11 +69,46 @@ pub struct EncodedFrame {
     pub bytes: Vec<u8>,
 }
 
+/// Back-compat alias for [`EncodedPacket`] (the pre-Task-2.2 name).
+pub type EncodedFrame = EncodedPacket;
+
+/// Codec-independent video encoder boundary (PDF Task 2.2).
+///
+/// The five operations are the complete lifecycle:
+/// - [`configure`](Self::configure) (re)configures resolution/bitrate/fps
+///   mid-session without a session restart where the codec permits;
+/// - [`encode`](Self::encode) produces one encoded access unit/packet;
+/// - [`force_keyframe`](Self::force_keyframe) makes the next unit an
+///   independently decodable keyframe;
+/// - [`reconfigure_bitrate`](Self::reconfigure_bitrate) changes only the
+///   target bitrate, keeping resolution and frame rate;
+/// - [`shutdown`](Self::shutdown) releases codec resources.
+///
+/// No method exposes an OpenH264 (or any vendor) type.
 pub trait VideoEncoder: Send {
-    fn encode(&mut self, frame: &CapturedFrame) -> Result<EncodedFrame, ScreenShareError>;
+    /// (Re)configure the encoder for a new stream geometry/rate. Changing the
+    /// resolution must not require restarting the surrounding session; codecs
+    /// that cannot change resolution live rebuild internally and bump the
+    /// config generation so the decoder re-creates.
+    fn configure(&mut self, config: CodecConfig) -> Result<(), ScreenShareError>;
+    /// Encode one captured frame into an access unit/packet.
+    fn encode(&mut self, frame: &CapturedFrame) -> Result<EncodedPacket, ScreenShareError>;
+    /// Force the next encoded packet to be an independently decodable keyframe.
+    fn force_keyframe(&mut self);
+    /// Change only the target bitrate, keeping resolution and frame rate.
+    /// Returns an error when the codec cannot change bitrate mid-session.
+    fn reconfigure_bitrate(&mut self, bitrate_bps: u32) -> Result<(), ScreenShareError>;
+    /// Release codec resources. Idempotent; calls after shutdown error.
+    fn shutdown(&mut self) -> Result<(), ScreenShareError> { Ok(()) }
+
+    /// Current codec metadata (codec kind, active config, generation).
     fn metadata(&self) -> CodecMetadata;
-    fn request_keyframe(&mut self);
-    fn reconfigure(&mut self, config: CodecConfig) -> Result<(), ScreenShareError>;
+
+    /// Back-compat alias for [`Self::force_keyframe`].
+    fn request_keyframe(&mut self) { self.force_keyframe(); }
+    /// Back-compat alias for [`Self::configure`].
+    fn reconfigure(&mut self, config: CodecConfig) -> Result<(), ScreenShareError> { self.configure(config) }
+    /// Reset the encoder to its currently active config (forces a keyframe).
     fn reset(&mut self) -> Result<(), ScreenShareError> { self.reconfigure(self.metadata().config) }
 }
 
@@ -114,15 +159,21 @@ pub struct OpenH264Encoder {
     sequence: u64,
     frames_since_keyframe: u64,
     keyframe_requested: bool,
+    shutdown: bool,
 }
 
 impl OpenH264Encoder {
     pub fn new(config: CodecConfig) -> Result<Self, ScreenShareError> {
         let config = config.validate()?;
         Ok(Self { encoder: make_encoder(config)?, config, generation: 0, sequence: 0,
-            frames_since_keyframe: 0, keyframe_requested: true })
+            frames_since_keyframe: 0, keyframe_requested: true, shutdown: false })
     }
     pub fn default_profile() -> Result<Self, ScreenShareError> { Self::new(CodecConfig::default()) }
+
+    fn ensure_running(&self) -> Result<(), ScreenShareError> {
+        if self.shutdown { return Err(ScreenShareError::new("encoder is shut down")); }
+        Ok(())
+    }
 }
 
 fn make_encoder(config: CodecConfig) -> Result<openh264::encoder::Encoder, ScreenShareError> {
@@ -145,7 +196,15 @@ fn make_encoder(config: CodecConfig) -> Result<openh264::encoder::Encoder, Scree
 }
 
 impl VideoEncoder for OpenH264Encoder {
-    fn encode(&mut self, frame: &CapturedFrame) -> Result<EncodedFrame, ScreenShareError> {
+    fn configure(&mut self, config: CodecConfig) -> Result<(), ScreenShareError> {
+        self.ensure_running()?;
+        let config = config.validate()?;
+        self.encoder = make_encoder(config)?; self.config = config; self.generation += 1;
+        self.frames_since_keyframe = 0; self.keyframe_requested = true; Ok(())
+    }
+
+    fn encode(&mut self, frame: &CapturedFrame) -> Result<EncodedPacket, ScreenShareError> {
+        self.ensure_running()?;
         if frame.width == 0 || frame.height == 0 { return Err(ScreenShareError::new("frame dimensions must be non-zero")); }
         let rgb = scale_rgb(&rgba_to_rgb(frame)?, frame.width, frame.height, self.config.width, self.config.height);
         if self.keyframe_requested || self.frames_since_keyframe >= self.config.keyframe_interval { self.encoder.force_intra_frame(); self.keyframe_requested = false; }
@@ -154,18 +213,43 @@ impl VideoEncoder for OpenH264Encoder {
         let stream = self.encoder.encode_at(&yuv, openh264::Timestamp::from_millis(frame.timestamp_us / 1_000)).map_err(fail)?;
         let keyframe = matches!(stream.frame_type(), openh264::encoder::FrameType::IDR | openh264::encoder::FrameType::I);
         if keyframe { self.frames_since_keyframe = 0; } else { self.frames_since_keyframe += 1; }
-        let encoded = EncodedFrame { timestamp_us: frame.timestamp_us, sequence: self.sequence, keyframe,
+        let encoded = EncodedPacket { timestamp_us: frame.timestamp_us, sequence: self.sequence, keyframe,
             config_generation: self.generation, width: self.config.width, height: self.config.height, bytes: stream.to_vec() };
         self.sequence += 1;
         Ok(encoded)
     }
-    fn metadata(&self) -> CodecMetadata { CodecMetadata { codec: CodecKind::H264, config: self.config, generation: self.generation } }
-    fn request_keyframe(&mut self) { self.keyframe_requested = true; }
-    fn reconfigure(&mut self, config: CodecConfig) -> Result<(), ScreenShareError> {
-        let config = config.validate()?;
-        self.encoder = make_encoder(config)?; self.config = config; self.generation += 1;
-        self.frames_since_keyframe = 0; self.keyframe_requested = true; Ok(())
+
+    fn force_keyframe(&mut self) { self.keyframe_requested = true; }
+
+    fn reconfigure_bitrate(&mut self, bitrate_bps: u32) -> Result<(), ScreenShareError> {
+        self.ensure_running()?;
+        if bitrate_bps == 0 { return Err(ScreenShareError::new("bitrate must be non-zero")); }
+        if bitrate_bps == self.config.target_bitrate_bps { return Ok(()); }
+        // The Rust openh264 wrapper does not expose OpenH264's native
+        // ENCODER_OPTION_BITRATE setter, so the codec-permitted mid-session
+        // path is to rebuild the encoder with the same resolution/fps and the
+        // new target bitrate. Resolution is unchanged, so the config
+        // generation does NOT bump — the decoder keeps its instance and
+        // re-syncs on the forced keyframe (SPS/PPS describe geometry, not
+        // bitrate).
+        let mut config = self.config;
+        config.target_bitrate_bps = bitrate_bps;
+        self.encoder = make_encoder(config)?;
+        self.config = config;
+        self.frames_since_keyframe = 0;
+        self.keyframe_requested = true;
+        Ok(())
     }
+
+    fn shutdown(&mut self) -> Result<(), ScreenShareError> {
+        // OpenH264 has no explicit resource release beyond drop; mark the
+        // instance shut down so later calls fail loudly instead of encoding
+        // into a codec the caller believes is released.
+        self.shutdown = true;
+        Ok(())
+    }
+
+    fn metadata(&self) -> CodecMetadata { CodecMetadata { codec: CodecKind::H264, config: self.config, generation: self.generation } }
 }
 
 #[allow(missing_debug_implementations)]
@@ -262,5 +346,100 @@ mod tests {
             }
         }
         assert_eq!(decoded, 6, "every static frame must decode");
+    }
+    #[test]
+    fn force_keyframe_controls_the_next_access_unit() {
+        let mut encoder = OpenH264Encoder::new(config(32, 24)).unwrap();
+        let first = encoder.encode(&pattern(32, 24, 0)).unwrap();
+        assert!(first.keyframe, "first unit is a keyframe");
+        let second = encoder.encode(&pattern(32, 24, 33_333)).unwrap();
+        assert!(!second.keyframe, "subsequent unit is a delta frame");
+        encoder.force_keyframe();
+        let third = encoder.encode(&pattern(32, 24, 66_666)).unwrap();
+        assert!(third.keyframe, "force_keyframe must make the next unit a keyframe");
+    }
+    #[test]
+    fn reconfigure_bitrate_keeps_resolution_and_stays_decodable() {
+        let cfg = config(32, 24);
+        let mut encoder = OpenH264Encoder::new(cfg).unwrap();
+        let mut decoder = OpenH264Decoder::new(cfg).unwrap();
+        let first = encoder.encode(&pattern(32, 24, 0)).unwrap();
+        assert!(decoder.decode(&first).unwrap().is_some());
+        let gen_before = encoder.metadata().generation;
+        encoder.reconfigure_bitrate(1_200_000).unwrap();
+        assert_eq!(encoder.metadata().generation, gen_before, "bitrate change must not bump config generation");
+        assert_eq!((encoder.metadata().config.width, encoder.metadata().config.height), (32, 24));
+        let next = encoder.encode(&pattern(32, 24, 33_333)).unwrap();
+        assert!(next.keyframe, "bitrate reconfigure forces a keyframe for re-sync");
+        assert!(decoder.decode(&next).unwrap().is_some(), "stream must stay decodable after bitrate change");
+        // Same-bitrate reconfigure is a no-op.
+        encoder.reconfigure_bitrate(1_200_000).unwrap();
+        assert_eq!(encoder.metadata().config.target_bitrate_bps, 1_200_000);
+    }
+    #[test]
+    fn configure_changes_resolution_without_session_restart() {
+        let mut encoder = OpenH264Encoder::new(config(32, 24)).unwrap();
+        encoder.encode(&pattern(32, 24, 0)).unwrap();
+        encoder.configure(config(48, 32)).unwrap();
+        assert_eq!(encoder.metadata().generation, 1, "resolution change bumps generation");
+        let frame = encoder.encode(&pattern(48, 32, 33_333)).unwrap();
+        assert_eq!((frame.width, frame.height), (48, 32));
+        assert!(frame.keyframe, "post-configure unit is a keyframe");
+        // A decoder that follows the generation change decodes the new geometry.
+        let mut decoder = OpenH264Decoder::new(config(48, 32)).unwrap();
+        assert!(decoder.decode(&frame).unwrap().is_some());
+    }
+    #[test]
+    fn shutdown_is_idempotent_and_blocks_further_use() {
+        let mut encoder = OpenH264Encoder::new(config(16, 16)).unwrap();
+        encoder.shutdown().unwrap();
+        assert!(encoder.shutdown().is_ok(), "shutdown is idempotent");
+        assert!(encoder.encode(&pattern(16, 16, 0)).is_err());
+        assert!(encoder.configure(config(32, 24)).is_err());
+        assert!(encoder.reconfigure_bitrate(500_000).is_err());
+    }
+    #[test]
+    fn trait_contract_back_compat_aliases_delegate_to_five_ops() {
+        // A mock that records only the five PDF operations proves the default
+        // aliases (request_keyframe / reconfigure / reset) delegate to them
+        // without touching OpenH264 at all.
+        #[derive(Default)]
+        struct MockEncoder {
+            configured: Vec<CodecConfig>,
+            keyframes: u32,
+            bitrates: Vec<u32>,
+            shutdowns: u32,
+            config: CodecConfig,
+        }
+        impl VideoEncoder for MockEncoder {
+            fn configure(&mut self, config: CodecConfig) -> Result<(), ScreenShareError> {
+                self.config = config; self.configured.push(config); Ok(())
+            }
+            fn encode(&mut self, frame: &CapturedFrame) -> Result<EncodedPacket, ScreenShareError> {
+                Ok(EncodedPacket { timestamp_us: frame.timestamp_us, sequence: 0, keyframe: true,
+                    config_generation: 0, width: self.config.width, height: self.config.height,
+                    bytes: vec![1] })
+            }
+            fn force_keyframe(&mut self) { self.keyframes += 1; }
+            fn reconfigure_bitrate(&mut self, bitrate_bps: u32) -> Result<(), ScreenShareError> {
+                self.bitrates.push(bitrate_bps); Ok(())
+            }
+            fn shutdown(&mut self) -> Result<(), ScreenShareError> { self.shutdowns += 1; Ok(()) }
+            fn metadata(&self) -> CodecMetadata {
+                CodecMetadata { codec: CodecKind::H264, config: self.config, generation: 0 }
+            }
+        }
+        let mut encoder = MockEncoder::default();
+        encoder.request_keyframe();
+        assert_eq!(encoder.keyframes, 1, "request_keyframe delegates to force_keyframe");
+        encoder.reconfigure(config(16, 16)).unwrap();
+        assert_eq!(encoder.configured.len(), 1, "reconfigure delegates to configure");
+        encoder.reconfigure_bitrate(300_000).unwrap();
+        assert_eq!(encoder.bitrates, vec![300_000]);
+        encoder.reset().unwrap();
+        assert_eq!(encoder.configured.len(), 2, "reset reconfigures with the active config");
+        encoder.shutdown().unwrap();
+        encoder.shutdown().unwrap();
+        assert_eq!(encoder.shutdowns, 2, "shutdown is idempotent");
     }
 }

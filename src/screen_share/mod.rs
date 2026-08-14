@@ -24,8 +24,8 @@ pub use capture::{
 };
 pub use adaptation::{AdaptiveQuality, QualityDecision};
 pub use codec::{
-    CodecConfig, CodecKind, CodecMetadata, EncodedFrame, OpenH264Decoder, OpenH264Encoder,
-    ScreenShareCodec, VideoDecoder, VideoEncoder, DEFAULT_QUEUE_CAPACITY,
+    CodecConfig, CodecKind, CodecMetadata, EncodedFrame, EncodedPacket, OpenH264Decoder,
+    OpenH264Encoder, ScreenShareCodec, VideoDecoder, VideoEncoder, DEFAULT_QUEUE_CAPACITY,
 };
 pub use host::{run_host_session, HostCommand, DEMO_FPS, DEMO_HEIGHT, DEMO_WIDTH};
 pub use platform::{
@@ -82,18 +82,19 @@ mod tests {
 
     struct FakeCodec;
     impl VideoEncoder for FakeCodec {
+        fn configure(&mut self, _config: CodecConfig) -> Result<(), ScreenShareError> { Ok(()) }
         fn encode(&mut self, frame: &CapturedFrame) -> Result<EncodedFrame, ScreenShareError> {
             Ok(EncodedFrame { timestamp_us: frame.timestamp_us, sequence: 0, keyframe: true,
                 config_generation: 0, width: frame.width, height: frame.height,
                 bytes: frame.pixels.clone() })
         }
+        fn force_keyframe(&mut self) {}
+        fn reconfigure_bitrate(&mut self, _bitrate_bps: u32) -> Result<(), ScreenShareError> { Ok(()) }
         fn metadata(&self) -> CodecMetadata {
             CodecMetadata { codec: CodecKind::H264,
                 config: CodecConfig { width: 2, height: 2, target_fps: 1, target_bitrate_bps: 1,
                     keyframe_interval: 1, max_queue_depth: 1 }, generation: 0 }
         }
-        fn request_keyframe(&mut self) {}
-        fn reconfigure(&mut self, _config: CodecConfig) -> Result<(), ScreenShareError> { Ok(()) }
     }
     impl VideoDecoder for FakeCodec {
         fn decode(&mut self, frame: &EncodedFrame) -> Result<Option<CapturedFrame>, ScreenShareError> {
