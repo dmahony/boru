@@ -28,7 +28,21 @@ impl std::fmt::Debug for ScreenShareSessionId { fn fmt(&self, f: &mut std::fmt::
 
 /// Lifecycle states. Streaming is only reachable after explicit Accept.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SessionState { Idle, Inviting, AwaitingAcceptance, Connecting, Streaming, Paused, Ending, Ended, Failed }
+pub enum SessionState {
+    Idle,
+    Inviting,
+    AwaitingAcceptance,
+    Connecting,
+    Streaming,
+    /// The media path failed transiently and is being re-established. The
+    /// session (and the chat/friend session it belongs to) survives; only
+    /// the media stream reconnects. Permissions are reset to view-only.
+    Reconnecting,
+    Paused,
+    Ending,
+    Ended,
+    Failed,
+}
 
 /// Events exposed to the conversation/UI layer. They contain no media data.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +59,14 @@ pub enum SessionEvent {
     Rejected { session_id: ScreenShareSessionId, reason: String },
     /// A session ended or its connection disappeared.
     Ended { session_id: ScreenShareSessionId },
+    /// The media path failed transiently; the session is being re-established.
+    /// The chat/friend session is unaffected — only the media stream is
+    /// reconnecting. Remote-control permissions were reset to view-only.
+    Reconnecting { session_id: ScreenShareSessionId },
+    /// The media path was re-established after a transient failure. The
+    /// session is streaming again, but view-only: control requires fresh
+    /// consent (PDF Task 3.3 / REC-2).
+    Reconnected { session_id: ScreenShareSessionId },
     /// Viewer requested explicit control capabilities; host UI must decide.
     ControlRequest { session_id: ScreenShareSessionId, peer_id: iroh::PublicKey, capabilities: Vec<Capability> },
     /// Control became active or was revoked while viewing continues.
@@ -95,6 +117,46 @@ impl SessionManager {
         record.state = SessionState::Ended;
         Some(ControlMessage::EndSession { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id })
     }
+    /// Enter the reconnecting state after a transient media failure (PDF Task
+    /// 3.3 / REC-1). The session record survives — the chat/friend session it
+    /// belongs to is unaffected because chat lives on a separate QUIC
+    /// connection — and remote-control permissions are reset to view-only
+    /// (REC-2: control is never silently resumed after a security-significant
+    /// reconnect). Emits `Reconnecting` and `ControlChanged(active: false)`.
+    /// Returns false when the session is not streaming (nothing to reconnect).
+    pub fn begin_reconnect(&mut self, id: ScreenShareSessionId, events: &tokio::sync::mpsc::Sender<SessionEvent>) -> bool {
+        let Some(record) = self.sessions.get_mut(&id) else { return false };
+        if record.state != SessionState::Streaming { return false; }
+        record.state = SessionState::Reconnecting;
+        if let Some(permissions) = self.permissions.get_mut(&id) {
+            permissions.reset_for_reconnect();
+        }
+        let _ = events.try_send(SessionEvent::Reconnecting { session_id: id });
+        let _ = events.try_send(SessionEvent::ControlChanged { session_id: id, active: false, capabilities: vec![Capability::ViewScreen] });
+        tracing::info!(session = ?id, "screen-share: session reconnecting");
+        true
+    }
+    /// Mark the media path re-established: Reconnecting → Streaming. Permissions
+    /// remain view-only (a reconnect never re-grants control by itself). Emits
+    /// `Reconnected`. Returns false when the session is not reconnecting.
+    pub fn complete_reconnect(&mut self, id: ScreenShareSessionId, events: &tokio::sync::mpsc::Sender<SessionEvent>) -> bool {
+        let Some(record) = self.sessions.get_mut(&id) else { return false };
+        if record.state != SessionState::Reconnecting { return false; }
+        record.state = SessionState::Streaming;
+        let _ = events.try_send(SessionEvent::Reconnected { session_id: id });
+        tracing::info!(session = ?id, "screen-share: session reconnected");
+        true
+    }
+    /// Abandon a reconnect attempt: Reconnecting → Ended. Emits `Ended`.
+    /// Returns false when the session is not reconnecting.
+    pub fn fail_reconnect(&mut self, id: ScreenShareSessionId, events: &tokio::sync::mpsc::Sender<SessionEvent>) -> bool {
+        let Some(record) = self.sessions.get_mut(&id) else { return false };
+        if record.state != SessionState::Reconnecting { return false; }
+        record.state = SessionState::Ended;
+        let _ = events.try_send(SessionEvent::Ended { session_id: id });
+        tracing::warn!(session = ?id, "screen-share: reconnect failed, session ended");
+        true
+    }
     /// Host-side grant of control capabilities. Generates the fresh nonce,
     /// emits a local `ControlChanged` so the host UI shows the indicator, and
     /// returns the wire GrantControl message to send to the viewer.
@@ -130,7 +192,32 @@ impl SessionManager {
                     });
                 }
                 if hello.permission != Permission::ViewOnly { return Some(ControlMessage::Reject { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: hello.session_id, reason: "unsupported permission".into() }); }
-                if self.sessions.contains_key(&hello.session_id) {
+                // Reconnect (PDF Task 3.3 / REC-1): the SAME host re-offers a
+                // session that is already active (or already reconnecting)
+                // after a transient media failure. This is not a duplicate
+                // offer — it is the media path re-establishing after the
+                // connection dropped. Keep the session record (the chat/friend
+                // session is unaffected), reset remote-control permissions to
+                // view-only (REC-2), and surface Reconnecting so the app can
+                // re-accept on the new connection. A fresh Hello for a pending
+                // invite (Connecting) is also treated as a re-offer, not a
+                // rejection, so a host that re-sends before the user decides
+                // still works.
+                if let Some(existing) = self.sessions.get(&hello.session_id) {
+                    if existing.host_id == peer_id
+                        && matches!(existing.state, SessionState::Connecting | SessionState::Streaming | SessionState::Reconnecting)
+                    {
+                        if let Some(record) = self.sessions.get_mut(&hello.session_id) {
+                            record.state = SessionState::Reconnecting;
+                            record.peer_id = Some(peer_id);
+                        }
+                        if let Some(permissions) = self.permissions.get_mut(&hello.session_id) {
+                            permissions.reset_for_reconnect();
+                        }
+                        let _ = events.try_send(SessionEvent::Reconnecting { session_id: hello.session_id });
+                        let _ = events.try_send(SessionEvent::ControlChanged { session_id: hello.session_id, active: false, capabilities: vec![Capability::ViewScreen] });
+                        return None;
+                    }
                     return Some(ControlMessage::Reject { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: hello.session_id, reason: "session already exists".into() });
                 }
                 self.sessions.insert(hello.session_id, Record { state: SessionState::Connecting, host_id: hello.host_id, peer_id: Some(peer_id), conversation_id: hello.conversation_id });
@@ -148,12 +235,19 @@ impl SessionManager {
                 // never pass because host_id is the host's own key.
                 if let Some(record) = self.sessions.get_mut(&session_id) {
                     if record.peer_id == Some(peer_id)
-                        && matches!(record.state, SessionState::AwaitingAcceptance | SessionState::Connecting)
+                        && matches!(record.state, SessionState::AwaitingAcceptance | SessionState::Connecting | SessionState::Reconnecting)
                     {
+                        let was_reconnecting = record.state == SessionState::Reconnecting;
                         record.state = SessionState::Streaming;
                         self.permissions.insert(session_id, SessionPermissions::view_only(session_id, peer_id));
                         tracing::info!(session = ?session_id, "screen-share: session entered Streaming");
-                        emit_event(events, SessionEvent::Accepted { session_id, peer_id });
+                        if was_reconnecting {
+                            // A fresh Accept on a reconnecting session completes
+                            // the reconnect (PDF Task 3.3).
+                            emit_event(events, SessionEvent::Reconnected { session_id });
+                        } else {
+                            emit_event(events, SessionEvent::Accepted { session_id, peer_id });
+                        }
                     } else {
                         tracing::warn!(session = ?session_id, "screen-share: Accept ignored (peer or state mismatch)");
                     }
@@ -624,6 +718,159 @@ mod tests {
     use super::*;
     #[test] fn accept_requires_pending_invitation() { let key = iroh::SecretKey::generate().public(); let mut manager = SessionManager::default(); let id = ScreenShareSessionId::generate(); assert!(manager.accept_invitation(id, key).is_none()); }
     #[test] fn end_is_idempotent() { let key = iroh::SecretKey::generate().public(); let peer = iroh::SecretKey::generate().public(); let id = ScreenShareSessionId::generate(); let mut manager = SessionManager::default(); manager.start_invitation(id, key, peer, 1); assert!(manager.end(id).is_some()); assert!(manager.end(id).is_none()); assert_eq!(manager.state(id), Some(SessionState::Ended)); }
+
+    /// REC-1: begin_reconnect keeps the session record alive (the chat/friend
+    /// session survives a transient media failure) but transitions to
+    /// Reconnecting and emits the event.
+    #[test]
+    fn begin_reconnect_preserves_session_and_emits_event() {
+        let host = iroh::SecretKey::generate().public();
+        let viewer = iroh::SecretKey::generate().public();
+        let mut manager = SessionManager::default();
+        let id = ScreenShareSessionId::generate();
+        manager.start_invitation(id, host, viewer, 42);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        manager.apply_remote(viewer, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id }, &tx);
+        assert_eq!(manager.state(id), Some(SessionState::Streaming));
+        // Drain the Accepted emitted by the Accept before the reconnect.
+        assert!(matches!(rx.try_recv(), Ok(SessionEvent::Accepted { session_id, .. }) if session_id == id));
+
+        assert!(manager.begin_reconnect(id, &tx));
+        assert_eq!(manager.state(id), Some(SessionState::Reconnecting));
+        assert_eq!(rx.try_recv().unwrap(), SessionEvent::Reconnecting { session_id: id });
+        // The session is still tracked — the chat/friend session survives.
+        assert!(manager.permissions(id).is_some());
+        // Control was reset: only ViewScreen remains.
+        assert_eq!(manager.permissions(id).unwrap().capabilities(), &[Capability::ViewScreen]);
+    }
+
+    /// begin_reconnect on a session that is not streaming is a no-op.
+    #[test]
+    fn begin_reconnect_requires_streaming() {
+        let host = iroh::SecretKey::generate().public();
+        let viewer = iroh::SecretKey::generate().public();
+        let mut manager = SessionManager::default();
+        let id = ScreenShareSessionId::generate();
+        manager.start_invitation(id, host, viewer, 1);
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        assert!(!manager.begin_reconnect(id, &tx));
+        assert_eq!(manager.state(id), Some(SessionState::AwaitingAcceptance));
+    }
+
+    /// REC-2: complete_reconnect returns to Streaming but does NOT silently
+    /// re-grant control capabilities that were active before the reconnect.
+    #[test]
+    fn complete_reconnect_returns_streaming_without_control_resume() {
+        let host = iroh::SecretKey::generate().public();
+        let viewer = iroh::SecretKey::generate().public();
+        let mut manager = SessionManager::default();
+        let id = ScreenShareSessionId::generate();
+        manager.start_invitation(id, host, viewer, 7);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        manager.apply_remote(viewer, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id }, &tx);
+        // Grant control BEFORE the failure; the reconnect must not resume it.
+        assert!(manager.grant_control(id, vec![Capability::ControlPointer, Capability::ControlKeyboard], &tx).is_some());
+        assert!(manager.permissions(id).unwrap().allows(id, viewer, Capability::ControlPointer));
+        // Drain events emitted so far (Accepted, ControlChanged(active:true)).
+        let _ = rx.try_recv();
+        let _ = rx.try_recv();
+
+        assert!(manager.begin_reconnect(id, &tx));
+        assert_eq!(manager.permissions(id).unwrap().capabilities(), &[Capability::ViewScreen]);
+        let _ = rx.try_recv(); // Reconnecting
+        let _ = rx.try_recv(); // ControlChanged(active:false)
+        assert!(manager.complete_reconnect(id, &tx));
+        assert_eq!(manager.state(id), Some(SessionState::Streaming));
+        assert_eq!(rx.try_recv().unwrap(), SessionEvent::Reconnected { session_id: id });
+        // Control was NOT silently resumed after the reconnect.
+        assert_eq!(manager.permissions(id).unwrap().capabilities(), &[Capability::ViewScreen]);
+        assert!(!manager.permissions(id).unwrap().allows(id, viewer, Capability::ControlPointer));
+    }
+
+    /// fail_reconnect abandons the reconnect and ends the session.
+    #[test]
+    fn fail_reconnect_ends_session() {
+        let host = iroh::SecretKey::generate().public();
+        let viewer = iroh::SecretKey::generate().public();
+        let mut manager = SessionManager::default();
+        let id = ScreenShareSessionId::generate();
+        manager.start_invitation(id, host, viewer, 1);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        manager.apply_remote(viewer, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id }, &tx);
+        let _ = rx.try_recv(); // Accepted
+        assert!(manager.begin_reconnect(id, &tx));
+        assert!(manager.fail_reconnect(id, &tx));
+        assert_eq!(manager.state(id), Some(SessionState::Ended));
+        assert_eq!(rx.try_recv().unwrap(), SessionEvent::Reconnecting { session_id: id });
+        assert_eq!(rx.try_recv().unwrap(), SessionEvent::ControlChanged { session_id: id, active: false, capabilities: vec![Capability::ViewScreen] });
+        assert_eq!(rx.try_recv().unwrap(), SessionEvent::Ended { session_id: id });
+    }
+
+    /// A re-Hello for the same session from the same host is treated as a
+    /// reconnect (not a duplicate-offer rejection): the session survives,
+    /// permissions reset to view-only, and Reconnecting is emitted.
+    #[test]
+    fn rehello_from_same_host_reconnects_active_session() {
+        let host = iroh::SecretKey::generate().public();
+        let viewer = iroh::SecretKey::generate().public();
+        let mut manager = SessionManager::default();
+        let id = ScreenShareSessionId::generate();
+        manager.start_invitation(id, host, viewer, 7);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        manager.apply_remote(viewer, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id }, &tx);
+        assert!(manager.grant_control(id, vec![Capability::ControlPointer], &tx).is_some());
+        let _ = rx.try_recv(); // Accepted
+        let _ = rx.try_recv(); // ControlChanged(active:true)
+
+        let hello = Hello {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: id,
+            host_id: host,
+            conversation_id: 7,
+            codecs: vec!["h264".into()],
+            width: 640,
+            height: 360,
+            frame_rate: 15,
+            permission: Permission::ViewOnly,
+        };
+        // The re-Hello arrives from the HOST's connection, exactly like the
+        // original Hello did.
+        let response = manager.apply_remote(host, ControlMessage::Hello(hello), &tx);
+        assert!(response.is_none(), "a reconnect Hello must not be rejected");
+        assert_eq!(manager.state(id), Some(SessionState::Reconnecting));
+        assert_eq!(rx.try_recv().unwrap(), SessionEvent::Reconnecting { session_id: id });
+        assert_eq!(manager.permissions(id).unwrap().capabilities(), &[Capability::ViewScreen]);
+    }
+
+    /// A re-Hello from a DIFFERENT host for an existing session is still a
+    /// duplicate-offer rejection (strangers must not hijack a session).
+    #[test]
+    fn rehello_from_stranger_is_rejected() {
+        let host = iroh::SecretKey::generate().public();
+        let stranger = iroh::SecretKey::generate().public();
+        let viewer = iroh::SecretKey::generate().public();
+        let mut manager = SessionManager::default();
+        let id = ScreenShareSessionId::generate();
+        manager.start_invitation(id, host, viewer, 7);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        manager.apply_remote(viewer, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id }, &tx);
+
+        let hello = Hello {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: id,
+            host_id: stranger,
+            conversation_id: 7,
+            codecs: vec!["h264".into()],
+            width: 640,
+            height: 360,
+            frame_rate: 15,
+            permission: Permission::ViewOnly,
+        };
+        let response = manager.apply_remote(viewer, ControlMessage::Hello(hello), &tx);
+        assert!(matches!(response, Some(ControlMessage::Reject { reason, .. }) if reason == "invitation identity does not match the connected peer"));
+        assert_eq!(manager.state(id), Some(SessionState::Streaming));
+        let _ = rx.try_recv(); // drain any stray event
+    }
     /// Regression: the HOST's manager records the invitee and must transition
     /// to Streaming when the INVITEE's Accept arrives. (The old check compared
     /// against record.host_id — the host's own key — so the Accept was

@@ -373,6 +373,7 @@ impl IcedChat {
             let state = match self.screen_share_host_state {
                 ScreenShareHostState::Inviting => "Waiting for the viewer to accept…",
                 ScreenShareHostState::Streaming => "Screen sharing active",
+                ScreenShareHostState::Reconnecting => "Reconnecting…",
                 ScreenShareHostState::Idle => unreachable!(),
             };
             let mut items: Vec<iced::Element<'_, AppMessage>> = vec![text(state).into()];

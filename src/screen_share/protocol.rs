@@ -1031,6 +1031,188 @@ mod tests {
         router.shutdown().await.unwrap();
     }
 
+    /// Full QUIC reconnect round trip (PDF Task 3.3): after a transient media
+    /// failure the host re-dials the viewer and re-sends the SAME Hello (same
+    /// session id, same host). The viewer's protocol handler must treat this
+    /// as a reconnect — NOT a duplicate-offer rejection — keep the session
+    /// alive, reset remote-control permissions to view-only (REC-2), and
+    /// accept a fresh Accept on the new connection. The host then completes
+    /// the reconnect and the session is Streaming again; control is NOT
+    /// silently resumed.
+    #[tokio::test]
+    async fn end_to_end_reconnect_after_media_failure() {
+        // Viewer endpoint with the protocol handler registered on the router.
+        let viewer = iroh::Endpoint::bind(presets::Minimal).await.unwrap();
+        let (events_tx, mut events_rx) = mpsc::channel(32);
+        let (media_tx, _media_rx) = mpsc::channel(64);
+        let protocol = ScreenShareProtocol::with_channels(events_tx.clone(), media_tx);
+        let router = Router::builder(viewer.clone())
+            .accept(SCREEN_SHARE_ALPN, protocol.clone())
+            .spawn();
+
+        // Host endpoint (with its own local session manager, as the real host
+        // driver uses).
+        let host = iroh::Endpoint::bind(presets::Minimal).await.unwrap();
+        let host_pk = host.secret_key().public();
+        let viewer_pk = viewer.secret_key().public();
+        let session_id = ScreenShareSessionId::generate();
+        let mut host_manager = SessionManager::default();
+        let (host_events_tx, mut host_events_rx) = mpsc::channel(32);
+        host_manager.start_invitation(session_id, host_pk, viewer_pk, 7);
+
+        // ---- First negotiation: Hello → Invitation → Accept → Streaming.
+        let connection = host.connect(viewer.addr(), SCREEN_SHARE_ALPN).await.unwrap();
+        let transport = QuicScreenTransport::new(connection.clone(), *session_id.as_bytes()).unwrap();
+        let hello = Hello {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id,
+            host_id: host_pk,
+            conversation_id: 7,
+            codecs: vec!["h264".into()],
+            width: 640,
+            height: 360,
+            frame_rate: 15,
+            permission: Permission::ViewOnly,
+        };
+        transport.send_control(&ControlMessage::Hello(hello.clone())).await.unwrap();
+        let event = events_rx.recv().await.unwrap();
+        let SessionEvent::Invitation { session_id: got_id, host_id, .. } = event else {
+            panic!("expected Invitation, got {event:?}");
+        };
+        assert_eq!(got_id, session_id);
+        assert_eq!(host_id, host_pk);
+
+        // Viewer accepts on the inbound connection; host applies the Accept.
+        protocol
+            .send_control(session_id, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id })
+            .await
+            .unwrap();
+        host_manager.apply_remote(viewer_pk, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id }, &host_events_tx);
+        assert_eq!(host_manager.state(session_id), Some(SessionState::Streaming));
+
+        // Viewer had remote control granted; the reconnect must drop it.
+        protocol
+            .manager()
+            .lock()
+            .await
+            .grant_control(session_id, vec![Capability::ControlPointer], &events_tx);
+        assert!(
+            protocol
+                .manager()
+                .lock()
+                .await
+                .permissions(session_id)
+                .unwrap()
+                .allows(session_id, host_pk, Capability::ControlPointer),
+            "control granted before reconnect"
+        );
+        // Drain the ControlChanged(active:true) emitted by the grant.
+        let event = events_rx.recv().await.unwrap();
+        assert!(
+            matches!(event, SessionEvent::ControlChanged { session_id: id, active: true, .. } if id == session_id),
+            "expected ControlChanged(active:true), got {event:?}"
+        );
+
+        // ---- Transient media failure: host enters Reconnecting locally.
+        assert!(host_manager.begin_reconnect(session_id, &host_events_tx));
+        assert_eq!(host_manager.state(session_id), Some(SessionState::Reconnecting));
+        // Drain the host events emitted so far (Accepted, Reconnecting,
+        // ControlChanged(active:false)).
+        let event = host_events_rx.recv().await.unwrap();
+        assert!(
+            matches!(event, SessionEvent::Accepted { session_id: id, .. } if id == session_id),
+            "expected Accepted, got {event:?}"
+        );
+        let event = host_events_rx.recv().await.unwrap();
+        assert!(
+            matches!(event, SessionEvent::Reconnecting { session_id: id } if id == session_id),
+            "expected Reconnecting, got {event:?}"
+        );
+        let event = host_events_rx.recv().await.unwrap();
+        assert!(
+            matches!(event, SessionEvent::ControlChanged { session_id: id, active: false, .. } if id == session_id),
+            "expected ControlChanged(active:false), got {event:?}"
+        );
+
+        // ---- Host re-dials and re-sends the SAME Hello on a NEW connection.
+        let reconnect_connection = host.connect(viewer.addr(), SCREEN_SHARE_ALPN).await.unwrap();
+        let reconnect_transport =
+            QuicScreenTransport::new(reconnect_connection.clone(), *session_id.as_bytes()).unwrap();
+        reconnect_transport.send_control(&ControlMessage::Hello(hello)).await.unwrap();
+
+        // The viewer must NOT reject the re-Hello: it emits Reconnecting and
+        // resets permissions to view-only (REC-2).
+        let event = events_rx.recv().await.unwrap();
+        assert!(
+            matches!(event, SessionEvent::Reconnecting { session_id: id } if id == session_id),
+            "expected Reconnecting, got {event:?}"
+        );
+        let event = events_rx.recv().await.unwrap();
+        assert!(
+            matches!(event, SessionEvent::ControlChanged { session_id: id, active: false, .. } if id == session_id),
+            "expected ControlChanged(active:false), got {event:?}"
+        );
+        assert_eq!(
+            protocol.manager().lock().await.state(session_id),
+            Some(SessionState::Reconnecting)
+        );
+        assert_eq!(
+            protocol.manager().lock().await.permissions(session_id).unwrap().capabilities(),
+            &[Capability::ViewScreen],
+            "reconnect must reset to view-only — control is not silently resumed"
+        );
+
+        // ---- Viewer re-accepts on the NEW connection and requests a fresh
+        // keyframe (REC-1).
+        protocol
+            .send_control(session_id, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id })
+            .await
+            .unwrap();
+        protocol
+            .send_screen_share(session_id, ScreenShareMessage::KeyframeRequest { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id })
+            .await
+            .unwrap();
+
+        // ---- Host reads the fresh Accept and completes the reconnect.
+        let (mut send, recv) = reconnect_connection.accept_bi().await.unwrap();
+        match read_unit(recv).await.unwrap() {
+            ReadUnit::Control(ControlMessage::Accept { session_id: id, .. }) => {
+                assert_eq!(id, session_id);
+            }
+            other => panic!("expected Accept control, got {other:?}"),
+        }
+        drop(send);
+
+        // The host applies the fresh Accept: Reconnecting → Streaming.
+        host_manager.apply_remote(viewer_pk, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id }, &host_events_tx);
+        assert_eq!(host_manager.state(session_id), Some(SessionState::Streaming));
+        let event = host_events_rx.recv().await.unwrap();
+        assert!(
+            matches!(event, SessionEvent::Reconnected { session_id: id } if id == session_id),
+            "expected Reconnected, got {event:?}"
+        );
+
+        // Host also receives the viewer's fresh-keyframe request.
+        let (mut send, recv) = reconnect_connection.accept_bi().await.unwrap();
+        match read_unit(recv).await.unwrap() {
+            ReadUnit::ScreenShare(ScreenShareMessage::KeyframeRequest { session_id: id, .. }) => {
+                assert_eq!(id, session_id);
+            }
+            other => panic!("expected KeyframeRequest, got {other:?}"),
+        }
+        drop(send);
+
+        // Host-side permissions are view-only too — control requires fresh
+        // explicit consent after a reconnect.
+        assert_eq!(
+            host_manager.permissions(session_id).unwrap().capabilities(),
+            &[Capability::ViewScreen],
+            "host permissions must not resume control after reconnect"
+        );
+
+        router.shutdown().await.unwrap();
+    }
+
     /// Versioned negotiation over real QUIC (PDF Task 3.1): the initiator
     /// sends a ScreenShareOffer with codecs/resolutions/fps range, the
     /// recipient's protocol handler emits a NegotiationInvitation and keeps

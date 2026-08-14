@@ -12,6 +12,7 @@ pub mod host;
 pub mod permissions;
 pub mod platform;
 pub mod protocol;
+pub mod reconnect;
 pub mod remote_input;
 pub mod session;
 pub mod stats;
@@ -42,6 +43,9 @@ pub use platform::{
 pub use protocol::{
     ControlMessage, Hello, InboundMedia, Permission, ScreenShareMessage, ScreenShareProtocol,
     SCREEN_SHARE_ALPN, SCREEN_SHARE_PROTOCOL_VERSION, MAX_INPUT_CODE, MAX_SCREEN_SHARE_MESSAGE,
+};
+pub use reconnect::{
+    keyframe_request, retry_reconnect, ReconnectOutcome, ReconnectPolicy,
 };
 pub use permissions::{Capability, ControlToken, RequestRateLimiter, SessionPermissions};
 pub use remote_input::{

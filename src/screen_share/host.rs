@@ -20,6 +20,7 @@ use super::{
     permissions::Capability,
     platform::{capture_dimensions, create_capture_source, CAPTURE_FPS},
     protocol::{self, ControlMessage, ScreenShareMessage, SCREEN_SHARE_PROTOCOL_VERSION},
+    reconnect::{retry_reconnect, ReconnectPolicy},
     remote_input::{self, create_platform_backend, InputEvent, NormalizedPointer},
     session::{ScreenShareSessionId, SessionEvent, SessionManager, SessionState},
     transport::{read_unit, QuicScreenTransport, ReadUnit},
@@ -171,7 +172,7 @@ async fn run_host_session_inner(
             return;
         }
     };
-    if let Err(error) = control.send(ControlOut::Legacy(ControlMessage::Hello(hello))).await {
+    if let Err(error) = control.send(ControlOut::Legacy(ControlMessage::Hello(hello.clone()))).await {
         let _ = events.send(SessionEvent::Rejected { session_id, reason: error.to_string() }).await;
         return;
     }
@@ -247,12 +248,43 @@ async fn run_host_session_inner(
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut media_drops: u64 = 0;
     let mut keyframe_requests: u64 = 0;
-    loop {
-        if stop.load(Ordering::Relaxed) || media.failed() || control.failed() {
+    // Reconnect-aware streaming loop (PDF Task 3.3): on a transient media
+    // failure (media/control channel failed, connection dropped, stream
+    // read error) the session does NOT end — it transitions to Reconnecting,
+    // re-establishes the media path with bounded retries, forces a fresh
+    // keyframe, and resumes. The chat/friend session is unaffected because
+    // chat rides a separate QUIC connection; only this media path reconnects.
+    let mut connection = connection;
+    let mut control = control;
+    let mut media = media;
+    'streaming: loop {
+        if stop.load(Ordering::Relaxed) {
             backend.shutdown().await;
             let _ = control.send(ControlOut::Legacy(ControlMessage::EndSession { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id })).await;
             return;
         }
+        if media.failed() || control.failed() {
+            match reconnect_media(&endpoint, peer, session_id, manager, &events, stop.as_ref(), hello.clone()).await {
+                Some((new_connection, new_control, new_media)) => {
+                    connection = new_connection;
+                    control = new_control;
+                    media = new_media;
+                    // Fresh keyframe after reconnection (PDF Task 3.3 / REC-1):
+                    // the next encoded frame is independently decodable, so the
+                    // viewer resynchronises without waiting for the periodic
+                    // keyframe.
+                    encoder.force_keyframe();
+                    media_drops = 0;
+                    continue 'streaming;
+                }
+                None => {
+                    backend.shutdown().await;
+                    let _ = control.send(ControlOut::Legacy(ControlMessage::EndSession { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id })).await;
+                    return;
+                }
+            }
+        }
+        let mut need_reconnect = false;
         tokio::select! {
             r = connection.accept_bi() => {
                 match r {
@@ -262,7 +294,7 @@ async fn run_host_session_inner(
                             let authorized = manager.permissions(sid).is_some_and(|permissions| {
                                 remote_input::authorize_nonce(permissions, sid, peer, capability, nonce).is_ok()
                             });
-                            if !authorized { continue; }
+                            if !authorized { continue 'streaming; }
                             match capability {
                                 Capability::ControlPointer => {
                                     if let Some((px, py)) = remote_input::normalize_to_capture(NormalizedPointer { x, y }, (capture_width, capture_height)) {
@@ -298,9 +330,9 @@ async fn run_host_session_inner(
                             }
                         },
                         Ok(ReadUnit::Media(_, _)) => {}
-                        Err(_) => return,
+                        Err(_) => { need_reconnect = true; }
                     },
-                    Err(_) => return,
+                    Err(_) => { need_reconnect = true; }
                 }
             }
             cmd = commands.recv() => match cmd {
@@ -387,6 +419,110 @@ async fn run_host_session_inner(
                     }
                 }
             }
+        }
+        if need_reconnect {
+            match reconnect_media(&endpoint, peer, session_id, manager, &events, stop.as_ref(), hello.clone()).await {
+                Some((new_connection, new_control, new_media)) => {
+                    connection = new_connection;
+                    control = new_control;
+                    media = new_media;
+                    // Fresh keyframe after reconnection so the viewer can
+                    // resynchronise immediately.
+                    encoder.force_keyframe();
+                    media_drops = 0;
+                }
+                None => {
+                    backend.shutdown().await;
+                    let _ = control.send(ControlOut::Legacy(ControlMessage::EndSession { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id })).await;
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// Re-establish the media path after a transient failure (PDF Task 3.3).
+///
+/// Transitions the session Streaming → Reconnecting (resetting remote-control
+/// permissions to view-only — REC-2), re-dials the viewer, re-sends the Hello,
+/// waits for a fresh Accept, then transitions back to Streaming. Returns the
+/// new connection/control/media channels on success; `None` when the reconnect
+/// was abandoned (session is ended by the caller).
+#[allow(clippy::too_many_arguments)]
+async fn reconnect_media(
+    endpoint: &Endpoint,
+    peer: PublicKey,
+    session_id: ScreenShareSessionId,
+    manager: &mut SessionManager,
+    events: &mpsc::Sender<SessionEvent>,
+    stop: &AtomicBool,
+    hello: protocol::Hello,
+) -> Option<(iroh::endpoint::Connection, ControlChannel, MediaChannel)> {
+    if !manager.begin_reconnect(session_id, events) {
+        return None;
+    }
+    let addr = endpoint
+        .remote_info(peer)
+        .await
+        .map(|info| iroh::EndpointAddr::from_parts(info.id(), info.into_addrs().map(|a| a.into_addr())))
+        .unwrap_or_else(|| iroh::EndpointAddr::new(peer));
+    let policy = ReconnectPolicy::default();
+    let result = retry_reconnect(&policy, stop, |_attempt| {
+        let addr = addr.clone();
+        let hello = hello.clone();
+        async move {
+            let new_connection = endpoint
+                .connect(addr, SCREEN_SHARE_ALPN)
+                .await
+                .map_err(|e| ScreenShareError::new(e.to_string()))?;
+            let new_transport = QuicScreenTransport::new(new_connection.clone(), *session_id.as_bytes())?;
+            let new_control = ControlChannel::new(new_transport.clone(), DEFAULT_CONTROL_QUEUE_CAPACITY)?;
+            let new_media = MediaChannel::new(new_transport.clone(), DEFAULT_MEDIA_QUEUE_CAPACITY)?;
+            new_control
+                .send(ControlOut::Legacy(ControlMessage::Hello(hello)))
+                .await?;
+            // Wait for the viewer's fresh Accept on the new connection. This
+            // only observes the wire message; the manager transition happens
+            // in complete_reconnect after the attempt succeeds, so the retry
+            // closure does not capture the manager mutably.
+            wait_for_accept(&new_connection, session_id, stop).await?;
+            Ok((new_connection, new_control, new_media))
+        }
+    })
+    .await;
+    match result {
+        Ok(channels) => {
+            manager.complete_reconnect(session_id, events);
+            Some(channels)
+        }
+        Err(_) => {
+            manager.fail_reconnect(session_id, events);
+            None
+        }
+    }
+}
+
+/// Wait for a fresh Accept on a re-established connection. Returns once an
+/// Accept for `session_id` is read on a stream; the caller completes the
+/// manager transition afterwards.
+async fn wait_for_accept(
+    connection: &iroh::endpoint::Connection,
+    session_id: ScreenShareSessionId,
+    stop: &AtomicBool,
+) -> Result<(), ScreenShareError> {
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return Err(ScreenShareError::new("reconnect stopped"));
+        }
+        let (mut send, recv) = connection.accept_bi().await.map_err(|e| ScreenShareError::new(e.to_string()))?;
+        match read_unit(recv).await {
+            Ok(ReadUnit::Control(ControlMessage::Accept { session_id: id, .. })) if id == session_id => {
+                return Ok(());
+            }
+            Ok(ReadUnit::Control(_)) | Ok(ReadUnit::ScreenShare(_)) | Ok(ReadUnit::Media(_, _)) => {
+                let _ = send.reset(0u32.into());
+            }
+            Err(error) => return Err(error),
         }
     }
 }

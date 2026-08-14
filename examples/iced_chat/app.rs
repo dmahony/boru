@@ -89,8 +89,8 @@ use boru_core::call::{CallId, CallKind};
 #[cfg(feature = "screen-sharing")]
 use boru_core::screen_share::{
     run_host_session, Capability, CapturedFrame, ControlMessage, HostCommand, InboundMedia,
-    OpenH264Decoder, PixelFormat, ScreenShareProtocol, ScreenShareSessionId, SessionEvent,
-    ViewerPipeline, DEFAULT_QUEUE_CAPACITY, SCREEN_SHARE_PROTOCOL_VERSION,
+    OpenH264Decoder, PixelFormat, ScreenShareMessage, ScreenShareProtocol, ScreenShareSessionId,
+    SessionEvent, ViewerPipeline, DEFAULT_QUEUE_CAPACITY, SCREEN_SHARE_PROTOCOL_VERSION,
 };
 #[cfg(feature = "video-calls")]
 use boru_core::call::video::VideoFrame;
@@ -3639,6 +3639,9 @@ pub(crate) enum ScreenShareHostState {
     Inviting,
     /// Viewer accepted; capture and streaming are active.
     Streaming,
+    /// The media path failed transiently and is being re-established.
+    /// The chat/friend session survives; only the media stream reconnects.
+    Reconnecting,
 }
 
 pub struct IcedChat {
@@ -14436,10 +14439,7 @@ impl IcedChat {
                 iced::Task::none()
             }
             #[cfg(feature = "screen-sharing")]
-            AppMessage::ScreenShareEventReceived(event) => {
-                self.apply_screen_share_event(event);
-                iced::Task::none()
-            }
+            AppMessage::ScreenShareEventReceived(event) => self.apply_screen_share_event(event),
             #[cfg(feature = "screen-sharing")]
             AppMessage::ScreenShareFrameReceived(frame) => {
                 if let Some(frame) = frame {
@@ -21029,7 +21029,7 @@ impl IcedChat {
 
     #[cfg(feature = "screen-sharing")]
     /// Apply one protocol session event to the deterministic UI session state.
-    fn apply_screen_share_event(&mut self, event: SessionEvent) {
+    fn apply_screen_share_event(&mut self, event: SessionEvent) -> iced::Task<AppMessage> {
         tracing::info!(?event, "screen-share: session event received");
         match event {
             SessionEvent::Invitation {
@@ -21044,6 +21044,7 @@ impl IcedChat {
                     self.screen_share_invite =
                         Some((host_id.fmt_short().to_string(), session_id));
                 }
+                iced::Task::none()
             }
             SessionEvent::NegotiationInvitation { session_id, host_id, .. } => {
                 // Versioned negotiation offers (PDF Task 3.1) surface through
@@ -21056,18 +21057,74 @@ impl IcedChat {
                     self.screen_share_invite =
                         Some((host_id.fmt_short().to_string(), session_id));
                 }
+                iced::Task::none()
             }
             SessionEvent::Accepted { .. } => {
                 if self.screen_share_host_state != ScreenShareHostState::Idle {
                     // Capture is active now — the persistent indicator stays on.
                     self.screen_share_host_state = ScreenShareHostState::Streaming;
                 }
+                iced::Task::none()
             }
             SessionEvent::Rejected { .. } => {
                 if self.screen_share_host_state != ScreenShareHostState::Idle {
                     self.screen_share_host_state = ScreenShareHostState::Idle;
                     self.screen_share_host_stop = None;
                 }
+                iced::Task::none()
+            }
+            SessionEvent::Reconnecting { session_id } => {
+                // The media path failed transiently (PDF Task 3.3). The
+                // chat/friend session survives — only the media stream
+                // reconnects. If we are the VIEWER of this session, keep
+                // viewing (do NOT tear down the decode worker) and re-accept
+                // on the new connection so the host can resume streaming.
+                if self.screen_share_view_session == Some(session_id) {
+                    self.screen_share_viewing = true;
+                    let Some(protocol) = self.screen_share_protocol.clone() else {
+                        return iced::Task::none();
+                    };
+                    return iced::Task::perform(
+                        async move {
+                            // Re-Accept on the new connection, then request a
+                            // fresh keyframe so the decoder resynchronises
+                            // without waiting for the next periodic keyframe.
+                            let result = protocol
+                                .send_control(
+                                    session_id,
+                                    ControlMessage::Accept {
+                                        version: SCREEN_SHARE_PROTOCOL_VERSION,
+                                        session_id,
+                                    },
+                                )
+                                .await
+                                .map_err(|e| e.to_string());
+                            let _ = protocol
+                                .send_screen_share(
+                                    session_id,
+                                    ScreenShareMessage::KeyframeRequest {
+                                        version: SCREEN_SHARE_PROTOCOL_VERSION,
+                                        session_id,
+                                    },
+                                )
+                                .await;
+                            result
+                        },
+                        |result| AppMessage::ScreenShareCommandFinished(result),
+                    );
+                }
+                if self.screen_share_host_state != ScreenShareHostState::Idle {
+                    // Host side: surface the reconnecting state to the user.
+                    self.screen_share_host_state = ScreenShareHostState::Reconnecting;
+                }
+                iced::Task::none()
+            }
+            SessionEvent::Reconnected { .. } => {
+                // The media path is back; resume the persistent indicator.
+                if self.screen_share_host_state == ScreenShareHostState::Reconnecting {
+                    self.screen_share_host_state = ScreenShareHostState::Streaming;
+                }
+                iced::Task::none()
             }
             SessionEvent::Ended { session_id } => {
                 if self.screen_share_view_session == Some(session_id) {
@@ -21084,6 +21141,7 @@ impl IcedChat {
                     self.screen_share_host_state = ScreenShareHostState::Idle;
                     self.screen_share_host_stop = None;
                 }
+                iced::Task::none()
             }
             SessionEvent::ControlRequest {
                 session_id,
@@ -21095,12 +21153,14 @@ impl IcedChat {
                     self.screen_share_control_request =
                         Some((session_id, peer_id.fmt_short().to_string(), capabilities));
                 }
+                iced::Task::none()
             }
             SessionEvent::ControlChanged { active, .. } => {
                 self.screen_share_control_active = active;
                 if !active {
                     self.screen_share_control_request = None;
                 }
+                iced::Task::none()
             }
         }
     }

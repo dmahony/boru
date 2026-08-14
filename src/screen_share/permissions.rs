@@ -86,6 +86,13 @@ impl SessionPermissions {
         self.granted.retain(|capability| *capability == Capability::ViewScreen);
         self.token = None;
     }
+    /// Security-significant reconnect: reset to view-only (PDF Task 3.3 /
+    /// REC-2). Control capabilities and the nonce token are dropped; the
+    /// session stays view-only until fresh explicit consent grants control.
+    pub fn reset_for_reconnect(&mut self) {
+        self.granted.retain(|capability| *capability == Capability::ViewScreen);
+        self.token = None;
+    }
     pub fn end(&mut self) { self.active = false; self.granted.clear(); self.token = None; }
 }
 
