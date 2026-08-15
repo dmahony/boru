@@ -359,7 +359,7 @@ fn validate_component_placement_overrides(
 fn validate_component_placement(
     path: &str,
     thumbnail: Option<ThumbnailPosition>,
-    _metadata: Option<MetadataAlignment>,
+    metadata: Option<MetadataAlignment>,
     buttons: Option<ButtonPlacement>,
     orientation: Option<CardOrientation>,
     issues: &mut Vec<String>,
@@ -377,6 +377,19 @@ fn validate_component_placement(
     }
     if matches!(buttons, ButtonPlacement::Side) && !matches!(orientation, CardOrientation::Horizontal) {
         issues.push(format!("{path}.button_placement = Side requires card_orientation Horizontal"));
+    }
+    // Non-start metadata alignment is a vertical-card affordance.  In a
+    // horizontal card the metadata column shares a row with the thumbnail;
+    // centering or trailing-aligning that column produces an unsupported
+    // layout (and is especially ambiguous when actions are on the side).
+    // Keep Start available for every placement, while Center/End require the
+    // vertical card composition with a top/bottom thumbnail.
+    if matches!(metadata, Some(MetadataAlignment::Center | MetadataAlignment::End))
+        && (!matches!(orientation, CardOrientation::Vertical) || !vertical_thumbnail)
+    {
+        issues.push(format!(
+            "{path}.metadata_alignment = Center or End requires card_orientation Vertical with thumbnail_position Top or Bottom"
+        ));
     }
 }
 
@@ -552,6 +565,24 @@ mod tests {
         .expect("config parses");
         let issues = validate_layout_overrides(&horizontal_with_top);
         assert!(issues.iter().any(|issue| issue.contains("Horizontal requires")));
+    }
+
+    #[test]
+    fn rejects_unsupported_metadata_alignment_combinations() {
+        let horizontal_center = parse_layout_config(
+            "[component.shared_by_me]\nmetadata_alignment = \"Center\"\n",
+        )
+        .expect("config parses");
+        let issues = validate_layout_overrides(&horizontal_center);
+        assert!(issues
+            .iter()
+            .any(|issue| issue.contains("metadata_alignment") && issue.contains("requires")));
+
+        let vertical_end = parse_layout_config(
+            "[component.video_card]\ncard_orientation = \"Vertical\"\nthumbnail_position = \"Top\"\nmetadata_alignment = \"End\"\n",
+        )
+        .expect("config parses");
+        assert!(validate_layout_overrides(&vertical_end).is_empty());
     }
 
     #[test]

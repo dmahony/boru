@@ -228,15 +228,15 @@ impl LayoutField {
             HomeCardSizingStatusDividerWidth => "Status divider width",
             HomeCardSizingStatusDividerHeight => "Status divider height",
             ComponentThumbnailPosition => "Thumbnail position",
-            ComponentMetadataAlignment => "Metadata alignment",
+            ComponentMetadataAlignment => "Metadata horizontal alignment",
             ComponentButtonPlacement => "Button placement",
             ComponentCardOrientation => "Card orientation",
             ComponentVideoCardThumbnailPosition => "Video card · thumbnail",
-            ComponentVideoCardMetadataAlignment => "Video card · metadata",
+            ComponentVideoCardMetadataAlignment => "Video card · metadata horizontal alignment",
             ComponentVideoCardButtonPlacement => "Video card · buttons",
             ComponentVideoCardCardOrientation => "Video card · orientation",
             ComponentSharedByMeThumbnailPosition => "Shared-by-me · thumbnail",
-            ComponentSharedByMeMetadataAlignment => "Shared-by-me · metadata",
+            ComponentSharedByMeMetadataAlignment => "Shared-by-me · metadata horizontal alignment",
             ComponentSharedByMeButtonPlacement => "Shared-by-me · buttons",
             ComponentSharedByMeCardOrientation => "Shared-by-me · orientation",
             ComponentVideoNarrowBreakpoint => "Video narrow breakpoint",
@@ -1400,6 +1400,13 @@ fn layout_choice_row(
     let selected = read_layout_choice(layout, field);
 
     let label = text(field.label()).size(11.0).color(muted_text(dark_mode));
+    let hint = matches!(
+        field,
+        LayoutField::ComponentMetadataAlignment
+            | LayoutField::ComponentVideoCardMetadataAlignment
+            | LayoutField::ComponentSharedByMeMetadataAlignment
+    )
+    .then(|| text("Center/End: vertical cards").size(8.0).color(muted_text(dark_mode)));
 
     let list = pick_list(options, Some(selected), move |choice: &str| {
         crate::app::AppMessage::Inspector(InspectorMsg::SetLayoutChoice {
@@ -1411,8 +1418,13 @@ fn layout_choice_row(
     .padding([2, 6])
     .text_size(11.0);
 
+    let heading = if let Some(hint) = hint {
+        row![label, Space::new().width(Length::Fill), hint]
+    } else {
+        row![label, Space::new().width(Length::Fill)]
+    };
     iced::widget::Column::new()
-        .push(row![label, Space::new().width(Length::Fill)].align_y(Alignment::Center))
+        .push(heading.align_y(Alignment::Center))
         .push(list)
         .spacing(2.0)
         .into()
