@@ -628,6 +628,137 @@ mod tests {
         }
     }
 
+    /// PDF Phase 11 Media matrix — 720p30: full encode → decode round trip
+    /// at the documented 720p30 target profile (1280x720 @ 30 fps). Every
+    /// frame must encode into a non-empty access unit, decode back to the
+    /// same geometry, and the capture timestamps must advance by one frame
+    /// period (33.3 ms) exactly as a real 30 fps capture source would.
+    #[test]
+    fn media_round_trip_720p30() {
+        let cfg = CodecConfig::profile_720p30();
+        let mut encoder = OpenH264Encoder::new(cfg).unwrap();
+        let mut decoder = OpenH264Decoder::new(cfg).unwrap();
+        let mut decoded = 0;
+        for i in 0..3 {
+            let frame = pattern(TARGET_720P30_WIDTH, TARGET_720P30_HEIGHT, i * 33_333);
+            let encoded = encoder.encode(&frame).unwrap();
+            assert!(!encoded.bytes.is_empty(), "720p30 frame {i} must encode");
+            assert_eq!((encoded.width, encoded.height), (TARGET_720P30_WIDTH, TARGET_720P30_HEIGHT));
+            assert_eq!(encoded.timestamp_us, i * 33_333, "capture timestamp preserved");
+            assert_eq!(encoded.sequence, i as u64, "sequence advances per frame");
+            if i == 0 {
+                assert!(encoded.keyframe, "first 720p30 unit is a keyframe");
+            } else {
+                assert!(!encoded.keyframe, "subsequent 720p30 units are delta frames");
+            }
+            let out = decoder.decode(&encoded).unwrap().expect("720p30 frame decodes");
+            assert_eq!((out.width, out.height), (TARGET_720P30_WIDTH, TARGET_720P30_HEIGHT));
+            assert_eq!(out.pixels.len(), (TARGET_720P30_WIDTH * TARGET_720P30_HEIGHT * 4) as usize);
+            decoded += 1;
+        }
+        assert_eq!(decoded, 3, "every 720p30 frame must decode");
+    }
+
+    /// PDF Phase 11 Media matrix — 1080p30: full encode → decode round trip
+    /// at the documented 1080p30 target profile (1920x1080 @ 30 fps).
+    #[test]
+    fn media_round_trip_1080p30() {
+        let cfg = CodecConfig::profile_1080p30();
+        let mut encoder = OpenH264Encoder::new(cfg).unwrap();
+        let mut decoder = OpenH264Decoder::new(cfg).unwrap();
+        let mut decoded = 0;
+        for i in 0..3 {
+            let frame = pattern(TARGET_1080P30_WIDTH, TARGET_1080P30_HEIGHT, i * 33_333);
+            let encoded = encoder.encode(&frame).unwrap();
+            assert!(!encoded.bytes.is_empty(), "1080p30 frame {i} must encode");
+            assert_eq!((encoded.width, encoded.height), (TARGET_1080P30_WIDTH, TARGET_1080P30_HEIGHT));
+            assert_eq!(encoded.timestamp_us, i * 33_333);
+            if i == 0 {
+                assert!(encoded.keyframe, "first 1080p30 unit is a keyframe");
+            } else {
+                assert!(!encoded.keyframe);
+            }
+            let out = decoder.decode(&encoded).unwrap().expect("1080p30 frame decodes");
+            assert_eq!((out.width, out.height), (TARGET_1080P30_WIDTH, TARGET_1080P30_HEIGHT));
+            assert_eq!(out.pixels.len(), (TARGET_1080P30_WIDTH * TARGET_1080P30_HEIGHT * 4) as usize);
+            decoded += 1;
+        }
+        assert_eq!(decoded, 3, "every 1080p30 frame must decode");
+    }
+
+    /// PDF Phase 11 Media matrix — keyframe recovery. The viewer lost frames
+    /// 1..=4 (network drop); on its KeyframeRequest the host forces a
+    /// keyframe and the SAME decoder instance recovers immediately — no
+    /// session restart, no encoder reset.
+    #[test]
+    fn keyframe_recovery_after_dropped_frames() {
+        let cfg = config(64, 48);
+        let mut encoder = OpenH264Encoder::new(cfg).unwrap();
+        let mut decoder = OpenH264Decoder::new(cfg).unwrap();
+        let first = encoder.encode(&pattern(64, 48, 0)).unwrap();
+        assert!(first.keyframe);
+        assert!(decoder.decode(&first).unwrap().is_some(), "keyframe decodes");
+        // Frames 1..=4 are dropped by the viewer (never decoded).
+        for i in 1..=4 {
+            let _ = encoder.encode(&pattern(64, 48, i * 33_333)).unwrap();
+        }
+        // The viewer's KeyframeRequest becomes force_keyframe on the host.
+        encoder.force_keyframe();
+        let recovery = encoder.encode(&pattern(64, 48, 5 * 33_333)).unwrap();
+        assert!(recovery.keyframe, "recovery frame must be independently decodable");
+        let recovered = decoder.decode(&recovery).unwrap().expect("recovery frame decodes");
+        assert_eq!((recovered.width, recovered.height), (64, 48));
+        assert_ne!(
+            recovered.pixels.iter().fold(0u64, |sum, b| sum + *b as u64),
+            0,
+            "recovered frame carries real pixels"
+        );
+    }
+
+    /// PDF Phase 11 Media matrix — long-running share. A two-minute share at
+    /// 30 fps (3600 frames) through the real capture source
+    /// (capture → encode → decode) must stay healthy: every frame encodes
+    /// and decodes, timestamps and sequence numbers advance monotonically,
+    /// and the stream remains fully decodable start to finish.
+    #[test]
+    fn long_running_share_remains_healthy() {
+        use crate::screen_share::capture::{ScreenCapture, TestPatternCapture};
+        const WIDTH: u32 = 160;
+        const HEIGHT: u32 = 90;
+        const FRAMES: u64 = 3600; // 2 minutes at 30 fps
+        let cfg = CodecConfig {
+            width: WIDTH,
+            height: HEIGHT,
+            target_fps: 30,
+            keyframe_interval: 60,
+            ..config(WIDTH, HEIGHT)
+        };
+        let mut capture = TestPatternCapture::new(WIDTH, HEIGHT).unwrap();
+        let mut encoder = OpenH264Encoder::new(cfg).unwrap();
+        let mut decoder = OpenH264Decoder::new(cfg).unwrap();
+        let mut decoded = 0u64;
+        let mut last_timestamp: Option<u64> = None;
+        for i in 0..FRAMES {
+            let frame = capture.capture().unwrap().expect("capture frame");
+            assert_eq!((frame.width, frame.height), (WIDTH, HEIGHT));
+            if let Some(last) = last_timestamp {
+                assert!(
+                    frame.timestamp_us > last,
+                    "capture timestamps advance monotonically (frame {i})"
+                );
+            }
+            last_timestamp = Some(frame.timestamp_us);
+            let encoded = encoder.encode(&frame).unwrap_or_else(|e| panic!("frame {i}: {e}"));
+            assert!(!encoded.bytes.is_empty(), "frame {i} must encode");
+            assert_eq!(encoded.sequence, i, "sequence advances monotonically");
+            assert_eq!(encoded.timestamp_us, frame.timestamp_us);
+            let out = decoder.decode(&encoded).unwrap_or_else(|e| panic!("decode {i}: {e}"));
+            assert!(out.is_some(), "frame {i} must decode");
+            decoded += 1;
+        }
+        assert_eq!(decoded, FRAMES, "every frame of a 2-minute share decodes");
+    }
+
     #[test]
     fn codec_config_applies_capture_config_encode_knobs() {
         let capture = CaptureConfig {

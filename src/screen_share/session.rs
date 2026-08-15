@@ -801,6 +801,93 @@ mod tests {
     #[test] fn accept_requires_pending_invitation() { let key = iroh::SecretKey::generate().public(); let mut manager = SessionManager::default(); let id = ScreenShareSessionId::generate(); assert!(manager.accept_invitation(id, key).is_none()); }
     #[test] fn end_is_idempotent() { let key = iroh::SecretKey::generate().public(); let peer = iroh::SecretKey::generate().public(); let id = ScreenShareSessionId::generate(); let mut manager = SessionManager::default(); manager.start_invitation(id, key, peer, 1); assert!(manager.end(id).is_some()); assert!(manager.end(id).is_none()); assert_eq!(manager.state(id), Some(SessionState::Ended)); }
 
+    /// PDF Phase 11 Security matrix — "no capture before consent". Before
+    /// the viewer's explicit Accept there is NO permission record, so no
+    /// capability (view, input, clipboard) can be authorized; the manager
+    /// ignores anything that is not the Accept. Only the explicit Accept
+    /// opens streaming, and it opens to view-only — remote input still
+    /// requires a separate explicit grant.
+    #[test]
+    fn no_capture_before_consent() {
+        let host = iroh::SecretKey::generate().public();
+        let viewer = iroh::SecretKey::generate().public();
+        let mut manager = SessionManager::default();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let id = ScreenShareSessionId::generate();
+        manager.start_invitation(id, host, viewer, 42);
+        assert_eq!(manager.state(id), Some(SessionState::AwaitingAcceptance));
+        assert!(
+            manager.permissions(id).is_none(),
+            "no permission record before consent — nothing can be authorized"
+        );
+        // A forged Accept from the HOST itself (not the invitee) is ignored.
+        assert!(
+            manager
+                .apply_remote(host, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id }, &tx)
+                .is_none()
+        );
+        assert_eq!(manager.state(id), Some(SessionState::AwaitingAcceptance));
+        // The INVITEE's explicit Accept is the only way into Streaming.
+        assert!(
+            manager
+                .apply_remote(viewer, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id }, &tx)
+                .is_none()
+        );
+        assert_eq!(manager.state(id), Some(SessionState::Streaming));
+        let permissions = manager.permissions(id).expect("permissions after consent");
+        assert!(permissions.is_view_only(), "every share defaults to view-only");
+        assert!(
+            !permissions.allows(id, viewer, Capability::ControlPointer),
+            "no input without an explicit permission grant"
+        );
+        assert!(
+            !permissions.allows(id, viewer, Capability::ControlKeyboard),
+            "no keyboard without an explicit permission grant"
+        );
+        assert!(permissions.allows(id, viewer, Capability::ViewScreen));
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            SessionEvent::Accepted { session_id: id, peer_id: viewer }
+        );
+    }
+
+    /// PDF Phase 11 Security matrix — "peer disconnect cleanup". When the
+    /// peer disconnects (EndSession from the viewer, or the host loop's
+    /// connection-error exit path), the session ends and the permission
+    /// record becomes inactive, so any late input/view attempt fails
+    /// authorization immediately — even if control was granted before the
+    /// disconnect.
+    #[test]
+    fn peer_disconnect_during_streaming_cleans_permissions() {
+        let host = iroh::SecretKey::generate().public();
+        let viewer = iroh::SecretKey::generate().public();
+        let mut manager = SessionManager::default();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let id = ScreenShareSessionId::generate();
+        manager.start_invitation(id, host, viewer, 7);
+        // Stream with control granted (the strongest pre-disconnect state).
+        manager.apply_remote(viewer, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id }, &tx);
+        assert!(manager.grant_control(id, vec![Capability::ControlPointer], &tx).is_some());
+        assert!(manager.permissions(id).unwrap().allows(id, viewer, Capability::ControlPointer));
+        let _ = rx.try_recv(); // Accepted
+        let _ = rx.try_recv(); // ControlChanged(active:true)
+        // The peer disconnects: its EndSession arrives (the host loop's
+        // connection-error path ends the session the same way).
+        manager.apply_remote(viewer, ControlMessage::EndSession { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id }, &tx);
+        assert_eq!(manager.state(id), Some(SessionState::Ended));
+        let permissions = manager.permissions(id).expect("permission record retained");
+        assert!(!permissions.is_active(), "ended session is inactive");
+        assert!(
+            !permissions.allows(id, viewer, Capability::ControlPointer),
+            "late input after disconnect fails authorization"
+        );
+        assert!(
+            !permissions.allows(id, viewer, Capability::ViewScreen),
+            "no late view after disconnect either"
+        );
+        assert_eq!(rx.try_recv().unwrap(), SessionEvent::Ended { session_id: id });
+    }
+
     /// REC-1: begin_reconnect keeps the session record alive (the chat/friend
     /// session survives a transient media failure) but transitions to
     /// Reconnecting and emits the event.
