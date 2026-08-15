@@ -100,6 +100,14 @@ nnnoiseless = { version = "0.5.2", default-features = false, optional = true }
 # (that would drag in a second WGPU version).
 nokhwa = { version = "0.10.11", features = ["input-native"], optional = true }
 openh264 = { version = "0.9.7", optional = true }
+# AV1 screen-share codec (BORU-SS-35): rav1e (BSD-2-Clause) encodes; rav1d
+# (BSD-2-Clause, the memorysafety pure-Rust port of dav1d) decodes. Both are
+# permissive and keep Boru MIT/Apache-2.0-compatible — see
+# docs/screenshare-feature-review.md §3.5 for the H.265 licensing gate.
+# NOTE: rav1d's `asm` feature has a broken 16bpc linkage on current releases;
+# only `bitdepth_8` is enabled (pure-Rust decode path is slower but correct).
+rav1e = { version = "0.8.1", default-features = false, features = ["asm", "threading"], optional = true }
+rav1d = { version = "1.1.0", default-features = false, features = ["bitdepth_8"], optional = true }
 
 # net dependencies (optional)
 futures-concurrency = { version = "7.6.1", optional = true }
@@ -298,7 +306,7 @@ video-playback = ["gui", "dep:iced_video_player"]
 terminal = ["gui", "dep:iced_term"]
 # Screen sharing is deliberately opt-in while the subsystem is integrated.
 # Reuse the OpenH264 dependency already used by video-calls.
-screen-sharing = ["net", "dep:openh264", "dep:zbus", "dep:libloading", "dep:windows-sys", "dep:windows", "dep:x11rb"]
+screen-sharing = ["net", "dep:openh264", "dep:zbus", "dep:libloading", "dep:windows-sys", "dep:windows", "dep:x11rb", "dep:rav1e", "dep:rav1d"]
 # Developer-only live UI editor gate (BORU-UI-08). Enabling this feature
 # turns the live UI editor on in ANY build (including release): boru-ui.toml
 # is loaded, the file watcher runs and live theme redraw is active. It is

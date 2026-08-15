@@ -1008,7 +1008,10 @@ mod tests {
     use super::*;
     use crate::screen_share::session::SessionState;
     use crate::screen_share::{
-        codec::{CodecConfig, OpenH264Decoder, OpenH264Encoder, VideoEncoder, DEFAULT_QUEUE_CAPACITY},
+        codec::{
+            Av1Decoder, Av1Encoder, CodecConfig, OpenH264Decoder, OpenH264Encoder, VideoEncoder,
+            DEFAULT_QUEUE_CAPACITY,
+        },
         capture::{PixelFormat, ScreenCapture},
         transport::{read_unit, QuicScreenTransport, ReadUnit},
         viewer::ViewerPipeline,
@@ -1483,6 +1486,106 @@ mod tests {
         // Viewer decodes through the production pipeline into an RGBA frame.
         let mut pipeline = ViewerPipeline::new(
             OpenH264Decoder::default_profile().unwrap(),
+            *session_id.as_bytes(),
+            DEFAULT_QUEUE_CAPACITY,
+        )
+        .unwrap();
+        pipeline.enqueue(media.header, media.payload).unwrap();
+        pipeline.process();
+        let decoded = pipeline.take_frame().expect("decoded frame available");
+        assert_eq!((decoded.width, decoded.height), (640, 360));
+        assert_eq!(decoded.pixel_format, PixelFormat::Rgba8);
+        assert_eq!(decoded.pixels.len(), 640 * 360 * 4);
+
+        router.shutdown().await.unwrap();
+    }
+
+    /// Full negotiation + media round trip for the AV1 codec path
+    /// (BORU-SS-35): the viewer advertises AV1 support, the host selects it,
+    /// and a rav1e-encoded / rav1d-decoded frame survives the wire.
+    #[tokio::test]
+    async fn end_to_end_invite_accept_av1_media_decode() {
+        let viewer = iroh::Endpoint::bind(presets::Minimal).await.unwrap();
+        let (events_tx, mut events_rx) = mpsc::channel(32);
+        let (media_tx, mut media_rx) = mpsc::channel(64);
+        let protocol = ScreenShareProtocol::with_channels(events_tx, media_tx);
+        let router = Router::builder(viewer.clone())
+            .accept(SCREEN_SHARE_ALPN, protocol.clone())
+            .spawn();
+
+        let host = iroh::Endpoint::bind(presets::Minimal).await.unwrap();
+        let host_pk = host.secret_key().public();
+        let connection = host.connect(viewer.addr(), SCREEN_SHARE_ALPN).await.unwrap();
+        let session_id = ScreenShareSessionId::generate();
+        let transport = QuicScreenTransport::new(connection.clone(), *session_id.as_bytes()).unwrap();
+
+        // Host advertises AV1 alongside H.264; the viewer must select AV1.
+        let hello = Hello {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id,
+            host_id: host_pk,
+            conversation_id: 8,
+            codecs: vec!["h264".into(), "av1".into()],
+            width: 640,
+            height: 360,
+            frame_rate: 15,
+            permission: Permission::ViewOnly,
+        };
+        transport.send_control(&ControlMessage::Hello(hello)).await.unwrap();
+        let event = events_rx.recv().await.unwrap();
+        let SessionEvent::Invitation { session_id: got_id, host_id, .. } = event else {
+            panic!("expected Invitation, got {event:?}");
+        };
+        assert_eq!(got_id, session_id);
+        assert_eq!(host_id, host_pk);
+
+        // Viewer accepts with the mutually supported codec (av1).
+        protocol
+            .send_control(session_id, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id })
+            .await
+            .unwrap();
+        let (mut send, recv) = connection.accept_bi().await.unwrap();
+        match read_unit(recv).await.unwrap() {
+            ReadUnit::Control(ControlMessage::Accept { session_id: id, .. }) => {
+                assert_eq!(id, session_id);
+            }
+            other => panic!("expected Accept control, got {other:?}"),
+        }
+        drop(send);
+
+        // Host captures + encodes one synthetic frame with the AV1 encoder and
+        // streams it. rav1e's low-latency lookahead swallows the first few
+        // frames, so feed until a packet emerges.
+        let config = CodecConfig {
+            width: 640,
+            height: 360,
+            target_fps: 15,
+            ..CodecConfig::default()
+        };
+        let mut capture = TestPatternCapture::new(640, 360).unwrap();
+        let mut encoder = Av1Encoder::new(config).unwrap();
+        let mut encoded = None;
+        for _ in 0..8 {
+            let frame = capture.capture().unwrap().unwrap();
+            if let Ok(packet) = encoder.encode(&frame) {
+                encoded = Some(packet);
+                break;
+            }
+        }
+        let encoded = encoded.expect("av1 packet after lookahead warm-up");
+        assert!(encoded.keyframe, "first emitted av1 unit must be a keyframe");
+        transport.send_frame(&encoded).await.unwrap();
+
+        // Viewer protocol forwards the media unit to the app-facing channel.
+        let media = media_rx.recv().await.unwrap();
+        assert_eq!(media.session_id, session_id);
+        assert_eq!(media.header.sequence, encoded.sequence);
+        assert_eq!(media.header.width as u32, 640);
+        assert_eq!(media.header.height as u32, 360);
+
+        // Viewer decodes through the production pipeline into an RGBA frame.
+        let mut pipeline = ViewerPipeline::new(
+            Av1Decoder::default_profile().unwrap(),
             *session_id.as_bytes(),
             DEFAULT_QUEUE_CAPACITY,
         )

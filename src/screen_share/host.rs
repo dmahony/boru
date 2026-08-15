@@ -18,7 +18,7 @@ use super::{
         ControlChannel, ControlOut, MediaChannel, DEFAULT_CONTROL_QUEUE_CAPACITY,
         DEFAULT_MEDIA_QUEUE_CAPACITY,
     },
-    codec::{CodecConfig, OpenH264Encoder, VideoEncoder},
+    codec::{create_encoder, CodecConfig, VideoEncoder},
     coords::{desktop_to_normalized, scale_sprite_to, CursorMeta, CursorSprite, MonitorGeometry},
     permissions::{Capability, SlidingWindowRateLimiter},
     platform::{capture_dimensions, create_capture_source, CAPTURE_FPS, ActiveCapture},
@@ -306,7 +306,13 @@ async fn run_host_session_inner(
         }
     }
     let (capture_width, capture_height) = capture_dimensions(&capture);
-    let Some(hello) = manager.hello(session_id, vec!["h264".to_string()], capture_width.min(u16::MAX as u32) as u16, capture_height.min(u16::MAX as u32) as u16, capture_fps as u16) else { return SessionTermination::NegotiationFailed };
+    // BORU-SS-35: advertise both codecs, H.264 first for compatibility. The
+    // runtime legacy Accept carries no codec choice, so the host falls back to
+    // the first advertised codec (H.264) — the versioned negotiation path
+    // (`ScreenShareOffer`/`ScreenShareAccept`, tested in session.rs) carries
+    // the real selection, and `create_encoder` honours it.
+    let host_codec = "h264";
+    let Some(hello) = manager.hello(session_id, vec!["h264".to_string(), "av1".to_string()], capture_width.min(u16::MAX as u32) as u16, capture_height.min(u16::MAX as u32) as u16, capture_fps as u16) else { return SessionTermination::NegotiationFailed };
     let addr = endpoint
         .remote_info(peer)
         .await
@@ -502,14 +508,19 @@ async fn run_host_session_inner(
     let mut config = CodecConfig::from_capture_config(&capture_config, encode_width, encode_height);
     let preset_reference = config;
     preset.apply_to_config(&mut config);
-    let Ok(mut encoder) = OpenH264Encoder::new(config) else { return SessionTermination::EncodeInitFailed };
+    // BORU-SS-35: build the encoder for the negotiated codec. The legacy
+    // runtime Accept carries no codec choice so the host falls back to the
+    // first advertised codec (H.264); the versioned negotiation path
+    // (`ScreenShareOffer`/`ScreenShareAccept`, tested in session.rs) carries
+    // the real selection, and `create_encoder` honours it.
+    let Ok(mut encoder) = create_encoder(host_codec, config) else { return SessionTermination::EncodeInitFailed };
     // PDF Phase 12: one structured capture-start line with the negotiated
     // codec, dimensions, bitrate, frame rate and backend. Contains no media
     // data (never screen contents or raw frame bytes).
     tracing::info!(
         event = "capture_start",
         backend = capture.backend_name(),
-        codec = "h264",
+        codec = encoder.metadata().codec.name(),
         width = encode_width,
         height = encode_height,
         bitrate_bps = config.target_bitrate_bps,
@@ -1135,7 +1146,7 @@ async fn run_host_session_inner(
                                     // channel never stalls capture. No media
                                     // data is ever included.
                                     let metrics = ScreenShareSessionMetrics {
-                                        codec: "h264".to_string(),
+                                        codec: encoder.metadata().codec.name().to_string(),
                                         width: config.width,
                                         height: config.height,
                                         fps: config.target_fps,
@@ -1336,7 +1347,7 @@ async fn wait_for_accept(
 /// forced keyframe re-syncs the stream). Returns `true` when a change was
 /// applied.
 fn apply_quality_config(
-    encoder: &mut OpenH264Encoder,
+    encoder: &mut Box<dyn VideoEncoder>,
     config: &mut CodecConfig,
     decision: QualityDecision,
 ) -> bool {
@@ -1362,7 +1373,7 @@ fn apply_quality_config(
 fn apply_preset_override(
     adaptive: &mut AdaptiveQuality,
     config: &mut CodecConfig,
-    encoder: &mut OpenH264Encoder,
+    encoder: &mut Box<dyn VideoEncoder>,
     preset_reference: &CodecConfig,
     preset: QualityPreset,
 ) -> bool {
@@ -1466,7 +1477,7 @@ async fn switch_capture_source(
     source_id: CaptureSourceId,
     capture_config: &CaptureConfig,
     config: &mut CodecConfig,
-    encoder: &mut OpenH264Encoder,
+    encoder: &mut Box<dyn VideoEncoder>,
     adaptive: &mut AdaptiveQuality,
     control: &ControlChannel,
     session_id: ScreenShareSessionId,
@@ -1544,7 +1555,7 @@ async fn recover_capture_source(
     current_source: &mut Option<CaptureSource>,
     capture_config: &CaptureConfig,
     config: &mut CodecConfig,
-    encoder: &mut OpenH264Encoder,
+    encoder: &mut Box<dyn VideoEncoder>,
     adaptive: &mut AdaptiveQuality,
     control: &ControlChannel,
     session_id: ScreenShareSessionId,
