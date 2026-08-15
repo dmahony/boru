@@ -11,6 +11,8 @@ mod boru_dialog;
 mod card_shell;
 #[cfg(feature = "dev-ui")]
 mod component_gallery;
+#[cfg(feature = "dev-ui")]
+mod designer;
 mod connection_details;
 mod dashboard_filters;
 mod dashboard_view_model;

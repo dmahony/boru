@@ -61,6 +61,8 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::card_shell::{CardShell, CARD_ROW_HEIGHT, StatusBadgeKind};
+#[cfg(feature = "dev-ui")]
+use crate::designer::{DesignerMessage, DesignerState};
 use crate::link_preview;
 use crate::notification::backend::NoopBackend;
 use crate::notification::event::{
@@ -3672,6 +3674,10 @@ pub(crate) enum ScreenShareHostState {
 }
 
 pub struct IcedChat {
+    /// Developer-only visual designer overlay state. This is intentionally
+    /// separate from all production chat/network/room state.
+    #[cfg(feature = "dev-ui")]
+    pub designer: DesignerState,
     // ── Navigation ──
     pub screen: Screen,
     /// Embedded terminal tab (feature `terminal`). Spawned eagerly with the
@@ -5554,6 +5560,10 @@ pub(crate) struct ShortCodeRedemption {
 
 #[derive(Debug, Clone)]
 pub enum AppMessage {
+    /// Route developer-only designer actions through the normal Iced update
+    /// pipeline. The variant is absent from production builds.
+    #[cfg(feature = "dev-ui")]
+    Designer(DesignerMessage),
     // ── Navigation ──
     /// Open the chat list screen (go back from a chat).
     GoToChatList,
@@ -8269,6 +8279,8 @@ impl IcedChat {
             scroll_offset: f32::MAX,
             viewport_height: 0.0,
             scroll_to_bottom_pending: false,
+            #[cfg(feature = "dev-ui")]
+            designer: DesignerState::default(),
             settings: app_settings.clone(),
             settings_return_to: None,
             friend_requests_return_to: None,
@@ -10255,6 +10267,8 @@ impl IcedChat {
 
     fn log_variant(message: &AppMessage) -> &'static str {
         match message {
+            #[cfg(feature = "dev-ui")]
+            AppMessage::Designer(_) => "Designer",
             AppMessage::GoToChatList => "GoToChatList",
             AppMessage::OpenRoom(_) => "OpenRoom",
             AppMessage::RoomOpened { .. } => "RoomOpened",
@@ -12602,6 +12616,11 @@ impl IcedChat {
         let _timer = PerfTracker::timer("update_msg", Self::log_variant(&message));
         debug!(message = Self::log_variant(&message), "app update");
         let task = match message {
+            #[cfg(feature = "dev-ui")]
+            AppMessage::Designer(designer_message) => {
+                self.designer.update(designer_message);
+                iced::Task::none()
+            }
             // ── Navigation ────────────────────────────────────────────
             AppMessage::GoToChatList => {
                 // Dismiss any open video-card overflow menu before leaving.
