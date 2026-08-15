@@ -20,6 +20,8 @@ pub mod remote_input;
 pub mod session;
 pub mod stats;
 pub mod transport;
+#[cfg(target_os = "linux")]
+pub mod vaapi;
 pub mod viewer;
 
 #[cfg(test)]
@@ -53,13 +55,15 @@ pub use channels::{
 };
 pub use adaptation::{AdaptiveQuality, PacingController, PacingCounters, QualityDecision, ViewerQualityRequest};
 pub use codec::{
-    CodecConfig, CodecKind, CodecMetadata, EncodedFrame, EncodedPacket, OpenH264Decoder,
-    OpenH264Encoder, QualityProfile, ScreenShareCodec, VideoDecoder, VideoEncoder,
-    DEFAULT_QUEUE_CAPACITY, DEFAULT_WIDTH, DEFAULT_HEIGHT, DEFAULT_FPS, DEFAULT_BITRATE_BPS,
-    DEFAULT_KEYFRAME_INTERVAL, TARGET_720P30_WIDTH, TARGET_720P30_HEIGHT,
-    TARGET_720P30_BITRATE_BPS, TARGET_1080P30_WIDTH, TARGET_1080P30_HEIGHT,
-    TARGET_1080P30_BITRATE_BPS,
+    available_encoder_codecs, create_encoder, create_encoder_for, CodecConfig, CodecKind,
+    CodecMetadata, EncodedFrame, EncodedPacket, OpenH264Decoder, OpenH264Encoder, QualityProfile,
+    ScreenShareCodec, VideoDecoder, VideoEncoder, DEFAULT_QUEUE_CAPACITY, DEFAULT_WIDTH,
+    DEFAULT_HEIGHT, DEFAULT_FPS, DEFAULT_BITRATE_BPS, DEFAULT_KEYFRAME_INTERVAL,
+    TARGET_720P30_WIDTH, TARGET_720P30_HEIGHT, TARGET_720P30_BITRATE_BPS, TARGET_1080P30_WIDTH,
+    TARGET_1080P30_HEIGHT, TARGET_1080P30_BITRATE_BPS,
 };
+#[cfg(target_os = "linux")]
+pub use vaapi::VaapiEncoder;
 pub use host::{run_host_session, HostCommand, SessionTermination, DEMO_FPS, DEMO_HEIGHT, DEMO_WIDTH};
 pub use platform::{
     capture_dimensions, create_capture_source, ActiveCapture, CAPTURE_FPS,
@@ -116,7 +120,6 @@ pub enum ScreenShareErrorKind {
     FormatNegotiation,
     /// A stream/buffer-level failure (short buffer, bad stride, etc.).
     Stream,
-    /// The system-audio backend or output device is missing (BORU-SS-37).
     /// Raised by the audio capture/playback path when the platform cannot
     /// capture or play shared system audio (e.g. no PipeWire runtime, no
     /// WASAPI loopback implementation, or no output device).
@@ -126,6 +129,10 @@ pub enum ScreenShareErrorKind {
     /// The host recovers by falling back to the next available source or
     /// pausing the stream; it never ends the session on this error.
     MonitorLost,
+    /// A hardware-accelerated codec path is unavailable (missing runtime
+    /// library, no GPU/driver, or the platform cannot provide the encoder).
+    /// Callers fall back to the software codec with a clear runtime log.
+    HardwareAccelerationUnavailable,
 }
 
 /// Error returned by a screen-sharing boundary.
@@ -188,6 +195,13 @@ impl ScreenShareError {
     /// the session on this error.
     pub fn monitor_lost(description: impl Into<String>) -> Self {
         Self::new(description).with_kind(ScreenShareErrorKind::MonitorLost)
+    }
+
+    /// Construct a hardware-acceleration-unavailable error. The message names
+    /// the missing piece (runtime library, GPU driver, permission) and the
+    /// fallback the caller should take.
+    pub fn hardware_acceleration_unavailable(description: impl Into<String>) -> Self {
+        Self::new(description).with_kind(ScreenShareErrorKind::HardwareAccelerationUnavailable)
     }
 
     /// Set the error kind (builder-style; used internally).

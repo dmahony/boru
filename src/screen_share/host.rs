@@ -22,7 +22,7 @@ use super::{
         ControlChannel, ControlOut, MediaChannel, DEFAULT_CONTROL_QUEUE_CAPACITY,
         DEFAULT_MEDIA_QUEUE_CAPACITY,
     },
-    codec::{CodecConfig, OpenH264Encoder, VideoEncoder},
+    codec::{available_encoder_codecs, create_encoder, CodecConfig, VideoEncoder},
     coords::{desktop_to_normalized, scale_sprite_to, CursorMeta, CursorSprite, MonitorGeometry},
     permissions::{Capability, SlidingWindowRateLimiter},
     platform::{capture_dimensions, create_capture_source, CAPTURE_FPS, ActiveCapture},
@@ -317,7 +317,7 @@ async fn run_host_session_inner(
         }
     }
     let (capture_width, capture_height) = capture_dimensions(&capture);
-    let Some(hello) = manager.hello(session_id, vec!["h264".to_string()], capture_width.min(u16::MAX as u32) as u16, capture_height.min(u16::MAX as u32) as u16, capture_fps as u16) else { return SessionTermination::NegotiationFailed };
+    let Some(hello) = manager.hello(session_id, available_encoder_codecs(), capture_width.min(u16::MAX as u32) as u16, capture_height.min(u16::MAX as u32) as u16, capture_fps as u16) else { return SessionTermination::NegotiationFailed };
     let addr = endpoint
         .remote_info(peer)
         .await
@@ -519,14 +519,15 @@ async fn run_host_session_inner(
     let mut config = CodecConfig::from_capture_config(&capture_config, encode_width, encode_height);
     let preset_reference = config;
     preset.apply_to_config(&mut config);
-    let Ok(mut encoder) = OpenH264Encoder::new(config) else { return SessionTermination::EncodeInitFailed };
+    let Ok(mut encoder) = create_encoder(config) else { return SessionTermination::EncodeInitFailed };
+    let encoder_codec = encoder.metadata().codec.wire_name();
     // PDF Phase 12: one structured capture-start line with the negotiated
     // codec, dimensions, bitrate, frame rate and backend. Contains no media
     // data (never screen contents or raw frame bytes).
     tracing::info!(
         event = "capture_start",
         backend = capture.backend_name(),
-        codec = "h264",
+        codec = encoder_codec,
         width = encode_width,
         height = encode_height,
         bitrate_bps = config.target_bitrate_bps,
@@ -754,7 +755,7 @@ async fn run_host_session_inner(
                                         requested,
                                         &capture_config,
                                         &mut config,
-                                        &mut encoder,
+                                        encoder.as_mut(),
                                         &mut adaptive,
                                         &control,
                                         session_id,
@@ -777,7 +778,7 @@ async fn run_host_session_inner(
                             ScreenShareMessage::QualityUpdate { session_id: sid, target_bitrate_bps, max_frame_rate, scale_factor, .. } if sid == session_id => {
                                 let request = ViewerQualityRequest { target_bitrate_bps, max_frame_rate, scale_factor };
                                 let decision = adaptive.apply_viewer_request(request);
-                                if apply_quality_config(&mut encoder, &mut config, decision) {
+                                if apply_quality_config(encoder.as_mut(), &mut config, decision) {
                                     tracing::info!(target_bitrate_bps, max_frame_rate, scale_factor, level = adaptive.level(), "screen-share: host applied viewer quality request");
                                 }
                             }
@@ -891,7 +892,7 @@ async fn run_host_session_inner(
                         source_id,
                         &capture_config,
                         &mut config,
-                        &mut encoder,
+                        encoder.as_mut(),
                         &mut adaptive,
                         &control,
                         session_id,
@@ -961,7 +962,7 @@ async fn run_host_session_inner(
                 Some(HostCommand::SetQualityPreset(override_preset)) => {
                     preset = override_preset.unwrap_or_else(|| QualityPreset::for_path(last_path_kind));
                     user_override = override_preset;
-                    if apply_preset_override(&mut adaptive, &mut config, &mut encoder, &preset_reference, preset) {
+                    if apply_preset_override(&mut adaptive, &mut config, encoder.as_mut(), &preset_reference, preset) {
                         tracing::info!(preset = preset.name(), level = adaptive.level(),
                             width = config.width, height = config.height,
                             fps = config.target_fps, bitrate = config.target_bitrate_bps,
@@ -1001,7 +1002,7 @@ async fn run_host_session_inner(
                                 source.id,
                                 &capture_config,
                                 &mut config,
-                                &mut encoder,
+                                encoder.as_mut(),
                                 &mut adaptive,
                                 &control,
                                 session_id,
@@ -1161,7 +1162,7 @@ async fn run_host_session_inner(
                             // controller (level preserved, viewer ceiling
                             // re-scaled) and apply its decision.
                             let decision = adaptive.set_capture_geometry(frame.width, frame.height);
-                            let _ = apply_quality_config(&mut encoder, &mut config, decision);
+                            let _ = apply_quality_config(encoder.as_mut(), &mut config, decision);
                         }
                         let encode_started = std::time::Instant::now();
                         match encoder.encode(&frame) {
@@ -1259,7 +1260,7 @@ async fn run_host_session_inner(
                                                     let mut ceiling = preset_reference;
                                                     path_preset.apply_to_config(&mut ceiling);
                                                     let decision = adaptive.set_ceiling(ceiling);
-                                                    if apply_quality_config(&mut encoder, &mut config, decision) {
+                                                    if apply_quality_config(encoder.as_mut(), &mut config, decision) {
                                                         tracing::info!(path = ?current_path, preset = preset.name(),
                                                             level = adaptive.level(), bitrate = config.target_bitrate_bps,
                                                             fps = config.target_fps, "screen-share: path change applied quality preset ceiling");
@@ -1284,7 +1285,7 @@ async fn run_host_session_inner(
                                     // channel never stalls capture. No media
                                     // data is ever included.
                                     let metrics = ScreenShareSessionMetrics {
-                                        codec: "h264".to_string(),
+                                        codec: encoder.metadata().codec.wire_name().to_string(),
                                         width: config.width,
                                         height: config.height,
                                         fps: config.target_fps,
@@ -1311,7 +1312,7 @@ async fn run_host_session_inner(
                                         skipped_unchanged_frames,
                                         "screen-share: performance metrics"
                                     );
-                                    if apply_quality_config(&mut encoder, &mut config, decision) {
+                                    if apply_quality_config(encoder.as_mut(), &mut config, decision) {
                                         let pacing_counters = pacing.counters();
                                         tracing::info!(level = adaptive.level(), width = config.width, height = config.height,
                                             fps = config.target_fps, bitrate = config.target_bitrate_bps,
@@ -1357,7 +1358,7 @@ async fn run_host_session_inner(
                             &mut current_source,
                             &capture_config,
                             &mut config,
-                            &mut encoder,
+                            encoder.as_mut(),
                             &mut adaptive,
                             &control,
                             session_id,
@@ -1528,7 +1529,7 @@ async fn wait_for_accept(
 /// forced keyframe re-syncs the stream). Returns `true` when a change was
 /// applied.
 fn apply_quality_config(
-    encoder: &mut OpenH264Encoder,
+    encoder: &mut dyn VideoEncoder,
     config: &mut CodecConfig,
     decision: QualityDecision,
 ) -> bool {
@@ -1554,7 +1555,7 @@ fn apply_quality_config(
 fn apply_preset_override(
     adaptive: &mut AdaptiveQuality,
     config: &mut CodecConfig,
-    encoder: &mut OpenH264Encoder,
+    encoder: &mut dyn VideoEncoder,
     preset_reference: &CodecConfig,
     preset: QualityPreset,
 ) -> bool {
@@ -1706,7 +1707,7 @@ async fn switch_capture_source(
     source_id: CaptureSourceId,
     capture_config: &CaptureConfig,
     config: &mut CodecConfig,
-    encoder: &mut OpenH264Encoder,
+    encoder: &mut dyn VideoEncoder,
     adaptive: &mut AdaptiveQuality,
     control: &ControlChannel,
     session_id: ScreenShareSessionId,
@@ -1834,7 +1835,7 @@ async fn recover_capture_source(
     current_source: &mut Option<CaptureSource>,
     capture_config: &CaptureConfig,
     config: &mut CodecConfig,
-    encoder: &mut OpenH264Encoder,
+    encoder: &mut dyn VideoEncoder,
     adaptive: &mut AdaptiveQuality,
     control: &ControlChannel,
     session_id: ScreenShareSessionId,

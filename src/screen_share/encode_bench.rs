@@ -1,4 +1,6 @@
-//! OpenH264 encode CPU-usage + fps benchmark (PDF Task 7.1).
+//! OpenH264 encode CPU-usage + fps benchmark (PDF Task 7.1), plus a VA-API
+//! hardware-accelerated benchmark (PDF Task 2.2 hardware path) that measures
+//! the same throughput/CPU metrics for the reference profiles.
 //!
 //! Measures wall-clock encode throughput and an estimated single-core CPU
 //! utilisation at the target frame rates for the two reference profiles
@@ -11,12 +13,19 @@
 //! ~40x, making the numbers meaningless and the timing assertions fail):
 //! `cargo test --release --features screen-sharing --lib -- --ignored --nocapture encode_bench`
 //!
+//! The VA-API cases additionally require a usable render node with an H.264
+//! encode entrypoint (e.g. `sudo -E cargo test ... vaapi_bench` on an Intel
+//! iGPU box), mirroring the host's own fallback: on machines without one the
+//! hardware case reports unavailable and the OpenH264 cases still pass.
+//!
 //! Results are recorded in `docs/screenshare-encode-benchmark.md`.
 
 use std::time::Instant;
 
 use super::capture::{CapturedFrame, PixelFormat};
 use super::codec::{CodecConfig, OpenH264Encoder, QualityProfile, VideoEncoder};
+#[cfg(target_os = "linux")]
+use super::vaapi::VaapiEncoder;
 
 /// Number of frames encoded per case (enough to amortise keyframe spikes and
 /// scheduler noise; 90 frames ≈ 3 seconds of real-time at 30 fps).
@@ -45,10 +54,13 @@ fn desktop_pattern(width: u32, height: u32, tick: u32) -> CapturedFrame {
 
 /// Encode `FRAMES_PER_CASE` frames and report throughput + CPU estimate.
 /// Returns `(avg_ms_per_frame, encoded_bytes_total)`.
-fn run_case(name: &str, config: CodecConfig, target_fps: u32) -> (f64, u64) {
-    let width = config.width;
-    let height = config.height;
-    let mut encoder = OpenH264Encoder::new(config).unwrap();
+fn run_case(
+    name: &str,
+    mut encoder: Box<dyn VideoEncoder>,
+    width: u32,
+    height: u32,
+    target_fps: u32,
+) -> (f64, u64) {
     // Warm-up keyframe so the timed region measures steady-state deltas.
     let _ = encoder.encode(&desktop_pattern(width, height, 0)).unwrap();
 
@@ -70,20 +82,43 @@ fn run_case(name: &str, config: CodecConfig, target_fps: u32) -> (f64, u64) {
     (avg_ms, bytes)
 }
 
+/// Software (OpenH264) case with the target profile's config.
+fn run_software_case(name: &str, config: CodecConfig, target_fps: u32) -> (f64, u64) {
+    let width = config.width;
+    let height = config.height;
+    run_case(name, Box::new(OpenH264Encoder::new(config).unwrap()), width, height, target_fps)
+}
+
+/// Hardware (VA-API) case; logs and skips when the local GPU cannot encode.
+#[cfg(target_os = "linux")]
+fn run_hardware_case(name: &str, config: CodecConfig, target_fps: u32) -> Option<(f64, u64)> {
+    let width = config.width;
+    let height = config.height;
+    match VaapiEncoder::new(config) {
+        Ok(encoder) => Some(run_case(name, Box::new(encoder), width, height, target_fps)),
+        Err(error) => {
+            println!(
+                "encode_bench: {name}: VA-API hardware encoder unavailable, skipped ({error})"
+            );
+            None
+        }
+    }
+}
+
 #[test]
 #[ignore = "perf-sensitive: must run in release mode (see module docs)"]
 fn benchmark_openh264_720p30_and_1080p30() {
     // 720p30: balanced (default) profile.
-    let (avg_720, _) = run_case("720p30-balanced", CodecConfig::profile_720p30(), 30);
+    let (avg_720, _) = run_software_case("720p30-balanced", CodecConfig::profile_720p30(), 30);
     // 1080p30: balanced (default) profile.
-    let (avg_1080, _) = run_case("1080p30-balanced", CodecConfig::profile_1080p30(), 30);
+    let (avg_1080, _) = run_software_case("1080p30-balanced", CodecConfig::profile_1080p30(), 30);
     // Quality-profile sweep on 1080p30 to show the CPU/quality knob.
-    let (avg_ll, _) = run_case(
+    let (avg_ll, _) = run_software_case(
         "1080p30-lowlatency",
         CodecConfig { quality_profile: QualityProfile::LowLatency, ..CodecConfig::profile_1080p30() },
         30,
     );
-    let (avg_hq, _) = run_case(
+    let (avg_hq, _) = run_software_case(
         "1080p30-highquality",
         CodecConfig { quality_profile: QualityProfile::HighQuality, ..CodecConfig::profile_1080p30() },
         30,
@@ -110,5 +145,34 @@ fn benchmark_openh264_720p30_and_1080p30() {
     assert!(
         avg_hq < 33.0,
         "high-quality 1080p must sustain 30fps (avg {avg_hq:.3}ms)"
+    );
+}
+
+/// VA-API hardware-accelerated benchmark (PDF Task 2.2). Requires a usable
+/// render node with an H.264 encode entrypoint; when absent (software-only
+/// host) the case is skipped rather than failed — mirroring the host's
+/// fallback behaviour. Assertions are deliberately loose: hardware encode
+/// should comfortably beat the 30fps target on any VA-API-capable GPU.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "perf-sensitive + hardware: must run in release mode on a VA-API-capable host (see module docs)"]
+fn benchmark_vaapi_720p30_and_1080p30() {
+    let Some((avg_720, _)) =
+        run_hardware_case("vaapi-720p30-balanced", CodecConfig::profile_720p30(), 30)
+    else {
+        return; // hardware unavailable: OpenH264 cases already covered it.
+    };
+    let Some((avg_1080, _)) =
+        run_hardware_case("vaapi-1080p30-balanced", CodecConfig::profile_1080p30(), 30)
+    else {
+        return;
+    };
+    assert!(
+        avg_720 < 16.0,
+        "VA-API 720p30 must be fast (avg {avg_720:.3}ms/frame)"
+    );
+    assert!(
+        avg_1080 < 16.0,
+        "VA-API 1080p30 must be fast (avg {avg_1080:.3}ms/frame)"
     );
 }

@@ -102,7 +102,7 @@ impl Default for CodecConfig {
 }
 
 impl CodecConfig {
-    fn validate(self) -> Result<Self, ScreenShareError> {
+    pub(crate) fn validate(self) -> Result<Self, ScreenShareError> {
         if self.width == 0 || self.height == 0 || self.width % 2 != 0 || self.height % 2 != 0 {
             return Err(ScreenShareError::new("codec dimensions must be non-zero even values"));
         }
@@ -143,7 +143,53 @@ impl CodecConfig {
 pub struct CodecMetadata { pub codec: CodecKind, pub config: CodecConfig, pub generation: u64 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CodecKind { H264 }
+pub enum CodecKind {
+    /// Software H.264 via OpenH264 (the portable baseline; always available).
+    H264,
+    /// Hardware H.264 via Linux VA-API (libva, MIT-style). Falls back to
+    /// [`Self::H264`] when libva or a usable GPU driver is missing.
+    H264Vaapi,
+    /// Hardware H.264 via Windows Media Foundation (IMFTransform). Typed
+    /// unavailable on non-Windows builds; on Windows it is behind the same
+    /// [`VideoEncoder`] boundary.
+    H264Mf,
+}
+
+impl CodecKind {
+    /// Wire codec name advertised in `Hello.codecs` / `StreamConfig.codec`.
+    ///
+    /// The viewer decodes the resulting stream with the same H.264 baseline
+    /// decoder regardless of which encoder produced it, so the wire name is
+    /// descriptive (for negotiation/statistics) rather than a decode gate.
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::H264 => "h264",
+            Self::H264Vaapi => "h264_vaapi",
+            Self::H264Mf => "h264_mf",
+        }
+    }
+
+    /// Reverse of [`Self::wire_name`]; unknown names map to `None`.
+    pub fn from_wire_name(name: &str) -> Option<Self> {
+        match name.to_ascii_lowercase().as_str() {
+            "h264" => Some(Self::H264),
+            "h264_vaapi" | "vaapi" => Some(Self::H264Vaapi),
+            "h264_mf" | "mf" => Some(Self::H264Mf),
+            _ => None,
+        }
+    }
+
+    /// The software fallback for every kind (OpenH264 produces a baseline
+    /// H.264 stream the viewer always decodes).
+    pub const fn software(self) -> Self {
+        Self::H264
+    }
+
+    /// Whether this kind is a hardware-accelerated encoder.
+    pub const fn is_hardware(self) -> bool {
+        !matches!(self, Self::H264)
+    }
+}
 
 /// One encoded access unit (a keyframe or delta frame) passed to a transport.
 ///
@@ -203,6 +249,17 @@ pub trait VideoEncoder: Send {
     /// Current codec metadata (codec kind, active config, generation).
     fn metadata(&self) -> CodecMetadata;
 
+    /// Whether the next [`encode`](Self::encode) must produce an
+    /// independently decodable keyframe (reconnect, source switch, viewer
+    /// recovery request). The host uses this to decide whether a
+    /// cursor-only metadata frame can be skipped (BORU-SS-33): when a
+    /// keyframe is pending, the frame must be encoded even if the pixels
+    /// are unchanged. Defaults to `false`; encoders that track pending
+    /// keyframes override this.
+    fn is_keyframe_pending(&self) -> bool {
+        false
+    }
+
     /// Back-compat alias for [`Self::force_keyframe`].
     fn request_keyframe(&mut self) { self.force_keyframe(); }
     /// Back-compat alias for [`Self::configure`].
@@ -222,6 +279,108 @@ pub trait ScreenShareCodec: VideoEncoder + VideoDecoder {}
 impl<T: VideoEncoder + VideoDecoder> ScreenShareCodec for T {}
 
 fn fail(error: impl std::fmt::Display) -> ScreenShareError { ScreenShareError::new(error.to_string()) }
+
+/// Create an encoder for `config`, preferring hardware acceleration when it
+/// is available and falling back to the OpenH264 software encoder.
+///
+/// # Fallback orchestration (PDF Task 2.2 hardware path)
+///
+/// On Linux the factory first attempts the VA-API hardware encoder
+/// ([`crate::screen_share::vaapi::VaapiEncoder`]); any init failure — missing
+/// `libva`, no render node, no permission, no H.264 encode entrypoint, driver
+/// error — is a typed [`ScreenShareErrorKind::HardwareAccelerationUnavailable`]
+/// error that is logged clearly and swallowed in favour of the
+/// always-available OpenH264 encoder. The viewer never notices which backend
+/// produced the stream: both emit the same baseline H.264 the decoder expects.
+pub fn create_encoder(config: CodecConfig) -> Result<Box<dyn VideoEncoder>, ScreenShareError> {
+    #[cfg(target_os = "linux")]
+    {
+        match crate::screen_share::vaapi::VaapiEncoder::new(config) {
+            Ok(encoder) => {
+                tracing::info!(
+                    codec = CodecKind::H264Vaapi.wire_name(),
+                    "screen-share: hardware encoder initialised (VA-API)"
+                );
+                return Ok(Box::new(encoder));
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    kind = ?error.kind(),
+                    codec = CodecKind::H264Vaapi.wire_name(),
+                    "screen-share: VA-API hardware encoder unavailable; falling back to OpenH264"
+                );
+            }
+        }
+    }
+    Ok(Box::new(OpenH264Encoder::new(config)?))
+}
+
+/// The codec names this host can actually encode with, ordered by preference
+/// (hardware first). Used to build `Hello.codecs` / `ScreenShareOffer.codecs`
+/// so negotiation advertises the real encoder; the viewer still decodes the
+/// resulting baseline H.264 with its existing decoder.
+pub fn available_encoder_codecs() -> Vec<String> {
+    let mut codecs = Vec::new();
+    #[cfg(target_os = "linux")]
+    if crate::screen_share::vaapi::vaapi_encode_available() {
+        codecs.push(CodecKind::H264Vaapi.wire_name().to_string());
+    }
+    codecs.push(CodecKind::H264.wire_name().to_string());
+    codecs
+}
+
+/// Create an encoder for the explicitly requested codec kind, falling back to
+/// OpenH264 on any hardware-init failure (same orchestration as
+/// [`create_encoder`]).
+///
+/// Hardware kinds that are NOT implemented on the current platform return a
+/// typed [`ScreenShareErrorKind::HardwareAccelerationUnavailable`] error that
+/// the caller maps to the software fallback — never a silent mis-encode. The
+/// Windows Media Foundation path (`h264_mf`, IMFTransform) is documented but
+/// not yet wired; requesting it yields a clear runtime error instead of a
+/// fake "hardware" encode.
+pub fn create_encoder_for(kind: CodecKind, config: CodecConfig) -> Result<Box<dyn VideoEncoder>, ScreenShareError> {
+    match kind {
+        CodecKind::H264 => Ok(Box::new(OpenH264Encoder::new(config)?)),
+        #[cfg(target_os = "linux")]
+        CodecKind::H264Vaapi => match crate::screen_share::vaapi::VaapiEncoder::new(config) {
+            Ok(encoder) => {
+                tracing::info!(
+                    codec = CodecKind::H264Vaapi.wire_name(),
+                    "screen-share: hardware encoder initialised (VA-API)"
+                );
+                Ok(Box::new(encoder))
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    kind = ?error.kind(),
+                    codec = CodecKind::H264Vaapi.wire_name(),
+                    "screen-share: VA-API hardware encoder unavailable; falling back to OpenH264"
+                );
+                Ok(Box::new(OpenH264Encoder::new(config)?))
+            }
+        },
+        #[cfg(not(target_os = "linux"))]
+        CodecKind::H264Vaapi => {
+            tracing::warn!(
+                codec = CodecKind::H264Vaapi.wire_name(),
+                "screen-share: VA-API is Linux-only; falling back to OpenH264"
+            );
+            Ok(Box::new(OpenH264Encoder::new(config)?))
+        }
+        CodecKind::H264Mf => {
+            // Media Foundation H.264 encoder (IMFTransform) — documented
+            // upstream API (learn.microsoft.com/en-us/windows/win32/medfound/h-264-video-encoder).
+            // Not yet wired: return a typed unavailable error so callers can
+            // fall back instead of believing hardware acceleration happened.
+            Err(ScreenShareError::hardware_acceleration_unavailable(
+                "Windows Media Foundation H.264 encoder (h264_mf) is not wired in this build; use the OpenH264 fallback",
+            ))
+        }
+    }
+}
 
 fn rgba_to_rgb(frame: &CapturedFrame) -> Result<Vec<u8>, ScreenShareError> {
     if !matches!(frame.pixel_format, PixelFormat::Bgra8 | PixelFormat::Rgba8) {
@@ -273,15 +432,6 @@ impl OpenH264Encoder {
         if self.shutdown { return Err(ScreenShareError::new("encoder is shut down")); }
         Ok(())
     }
-
-    /// Whether the next encode must produce an independently decodable
-    /// keyframe (BORU-SS-33). The host uses this to decide whether a
-    /// cursor-only metadata frame can be SKIPPED: when a keyframe is
-    /// pending (reconnect, source switch, viewer recovery request), the
-    /// frame must be encoded even if the pixels are unchanged.
-    pub fn is_keyframe_pending(&self) -> bool {
-        self.keyframe_requested
-    }
 }
 
 fn make_encoder(config: CodecConfig) -> Result<openh264::encoder::Encoder, ScreenShareError> {
@@ -322,6 +472,10 @@ impl VideoEncoder for OpenH264Encoder {
         let config = config.validate()?;
         self.encoder = make_encoder(config)?; self.config = config; self.generation += 1;
         self.frames_since_keyframe = 0; self.keyframe_requested = true; Ok(())
+    }
+
+    fn is_keyframe_pending(&self) -> bool {
+        self.keyframe_requested
     }
 
     fn encode(&mut self, frame: &CapturedFrame) -> Result<EncodedPacket, ScreenShareError> {
@@ -441,6 +595,22 @@ mod tests {
         let mut decoder = OpenH264Decoder::new(cfg).unwrap(); let decoded = decoder.decode(&encoded).unwrap().unwrap();
         assert_eq!((decoded.width, decoded.height), (32, 24)); assert_eq!(decoded.pixels.len(), source.pixels.len());
         assert_ne!(decoded.pixels.iter().fold(0u64, |sum, b| sum + *b as u64), 0);
+    }
+    #[test]
+    fn factory_rejects_unwired_hardware_kinds_with_typed_error() {
+        // Windows Media Foundation (h264_mf) is documented but not wired in
+        // this build: requesting it must produce a typed
+        // HardwareAccelerationUnavailable error, never a silent software
+        // encode (BORU-SS-34 fallback contract).
+        let error = match create_encoder_for(CodecKind::H264Mf, config(32, 24)) {
+            Err(error) => error,
+            Ok(_) => panic!("h264_mf must not silently succeed in this build"),
+        };
+        assert_eq!(error.kind(), crate::screen_share::ScreenShareErrorKind::HardwareAccelerationUnavailable);
+        // Unknown wire names never map to a codec kind (negotiation rejects
+        // them rather than guessing).
+        assert_eq!(CodecKind::from_wire_name("vp8"), None);
+        assert_eq!(CodecKind::from_wire_name(""), None);
     }
     #[test]
     fn request_reset_and_reconfigure_are_explicit() {
