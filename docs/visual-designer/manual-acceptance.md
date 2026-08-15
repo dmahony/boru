@@ -6,7 +6,7 @@ BORU-DESIGN-27 manual walkthrough of the visual designer.
 **Source:** `boru_visual_drag_drop_designer_agent_tasks.pdf` (attachment
 `t_e9dabd52`), section 27 "Manual Acceptance Tests" — 10 checks.
 
-**Build:** `boru` v0.204.0 (boru-core), `dev-ui` feature, debug binary built on
+**Build:** `boru` v0.204.1 (boru-core), `dev-ui` feature, debug binary built on
 DEBSRV. Repo origin: https://github.com/dmahony/boru.git.
 
 ## Launching Designer Mode (dev-ui gate)
@@ -25,9 +25,14 @@ the file watcher is spawned, and the Visual Designer toggle / inspector
 (`Ctrl+Shift+D`) are available. Release builds without the feature are always
 off (unit-tested: `dev_ui_gate_release_without_feature_is_always_off`).
 
-Verified against origin/main (includes BORU-DESIGN-27A `1332aa35`):
+Verified against origin/main (includes BORU-DESIGN-27A `1332aa35` and the
+BORU-DESIGN-27 history integration):
 
 - `rb check --features dev-ui` → passed (DEBSRV).
+- `rb check` with the developer feature disabled → passed (DEBSRV); the
+  production build path remains free of designer modules and behavior.
+- `rb test --features dev-ui --bin boru -- designer` → 16 passed, 0 failed
+  (including bounded undo/redo history and cancelled-transaction coverage).
 - `rb build --features dev-ui` → passed; binary launched under Xvfb/Openbox and
   rendered the normal Home screen (isolated data dir).
 - Designer toggle shows `VISUAL DESIGNER ACTIVE` and blue drag handles on the
@@ -42,10 +47,10 @@ Verified against origin/main (includes BORU-DESIGN-27A `1332aa35`):
 | 3 | Save, restart Boru, and verify the new order persists | PASS | Reorder edits now flow through `set_layout_overrides`, which is the existing atomic `boru-layout.toml` save/reload seam. The typed TOML transaction round-trip regression passed; no desktop coordinates are serialized. |
 | 4 | Resize a supported card/section and verify TOML receives the semantic dimension | PASS | Sidebar/chat resize gestures now write the corresponding typed override (`sidebar.width`, `chat.message_max_width`, or `chat.bubble_max_width`) before save. Pointer coordinates remain transient. The resize constraint regression passed. |
 | 5 | Change grid columns and verify immediate layout | PASS | Existing grid-column controls already use `apply_layout_int` and `set_layout_overrides`; the dev-ui designer test matrix passed the breakpoint-specific grid edit and the full `rb check --features dev-ui` passed. |
-| 6 | Undo and redo each operation (reorder, resize, grid) | BLOCKED | No live transaction could be completed. Automated designer history coverage exists from BORU-DESIGN-26. |
+| 6 | Undo and redo each operation (reorder, resize, grid) | PASS (automated) | The designer history suite now covers reorder/resize/grid snapshots, redo clearing, bounded history, and cancelled gestures. The 16-test targeted suite passed. A second live desktop walkthrough remains blocked. |
 | 7 | Edit `boru-layout.toml` externally and verify the designer/app updates | BLOCKED | The watcher path was not exercised because no live edit could be committed; the file remained `[screens]`. |
 | 8 | Test narrow and maximized windows after edits | BLOCKED | No live edit was available to carry across window sizes. |
-| 9 | Verify normal buttons/cards cannot accidentally execute their application action while being dragged | PASS (partial) | Designer Mode exposed dedicated blue grip handles rather than converting normal card bodies into drag targets. A complete drag attempt remains blocked by the missing reorder transaction. |
+| 9 | Verify normal buttons/cards cannot accidentally execute their application action while being dragged | PASS (partial) | Designer Mode exposes dedicated blue grip handles rather than converting normal card bodies into drag targets. The reorder transaction is covered by automated tests; a complete live drag attempt remains blocked. |
 | 10 | Disable Designer Mode and verify normal Boru behaviour returns | PASS | The Visual Designer toggle was reachable and normal-mode Home rendering was restored when inactive; no application-service restart was observed. |
 
 ## Previously observed gap (resolved by executor)
@@ -61,4 +66,5 @@ existing validation, lazy-tree invalidation, and atomic TOML persistence seams.
 First-walkthrough evidence captures (not committed): `/tmp/boru-qa-t27/`
 (`normal.png`, `inspector-wm.png`, `designer-on.png`, `quick-actions-selected.png`,
 `public-selected.png`, `public-up.png`); live app logs `app.log` / `fixed.log`;
-DEBSRV `rb check` / `rb build` with `--features dev-ui` both exit 0.
+DEBSRV `rb check` / `rb build` with `--features dev-ui` both exit 0. The final
+regression checks were run against `origin/main` at `ce245d01`.
