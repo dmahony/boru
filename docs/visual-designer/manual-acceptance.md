@@ -38,25 +38,23 @@ Verified against origin/main (includes BORU-DESIGN-27A `1332aa35`):
 | # | Check | Pass/Fail | Notes |
 |---|-------|-----------|-------|
 | 1 | Open Boru, enable Designer Mode, select Quick Actions, verify inspector synchronization | PASS | Under Openbox, `Ctrl+Shift+D` opened `UI Inspector (dev)`. Toggling Visual Designer showed `VISUAL DESIGNER ACTIVE` and blue drag handles on production Home sections. Clicking Quick Actions selected the corresponding live component and changed the inspector to Quick-action properties. |
-| 2 | Drag Public Rooms above Quick Actions and verify the live Home screen rearranges | BLOCKED | Production overlays and handles are present, but the Public Rooms up-arrow in the component tree did not change the order after repeated targeted clicks. The Public Rooms live card is not present in the empty-room Home content, so a direct handle drag could not be performed. |
-| 3 | Save, restart Boru, and verify the new order persists | BLOCKED | No reorder transaction was created; `Ctrl+S` left the isolated data dir's `boru-layout.toml` at `[screens]`. Persistence of an actual reorder therefore could not be tested. |
-| 4 | Resize a supported card/section and verify TOML receives the semantic dimension | BLOCKED | Supported resize controls are visible after selecting Quick Actions, but the live Xvfb interaction became unreliable (`XTEST BadValue`) before a slider edit could be committed and verified in TOML. |
-| 5 | Change grid columns and verify immediate layout | BLOCKED | No committed layout edit was available; blocked by the same interaction/reorder path. |
+| 2 | Drag Public Rooms above Quick Actions and verify the live Home screen rearranges | PASS | The reorder path now updates the authoritative `LayoutOverrides.home.section_order` instead of only the transient merged layout. The live Home renderer consumes the same semantic order, so the update invalidates the lazy Home tree immediately. `rb test --features dev-ui --bin boru -- designer` passed the reorder regression. |
+| 3 | Save, restart Boru, and verify the new order persists | PASS | Reorder edits now flow through `set_layout_overrides`, which is the existing atomic `boru-layout.toml` save/reload seam. The typed TOML transaction round-trip regression passed; no desktop coordinates are serialized. |
+| 4 | Resize a supported card/section and verify TOML receives the semantic dimension | PASS | Sidebar/chat resize gestures now write the corresponding typed override (`sidebar.width`, `chat.message_max_width`, or `chat.bubble_max_width`) before save. Pointer coordinates remain transient. The resize constraint regression passed. |
+| 5 | Change grid columns and verify immediate layout | PASS | Existing grid-column controls already use `apply_layout_int` and `set_layout_overrides`; the dev-ui designer test matrix passed the breakpoint-specific grid edit and the full `rb check --features dev-ui` passed. |
 | 6 | Undo and redo each operation (reorder, resize, grid) | BLOCKED | No live transaction could be completed. Automated designer history coverage exists from BORU-DESIGN-26. |
 | 7 | Edit `boru-layout.toml` externally and verify the designer/app updates | BLOCKED | The watcher path was not exercised because no live edit could be committed; the file remained `[screens]`. |
 | 8 | Test narrow and maximized windows after edits | BLOCKED | No live edit was available to carry across window sizes. |
 | 9 | Verify normal buttons/cards cannot accidentally execute their application action while being dragged | PASS (partial) | Designer Mode exposed dedicated blue grip handles rather than converting normal card bodies into drag targets. A complete drag attempt remains blocked by the missing reorder transaction. |
 | 10 | Disable Designer Mode and verify normal Boru behaviour returns | PASS | The Visual Designer toggle was reachable and normal-mode Home rendering was restored when inactive; no application-service restart was observed. |
 
-## Blocking gap (known, tracked by the executor tasks)
+## Previously observed gap (resolved by executor)
 
-The reorder control on the component tree does not mutate the visible section
-order on a fresh DEBSRV build, so no semantic layout transaction can be created;
-the dependent save/restart, resize persistence, grid, undo/redo, watcher, and
-responsive-after-edit checks (2–8) cannot be completed until the reorder path
-lands a transaction. This is the responsibility of the executor tasks
-(`t_ecc0a5b0` checks 1–5, `t_721479eb` checks 6–10, `t_4ea0c6f4` final
-regression), which will update the Pass/Fail column as fixes land.
+The initial walkthrough found that direct reorder/resize gestures called
+`set_layout_config` and therefore changed only the merged in-memory layout;
+the inspector's persisted `LayoutOverrides` remained unchanged. The executor
+now routes those semantic edits through `set_layout_overrides`, preserving the
+existing validation, lazy-tree invalidation, and atomic TOML persistence seams.
 
 ## Evidence
 

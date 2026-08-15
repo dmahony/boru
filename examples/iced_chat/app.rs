@@ -19755,7 +19755,10 @@ impl IcedChat {
         let mut layout = self.active_layout.clone();
         let moved = layout.home.section_order.remove(source);
         layout.home.section_order.insert(target, moved);
-        self.set_layout_config(layout);
+        let mut overrides = self.layout_overrides.clone();
+        overrides.home.get_or_insert_with(Default::default).section_order =
+            Some(layout.home.section_order.clone());
+        self.set_layout_overrides(overrides);
         self.designer.update(DesignerMessage::MarkDirty);
     }
 
@@ -19773,7 +19776,10 @@ impl IcedChat {
         let mut layout = before.clone();
         let section = layout.home.section_order.remove(index);
         layout.home.section_order.insert(target, section);
-        self.set_layout_config(layout);
+        let mut overrides = self.layout_overrides.clone();
+        overrides.home.get_or_insert_with(Default::default).section_order =
+            Some(layout.home.section_order.clone());
+        self.set_layout_overrides(overrides);
         self.designer_history.record(&before, &self.active_layout);
         self.designer.update(DesignerMessage::MarkDirty);
     }
@@ -19841,7 +19847,22 @@ impl IcedChat {
             operation.current = current;
             operation.origin = current;
         }
-        self.set_layout_config(layout);
+        let mut overrides = self.layout_overrides.clone();
+        match component {
+            crate::designer::ComponentId::Sidebar => {
+                overrides.sidebar.get_or_insert_with(Default::default).width = Some(value);
+            }
+            crate::designer::ComponentId::ChatMessageList => {
+                overrides.chat.get_or_insert_with(Default::default).message_max_width =
+                    Some(value);
+            }
+            crate::designer::ComponentId::ChatComposer => {
+                overrides.chat.get_or_insert_with(Default::default).bubble_max_width =
+                    Some(value);
+            }
+            _ => return,
+        }
+        self.set_layout_overrides(overrides);
         self.designer.update(DesignerMessage::MarkDirty);
         debug!(component = %component, value, "designer resize updated");
     }
