@@ -114,6 +114,10 @@ impl IcedChat {
             self.designer.enabled,
             self.designer.hovered_component,
             self.designer.selected_component,
+            self.designer.resize_operation.as_ref().and_then(|op| {
+                (op.component == crate::designer::ComponentId::ChatMessageList)
+                    .then_some(self.boru_layout().chat.message_max_width)
+            }),
         );
         let composer = self.view_composer();
         #[cfg(feature = "dev-ui")]
@@ -123,6 +127,10 @@ impl IcedChat {
             self.designer.enabled,
             self.designer.hovered_component,
             self.designer.selected_component,
+            self.designer.resize_operation.as_ref().and_then(|op| {
+                (op.component == crate::designer::ComponentId::ChatComposer)
+                    .then_some(self.boru_layout().chat.bubble_max_width)
+            }),
         );
         let content = content
         .push(chat_log)

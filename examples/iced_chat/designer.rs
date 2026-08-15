@@ -79,6 +79,7 @@ pub(crate) fn overlay<'a>(
     enabled: bool,
     hovered: Option<ComponentId>,
     selected: Option<ComponentId>,
+    resize_value: Option<f32>,
 ) -> Element<'a, crate::app::AppMessage> {
     if !enabled {
         return content;
@@ -129,6 +130,34 @@ pub(crate) fn overlay<'a>(
     .on_release(crate::app::AppMessage::Designer(
         DesignerMessage::CommitDrag,
     ));
+    let resize_handle = mouse_area(
+        container(text("↘").size(14.0).color(Color::WHITE))
+            .padding(Padding::from(3.0))
+            .style(|_| container::Style {
+                background: Some(Background::Color(Color::from_rgba(0.72, 0.32, 0.08, 0.94))),
+                border: Border {
+                    color: Color::from_rgb(1.0, 0.78, 0.32),
+                    width: 1.0,
+                    radius: 4.0.into(),
+                },
+                ..Default::default()
+            }),
+    )
+    .on_press(crate::app::AppMessage::Designer(DesignerMessage::StartResize {
+        component,
+        origin: Point::ORIGIN,
+    }))
+    .on_move(|point| crate::app::AppMessage::Designer(DesignerMessage::UpdateResize(point)))
+    .on_release(crate::app::AppMessage::Designer(DesignerMessage::CancelResize));
+    let resize_label = resize_value.map(|value| {
+        container(text(format!("{value:.0}px")).size(11.0).color(Color::WHITE))
+            .padding(Padding::from(3.0))
+            .style(|_| container::Style {
+                background: Some(Background::Color(Color::from_rgba(0.72, 0.32, 0.08, 0.94))),
+                border: Border::default(),
+                ..Default::default()
+            })
+    });
     let layered = Stack::new()
         .push(container(content).style(move |_| container::Style {
             border: if is_selected {
@@ -158,6 +187,26 @@ pub(crate) fn overlay<'a>(
             .width(Length::Shrink)
             .height(Length::Shrink),
     );
+    let supports_resize = matches!(
+        component,
+        ComponentId::Sidebar | ComponentId::ChatMessageList | ComponentId::ChatComposer
+    );
+    let layered = if supports_resize {
+        Stack::new()
+            .push(layered)
+            .push(
+                container(resize_handle)
+                    .width(Length::Shrink)
+                    .height(Length::Shrink),
+            )
+            .push(
+                container(resize_label.unwrap_or_else(|| container(text(""))))
+                    .width(Length::Shrink)
+                    .height(Length::Shrink),
+            )
+    } else {
+        layered
+    };
     mouse_area(layered)
         .on_enter(crate::app::AppMessage::Designer(DesignerMessage::Hover(
             Some(component),
@@ -392,5 +441,21 @@ mod tests {
         for id in ComponentId::ALL {
             assert_eq!(id.as_str().parse::<ComponentId>().unwrap(), id);
         }
+    }
+
+    #[test]
+    fn resize_operation_tracks_pointer_until_cancelled() {
+        let mut state = DesignerState::default();
+        state.update(DesignerMessage::Enter);
+        state.update(DesignerMessage::StartResize {
+            component: ComponentId::Sidebar,
+            origin: Point::new(10.0, 20.0),
+        });
+        state.update(DesignerMessage::UpdateResize(Point::new(42.0, 24.0)));
+        let operation = state.resize_operation.as_ref().expect("resize started");
+        assert_eq!(operation.component, ComponentId::Sidebar);
+        assert_eq!(operation.current, Point::new(42.0, 24.0));
+        state.update(DesignerMessage::CancelResize);
+        assert!(state.resize_operation.is_none());
     }
 }

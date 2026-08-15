@@ -1338,6 +1338,7 @@ impl IcedChat {
             designer_enabled,
             designer_hovered,
             designer_selected,
+            None,
         );
 
         // ── Mesh Health card ──
@@ -1498,6 +1499,7 @@ impl IcedChat {
             designer_enabled,
             designer_hovered,
             designer_selected,
+            None,
         );
 
         // ── Quick actions: four equal, full-card targets (Figure 3) ──
@@ -1519,6 +1521,7 @@ impl IcedChat {
             designer_enabled,
             designer_hovered,
             designer_selected,
+            None,
         );
 
         // DLMGR-01: home entry point — a compact outline button beside the
@@ -1584,6 +1587,7 @@ impl IcedChat {
             designer_enabled,
             designer_hovered,
             designer_selected,
+            None,
         );
         let tunnels_card = iced::widget::lazy(dep.tunnels.clone(), move |card_dep| {
             Self::view_tunnels_card(card_dep, btheme)
@@ -1595,6 +1599,7 @@ impl IcedChat {
             designer_enabled,
             designer_hovered,
             designer_selected,
+            None,
         );
 
         // ── Page header: greeting + welcome + Download Manager ──

@@ -12631,6 +12631,10 @@ impl IcedChat {
                     self.update_home_drag(point);
                     return iced::Task::none();
                 }
+                if let DesignerMessage::UpdateResize(point) = designer_message {
+                    self.update_resize(point);
+                    return iced::Task::none();
+                }
                 if matches!(designer_message, DesignerMessage::CommitDrag) {
                     self.commit_home_drag();
                     self.designer.update(DesignerMessage::CommitDrag);
@@ -19576,6 +19580,46 @@ impl IcedChat {
         self.designer.update(DesignerMessage::MarkDirty);
     }
 
+    /// Apply a resize gesture to the semantic layout field exposed by the
+    /// selected component. Pointer coordinates are transient; only the typed
+    /// width value is written back to the live LayoutConfig.
+    #[cfg(feature = "dev-ui")]
+    fn update_resize(&mut self, current: iced::Point) {
+        let Some(operation) = self.designer.resize_operation.as_ref() else {
+            return;
+        };
+        let delta = current.x - operation.origin.x;
+        let component = operation.component;
+        let mut layout = self.active_layout.clone();
+        let value = match component {
+            crate::designer::ComponentId::Sidebar => {
+                let value = (layout.sidebar.width + delta)
+                    .clamp(layout.sidebar.width_min, layout.sidebar.width_max);
+                layout.sidebar.width = value;
+                value
+            }
+            crate::designer::ComponentId::ChatMessageList => {
+                let value = (layout.chat.message_max_width + delta)
+                    .clamp(1.0, layout.chat.bubble_max_width);
+                layout.chat.message_max_width = value;
+                value
+            }
+            crate::designer::ComponentId::ChatComposer => {
+                let value = (layout.chat.bubble_max_width + delta).clamp(1.0, 1200.0);
+                layout.chat.bubble_max_width = value;
+                value
+            }
+            _ => return,
+        };
+        if let Some(operation) = self.designer.resize_operation.as_mut() {
+            operation.current = current;
+            operation.origin = current;
+        }
+        self.set_layout_config(layout);
+        self.designer.update(DesignerMessage::MarkDirty);
+        debug!(component = %component, value, "designer resize updated");
+    }
+
     /// BORU-LAYOUT-03: replace the live layout AND bump `layout_revision` so
     /// lazy/prewarm caches rebuild. Only layout state is touched — theme,
     /// networking, gossip, rooms, tunnels, media playback, chat history and
@@ -20586,6 +20630,10 @@ impl IcedChat {
             self.designer.enabled,
             self.designer.hovered_component,
             self.designer.selected_component,
+            self.designer.resize_operation.as_ref().and_then(|op| {
+                (op.component == crate::designer::ComponentId::Sidebar)
+                    .then_some(self.boru_layout().sidebar.width)
+            }),
         );
         #[cfg(feature = "dev-ui")]
         let main_panel = self.inspect_region(self.component_id_for_screen(), main_panel);
