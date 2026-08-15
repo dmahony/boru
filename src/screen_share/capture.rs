@@ -4,6 +4,7 @@
 use std::collections::VecDeque;
 
 use super::coords::MonitorGeometry;
+use super::codec::QualityProfile;
 use super::ScreenShareError;
 
 /// Pixel layout of a normalized captured frame.
@@ -203,6 +204,12 @@ pub struct CaptureSource {
 }
 
 /// Configuration for a capture session.
+///
+/// Carries both capture-side settings (`target_fps`,
+/// `preferred_pixel_format`) and the encode knobs the host forwards into the
+/// encoder config (PDF Task 7.1): bitrate, keyframe interval and quality
+/// profile. Backends only consume the capture fields; the encode fields ride
+/// the same config so the whole pipeline is configured from one place.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaptureConfig {
     /// Target capture rate in frames per second.
@@ -211,6 +218,12 @@ pub struct CaptureConfig {
     /// equivalent format the platform provides; the produced frames always
     /// carry their actual [`PixelFormat`].
     pub preferred_pixel_format: PixelFormat,
+    /// Target encode bitrate in bits per second (forwarded to the codec).
+    pub target_bitrate_bps: u32,
+    /// Maximum distance between keyframes, in frames (forwarded to the codec).
+    pub keyframe_interval: u64,
+    /// Quality/latency profile applied to the encoder (PDF Task 7.1).
+    pub quality_profile: QualityProfile,
 }
 
 impl Default for CaptureConfig {
@@ -218,6 +231,9 @@ impl Default for CaptureConfig {
         Self {
             target_fps: 15,
             preferred_pixel_format: PixelFormat::Bgra8,
+            target_bitrate_bps: super::codec::DEFAULT_BITRATE_BPS,
+            keyframe_interval: super::codec::DEFAULT_KEYFRAME_INTERVAL,
+            quality_profile: QualityProfile::Balanced,
         }
     }
 }

@@ -5,9 +5,17 @@
 //! reconfigure_bitrate, shutdown — plus the codec-agnostic [`CodecConfig`] and
 //! [`EncodedPacket`] types, so future hardware codecs (VA-API, NVENC, DXVA)
 //! can implement the same boundary without depending on OpenH264.
+//!
+//! The concrete [`OpenH264Encoder`] (PDF Task 7.1 baseline) drives OpenH264
+//! through its documented `EncoderConfig` knobs only: usage type, complexity,
+//! QP range, bitrate, frame rate, rate-control mode and intra-frame period
+//! (see the OpenH264 docs for `SCREEN_CONTENT_REAL_TIME`, complexity levels
+//! and QP semantics). The [`QualityProfile`] enum maps the Boru-visible
+//! quality knob onto those documented settings.
 #![allow(missing_docs)]
 
-use super::{capture::{CapturedFrame, PixelFormat}, ScreenShareError};
+use super::capture::{CaptureConfig, CapturedFrame, PixelFormat};
+use super::ScreenShareError;
 
 pub const DEFAULT_WIDTH: u32 = 1920;
 pub const DEFAULT_HEIGHT: u32 = 1080;
@@ -15,6 +23,50 @@ pub const DEFAULT_FPS: u32 = 30;
 pub const DEFAULT_BITRATE_BPS: u32 = 4_000_000;
 pub const DEFAULT_KEYFRAME_INTERVAL: u64 = 60;
 pub const DEFAULT_QUEUE_CAPACITY: usize = 2;
+
+/// 720p target profile (PDF Task 7.1): 1280x720 @ 30 fps.
+pub const TARGET_720P30_WIDTH: u32 = 1280;
+pub const TARGET_720P30_HEIGHT: u32 = 720;
+/// 720p30 default bitrate (2.5 Mbps is a sane LAN/relay balance for
+/// screen content at 720p30).
+pub const TARGET_720P30_BITRATE_BPS: u32 = 2_500_000;
+
+/// 1080p target profile (PDF Task 7.1): 1920x1080 @ 30 fps.
+pub const TARGET_1080P30_WIDTH: u32 = 1920;
+pub const TARGET_1080P30_HEIGHT: u32 = 1080;
+/// 1080p30 default bitrate (4 Mbps — the existing default).
+pub const TARGET_1080P30_BITRATE_BPS: u32 = 4_000_000;
+
+/// Quality/latency trade-off exposed through configuration (PDF Task 7.1).
+///
+/// Maps onto the documented OpenH264 encoder knobs — usage type
+/// (`SCREEN_CONTENT_REAL_TIME` is the screen-sharing usage mode), complexity
+/// (Low/Medium/High) and QP range (lower QP = higher quality, more CPU).
+/// The wire representation is a small `u8` (`as_u8`/`from_u8`) so it can ride
+/// on the versioned `StreamConfig` protocol message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QualityProfile {
+    /// Default: screen-content real-time usage, medium complexity, default QP.
+    #[default]
+    Balanced,
+    /// Fastest encode, lowest CPU: low complexity, slightly wider QP range.
+    LowLatency,
+    /// Crispest output: high complexity, tighter QP range (higher CPU).
+    HighQuality,
+}
+
+impl QualityProfile {
+    pub const fn name(self) -> &'static str {
+        match self { Self::Balanced => "balanced", Self::LowLatency => "low-latency", Self::HighQuality => "high-quality" }
+    }
+    /// Stable wire value: 0 = Balanced, 1 = LowLatency, 2 = HighQuality.
+    pub const fn as_u8(self) -> u8 {
+        match self { Self::Balanced => 0, Self::LowLatency => 1, Self::HighQuality => 2 }
+    }
+    pub const fn from_u8(value: u8) -> Option<Self> {
+        match value { 0 => Some(Self::Balanced), 1 => Some(Self::LowLatency), 2 => Some(Self::HighQuality), _ => None }
+    }
+}
 
 /// Encoder/decoder configuration negotiated for a screen stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,13 +77,15 @@ pub struct CodecConfig {
     pub target_bitrate_bps: u32,
     pub keyframe_interval: u64,
     pub max_queue_depth: usize,
+    /// Quality/latency profile applied to the encoder (PDF Task 7.1).
+    pub quality_profile: QualityProfile,
 }
 
 impl Default for CodecConfig {
     fn default() -> Self {
         Self { width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT, target_fps: DEFAULT_FPS,
             target_bitrate_bps: DEFAULT_BITRATE_BPS, keyframe_interval: DEFAULT_KEYFRAME_INTERVAL,
-            max_queue_depth: DEFAULT_QUEUE_CAPACITY }
+            max_queue_depth: DEFAULT_QUEUE_CAPACITY, quality_profile: QualityProfile::Balanced }
     }
 }
 
@@ -44,6 +98,32 @@ impl CodecConfig {
             return Err(ScreenShareError::new("codec rates and queue depth must be non-zero"));
         }
         Ok(self)
+    }
+
+    /// 720p @ 30 fps target profile (PDF Task 7.1).
+    pub fn profile_720p30() -> Self {
+        Self { width: TARGET_720P30_WIDTH, height: TARGET_720P30_HEIGHT, target_fps: 30,
+            target_bitrate_bps: TARGET_720P30_BITRATE_BPS, ..Self::default() }
+    }
+
+    /// 1080p @ 30 fps target profile (PDF Task 7.1).
+    pub fn profile_1080p30() -> Self {
+        Self { width: TARGET_1080P30_WIDTH, height: TARGET_1080P30_HEIGHT, target_fps: 30,
+            target_bitrate_bps: TARGET_1080P30_BITRATE_BPS, ..Self::default() }
+    }
+
+    /// Build the codec config from a capture-session config, so bitrate,
+    /// frame rate, keyframe interval and quality profile all flow from the
+    /// same CaptureConfig the capture backend was started with.
+    pub fn from_capture_config(capture: &CaptureConfig, width: u32, height: u32) -> Self {
+        Self {
+            width, height,
+            target_fps: capture.target_fps,
+            target_bitrate_bps: capture.target_bitrate_bps,
+            keyframe_interval: capture.keyframe_interval,
+            quality_profile: capture.quality_profile,
+            ..Self::default()
+        }
     }
 }
 
@@ -177,12 +257,25 @@ impl OpenH264Encoder {
 }
 
 fn make_encoder(config: CodecConfig) -> Result<openh264::encoder::Encoder, ScreenShareError> {
-    use openh264::encoder::{BitRate, Complexity, EncoderConfig, IntraFramePeriod, RateControlMode, UsageType};
+    use openh264::encoder::{BitRate, Complexity, EncoderConfig, IntraFramePeriod, QpRange, RateControlMode, UsageType};
+    // PDF Task 7.1 quality profile → documented OpenH264 settings.
+    //
+    // Usage type: SCREEN_CONTENT_REAL_TIME is OpenH264's screen-sharing mode
+    // (camera mode biases toward noisy sensor content and moves more bits into
+    // temporal detail; screen mode suits static desktops with text/cursors).
+    // Complexity: Low = fastest (fewer CPU cycles/frame), High = crispest.
+    // QP range: a tighter max keeps quality high; a wider max lets the rate
+    // controller compress more aggressively under the bitrate budget.
+    let (complexity, qp_max) = match config.quality_profile {
+        QualityProfile::LowLatency => (Complexity::Low, 45),
+        QualityProfile::Balanced => (Complexity::Medium, 41),
+        QualityProfile::HighQuality => (Complexity::High, 36),
+    };
     let settings = EncoderConfig::new().bitrate(BitRate::from_bps(config.target_bitrate_bps))
         .max_frame_rate(openh264::encoder::FrameRate::from_hz(config.target_fps as f32))
-        .rate_control_mode(RateControlMode::Bitrate).usage_type(UsageType::CameraVideoRealTime)
-        .complexity(Complexity::Low).skip_frames(false).scene_change_detect(false)
-        .background_detection(false).long_term_reference(false)
+        .rate_control_mode(RateControlMode::Bitrate).usage_type(UsageType::ScreenContentRealTime)
+        .complexity(complexity).qp(QpRange::new(0, qp_max)).skip_frames(false)
+        .scene_change_detect(false).background_detection(false).long_term_reference(false)
         .intra_frame_period(IntraFramePeriod::from_num_frames(config.keyframe_interval as u32));
     // NOTE: skip_frames MUST stay false. With skipping enabled, a static
     // screen (nobody interacting with the host) makes the encoder emit no
@@ -209,7 +302,11 @@ impl VideoEncoder for OpenH264Encoder {
         let rgb = scale_rgb(&rgba_to_rgb(frame)?, frame.width, frame.height, self.config.width, self.config.height);
         if self.keyframe_requested || self.frames_since_keyframe >= self.config.keyframe_interval { self.encoder.force_intra_frame(); self.keyframe_requested = false; }
         let source = openh264::formats::RgbSliceU8::new(&rgb, (self.config.width as usize, self.config.height as usize));
-        let yuv = openh264::formats::YUVBuffer::from_rgb_source(source);
+        // Fast path: `from_rgb8_source` uses the integer `write_yuv_scalar`
+        // converter. `from_rgb_source` goes through the f32 per-pixel
+        // `write_yuv_by_pixel` path, which is dramatically slower at HD
+        // resolutions (measured ~40ms extra per 1080p frame).
+        let yuv = openh264::formats::YUVBuffer::from_rgb8_source(source);
         let stream = self.encoder.encode_at(&yuv, openh264::Timestamp::from_millis(frame.timestamp_us / 1_000)).map_err(fail)?;
         let keyframe = matches!(stream.frame_type(), openh264::encoder::FrameType::IDR | openh264::encoder::FrameType::I);
         if keyframe { self.frames_since_keyframe = 0; } else { self.frames_since_keyframe += 1; }
@@ -294,7 +391,7 @@ impl VideoDecoder for OpenH264Decoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn config(width: u32, height: u32) -> CodecConfig { CodecConfig { width, height, target_fps: 30, target_bitrate_bps: 400_000, keyframe_interval: 4, max_queue_depth: 2 } }
+    fn config(width: u32, height: u32) -> CodecConfig { CodecConfig { width, height, target_fps: 30, target_bitrate_bps: 400_000, keyframe_interval: 4, max_queue_depth: 2, quality_profile: QualityProfile::Balanced } }
     fn pattern(width: u32, height: u32, timestamp_us: u64) -> CapturedFrame {
         let mut pixels = Vec::with_capacity((width * height * 4) as usize);
         for y in 0..height { for x in 0..width { pixels.extend_from_slice(&[x as u8, y as u8, (x ^ y) as u8, 255]); }}
@@ -441,5 +538,66 @@ mod tests {
         encoder.shutdown().unwrap();
         encoder.shutdown().unwrap();
         assert_eq!(encoder.shutdowns, 2, "shutdown is idempotent");
+    }
+
+    #[test]
+    fn quality_profile_round_trips_through_wire_value() {
+        for profile in [QualityProfile::Balanced, QualityProfile::LowLatency, QualityProfile::HighQuality] {
+            assert_eq!(QualityProfile::from_u8(profile.as_u8()), Some(profile));
+            assert!(!profile.name().is_empty());
+        }
+        assert_eq!(QualityProfile::from_u8(9), None, "unknown wire value must be rejected");
+        assert_eq!(QualityProfile::default(), QualityProfile::Balanced);
+    }
+
+    #[test]
+    fn target_profiles_expose_720p30_and_1080p30() {
+        let p720 = CodecConfig::profile_720p30();
+        assert_eq!((p720.width, p720.height, p720.target_fps), (1280, 720, 30));
+        assert_eq!(p720.target_bitrate_bps, TARGET_720P30_BITRATE_BPS);
+        let p1080 = CodecConfig::profile_1080p30();
+        assert_eq!((p1080.width, p1080.height, p1080.target_fps), (1920, 1080, 30));
+        assert_eq!(p1080.target_bitrate_bps, TARGET_1080P30_BITRATE_BPS);
+        // Both are valid encoder configs (validation passes).
+        assert!(p720.validate().is_ok());
+        assert!(p1080.validate().is_ok());
+    }
+
+    #[test]
+    fn every_quality_profile_constructs_and_encodes_decodable_frames() {
+        for profile in [QualityProfile::LowLatency, QualityProfile::Balanced, QualityProfile::HighQuality] {
+            let cfg = CodecConfig { quality_profile: profile, ..config(32, 24) };
+            let mut encoder = OpenH264Encoder::new(cfg).unwrap();
+            let mut decoder = OpenH264Decoder::new(cfg).unwrap();
+            let first = encoder.encode(&pattern(32, 24, 0)).unwrap();
+            assert!(first.keyframe && !first.bytes.is_empty(), "{profile:?} keyframe must encode");
+            assert!(decoder.decode(&first).unwrap().is_some(), "{profile:?} keyframe must decode");
+            let second = encoder.encode(&pattern(32, 24, 33_333)).unwrap();
+            assert!(!second.bytes.is_empty(), "{profile:?} delta frame must encode");
+            assert!(decoder.decode(&second).unwrap().is_some(), "{profile:?} delta frame must decode");
+        }
+    }
+
+    #[test]
+    fn codec_config_applies_capture_config_encode_knobs() {
+        let capture = CaptureConfig {
+            target_fps: 24,
+            target_bitrate_bps: 3_000_000,
+            keyframe_interval: 30,
+            quality_profile: QualityProfile::HighQuality,
+            ..CaptureConfig::default()
+        };
+        let codec = CodecConfig::from_capture_config(&capture, 1280, 720);
+        assert_eq!(codec.width, 1280);
+        assert_eq!(codec.height, 720);
+        assert_eq!(codec.target_fps, 24);
+        assert_eq!(codec.target_bitrate_bps, 3_000_000);
+        assert_eq!(codec.keyframe_interval, 30);
+        assert_eq!(codec.quality_profile, QualityProfile::HighQuality);
+        // Default capture config drives the default codec values.
+        let defaults = CodecConfig::from_capture_config(&CaptureConfig::default(), 640, 360);
+        assert_eq!(defaults.target_bitrate_bps, DEFAULT_BITRATE_BPS);
+        assert_eq!(defaults.keyframe_interval, DEFAULT_KEYFRAME_INTERVAL);
+        assert_eq!(defaults.quality_profile, QualityProfile::Balanced);
     }
 }

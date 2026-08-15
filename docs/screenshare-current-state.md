@@ -453,6 +453,37 @@ remote control works without an xdg-desktop-portal daemon:
   coverage, synthetic-input policy, layout dependence, no secure-desktop
   injection) are in `docs/screenshare-x11-input.md`.
 
+### 2.8 OpenH264 baseline encode + configurable quality (BORU-SS-18 / PDF Task 7.1)
+
+The OpenH264 encoder is now configured through the capture/stream config with
+a Boru-owned quality knob:
+
+- **Quality profile.** `QualityProfile` (`codec.rs`): `Balanced` (default) /
+  `LowLatency` / `HighQuality`, mapped onto the *documented* OpenH264
+  `EncoderConfig` settings — usage type `SCREEN_CONTENT_REAL_TIME` (OpenH264's
+  screen-sharing mode, not the camera mode used previously), complexity
+  (Low/Medium/High) and QP range (45/41/36 max respectively). Wire value is a
+  compact `u8` (`as_u8`/`from_u8`) carried on the versioned `StreamConfig`
+  protocol message (validated; unknown values rejected).
+- **Target profiles.** `CodecConfig::profile_720p30()` (1280x720 @ 30,
+  2.5 Mbps) and `profile_1080p30()` (1920x1080 @ 30, 4 Mbps) plus the
+  `TARGET_*` constants — the PDF Task 7.1 reference targets.
+- **Config plumbing.** `CaptureConfig` now carries `target_bitrate_bps`,
+  `keyframe_interval` and `quality_profile` alongside the existing capture
+  fields; the host builds the encoder config via
+  `CodecConfig::from_capture_config(capture, width, height)` so bitrate, fps,
+  keyframe interval and quality profile all flow from one config object.
+- **Fast RGB→YUV path.** `encode()` now uses
+  `YUVBuffer::from_rgb8_source` (integer `write_yuv_scalar`) instead of
+  `from_rgb_source` (f32 per-pixel `write_yuv_by_pixel`), a ~2x encode
+  speedup at HD resolutions.
+- **Benchmark.** `src/screen_share/encode_bench.rs` measures encode fps and
+  single-core CPU% at 720p30/1080p30 (all profiles). `#[ignore]`d (perf
+  sensitive); run in release mode. Results in
+  `docs/screenshare-encode-benchmark.md`. 12 codec unit tests incl. profile
+  round-trip, target-profile values, every-profile encode/decode, and
+  CaptureConfig→CodecConfig application.
+
 ## 3. Dependency usage map (within the screen-share subsystem)
 
 | Dependency | Cargo.toml | Where used (file:line) | Purpose |

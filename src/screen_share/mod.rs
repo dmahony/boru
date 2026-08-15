@@ -23,6 +23,9 @@ pub mod viewer;
 #[cfg(test)]
 mod media_path_bench;
 
+#[cfg(test)]
+mod encode_bench;
+
 pub use capture::{
     CapturedFrame, CaptureConfig, CaptureSource, CaptureSourceId, CaptureSourceKind,
     DesktopCaptureBackend, DirtyRegion, FrameRect, FrameSink, PixelFormat, ScreenCapture,
@@ -40,7 +43,11 @@ pub use channels::{
 pub use adaptation::{AdaptiveQuality, QualityDecision};
 pub use codec::{
     CodecConfig, CodecKind, CodecMetadata, EncodedFrame, EncodedPacket, OpenH264Decoder,
-    OpenH264Encoder, ScreenShareCodec, VideoDecoder, VideoEncoder, DEFAULT_QUEUE_CAPACITY,
+    OpenH264Encoder, QualityProfile, ScreenShareCodec, VideoDecoder, VideoEncoder,
+    DEFAULT_QUEUE_CAPACITY, DEFAULT_WIDTH, DEFAULT_HEIGHT, DEFAULT_FPS, DEFAULT_BITRATE_BPS,
+    DEFAULT_KEYFRAME_INTERVAL, TARGET_720P30_WIDTH, TARGET_720P30_HEIGHT,
+    TARGET_720P30_BITRATE_BPS, TARGET_1080P30_WIDTH, TARGET_1080P30_HEIGHT,
+    TARGET_1080P30_BITRATE_BPS,
 };
 pub use host::{run_host_session, HostCommand, DEMO_FPS, DEMO_HEIGHT, DEMO_WIDTH};
 pub use platform::{
@@ -186,7 +193,7 @@ mod tests {
         fn metadata(&self) -> CodecMetadata {
             CodecMetadata { codec: CodecKind::H264,
                 config: CodecConfig { width: 2, height: 2, target_fps: 1, target_bitrate_bps: 1,
-                    keyframe_interval: 1, max_queue_depth: 1 }, generation: 0 }
+                    keyframe_interval: 1, max_queue_depth: 1, quality_profile: QualityProfile::Balanced }, generation: 0 }
         }
     }
     impl VideoDecoder for FakeCodec {

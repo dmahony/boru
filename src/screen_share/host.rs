@@ -16,6 +16,7 @@ use super::{
         ControlChannel, ControlOut, MediaChannel, DEFAULT_CONTROL_QUEUE_CAPACITY,
         DEFAULT_MEDIA_QUEUE_CAPACITY,
     },
+    capture::CaptureConfig,
     codec::{CodecConfig, OpenH264Encoder, VideoEncoder},
     permissions::Capability,
     platform::{capture_dimensions, create_capture_source, CAPTURE_FPS},
@@ -233,12 +234,16 @@ async fn run_host_session_inner(
     // Streaming: capture → encode → send, apply consent-gated input, honour
     // host commands and stop. The codec is configured from the ACTIVE
     // capture's geometry (the encoder requires even dimensions; real portal
-    // sources are typically even, but round down defensively).
+    // sources are typically even, but round down defensively) plus the
+    // capture-session encode knobs — bitrate, keyframe interval and quality
+    // profile ride the same CaptureConfig the capture backend uses, so the
+    // whole pipeline is configured from one place (PDF Task 7.1).
     let (capture_width, capture_height) = capture_dimensions(&capture);
     let encode_width = capture_width & !1;
     let encode_height = capture_height & !1;
     if encode_width == 0 || encode_height == 0 { return; }
-    let mut config = CodecConfig { width: encode_width, height: encode_height, target_fps: capture_fps, ..CodecConfig::default() };
+    let capture_config = CaptureConfig { target_fps: capture_fps, ..CaptureConfig::default() };
+    let mut config = CodecConfig::from_capture_config(&capture_config, encode_width, encode_height);
     let Ok(mut encoder) = OpenH264Encoder::new(config) else { return };
     // The remote-input backend is created LAZILY, only when the host
     // explicitly grants control (PDF Task 9.1 / T5.3: "Remote control must be
