@@ -1907,6 +1907,7 @@ pub fn view_inspector(
     inspect_enabled: bool,
     inspect_hover: Option<ComponentId>,
     inspect_selected: Option<ComponentId>,
+    designer_selected: Option<crate::designer::ComponentId>,
 ) -> Element<'static, AppMessage> {
     let mut col = iced::widget::Column::new()
         .push(panel_heading(dark_mode))
@@ -1920,7 +1921,12 @@ pub fn view_inspector(
         .push(Space::new().height(Length::Fixed(6.0)))
         .spacing(2.0);
 
+    let selected_theme_section =
+        designer_selected.map(|component| component.inspector_component().section());
     for section in SECTIONS {
+        if selected_theme_section.is_some_and(|selected| selected != section.id) {
+            continue;
+        }
         let collapsed = draft.collapsed_sections.contains(&section.id);
         let highlighted = inspect_selected.map(|c| c.section()) == Some(section.id);
         col = col
@@ -1966,6 +1972,16 @@ pub fn view_inspector(
         .push(Space::new().height(Length::Fixed(6.0)));
 
     for section in crate::layout_inspector::LAYOUT_SECTIONS {
+        let has_visible_field = section
+            .groups
+            .iter()
+            .flat_map(|group| group.fields.iter())
+            .any(|field| {
+                crate::layout_inspector::field_visible_for_designer(*field, designer_selected)
+            });
+        if designer_selected.is_some() && !has_visible_field {
+            continue;
+        }
         let collapsed = draft.collapsed_layout_sections.contains(&section.id);
         col = col
             .push(crate::layout_inspector::layout_section_header(
@@ -1985,6 +2001,12 @@ pub fn view_inspector(
                     .push(Space::new().height(Length::Fixed(2.0)));
             }
             for field in group.fields {
+                if !crate::layout_inspector::field_visible_for_designer(
+                    *field,
+                    designer_selected,
+                ) {
+                    continue;
+                }
                 col = col.push(crate::layout_inspector::layout_field_row(
                     layout,
                     draft,

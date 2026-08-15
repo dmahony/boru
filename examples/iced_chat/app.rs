@@ -12648,6 +12648,19 @@ impl IcedChat {
                     self.designer.update(DesignerMessage::CommitDrag);
                     return iced::Task::none();
                 }
+                if let DesignerMessage::StartResize { component, .. } = designer_message {
+                    self.designer.update(DesignerMessage::StartResize {
+                        component,
+                        origin: iced::Point::ORIGIN,
+                    });
+                    self.designer.selected_component = Some(component);
+                    let inspector_component = component.inspector_component();
+                    let section = inspector_component.section();
+                    self.inspect_selected = Some(inspector_component);
+                    self.inspect_hover = Some(inspector_component);
+                    self.inspector_draft.collapsed_sections.remove(&section);
+                    return iced::Task::none();
+                }
                 self.designer.update(designer_message);
                 if let Some(Some(component)) = selection {
                     let inspector_component = component.inspector_component();
@@ -19714,6 +19727,7 @@ impl IcedChat {
                 self.inspect_ui_enabled,
                 self.inspect_hover,
                 self.inspect_selected,
+                self.designer.selected_component,
             ),
         ]
         .spacing(8)

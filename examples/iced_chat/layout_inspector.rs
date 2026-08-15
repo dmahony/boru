@@ -1054,6 +1054,47 @@ pub struct LayoutInspectorSection {
 /// (PDF Task 4). Sub-group labels use the actual field names from
 /// `layout.rs` — only values that exist in the typed model are exposed,
 /// nothing derived.
+///
+/// The designer and inspector share the active merged layout, so this filter
+/// keeps the inspector focused on the selected canvas component without
+/// creating a second selection or value model.
+pub fn field_visible_for_designer(
+    field: LayoutField,
+    selected: Option<crate::designer::ComponentId>,
+) -> bool {
+    let Some(selected) = selected else { return true };
+    use LayoutField::*;
+    match selected {
+        crate::designer::ComponentId::HomeQuickActions => matches!(
+            field,
+            HomeSectionOrder
+                | HomeHiddenSections
+                | HomeMode
+                | HomeGridColumnGap
+                | HomeQuickColumnsWide
+                | HomeQuickColumnsMid
+                | HomeQuickColumnsNarrow
+                | HomeQuickFourColBreakpoint
+                | HomeQuickTwoColBreakpoint
+                | HomeQuickCardPaddingY
+                | HomeQuickCardPaddingX
+                | HomeGapsCardGap
+                | HomeCardSizingQuickActionIconSize
+        ),
+        crate::designer::ComponentId::HomeWelcome
+        | crate::designer::ComponentId::HomePublicRooms
+        | crate::designer::ComponentId::HomeFriends
+        | crate::designer::ComponentId::HomeRecentActivity => {
+            matches!(field, HomeSectionOrder | HomeHiddenSections)
+        }
+        // Sidebar and chat geometry are represented by ThemeField entries;
+        // there are no duplicate LayoutField entries for them.
+        crate::designer::ComponentId::Sidebar
+        | crate::designer::ComponentId::ChatMessageList
+        | crate::designer::ComponentId::ChatComposer => false,
+    }
+}
+
 pub const LAYOUT_SECTIONS: &[LayoutInspectorSection] = &[
     LayoutInspectorSection {
         id: LayoutSectionId::Home,
