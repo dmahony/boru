@@ -7,6 +7,66 @@
 //! other UI actions.
 
 use iced::Point;
+use std::fmt;
+use std::str::FromStr;
+
+/// Stable semantic identifiers for the parts of the application exposed to
+/// the visual designer. These are part of the designer's file/inspector
+/// contract: add new variants, but do not rename or reorder existing ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ComponentId {
+    HomeWelcome,
+    HomeQuickActions,
+    HomePublicRooms,
+    HomeFriends,
+    HomeRecentActivity,
+    Sidebar,
+    ChatMessageList,
+    ChatComposer,
+}
+
+impl ComponentId {
+    pub const ALL: [Self; 8] = [
+        Self::HomeWelcome,
+        Self::HomeQuickActions,
+        Self::HomePublicRooms,
+        Self::HomeFriends,
+        Self::HomeRecentActivity,
+        Self::Sidebar,
+        Self::ChatMessageList,
+        Self::ChatComposer,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::HomeWelcome => "home.welcome",
+            Self::HomeQuickActions => "home.quick_actions",
+            Self::HomePublicRooms => "home.public_rooms",
+            Self::HomeFriends => "home.friends",
+            Self::HomeRecentActivity => "home.recent_activity",
+            Self::Sidebar => "sidebar",
+            Self::ChatMessageList => "chat.message_list",
+            Self::ChatComposer => "chat.composer",
+        }
+    }
+}
+
+impl fmt::Display for ComponentId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ComponentId {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|id| id.as_str() == value)
+            .ok_or_else(|| format!("unknown designer component ID: {value}"))
+    }
+}
 
 /// Responsive preview bands exposed by the designer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,7 +87,7 @@ impl Default for PreviewBreakpoint {
 /// desktop coordinates are persisted by the designer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DragOperation {
-    pub component: String,
+    pub component: ComponentId,
     pub origin: Point,
     pub current: Point,
 }
@@ -36,7 +96,7 @@ pub struct DragOperation {
 /// delta into responsive constraints rather than absolute coordinates.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResizeOperation {
-    pub component: String,
+    pub component: ComponentId,
     pub origin: Point,
     pub current: Point,
 }
@@ -45,8 +105,8 @@ pub struct ResizeOperation {
 #[derive(Debug, Clone, PartialEq)]
 pub struct DesignerState {
     pub enabled: bool,
-    pub hovered_component: Option<String>,
-    pub selected_component: Option<String>,
+    pub hovered_component: Option<ComponentId>,
+    pub selected_component: Option<ComponentId>,
     pub drag_operation: Option<DragOperation>,
     pub resize_operation: Option<ResizeOperation>,
     pub preview_breakpoint: PreviewBreakpoint,
@@ -74,12 +134,18 @@ impl Default for DesignerState {
 pub enum DesignerMessage {
     Enter,
     Exit,
-    Hover(Option<String>),
-    Select(Option<String>),
-    StartDrag { component: String, origin: Point },
+    Hover(Option<ComponentId>),
+    Select(Option<ComponentId>),
+    StartDrag {
+        component: ComponentId,
+        origin: Point,
+    },
     UpdateDrag(Point),
     CancelDrag,
-    StartResize { component: String, origin: Point },
+    StartResize {
+        component: ComponentId,
+        origin: Point,
+    },
     UpdateResize(Point),
     CancelResize,
     SetBreakpoint(PreviewBreakpoint),
@@ -160,14 +226,32 @@ mod tests {
     fn exit_cancels_transient_interaction_state() {
         let mut state = DesignerState::default();
         state.update(DesignerMessage::Enter);
-        state.update(DesignerMessage::Select(Some("home.welcome".into())));
+        state.update(DesignerMessage::Select(Some(ComponentId::HomeWelcome)));
         state.update(DesignerMessage::StartDrag {
-            component: "home.welcome".into(),
+            component: ComponentId::HomeWelcome,
             origin: Point::new(1.0, 2.0),
         });
         state.update(DesignerMessage::Exit);
         assert!(!state.enabled);
         assert!(state.selected_component.is_none());
         assert!(state.drag_operation.is_none());
+    }
+
+    #[test]
+    fn component_ids_are_stable_and_round_trip() {
+        let expected = [
+            "home.welcome",
+            "home.quick_actions",
+            "home.public_rooms",
+            "home.friends",
+            "home.recent_activity",
+            "sidebar",
+            "chat.message_list",
+            "chat.composer",
+        ];
+        assert_eq!(ComponentId::ALL.map(ComponentId::as_str), expected);
+        for id in ComponentId::ALL {
+            assert_eq!(id.as_str().parse::<ComponentId>().unwrap(), id);
+        }
     }
 }

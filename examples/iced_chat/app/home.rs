@@ -1151,6 +1151,17 @@ impl IcedChat {
         use iced::widget::{button, container, row, Column, Row, Space};
         use iced::{Alignment, Length};
 
+        // Stable semantic anchors for the editable Home sections. These are
+        // independent of layout order and widget allocation.
+        #[cfg(feature = "dev-ui")]
+        let _designer_components = (
+            crate::designer::ComponentId::HomeWelcome,
+            crate::designer::ComponentId::HomeQuickActions,
+            crate::designer::ComponentId::HomePublicRooms,
+            crate::designer::ComponentId::HomeFriends,
+            crate::designer::ComponentId::HomeRecentActivity,
+        );
+
         let window_width = dep.window_width_bits as f32 / 100.0;
         let theme = Self::theme_from_dark(dep.dark_mode);
         // UI-HOME-15: all home breakpoints are based on the dashboard's

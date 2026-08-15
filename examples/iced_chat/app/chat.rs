@@ -14,6 +14,12 @@ impl IcedChat {
     pub(crate) fn view_chat_panel(&self) -> iced::Element<'_, AppMessage> {
         use iced::{widget, Length};
 
+        #[cfg(feature = "dev-ui")]
+        let _designer_components = (
+            crate::designer::ComponentId::ChatMessageList,
+            crate::designer::ComponentId::ChatComposer,
+        );
+
         // Show a loading spinner while the gossip subscription is in flight.
         if self.room_loading {
             const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -3353,6 +3359,9 @@ impl IcedChat {
         timeline_width: f32,
         viewport_height: f32,
     ) -> iced::widget::Scrollable<'_, AppMessage> {
+        #[cfg(feature = "dev-ui")]
+        let _designer_component = crate::designer::ComponentId::ChatMessageList;
+
         use iced::widget::space;
         use iced::widget::text::Wrapping;
         use iced::widget::{button, container, scrollable, text, Column, Row};
@@ -4310,6 +4319,9 @@ impl IcedChat {
     }
 
     pub(crate) fn view_composer(&self) -> iced::Element<'_, AppMessage> {
+        #[cfg(feature = "dev-ui")]
+        let _designer_component = crate::designer::ComponentId::ChatComposer;
+
         use crate::design_tokens::SPACE_8;
         use iced::widget::{button, container, row, text, text_input};
         use iced::{Alignment, Length, Padding};

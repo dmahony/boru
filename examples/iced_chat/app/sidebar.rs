@@ -192,6 +192,9 @@ impl IcedChat {
         use iced::widget::{container, rule, text, Column, Row, Space};
         use iced::{Alignment, Length};
 
+        #[cfg(feature = "dev-ui")]
+        let _designer_component = crate::designer::ComponentId::Sidebar;
+
         let theme = self.theme();
         let btheme = self.boru_theme();
         let inset = btheme.sidebar.inset; // 24 px
