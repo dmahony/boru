@@ -100,6 +100,8 @@ pub enum LayoutField {
     HomeQuickColumnsNarrow,
     HomeQuickFourColBreakpoint,
     HomeQuickTwoColBreakpoint,
+    HomeQuickCardPaddingY,
+    HomeQuickCardPaddingX,
     // ── Home: canvas ──
     HomeMaxContentWidth,
     // ── Home: padding ──
@@ -196,6 +198,8 @@ impl LayoutField {
             HomeQuickColumnsNarrow => "Columns (narrow)",
             HomeQuickFourColBreakpoint => "4-col breakpoint",
             HomeQuickTwoColBreakpoint => "2-col breakpoint",
+            HomeQuickCardPaddingY => "Quick-action card padding y",
+            HomeQuickCardPaddingX => "Quick-action card padding x",
             HomeMaxContentWidth => "Max content width",
             HomePaddingTop => "Top padding",
             HomePaddingBottom => "Bottom padding",
@@ -279,6 +283,8 @@ impl LayoutField {
             | HomeQuickColumnsNarrow
             | HomeQuickFourColBreakpoint
             | HomeQuickTwoColBreakpoint
+            | HomeQuickCardPaddingY
+            | HomeQuickCardPaddingX
             | HomeMaxContentWidth
             | HomePaddingTop
             | HomePaddingBottom
@@ -402,6 +408,8 @@ impl LayoutField {
             HomeGridStackBreakpoint
             | HomeQuickFourColBreakpoint
             | HomeQuickTwoColBreakpoint
+            | HomeQuickCardPaddingY
+            | HomeQuickCardPaddingX
             | ComponentVideoNarrowBreakpoint
             | ComponentVideoMediumBreakpoint
             | ResponsiveHomeIllustrationFullContent
@@ -497,6 +505,8 @@ pub fn read_layout_float(layout: &LayoutConfig, field: LayoutField) -> f32 {
         HomeGridStackBreakpoint => h.grid.stack_breakpoint,
         HomeQuickFourColBreakpoint => h.quick_actions.four_col_breakpoint,
         HomeQuickTwoColBreakpoint => h.quick_actions.two_col_breakpoint,
+        HomeQuickCardPaddingY => h.quick_actions.card_padding_y,
+        HomeQuickCardPaddingX => h.quick_actions.card_padding_x,
         HomeMaxContentWidth => h.max_content_width,
         HomePaddingTop => h.padding.top,
         HomePaddingBottom => h.padding.bottom,
@@ -745,6 +755,8 @@ pub fn apply_layout_float(
         HomeGridStackBreakpoint => set(&mut ov_home_grid(overrides).stack_breakpoint),
         HomeQuickFourColBreakpoint => set(&mut ov_home_quick(overrides).four_col_breakpoint),
         HomeQuickTwoColBreakpoint => set(&mut ov_home_quick(overrides).two_col_breakpoint),
+        HomeQuickCardPaddingY => set(&mut ov_home_quick(overrides).card_padding_y),
+        HomeQuickCardPaddingX => set(&mut ov_home_quick(overrides).card_padding_x),
         HomeMaxContentWidth => set(&mut ov_home(overrides).max_content_width),
         HomePaddingTop => set(&mut ov_home_padding(overrides).top),
         HomePaddingBottom => set(&mut ov_home_padding(overrides).bottom),
@@ -1073,6 +1085,8 @@ pub const LAYOUT_SECTIONS: &[LayoutInspectorSection] = &[
                     LayoutField::HomeQuickColumnsNarrow,
                     LayoutField::HomeQuickFourColBreakpoint,
                     LayoutField::HomeQuickTwoColBreakpoint,
+                    LayoutField::HomeQuickCardPaddingY,
+                    LayoutField::HomeQuickCardPaddingX,
                 ],
             },
             LayoutFieldGroup {
@@ -1225,7 +1239,7 @@ pub const LAYOUT_SECTIONS: &[LayoutInspectorSection] = &[
 /// test below (`every_exposed_layout_field_maps_to_a_real_config_leaf`)
 /// asserts the literal matches the actual `LAYOUT_SECTIONS` contents.
 #[cfg(test)]
-pub const LAYOUT_FIELD_COUNT: usize = 76;
+pub const LAYOUT_FIELD_COUNT: usize = 78;
 
 // ── Save / reload status (BORU-LAYOUT-08) ────────────────────────────
 
@@ -1913,7 +1927,7 @@ mod tests {
         // must apply without error AND change the merged layout away from
         // the default (the value chosen is deliberately different from the
         // baseline for each kind).
-        assert_eq!(LAYOUT_FIELD_COUNT, 76, "panel field count drift");
+        assert_eq!(LAYOUT_FIELD_COUNT, 78, "panel field count drift");
         for section in LAYOUT_SECTIONS {
             for group in section.groups {
                 for field in group.fields {

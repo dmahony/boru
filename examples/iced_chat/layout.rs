@@ -223,6 +223,10 @@ pub struct QuickActionsLayout {
     /// Content width at/above which the grid uses `columns_mid`
     /// (`HOME_QUICK_ONE_COL_CONTENT` = 520 px).
     pub two_col_breakpoint: f32,
+    /// Vertical padding inside each quick-action card.
+    pub card_padding_y: f32,
+    /// Horizontal padding inside each quick-action card.
+    pub card_padding_x: f32,
 }
 
 impl Default for QuickActionsLayout {
@@ -233,6 +237,8 @@ impl Default for QuickActionsLayout {
             columns_narrow: 1,
             four_col_breakpoint: crate::design_tokens::HOME_QUICK_FOUR_COL_CONTENT,
             two_col_breakpoint: crate::design_tokens::HOME_QUICK_ONE_COL_CONTENT,
+            card_padding_y: crate::design_tokens::SPACE_16,
+            card_padding_x: crate::design_tokens::SPACE_16,
         }
     }
 }
@@ -1227,6 +1233,8 @@ layout_override_group! {
         columns_narrow: usize,
         four_col_breakpoint: f32,
         two_col_breakpoint: f32,
+        card_padding_y: f32,
+        card_padding_x: f32,
     }
 }
 

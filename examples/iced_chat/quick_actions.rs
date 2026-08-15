@@ -22,7 +22,7 @@
 use iced::widget::{button, container, Column, Row, Space};
 use iced::{Alignment, Background, Border, Color, Element, Length, Theme, Vector};
 
-use crate::app::{AppMessage, SPACE_12, SPACE_16, SPACE_4, SPACE_8};
+use crate::app::{AppMessage, SPACE_12, SPACE_4, SPACE_8};
 use crate::design_tokens;
 use crate::icon_system::{Icon, IconSize};
 
@@ -114,6 +114,8 @@ pub fn quick_action_card<'a>(
     opacity: f32,
     card_radius: f32,
     icon_size: f32,
+    card_padding_y: f32,
+    card_padding_x: f32,
 ) -> Element<'a, AppMessage> {
     let content = Column::new()
         .push(quick_action_icon(action.icon, icon_size))
@@ -163,7 +165,7 @@ pub fn quick_action_card<'a>(
         // HOME-02 compact: 16 px vertical / 16 px horizontal padding (was
         // 20 px / 24 px) — smaller card, denser grid, still an easy tap
         // target because the whole card is the button.
-        .padding([SPACE_16, SPACE_16])
+        .padding([card_padding_y, card_padding_x])
         // Content-driven height: no fixed box, no hidden overflow — the
         // card grows to contain icon + title + full description.
         .width(Length::Fill)
@@ -279,7 +281,15 @@ pub fn quick_action_grid<'a>(
             .align_y(Alignment::Start)
             .width(Length::Fill);
         for action in actions {
-            row = row.push(quick_action_card(action, theme, opacity, card_radius, icon_size));
+            row = row.push(quick_action_card(
+                action,
+                theme,
+                opacity,
+                card_radius,
+                icon_size,
+                layout.card_padding_y,
+                layout.card_padding_x,
+            ));
         }
         rows.push(row.into());
     }
@@ -413,6 +423,7 @@ mod tests {
             columns_narrow: 1,
             four_col_breakpoint: 800.0,
             two_col_breakpoint: 400.0,
+            ..Default::default()
         };
         assert_eq!(grid_columns_for(1000.0, layout), 3);
         assert_eq!(grid_columns_for(799.0, layout), 2);
