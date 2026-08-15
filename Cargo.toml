@@ -156,8 +156,9 @@ windows = { version = "0.58", default-features = false, features = [
 ], optional = true }
 # x11rb: direct X11 capture (GetImage) fallback for the Linux ScreenCast
 # backend — used when xdg-desktop-portal/PipeWire are unavailable, so real
-# desktop sharing works on any X11 display.
-x11rb = { version = "0.13", optional = true }
+# desktop sharing works on any X11 display. The `randr` feature enables
+# monitor enumeration (RandR 1.5 GetMonitors, with a CRTC-walk fallback).
+x11rb = { version = "0.13", optional = true, features = ["randr"] }
 
 # filesystem notification for shared folder monitoring
 notify = { version = "6", features = [] }

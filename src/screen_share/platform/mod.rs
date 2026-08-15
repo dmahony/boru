@@ -14,11 +14,12 @@ pub mod windows_common;
 pub mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::{
-    capture_dimensions, choose_cursor_mode, classify_desktop_environment, classify_session_type,
-    create_capture_source, detect_desktop_environment, detect_session_type, select_sources_options,
-    ActiveCapture, CursorMode, DesktopEnvironment, LinuxPortalCapture, MachineError, PortalCapture,
-    PortalEvent, PortalSessionMachine, PortalState, SessionFailure, SessionPhase, SessionType,
-    CAPTURE_FPS,
+    capture_dimensions, choose_cursor_mode, classify_desktop_environment, classify_display_server,
+    classify_session_type, clip_to_root, create_capture_source, detect_desktop_environment,
+    detect_display_server, detect_session_type, select_sources_options, ActiveCapture,
+    CaptureRect, CursorMode, DesktopEnvironment, DisplayServer, LinuxPortalCapture,
+    MachineError, PortalCapture, PortalEvent, PortalSessionMachine, PortalState,
+    SessionFailure, SessionPhase, SessionType, X11Capture, X11Monitor, CAPTURE_FPS,
 };
 
 /// Pure PipeWire format negotiation + CPU frame normalization (BORU-SS-14).

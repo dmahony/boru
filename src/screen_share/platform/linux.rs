@@ -13,6 +13,12 @@
 //! 3. [`PortalSessionMachine`] — pure D-Bus lifecycle state machine
 //!    (create → select → start → stream → close, plus every failure path),
 //!    unit-tested without a session bus/portal/compositor.
+//! 4. [`X11Capture`] — direct X11 GetImage capture (PDF Task 6.1): RandR
+//!    monitor enumeration + selected-geometry capture behind
+//!    [`DesktopCaptureBackend`], with whole-root [`ScreenCapture`] used by
+//!    the `ActiveCapture::X11` fallback path. Display-server detection
+//!    ([`detect_display_server`]) decides whether the portal or the direct
+//!    backend is preferred under Wayland/XWayland vs native X11.
 //!
 //! The live zbus connection and session object path are kept for the whole
 //! capture lifetime and teardown is explicit: [`LinuxPortalCapture::close`]
@@ -33,14 +39,17 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::screen_share::{
-    capture::FrameSink, CapturedFrame, PixelFormat, ScreenCapture, ScreenShareError,
-    TestPatternCapture,
+    capture::FrameSink, CapturedFrame, CaptureConfig, CaptureSource, CaptureSourceId,
+    CaptureSourceKind, DesktopCaptureBackend, MonitorGeometry, PixelFormat, ScreenCapture,
+    ScreenShareError, TestPatternCapture,
 };
 use super::linux_pw::{
     build_format_pod, normalize_buffer, parse_format_pod, NegotiatedFormat, SPA_PARAM_Buffers,
     SPA_PARAM_Format,
 };
+use super::windows_common::monitor_source_id;
 use x11rb::connection::Connection as _;
+use x11rb::protocol::randr::{self, ConnectionExt as _};
 use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat, ImageOrder};
 
 /// State of the XDG ScreenCast portal session.
@@ -434,6 +443,71 @@ pub fn detect_desktop_environment() -> DesktopEnvironment {
     std::env::var("XDG_CURRENT_DESKTOP")
         .map(|value| classify_desktop_environment(&value))
         .unwrap_or_default()
+}
+
+// ── Display-server detection (Wayland / XWayland / X11) ────────────────────
+//
+// PDF Task 6.1: "Detect when Boru is actually running under Wayland/XWayland
+// and prefer the portal backend when appropriate." A direct X11 GetImage
+// capture only sees XWayland windows when the session is Wayland, so the
+// portal ScreenCast backend must be preferred there. Under a native X11
+// session the direct backend needs no portal daemon at all.
+
+/// Which display server the process is running under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DisplayServer {
+    /// A real Wayland session (`WAYLAND_DISPLAY` set and/or
+    /// `XDG_SESSION_TYPE=wayland`), with no usable X server.
+    Wayland,
+    /// A Wayland session where `DISPLAY` also points at an XWayland server.
+    /// Direct X11 capture would only see XWayland windows, so the portal is
+    /// the correct capture path.
+    XWayland,
+    /// A native X11 session (`XDG_SESSION_TYPE=x11` or only `DISPLAY` set).
+    /// Direct X11 capture works without a portal daemon.
+    X11,
+    #[default]
+    Unknown,
+}
+
+/// Classify the display server from the three environment variables that
+/// decide it. Pure for tests; callers pass `Option<&str>` (unset vars → `None`).
+pub fn classify_display_server(
+    wayland_display: Option<&str>,
+    xdg_session_type: Option<&str>,
+    display: Option<&str>,
+) -> DisplayServer {
+    let wayland_session =
+        wayland_display.is_some() || xdg_session_type == Some("wayland");
+    if wayland_session {
+        if display.is_some() {
+            DisplayServer::XWayland
+        } else {
+            DisplayServer::Wayland
+        }
+    } else if xdg_session_type == Some("x11") || display.is_some() {
+        DisplayServer::X11
+    } else {
+        DisplayServer::Unknown
+    }
+}
+
+impl DisplayServer {
+    /// Whether the xdg-desktop-portal ScreenCast backend should be preferred
+    /// over the direct X11 backend. True for Wayland and XWayland (the only
+    /// sessions where a direct X11 capture is wrong or incomplete).
+    pub fn prefers_portal(self) -> bool {
+        matches!(self, DisplayServer::Wayland | DisplayServer::XWayland)
+    }
+}
+
+/// The display server Boru is actually running under, from the environment.
+pub fn detect_display_server() -> DisplayServer {
+    classify_display_server(
+        std::env::var("WAYLAND_DISPLAY").ok().as_deref(),
+        std::env::var("XDG_SESSION_TYPE").ok().as_deref(),
+        std::env::var("DISPLAY").ok().as_deref(),
+    )
 }
 
 // ── Portal cursor modes (PDF Task 5.3) ──────────────────────────────────────
@@ -1554,13 +1628,60 @@ async fn detect_portal_backend(connection: &zbus::Connection) -> Option<String> 
 
 // ── Direct X11 capture backend ─────────────────────────────────────────────
 
-/// Direct X11 capture: grabs the root window via `GetImage` and converts the
-/// ZPixmap buffer to RGBA8. This is the no-portal fallback — it makes real
-/// desktop sharing work on any X11 display without xdg-desktop-portal or
-/// PipeWire. Pixels are interpreted through the root visual's channel masks,
-/// so both LSBFirst (BGRX, typical x86) and MSBFirst (XRGB) servers convert
-/// correctly. An XShm fast path can replace the per-frame GetImage copy later
-/// without changing this interface.
+/// A capture rectangle in root-window coordinates (physical pixels).
+///
+/// `x`/`y` are the top-left corner inside the root window; `width`/`height`
+/// are the capture size. GetImage accepts `i16`/`u16` coordinates, which
+/// matches RandR monitor geometry exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CaptureRect {
+    /// Left edge in root coordinates.
+    pub x: i16,
+    /// Top edge in root coordinates.
+    pub y: i16,
+    /// Capture width in pixels.
+    pub width: u16,
+    /// Capture height in pixels.
+    pub height: u16,
+}
+
+/// One monitor advertised by the X11 backend.
+///
+/// `x`/`y` are the monitor origin in root-window coordinates (RandR CRTC
+/// coordinates); `width`/`height` are the monitor's pixel size. Monitors
+/// left of / above the root origin can have negative origins, matching the
+/// coordinate model in [`crate::screen_share::coords::MonitorGeometry`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct X11Monitor {
+    /// Stable source id (FNV-1a of the RandR name, mirroring the Windows
+    /// backend's `monitor_source_id`).
+    pub id: CaptureSourceId,
+    /// RandR output/monitor name (e.g. `DP-1`, `HDMI-A-0`), or a fallback
+    /// like `Screen` when RandR cannot supply a name.
+    pub name: String,
+    /// Left edge in root coordinates.
+    pub x: i16,
+    /// Top edge in root coordinates.
+    pub y: i16,
+    /// Pixel width.
+    pub width: u16,
+    /// Pixel height.
+    pub height: u16,
+    /// Whether RandR marks this monitor as primary.
+    pub primary: bool,
+}
+
+/// Direct X11 capture: grabs a rectangle of the root window via `GetImage`
+/// and converts the ZPixmap buffer to RGBA8. This is the no-portal fallback —
+/// it makes real desktop sharing work on any X11 display without
+/// xdg-desktop-portal or PipeWire. Pixels are interpreted through the root
+/// visual's channel masks, so both LSBFirst (BGRX, typical x86) and MSBFirst
+/// (XRGB) servers convert correctly. An XShm fast path can replace the
+/// per-frame GetImage copy later without changing this interface.
+///
+/// The backend implements both [`ScreenCapture`] (whole-root capture, used by
+/// the `ActiveCapture::X11` fallback path) and [`DesktopCaptureBackend`]
+/// (monitor enumeration + selected-geometry capture, PDF Task 6.1).
 pub struct X11Capture {
     conn: x11rb::rust_connection::RustConnection,
     root: u32,
@@ -1572,6 +1693,10 @@ pub struct X11Capture {
     green_mask: u32,
     blue_mask: u32,
     timestamp_us: u64,
+    /// The monitor rectangle selected via [`DesktopCaptureBackend::start`].
+    selected: Option<CaptureRect>,
+    /// Whether [`DesktopCaptureBackend::start`] has been called.
+    started: bool,
 }
 
 impl X11Capture {
@@ -1619,7 +1744,173 @@ impl X11Capture {
             green_mask,
             blue_mask,
             timestamp_us: 0,
+            selected: None,
+            started: false,
         })
+    }
+
+    /// Enumerate monitors via RandR.
+    ///
+    /// Tries the modern RandR 1.5 `GetMonitors` path first (it reports
+    /// physical monitor names and the primary flag). Falls back to a
+    /// CRTC walk (`GetScreenResourcesCurrent` + `GetCrtcInfo` +
+    /// `GetOutputInfo`) for older servers, and finally to a single
+    /// root-window screen so capture still works without RandR at all.
+    pub fn list_monitors(&self) -> Result<Vec<X11Monitor>, ScreenShareError> {
+        if let Ok(monitors) = self.randr_monitors() {
+            if !monitors.is_empty() {
+                return Ok(monitors);
+            }
+        }
+        if let Ok(monitors) = self.crtc_monitors() {
+            if !monitors.is_empty() {
+                return Ok(monitors);
+            }
+        }
+        Ok(vec![self.root_monitor()])
+    }
+
+    /// RandR 1.5 `GetMonitors` path (RANDR 1.5+). Returns `Err` when the
+    /// request itself fails (old server, extension missing) so callers fall
+    /// back to the CRTC walk.
+    fn randr_monitors(&self) -> Result<Vec<X11Monitor>, ScreenShareError> {
+        let reply = self
+            .conn
+            .randr_get_monitors(self.root, true)
+            .map_err(|e| ScreenShareError::new(format!("X11 RandR GetMonitors failed: {e}")))?
+            .reply()
+            .map_err(|e| ScreenShareError::new(format!("X11 RandR GetMonitors reply failed: {e}")))?;
+        let mut out = Vec::with_capacity(reply.monitors.len());
+        for (index, monitor) in reply.monitors.iter().enumerate() {
+            let name = self
+                .atom_name(monitor.name)
+                .unwrap_or_else(|| format!("Monitor {index}"));
+            out.push(X11Monitor {
+                id: monitor_source_id(&name),
+                name,
+                x: monitor.x,
+                y: monitor.y,
+                width: monitor.width,
+                height: monitor.height,
+                primary: monitor.primary,
+            });
+        }
+        Ok(out)
+    }
+
+    /// CRTC walk for servers without RandR 1.5: one source per active CRTC,
+    /// named from its first output.
+    fn crtc_monitors(&self) -> Result<Vec<X11Monitor>, ScreenShareError> {
+        let resources = self
+            .conn
+            .randr_get_screen_resources_current(self.root)
+            .map_err(|e| ScreenShareError::new(format!("X11 RandR screen resources failed: {e}")))?
+            .reply()
+            .map_err(|e| {
+                ScreenShareError::new(format!("X11 RandR screen resources reply failed: {e}"))
+            })?;
+        let primary_output = self
+            .conn
+            .randr_get_output_primary(self.root)
+            .map_err(|e| ScreenShareError::new(format!("X11 RandR output primary failed: {e}")))?
+            .reply()
+            .map_err(|e| {
+                ScreenShareError::new(format!("X11 RandR output primary reply failed: {e}"))
+            })?
+            .output;
+        let mut out = Vec::with_capacity(resources.crtcs.len());
+        for (index, crtc) in resources.crtcs.iter().enumerate() {
+            let info = self
+                .conn
+                .randr_get_crtc_info(*crtc, resources.config_timestamp)
+                .map_err(|e| ScreenShareError::new(format!("X11 RandR CRTC info failed: {e}")))?
+                .reply()
+                .map_err(|e| {
+                    ScreenShareError::new(format!("X11 RandR CRTC info reply failed: {e}"))
+                })?;
+            if info.width == 0 || info.height == 0 {
+                continue; // inactive CRTC
+            }
+            let name = info
+                .outputs
+                .first()
+                .and_then(|output| {
+                    let out_info = self
+                        .conn
+                        .randr_get_output_info(*output, resources.config_timestamp)
+                        .ok()?
+                        .reply()
+                        .ok()?;
+                    if out_info.name.is_empty() {
+                        None
+                    } else {
+                        Some(String::from_utf8_lossy(&out_info.name).into_owned())
+                    }
+                })
+                .unwrap_or_else(|| format!("Screen {index}"));
+            out.push(X11Monitor {
+                id: monitor_source_id(&name),
+                name,
+                x: info.x,
+                y: info.y,
+                width: info.width,
+                height: info.height,
+                primary: info.outputs.contains(&primary_output),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Resolve an atom to its string name, if the server knows it.
+    fn atom_name(&self, atom: u32) -> Option<String> {
+        let reply = self.conn.get_atom_name(atom).ok()?.reply().ok()?;
+        if reply.name.is_empty() {
+            None
+        } else {
+            Some(String::from_utf8_lossy(&reply.name).into_owned())
+        }
+    }
+
+    /// Last-resort single source: the whole root window as one "screen".
+    fn root_monitor(&self) -> X11Monitor {
+        X11Monitor {
+            id: monitor_source_id("Screen"),
+            name: "Screen".to_string(),
+            x: 0,
+            y: 0,
+            width: self.width.min(u16::MAX as u32) as u16,
+            height: self.height.min(u16::MAX as u32) as u16,
+            primary: true,
+        }
+    }
+
+    /// Capture the given root-window rectangle, converting ZPixmap to RGBA8.
+    /// The rectangle is clipped to the root bounds (RandR monitors can sit
+    /// partially outside after resolution changes).
+    fn capture_rect(&mut self, rect: CaptureRect) -> Result<Option<CapturedFrame>, ScreenShareError> {
+        let Some((x, y, width, height)) = clip_to_root(rect, self.width, self.height) else {
+            return Ok(None);
+        };
+        let reply = self
+            .conn
+            .get_image(ImageFormat::Z_PIXMAP, self.root, x, y, width, height, u32::MAX)
+            .map_err(|e| ScreenShareError::new(format!("X11 GetImage failed: {e}")))?
+            .reply()
+            .map_err(|e| ScreenShareError::new(format!("X11 GetImage reply failed: {e}")))?;
+        let pixels = convert_zpixmap_rgba(
+            &reply.data,
+            width as usize,
+            height as usize,
+            self.depth,
+            self.lsb_first,
+            self.red_mask,
+            self.green_mask,
+            self.blue_mask,
+        )?;
+        let timestamp_us = self.timestamp_us;
+        self.timestamp_us = self.timestamp_us.saturating_add(33_333);
+        CapturedFrame::cpu(timestamp_us, width as u32, height as u32, PixelFormat::Rgba8, pixels)
+            .map(Some)
     }
 }
 
@@ -1640,25 +1931,107 @@ impl ScreenCapture for X11Capture {
         }
         self.width = width;
         self.height = height;
-        let reply = self
-            .conn
-            .get_image(ImageFormat::Z_PIXMAP, self.root, 0, 0, width as u16, height as u16, u32::MAX)
-            .map_err(|e| ScreenShareError::new(format!("X11 GetImage failed: {e}")))?
-            .reply()
-            .map_err(|e| ScreenShareError::new(format!("X11 GetImage reply failed: {e}")))?;
-        let pixels = convert_zpixmap_rgba(
-            &reply.data,
-            width as usize,
-            height as usize,
-            self.depth,
-            self.lsb_first,
-            self.red_mask,
-            self.green_mask,
-            self.blue_mask,
-        )?;
-        let timestamp_us = self.timestamp_us;
-        self.timestamp_us = self.timestamp_us.saturating_add(33_333);
-        CapturedFrame::cpu(timestamp_us, width, height, PixelFormat::Rgba8, pixels).map(Some)
+        self.capture_rect(CaptureRect {
+            x: 0,
+            y: 0,
+            width: width.min(u16::MAX as u32) as u16,
+            height: height.min(u16::MAX as u32) as u16,
+        })
+    }
+}
+
+impl DesktopCaptureBackend for X11Capture {
+    fn list_sources(&self) -> Result<Vec<CaptureSource>, ScreenShareError> {
+        self.list_monitors()
+            .map(|monitors| monitors.iter().map(x11_monitor_source).collect())
+    }
+
+    fn start(
+        &mut self,
+        source: CaptureSourceId,
+        config: CaptureConfig,
+    ) -> Result<(), ScreenShareError> {
+        if self.started {
+            return Err(ScreenShareError::new("capture already started"));
+        }
+        if config.target_fps == 0 {
+            return Err(ScreenShareError::new("target fps must be non-zero"));
+        }
+        let monitor = self
+            .list_monitors()?
+            .into_iter()
+            .find(|monitor| monitor.id == source)
+            .ok_or_else(|| ScreenShareError::new("unknown X11 capture source"))?;
+        self.selected = Some(CaptureRect {
+            x: monitor.x,
+            y: monitor.y,
+            width: monitor.width,
+            height: monitor.height,
+        });
+        self.started = true;
+        Ok(())
+    }
+
+    fn next_frame(&mut self) -> Result<Option<CapturedFrame>, ScreenShareError> {
+        if !self.started {
+            return Err(ScreenShareError::new(
+                "capture is not started; call start() before next_frame()",
+            ));
+        }
+        let Some(rect) = self.selected else {
+            return Err(ScreenShareError::new("capture has no selected source"));
+        };
+        self.capture_rect(rect)
+    }
+
+    fn stop(&mut self) {
+        self.started = false;
+        self.selected = None;
+    }
+}
+
+/// Clip a capture rectangle to the root window bounds.
+///
+/// RandR can report monitor rectangles that extend past the root (e.g. after
+/// a resolution change) or with negative origins; GetImage requires a
+/// rectangle fully inside the drawable. Returns `None` when the rectangle is
+/// completely outside the root.
+pub fn clip_to_root(
+    rect: CaptureRect,
+    root_width: u32,
+    root_height: u32,
+) -> Option<(i16, i16, u16, u16)> {
+    let left = rect.x.max(0) as i64;
+    let top = rect.y.max(0) as i64;
+    let right = (rect.x as i64 + rect.width as i64).min(root_width as i64);
+    let bottom = (rect.y as i64 + rect.height as i64).min(root_height as i64);
+    if left >= right || top >= bottom {
+        return None;
+    }
+    Some((left as i16, top as i16, (right - left) as u16, (bottom - top) as u16))
+}
+
+/// Build a [`CaptureSource`] from an enumerated X11 monitor.
+///
+/// Pure helper so the source-advertisement shape (id, kind, title, native
+/// size, desktop geometry) is unit-tested without a live X server; the
+/// backend calls it from [`DesktopCaptureBackend::list_sources`]. The
+/// geometry carries the monitor's root-window origin (which may be negative
+/// for monitors left of / above the root origin), so the host can normalize
+/// coordinates against the shared source.
+pub fn x11_monitor_source(monitor: &X11Monitor) -> CaptureSource {
+    CaptureSource {
+        id: monitor.id,
+        kind: CaptureSourceKind::Monitor,
+        title: format!("{}: {}x{}", monitor.name, monitor.width, monitor.height),
+        width: monitor.width as u32,
+        height: monitor.height as u32,
+        geometry: Some(MonitorGeometry::new(
+            monitor.x as i32,
+            monitor.y as i32,
+            monitor.width as u32,
+            monitor.height as u32,
+        )),
     }
 }
 
@@ -1770,15 +2143,37 @@ const DEMO_FPS: u32 = 15;
 /// Try the real platform capture first, then the direct X11 backend, falling
 /// back to the synthetic test pattern. `force_fallback` is a test hook;
 /// production callers pass `false`.
+///
+/// Backend order is display-server aware (PDF Task 6.1): under Wayland or
+/// XWayland the portal is preferred (a direct X11 capture would only see
+/// XWayland windows); under a native X11 session the direct backend needs no
+/// portal daemon and is tried first.
 pub async fn create_capture_source(force_fallback: bool) -> ActiveCapture {
     #[cfg(target_os = "linux")]
     {
         if !force_fallback {
-            if let Ok(capture) = LinuxPortalCapture::connect().await {
-                return ActiveCapture::Portal(capture);
-            }
-            if let Ok(capture) = X11Capture::connect() {
-                return ActiveCapture::X11(capture);
+            let portal_first = detect_display_server().prefers_portal();
+            let portal = async {
+                LinuxPortalCapture::connect()
+                    .await
+                    .ok()
+                    .map(ActiveCapture::Portal)
+            };
+            let x11 = || X11Capture::connect().ok().map(ActiveCapture::X11);
+            if portal_first {
+                if let Some(capture) = portal.await {
+                    return capture;
+                }
+                if let Some(capture) = x11() {
+                    return capture;
+                }
+            } else {
+                if let Some(capture) = x11() {
+                    return capture;
+                }
+                if let Some(capture) = portal.await {
+                    return capture;
+                }
             }
         }
     }
@@ -2154,6 +2549,214 @@ mod tests {
         );
         assert!(
             convert_zpixmap_rgba(&[0; 8], 2, 1, 24, true, 0, 0, 0x0000_00FF).is_err()
+        );
+    }
+
+    // ── Display-server detection (BORU-SS-16 / PDF Task 6.1) ────────────────
+
+    #[test]
+    fn display_server_classification() {
+        // Wayland session without DISPLAY → Wayland.
+        assert_eq!(
+            classify_display_server(Some("wayland-0"), Some("wayland"), None),
+            DisplayServer::Wayland
+        );
+        assert_eq!(
+            classify_display_server(Some("wayland-0"), None, None),
+            DisplayServer::Wayland
+        );
+        // Wayland session WITH DISPLAY → XWayland (X server is XWayland).
+        assert_eq!(
+            classify_display_server(Some("wayland-0"), Some("wayland"), Some(":0")),
+            DisplayServer::XWayland
+        );
+        assert_eq!(
+            classify_display_server(Some("wayland-0"), None, Some(":0")),
+            DisplayServer::XWayland
+        );
+        // Native X11: XDG_SESSION_TYPE=x11 or only DISPLAY set.
+        assert_eq!(
+            classify_display_server(None, Some("x11"), Some(":0")),
+            DisplayServer::X11
+        );
+        assert_eq!(
+            classify_display_server(None, None, Some(":0")),
+            DisplayServer::X11
+        );
+        // Nothing set → Unknown (headless CI, ssh without X forwarding).
+        assert_eq!(
+            classify_display_server(None, None, None),
+            DisplayServer::Unknown
+        );
+        assert_eq!(
+            classify_display_server(None, Some("tty"), None),
+            DisplayServer::Unknown
+        );
+    }
+
+    #[test]
+    fn display_server_portal_preference() {
+        // Wayland/XWayland must prefer the portal (direct X11 capture would
+        // only see XWayland windows).
+        assert!(DisplayServer::Wayland.prefers_portal());
+        assert!(DisplayServer::XWayland.prefers_portal());
+        // Native X11 and unknown sessions use the direct backend first.
+        assert!(!DisplayServer::X11.prefers_portal());
+        assert!(!DisplayServer::Unknown.prefers_portal());
+    }
+
+    #[test]
+    fn display_server_round_trips_through_environment() {
+        // The env-reader is a thin wrapper over classify; sanity-check that a
+        // wayland+DISPLAY env combination is seen as XWayland.
+        std::env::set_var("WAYLAND_DISPLAY", "wayland-1");
+        std::env::set_var("DISPLAY", ":0");
+        std::env::set_var("XDG_SESSION_TYPE", "wayland");
+        assert_eq!(detect_display_server(), DisplayServer::XWayland);
+        std::env::remove_var("WAYLAND_DISPLAY");
+        std::env::set_var("XDG_SESSION_TYPE", "x11");
+        assert_eq!(detect_display_server(), DisplayServer::X11);
+        std::env::remove_var("DISPLAY");
+        std::env::remove_var("XDG_SESSION_TYPE");
+        assert_eq!(detect_display_server(), DisplayServer::Unknown);
+    }
+
+    // ── X11 geometry selection (BORU-SS-16 / PDF Task 6.1) ──────────────────
+
+    #[test]
+    fn clip_to_root_keeps_fully_inside_rect() {
+        let rect = CaptureRect { x: 100, y: 50, width: 800, height: 600 };
+        assert_eq!(clip_to_root(rect, 1920, 1080), Some((100, 50, 800, 600)));
+    }
+
+    #[test]
+    fn clip_to_root_clamps_partial_overflow() {
+        // Monitor sits past the right/bottom edge of a 1920x1080 root.
+        let rect = CaptureRect { x: 1800, y: 1000, width: 400, height: 300 };
+        assert_eq!(clip_to_root(rect, 1920, 1080), Some((1800, 1000, 120, 80)));
+    }
+
+    #[test]
+    fn clip_to_root_rejects_fully_outside_rect() {
+        // Monitor entirely beyond the root bounds → nothing to capture.
+        let rect = CaptureRect { x: 2000, y: 0, width: 100, height: 100 };
+        assert_eq!(clip_to_root(rect, 1920, 1080), None);
+        let rect = CaptureRect { x: 0, y: 1200, width: 100, height: 100 };
+        assert_eq!(clip_to_root(rect, 1920, 1080), None);
+    }
+
+    #[test]
+    fn clip_to_root_clamps_negative_origin() {
+        // RandR can report a monitor left of the root origin.
+        let rect = CaptureRect { x: -100, y: -50, width: 400, height: 300 };
+        assert_eq!(clip_to_root(rect, 1920, 1080), Some((0, 0, 300, 250)));
+    }
+
+    #[test]
+    fn x11_monitor_source_advertises_geometry() {
+        let monitor = X11Monitor {
+            id: monitor_source_id("DP-1"),
+            name: "DP-1".to_string(),
+            x: 1920,
+            y: 0,
+            width: 2560,
+            height: 1440,
+            primary: false,
+        };
+        let source = x11_monitor_source(&monitor);
+        assert_eq!(source.id, monitor_source_id("DP-1"));
+        assert_eq!(source.kind, CaptureSourceKind::Monitor);
+        assert_eq!(source.title, "DP-1: 2560x1440");
+        assert_eq!(source.width, 2560);
+        assert_eq!(source.height, 1440);
+        assert_eq!(
+            source.geometry,
+            Some(MonitorGeometry::new(1920, 0, 2560, 1440))
+        );
+    }
+
+    #[test]
+    fn x11_monitor_source_handles_negative_origin() {
+        // A monitor left of / above the primary has a negative origin; the
+        // CaptureSource must carry it so coordinate mapping stays correct.
+        let monitor = X11Monitor {
+            id: monitor_source_id("HDMI-A-0"),
+            name: "HDMI-A-0".to_string(),
+            x: -1920,
+            y: -120,
+            width: 1920,
+            height: 1080,
+            primary: false,
+        };
+        let source = x11_monitor_source(&monitor);
+        assert_eq!(
+            source.geometry,
+            Some(MonitorGeometry::new(-1920, -120, 1920, 1080))
+        );
+    }
+
+    #[test]
+    fn x11_monitor_id_is_stable_and_distinct() {
+        let dp1 = monitor_source_id("DP-1");
+        let again = monitor_source_id("DP-1");
+        let hdmi = monitor_source_id("HDMI-A-0");
+        assert_eq!(dp1, again);
+        assert_ne!(dp1, hdmi);
+    }
+
+    /// Live X11 backend test — REQUIRES a real X server (`$DISPLAY` set, e.g.
+    /// a desktop session, Xvfb, or Xwayland). Skipped by default; run with
+    /// `cargo test --features screen-sharing -- --ignored x11_live_`.
+    ///
+    /// Verifies: `X11Capture::connect`, monitor enumeration (RandR
+    /// GetMonitors → CRTC fallback → root fallback), and a real GetImage
+    /// capture through the [`DesktopCaptureBackend`] lifecycle.
+    #[test]
+    #[ignore = "requires a real X server (DISPLAY set)"]
+    fn x11_live_enumerates_and_captures_selected_monitor() {
+        let mut capture = X11Capture::connect().expect("connect to $DISPLAY");
+        let monitors = capture.list_monitors().expect("enumerate monitors");
+        assert!(!monitors.is_empty(), "at least one monitor expected");
+        let primary = monitors
+            .iter()
+            .find(|m| m.primary)
+            .or_else(|| monitors.first())
+            .expect("primary or first monitor");
+        let sources = capture.list_sources().expect("list sources");
+        assert_eq!(sources.len(), monitors.len());
+        let source = x11_monitor_source(primary);
+        capture
+            .start(source.id, CaptureConfig::default())
+            .expect("start primary monitor");
+        let frame = capture
+            .next_frame()
+            .expect("next_frame after start")
+            .expect("a frame from GetImage");
+        assert_eq!(frame.width, primary.width as u32);
+        assert_eq!(frame.height, primary.height as u32);
+        assert_eq!(frame.pixel_format, PixelFormat::Rgba8);
+        // Lifecycle enforcement: double start is an error, next_frame after
+        // stop is an error, stop is idempotent.
+        assert!(capture
+            .start(source.id, CaptureConfig::default())
+            .is_err());
+        capture.stop();
+        capture.stop(); // idempotent
+        assert!(capture.next_frame().is_err());
+    }
+
+    /// Live whole-root capture — REQUIRES a real X server. Exercises the
+    /// `ScreenCapture` trait used by the `ActiveCapture::X11` fallback path.
+    #[test]
+    #[ignore = "requires a real X server (DISPLAY set)"]
+    fn x11_live_screen_capture_whole_root() {
+        let mut capture = X11Capture::connect().expect("connect to $DISPLAY");
+        let frame = capture.capture().expect("whole-root capture").expect("frame");
+        assert!(frame.width > 0 && frame.height > 0);
+        assert_eq!(frame.pixel_format, PixelFormat::Rgba8);
+        assert_eq!(
+            frame.pixels.len(),
+            (frame.width * frame.height * 4) as usize
         );
     }
 }

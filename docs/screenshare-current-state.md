@@ -62,7 +62,7 @@ definitive file list:
 | `adaptation.rs` | 89 | `AdaptiveQuality`, `QualityDecision` | **Implemented but UNUSED** (no production caller) |
 | `stats.rs` | 121 | `ScreenShareStats`, `ScreenShareStatsSnapshot` | Implemented (internal to viewer; not surfaced to UI) |
 | `platform/mod.rs` | 103 | Per-OS dispatch, `ActiveCapture`, `create_capture_source` | Implemented |
-| `platform/linux.rs` | 2109 | Portal/PipeWire capture (lifecycle machine + clean teardown) + X11 fallback + dlopen PipeWire client | Implemented |
+| `platform/linux.rs` | 2544 | Portal/PipeWire capture (lifecycle machine + clean teardown) + X11 fallback (`DesktopCaptureBackend` with RandR monitor enumeration, BORU-SS-16) + dlopen PipeWire client | Implemented |
 | `platform/linux_pw.rs` | ~620 | **Pure PipeWire format negotiation + CPU frame normalization (BORU-SS-14)**: SPA pod constants (verified against PipeWire headers), format advertisement pod builder, negotiated-format parser, SPA→`PixelFormat` layout mapping, stride-aware row copy with 24-bit RGB/BGR expansion, `NegotiatedFormat` with renegotiation generation counter | Implemented |
 | `platform/windows.rs` | 554 | WinRT Graphics Capture backend (`DesktopCaptureBackend`) | Implemented |
 | `platform/windows_common.rs` | 340 | Windows lifecycle state machine, HRESULT classification, monitor ids (Linux-tested) | Implemented |
@@ -207,12 +207,17 @@ factory (`platform/mod.rs:83-95`), `capture_dimensions`
    and calls `org.freedesktop.portal.Session.Close`; `Drop` does the same
    best-effort. See `docs/screenshare-wayland-portal-verification.md`.
 4. `X11Capture` — direct X11 GetImage fallback via x11rb
-   (`linux.rs:1557-1656`, `convert_zpixmap_rgba`).
+   (`linux.rs:1625-2110`, `convert_zpixmap_rgba`). Full
+   `DesktopCaptureBackend` with RandR monitor enumeration and
+   selected-geometry capture (BORU-SS-16, §2.6).
 
 `ActiveCapture::{Portal,X11,TestPattern}` + `create_capture_source` selection
-order (portal → X11 → test-pattern). 20 unit tests incl. 11
-`PortalSessionMachine` lifecycle/teardown/DE-classification tests, SPA pod
-round-trip, and ZPixmap byte-order conversions.
+order is display-server aware (BORU-SS-16): Wayland/XWayland prefer the portal
+first (X11 fallback after); native X11 prefers the direct backend first
+(portal after); test-pattern is the last resort. 33 unit tests in
+`platform/linux.rs` incl. 11 `PortalSessionMachine` lifecycle/teardown/
+DE-classification tests, SPA pod round-trip, 10 BORU-SS-16 display-server /
+geometry / monitor-source tests, and ZPixmap byte-order conversions.
 
 **platform/windows.rs** — real WinRT `Windows.Graphics.Capture` backend
 (BORU-SS-11 / PDF Task 4.1): `GraphicsCapture` implements the
@@ -382,6 +387,47 @@ with a future DMA-BUF path):
   the only path to control; session tests assert Accept never grants control
   and a `ControlRequest` never changes permissions by itself.
 
+### 2.6 X11 fallback backend (BORU-SS-16 / PDF Task 6.1)
+
+The direct X11 backend (`src/screen_share/platform/linux.rs`) is now a full
+`DesktopCaptureBackend` behind the same trait as Windows/Wayland:
+
+- **Monitor enumeration via RandR.** `X11Capture::list_monitors()` tries the
+  modern RandR 1.5 `GetMonitors` path first (physical monitor names + primary
+  flag), falls back to a CRTC walk (`GetScreenResourcesCurrent` +
+  `GetCrtcInfo` + `GetOutputInfo` names) for older servers, and finally to a
+  single root-window "Screen" source so capture still works without RandR.
+  `list_sources()` advertises each monitor as a `CaptureSource` with its
+  root-window `MonitorGeometry` (negative origins supported), mirroring the
+  Windows `monitor_source` shape; ids are the same FNV-1a name hash
+  (`windows_common::monitor_source_id`).
+- **Selected-geometry capture.** `DesktopCaptureBackend::start(source, config)`
+  validates the source against the live monitor list and stores the selected
+  rectangle; `next_frame()` runs `GetImage` on exactly that rectangle
+  (`clip_to_root` clamps to the root bounds for monitors that moved past the
+  edge). The legacy whole-root `ScreenCapture` impl is preserved for the
+  `ActiveCapture::X11` fallback path, so existing host behaviour is
+  unchanged.
+- **Display-server detection.** `DisplayServer` (Wayland / XWayland / X11 /
+  Unknown) is classified from `WAYLAND_DISPLAY`, `XDG_SESSION_TYPE` and
+  `DISPLAY` (`classify_display_server` pure + `detect_display_server`
+  env-reader). `create_capture_source` uses `DisplayServer::prefers_portal()`:
+  under Wayland/XWayland the portal is tried first (a direct X11 capture
+  would only see XWayland windows); under native X11 the direct backend is
+  tried first (no portal daemon needed).
+- **Correctness-first.** No XShm / damage tracking yet — documented follow-up
+  (PDF Task 6.1: "optimize with SHM/damage tracking later if necessary").
+  Per-frame `GetImage` + `convert_zpixmap_rgba` (LSBFirst/MSBFirst channel
+  masks) is the baseline.
+- **Tests.** Pure Linux-runnable tests cover display-server classification +
+  portal preference, `clip_to_root` clamping (inside / partial overflow /
+  fully outside / negative origin), monitor→source geometry mapping, and
+  stable ids. Live tests (`x11_live_*`) are `#[ignore]`d and documented: they
+  need a real X server (`$DISPLAY`, e.g. a desktop session, Xvfb, or
+  Xwayland) and verify enumeration + real GetImage capture through the
+  `DesktopCaptureBackend` lifecycle. Run them explicitly with
+  `cargo test --features screen-sharing -- --ignored x11_live_`.
+
 ## 3. Dependency usage map (within the screen-share subsystem)
 
 | Dependency | Cargo.toml | Where used (file:line) | Purpose |
@@ -478,16 +524,18 @@ Notes:
 
 ## 5. Test coverage summary
 
-- **Unit tests:** 157 `#[test]` pass in `src/screen_share/` with
+- **Unit tests:** 167 `#[test]` pass in `src/screen_share/` with
   `--features screen-sharing` (includes codec 3, protocol 4, transport 3,
   session 7 [incl. 2 BORU-SS-15 explicit-grant tests], viewer 3,
   permissions 2, remote_input 6 [incl. 2 BORU-SS-15 portal-gate tests],
   adaptation 2, capture 3, stats 1, mod 3 (incl. the error-kind mapping
-  test added by BORU-SS-14), coords 15, platform/linux 23 [incl. 3
-  BORU-SS-15 cursor-mode tests and 11 portal-lifecycle / DE-detection
-  tests from BORU-SS-13], platform/linux_pw 13, platform/windows_common
+  test added by BORU-SS-14), coords 15, platform/linux 33 [incl. 3
+  BORU-SS-15 cursor-mode tests, 11 portal-lifecycle / DE-detection
+  tests from BORU-SS-13, and 10 BORU-SS-16 display-server / geometry /
+  monitor-source tests], platform/linux_pw 13, platform/windows_common
   10, plus the channels/reconnect/session tests added by later BORU-SS
-  tasks) — see per-file table above.
+  tasks) — see per-file table above. Two live-X11 tests
+  (`x11_live_*`) are `#[ignore]`d because they need a real X server.
 - **End-to-end protocol test:** `protocol.rs:322-412`
   (`end_to_end_invite_accept_media_decode`) — two real iroh endpoints, Hello →
   Invitation → Accept → media → decode through `ViewerPipeline`.

@@ -46,6 +46,10 @@ pub use host::{run_host_session, HostCommand, DEMO_FPS, DEMO_HEIGHT, DEMO_WIDTH}
 pub use platform::{
     capture_dimensions, create_capture_source, ActiveCapture, CAPTURE_FPS,
 };
+#[cfg(target_os = "linux")]
+pub use platform::{
+    classify_display_server, detect_display_server, DisplayServer, X11Capture, X11Monitor,
+};
 pub use protocol::{
     ControlMessage, Hello, InboundMedia, Permission, ScreenShareMessage, ScreenShareProtocol,
     SCREEN_SHARE_ALPN, SCREEN_SHARE_PROTOCOL_VERSION, MAX_INPUT_CODE, MAX_SCREEN_SHARE_MESSAGE,
