@@ -5431,6 +5431,22 @@ pub enum Shortcut {
     /// Ctrl+Shift+Z or Ctrl+Y — redo a designer transaction.
     #[cfg(feature = "dev-ui")]
     DesignerRedo,
+    /// Ctrl+S — save the current developer layout configuration.
+    #[cfg(feature = "dev-ui")]
+    DesignerSave,
+    /// Arrow-key semantic nudge for the selected layout property.
+    #[cfg(feature = "dev-ui")]
+    DesignerNudgeUp,
+    #[cfg(feature = "dev-ui")]
+    DesignerNudgeDown,
+    #[cfg(feature = "dev-ui")]
+    DesignerNudgeLeft,
+    #[cfg(feature = "dev-ui")]
+    DesignerNudgeRight,
+    /// Delete hides a supported optional designer section; it never removes
+    /// production widgets or features.
+    #[cfg(feature = "dev-ui")]
+    DesignerDelete,
 }
 
 #[derive(Debug, Clone)]
@@ -10713,6 +10729,18 @@ impl IcedChat {
                 Shortcut::DesignerUndo => "Shortcut(DesignerUndo)",
                 #[cfg(feature = "dev-ui")]
                 Shortcut::DesignerRedo => "Shortcut(DesignerRedo)",
+                #[cfg(feature = "dev-ui")]
+                Shortcut::DesignerSave => "Shortcut(DesignerSave)",
+                #[cfg(feature = "dev-ui")]
+                Shortcut::DesignerNudgeUp => "Shortcut(DesignerNudgeUp)",
+                #[cfg(feature = "dev-ui")]
+                Shortcut::DesignerNudgeDown => "Shortcut(DesignerNudgeDown)",
+                #[cfg(feature = "dev-ui")]
+                Shortcut::DesignerNudgeLeft => "Shortcut(DesignerNudgeLeft)",
+                #[cfg(feature = "dev-ui")]
+                Shortcut::DesignerNudgeRight => "Shortcut(DesignerNudgeRight)",
+                #[cfg(feature = "dev-ui")]
+                Shortcut::DesignerDelete => "Shortcut(DesignerDelete)",
             },
             AppMessage::DownloadProgress(_) => "DownloadProgress",
             AppMessage::ShowCreateGroupDialog => "ShowCreateGroupDialog",
@@ -15083,6 +15111,66 @@ impl IcedChat {
             | AppMessage::InviteWhisperInputChanged(_)
             | AppMessage::InviteSendWhisper => self.update_chat(message),
             // ── Global keyboard shortcuts ───────────────────────────
+            #[cfg(feature = "dev-ui")]
+            AppMessage::Shortcut(Shortcut::DesignerSave) => {
+                if self.designer.enabled {
+                    return iced::Task::done(AppMessage::Inspector(
+                        crate::inspector::InspectorMsg::SaveLayout,
+                    ));
+                }
+                iced::Task::none()
+            }
+            #[cfg(feature = "dev-ui")]
+            AppMessage::Shortcut(shortcut @ (Shortcut::DesignerNudgeUp
+            | Shortcut::DesignerNudgeDown
+            | Shortcut::DesignerNudgeLeft
+            | Shortcut::DesignerNudgeRight)) => {
+                if self.designer.enabled {
+                    let direction = match shortcut {
+                        Shortcut::DesignerNudgeUp | Shortcut::DesignerNudgeRight => 1.0,
+                        Shortcut::DesignerNudgeDown | Shortcut::DesignerNudgeLeft => -1.0,
+                        _ => unreachable!(),
+                    };
+                    let step = if self.designer.fine_adjust { 1.0 } else { 8.0 };
+                    if self.designer.selected_component.is_some_and(|component| {
+                        component.home_section().is_some()
+                    }) {
+                        let value = (self.active_layout.home.max_content_width + direction * step)
+                            .clamp(600.0, 2400.0);
+                        return iced::Task::done(AppMessage::Inspector(
+                            crate::inspector::InspectorMsg::SetLayoutFloat {
+                                field: crate::layout_inspector::LayoutField::HomeMaxContentWidth,
+                                value,
+                            },
+                        ));
+                    }
+                }
+                iced::Task::none()
+            }
+            #[cfg(feature = "dev-ui")]
+            AppMessage::Shortcut(Shortcut::DesignerDelete) => {
+                if self.designer.enabled {
+                    if let Some(component) = self.designer.selected_component {
+                        // Hero is a production-required feature. The other
+                        // home sections are explicitly optional and use the
+                        // existing visibility override semantics.
+                        if let Some(section) = component.home_section() {
+                            if section == crate::layout::HomeSection::Hero {
+                                return iced::Task::none();
+                            }
+                            let mut overrides = self.layout_overrides.clone();
+                            let home = overrides.home.get_or_insert_with(Default::default);
+                            let hidden = home.hidden_sections.get_or_insert_with(Vec::new);
+                            if !hidden.contains(&section) {
+                                hidden.push(section);
+                                self.set_layout_overrides(overrides);
+                                self.designer.update(DesignerMessage::MarkDirty);
+                            }
+                        }
+                    }
+                }
+                iced::Task::none()
+            }
             AppMessage::Shortcut(Shortcut::Escape) => {
                 #[cfg(feature = "dev-ui")]
                 if self.designer.enabled
@@ -21217,6 +21305,20 @@ pub fn shortcut_from_key(
         key::Key::Character(c) if ctrl && c.eq_ignore_ascii_case("y") => {
             Some(Shortcut::DesignerRedo)
         }
+        #[cfg(feature = "dev-ui")]
+        key::Key::Character(c) if ctrl && c.eq_ignore_ascii_case("s") => {
+            Some(Shortcut::DesignerSave)
+        }
+        #[cfg(feature = "dev-ui")]
+        key::Key::Named(key::Named::ArrowUp) if !ctrl => Some(Shortcut::DesignerNudgeUp),
+        #[cfg(feature = "dev-ui")]
+        key::Key::Named(key::Named::ArrowDown) if !ctrl => Some(Shortcut::DesignerNudgeDown),
+        #[cfg(feature = "dev-ui")]
+        key::Key::Named(key::Named::ArrowLeft) if !ctrl => Some(Shortcut::DesignerNudgeLeft),
+        #[cfg(feature = "dev-ui")]
+        key::Key::Named(key::Named::ArrowRight) if !ctrl => Some(Shortcut::DesignerNudgeRight),
+        #[cfg(feature = "dev-ui")]
+        key::Key::Named(key::Named::Delete) => Some(Shortcut::DesignerDelete),
         key::Key::Named(key::Named::Escape) => Some(Shortcut::Escape),
         key::Key::Named(key::Named::Backspace) if ctrl => Some(Shortcut::BackToChatList),
         key::Key::Character(c) if ctrl && c.eq_ignore_ascii_case("n") => Some(Shortcut::NewChat),
