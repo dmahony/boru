@@ -2121,6 +2121,22 @@ impl ActiveCapture {
         }
     }
 
+    /// Top-left of the captured rectangle in root-window coordinates.
+    ///
+    /// The X11 backend captures the selected monitor rect (or the whole root
+    /// at `(0, 0)`); absolute XTest pointer motion needs this origin so the
+    /// host can map capture pixels back to root coordinates (PDF Task 6.2).
+    /// The portal and test-pattern paths have no root offset.
+    pub fn input_origin(&self) -> (i32, i32) {
+        match self {
+            ActiveCapture::X11(capture) => capture
+                .selected
+                .map(|rect| (rect.x as i32, rect.y as i32))
+                .unwrap_or((0, 0)),
+            _ => (0, 0),
+        }
+    }
+
     /// Whether the synthetic fallback is active (viewer/UI diagnostics).
     pub fn is_test_pattern(&self) -> bool {
         matches!(self, ActiveCapture::TestPattern(..))

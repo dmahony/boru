@@ -58,7 +58,7 @@ definitive file list:
 | `host.rs` | 348 | `run_host_session` (dial → Hello → negotiate → capture/encode/send), `HostCommand` | Implemented |
 | `viewer.rs` | 241 | `ViewerPipeline` (bounded receiver decode pipeline), `DecodedFrame` | Implemented |
 | `permissions.rs` | 117 | `Capability`, `ControlToken`, `RequestRateLimiter`, `SessionPermissions` | Implemented |
-| `remote_input.rs` | ~440 | `InputEvent`, `RemoteInput` trait, Linux RemoteDesktop portal / Windows SendInput backends, `device_mask_grants` + `parse_devices_mask` gates (BORU-SS-15) | Implemented |
+| `remote_input.rs` | ~640 | `InputEvent`, `RemoteInput` trait, Linux RemoteDesktop portal / Windows SendInput backends + X11 XTest backend (BORU-SS-17), `device_mask_grants` + `parse_devices_mask` gates (BORU-SS-15) | Implemented |
 | `adaptation.rs` | 89 | `AdaptiveQuality`, `QualityDecision` | **Implemented but UNUSED** (no production caller) |
 | `stats.rs` | 121 | `ScreenShareStats`, `ScreenShareStatsSnapshot` | Implemented (internal to viewer; not surfaced to UI) |
 | `platform/mod.rs` | 103 | Per-OS dispatch, `ActiveCapture`, `create_capture_source` | Implemented |
@@ -428,6 +428,31 @@ The direct X11 backend (`src/screen_share/platform/linux.rs`) is now a full
   `DesktopCaptureBackend` lifecycle. Run them explicitly with
   `cargo test --features screen-sharing -- --ignored x11_live_`.
 
+### 2.7 X11 remote input (BORU-SS-17 / PDF Task 6.2)
+
+The X11 input backend (`X11RemoteInput` in `src/screen_share/remote_input.rs`)
+injects via the XTEST extension when running under a native X11 session, so
+remote control works without an xdg-desktop-portal daemon:
+
+- **Consent-gated injection.** The backend is created only on the first
+  explicit `GrantControl` (same lazy path as the portal backend), stores the
+  granted device mask (pointer/keyboard bits), and `apply` re-checks the mask
+  for every event. The streaming loop also runs `authorize_nonce` before
+  forwarding, so injection is doubly gated on `permissions.rs` state.
+- **Pure event translation.** `x11_pointer_actions` / `x11_key_action` /
+  `build_keysym_to_keycode` translate normalized events into XTest actions
+  (absolute motion with monitor origin, button press/release, wheel
+  press+release pair, keysym → keycode via the server `GetKeyboardMapping`)
+  and are unit-tested without an X server. Live XTest delivery needs a real
+  X session (documented in `docs/screenshare-x11-input.md`).
+- **Backend selection.** `create_platform_backend` is display-server aware:
+  XTest is tried first under native X11, the RemoteDesktop portal first under
+  Wayland/XWayland (XTest under XWayland only reaches XWayland windows), with
+  portal ⇄ XTest fallback then `UnavailableInputBackend`.
+- **Limitations documented.** Compositor/XWayland caveats (XWayland window
+  coverage, synthetic-input policy, layout dependence, no secure-desktop
+  injection) are in `docs/screenshare-x11-input.md`.
+
 ## 3. Dependency usage map (within the screen-share subsystem)
 
 | Dependency | Cargo.toml | Where used (file:line) | Purpose |
@@ -437,7 +462,7 @@ The direct X11 backend (`src/screen_share/platform/linux.rs`) is now a full
 | `libloading` 0.8 | `Cargo.toml:138` | `platform/linux.rs:481-513,531-532` (`Pw::load`, `Library::new(PW_LIB)`) | dlopen `libpipewire-0.3.so.0` (no PipeWire dev headers needed) |
 | `windows-sys` 0.59 | `Cargo.toml:140` | `remote_input.rs:220-228` (`SendInput`, `GetSystemMetrics`) | Windows user-session input injection |
 | `windows` 0.58 | `Cargo.toml:143-156` | `platform/windows.rs` (WinRT Graphics Capture), `platform/windows_common.rs` (classifier, no WinRT imports) | WinRT Graphics Capture |
-| `x11rb` 0.13 | `Cargo.toml:160` | `platform/linux.rs:31-32,956-1055` | Direct X11 GetImage capture fallback |
+| `x11rb` 0.13 | `Cargo.toml:160` | `platform/linux.rs:31-32,956-1055` (GetImage capture); `remote_input.rs:414-536` (XTest fake input) | Direct X11 GetImage capture fallback + XTest remote input |
 | `iroh` 1 (patched) | `Cargo.toml:111,457-463` | `protocol.rs:180-280` (ProtocolHandler/router), `transport.rs:118-163` (Connection/SendStream), `host.rs:24-25,98-155` (Endpoint::connect), `session.rs` + `permissions.rs` + `remote_input.rs` (PublicKey identity) | ALPN registration, QUIC dial/accept, control+media streams, peer identity |
 
 Notes:

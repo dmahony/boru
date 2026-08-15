@@ -81,31 +81,65 @@ impl RemoteInput for UnavailableInputBackend {
 }
 
 /// Create the platform input backend, failing closed when the environment does
-/// not provide one (no portal session bus on Linux). `capture` is the capture
-/// source geometry used to scale pointer coordinates to the platform screen.
-pub async fn create_platform_backend(capture: (u32, u32)) -> Box<dyn RemoteInput> {
+/// not provide one. `capture` is the capture source geometry used to scale
+/// pointer coordinates to the platform screen; `origin` is the capture rect's
+/// top-left in platform root/screen coordinates (used by the X11 backend for
+/// absolute XTest motion; the portal uses relative motion and Windows uses
+/// virtual-screen coordinates, so both ignore it); `granted` is the set of
+/// capabilities the host explicitly granted, which every backend stores and
+/// re-checks per event.
+///
+/// Backend order is display-server aware (PDF Task 6.2, mirroring the capture
+/// side from BORU-SS-16): under Wayland or XWayland the RemoteDesktop portal
+/// is preferred (XTest under XWayland only reaches XWayland windows); under a
+/// native X11 session the direct XTest backend needs no portal daemon and is
+/// tried first.
+pub async fn create_platform_backend(
+    capture: (u32, u32),
+    origin: (i32, i32),
+    granted: &[Capability],
+) -> Box<dyn RemoteInput> {
     #[cfg(target_os = "linux")]
     {
-        match LinuxPortalRemoteInput::connect().await {
-            Ok(backend) => Box::new(backend),
-            Err(_) => Box::new(UnavailableInputBackend),
+        let portal_first = crate::screen_share::platform::linux::detect_display_server().prefers_portal();
+        let portal = LinuxPortalRemoteInput::connect();
+        let x11 = || X11RemoteInput::connect(capture, origin, granted);
+        if portal_first {
+            if let Ok(backend) = portal.await {
+                return Box::new(backend);
+            }
+            if let Ok(backend) = x11() {
+                return Box::new(backend);
+            }
+        } else {
+            if let Ok(backend) = x11() {
+                return Box::new(backend);
+            }
+            if let Ok(backend) = portal.await {
+                return Box::new(backend);
+            }
         }
+        Box::new(UnavailableInputBackend)
     }
     #[cfg(all(not(target_os = "linux"), target_os = "windows"))]
     {
+        let _ = (origin, granted);
         Box::new(WindowsRemoteInput::new(capture))
     }
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
+        let _ = (origin, granted);
         Box::new(UnavailableInputBackend)
     }
 }
 
 // ── Linux: xdg-desktop-portal RemoteDesktop (D-Bus) ─────────────────────────
 //
-// The portal path is the only supported injection mechanism on Linux; no
-// privileged XTest/uinput fallback. The session bus object is
-// org.freedesktop.portal.RemoteDesktop at /org/freedesktop/portal/desktop.
+// The portal path is the supported injection mechanism under Wayland and
+// XWayland (where XTest only reaches XWayland windows). Under a native X11
+// session the direct XTest backend (see below) needs no portal daemon and is
+// preferred. The session bus object is org.freedesktop.portal.RemoteDesktop
+// at /org/freedesktop/portal/desktop.
 
 #[cfg(target_os = "linux")]
 #[derive(Debug, Default)]
@@ -257,6 +291,250 @@ impl RemoteInput for LinuxPortalRemoteInput {
         self.connection = None;
         self.session = None;
         self.granted_devices = 0;
+    }
+}
+
+// ── Linux: X11 XTest fake input (direct, no portal daemon) ────────────────
+//
+// The XTest extension injects synthetic core input into the X server (PDF
+// Task 6.2). It is the right path under a native X11 session: no
+// xdg-desktop-portal daemon is needed and the events reach every X11 client.
+// Under Wayland/XWayland the RemoteDesktop portal is preferred (XTest only
+// reaches XWayland windows); `create_platform_backend` picks the backend
+// order from the display-server detection, mirroring the capture side.
+//
+// Consent model: the backend is constructed ONLY after the host explicitly
+// granted control (`HostCommand::GrantControl`), and it stores the granted
+// device mask. `apply` re-checks that mask for every event, so injection is
+// gated on the permissions.rs state even if a caller bypasses the protocol
+// authorization (defense in depth; the streaming loop also runs
+// `authorize_nonce` before forwarding events).
+
+/// XTest FakeInput event type constants (xtestproto.h).
+pub const XTEST_KEY_PRESS: u8 = 2;
+pub const XTEST_KEY_RELEASE: u8 = 3;
+pub const XTEST_BUTTON_PRESS: u8 = 4;
+pub const XTEST_BUTTON_RELEASE: u8 = 5;
+pub const XTEST_MOTION_NOTIFY: u8 = 6;
+
+/// One XTest fake-input request produced by the pure translation functions.
+/// `Motion` carries absolute root-window coordinates (type 6 with detail 0);
+/// `Button` carries an X11 button id (1-3 buttons, 4-7 wheel); `Key` carries
+/// a keycode. `X11RemoteInput::apply` turns each into `FakeInput`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum X11Action {
+    Motion { x: i16, y: i16 },
+    Button { button: u8, pressed: bool },
+    Key { keycode: u8, pressed: bool },
+}
+
+/// Build the keysym → keycode reverse map from a `GetKeyboardMapping` reply.
+///
+/// Pure and unit-tested without an X server. Keycodes start at
+/// `first_keycode` (typically 8); each keycode has `keysyms_per_keycode`
+/// slots (usually 2: unshifted/shifted). The lowest keycode containing a
+/// keysym wins, matching `XKeysymToKeycode` semantics. Zero keysyms
+/// (NoSymbol) are skipped.
+pub fn build_keysym_to_keycode(
+    keysyms_per_keycode: u8,
+    keysyms: &[u32],
+    first_keycode: u8,
+) -> std::collections::HashMap<u32, u8> {
+    let mut map = std::collections::HashMap::new();
+    if keysyms_per_keycode == 0 {
+        return map;
+    }
+    for (index, chunk) in keysyms.chunks(keysyms_per_keycode as usize).enumerate() {
+        let keycode = first_keycode.saturating_add(index as u8);
+        for &sym in chunk {
+            if sym != 0 && !map.contains_key(&sym) {
+                map.insert(sym, keycode);
+            }
+        }
+    }
+    map
+}
+
+/// Translate a pointer [`InputEvent`] into XTest actions.
+///
+/// `event.x`/`event.y` are capture pixels; `origin` is the capture rect's
+/// top-left in root-window coordinates (the host passes the selected
+/// monitor's origin, `(0, 0)` for a whole-root capture). Motion is clamped to
+/// the root window bounds. X11 wheel buttons (4-7) are emitted as a
+/// press+release pair on the press event so a scroll tick happens exactly
+/// once; the matching release event is a no-op (avoids a double scroll).
+pub fn x11_pointer_actions(
+    event: &InputEvent,
+    origin: (i32, i32),
+    root: (u32, u32),
+) -> Result<Vec<X11Action>, ScreenShareError> {
+    if root.0 == 0 || root.1 == 0 {
+        return Err(ScreenShareError::new("X11 root window has zero size"));
+    }
+    let mut actions = Vec::new();
+    if event.code == 0 || (1..=7).contains(&event.code) {
+        // Absolute motion to the event point (moves the pointer even for
+        // button events; the viewer throttles redundant moves already).
+        let rx = (origin.0 as i64 + event.x as i64).clamp(0, root.0 as i64 - 1) as i16;
+        let ry = (origin.1 as i64 + event.y as i64).clamp(0, root.1 as i64 - 1) as i16;
+        actions.push(X11Action::Motion { x: rx, y: ry });
+    }
+    match event.code {
+        0 => {}
+        1..=3 => actions.push(X11Action::Button { button: event.code as u8, pressed: event.pressed }),
+        4..=7 => {
+            // Wheel tick: press + release on the press event only.
+            if event.pressed {
+                actions.push(X11Action::Button { button: event.code as u8, pressed: true });
+                actions.push(X11Action::Button { button: event.code as u8, pressed: false });
+            }
+        }
+        _ => return Err(ScreenShareError::new("unsupported X11 pointer button code")),
+    }
+    Ok(actions)
+}
+
+/// Translate a keyboard [`InputEvent`] into an XTest Key action.
+///
+/// The wire code is an X11 keysym; it is mapped to a keycode through the
+/// server keyboard map. Unknown keysyms fail closed (the event is rejected,
+/// mirroring the Windows backend's `keysym_to_vk` returning 0).
+pub fn x11_key_action(
+    code: u32,
+    keysym_to_keycode: &std::collections::HashMap<u32, u8>,
+    pressed: bool,
+) -> Result<X11Action, ScreenShareError> {
+    let keycode = keysym_to_keycode
+        .get(&code)
+        .copied()
+        .ok_or_else(|| ScreenShareError::new("unsupported key code (no keycode in server mapping)"))?;
+    Ok(X11Action::Key { keycode, pressed })
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+pub struct X11RemoteInput {
+    conn: x11rb::rust_connection::RustConnection,
+    root: u32,
+    root_width: u32,
+    root_height: u32,
+    /// Device mask the host explicitly granted (1 = pointer, 2 = keyboard).
+    /// Empty when control was denied — `apply` then fails closed so
+    /// view-only sharing keeps working.
+    granted_devices: u32,
+    /// Capture rect origin in root-window coordinates (monitor x/y).
+    origin: (i32, i32),
+    keysym_to_keycode: std::collections::HashMap<u32, u8>,
+    active: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl X11RemoteInput {
+    /// Connect to `$DISPLAY`, verify the XTEST extension is present, and
+    /// build the server keyboard map. Fails closed when the X server is
+    /// unreachable or XTEST is not supported.
+    pub fn connect(
+        capture: (u32, u32),
+        origin: (i32, i32),
+        granted: &[Capability],
+    ) -> Result<Self, ScreenShareError> {
+        use x11rb::connection::{Connection as _, RequestConnection as _};
+        use x11rb::protocol::xproto::ConnectionExt as _;
+
+        let (conn, screen_num) = x11rb::connect(None)
+            .map_err(|e| ScreenShareError::new(format!("X11 connect failed: {e}")))?;
+        let screen = conn.setup().roots.get(screen_num).ok_or_else(|| {
+            ScreenShareError::new("X11 setup has no root screen")
+        })?;
+        let root = screen.root;
+        let root_width = screen.width_in_pixels as u32;
+        let root_height = screen.height_in_pixels as u32;
+        // Fail closed when XTEST is not present (very rare; Xvfb/Xorg both
+        // ship it). `fake_input` would error at request time otherwise.
+        let extension = conn
+            .extension_information(x11rb::protocol::xtest::X11_EXTENSION_NAME)
+            .map_err(|e| ScreenShareError::new(format!("X11 extension query failed: {e}")))?
+            .ok_or_else(|| ScreenShareError::new("XTEST extension is not available on this X server"))?;
+        let _ = extension;
+        // Server keyboard mapping: keycode → keysyms, reversed for
+        // keysym → keycode translation.
+        let setup = conn.setup();
+        let first_keycode = setup.min_keycode;
+        let count = setup.max_keycode.saturating_sub(setup.min_keycode).saturating_add(1);
+        let mapping = conn
+            .get_keyboard_mapping(first_keycode, count)
+            .map_err(|e| ScreenShareError::new(format!("X11 get_keyboard_mapping failed: {e}")))?
+            .reply()
+            .map_err(|e| ScreenShareError::new(format!("X11 keyboard mapping reply failed: {e}")))?;
+        let keysym_to_keycode = build_keysym_to_keycode(
+            mapping.keysyms_per_keycode,
+            &mapping.keysyms,
+            first_keycode,
+        );
+        let mut granted_devices = 0u32;
+        for capability in granted {
+            match capability {
+                Capability::ControlPointer => granted_devices |= PORTAL_DEVICE_POINTER,
+                Capability::ControlKeyboard => granted_devices |= PORTAL_DEVICE_KEYBOARD,
+                _ => {}
+            }
+        }
+        tracing::info!(granted_devices, root_width, root_height, capture = ?capture, "screen-share: X11 XTest input backend connected");
+        Ok(Self {
+            conn,
+            root,
+            root_width,
+            root_height,
+            granted_devices,
+            origin,
+            keysym_to_keycode,
+            active: true,
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[async_trait::async_trait]
+impl RemoteInput for X11RemoteInput {
+    async fn apply(&mut self, event: InputEvent) -> Result<(), ScreenShareError> {
+        use x11rb::protocol::xtest::ConnectionExt as _;
+        if !self.active {
+            return Err(ScreenShareError::new("remote input revoked"));
+        }
+        if !device_mask_grants(self.granted_devices, event.capability) {
+            return Err(ScreenShareError::new("device type was not granted by the host (view-only)"));
+        }
+        let actions = match event.capability {
+            Capability::ControlPointer => {
+                x11_pointer_actions(&event, self.origin, (self.root_width, self.root_height))?
+            }
+            Capability::ControlKeyboard => {
+                vec![x11_key_action(event.code, &self.keysym_to_keycode, event.pressed)?]
+            }
+            _ => return Err(ScreenShareError::new("capability is not supported by the X11 backend")),
+        };
+        for action in actions {
+            let (type_, detail, root_x, root_y) = match action {
+                X11Action::Motion { x, y } => (XTEST_MOTION_NOTIFY, 0u8, x, y),
+                X11Action::Button { button, pressed } => {
+                    let type_ = if pressed { XTEST_BUTTON_PRESS } else { XTEST_BUTTON_RELEASE };
+                    (type_, button, 0i16, 0i16)
+                }
+                X11Action::Key { keycode, pressed } => {
+                    let type_ = if pressed { XTEST_KEY_PRESS } else { XTEST_KEY_RELEASE };
+                    (type_, keycode, 0i16, 0i16)
+                }
+            };
+            let _ = self
+                .conn
+                .xtest_fake_input(type_, detail, 0, self.root, root_x, root_y, 0)
+                .map_err(|e| ScreenShareError::new(format!("XTest fake input failed: {e}")))?;
+        }
+        Ok(())
+    }
+
+    async fn shutdown(&mut self) {
+        self.active = false;
     }
 }
 
@@ -454,5 +732,184 @@ mod tests {
 
         // Not a dict at all.
         assert_eq!(parse_devices_mask(&Value::U32(3)), None);
+    }
+
+    // ── X11 XTest translation (PDF Task 6.2) ────────────────────────────────
+    //
+    // These tests are pure — they exercise the normalized-event → X11-event
+    // translation without a real X server. The live XTest path (connect +
+    // FakeInput over a real DISPLAY) is documented in
+    // docs/screenshare-x11-input.md and needs an actual X session.
+
+    fn ptr(code: u32, x: f32, y: f32, pressed: bool) -> InputEvent {
+        InputEvent { code, capability: Capability::ControlPointer, token: None, x, y, pressed }
+    }
+
+    fn key(code: u32, pressed: bool) -> InputEvent {
+        InputEvent { code, capability: Capability::ControlKeyboard, token: None, x: 0.0, y: 0.0, pressed }
+    }
+
+    /// A plausible `GetKeyboardMapping` reply: 2 keysyms per keycode starting
+    /// at keycode 8. `a`/`A` on 38, `b`/`B` on 56, `1`/`!` on 10, and a
+    /// keycode (50) with a keysym in both slots to verify lowest-keycode wins.
+    fn sample_keymap() -> std::collections::HashMap<u32, u8> {
+        let mut keysyms = vec![0u32; 256 * 2];
+        let mut put = |keycode: usize, slot: usize, sym: u32| {
+            keysyms[(keycode - 8) * 2 + slot] = sym;
+        };
+        put(38, 0, 0x61); // a
+        put(38, 1, 0x41); // A
+        put(56, 0, 0x62); // b
+        put(56, 1, 0x42); // B
+        put(10, 0, 0x31); // 1
+        put(10, 1, 0x21); // !
+        put(50, 0, 0xFFE1); // Shift_L
+        put(50, 1, 0xFFE1); // Shift_L again (same keycode, both slots)
+        build_keysym_to_keycode(2, &keysyms, 8)
+    }
+
+    #[test]
+    fn x11_pointer_move_maps_capture_pixels_to_root() {
+        // Whole-root capture: origin (0,0), root 1920x1080.
+        let event = ptr(0, 960.0, 540.0, false);
+        let actions = x11_pointer_actions(&event, (0, 0), (1920, 1080)).unwrap();
+        assert_eq!(actions, vec![X11Action::Motion { x: 960, y: 540 }]);
+    }
+
+    #[test]
+    fn x11_pointer_move_applies_monitor_origin() {
+        // Second monitor at origin (1920, 0); capture-local (640, 360) →
+        // root (2560, 360).
+        let event = ptr(0, 640.0, 360.0, false);
+        let actions = x11_pointer_actions(&event, (1920, 0), (3840, 1080)).unwrap();
+        assert_eq!(actions, vec![X11Action::Motion { x: 2560, y: 360 }]);
+    }
+
+    #[test]
+    fn x11_pointer_move_clamps_to_root_bounds() {
+        // Negative origin monitor (left of root): clamp below 0 and past the
+        // root edge.
+        let event = ptr(0, 10.0, 5000.0, false);
+        let actions = x11_pointer_actions(&event, (-1920, 0), (1920, 1080)).unwrap();
+        assert_eq!(actions, vec![X11Action::Motion { x: 0, y: 1079 }]);
+    }
+
+    #[test]
+    fn x11_pointer_button_press_and_release() {
+        let press = x11_pointer_actions(&ptr(1, 100.0, 100.0, true), (0, 0), (1920, 1080)).unwrap();
+        assert_eq!(
+            press,
+            vec![
+                X11Action::Motion { x: 100, y: 100 },
+                X11Action::Button { button: 1, pressed: true },
+            ]
+        );
+        let release = x11_pointer_actions(&ptr(1, 100.0, 100.0, false), (0, 0), (1920, 1080)).unwrap();
+        assert_eq!(
+            release,
+            vec![
+                X11Action::Motion { x: 100, y: 100 },
+                X11Action::Button { button: 1, pressed: false },
+            ]
+        );
+    }
+
+    #[test]
+    fn x11_wheel_emits_press_release_pair_once() {
+        // X11 wheel-up is button 4; a tick is press+release so the server
+        // scrolls exactly once. The matching release event is a no-op.
+        let tick = x11_pointer_actions(&ptr(4, 50.0, 50.0, true), (0, 0), (1920, 1080)).unwrap();
+        assert_eq!(
+            tick,
+            vec![
+                X11Action::Motion { x: 50, y: 50 },
+                X11Action::Button { button: 4, pressed: true },
+                X11Action::Button { button: 4, pressed: false },
+            ]
+        );
+        let release = x11_pointer_actions(&ptr(4, 50.0, 50.0, false), (0, 0), (1920, 1080)).unwrap();
+        assert_eq!(release, vec![X11Action::Motion { x: 50, y: 50 }]);
+    }
+
+    #[test]
+    fn x11_pointer_rejects_unknown_button_and_zero_root() {
+        assert!(x11_pointer_actions(&ptr(9, 0.0, 0.0, true), (0, 0), (1920, 1080)).is_err());
+        assert!(x11_pointer_actions(&ptr(0, 0.0, 0.0, false), (0, 0), (0, 1080)).is_err());
+    }
+
+    #[test]
+    fn x11_keysym_map_builds_lowest_keycode_and_skips_no_symbol() {
+        let map = sample_keymap();
+        assert_eq!(map.get(&0x61), Some(&38));
+        assert_eq!(map.get(&0x41), Some(&38));
+        assert_eq!(map.get(&0x62), Some(&56));
+        assert_eq!(map.get(&0x31), Some(&10));
+        assert_eq!(map.get(&0x21), Some(&10));
+        // Shift_L present (modifier state handled via normal key events).
+        assert_eq!(map.get(&0xFFE1), Some(&50));
+        // Unmapped keysym is absent.
+        assert_eq!(map.get(&0x7A), None);
+    }
+
+    #[test]
+    fn x11_key_translates_keysym_to_keycode() {
+        let map = sample_keymap();
+        let action = x11_key_action(0x61, &map, true).unwrap();
+        assert_eq!(action, X11Action::Key { keycode: 38, pressed: true });
+        let release = x11_key_action(0x61, &map, false).unwrap();
+        assert_eq!(release, X11Action::Key { keycode: 38, pressed: false });
+        // Modifier keysym translates too — the server updates its modifier
+        // state from the injected keycode.
+        let shift = x11_key_action(0xFFE1, &map, true).unwrap();
+        assert_eq!(shift, X11Action::Key { keycode: 50, pressed: true });
+    }
+
+    #[test]
+    fn x11_key_rejects_unknown_keysym() {
+        let map = sample_keymap();
+        assert!(x11_key_action(0x7A, &map, true).is_err());
+    }
+
+    #[test]
+    fn x11_empty_keymap_rejects_everything() {
+        let empty = std::collections::HashMap::new();
+        assert!(x11_key_action(0x61, &empty, true).is_err());
+        // Empty (0 keysyms per keycode) mapping builds an empty map.
+        let built = build_keysym_to_keycode(0, &[], 8);
+        assert!(built.is_empty());
+    }
+
+    #[test]
+    fn x11_consent_gate_rejects_ungranted_device_before_translation() {
+        // The backend gate mirrors the portal: with no granted device bits
+        // the event is rejected even though the pure translation would
+        // succeed — so a view-only share can never inject input.
+        let granted = device_mask_for_capabilities(&[Capability::ViewScreen]);
+        assert!(!device_mask_grants(granted, Capability::ControlPointer));
+        assert!(!device_mask_grants(granted, Capability::ControlKeyboard));
+
+        let granted_pointer = device_mask_for_capabilities(&[Capability::ControlPointer]);
+        assert!(device_mask_grants(granted_pointer, Capability::ControlPointer));
+        assert!(!device_mask_grants(granted_pointer, Capability::ControlKeyboard));
+
+        let granted_both =
+            device_mask_for_capabilities(&[Capability::ControlPointer, Capability::ControlKeyboard]);
+        assert!(device_mask_grants(granted_both, Capability::ControlPointer));
+        assert!(device_mask_grants(granted_both, Capability::ControlKeyboard));
+    }
+
+    /// Build the granted-device bitmask the X11 backend stores from the
+    /// capabilities passed in an explicit GrantControl (pure mirror of the
+    /// logic inside `X11RemoteInput::connect`).
+    fn device_mask_for_capabilities(capabilities: &[Capability]) -> u32 {
+        let mut mask = 0u32;
+        for capability in capabilities {
+            match capability {
+                Capability::ControlPointer => mask |= PORTAL_DEVICE_POINTER,
+                Capability::ControlKeyboard => mask |= PORTAL_DEVICE_KEYBOARD,
+                _ => {}
+            }
+        }
+        mask
     }
 }

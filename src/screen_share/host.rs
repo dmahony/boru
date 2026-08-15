@@ -346,17 +346,23 @@ async fn run_host_session_inner(
             cmd = commands.recv() => match cmd {
                 Some(HostCommand::GrantControl(capabilities)) => {
                     // Remote control is opt-in (PDF Task 9.1 / T5.3): the
-                    // RemoteDesktop portal session is opened only when the
-                    // host user explicitly grants control, never for view-only
-                    // shares. If the portal is missing or the user denies the
-                    // portal dialog, `create_platform_backend` fails closed to
-                    // `UnavailableInputBackend` and the grant still proceeds
-                    // at the protocol level while input does nothing — the
-                    // share remains view-only and functional.
+                    // platform input backend (RemoteDesktop portal on
+                    // Wayland/XWayland, XTest on native X11) is opened only
+                    // when the host user explicitly grants control, never for
+                    // view-only shares. If the platform is missing or the user
+                    // denies the portal dialog, `create_platform_backend`
+                    // fails closed to `UnavailableInputBackend` and the grant
+                    // still proceeds at the protocol level while input does
+                    // nothing — the share remains view-only and functional.
                     if backend.is_none() {
                         tracing::info!("screen-share: host opening remote-input backend (explicit control grant)");
                         let backend_started = std::time::Instant::now();
-                        backend = Some(create_platform_backend((capture_width, capture_height)).await);
+                        backend = Some(create_platform_backend(
+                            (capture_width, capture_height),
+                            capture.input_origin(),
+                            &capabilities,
+                        )
+                        .await);
                         tracing::info!(elapsed_ms = backend_started.elapsed().as_millis() as u64, "screen-share: host remote-input backend ready");
                     }
                     if let Some(message) = manager.grant_control(session_id, capabilities, events) {

@@ -62,6 +62,12 @@ impl ActiveCapture {
             Self::Graphics(_, dimensions) | Self::TestPattern(_, dimensions) => *dimensions,
         }
     }
+    /// Input backends on non-Linux platforms do not need a root-window
+    /// origin (Windows SendInput uses virtual-screen coordinates; the portal
+    /// uses relative motion), so the origin is always `(0, 0)` here.
+    pub fn input_origin(&self) -> (i32, i32) {
+        (0, 0)
+    }
     pub fn is_test_pattern(&self) -> bool {
         matches!(self, Self::TestPattern(..))
     }
@@ -87,6 +93,9 @@ impl ActiveCapture {
         match self {
             Self::TestPattern(_, dimensions) => *dimensions,
         }
+    }
+    pub fn input_origin(&self) -> (i32, i32) {
+        (0, 0)
     }
     pub fn is_test_pattern(&self) -> bool {
         matches!(self, Self::TestPattern(..))
