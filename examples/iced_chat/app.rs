@@ -12693,6 +12693,14 @@ impl IcedChat {
                     self.designer.update(DesignerMessage::CommitResize);
                     return iced::Task::none();
                 }
+                if matches!(designer_message, DesignerMessage::CancelResize) {
+                    // A cancelled gesture must not leave its pre-gesture
+                    // snapshot pending.  Otherwise a later unrelated resize
+                    // could commit a stale history transaction.
+                    self.designer_history.cancel();
+                    self.designer.update(DesignerMessage::CancelResize);
+                    return iced::Task::none();
+                }
                 self.designer.update(designer_message);
                 if let Some(Some(component)) = selection {
                     let inspector_component = component.inspector_component();

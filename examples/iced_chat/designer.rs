@@ -679,4 +679,18 @@ mod tests {
         history.record(&one, &two);
         assert!(history.redo(&two).is_none());
     }
+
+    #[test]
+    fn cancelling_a_gesture_discards_pending_history_snapshot() {
+        let base = crate::layout::LayoutConfig::default();
+        let mut changed = base.clone();
+        changed.sidebar.width += 8.0;
+        let mut history = DesignerHistory::new(4);
+
+        history.begin(&base);
+        history.cancel();
+        history.commit(&changed);
+
+        assert!(history.undo(&changed).is_none());
+    }
 }
