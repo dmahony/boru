@@ -484,3 +484,97 @@ fn matrix_save_round_trip() {
     let reloaded = load_layout_config(dir.path()).expect("load succeeds");
     assert_eq!(reloaded, cfg, "on-disk round trip is lossless");
 }
+
+/// BORU-DESIGN-26: a completed designer transaction crosses the same typed
+/// layout/TOML seam used by Save Layout.
+#[cfg(feature = "dev-ui")]
+#[test]
+fn designer_transaction_round_trips_through_typed_toml() {
+    let source = r#"
+[home]
+section_order = ["PeopleActivity", "MeshHealth", "QuickActions", "Hero", "Tunnels"]
+hidden_sections = ["Tunnels"]
+[home.quick_actions]
+columns_wide = 5
+[responsive.home_columns]
+narrow = 1
+desktop = 3
+"#;
+    let overrides = parse_layout_config(source).expect("designer transaction parses");
+    let (reloaded, warnings) = merge_layout_config(&LayoutConfig::default(), &overrides);
+    assert!(
+        warnings.is_empty(),
+        "transaction values are valid: {warnings:?}"
+    );
+    assert_eq!(reloaded.home.section_order[0], HomeSection::PeopleActivity);
+    assert_eq!(reloaded.home.hidden_sections, vec![HomeSection::Tunnels]);
+    assert_eq!(reloaded.home.quick_actions.columns_wide, 5);
+    assert_eq!(reloaded.responsive.home_columns.desktop, 3);
+
+    let text =
+        crate::layout_config::layout_config_to_toml(&overrides).expect("serialize transaction");
+    let reparsed = parse_layout_config(&text).expect("serialized transaction parses");
+    let (round_trip, _) = merge_layout_config(&LayoutConfig::default(), &reparsed);
+    assert_eq!(round_trip, reloaded);
+}
+
+#[test]
+fn designer_reorder_preserves_sections_and_visibility() {
+    let (layout, warnings) = merge_toml(
+        "[home]\nsection_order = [\"Tunnels\", \"Hero\", \"MeshHealth\", \"QuickActions\", \"PeopleActivity\"]\nhidden_sections = [\"Tunnels\"]\n",
+    );
+    assert!(warnings.is_empty());
+    assert_eq!(
+        layout.home.section_order.len(),
+        LayoutConfig::default().home.section_order.len()
+    );
+    assert_eq!(
+        layout.home.visible_sections(),
+        vec![
+            HomeSection::Hero,
+            HomeSection::MeshHealth,
+            HomeSection::QuickActions,
+            HomeSection::PeopleActivity,
+        ]
+    );
+    assert_eq!(layout.home.section_order[0], HomeSection::Tunnels);
+}
+
+#[test]
+fn designer_hidden_component_can_be_recovered() {
+    let hidden = merge_toml("[home]\nhidden_sections = [\"QuickActions\"]\n").0;
+    assert!(!hidden
+        .home
+        .visible_sections()
+        .contains(&HomeSection::QuickActions));
+    let recovered = merge_toml("[home]\nhidden_sections = []\n").0;
+    assert!(recovered
+        .home
+        .visible_sections()
+        .contains(&HomeSection::QuickActions));
+    assert_eq!(
+        recovered.home.section_order,
+        LayoutConfig::default().home.section_order
+    );
+}
+
+#[test]
+fn designer_breakpoint_specific_edits_stay_in_their_tier() {
+    let (layout, warnings) = merge_toml(
+        "[responsive.home_columns]\nnarrow = 1\ndesktop = 3\nultra_wide = 4\n[responsive.home_padding_x]\ndesktop = 40.0\n",
+    );
+    assert!(warnings.is_empty());
+    assert_eq!(layout.responsive.home_columns_for_width(320.0), 1);
+    assert_eq!(layout.responsive.home_columns_for_width(1024.0), 3);
+    assert_eq!(layout.responsive.home_columns_for_width(1920.0), 4);
+    assert_eq!(layout.responsive.home_padding_x_for_width(1024.0), 40.0);
+    assert_ne!(layout.responsive.home_padding_x_for_width(320.0), 40.0);
+}
+
+#[test]
+fn designer_resize_clamps_to_layout_constraints() {
+    let (layout, warnings) = merge_toml("[sidebar]\nwidth = 999999.0\n");
+    assert_eq!(layout.sidebar.width, 4096.0);
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].contains("sidebar.width"));
+}

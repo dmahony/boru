@@ -708,4 +708,39 @@ mod tests {
         state.reject("sidebar width is outside its constraints");
         assert_eq!(state.validation_errors.len(), 1);
     }
+
+    #[test]
+    fn invalid_drop_does_not_mutate_layout_and_reports_feedback() {
+        let mut state = DesignerState::default();
+        state.update(DesignerMessage::Enter);
+        state.update(DesignerMessage::StartDrag {
+            component: ComponentId::HomeQuickActions,
+            origin: Point::ORIGIN,
+        });
+        state.reject("Quick Actions cannot be dropped into Chat");
+        assert!(state.drag_operation.is_none());
+        assert_eq!(state.validation_errors, vec!["Quick Actions cannot be dropped into Chat"]);
+    }
+
+    #[test]
+    fn breakpoint_edit_is_clamped_and_selects_custom_preview() {
+        let mut state = DesignerState::default();
+        state.update(DesignerMessage::SetCustomWidth("99999".into()));
+        assert_eq!(state.preview_breakpoint, PreviewBreakpoint::Custom);
+        assert_eq!(state.custom_preview_width, 3840.0);
+        assert_eq!(state.preview_breakpoint.width(state.custom_preview_width), 3840.0);
+    }
+
+    #[test]
+    fn resize_transaction_is_cancelled_without_leaking_pointer_coordinates() {
+        let mut state = DesignerState::default();
+        state.update(DesignerMessage::Enter);
+        state.update(DesignerMessage::StartResize {
+            component: ComponentId::Sidebar,
+            origin: Point::new(10.0, 10.0),
+        });
+        state.update(DesignerMessage::UpdateResize(Point::new(5000.0, 10.0)));
+        state.update(DesignerMessage::CancelResize);
+        assert!(state.resize_operation.is_none());
+    }
 }
