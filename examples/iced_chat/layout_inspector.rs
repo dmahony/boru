@@ -1452,9 +1452,58 @@ fn layout_sections_row(
         .push(input)
         .spacing(2.0)
         .into()
-}
+        }
 
-/// Collapsible layout section header with a per-section Reset action.
+        /// Render discoverable show/hide controls for every home section. Hidden
+        /// sections stay in `section_order` and can always be restored here.
+        pub fn home_section_visibility_rows(
+        layout: &LayoutConfig,
+        dark_mode: bool,
+        ) -> Element<'static, crate::app::AppMessage> {
+        let sections = [
+            HomeSection::Hero,
+            HomeSection::MeshHealth,
+            HomeSection::QuickActions,
+            HomeSection::PeopleActivity,
+            HomeSection::Tunnels,
+        ];
+        let mut rows = iced::widget::Column::new().spacing(2.0);
+        for section in sections {
+            let hidden = layout.home.hidden_sections.contains(&section);
+            let action = button(text(if hidden { "Show" } else { "Hide" }).size(10.0))
+                .on_press(crate::app::AppMessage::Inspector(
+                    crate::inspector::InspectorMsg::SetHomeSectionVisibility {
+                        section,
+                        visible: hidden,
+                    },
+                ))
+                .padding([2, 7]);
+            rows = rows.push(
+                row![
+                    text(home_section_label(section)).size(11.0).color(muted_text(dark_mode)),
+                    Space::new().width(Length::Fill),
+                    text(if hidden { "hidden" } else { "visible" })
+                        .size(10.0)
+                        .color(value_text(dark_mode)),
+                    action,
+                ]
+                .align_y(Alignment::Center),
+            );
+        }
+        rows.into()
+        }
+
+        fn home_section_label(section: HomeSection) -> &'static str {
+        match section {
+            HomeSection::Hero => "Hero",
+            HomeSection::MeshHealth => "Mesh health",
+            HomeSection::QuickActions => "Quick actions",
+            HomeSection::PeopleActivity => "People & activity",
+            HomeSection::Tunnels => "Tunnels",
+        }
+        }
+
+        /// Collapsible layout section header with a per-section Reset action.
 pub fn layout_section_header(
     section: &LayoutInspectorSection,
     collapsed: bool,

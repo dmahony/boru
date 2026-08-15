@@ -1459,6 +1459,12 @@ pub enum InspectorMsg {
         field: crate::layout_inspector::LayoutField,
         text: String,
     },
+    /// Show or hide one optional home-dashboard section without removing its
+    /// order or any other layout configuration.
+    SetHomeSectionVisibility {
+        section: crate::layout::HomeSection,
+        visible: bool,
+    },
     /// Save the current editable layout overrides to `boru-layout.toml`
     /// (atomic write, same format the dev watcher reloads).
     SaveLayout,
@@ -1985,6 +1991,15 @@ pub fn view_inspector(
                     *field,
                     dark_mode,
                 ));
+            }
+            if section.id == crate::layout_inspector::LayoutSectionId::Home
+                && group.label == "Sections"
+            {
+                col = col
+                    .push(subgroup_header("Visibility", dark_mode))
+                    .push(crate::layout_inspector::home_section_visibility_rows(
+                        layout, dark_mode,
+                    ));
             }
             col = col.push(Space::new().height(Length::Fixed(4.0)));
         }

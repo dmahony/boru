@@ -20353,6 +20353,20 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
+            InspectorMsg::SetHomeSectionVisibility { section, visible } => {
+                let mut overrides = self.layout_overrides.clone();
+                let home = overrides.home.get_or_insert_with(Default::default);
+                let mut hidden = self.active_layout.home.hidden_sections.clone();
+                if visible {
+                    hidden.retain(|candidate| *candidate != section);
+                } else if !hidden.contains(&section) {
+                    hidden.push(section);
+                }
+                home.hidden_sections = Some(hidden);
+                self.set_layout_overrides(overrides);
+                tracing::debug!(?section, visible, "UI Inspector: home section visibility changed");
+                iced::Task::none()
+            }
         }
     }
 
@@ -39027,6 +39041,59 @@ fn inspector_set_layout_choice_and_int_apply_immediately() {
     }));
     drop(task);
     assert_eq!(app.active_layout.home.grid.rail_portion, 2);
+}
+
+#[cfg(feature = "dev-ui")]
+#[test]
+fn inspector_home_section_visibility_preserves_order_and_other_layout_fields() {
+    let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+    let original_order = app.active_layout.home.section_order.clone();
+    let original_padding = app.active_layout.home.padding.top;
+
+    let task = app.update(AppMessage::Inspector(
+        crate::inspector::InspectorMsg::SetHomeSectionVisibility {
+            section: crate::layout::HomeSection::Tunnels,
+            visible: false,
+        },
+    ));
+    drop(task);
+    assert!(app
+        .active_layout
+        .home
+        .hidden_sections
+        .contains(&crate::layout::HomeSection::Tunnels));
+    assert_eq!(app.active_layout.home.section_order, original_order);
+    assert_eq!(app.active_layout.home.padding.top, original_padding);
+    assert_eq!(
+        app.layout_overrides
+            .home
+            .as_ref()
+            .expect("home override group")
+            .hidden_sections,
+        Some(vec![crate::layout::HomeSection::Tunnels])
+    );
+
+    let task = app.update(AppMessage::Inspector(
+        crate::inspector::InspectorMsg::SetHomeSectionVisibility {
+            section: crate::layout::HomeSection::Tunnels,
+            visible: true,
+        },
+    ));
+    drop(task);
+    assert!(!app
+        .active_layout
+        .home
+        .hidden_sections
+        .contains(&crate::layout::HomeSection::Tunnels));
+    assert_eq!(app.active_layout.home.section_order, original_order);
+    assert_eq!(
+        app.layout_overrides
+            .home
+            .as_ref()
+            .expect("home override group")
+            .hidden_sections,
+        Some(Vec::new())
+    );
 }
 
 #[cfg(feature = "dev-ui")]
