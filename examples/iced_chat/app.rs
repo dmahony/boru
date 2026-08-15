@@ -20494,12 +20494,15 @@ fn map_gui_action(action: GuiActionRequest) -> AppMessage {
 /// Drain inbound media for one viewer session into the bounded decode
 /// pipeline, publishing the newest decoded frame to `watch_tx`. Runs on the
 /// tokio runtime (never the UI thread); exits when the session ends, the
-/// channel closes, or `stop` is set.
+/// channel closes, or `stop` is set. When the pipeline detects missing or
+/// corrupt frames it emits a `KeyframeRequest` on the control channel so the
+/// host forces the next unit to be independently decodable (PDF Task 8.1).
 async fn decode_worker(
     media_rx: Arc<Mutex<Receiver<InboundMedia>>>,
     session_id: ScreenShareSessionId,
     mut pipeline: ViewerPipeline<OpenH264Decoder>,
     watch_tx: tokio::sync::watch::Sender<Option<CapturedFrame>>,
+    protocol: Option<ScreenShareProtocol>,
     stop: Arc<AtomicBool>,
 ) {
     loop {
@@ -20525,6 +20528,25 @@ async fn decode_worker(
             break;
         }
         pipeline.process();
+        // Corrupt/missing frames recovered via a fresh keyframe: emit the
+        // request on the reliable control channel so the host resynchronises
+        // without waiting for the next periodic keyframe.
+        if pipeline.take_keyframe_request() {
+            if let Some(protocol) = &protocol {
+                if let Err(error) = protocol
+                    .send_screen_share(
+                        session_id,
+                        ScreenShareMessage::KeyframeRequest {
+                            version: SCREEN_SHARE_PROTOCOL_VERSION,
+                            session_id,
+                        },
+                    )
+                    .await
+                {
+                    tracing::warn!(error = %error, "screen-share: viewer keyframe request send failed");
+                }
+            }
+        }
         if let Some(frame) = pipeline.take_frame() {
             let _ = watch_tx.send(Some(frame));
         }
@@ -21077,9 +21099,10 @@ impl IcedChat {
         self.screen_share_decode_stop = Some(decode_stop.clone());
         let (watch_tx, watch_rx) = tokio::sync::watch::channel(None);
         self.screen_share_frame_watch = Some(Arc::new(tokio::sync::Mutex::new(watch_rx)));
+        let protocol = self.screen_share_protocol.clone();
         let runtime_handle = self.runtime_handle.clone();
         runtime_handle.spawn(async move {
-            decode_worker(media_rx, session_id, pipeline, watch_tx, decode_stop).await;
+            decode_worker(media_rx, session_id, pipeline, watch_tx, protocol, decode_stop).await;
         });
         send_task
     }

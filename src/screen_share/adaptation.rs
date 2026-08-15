@@ -302,7 +302,7 @@ fn config_for_level(base: CodecConfig, level: u8) -> CodecConfig {
 mod tests {
     use super::*;
     fn stats(backlog: u64, age: u64, late: u64) -> ScreenShareStatsSnapshot {
-        ScreenShareStatsSnapshot { sender_fps: 30, encoded_fps: 30, dropped_capture_frames: 0, encode_time_us: 0, bitrate_bps: 0, bytes_in_flight: backlog, media_resets: 0, receiver_fps: 30, decode_time_us: 0, late_drops: late, frame_age_us: age, decoded_frames: 0, rendered_frames: 0, decode_errors: 0, send_queue_depth: 0, measured_throughput_bps: 0, encode_time_avg_us: 0, rtt_us: 0, dropped_frames: 0 }
+        ScreenShareStatsSnapshot { sender_fps: 30, encoded_fps: 30, dropped_capture_frames: 0, encode_time_us: 0, bitrate_bps: 0, bytes_in_flight: backlog, media_resets: 0, receiver_fps: 30, decode_time_us: 0, late_drops: late, frame_age_us: age, decoded_frames: 0, rendered_frames: 0, decode_errors: 0, keyframe_requests: 0, send_queue_depth: 0, measured_throughput_bps: 0, encode_time_avg_us: 0, rtt_us: 0, dropped_frames: 0 }
     }
     fn base_stats() -> ScreenShareStatsSnapshot { stats(0, 0, 0) }
     #[test]

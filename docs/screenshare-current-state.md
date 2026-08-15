@@ -142,7 +142,18 @@ bounded queue (`viewer.rs:109-121`), ordering-watermark advance at enqueue
 `viewer.rs:125-171`), keyframe-recovery on decode error (`viewer.rs:159-167`),
 `revoke()`/`end()` (`viewer.rs:76-87`), `take_frame()` (`viewer.rs:174-178`),
 and counters/`stats()` (`viewer.rs:181-187`). 3 unit tests
-(`viewer.rs:212-240`).
+(`viewer.rs:212-240`). **BORU-SS-21 (PDF Task 8.1, decoder pipeline):** the
+pipeline now detects missing-sequence gaps at enqueue (a sequence jump counts
+the lost units as dropped and requests a keyframe unless the arrival itself is
+a keyframe — `viewer.rs:112-128`), recovers when a dependent frame decodes to
+no picture (`Ok(None)` → keyframe request, `viewer.rs:153-163`), and surfaces
+pending recovery via one-shot `take_keyframe_request()`
+(`viewer.rs:218-226`); every request feeds a `keyframe_requests` counter and
+the stats snapshot (`stats.rs:25-27`, `observe_keyframe_request`). The app's
+decode worker (`app.rs:20498-20552`) drains the pending flag and emits
+`ScreenShareMessage::KeyframeRequest` on the reliable control channel so the
+host forces the next unit to be a keyframe (PDF Task 3.2 / Task 8.1). 9 unit
+tests.
 
 **permissions.rs** — `Capability::{ViewScreen,ControlPointer,ControlKeyboard,
 Clipboard}` (`permissions.rs:10`), `MAX_CAPABILITIES = 4`
@@ -600,9 +611,11 @@ Notes:
     button (`app/chat.rs:468-472`), **Stop Viewing** (`app/chat.rs:474`),
     and a mouse-area that emits `ScreenSharePointerMove`/`Button` events when
     control is active (`app/chat.rs:417-447`).
-- **Decode worker:** `decode_worker` (`app.rs:20483-20517`) drains inbound
+- **Decode worker:** `decode_worker` (`app.rs:20498-20552`) drains inbound
   media for the session, feeds `ViewerPipeline<OpenH264Decoder>`, publishes
-  newest frames to a watch channel (`app.rs:21019-21026`).
+  newest frames to a watch channel (`app.rs:21103-21108`), and emits
+  `ScreenShareMessage::KeyframeRequest` on the control channel when the
+  pipeline reports missing/corrupt frames (BORU-SS-21).
 - **Subscriptions:** `screen_share_events_subscription`
   (`app.rs:20530-20551`), `screen_share_frame_subscription`
   (`app.rs:20564-20587`), `screen_share_keyboard_subscription`
@@ -630,12 +643,13 @@ Notes:
 
 ## 5. Test coverage summary
 
-- **Unit tests:** 167 `#[test]` pass in `src/screen_share/` with
+- **Unit tests:** 199 `#[test]` pass in `src/screen_share/` with
   `--features screen-sharing` (includes codec 3, protocol 4, transport 3,
-  session 7 [incl. 2 BORU-SS-15 explicit-grant tests], viewer 3,
-  permissions 2, remote_input 6 [incl. 2 BORU-SS-15 portal-gate tests],
-  adaptation 2, capture 3, stats 1, mod 3 (incl. the error-kind mapping
-  test added by BORU-SS-14), coords 15, platform/linux 33 [incl. 3
+  session 7 [incl. 2 BORU-SS-15 explicit-grant tests], viewer 9 [incl.
+  BORU-SS-21 missing-gap, no-picture, one-shot, and session-isolation
+  tests], permissions 2, remote_input 6 [incl. 2 BORU-SS-15 portal-gate
+  tests], adaptation 2, capture 3, stats 1, mod 3 (incl. the error-kind
+  mapping test added by BORU-SS-14), coords 15, platform/linux 33 [incl. 3
   BORU-SS-15 cursor-mode tests, 11 portal-lifecycle / DE-detection
   tests from BORU-SS-13, and 10 BORU-SS-16 display-server / geometry /
   monitor-source tests], platform/linux_pw 13, platform/windows_common
