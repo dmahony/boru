@@ -1472,6 +1472,22 @@ pub enum InspectorMsg {
     /// disk. A missing/invalid file keeps the current layout and reports
     /// the error in the panel status line.
     ReloadLayoutFromDisk,
+    RequestReloadTheme,
+    RequestReloadLayout,
+    RequestResetAll,
+    RequestResetLayoutAll,
+    RequestResetSelected,
+    ConfirmDestructive,
+    CancelDestructive,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingDestructive {
+    ReloadTheme,
+    ReloadLayout,
+    ResetAll,
+    ResetLayoutAll,
+    ResetSelected(crate::designer::ComponentId),
 }
 
 /// Result of the last Save Theme action (BORU-UI-12), shown as the panel's
@@ -1559,6 +1575,7 @@ pub struct InspectorDraft {
     /// layout recompute (values clamped or replaced by defaults). Set by
     /// the app after every merge; rendered as a compact warnings list.
     pub layout_merge_warnings: Vec<String>,
+    pub pending_destructive: Option<PendingDestructive>,
 }
 
 // ── View ──────────────────────────────────────────────────────────────
@@ -1910,11 +1927,13 @@ pub fn view_inspector(
     inspect_hover: Option<ComponentId>,
     inspect_selected: Option<ComponentId>,
     designer_selected: Option<crate::designer::ComponentId>,
+    designer_dirty: bool,
 ) -> Element<'static, AppMessage> {
     let mut col = iced::widget::Column::new()
         .push(panel_heading(dark_mode))
         .push(designer_mode_row(designer_enabled, dark_mode))
         .push(inspect_ui_row(inspect_enabled, inspect_hover, inspect_selected, dark_mode))
+        .push(dirty_actions_row(draft, designer_selected, designer_dirty, dark_mode))
         .push(reset_actions_row(dark_mode))
         .push(save_theme_row(dark_mode, &draft.save_status))
         .push(reload_theme_row(dark_mode, &draft.reload_status))
@@ -2044,6 +2063,41 @@ pub fn view_inspector(
     panel.into()
 }
 
+fn dirty_actions_row(
+    draft: &InspectorDraft,
+    selected: Option<crate::designer::ComponentId>,
+    dirty: bool,
+    dark_mode: bool,
+) -> Element<'static, AppMessage> {
+    if let Some(action) = draft.pending_destructive {
+        let prompt = match action {
+            PendingDestructive::ReloadTheme => "Reload theme from disk? Unsaved edits will be discarded.",
+            PendingDestructive::ReloadLayout => "Reload layout from disk? Unsaved edits will be discarded.",
+            PendingDestructive::ResetAll => "Reset all theme values to Boru defaults?",
+            PendingDestructive::ResetLayoutAll => "Reset the layout to Boru defaults?",
+            PendingDestructive::ResetSelected(_) => "Reset the selected component to Boru defaults?",
+        };
+        return container(iced::widget::column![
+            text(prompt).size(10.0).color(Color::from_rgb(0.95, 0.65, 0.2)),
+            row![
+                button(text("Confirm").size(10.0)).on_press(AppMessage::Inspector(InspectorMsg::ConfirmDestructive)),
+                button(text("Cancel").size(10.0)).on_press(AppMessage::Inspector(InspectorMsg::CancelDestructive)),
+            ].spacing(6),
+        ].spacing(4)).padding(6).into();
+    }
+    let status = text(if dirty { "Unsaved Changes" } else { "Saved" })
+        .size(10.0)
+        .color(if dirty { Color::from_rgb(0.95, 0.65, 0.2) } else { muted_text(dark_mode) });
+    row![
+        status,
+        Space::new().width(Length::Fill),
+        button(text("Save").size(10.0)).on_press(AppMessage::Inspector(InspectorMsg::SaveTheme)),
+        button(text("Reload From Disk").size(10.0)).on_press(AppMessage::Inspector(InspectorMsg::RequestReloadTheme)),
+        button(text("Reset Selected").size(10.0)).on_press_maybe(selected.map(|_| AppMessage::Inspector(InspectorMsg::RequestResetSelected))),
+        button(text("Reset Layout").size(10.0)).on_press(AppMessage::Inspector(InspectorMsg::RequestResetLayoutAll)),
+    ].spacing(4).align_y(Alignment::Center).into()
+}
+
 /// Row with the Visual Designer toggle (BORU-DESIGN-03).
 fn designer_mode_row(enabled: bool, dark_mode: bool) -> Element<'static, AppMessage> {
     let toggle = toggler(enabled)
@@ -2126,7 +2180,7 @@ fn reset_actions_row(dark_mode: bool) -> Element<'static, AppMessage> {
     } else {
         Color::from_rgb(0.15, 0.15, 0.15)
     }))
-    .on_press(AppMessage::Inspector(InspectorMsg::ResetAll))
+    .on_press(AppMessage::Inspector(InspectorMsg::RequestResetAll))
     .padding([3, 8]);
     let hint = text("resets every section to Boru defaults")
         .size(9.0)
@@ -2243,7 +2297,7 @@ fn reload_theme_row(dark_mode: bool, status: &ThemeReloadStatus) -> Element<'sta
     } else {
         Color::from_rgb(0.15, 0.15, 0.15)
     }))
-    .on_press(AppMessage::Inspector(InspectorMsg::ReloadFromDisk))
+    .on_press(AppMessage::Inspector(InspectorMsg::RequestReloadTheme))
     .padding([3, 8]);
 
     let (msg, color) = match status {

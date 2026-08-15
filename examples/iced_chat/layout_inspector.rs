@@ -1647,7 +1647,7 @@ pub fn layout_panel_heading(dark_mode: bool) -> Element<'static, crate::app::App
     } else {
         Color::from_rgb(0.4, 0.42, 0.4)
     }))
-    .on_press(crate::app::AppMessage::Inspector(InspectorMsg::ResetLayoutAll))
+    .on_press(crate::app::AppMessage::Inspector(InspectorMsg::RequestResetLayoutAll))
     .padding([2, 6])
     .style(button::text);
 
@@ -1733,7 +1733,7 @@ pub fn reload_layout_row(
             }),
     )
     .on_press(crate::app::AppMessage::Inspector(
-        InspectorMsg::ReloadLayoutFromDisk,
+        InspectorMsg::RequestReloadLayout,
     ))
     .padding([3, 8]);
 

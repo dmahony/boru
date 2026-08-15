@@ -19804,6 +19804,7 @@ impl IcedChat {
                 self.inspect_hover,
                 self.inspect_selected,
                 self.designer.selected_component,
+                self.designer.dirty,
             ),
         ]
         .spacing(8)
@@ -20092,6 +20093,72 @@ impl IcedChat {
     fn update_inspector(&mut self, msg: crate::inspector::InspectorMsg) -> iced::Task<AppMessage> {
         use crate::inspector::InspectorMsg;
         match msg {
+            InspectorMsg::RequestReloadTheme => {
+                self.inspector_draft.pending_destructive =
+                    Some(crate::inspector::PendingDestructive::ReloadTheme);
+                iced::Task::none()
+            }
+            InspectorMsg::RequestReloadLayout => {
+                self.inspector_draft.pending_destructive =
+                    Some(crate::inspector::PendingDestructive::ReloadLayout);
+                iced::Task::none()
+            }
+            InspectorMsg::RequestResetAll => {
+                self.inspector_draft.pending_destructive =
+                    Some(crate::inspector::PendingDestructive::ResetAll);
+                iced::Task::none()
+            }
+            InspectorMsg::RequestResetLayoutAll => {
+                self.inspector_draft.pending_destructive =
+                    Some(crate::inspector::PendingDestructive::ResetLayoutAll);
+                iced::Task::none()
+            }
+            InspectorMsg::RequestResetSelected => {
+                if let Some(component) = self.designer.selected_component {
+                    self.inspector_draft.pending_destructive = Some(
+                        crate::inspector::PendingDestructive::ResetSelected(component),
+                    );
+                }
+                iced::Task::none()
+            }
+            InspectorMsg::CancelDestructive => {
+                self.inspector_draft.pending_destructive = None;
+                iced::Task::none()
+            }
+            InspectorMsg::ConfirmDestructive => {
+                let Some(action) = self.inspector_draft.pending_destructive.take() else {
+                    return iced::Task::none();
+                };
+                match action {
+                    crate::inspector::PendingDestructive::ReloadTheme => {
+                        return self.update_inspector(InspectorMsg::ReloadFromDisk);
+                    }
+                    crate::inspector::PendingDestructive::ReloadLayout => {
+                        return self.update_inspector(InspectorMsg::ReloadLayoutFromDisk);
+                    }
+                    crate::inspector::PendingDestructive::ResetAll => {
+                        return self.update_inspector(InspectorMsg::ResetAll);
+                    }
+                    crate::inspector::PendingDestructive::ResetLayoutAll => {
+                        return self.update_inspector(InspectorMsg::ResetLayoutAll);
+                    }
+                    crate::inspector::PendingDestructive::ResetSelected(component) => {
+                        let theme_section = component.inspector_component().section();
+                        let layout_section = match component {
+                            crate::designer::ComponentId::HomeWelcome
+                            | crate::designer::ComponentId::HomeQuickActions
+                            | crate::designer::ComponentId::HomePublicRooms
+                            | crate::designer::ComponentId::HomeFriends
+                            | crate::designer::ComponentId::HomeRecentActivity => {
+                                crate::layout_inspector::LayoutSectionId::Home
+                            }
+                            _ => crate::layout_inspector::LayoutSectionId::Component,
+                        };
+                        let _ = self.update_inspector(InspectorMsg::ResetSection(theme_section));
+                        return self.update_inspector(InspectorMsg::ResetLayoutSection(layout_section));
+                    }
+                }
+            }
             InspectorMsg::ToggleVisible => {
                 self.inspector_visible = !self.inspector_visible;
                 if !self.inspector_visible {
