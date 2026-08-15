@@ -93,13 +93,16 @@ pub enum SessionEvent {
     /// renegotiated the capture geometry). Carries the NEW source identity
     /// and dimensions; the wire `SourceChanged` message is sent BEFORE any
     /// frame with the new geometry, and this event surfaces the same change
-    /// to the app UI.
+    /// to the app UI. `source_mode` tells the viewer how the desktop maps
+    /// onto the stream (Single / PerDisplay / Spanning, PDF Phase 14 /
+    /// BORU-SS-38).
     SourceChanged {
         session_id: ScreenShareSessionId,
         source_id: u64,
         title: String,
         width: u32,
         height: u32,
+        source_mode: super::protocol::SourceMode,
     },
     /// BORU-SS-33: the host delivered a new cursor SHAPE (PDF Task 5.3
     /// `Metadata` cursor mode). The viewer caches the sprite and composites
@@ -137,6 +140,15 @@ pub enum SessionEvent {
     Metrics {
         session_id: ScreenShareSessionId,
         metrics: ScreenShareSessionMetrics,
+    },
+    /// System-audio sharing state changed (BORU-SS-37). Emitted when the host
+    /// enables/disables shared audio (audio is opt-in) or the capture backend
+    /// fails. `error` carries a typed, user-safe reason when capture could
+    /// not start (e.g. no PipeWire runtime). Contains no media data.
+    AudioState {
+        session_id: ScreenShareSessionId,
+        enabled: bool,
+        error: Option<String>,
     },
 }
 

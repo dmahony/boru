@@ -24,8 +24,8 @@ use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Capability { ViewScreen, ControlPointer, ControlKeyboard, Clipboard }
-pub const MAX_CAPABILITIES: usize = 4;
+pub enum Capability { ViewScreen, ControlPointer, ControlKeyboard, Clipboard, Audio }
+pub const MAX_CAPABILITIES: usize = 5;
 pub const REQUEST_WINDOW: Duration = Duration::from_secs(10);
 pub const MAX_REQUESTS_PER_WINDOW: u32 = 4;
 pub const CONTROL_GRANT_TTL: Duration = Duration::from_secs(15 * 60);
@@ -382,6 +382,38 @@ mod tests {
         assert!(!clipboard_only.allows(session, peer, Capability::ControlKeyboard));
         assert!(!clipboard_only.has_control());
         assert!(!clipboard_only.is_view_only());
+    }
+
+    /// BORU-SS-37: system-audio sharing is a SEPARATE optional capability —
+    /// never enabled by remote control or clipboard, and grantable on its own
+    /// (mirroring the clipboard separation, PDF Task 9.3).
+    #[test]
+    fn audio_is_separate_from_remote_control_and_clipboard() {
+        let session = session();
+        let peer = peer();
+        let mut permissions = SessionPermissions::view_only(session, peer);
+
+        // Remote control / clipboard grants never enable audio.
+        assert!(permissions.grant([Capability::ControlPointer, Capability::ControlKeyboard, Capability::Clipboard]));
+        assert!(permissions.allows(session, peer, Capability::ControlPointer));
+        assert!(permissions.allows(session, peer, Capability::Clipboard));
+        assert!(!permissions.allows(session, peer, Capability::Audio));
+        assert!(!Capability::Audio.is_control(), "Audio must not be a control capability");
+
+        // An explicit audio grant enables it on its own (and mints a fresh
+        // token so the wire GrantControl can carry a nonce).
+        assert!(permissions.grant([Capability::Audio]));
+        assert!(permissions.allows(session, peer, Capability::Audio));
+        assert!(permissions.token().is_some());
+
+        // Audio alone never implies remote control.
+        let mut audio_only = SessionPermissions::view_only(session, peer);
+        assert!(audio_only.grant([Capability::Audio]));
+        assert!(audio_only.allows(session, peer, Capability::Audio));
+        assert!(!audio_only.allows(session, peer, Capability::ControlPointer));
+        assert!(!audio_only.allows(session, peer, Capability::Clipboard));
+        assert!(!audio_only.has_control());
+        assert!(!audio_only.is_view_only());
     }
 
     #[test]

@@ -588,6 +588,8 @@
   "screenshare.request_clipboard": "Request Clipboard",
   "screenshare.send_clipboard": "Send Clipboard",
   "screenshare.grant_clipboard": "Grant Clipboard",
+  "screenshare.audio_on": "Audio On",
+  "screenshare.audio_off": "Audio Off",
   "screenshare.revoke_control": "Revoke Control",
   "screenshare.stop_sharing": "Stop Sharing",
   "screenshare.stop_viewing": "Stop Viewing",

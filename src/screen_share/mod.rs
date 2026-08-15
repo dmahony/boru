@@ -5,6 +5,7 @@
 //! to chat conversations.
 
 pub mod adaptation;
+pub mod audio;
 pub mod capture;
 pub mod channels;
 pub mod codec;
@@ -32,6 +33,14 @@ pub use capture::{
     DesktopCaptureBackend, DirtyRegion, FrameRect, FrameSink, PixelFormat, ScreenCapture,
     TestPatternCapture,
 };
+pub use audio::{
+    audio_sample_ring, create_system_audio_capture, AudioOutput, AudioSampleConsumer,
+    AudioSampleProducer, NullAudioCapture, OpusAudioDecoder, OpusAudioEncoder, SystemAudioCapture,
+    UnavailableAudioCapture, AUDIO_BITRATE_BPS, AUDIO_CHANNELS, AUDIO_FRAME_MS,
+    AUDIO_RING_SAMPLES, AUDIO_SAMPLE_RATE, AUDIO_SAMPLES_PER_CHANNEL, AUDIO_SAMPLES_PER_FRAME,
+};
+#[cfg(target_os = "linux")]
+pub use audio::PipeWireAudioCapture;
 pub use coords::{
     composite_cursor, composite_cursor_rgba, cursor_viewport_rect, desktop_to_normalized,
     desktop_to_source, geometry_from_logical, logical_to_physical, normalized_to_desktop,
@@ -61,10 +70,11 @@ pub use platform::{
     classify_display_server, detect_display_server, DisplayServer, X11Capture, X11Monitor,
 };
 pub use protocol::{
-    ControlMessage, Hello, InboundMedia, InputEventKind, Permission, RedactedText,
-    ScreenShareMessage, ScreenShareProtocol, SCREEN_SHARE_ALPN, SCREEN_SHARE_PROTOCOL_VERSION,
-    MAX_INPUT_CODE, MAX_MODIFIER_MASK, MAX_SCREEN_SHARE_MESSAGE, MOD_ALT, MOD_CTRL, MOD_META,
-    MOD_SHIFT, MAX_CLIPBOARD_TEXT,
+    ControlMessage, Hello, InboundAudio, InboundMedia, InputEventKind, Permission, RedactedText,
+    ScreenShareMessage, ScreenShareProtocol, SourceMode, SCREEN_SHARE_ALPN,
+    SCREEN_SHARE_PROTOCOL_VERSION, MAX_INPUT_CODE, MAX_MODIFIER_MASK,
+    MAX_SCREEN_SHARE_MESSAGE, MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT, MAX_CLIPBOARD_TEXT,
+    MAX_AUDIO_FRAME, MIN_AUDIO_SAMPLE_RATE, MAX_AUDIO_SAMPLE_RATE,
 };
 pub use presets::QualityPreset;
 pub use reconnect::{
@@ -84,8 +94,9 @@ pub use session::{
     ScreenShareSession, ScreenShareSessionId, SessionEvent, SessionManager, SessionState,
     MAX_ACTIVE_NEGOTIATIONS,
 };
-pub use transport::{decode_media, encode_media, LatestFrameQueue, MediaHeader, PathKind,
-    QuicScreenTransport, ReadUnit, ScreenTransport, TransportCounters, MAX_MEDIA_FRAME};
+pub use transport::{decode_audio, decode_media, encode_audio, encode_media, AudioHeader,
+    LatestFrameQueue, MediaHeader, PathKind, QuicScreenTransport, ReadUnit, ScreenTransport,
+    TransportCounters, MAX_MEDIA_FRAME};
 pub use viewer::{DecodedFrame, ViewerPipeline};
 pub use stats::{ScreenShareSessionMetrics, ScreenShareStats, ScreenShareStatsSnapshot};
 
@@ -106,6 +117,16 @@ pub enum ScreenShareErrorKind {
     FormatNegotiation,
     /// A stream/buffer-level failure (short buffer, bad stride, etc.).
     Stream,
+    /// The system-audio backend or output device is missing (BORU-SS-37).
+    /// Raised by the audio capture/playback path when the platform cannot
+    /// capture or play shared system audio (e.g. no PipeWire runtime, no
+    /// WASAPI loopback implementation, or no output device).
+    AudioUnavailable,
+    /// The shared capture source (monitor) is no longer available —
+    /// monitor unplug / laptop dock-undock (PDF Phase 10 / BORU-SS-38).
+    /// The host recovers by falling back to the next available source or
+    /// pausing the stream; it never ends the session on this error.
+    MonitorLost,
 }
 
 /// Error returned by a screen-sharing boundary.
@@ -154,6 +175,20 @@ impl ScreenShareError {
     /// Construct a stream/buffer-level failure error.
     pub fn stream(description: impl Into<String>) -> Self {
         Self::new(description).with_kind(ScreenShareErrorKind::Stream)
+    }
+
+    /// Construct an audio-unavailable error (no system-audio backend or no
+    /// output device). The message names what is missing and the action to
+    /// take.
+    pub fn audio_unavailable(description: impl Into<String>) -> Self {
+        Self::new(description).with_kind(ScreenShareErrorKind::AudioUnavailable)
+    }
+
+    /// Construct a monitor-lost error (monitor unplug / laptop dock-undock,
+    /// PDF Phase 10 / BORU-SS-38). The host falls back or pauses, never ends
+    /// the session on this error.
+    pub fn monitor_lost(description: impl Into<String>) -> Self {
+        Self::new(description).with_kind(ScreenShareErrorKind::MonitorLost)
     }
 
     /// Set the error kind (builder-style; used internally).

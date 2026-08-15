@@ -608,6 +608,23 @@ impl IcedChat {
                         .into(),
                 );
             }
+            // System-audio sharing (BORU-SS-37): a SEPARATE optional
+            // capability — the sharer toggles it explicitly (mirroring
+            // clipboard, PDF Task 9.3). The label reflects the current
+            // state; enabling grants Capability::Audio and starts capture,
+            // disabling stops it. A typed unavailable error (no PipeWire
+            // runtime) surfaces as a toast via SessionEvent::AudioState.
+            if self.screen_share_host_state == ScreenShareHostState::Streaming {
+                items.push(
+                    button(text(if self.screen_share_audio_active {
+                        crate::i18n::t("screenshare.audio_on")
+                    } else {
+                        crate::i18n::t("screenshare.audio_off")
+                    }))
+                    .on_press(AppMessage::ScreenShareToggleAudio)
+                    .into(),
+                );
+            }
             // PDF Phase 12: developer diagnostics overlay — only when the
             // dev-ui gate is on (`--dev-ui` / `BORU_DEV_UI=1` / dev-ui feature).
             if self.screen_share_dev_overlay {
@@ -839,6 +856,8 @@ impl IcedChat {
             Capability::ControlPointer => "pointer".to_string(),
             Capability::ControlKeyboard => "keyboard".to_string(),
             Capability::Clipboard => "clipboard".to_string(),
+            // BORU-SS-37: system audio is a separate optional capability.
+            Capability::Audio => "audio".to_string(),
             Capability::ViewScreen => "view".to_string(),
         }
     }

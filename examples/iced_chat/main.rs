@@ -877,8 +877,9 @@ fn main() -> Result<()> {
     let screen_share = {
         let (events_tx, events_rx) = tokio::sync::mpsc::channel(32);
         let (media_tx, media_rx) = tokio::sync::mpsc::channel(64);
-        let protocol = ScreenShareProtocol::with_channels(events_tx.clone(), media_tx);
-        (protocol, events_rx, media_rx, events_tx)
+        let (audio_tx, audio_rx) = tokio::sync::mpsc::channel(32);
+        let protocol = ScreenShareProtocol::with_channels(events_tx.clone(), media_tx, audio_tx);
+        (protocol, events_rx, media_rx, audio_rx, events_tx)
     };
     let (
         endpoint,
@@ -1954,13 +1955,16 @@ fn main() -> Result<()> {
             {
                 // Wire the screen-share protocol channels and handle into the
                 // app: events for invitations, media for the decode worker,
-                // and the protocol handle to respond on inbound connections.
+                // audio for the playback worker, and the protocol handle to
+                // respond on inbound connections.
                 app.screen_share_protocol = Some(screen_share.0.clone());
                 app.screen_share_events_rx =
                     Some(Arc::new(tokio::sync::Mutex::new(screen_share.1)));
                 app.screen_share_media_rx =
                     Some(Arc::new(tokio::sync::Mutex::new(screen_share.2)));
-                app.screen_share_events_tx = Some(screen_share.3);
+                app.screen_share_audio_rx =
+                    Some(Arc::new(tokio::sync::Mutex::new(screen_share.3)));
+                app.screen_share_events_tx = Some(screen_share.4);
                 // PDF Phase 12: developer diagnostics overlay on the
                 // screen-share surface. Mirrors the live-UI-editor dev gate
                 // (cargo feature `dev-ui`, or a debug build with --dev-ui /

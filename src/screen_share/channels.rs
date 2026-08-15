@@ -27,7 +27,7 @@ use tokio::sync::{mpsc, Notify};
 use super::{
     codec::EncodedFrame,
     protocol::{ControlMessage, ScreenShareMessage},
-    transport::QuicScreenTransport,
+    transport::{AudioHeader, QuicScreenTransport},
     ScreenShareError,
 };
 
@@ -135,6 +135,10 @@ pub enum ControlOut {
     Legacy(ControlMessage),
     /// Versioned protocol message (negotiation/lifecycle/keyframe/quality).
     Versioned(ScreenShareMessage),
+    /// Encoded Opus audio unit (BORU-SS-37) on the dedicated audio stream
+    /// kind. Carries its own framing so audio never shares a queue with
+    /// control traffic and never blocks video.
+    Audio(AudioHeader, Vec<u8>),
 }
 
 /// Reliable, bounded control channel.
@@ -171,6 +175,7 @@ impl ControlChannel {
                 let result = match &message {
                     ControlOut::Legacy(message) => transport.send_control(message).await,
                     ControlOut::Versioned(message) => transport.send_screen_share(message).await,
+                    ControlOut::Audio(header, payload) => transport.send_audio(header, payload).await,
                 };
                 if let Err(error) = result {
                     tracing::warn!(error = %error, "screen-share: control channel send failed");
