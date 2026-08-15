@@ -93,11 +93,11 @@ use boru_core::call::history::{event_text as call_history_text, CallHistoryOutco
 use boru_core::call::{CallId, CallKind};
 #[cfg(feature = "screen-sharing")]
 use boru_core::screen_share::{
-    run_host_session, Capability, CapturedFrame, CaptureSource, ControlMessage, HostCommand,
-    InboundMedia, InputEventKind, OpenH264Decoder, PixelFormat, RedactedText, ScreenShareMessage,
-    ScreenShareProtocol, ScreenShareSessionMetrics, ScreenShareStatsSnapshot, MAX_CLIPBOARD_TEXT,
-    ScreenShareSessionId, SessionEvent, ViewerPipeline, DEFAULT_QUEUE_CAPACITY, MOD_ALT, MOD_CTRL,
-    MOD_META, MOD_SHIFT, SCREEN_SHARE_PROTOCOL_VERSION,
+    run_host_session, Capability, CapturedFrame, CaptureSource, CaptureSourceId, ControlMessage,
+    HostCommand, InboundMedia, InputEventKind, OpenH264Decoder, PixelFormat, RedactedText,
+    ScreenShareMessage, ScreenShareProtocol, ScreenShareSessionMetrics, ScreenShareStatsSnapshot,
+    MAX_CLIPBOARD_TEXT, ScreenShareSessionId, SessionEvent, ViewerPipeline, DEFAULT_QUEUE_CAPACITY,
+    MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT, SCREEN_SHARE_PROTOCOL_VERSION,
 };
 #[cfg(feature = "video-calls")]
 use boru_core::call::video::VideoFrame;
@@ -3638,17 +3638,35 @@ struct IncomingCall {
 
 #[cfg(feature = "screen-sharing")]
 /// Host-side lifecycle of a locally initiated screen-share session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Maps 1:1 to the seven states Phase 13 of the screen-share UX spec asks
+/// the sharer UI to display: requesting, awaiting acceptance, sharing,
+/// paused, reconnecting, stopped, error. `Idle` is the no-session baseline.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ScreenShareHostState {
     /// No local sharing session.
     Idle,
-    /// Hello sent; waiting for the viewer's explicit Accept/Reject.
+    /// The user clicked Share and the host driver is starting (dialing /
+    /// enumerating sources). Nothing is being captured or streamed yet.
+    Requesting,
+    /// Hello/offer sent; waiting for the viewer's explicit Accept/Reject.
     Inviting,
     /// Viewer accepted; capture and streaming are active.
     Streaming,
+    /// The stream is paused because no capture source is available (monitor
+    /// unplug / dock-undock with no fallback). The session survives; picking
+    /// a source resumes it.
+    Paused,
     /// The media path failed transiently and is being re-established.
     /// The chat/friend session survives; only the media stream reconnects.
     Reconnecting,
+    /// Terminal: the share stopped (user clicked Stop, the viewer ended the
+    /// session, or the peer declined). Clears to `Idle` when the user
+    /// dismisses the notice or starts a new share.
+    Stopped,
+    /// Terminal: the share failed with a user-safe reason. Clears to `Idle`
+    /// when the user dismisses the notice or retries.
+    Error(String),
 }
 
 pub struct IcedChat {
@@ -4323,6 +4341,21 @@ pub struct IcedChat {
     /// share"). Populated by `SessionEvent::SourcesEnumerated`; the monitor
     /// switching UX (BORU-SS-29) presents this list to the sharer.
     screen_share_sources: Option<Vec<CaptureSource>>,
+    #[cfg(feature = "screen-sharing")]
+    /// The capture source currently selected by the sharer (host side).
+    /// Defaults to the first enumerated source; updated when the user picks
+    /// a source from the picker or when `SourceChanged` arrives.
+    screen_share_selected_source: Option<CaptureSourceId>,
+    #[cfg(feature = "screen-sharing")]
+    /// Who the local viewer is watching (short public key from the invite),
+    /// shown while `screen_share_viewing` so the viewer always knows who is
+    /// sharing (PDF Phase 13: "show who is sharing").
+    screen_share_viewing_peer: Option<String>,
+    #[cfg(feature = "screen-sharing")]
+    /// Ticks spent in a terminal notice state (`Stopped` / `Error`); the
+    /// notice auto-clears to `Idle` after `SCREEN_SHARE_NOTICE_TICKS`
+    /// 1-second ConnMonitorTicks so a stale status never blocks a restart.
+    screen_share_notice_ticks: u8,
     /// Receiver for incoming inbox events.
     pub inbox_events_rx: Arc<Mutex<Receiver<InboxEvent>>>,
     /// Receiver for incoming whisper events.
@@ -5694,6 +5727,16 @@ pub enum AppMessage {
     #[cfg(feature = "screen-sharing")]
     /// Viewer asks the host to restore full quality (clears the manual ceiling).
     ScreenShareFullQuality,
+    #[cfg(feature = "screen-sharing")]
+    /// Sharer picks a capture source from the enumerated monitor list
+    /// (PDF Phase 13: source selection before capture). Sends
+    /// `HostCommand::SwitchSource` to the host driver so the choice applies
+    /// whether the viewer has already accepted (in-session switch with a
+    /// `SourceChanged` message) or is still deciding (pre-acceptance switch).
+    ScreenShareSelectSource(CaptureSourceId),
+    #[cfg(feature = "screen-sharing")]
+    /// Dismiss the terminal `Stopped` / `Error` notice and return to `Idle`.
+    ScreenShareDismissNotice,
     #[cfg(feature = "screen-sharing")]
     /// Viewer pointer motion over the image (normalized 0..1, image-relative).
     ScreenSharePointerMove { x: f32, y: f32 },
@@ -8326,6 +8369,9 @@ impl IcedChat {
             screen_share_src_size: None,
             #[cfg(feature = "screen-sharing")]
             screen_share_sources: None,
+            screen_share_selected_source: None,
+            screen_share_viewing_peer: None,
+            screen_share_notice_ticks: 0,
             inbox_events_rx,
             whisper_events_rx,
             profile_image_handle,
@@ -10207,6 +10253,10 @@ impl IcedChat {
             AppMessage::ScreenShareLowerQuality => "ScreenShareLowerQuality",
             #[cfg(feature = "screen-sharing")]
             AppMessage::ScreenShareFullQuality => "ScreenShareFullQuality",
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareSelectSource(_) => "ScreenShareSelectSource",
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareDismissNotice => "ScreenShareDismissNotice",
             #[cfg(feature = "screen-sharing")]
             AppMessage::ScreenSharePointerMove { .. } => "ScreenSharePointerMove",
             #[cfg(feature = "screen-sharing")]
@@ -14549,6 +14599,10 @@ impl IcedChat {
                     });
                 }
                 self.reset_screen_share_state();
+                // Terminal notice: the user stopped the share. Visible until
+                // dismissed or a new share starts (PDF Phase 13: show a clear
+                // "stopped" state).
+                self.screen_share_host_state = ScreenShareHostState::Stopped;
                 iced::Task::none()
             }
             #[cfg(feature = "screen-sharing")]
@@ -14657,6 +14711,26 @@ impl IcedChat {
             AppMessage::ScreenShareLowerQuality => self.send_screen_share_quality(60, 60),
             #[cfg(feature = "screen-sharing")]
             AppMessage::ScreenShareFullQuality => self.send_screen_share_quality(100, 100),
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareSelectSource(source_id) => {
+                // PDF Phase 13: sharer picks the monitor to share. The choice
+                // is applied by the host driver whether the viewer has
+                // already accepted (in-session switch + SourceChanged) or is
+                // still deciding (pre-acceptance re-select). The local
+                // selection marker updates immediately so the picker UI can
+                // highlight the chosen source.
+                self.screen_share_selected_source = Some(source_id);
+                if let Some(tx) = &self.screen_share_host_cmd_tx {
+                    let _ = tx.try_send(HostCommand::SwitchSource(source_id));
+                }
+                iced::Task::none()
+            }
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareDismissNotice => {
+                self.screen_share_host_state = ScreenShareHostState::Idle;
+                self.screen_share_notice_ticks = 0;
+                iced::Task::none()
+            }
             #[cfg(feature = "screen-sharing")]
             AppMessage::ScreenSharePointerMove { x, y } => {
                 let modifiers = self.screen_share_modifiers;
@@ -16155,6 +16229,21 @@ impl IcedChat {
                     self.toast_counter = self.toast_counter.saturating_sub(60);
                     if self.toast_counter == 0 {
                         self.toast_message = None;
+                    }
+                }
+
+                // Auto-dismiss a terminal screen-share notice (Stopped/Error)
+                // after ~8 seconds so a stale status never blocks a fresh
+                // share (the panel also offers Dismiss/retry immediately).
+                #[cfg(feature = "screen-sharing")]
+                if matches!(
+                    self.screen_share_host_state,
+                    ScreenShareHostState::Stopped | ScreenShareHostState::Error(_)
+                ) {
+                    self.screen_share_notice_ticks = self.screen_share_notice_ticks.saturating_add(1);
+                    if self.screen_share_notice_ticks >= 8 {
+                        self.screen_share_host_state = ScreenShareHostState::Idle;
+                        self.screen_share_notice_ticks = 0;
                     }
                 }
 
@@ -21122,7 +21211,12 @@ impl IcedChat {
     /// (dial → Hello → negotiate → capture/encode/send) and show the
     /// persistent indicator while it runs.
     fn start_screen_share(&mut self, peer: PublicKey) -> iced::Task<AppMessage> {
-        if self.screen_share_host_state != ScreenShareHostState::Idle {
+        // A terminal notice (Stopped/Error) never blocks a fresh share: the
+        // user can restart directly from the panel without dismissing first.
+        if !matches!(
+            self.screen_share_host_state,
+            ScreenShareHostState::Idle | ScreenShareHostState::Stopped | ScreenShareHostState::Error(_)
+        ) {
             return iced::Task::none();
         }
         // BORU-CP-12 (PDF Task 4.3): a new client must not attempt an
@@ -21161,7 +21255,8 @@ impl IcedChat {
         let Some(events_tx) = self.screen_share_events_tx.clone() else {
             return iced::Task::none();
         };
-        self.screen_share_host_state = ScreenShareHostState::Inviting;
+        self.screen_share_host_state = ScreenShareHostState::Requesting;
+        self.screen_share_notice_ticks = 0;
         let stop = Arc::new(AtomicBool::new(false));
         self.screen_share_host_stop = Some(stop.clone());
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(8);
@@ -21467,11 +21562,14 @@ impl IcedChat {
     /// Accept the pending invitation: respond Accept on the inbound QUIC
     /// connection and spawn the viewer decode worker for the session.
     fn accept_screen_share(&mut self) -> iced::Task<AppMessage> {
-        let Some((_, session_id)) = self.screen_share_invite.take() else {
+        let Some((sharer, session_id)) = self.screen_share_invite.take() else {
             return iced::Task::none();
         };
         self.screen_share_viewing = true;
         self.screen_share_view_session = Some(session_id);
+        // Who is sharing (PDF Phase 13): keep the sharer identity for the
+        // viewer panel so the viewer always knows whose screen is displayed.
+        self.screen_share_viewing_peer = Some(sharer);
         // Respond Accept on the same connection the invitation arrived on.
         let mut send_task = iced::Task::none();
         if let Some(protocol) = &self.screen_share_protocol {
@@ -21583,9 +21681,17 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
-            SessionEvent::Rejected { .. } => {
+            SessionEvent::Rejected { reason, .. } => {
+                // The peer declined or the session failed before streaming.
+                // Surface a terminal notice: a peer "declined" is a normal
+                // stop outcome, anything else is an error worth reading.
                 if self.screen_share_host_state != ScreenShareHostState::Idle {
-                    self.screen_share_host_state = ScreenShareHostState::Idle;
+                    if reason.eq_ignore_ascii_case("declined") {
+                        self.screen_share_host_state = ScreenShareHostState::Stopped;
+                    } else {
+                        self.screen_share_host_state = ScreenShareHostState::Error(reason);
+                    }
+                    self.screen_share_notice_ticks = 0;
                     self.screen_share_host_stop = None;
                 }
                 iced::Task::none()
@@ -21647,6 +21753,7 @@ impl IcedChat {
                 if self.screen_share_view_session == Some(session_id) {
                     self.screen_share_viewing = false;
                     self.screen_share_view_session = None;
+                    self.screen_share_viewing_peer = None;
                     self.screen_share_last_frame_ts = None;
                     self.screen_share_frame_handle = None;
                     if let Some(stop) = &self.screen_share_decode_stop {
@@ -21655,7 +21762,11 @@ impl IcedChat {
                     self.screen_share_decode_stop = None;
                 }
                 if self.screen_share_host_state != ScreenShareHostState::Idle {
-                    self.screen_share_host_state = ScreenShareHostState::Idle;
+                    // Terminal notice: the share stopped (peer ended it or
+                    // the transport died). Stays visible until dismissed or
+                    // a new share starts.
+                    self.screen_share_host_state = ScreenShareHostState::Stopped;
+                    self.screen_share_notice_ticks = 0;
                     self.screen_share_host_stop = None;
                 }
                 iced::Task::none()
@@ -21694,33 +21805,52 @@ impl IcedChat {
                 return iced::clipboard::write(text.into_inner());
             }
             SessionEvent::SourcesEnumerated { sources, .. } => {
-                // PDF Phase 10: the host enumerated its monitors before the
-                // share started. Store the list for the monitor-switching UX
-                // (BORU-SS-29); nothing else changes here.
+                // PDF Phase 10/13: the host enumerated its monitors before
+                // the share started. Store the list for the source picker;
+                // the first source is the host's default selection, and once
+                // the sources are known the session moves from "requesting"
+                // to "awaiting acceptance" (the offer is in flight).
+                if self.screen_share_selected_source.is_none() {
+                    self.screen_share_selected_source =
+                        sources.first().map(|source| source.id);
+                }
                 self.screen_share_sources = Some(sources);
+                if self.screen_share_host_state == ScreenShareHostState::Requesting {
+                    self.screen_share_host_state = ScreenShareHostState::Inviting;
+                }
                 iced::Task::none()
             }
-            SessionEvent::SourceChanged { width, height, title, .. } => {
+            SessionEvent::SourceChanged { source_id, width, height, title, .. } => {
                 // PDF Phase 10: the shared source changed (host switched
                 // monitor or the platform renegotiated geometry). The wire
                 // SourceChanged message already went out BEFORE the media
-                // dimensions change; keep the viewer surface geometry in
-                // sync here.
+                // dimensions change; keep the viewer surface geometry and
+                // the picker's selected marker in sync here.
                 tracing::info!(title = %title, width, height, "screen-share: source changed");
                 self.screen_share_src_size = Some((width, height));
+                self.screen_share_selected_source = Some(CaptureSourceId(source_id));
                 iced::Task::none()
             }
             SessionEvent::SourceUnavailable { reason, fallback, .. } => {
                 // PDF Phase 10: monitor unplug / laptop dock-undock handled
-                // gracefully. The host either fell back to another source or
-                // paused the stream; the chat session survives either way.
-                let message = match fallback {
-                    Some(name) => format!("Screen share paused — {reason} (using {name})"),
-                    None => format!("Screen share paused — {reason}"),
-                };
-                tracing::warn!("{message}");
-                self.toast_message = Some(message);
-                self.toast_counter = 160;
+                // gracefully. The host either fell back to another source
+                // (toast, keep streaming) or paused the stream with no
+                // source left (surface the PAUSED state so the sharer knows
+                // frames stopped; picking a source from the panel resumes).
+                match fallback {
+                    Some(name) => {
+                        let message = format!("Screen share paused — {reason} (using {name})");
+                        tracing::warn!("{message}");
+                        self.toast_message = Some(message);
+                        self.toast_counter = 160;
+                    }
+                    None => {
+                        tracing::warn!(reason = %reason, "screen-share: stream paused — no source available");
+                        if self.screen_share_host_state != ScreenShareHostState::Idle {
+                            self.screen_share_host_state = ScreenShareHostState::Paused;
+                        }
+                    }
+                }
                 iced::Task::none()
             }
             SessionEvent::Metrics { metrics, .. } => {
@@ -21743,6 +21873,7 @@ impl IcedChat {
         self.screen_share_invite = None;
         self.screen_share_viewing = false;
         self.screen_share_view_session = None;
+        self.screen_share_viewing_peer = None;
         self.screen_share_decode_stop = None;
         self.screen_share_fullscreen = false;
         self.screen_share_last_frame_ts = None;
@@ -21763,6 +21894,8 @@ impl IcedChat {
         self.screen_share_hover = None;
         self.screen_share_src_size = None;
         self.screen_share_sources = None;
+        self.screen_share_selected_source = None;
+        self.screen_share_notice_ticks = 0;
     }
 
     pub fn subscription(
@@ -26306,6 +26439,171 @@ mod tests {
         );
         assert!(app.toast_message.is_some(), "UI must explain why the action is unavailable");
         assert!(app.toast_message.as_deref().unwrap().contains("does not support screen sharing"));
+    }
+
+    /// BORU-SS-29 (PDF Phase 13): the sharer panel runs through the seven
+    /// states. SourcesEnumerated moves Requesting → Inviting (awaiting
+    /// acceptance) and seeds the source picker's default selection with the
+    /// first enumerated source.
+    #[cfg(feature = "screen-sharing")]
+    #[test]
+    fn screen_share_sources_enumerated_advances_to_inviting_and_defaults_selection() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        app.screen_share_host_state = ScreenShareHostState::Requesting;
+
+        let sources = vec![
+            CaptureSource {
+                id: CaptureSourceId(1),
+                kind: boru_core::screen_share::CaptureSourceKind::Monitor,
+                title: "DP-1: 1920x1080".to_string(),
+                width: 1920,
+                height: 1080,
+                geometry: None,
+            },
+            CaptureSource {
+                id: CaptureSourceId(2),
+                kind: boru_core::screen_share::CaptureSourceKind::Monitor,
+                title: "DP-2: 2560x1440".to_string(),
+                width: 2560,
+                height: 1440,
+                geometry: None,
+            },
+        ];
+        app.update(AppMessage::ScreenShareEventReceived(SessionEvent::SourcesEnumerated {
+            session_id: ScreenShareSessionId::generate(),
+            sources,
+        }));
+
+        assert_eq!(
+            app.screen_share_host_state,
+            ScreenShareHostState::Inviting,
+            "sources enumerated while requesting → awaiting acceptance"
+        );
+        assert_eq!(
+            app.screen_share_selected_source,
+            Some(CaptureSourceId(1)),
+            "the picker defaults to the host's first source"
+        );
+        assert_eq!(
+            app.screen_share_sources.as_ref().map(Vec::len),
+            Some(2),
+            "the picker list is stored for the monitor-selection UI"
+        );
+    }
+
+    /// BORU-SS-29 (PDF Phase 13): a rejected share surfaces an explicit
+    /// terminal state — a peer "declined" is a normal stop, any other
+    /// failure reason is an error the user can read.
+    #[cfg(feature = "screen-sharing")]
+    #[test]
+    fn screen_share_rejected_maps_to_error_or_stopped() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        app.screen_share_host_state = ScreenShareHostState::Inviting;
+        app.update(AppMessage::ScreenShareEventReceived(SessionEvent::Rejected {
+            session_id: ScreenShareSessionId::generate(),
+            reason: "no route to peer".to_string(),
+        }));
+        assert_eq!(
+            app.screen_share_host_state,
+            ScreenShareHostState::Error("no route to peer".to_string()),
+            "a transport/negotiation failure is an error state"
+        );
+
+        app.screen_share_host_state = ScreenShareHostState::Inviting;
+        app.update(AppMessage::ScreenShareEventReceived(SessionEvent::Rejected {
+            session_id: ScreenShareSessionId::generate(),
+            reason: "declined".to_string(),
+        }));
+        assert_eq!(
+            app.screen_share_host_state,
+            ScreenShareHostState::Stopped,
+            "a peer decline is a normal stop outcome, not an error"
+        );
+    }
+
+    /// BORU-SS-29 (PDF Phase 13): a session end and a user-initiated stop
+    /// both land on the terminal "stopped" notice, and the Dismiss action
+    /// returns the panel to Idle so a fresh share can start.
+    #[cfg(feature = "screen-sharing")]
+    #[test]
+    fn screen_share_stopped_notice_clears_on_dismiss() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        app.screen_share_host_state = ScreenShareHostState::Streaming;
+        app.update(AppMessage::ScreenShareEventReceived(SessionEvent::Ended {
+            session_id: ScreenShareSessionId::generate(),
+        }));
+        assert_eq!(
+            app.screen_share_host_state,
+            ScreenShareHostState::Stopped,
+            "an ended session shows the stopped notice"
+        );
+
+        app.update(AppMessage::ScreenShareDismissNotice);
+        assert_eq!(
+            app.screen_share_host_state,
+            ScreenShareHostState::Idle,
+            "dismiss clears the terminal notice"
+        );
+    }
+
+    /// BORU-SS-29 (PDF Phase 13): when the shared source disappears with no
+    /// fallback the stream shows PAUSED (picking a source resumes it); when
+    /// the host falls back to another monitor the share keeps streaming and
+    /// the change is surfaced as a toast instead.
+    #[cfg(feature = "screen-sharing")]
+    #[test]
+    fn screen_share_source_unavailable_pauses_or_toasts() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        app.screen_share_host_state = ScreenShareHostState::Streaming;
+        app.update(AppMessage::ScreenShareEventReceived(SessionEvent::SourceUnavailable {
+            session_id: ScreenShareSessionId::generate(),
+            reason: "monitor unplugged".to_string(),
+            fallback: None,
+        }));
+        assert_eq!(
+            app.screen_share_host_state,
+            ScreenShareHostState::Paused,
+            "no fallback source → paused state"
+        );
+
+        app.screen_share_host_state = ScreenShareHostState::Streaming;
+        app.update(AppMessage::ScreenShareEventReceived(SessionEvent::SourceUnavailable {
+            session_id: ScreenShareSessionId::generate(),
+            reason: "monitor unplugged".to_string(),
+            fallback: Some("DP-2".to_string()),
+        }));
+        assert_eq!(
+            app.screen_share_host_state,
+            ScreenShareHostState::Streaming,
+            "a fallback source keeps the share streaming"
+        );
+        assert!(
+            app.toast_message.as_deref().unwrap_or_default().contains("Screen share paused"),
+            "the fallback is surfaced as a toast"
+        );
+    }
+
+    /// BORU-SS-29 (PDF Phase 13): picking a monitor from the source picker
+    /// records the selection and routes HostCommand::SwitchSource to the
+    /// host driver so the choice applies before/after acceptance.
+    #[cfg(feature = "screen-sharing")]
+    #[test]
+    fn screen_share_select_source_forwards_switch_command() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(8);
+        app.screen_share_host_cmd_tx = Some(cmd_tx);
+
+        app.update(AppMessage::ScreenShareSelectSource(CaptureSourceId(2)));
+
+        assert_eq!(app.screen_share_selected_source, Some(CaptureSourceId(2)));
+        let received = cmd_rx.try_recv();
+        assert!(
+            matches!(received, Ok(HostCommand::SwitchSource(CaptureSourceId(2)))),
+            "the picker choice must reach the host driver, got {received:?}"
+        );
     }
 
     /// Tunnel creation against a peer that lacks the TUNNELS capability is

@@ -311,9 +311,26 @@ async fn run_host_session_inner(
                 // media path is streaming; during negotiation the payload is
                 // dropped (never logged — PDF guardrail).
                 Some(HostCommand::SendClipboard(_)) => false,
-                // Source switching (PDF Phase 10) only applies once the media
-                // path is streaming; during negotiation it is ignored.
-                Some(HostCommand::SwitchSource(_)) => false,
+                // Source selection (PDF Phase 10/13): the sharer picks the
+                // monitor BEFORE the viewer accepts, so the offer that leads
+                // to streaming starts with the chosen source. Re-select the
+                // capture backend now; the encoder is configured from the
+                // ACTIVE source's dimensions when streaming begins. No wire
+                // message is needed pre-acceptance — the viewer has not
+                // started decoding and will initialize from the first frame.
+                Some(HostCommand::SwitchSource(source_id)) => {
+                    if let Ok(sources) = capture.list_sources() {
+                        if sources.iter().any(|source| source.id == source_id) {
+                            let _ = capture.switch_source(source_id, &capture_config);
+                            current_source =
+                                capture.current_source().or_else(|| current_source.clone());
+                            tracing::info!(source = ?source_id, "screen-share: initial source selected");
+                        } else {
+                            tracing::warn!(source = ?source_id, "screen-share: selected source not in current enumeration");
+                        }
+                    }
+                    false
+                }
                 None => return SessionTermination::HostCommandClosed,
             },
             _ = tokio::time::sleep(Duration::from_millis(250)) => false,

@@ -370,13 +370,104 @@ impl IcedChat {
                 ].spacing(SPACE_8),
             ].spacing(SPACE_6)
         } else if self.screen_share_host_state != ScreenShareHostState::Idle {
-            let state = match self.screen_share_host_state {
-                ScreenShareHostState::Inviting => "Waiting for the viewer to accept…",
-                ScreenShareHostState::Streaming => "Screen sharing active",
-                ScreenShareHostState::Reconnecting => "Reconnecting…",
+            // ── Sharer panel (PDF Phase 13) ────────────────────────────
+            // All seven states are displayed: requesting, awaiting
+            // acceptance, sharing, paused, reconnecting, stopped, error.
+            // Stop Sharing stays reachable in every active state, and the
+            // monitor picker lets the sharer choose/switch the source.
+            let conversation = self
+                .conversation_store
+                .active_iter()
+                .into_iter()
+                .find(|entry| entry.topic == self.topic);
+            let peer_name = conversation
+                .map(|entry| entry.display_name())
+                .unwrap_or_default();
+
+            let state_text = match &self.screen_share_host_state {
+                ScreenShareHostState::Requesting => crate::i18n::t("screenshare.requesting"),
+                ScreenShareHostState::Inviting => crate::i18n::t("screenshare.awaiting_acceptance"),
+                ScreenShareHostState::Streaming => {
+                    if peer_name.is_empty() {
+                        crate::i18n::t("screenshare.sharing")
+                    } else {
+                        crate::i18n::t_args(
+                            "screenshare.sharing_with",
+                            &[("name", &peer_name)],
+                        )
+                    }
+                }
+                ScreenShareHostState::Paused => crate::i18n::t("screenshare.paused"),
+                ScreenShareHostState::Reconnecting => crate::i18n::t("screenshare.reconnecting"),
+                ScreenShareHostState::Stopped => crate::i18n::t("screenshare.stopped"),
+                ScreenShareHostState::Error(_) => crate::i18n::t("screenshare.error"),
                 ScreenShareHostState::Idle => unreachable!(),
             };
-            let mut items: Vec<iced::Element<'_, AppMessage>> = vec![text(state).into()];
+            let mut items: Vec<iced::Element<'_, AppMessage>> = vec![text(state_text).into()];
+
+            // Error reason (user-safe; never logs media data).
+            if let ScreenShareHostState::Error(reason) = &self.screen_share_host_state {
+                items.push(
+                    text(reason)
+                        .size(crate::fonts::TypeRole::SupportingText.size_px())
+                        .color(Self::muted_color(self.dark_mode))
+                        .into(),
+                );
+            }
+
+            // ── Monitor/source selection (PDF Phase 13) ───────────────
+            // The enumerated monitor list is shown in every active state so
+            // the sharer can pick the initial source before the viewer
+            // accepts and switch it any time afterwards. The chosen entry is
+            // highlighted; picking one sends HostCommand::SwitchSource.
+            if let Some(sources) = &self.screen_share_sources {
+                if !sources.is_empty() {
+                    let selected = self.screen_share_selected_source;
+                    let source_row: Vec<iced::Element<'_, AppMessage>> = sources
+                        .iter()
+                        .map(|source| {
+                            let is_selected = selected == Some(source.id);
+                            let label = if is_selected {
+                                format!("✓ {}", source.title)
+                            } else {
+                                source.title.clone()
+                            };
+                            button(text(label).size(crate::fonts::TypeRole::SupportingText.size_px()))
+                                .on_press(AppMessage::ScreenShareSelectSource(source.id))
+                                .padding([2, 6])
+                                .into()
+                        })
+                        .collect();
+                    items.push(
+                        row![
+                            text(crate::i18n::t("screenshare.source"))
+                                .size(crate::fonts::TypeRole::SupportingText.size_px())
+                                .color(Self::muted_color(self.dark_mode)),
+                            row(source_row).spacing(SPACE_4),
+                        ]
+                        .spacing(SPACE_6)
+                        .align_y(iced::Alignment::Center)
+                        .into(),
+                    );
+                }
+            }
+
+            // Remote-control indicator (PDF Phase 13: "show ... whether
+            // remote control is enabled"). Explicit consent is separate —
+            // control is never granted automatically (PDF Task 9.1).
+            if self.screen_share_host_state == ScreenShareHostState::Streaming {
+                items.push(
+                    text(if self.screen_share_control_active {
+                        crate::i18n::t("screenshare.remote_control_on")
+                    } else {
+                        crate::i18n::t("screenshare.remote_control_off")
+                    })
+                    .size(crate::fonts::TypeRole::SupportingText.size_px())
+                    .color(Self::muted_color(self.dark_mode))
+                    .into(),
+                );
+            }
+
             // Explicit consent prompt: the host picks the granted capabilities.
             if let Some((_, viewer, capabilities)) = &self.screen_share_control_request {
                 let caps = capabilities
@@ -458,9 +549,61 @@ impl IcedChat {
                     }
                 }
             }
-            items.push(button(text(crate::i18n::t("screenshare.stop_sharing"))).on_press(AppMessage::StopScreenShare).into());
+            // Stop Sharing is permanently accessible while a session is
+            // active (requesting → error). Terminal notices offer retry and
+            // dismissal instead.
+            match &self.screen_share_host_state {
+                ScreenShareHostState::Stopped | ScreenShareHostState::Error(_) => {
+                    let peer_key = conversation
+                        .and_then(|entry| PublicKey::from_str(&entry.peer_id).ok());
+                    let mut actions: Vec<iced::Element<'_, AppMessage>> = Vec::new();
+                    if let Some(key) = peer_key {
+                        actions.push(
+                            button(text(crate::i18n::t("screenshare.share_again")))
+                                .on_press(AppMessage::StartScreenShare(key))
+                                .into(),
+                        );
+                    }
+                    actions.push(
+                        button(text(crate::i18n::t("screenshare.dismiss")))
+                            .on_press(AppMessage::ScreenShareDismissNotice)
+                            .into(),
+                    );
+                    items.push(row(actions).spacing(SPACE_8).into());
+                }
+                _ => {
+                    items.push(
+                        button(text(crate::i18n::t("screenshare.stop_sharing")))
+                            .on_press(AppMessage::StopScreenShare)
+                            .into(),
+                    );
+                }
+            }
             column(items).spacing(SPACE_6)
         } else if self.screen_share_viewing {
+            // Who is sharing (PDF Phase 13): the viewer always sees the
+            // sharer's identity above the surface, plus whether remote
+            // control is enabled.
+            let mut viewer_lines: Vec<iced::Element<'_, AppMessage>> = Vec::new();
+            if let Some(sharer) = &self.screen_share_viewing_peer {
+                viewer_lines.push(
+                    text(crate::i18n::t_args(
+                        "screenshare.viewing_peer",
+                        &[("name", sharer)],
+                    ))
+                    .into(),
+                );
+            }
+            viewer_lines.push(
+                text(if self.screen_share_control_active {
+                    crate::i18n::t("screenshare.remote_control_on")
+                } else {
+                    crate::i18n::t("screenshare.remote_control_off")
+                })
+                .size(crate::fonts::TypeRole::SupportingText.size_px())
+                .color(Self::muted_color(self.dark_mode))
+                .into(),
+            );
             // Dedicated scalable surface (PDF Task 8.2). The surface fills
             // the panel width; its height is capped so the chat log stays
             // usable (fullscreen raises the cap). Fit/100%/zoom/pan are
@@ -580,8 +723,9 @@ impl IcedChat {
                     .padding([2, 6])
                     .into(),
             );
-            column![
-                video,
+            let mut viewer_column: Vec<iced::Element<'_, AppMessage>> = viewer_lines;
+            viewer_column.push(video.into());
+            viewer_column.push(
                 row![
                     view_screen_share_view_controls(
                         scale,
@@ -590,9 +734,10 @@ impl IcedChat {
                     row(actions).spacing(SPACE_6),
                 ]
                 .spacing(SPACE_8)
-                .align_y(iced::Alignment::Center),
-            ]
-            .spacing(SPACE_6)
+                .align_y(iced::Alignment::Center)
+                .into(),
+            );
+            column(viewer_column).spacing(SPACE_6)
         } else {
             return iced::widget::Space::new().height(Length::Fixed(0.0)).into();
         };
@@ -1649,7 +1794,12 @@ impl IcedChat {
             Some(key)
                 if !is_group
                     && !is_blocked
-                    && self.screen_share_host_state == ScreenShareHostState::Idle
+                    && matches!(
+                        self.screen_share_host_state,
+                        ScreenShareHostState::Idle
+                            | ScreenShareHostState::Stopped
+                            | ScreenShareHostState::Error(_)
+                    )
                     && screen_share_offered =>
             {
                 tool_btn(
@@ -1661,7 +1811,12 @@ impl IcedChat {
             Some(_)
                 if !is_group
                     && !is_blocked
-                    && self.screen_share_host_state == ScreenShareHostState::Idle =>
+                    && matches!(
+                        self.screen_share_host_state,
+                        ScreenShareHostState::Idle
+                            | ScreenShareHostState::Stopped
+                            | ScreenShareHostState::Error(_)
+                    ) =>
             {
                 tool_btn(
                     Icon::Monitor.build().size(IconSize::Sm).build().into(),
