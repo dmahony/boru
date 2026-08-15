@@ -8,6 +8,7 @@
 
 use iced::widget::{container, mouse_area, text, Stack};
 use iced::{Background, Border, Color, Element, Length, Padding, Point};
+use crate::layout::HomeSection;
 use std::fmt;
 use std::str::FromStr;
 
@@ -123,11 +124,30 @@ pub(crate) fn overlay<'a>(
     mouse_area(layered)
         .on_enter(crate::app::AppMessage::Designer(DesignerMessage::Hover(Some(component))))
         .on_exit(crate::app::AppMessage::Designer(DesignerMessage::Hover(None)))
-        .on_press(crate::app::AppMessage::Designer(DesignerMessage::Select(Some(component))))
+        .on_press(crate::app::AppMessage::Designer(DesignerMessage::StartDrag {
+            component,
+            origin: Point::ORIGIN,
+        }))
+        .on_move(|point| {
+            crate::app::AppMessage::Designer(DesignerMessage::UpdateDrag(point))
+        })
+        .on_release(crate::app::AppMessage::Designer(DesignerMessage::CommitDrag))
         .into()
 }
 
 impl ComponentId {
+    /// Map stable designer surfaces to semantic home sections.
+    pub(crate) const fn home_section(self) -> Option<HomeSection> {
+        match self {
+            Self::HomeWelcome => Some(HomeSection::Hero),
+            Self::HomeQuickActions => Some(HomeSection::QuickActions),
+            Self::HomePublicRooms => Some(HomeSection::MeshHealth),
+            Self::HomeFriends => Some(HomeSection::PeopleActivity),
+            Self::HomeRecentActivity => Some(HomeSection::Tunnels),
+            Self::Sidebar | Self::ChatMessageList | Self::ChatComposer => None,
+        }
+    }
+
     /// Map a designer surface to the existing inspector's authoritative
     /// component hierarchy. Several fine-grained designer surfaces share the
     /// same theme/layout section.
@@ -164,8 +184,10 @@ impl Default for PreviewBreakpoint {
 #[derive(Debug, Clone, PartialEq)]
 pub struct DragOperation {
     pub component: ComponentId,
+    pub section: Option<HomeSection>,
     pub origin: Point,
     pub current: Point,
+    pub proposed_index: Option<usize>,
 }
 
 /// A transient resize operation. The eventual layout layer will translate the
@@ -217,6 +239,7 @@ pub enum DesignerMessage {
         origin: Point,
     },
     UpdateDrag(Point),
+    CommitDrag,
     CancelDrag,
     StartResize {
         component: ComponentId,
@@ -249,9 +272,12 @@ impl DesignerState {
             DesignerMessage::StartDrag { component, origin } if self.enabled => {
                 self.drag_operation = Some(DragOperation {
                     component,
+                    section: component.home_section(),
                     origin,
                     current: origin,
+                    proposed_index: None,
                 });
+                self.selected_component = Some(component);
             }
             DesignerMessage::StartDrag { .. } => {}
             DesignerMessage::UpdateDrag(current) => {
@@ -259,6 +285,7 @@ impl DesignerState {
                     operation.current = current;
                 }
             }
+            DesignerMessage::CommitDrag => self.drag_operation = None,
             DesignerMessage::CancelDrag => self.drag_operation = None,
             DesignerMessage::StartResize { component, origin } if self.enabled => {
                 self.resize_operation = Some(ResizeOperation {

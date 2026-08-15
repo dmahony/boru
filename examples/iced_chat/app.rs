@@ -12624,8 +12624,18 @@ impl IcedChat {
             AppMessage::Designer(designer_message) => {
                 let selection = match &designer_message {
                     DesignerMessage::Select(component) => Some(*component),
+                    DesignerMessage::StartDrag { component, .. } => Some(Some(*component)),
                     _ => None,
                 };
+                if let DesignerMessage::UpdateDrag(point) = designer_message {
+                    self.update_home_drag(point);
+                    return iced::Task::none();
+                }
+                if matches!(designer_message, DesignerMessage::CommitDrag) {
+                    self.commit_home_drag();
+                    self.designer.update(DesignerMessage::CommitDrag);
+                    return iced::Task::none();
+                }
                 self.designer.update(designer_message);
                 if let Some(Some(component)) = selection {
                     let inspector_component = component.inspector_component();
@@ -19517,6 +19527,53 @@ impl IcedChat {
     /// renderer closure clone the slice they consume.
     pub(crate) fn boru_layout(&self) -> &crate::layout::LayoutConfig {
         &self.active_layout
+    }
+
+    #[cfg(feature = "dev-ui")]
+    fn update_home_drag(&mut self, current: iced::Point) {
+        let Some(operation) = self.designer.drag_operation.as_mut() else {
+            return;
+        };
+        operation.current = current;
+        let Some(section) = operation.section else {
+            return;
+        };
+        let order = &self.active_layout.home.section_order;
+        let Some(source) = order.iter().position(|candidate| *candidate == section) else {
+            return;
+        };
+        // Pointer coordinates are transient interaction data. The semantic
+        // result is only an insertion index in the typed sections array.
+        let shift = ((current.y - operation.origin.y) / 120.0).round() as isize;
+        let max_index = order.len().saturating_sub(1) as isize;
+        operation.proposed_index = Some((source as isize + shift).clamp(0, max_index) as usize);
+    }
+
+    #[cfg(feature = "dev-ui")]
+    fn commit_home_drag(&mut self) {
+        let Some(operation) = self.designer.drag_operation.clone() else {
+            return;
+        };
+        let (Some(section), Some(target)) = (operation.section, operation.proposed_index) else {
+            return;
+        };
+        let Some(source) = self
+            .active_layout
+            .home
+            .section_order
+            .iter()
+            .position(|candidate| *candidate == section)
+        else {
+            return;
+        };
+        if source == target {
+            return;
+        }
+        let mut layout = self.active_layout.clone();
+        let moved = layout.home.section_order.remove(source);
+        layout.home.section_order.insert(target, moved);
+        self.set_layout_config(layout);
+        self.designer.update(DesignerMessage::MarkDirty);
     }
 
     /// BORU-LAYOUT-03: replace the live layout AND bump `layout_revision` so

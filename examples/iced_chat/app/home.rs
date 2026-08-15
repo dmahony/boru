@@ -54,6 +54,8 @@ pub(crate) struct ChatListDependency {
     /// LayoutConfig (the home layout itself is captured separately by the
     /// renderer's closure and re-read when this revision changes).
     pub(crate) layout_revision: u64,
+    #[cfg(feature = "dev-ui")]
+    pub(crate) drag_placeholder: Option<(crate::designer::ComponentId, usize)>,
     pub(crate) window_width_bits: u32,
     pub(crate) mesh_health: MeshHealthSnapshot,
     pub(crate) main_screen_reconnect_frame: u32,
@@ -1084,6 +1086,7 @@ impl IcedChat {
             self.designer.hovered_component,
             self.designer.selected_component,
         );
+
         iced::widget::lazy(dep, move |dep| {
             Self::view_chat_list_content(
                 dep,
@@ -1096,6 +1099,8 @@ impl IcedChat {
                 designer_hovered,
                 #[cfg(feature = "dev-ui")]
                 designer_selected,
+                #[cfg(feature = "dev-ui")]
+                dep.drag_placeholder,
             )
         })
         .into()
@@ -1109,6 +1114,12 @@ impl IcedChat {
             Instant::now()
                 .saturating_duration_since(t)
                 .as_secs()
+        });
+        #[cfg(feature = "dev-ui")]
+        let drag_placeholder = self.designer.drag_operation.as_ref().and_then(|operation| {
+            operation
+                .proposed_index
+                .map(|index| (operation.component, index))
         });
         // Newest mesh events first (the log pushes to the back), capped at the
         // number the card renders. Age is captured here so the snapshot stays
@@ -1147,6 +1158,8 @@ impl IcedChat {
             hero_pulse_frame: (self.activity_tick % crate::status_card::STATUS_CARD_PULSE_PHASES as u64)
                 as u32,
             reduced_motion: self.reduced_motion,
+            #[cfg(feature = "dev-ui")]
+            drag_placeholder,
         }
     }
 
@@ -1167,6 +1180,7 @@ impl IcedChat {
         #[cfg(feature = "dev-ui")] designer_enabled: bool,
         #[cfg(feature = "dev-ui")] designer_hovered: Option<crate::designer::ComponentId>,
         #[cfg(feature = "dev-ui")] designer_selected: Option<crate::designer::ComponentId>,
+        #[cfg(feature = "dev-ui")] drag_placeholder: Option<(crate::designer::ComponentId, usize)>,
     ) -> iced::Element<'static, AppMessage> {
         use iced::widget::{button, container, row, Column, Row, Space};
         use iced::{Alignment, Length};
@@ -1477,6 +1491,14 @@ impl IcedChat {
             .card_radius(btheme.radii.card)
             .background_opacity(home_menu_opacity)
             .build(&theme);
+        #[cfg(feature = "dev-ui")]
+        let mesh_card = crate::designer::overlay(
+            crate::designer::ComponentId::HomePublicRooms,
+            mesh_card.into(),
+            designer_enabled,
+            designer_hovered,
+            designer_selected,
+        );
 
         // ── Quick actions: four equal, full-card targets (Figure 3) ──
         // BORU-UI-03: card radius comes from the LIVE theme
@@ -1566,6 +1588,14 @@ impl IcedChat {
         let tunnels_card = iced::widget::lazy(dep.tunnels.clone(), move |card_dep| {
             Self::view_tunnels_card(card_dep, btheme)
         });
+        #[cfg(feature = "dev-ui")]
+        let tunnels_card = crate::designer::overlay(
+            crate::designer::ComponentId::HomeRecentActivity,
+            tunnels_card.into(),
+            designer_enabled,
+            designer_hovered,
+            designer_selected,
+        );
 
         // ── Page header: greeting + welcome + Download Manager ──
         // UI-HOME-15: on narrow content the Download Manager stacks under
@@ -1767,6 +1797,42 @@ impl IcedChat {
         // ~40 px — roughly 12 px more breathing room between the
         // \"Welcome to Boru\" subtitle and the card grid. BORU-LAYOUT-03:
         // the gap comes from the layout model (`home.gaps`).
+        #[cfg(feature = "dev-ui")]
+        let drag_ghost: Option<iced::Element<'static, AppMessage>> =
+            drag_placeholder.map(|(_, index)| {
+            container(
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::Metadata,
+                    format!("Drop section at position {}", index + 1),
+                )
+                .color(crate::design_tokens::text_muted(&theme)),
+            )
+            .width(Length::Fill)
+            .padding([SPACE_4, SPACE_8])
+            .style(|theme| container::Style {
+                background: Some(iced::Background::Color(
+                    crate::design_tokens::surface_hover(theme),
+                )),
+                border: iced::Border {
+                    color: iced::Color::from_rgb(0.25, 0.68, 1.0),
+                    width: 1.0,
+                    radius: 4.0.into(),
+                },
+                ..Default::default()
+            })
+            .into()
+        });
+        #[cfg(feature = "dev-ui")]
+        let col = Column::new()
+            .push(page_header)
+            .push(Space::new().height(Length::Fixed(layout.gaps.header_dashboard_gap)))
+            .push(drag_ghost)
+            .push(main_content)
+            .push(Space::new().height(Length::Fixed(layout.gaps.footer_gap)))
+            .push(footer)
+            .spacing(0)
+            .width(Length::Fill);
+        #[cfg(not(feature = "dev-ui"))]
         let col = Column::new()
             .push(page_header)
             .push(Space::new().height(Length::Fixed(layout.gaps.header_dashboard_gap)))
