@@ -17583,6 +17583,10 @@ impl IcedChat {
             #[cfg(feature = "dev-ui")]
             AppMessage::GalleryLayoutPreset(preset) => {
                 self.gallery_state.layout_preset = preset;
+                // Gallery presets are previews of the same typed layout used
+                // by production screens, so selecting one updates the shared
+                // live configuration rather than a gallery-only copy.
+                self.set_layout_overrides(preset.overrides());
                 iced::Task::none()
             }
 
@@ -20924,10 +20928,12 @@ impl IcedChat {
                 .into(),
             },
             #[cfg(feature = "dev-ui")]
-            Screen::Gallery => crate::component_gallery::view_gallery(
+            Screen::Gallery => crate::component_gallery::view_gallery_with_designer(
                 &self.gallery_state,
                 self.window_width,
                 &self.boru_theme(),
+                &self.active_layout,
+                &self.designer,
             ),
         };
         // BORU-UI-11: when inspection mode is enabled, tag the sidebar and

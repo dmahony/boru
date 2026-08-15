@@ -136,7 +136,7 @@ impl GalleryLayoutPreset {
 
     /// The partial override set that defines this preset. `Default` is the
     /// empty override set (the merge becomes the identity).
-    fn overrides(self) -> LayoutOverrides {
+    pub(crate) fn overrides(self) -> LayoutOverrides {
         match self {
             GalleryLayoutPreset::Default => LayoutOverrides::default(),
 
@@ -321,8 +321,42 @@ pub fn view_gallery(
     window_width: f32,
     btheme: &crate::theme::BoruTheme,
 ) -> Element<'static, AppMessage> {
+    view_gallery_impl(state, window_width, btheme, None, false, None, None)
+}
+
+/// Build the gallery with the live application designer state.
+#[cfg(feature = "dev-ui")]
+pub fn view_gallery_with_designer(
+    state: &GalleryState,
+    window_width: f32,
+    btheme: &crate::theme::BoruTheme,
+    layout: &LayoutConfig,
+    designer: &crate::designer::DesignerState,
+) -> Element<'static, AppMessage> {
+    view_gallery_impl(
+        state,
+        window_width,
+        btheme,
+        Some(layout),
+        designer.enabled,
+        designer.hovered_component,
+        designer.selected_component,
+    )
+}
+
+fn view_gallery_impl(
+    state: &GalleryState,
+    window_width: f32,
+    btheme: &crate::theme::BoruTheme,
+    live_layout: Option<&LayoutConfig>,
+    designer_enabled: bool,
+    designer_hovered: Option<crate::designer::ComponentId>,
+    designer_selected: Option<crate::designer::ComponentId>,
+) -> Element<'static, AppMessage> {
     let preview_width = effective_preview_width(state, window_width);
-    let layout = state.layout_preset.layout_config();
+    let layout = live_layout
+        .cloned()
+        .unwrap_or_else(|| state.layout_preset.layout_config());
 
     // Full-width control bar, then the whole gallery re-laid out inside a
     // fixed-width frame so every production component responds to the
@@ -330,6 +364,16 @@ pub fn view_gallery(
     let page = Column::new()
         .push(responsive_preview_controls(state, preview_width))
         .push(Space::new().height(Length::Fixed(design_tokens::SPACE_16)))
+        .push(if designer_enabled {
+            designer_gallery_preview(&layout, designer_hovered, designer_selected)
+        } else {
+            Space::new().height(Length::Fixed(0.0)).into()
+        })
+        .push(if designer_enabled {
+            Space::new().height(Length::Fixed(design_tokens::SPACE_24))
+        } else {
+            Space::new().height(Length::Fixed(0.0))
+        })
         .push(
             container(gallery_sections(btheme, &layout, preview_width))
                 .padding(design_tokens::SPACE_24)
@@ -346,6 +390,40 @@ pub fn view_gallery(
             .width(Length::Fill),
     )
     .into()
+}
+
+/// Editable gallery surfaces use the same production `CardShell` renderer as
+/// the home screen. Only the developer overlay is interactive.
+#[cfg(feature = "dev-ui")]
+fn designer_gallery_preview(
+    layout: &LayoutConfig,
+    hovered: Option<crate::designer::ComponentId>,
+    selected: Option<crate::designer::ComponentId>,
+) -> Element<'static, AppMessage> {
+    let surfaces = [
+        (crate::designer::ComponentId::HomeWelcome, HomeSection::Hero),
+        (crate::designer::ComponentId::HomeQuickActions, HomeSection::QuickActions),
+        (crate::designer::ComponentId::HomePublicRooms, HomeSection::MeshHealth),
+        (crate::designer::ComponentId::HomeFriends, HomeSection::PeopleActivity),
+        (crate::designer::ComponentId::HomeRecentActivity, HomeSection::Tunnels),
+    ];
+    let row = surfaces.into_iter().filter_map(|(id, section)| {
+        if layout.home.hidden_sections.contains(&section) {
+            return None;
+        }
+        Some(crate::designer::overlay(
+            id,
+            home_section_demo(section),
+            true,
+            hovered,
+            selected,
+            None,
+        ))
+    });
+    Column::new()
+        .push(gallery_section("Designer Preview (production components)"))
+        .push(Row::new().spacing(design_tokens::SPACE_16).extend(row).wrap())
+        .into()
 }
 
 /// BORU-UI-15: the responsive-preview control bar — preset buttons for
