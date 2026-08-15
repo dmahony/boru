@@ -1897,12 +1897,14 @@ pub fn view_inspector(
     layout: &crate::layout::LayoutConfig,
     draft: &InspectorDraft,
     dark_mode: bool,
+    designer_enabled: bool,
     inspect_enabled: bool,
     inspect_hover: Option<ComponentId>,
     inspect_selected: Option<ComponentId>,
 ) -> Element<'static, AppMessage> {
     let mut col = iced::widget::Column::new()
         .push(panel_heading(dark_mode))
+        .push(designer_mode_row(designer_enabled, dark_mode))
         .push(inspect_ui_row(inspect_enabled, inspect_hover, inspect_selected, dark_mode))
         .push(reset_actions_row(dark_mode))
         .push(save_theme_row(dark_mode, &draft.save_status))
@@ -2001,6 +2003,37 @@ pub fn view_inspector(
     .style(move |t| panel_style(t, dark_mode));
 
     panel.into()
+}
+
+/// Row with the Visual Designer toggle (BORU-DESIGN-03).
+fn designer_mode_row(enabled: bool, dark_mode: bool) -> Element<'static, AppMessage> {
+    let toggle = toggler(enabled)
+        .label("Visual Designer")
+        .on_toggle(|value| {
+            AppMessage::Designer(if value {
+                crate::designer::DesignerMessage::Enter
+            } else {
+                crate::designer::DesignerMessage::Exit
+            })
+        });
+    let status = text(if enabled {
+        "Active — designer interactions enabled"
+    } else {
+        "Off — normal application behaviour"
+    })
+    .size(9.0)
+    .color(if enabled {
+        Color::from_rgb(0.2, 0.65, 0.4)
+    } else if dark_mode {
+        Color::from_rgb(0.55, 0.55, 0.6)
+    } else {
+        Color::from_rgb(0.45, 0.45, 0.45)
+    });
+    iced::widget::Column::new()
+        .push(row![toggle, Space::new().width(Length::Fill)].align_y(Alignment::Center))
+        .push(status)
+        .spacing(2.0)
+        .into()
 }
 
 /// Row with the 'Inspect UI' toggle + status line (BORU-UI-11).

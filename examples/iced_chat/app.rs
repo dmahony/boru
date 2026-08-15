@@ -17320,6 +17320,12 @@ impl IcedChat {
             // ── Dev UI Inspector (BORU-UI-09) ───────────────────────
             #[cfg(feature = "dev-ui")]
             AppMessage::Inspector(msg) => self.update_inspector(msg),
+            // ── Visual Designer (BORU-DESIGN-03) ────────────────────
+            #[cfg(feature = "dev-ui")]
+            AppMessage::Designer(msg) => {
+                self.designer.update(msg);
+                iced::Task::none()
+            }
             // ── File sharing dashboard (state layer) ────────────────
             AppMessage::OpenDownloadsFolder
             | AppMessage::DashboardSearchChanged(_)
@@ -19535,6 +19541,7 @@ impl IcedChat {
             &self.active_layout,
             &self.inspector_draft,
             self.dark_mode,
+            self.designer.enabled,
             self.inspect_ui_enabled,
             self.inspect_hover,
             self.inspect_selected,
@@ -20633,6 +20640,40 @@ impl IcedChat {
                 ..Default::default()
             });
             let top = container(pill)
+                .width(iced::Length::Fill)
+                .align_x(iced::Alignment::Center)
+                .padding(iced::Padding {
+                    top: 8.0,
+                    ..Default::default()
+                });
+            iced::widget::Stack::new()
+                .push(result)
+                .push(top)
+                .width(iced::Length::Fill)
+                .height(iced::Length::Fill)
+                .into()
+        } else {
+            result
+        };
+
+        #[cfg(feature = "dev-ui")]
+        let result = if self.designer.enabled {
+            let banner = container(
+                text("VISUAL DESIGNER ACTIVE")
+                    .size(12.0)
+                    .color(Color::WHITE),
+            )
+            .padding(iced::Padding::from(5.0))
+            .style(move |_| container::Style {
+                background: Some(iced::Background::Color(Color::from_rgb(0.12, 0.42, 0.28))),
+                border: iced::Border {
+                    color: Color::from_rgb(0.55, 0.95, 0.7),
+                    width: 1.0,
+                    radius: iced::border::Radius::from(4.0),
+                },
+                ..Default::default()
+            });
+            let top = container(banner)
                 .width(iced::Length::Fill)
                 .align_x(iced::Alignment::Center)
                 .padding(iced::Padding {
