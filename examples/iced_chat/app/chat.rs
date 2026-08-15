@@ -429,6 +429,7 @@ impl IcedChat {
                     let pan = self.screen_share_pan;
                     let control_active = self.screen_share_control_active;
                     let hover = self.screen_share_hover;
+                    let last_pointer_norm = self.screen_share_last_pointer_pos;
                     let surface = responsive(move |size: iced::Size| {
                         let viewport = iced::Size::new(size.width, cap);
                         view_screen_share_surface(
@@ -439,6 +440,7 @@ impl IcedChat {
                             pan,
                             control_active,
                             hover,
+                            last_pointer_norm,
                         )
                     });
                     container(surface)
@@ -551,6 +553,7 @@ impl IcedChat {
         let pan = self.screen_share_pan;
         let control_active = self.screen_share_control_active;
         let hover = self.screen_share_hover;
+        let last_pointer_norm = self.screen_share_last_pointer_pos;
         let scale = SurfaceGeometry::new(
             iced::Size::new(self.window_width, 600.0),
             src_size,
@@ -560,7 +563,16 @@ impl IcedChat {
         .scale();
 
         let surface = responsive(move |size: iced::Size| {
-            view_screen_share_surface(handle, src_size, size, mode, pan, control_active, hover)
+            view_screen_share_surface(
+                handle,
+                src_size,
+                size,
+                mode,
+                pan,
+                control_active,
+                hover,
+                last_pointer_norm,
+            )
         });
 
         let controls = row![

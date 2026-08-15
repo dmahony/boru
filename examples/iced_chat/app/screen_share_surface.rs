@@ -194,6 +194,10 @@ impl SurfaceGeometry {
 /// `hover` is the last known cursor position over the surface (used as the
 /// wheel-zoom anchor); `control_active` switches the mouse area between
 /// remote-control forwarding (BORU-SS-17) and local pan/zoom.
+/// `last_pointer_norm` is the last sent normalized pointer position
+/// (`screen_share_last_pointer_pos`), used for press/release coordinates in
+/// control mode so clicks land where the cursor is (the old fixed-box path
+/// used the same value).
 pub(crate) fn view_screen_share_surface<'a>(
     handle: &'a iced::widget::image::Handle,
     source: iced::Size,
@@ -202,6 +206,7 @@ pub(crate) fn view_screen_share_surface<'a>(
     pan: Option<(f32, f32)>,
     control_active: bool,
     hover: Option<iced::Point>,
+    last_pointer_norm: Option<(f32, f32)>,
 ) -> iced::Element<'a, AppMessage> {
     use iced::widget::{container, image, mouse_area};
     use iced::Length;
@@ -240,9 +245,10 @@ pub(crate) fn view_screen_share_surface<'a>(
     if control_active {
         // Remote control: forward pointer motion/buttons using the same
         // geometry, so normalized coordinates stay correct under pan/zoom.
+        // Press/release use the last sent normalized position (updated on
+        // every move) so clicks land where the cursor is.
         let g = geom;
-        let last = hover.unwrap_or(iced::Point::new(0.0, 0.0));
-        let (lx, ly) = g.viewport_to_normalized(last);
+        let (lx, ly) = last_pointer_norm.unwrap_or((0.0, 0.0));
         mouse_area(surface)
             .on_move(move |pos| {
                 let (x, y) = g.viewport_to_normalized(pos);
