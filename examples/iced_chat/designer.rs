@@ -6,9 +6,9 @@
 //! `AppMessage`, so designer changes use the same Iced update pipeline as all
 //! other UI actions.
 
+use crate::layout::HomeSection;
 use iced::widget::{container, mouse_area, text, Stack};
 use iced::{Background, Border, Color, Element, Length, Padding, Point};
-use crate::layout::HomeSection;
 use std::fmt;
 use std::str::FromStr;
 
@@ -101,6 +101,34 @@ pub(crate) fn overlay<'a>(
     } else {
         container(text("")).into()
     };
+    // Keep the drag target explicit rather than making the whole production
+    // card draggable.  The latter is particularly dangerous for cards whose
+    // normal click opens a room, starts playback, or downloads a file.  The
+    // handle is part of the developer-only overlay, so it cannot alter the
+    // normal application surface when Designer Mode is disabled.
+    let drag_handle = mouse_area(
+        container(text("⠿").size(16.0).color(Color::WHITE))
+            .padding(Padding::from(4.0))
+            .style(|_| container::Style {
+                background: Some(Background::Color(Color::from_rgba(0.08, 0.32, 0.72, 0.94))),
+                border: Border {
+                    color: Color::from_rgb(0.55, 0.78, 1.0),
+                    width: 1.0,
+                    radius: 4.0.into(),
+                },
+                ..Default::default()
+            }),
+    )
+    .on_press(crate::app::AppMessage::Designer(
+        DesignerMessage::StartDrag {
+            component,
+            origin: Point::ORIGIN,
+        },
+    ))
+    .on_move(|point| crate::app::AppMessage::Designer(DesignerMessage::UpdateDrag(point)))
+    .on_release(crate::app::AppMessage::Designer(
+        DesignerMessage::CommitDrag,
+    ));
     let layered = Stack::new()
         .push(container(content).style(move |_| container::Style {
             border: if is_selected {
@@ -120,18 +148,26 @@ pub(crate) fn overlay<'a>(
             },
             ..Default::default()
         }))
-        .push(container(label).width(Length::Shrink).height(Length::Shrink));
+        .push(
+            container(label)
+                .width(Length::Shrink)
+                .height(Length::Shrink),
+        );
+    let layered = Stack::new().push(layered).push(
+        container(drag_handle)
+            .width(Length::Shrink)
+            .height(Length::Shrink),
+    );
     mouse_area(layered)
-        .on_enter(crate::app::AppMessage::Designer(DesignerMessage::Hover(Some(component))))
-        .on_exit(crate::app::AppMessage::Designer(DesignerMessage::Hover(None)))
-        .on_press(crate::app::AppMessage::Designer(DesignerMessage::StartDrag {
-            component,
-            origin: Point::ORIGIN,
-        }))
-        .on_move(|point| {
-            crate::app::AppMessage::Designer(DesignerMessage::UpdateDrag(point))
-        })
-        .on_release(crate::app::AppMessage::Designer(DesignerMessage::CommitDrag))
+        .on_enter(crate::app::AppMessage::Designer(DesignerMessage::Hover(
+            Some(component),
+        )))
+        .on_exit(crate::app::AppMessage::Designer(DesignerMessage::Hover(
+            None,
+        )))
+        .on_press(crate::app::AppMessage::Designer(DesignerMessage::Select(
+            Some(component),
+        )))
         .into()
 }
 
