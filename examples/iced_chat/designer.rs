@@ -7,7 +7,7 @@
 //! other UI actions.
 
 use crate::layout::HomeSection;
-use iced::widget::{container, mouse_area, text, Stack};
+use iced::widget::{button, container, mouse_area, row, text, Stack};
 use iced::{Background, Border, Color, Element, Length, Padding, Point};
 use std::fmt;
 use std::str::FromStr;
@@ -187,6 +187,30 @@ pub(crate) fn overlay<'a>(
             .width(Length::Shrink)
             .height(Length::Shrink),
     );
+    // Grid editing is visible only for the selected Quick Actions grid. The
+    // app maps these semantic deltas to the active typed layout field.
+    let layered = if component == ComponentId::HomeQuickActions && is_selected {
+        let grid_controls = row![
+            button(text("−").size(14.0))
+                .padding([2, 7])
+                .on_press(crate::app::AppMessage::Designer(
+                    DesignerMessage::AdjustGridColumns(-1),
+                )),
+            button(text("+").size(14.0))
+                .padding([2, 7])
+                .on_press(crate::app::AppMessage::Designer(
+                    DesignerMessage::AdjustGridColumns(1),
+                )),
+        ]
+        .spacing(2);
+        Stack::new().push(layered).push(
+            container(grid_controls)
+                .width(Length::Shrink)
+                .height(Length::Shrink),
+        )
+    } else {
+        layered
+    };
     let supports_resize = matches!(
         component,
         ComponentId::Sidebar | ComponentId::ChatMessageList | ComponentId::ChatComposer
@@ -333,6 +357,8 @@ pub enum DesignerMessage {
     UpdateResize(Point),
     CancelResize,
     SetBreakpoint(PreviewBreakpoint),
+    /// Increment/decrement the selected grid at the active preview breakpoint.
+    AdjustGridColumns(i8),
     MarkDirty,
     SetValidationErrors(Vec<String>),
     ClearValidationErrors,
@@ -387,6 +413,7 @@ impl DesignerState {
             }
             DesignerMessage::CancelResize => self.resize_operation = None,
             DesignerMessage::SetBreakpoint(breakpoint) => self.preview_breakpoint = breakpoint,
+            DesignerMessage::AdjustGridColumns(_) => {}
             DesignerMessage::MarkDirty => self.dirty = true,
             DesignerMessage::SetValidationErrors(errors) => self.validation_errors = errors,
             DesignerMessage::ClearValidationErrors => self.validation_errors.clear(),

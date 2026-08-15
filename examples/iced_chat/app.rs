@@ -12635,6 +12635,10 @@ impl IcedChat {
                     self.update_resize(point);
                     return iced::Task::none();
                 }
+                if let DesignerMessage::AdjustGridColumns(delta) = designer_message {
+                    self.adjust_selected_grid_columns(delta);
+                    return iced::Task::none();
+                }
                 if matches!(designer_message, DesignerMessage::CommitDrag) {
                     self.commit_home_drag();
                     self.designer.update(DesignerMessage::CommitDrag);
@@ -20339,6 +20343,43 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
+        }
+    }
+
+    /// Apply a semantic +/- edit to the selected Quick Actions grid. The
+    /// active preview breakpoint selects the corresponding typed layout leaf.
+    #[cfg(feature = "dev-ui")]
+    fn adjust_selected_grid_columns(&mut self, delta: i8) {
+        if !self.designer.enabled
+            || self.designer.selected_component
+                != Some(crate::designer::ComponentId::HomeQuickActions)
+        {
+            return;
+        }
+        let field = match self.designer.preview_breakpoint {
+            crate::designer::PreviewBreakpoint::Compact => {
+                crate::layout_inspector::LayoutField::HomeQuickColumnsNarrow
+            }
+            crate::designer::PreviewBreakpoint::Medium => {
+                crate::layout_inspector::LayoutField::HomeQuickColumnsMid
+            }
+            crate::designer::PreviewBreakpoint::Reference
+            | crate::designer::PreviewBreakpoint::Large => {
+                crate::layout_inspector::LayoutField::HomeQuickColumnsWide
+            }
+        };
+        let current = crate::layout_inspector::read_layout_int(&self.active_layout, field);
+        let next = (current + i64::from(delta)).clamp(1, 8);
+        if next == current {
+            return;
+        }
+        let mut overrides = self.layout_overrides.clone();
+        match crate::layout_inspector::apply_layout_int(&mut overrides, field, next) {
+            Ok(()) => {
+                self.set_layout_overrides(overrides);
+                self.designer.update(DesignerMessage::MarkDirty);
+            }
+            Err(error) => tracing::warn!(%error, ?field, "designer: rejected grid column edit"),
         }
     }
 
