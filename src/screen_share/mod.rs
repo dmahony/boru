@@ -40,7 +40,7 @@ pub use channels::{
     BoundedFrameQueue, ControlChannel, ControlOut, MediaChannel, DEFAULT_CONTROL_QUEUE_CAPACITY,
     DEFAULT_MEDIA_QUEUE_CAPACITY,
 };
-pub use adaptation::{AdaptiveQuality, QualityDecision};
+pub use adaptation::{AdaptiveQuality, PacingController, PacingCounters, QualityDecision};
 pub use codec::{
     CodecConfig, CodecKind, CodecMetadata, EncodedFrame, EncodedPacket, OpenH264Decoder,
     OpenH264Encoder, QualityProfile, ScreenShareCodec, VideoDecoder, VideoEncoder,
@@ -184,7 +184,7 @@ mod tests {
     impl VideoEncoder for FakeCodec {
         fn configure(&mut self, _config: CodecConfig) -> Result<(), ScreenShareError> { Ok(()) }
         fn encode(&mut self, frame: &CapturedFrame) -> Result<EncodedFrame, ScreenShareError> {
-            Ok(EncodedFrame { timestamp_us: frame.timestamp_us, sequence: 0, keyframe: true,
+            Ok(EncodedFrame { timestamp_us: frame.timestamp_us, encode_timestamp_us: frame.timestamp_us, sequence: 0, keyframe: true,
                 config_generation: 0, width: frame.width, height: frame.height,
                 bytes: frame.pixels.clone() })
         }

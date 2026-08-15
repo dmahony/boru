@@ -24,6 +24,18 @@ pub const DEFAULT_BITRATE_BPS: u32 = 4_000_000;
 pub const DEFAULT_KEYFRAME_INTERVAL: u64 = 60;
 pub const DEFAULT_QUEUE_CAPACITY: usize = 2;
 
+/// Monotonic microsecond clock for stage timestamps.
+///
+/// Capture backends that stamp with `SystemTime` (PipeWire, linux.rs) use the
+/// same clock, so `encode_timestamp_us - timestamp_us` measures the
+/// capture→encode stage latency end to end.
+pub fn now_micros() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros() as u64
+}
+
 /// 720p target profile (PDF Task 7.1): 1280x720 @ 30 fps.
 pub const TARGET_720P30_WIDTH: u32 = 1280;
 pub const TARGET_720P30_HEIGHT: u32 = 720;
@@ -135,12 +147,19 @@ pub enum CodecKind { H264 }
 
 /// One encoded access unit (a keyframe or delta frame) passed to a transport.
 ///
-/// Carries the timestamp, sequence number, keyframe flag, and the encoder
-/// generation/resolution it was produced with, so downstream consumers (the
-/// decoder and the protocol layer) never need codec-specific types.
+/// Carries the capture timestamp, the encode-stage timestamp, sequence number,
+/// keyframe flag, and the encoder generation/resolution it was produced with,
+/// so downstream consumers (the decoder and the protocol layer) never need
+/// codec-specific types.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncodedPacket {
+    /// Capture timestamp (from `CapturedFrame.timestamp_us`), same clock as
+    /// `encode_timestamp_us`.
     pub timestamp_us: u64,
+    /// Encode-stage timestamp, stamped when encoding completed
+    /// (PDF Task 7.2: capture and encode stages timestamped so end-to-end
+    /// latency can be measured).
+    pub encode_timestamp_us: u64,
     pub sequence: u64,
     pub keyframe: bool,
     pub config_generation: u64,
@@ -310,7 +329,14 @@ impl VideoEncoder for OpenH264Encoder {
         let stream = self.encoder.encode_at(&yuv, openh264::Timestamp::from_millis(frame.timestamp_us / 1_000)).map_err(fail)?;
         let keyframe = matches!(stream.frame_type(), openh264::encoder::FrameType::IDR | openh264::encoder::FrameType::I);
         if keyframe { self.frames_since_keyframe = 0; } else { self.frames_since_keyframe += 1; }
-        let encoded = EncodedPacket { timestamp_us: frame.timestamp_us, sequence: self.sequence, keyframe,
+        let encoded = EncodedPacket {
+            timestamp_us: frame.timestamp_us,
+            // Encode-stage timestamp (PDF Task 7.2): stamped on the same
+            // SystemTime clock as PipeWire capture timestamps so
+            // `encode_timestamp_us - timestamp_us` is the capture→encode
+            // stage latency, measurable end to end.
+            encode_timestamp_us: now_micros(),
+            sequence: self.sequence, keyframe,
             config_generation: self.generation, width: self.config.width, height: self.config.height, bytes: stream.to_vec() };
         self.sequence += 1;
         Ok(encoded)
@@ -513,7 +539,7 @@ mod tests {
                 self.config = config; self.configured.push(config); Ok(())
             }
             fn encode(&mut self, frame: &CapturedFrame) -> Result<EncodedPacket, ScreenShareError> {
-                Ok(EncodedPacket { timestamp_us: frame.timestamp_us, sequence: 0, keyframe: true,
+                Ok(EncodedPacket { timestamp_us: frame.timestamp_us, encode_timestamp_us: frame.timestamp_us, sequence: 0, keyframe: true,
                     config_generation: 0, width: self.config.width, height: self.config.height,
                     bytes: vec![1] })
             }
@@ -538,6 +564,30 @@ mod tests {
         encoder.shutdown().unwrap();
         encoder.shutdown().unwrap();
         assert_eq!(encoder.shutdowns, 2, "shutdown is idempotent");
+    }
+
+    #[test]
+    fn every_encode_stamps_an_encode_stage_timestamp() {
+        // PDF Task 7.2: capture and encode stages both carry timestamps so
+        // end-to-end latency is measurable. The encoder stamps on the same
+        // SystemTime clock real PipeWire captures use, so the delta between
+        // the two timestamps is the capture→encode stage latency.
+        let cfg = config(32, 24);
+        let mut encoder = OpenH264Encoder::new(cfg).unwrap();
+        let first = encoder.encode(&pattern(32, 24, 1000)).unwrap();
+        assert!(
+            first.encode_timestamp_us > 0,
+            "encode stage must carry a timestamp"
+        );
+        assert!(
+            first.encode_timestamp_us >= first.timestamp_us,
+            "encode happens at or after capture on the same clock"
+        );
+        // Timestamps are monotonic across encodes.
+        let second = encoder.encode(&pattern(32, 24, 33_333)).unwrap();
+        assert!(second.encode_timestamp_us >= first.encode_timestamp_us);
+        // The capture timestamp is preserved unchanged for latency math.
+        assert_eq!(second.timestamp_us, 33_333);
     }
 
     #[test]

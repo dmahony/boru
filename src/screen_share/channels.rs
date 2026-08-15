@@ -348,6 +348,7 @@ mod tests {
     fn frame(sequence: u64, keyframe: bool) -> EncodedFrame {
         EncodedFrame {
             timestamp_us: sequence,
+            encode_timestamp_us: sequence,
             sequence,
             keyframe,
             config_generation: 0,

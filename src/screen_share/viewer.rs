@@ -134,6 +134,7 @@ impl<D: VideoDecoder> ViewerPipeline<D> {
             }
             let frame = EncodedFrame {
                 timestamp_us: header.timestamp_us,
+                encode_timestamp_us: header.encode_timestamp_us,
                 sequence: header.sequence,
                 keyframe: header.flags & MediaHeader::FLAG_KEYFRAME != 0,
                 config_generation: header.config_generation,
@@ -206,7 +207,7 @@ mod tests {
         fn reset(&mut self) -> Result<(), ScreenShareError> { self.resets += 1; Ok(()) }
     }
     fn header(seq: u64, keyframe: bool) -> MediaHeader {
-        MediaHeader { version: 1, session_id: [7; 16], sequence: seq, timestamp_us: seq,
+        MediaHeader { version: 1, session_id: [7; 16], sequence: seq, timestamp_us: seq, encode_timestamp_us: seq,
             codec: 1, flags: if keyframe { MediaHeader::FLAG_KEYFRAME } else { 0 },
             width: 2, height: 2, config_generation: 0, payload_len: 1 }
     }

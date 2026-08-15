@@ -51,15 +51,15 @@ definitive file list:
 | `mod.rs` | 142 | Subsystem boundary, re-exports, `ScreenShareError`, boundary unit tests | Implemented |
 | `capture.rs` | 232 | `PixelFormat`, `CapturedFrame`, `FrameSink`, `ScreenCapture` trait, `TestPatternCapture` | Implemented |
 | `coords.rs` | 232 | Pure desktop↔source↔normalized coordinate mapping, DPI helpers, cursor sprite compositing (BORU-SS-12) | Implemented |
-| `codec.rs` | 257 | `CodecConfig`, `EncodedFrame`, `VideoEncoder`/`VideoDecoder` traits, `OpenH264Encoder`/`Decoder` | Implemented |
+| `codec.rs` | 653 | `CodecConfig`, `QualityProfile`, `EncodedPacket`/`EncodedFrame` (capture + encode timestamps), `VideoEncoder`/`VideoDecoder` traits, `OpenH264Encoder`/`Decoder` | Implemented |
 | `protocol.rs` | 413 | ALPN, `ControlMessage`, `Hello`, `Permission`, `ProtocolError`, `ScreenShareProtocol` (iroh handler) | Implemented |
-| `transport.rs` | 190 | `MediaHeader`, `encode_media`/`decode_media`, `LatestFrameQueue`, `QuicScreenTransport`, `read_unit` | Implemented |
+| `transport.rs` | 214 | `MediaHeader` (capture + encode timestamps), `encode_media`/`decode_media`, `LatestFrameQueue`, `QuicScreenTransport`, `read_unit` | Implemented |
 | `session.rs` | 288 | `ScreenShareSessionId`, `SessionState`, `SessionEvent`, `SessionManager` | Implemented |
-| `host.rs` | 348 | `run_host_session` (dial → Hello → negotiate → capture/encode/send), `HostCommand` | Implemented |
-| `viewer.rs` | 241 | `ViewerPipeline` (bounded receiver decode pipeline), `DecodedFrame` | Implemented |
+| `host.rs` | 608 | `run_host_session` (dial → Hello → negotiate → capture/encode/send), `HostCommand`, pacing queue (BORU-SS-19) | Implemented |
+| `viewer.rs` | 243 | `ViewerPipeline` (bounded receiver decode pipeline), `DecodedFrame` | Implemented |
 | `permissions.rs` | 117 | `Capability`, `ControlToken`, `RequestRateLimiter`, `SessionPermissions` | Implemented |
 | `remote_input.rs` | ~640 | `InputEvent`, `RemoteInput` trait, Linux RemoteDesktop portal / Windows SendInput backends + X11 XTest backend (BORU-SS-17), `device_mask_grants` + `parse_devices_mask` gates (BORU-SS-15) | Implemented |
-| `adaptation.rs` | 89 | `AdaptiveQuality`, `QualityDecision` | **Implemented but UNUSED** (no production caller) |
+| `adaptation.rs` | 264 | `AdaptiveQuality`, `QualityDecision`, `PacingController`/`PacingCounters` (latest-frame queue + drop counters, BORU-SS-19) | `AdaptiveQuality` unused; `PacingController` wired into host.rs |
 | `stats.rs` | 121 | `ScreenShareStats`, `ScreenShareStatsSnapshot` | Implemented (internal to viewer; not surfaced to UI) |
 | `platform/mod.rs` | 103 | Per-OS dispatch, `ActiveCapture`, `create_capture_source` | Implemented |
 | `platform/linux.rs` | 2544 | Portal/PipeWire capture (lifecycle machine + clean teardown) + X11 fallback (`DesktopCaptureBackend` with RandR monitor enumeration, BORU-SS-16) + dlopen PipeWire client | Implemented |
@@ -164,11 +164,17 @@ incl. X11-keysym → virtual-key map `remote_input.rs:198-213`). 4 unit tests.
 
 **adaptation.rs** — `AdaptiveQuality` congestion controller with 4 quality
 levels (bitrate → fps → resolution, `adaptation.rs:24-60`) and hysteresis
-tests. **No production caller**: `grep` for `AdaptiveQuality`/`QualityDecision`
-outside `adaptation.rs`/`mod.rs` returns nothing in `src/`, `examples/`, or
-`tests/`. Exported at `mod.rs:21` but never instantiated by the host or viewer
-loops. This is the PDF Phase 7/adaptive-quality gap — the next chain steps can
-wire it into `host.rs`.
+tests. Also `PacingController`/`PacingCounters` (BORU-SS-19 / PDF Task 7.2):
+a bounded latest-frame queue between capture and encode that drops obsolete
+frames over building latency, caps queue length at `max_queue_depth`, and
+records drop counters (`dropped_queue_full`, `dropped_obsolete`). Wired into
+`host.rs` streaming (BORU-SS-19) with skipped-tick accounting; counters are
+exposed for BORU-SS-28 metrics. `AdaptiveQuality` itself still has **no
+production caller**: `grep` for `AdaptiveQuality`/`QualityDecision` outside
+`adaptation.rs`/`mod.rs` returns nothing in `src/`, `examples/`, or
+`tests/`. Exported at `mod.rs:44` but never instantiated by the host or
+viewer loops. This is the PDF Phase 7/adaptive-quality gap — the next chain
+steps can wire it into `host.rs`.
 
 **stats.rs** — `ScreenShareStatsSnapshot` (`stats.rs:10-25`) and
 `ScreenShareStats` (`stats.rs:28-103`): monotonic counters for
@@ -619,6 +625,7 @@ Notes:
 | Portal cursor modes (ScreenCast `cursor_mode`, BORU-SS-15) | Implemented |
 | Remote-control consent gating (view-only default, explicit grant, lazy backend, BORU-SS-15) | Implemented |
 | Viewer decode pipeline | Implemented |
+| Frame pacing: latest-frame queue, capped lengths, drop counters (PDF Task 7.2) | Implemented |
 | Adaptive quality controller | Implemented but **unwired** (no production caller) |
 | Developer metrics/overlay | Counters implemented, **not surfaced** in UI |
 | UI: start/stop/view/accept/decline/control | Implemented |

@@ -53,6 +53,10 @@ pub struct MediaHeader {
     pub session_id: [u8; 16],
     pub sequence: u64,
     pub timestamp_us: u64,
+    /// Encode-stage timestamp (PDF Task 7.2) so the viewer can measure
+    /// end-to-end latency: capture→encode (encode_timestamp - timestamp) and
+    /// encode→receive (receive time - encode_timestamp).
+    pub encode_timestamp_us: u64,
     pub codec: u8,
     pub flags: u8,
     pub width: u16,
@@ -79,7 +83,7 @@ impl MediaHeader {
 pub fn encode_media(session_id: [u8; 16], frame: &EncodedFrame) -> Result<Vec<u8>, ScreenShareError> {
     if frame.bytes.is_empty() || frame.bytes.len() > MAX_MEDIA_FRAME { return Err(ScreenShareError::new("encoded frame exceeds limit")); }
     if frame.width == 0 || frame.height == 0 || frame.width > u16::MAX as u32 || frame.height > u16::MAX as u32 { return Err(ScreenShareError::new("encoded frame dimensions are invalid")); }
-    let header = MediaHeader { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id, sequence: frame.sequence, timestamp_us: frame.timestamp_us, codec: 1, flags: if frame.keyframe { MediaHeader::FLAG_KEYFRAME } else { 0 }, width: frame.width as u16, height: frame.height as u16, config_generation: frame.config_generation, payload_len: frame.bytes.len() as u32 };
+    let header = MediaHeader { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id, sequence: frame.sequence, timestamp_us: frame.timestamp_us, encode_timestamp_us: frame.encode_timestamp_us, codec: 1, flags: if frame.keyframe { MediaHeader::FLAG_KEYFRAME } else { 0 }, width: frame.width as u16, height: frame.height as u16, config_generation: frame.config_generation, payload_len: frame.bytes.len() as u32 };
     let header_bytes = postcard::to_stdvec(&header).map_err(|e| ScreenShareError::new(e.to_string()))?;
     if header_bytes.len() > MAX_MEDIA_HEADER { return Err(ScreenShareError::new("media header exceeds limit")); }
     let mut out = Vec::with_capacity(1 + 2 + header_bytes.len() + frame.bytes.len());
@@ -189,16 +193,17 @@ mod tests {
     use super::*;
     #[test]
     fn media_round_trip_and_bounds() {
-        let frame = EncodedFrame { timestamp_us: 7, sequence: 9, keyframe: true, config_generation: 2, width: 1280, height: 720, bytes: vec![4, 5, 6] };
+        let frame = EncodedFrame { timestamp_us: 7, encode_timestamp_us: 9, sequence: 9, keyframe: true, config_generation: 2, width: 1280, height: 720, bytes: vec![4, 5, 6] };
         let bytes = encode_media([1; 16], &frame).unwrap();
         let (header, payload) = decode_media(&bytes).unwrap();
         assert_eq!(header.sequence, 9); assert_eq!(payload, frame.bytes);
+        assert_eq!(header.encode_timestamp_us, 9, "encode timestamp must ride the wire");
         assert!(decode_media(&bytes[..bytes.len() - 1]).is_err());
     }
     #[test]
     fn queue_keeps_current_state_bounded() {
         let mut q = LatestFrameQueue::new(8).unwrap();
-        let mut h = MediaHeader { version: 1, session_id: [1;16], sequence: 2, timestamp_us: 0, codec: 1, flags: 0, width: 1, height: 1, config_generation: 0, payload_len: 1 };
+        let mut h = MediaHeader { version: 1, session_id: [1;16], sequence: 2, timestamp_us: 0, encode_timestamp_us: 0, codec: 1, flags: 0, width: 1, height: 1, config_generation: 0, payload_len: 1 };
         q.push(h, vec![2]); h.sequence = 1; q.push(h, vec![1]); assert_eq!(q.take_latest().unwrap().0.sequence, 2);
     }
     #[test]

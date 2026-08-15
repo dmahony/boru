@@ -12,6 +12,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use super::{
+    adaptation::PacingController,
     channels::{
         ControlChannel, ControlOut, MediaChannel, DEFAULT_CONTROL_QUEUE_CAPACITY,
         DEFAULT_MEDIA_QUEUE_CAPACITY,
@@ -257,6 +258,15 @@ async fn run_host_session_inner(
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut media_drops: u64 = 0;
     let mut keyframe_requests: u64 = 0;
+    // Frame pacing (PDF Task 7.2): bounded latest-frame queue between capture
+    // and encode. When the encoder or network falls behind, obsolete frames
+    // are dropped instead of building latency; queue length is capped at the
+    // codec's max_queue_depth and drops are counted for BORU-SS-28 metrics.
+    let Ok(mut pacing) = PacingController::new(config.max_queue_depth) else { return };
+    // Track the frame period so skipped interval ticks (MissedTickBehavior::Skip)
+    // can be counted as dropped obsolete frames when the pipeline fell behind.
+    let frame_period_us = 1_000_000 / capture_fps as u64;
+    let mut last_tick = std::time::Instant::now();
     // Reconnect-aware streaming loop (PDF Task 3.3): on a transient media
     // failure (media/control channel failed, connection dropped, stream
     // read error) the session does NOT end — it transitions to Reconnecting,
@@ -383,8 +393,27 @@ async fn run_host_session_inner(
                 None => return,
             },
             _ = interval.tick() => {
+                // Pacing (PDF Task 7.2): with MissedTickBehavior::Skip, when
+                // the previous encode/send round exceeded one frame period the
+                // interval coalesces the missed ticks into the next one. Those
+                // frames were implicitly dropped rather than queued — the
+                // latest-frame strategy. Count them as obsolete so drop
+                // pressure is visible to metrics.
+                let now = std::time::Instant::now();
+                let elapsed_us = now.saturating_duration_since(last_tick).as_micros() as u64;
+                last_tick = now;
+                if elapsed_us > frame_period_us {
+                    pacing.note_missed_frames(elapsed_us / frame_period_us - 1);
+                }
                 match capture.capture() {
                     Ok(Some(frame)) => {
+                        // The pacing queue is bounded (max_queue_depth): if the
+                        // encoder/network fell behind and the queue is full, the
+                        // oldest stale frame is dropped (counted) and the newest
+                        // survives — never build latency by queueing obsolete
+                        // frames.
+                        pacing.push(frame);
+                        let Some(frame) = pacing.pop_latest() else { return };
                         // Real portal captures negotiate their geometry after
                         // streaming starts; reconfigure the encoder when the
                         // frame size differs from the initial config.
@@ -429,12 +458,18 @@ async fn run_host_session_inner(
                                 // strategy) and the drop is counted.
                                 let sequence = encoded.sequence;
                                 let bytes_len = encoded.bytes.len();
+                                let encode_age_us = encoded.encode_timestamp_us.saturating_sub(encoded.timestamp_us);
                                 let dropped = media.send_frame(encoded).await;
                                 if dropped {
                                     media_drops += 1;
                                 }
                                 if sequence == 0 || sequence % 150 == 0 {
-                                    tracing::info!(sequence, bytes = bytes_len, media_drops, keyframe_requests, "screen-share: host frame queued on media channel");
+                                    let pacing_counters = pacing.counters();
+                                    tracing::info!(sequence, bytes = bytes_len, media_drops, keyframe_requests, encode_age_us,
+                                        pacing_captured = pacing_counters.captured, pacing_encoded = pacing_counters.encoded,
+                                        pacing_dropped_queue_full = pacing_counters.dropped_queue_full,
+                                        pacing_dropped_obsolete = pacing_counters.dropped_obsolete,
+                                        "screen-share: host frame queued on media channel");
                                 }
                                 if media_drops > 0 && media_drops % 150 == 0 {
                                     tracing::warn!(media_drops, "screen-share: host dropping stale media frames (queue full)");
