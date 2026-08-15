@@ -33,6 +33,8 @@ mod layout;
 mod layout_config;
 #[cfg(feature = "dev-ui")]
 mod layout_inspector;
+#[cfg(feature = "dev-ui")]
+mod layout_metadata;
 mod layout_merge;
 mod layout_watcher;
 #[cfg(test)]
