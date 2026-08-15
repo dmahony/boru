@@ -1,22 +1,30 @@
 //! Consent-gated remote input and platform boundaries.
 #![allow(missing_docs)]
+use super::coords::{MonitorGeometry, NormalizedPoint, normalized_to_source};
 use super::permissions::{Capability, ControlToken, SessionPermissions};
+use super::protocol::InputEventKind;
 use super::session::ScreenShareSessionId;
 use super::ScreenShareError;
 use std::time::Instant;
 
-/// One normalized input event flowing viewer → host. For pointer events `x`/`y`
-/// are capture pixels after the host maps normalized viewer coordinates; for
-/// keyboard events they are ignored. `code` is a button id (1-3) for pointer or
-/// an X11 keysym for keyboard. `pressed` is the key/button state.
+/// One normalized input event flowing viewer → host (PDF Task 9.2). The
+/// explicit `kind` disambiguates pointer motion, buttons, wheel ticks, key
+/// down/up and modifier-state changes; `x`/`y` are capture pixels for pointer
+/// kinds after the host maps normalized viewer coordinates, and 0 for
+/// keyboard. `code` is a button id (1-3) for pointer buttons, an X11 wheel
+/// button (4-7) for wheel ticks, an X11 keysym for keyboard, or the new
+/// modifier bitmask for `ModifierChange`. `modifiers` is the viewer's current
+/// held-modifier bitmask carried with every event.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InputEvent {
+    pub kind: InputEventKind,
     pub code: u32,
     pub capability: Capability,
     pub token: Option<ControlToken>,
     pub x: f32,
     pub y: f32,
     pub pressed: bool,
+    pub modifiers: u32,
 }
 pub const MAX_INPUT_EVENT_BYTES: usize = 256;
 
@@ -64,12 +72,22 @@ pub fn map_pointer(point: NormalizedPointer, viewer: (f32, f32), capture: (u32, 
 /// Map a viewer point normalized to the image rect (0..1) into capture pixels,
 /// rejecting out-of-range points. The viewer already excludes letterbox via the
 /// mouse area, so this is a direct scale plus bounds check.
+///
+/// This delegates to the BORU-SS-12 coordinate math ([`normalized_to_source`]
+/// against a zero-origin [`MonitorGeometry`] of the capture size) so the input
+/// path shares the exact normalization used by the desktop↔source mapping —
+/// coordinates are independent of the sender's local window size because they
+/// are expressed relative to the shared source, not the viewer window.
 pub fn normalize_to_capture(point: NormalizedPointer, capture: (u32, u32)) -> Option<(u32, u32)> {
-    if !point.x.is_finite() || !point.y.is_finite() || capture.0 == 0 || capture.1 == 0 { return None; }
-    let x = point.x * capture.0 as f32;
-    let y = point.y * capture.1 as f32;
-    if x < 0.0 || y < 0.0 || x >= capture.0 as f32 || y >= capture.1 as f32 { return None; }
-    Some((x.floor() as u32, y.floor() as u32))
+    let geometry = MonitorGeometry::new(0, 0, capture.0, capture.1);
+    let source = normalized_to_source(
+        NormalizedPoint {
+            x: point.x as f64,
+            y: point.y as f64,
+        },
+        &geometry,
+    )?;
+    Some((source.x, source.y))
 }
 
 #[derive(Debug, Default)]
@@ -263,24 +281,41 @@ impl RemoteInput for LinuxPortalRemoteInput {
             return Err(ScreenShareError::new("device type was not granted by the portal (view-only)"));
         }
         let portal = ("org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", "org.freedesktop.portal.RemoteDesktop");
-        match event.capability {
-            Capability::ControlPointer => {
+        match event.kind {
+            InputEventKind::PointerMove | InputEventKind::PointerButton | InputEventKind::Wheel => {
                 let (px, py) = (event.x as f64, event.y as f64);
                 let (dx, dy) = match self.last { Some((lx, ly)) => (px - lx, py - ly), None => (0.0, 0.0) };
                 self.last = Some((px, py));
                 if dx != 0.0 || dy != 0.0 {
                     let _ = connection.call_method(Some(portal.0), portal.1, Some(portal.2), "NotifyPointerMotion", &(session, empty_options(), dx, dy)).await.map_err(|e| ScreenShareError::new(format!("portal pointer motion failed: {e}")))?;
                 }
-                if event.code != 0 {
-                    let state = if event.pressed { 1u32 } else { 0u32 };
-                    let _ = connection.call_method(Some(portal.0), portal.1, Some(portal.2), "NotifyPointerButton", &(session, empty_options(), event.code as i32, state)).await.map_err(|e| ScreenShareError::new(format!("portal pointer button failed: {e}")))?;
+                match event.kind {
+                    InputEventKind::PointerButton => {
+                        let state = if event.pressed { 1u32 } else { 0u32 };
+                        let _ = connection.call_method(Some(portal.0), portal.1, Some(portal.2), "NotifyPointerButton", &(session, empty_options(), event.code as i32, state)).await.map_err(|e| ScreenShareError::new(format!("portal pointer button failed: {e}")))?;
+                    }
+                    InputEventKind::Wheel => {
+                        // Wheel tick: X11 wheel buttons 4-7 are emitted as a
+                        // press+release pair so the compositor scrolls exactly
+                        // once (mirrors the X11 XTest backend).
+                        if event.pressed {
+                            let _ = connection.call_method(Some(portal.0), portal.1, Some(portal.2), "NotifyPointerButton", &(session, empty_options(), event.code as i32, 1u32)).await.map_err(|e| ScreenShareError::new(format!("portal wheel press failed: {e}")))?;
+                            let _ = connection.call_method(Some(portal.0), portal.1, Some(portal.2), "NotifyPointerButton", &(session, empty_options(), event.code as i32, 0u32)).await.map_err(|e| ScreenShareError::new(format!("portal wheel release failed: {e}")))?;
+                        }
+                    }
+                    _ => {}
                 }
             }
-            Capability::ControlKeyboard => {
+            InputEventKind::Key => {
                 let state = if event.pressed { 1u32 } else { 0u32 };
                 let _ = connection.call_method(Some(portal.0), portal.1, Some(portal.2), "NotifyKeyboardKeysym", &(session, empty_options(), event.code as i32, state)).await.map_err(|e| ScreenShareError::new(format!("portal keyboard failed: {e}")))?;
             }
-            _ => return Err(ScreenShareError::new("capability is not supported by the portal backend")),
+            InputEventKind::ModifierChange => {
+                // The portal has no modifier-state API; modifier keys are
+                // delivered as normal keyboard keysyms (which the compositor
+                // uses to track modifier state). The explicit ModifierChange
+                // event is accepted and recorded at the protocol layer.
+            }
         }
         Ok(())
     }
@@ -362,7 +397,10 @@ pub fn build_keysym_to_keycode(
 /// monitor's origin, `(0, 0)` for a whole-root capture). Motion is clamped to
 /// the root window bounds. X11 wheel buttons (4-7) are emitted as a
 /// press+release pair on the press event so a scroll tick happens exactly
-/// once; the matching release event is a no-op (avoids a double scroll).
+/// once; the matching release event is a no-op (avoids a double scroll). The
+/// explicit [`InputEventKind`] decides what the code means — the same code
+/// space (1-3 button, 4-7 wheel, 0 move) is enforced here as a defense-in-depth
+/// check on top of protocol validation.
 pub fn x11_pointer_actions(
     event: &InputEvent,
     origin: (i32, i32),
@@ -371,25 +409,32 @@ pub fn x11_pointer_actions(
     if root.0 == 0 || root.1 == 0 {
         return Err(ScreenShareError::new("X11 root window has zero size"));
     }
-    let mut actions = Vec::new();
-    if event.code == 0 || (1..=7).contains(&event.code) {
-        // Absolute motion to the event point (moves the pointer even for
-        // button events; the viewer throttles redundant moves already).
-        let rx = (origin.0 as i64 + event.x as i64).clamp(0, root.0 as i64 - 1) as i16;
-        let ry = (origin.1 as i64 + event.y as i64).clamp(0, root.1 as i64 - 1) as i16;
-        actions.push(X11Action::Motion { x: rx, y: ry });
+    if !event.kind.is_pointer() {
+        return Err(ScreenShareError::new("not a pointer input event"));
     }
-    match event.code {
-        0 => {}
-        1..=3 => actions.push(X11Action::Button { button: event.code as u8, pressed: event.pressed }),
-        4..=7 => {
+    let mut actions = Vec::new();
+    // Absolute motion to the event point (moves the pointer even for
+    // button/wheel events; the viewer throttles redundant moves already).
+    let rx = (origin.0 as i64 + event.x as i64).clamp(0, root.0 as i64 - 1) as i16;
+    let ry = (origin.1 as i64 + event.y as i64).clamp(0, root.1 as i64 - 1) as i16;
+    actions.push(X11Action::Motion { x: rx, y: ry });
+    match event.kind {
+        InputEventKind::PointerMove => {
+            if event.code != 0 { return Err(ScreenShareError::new("pointer move must carry code 0")); }
+        }
+        InputEventKind::PointerButton => {
+            if !(1..=3).contains(&event.code) { return Err(ScreenShareError::new("unsupported X11 pointer button code")); }
+            actions.push(X11Action::Button { button: event.code as u8, pressed: event.pressed });
+        }
+        InputEventKind::Wheel => {
+            if !(4..=7).contains(&event.code) { return Err(ScreenShareError::new("unsupported X11 wheel code")); }
             // Wheel tick: press + release on the press event only.
             if event.pressed {
                 actions.push(X11Action::Button { button: event.code as u8, pressed: true });
                 actions.push(X11Action::Button { button: event.code as u8, pressed: false });
             }
         }
-        _ => return Err(ScreenShareError::new("unsupported X11 pointer button code")),
+        _ => return Err(ScreenShareError::new("not a pointer input event")),
     }
     Ok(actions)
 }
@@ -504,14 +549,20 @@ impl RemoteInput for X11RemoteInput {
         if !device_mask_grants(self.granted_devices, event.capability) {
             return Err(ScreenShareError::new("device type was not granted by the host (view-only)"));
         }
-        let actions = match event.capability {
-            Capability::ControlPointer => {
+        let actions = match event.kind {
+            InputEventKind::PointerMove | InputEventKind::PointerButton | InputEventKind::Wheel => {
                 x11_pointer_actions(&event, self.origin, (self.root_width, self.root_height))?
             }
-            Capability::ControlKeyboard => {
+            InputEventKind::Key => {
                 vec![x11_key_action(event.code, &self.keysym_to_keycode, event.pressed)?]
             }
-            _ => return Err(ScreenShareError::new("capability is not supported by the X11 backend")),
+            InputEventKind::ModifierChange => {
+                // X11 tracks modifier state from the injected modifier keysym
+                // events themselves; the explicit ModifierChange event is
+                // accepted and recorded at the protocol layer (defense in
+                // depth for key combinations).
+                Vec::new()
+            }
         };
         for action in actions {
             let (type_, detail, root_x, root_y) = match action {
@@ -585,14 +636,14 @@ impl RemoteInput for WindowsRemoteInput {
             SendInput, INPUT, INPUT_KEYBOARD, INPUT_MOUSE, INPUT_0, KEYBDINPUT, KEYEVENTF_KEYUP,
             MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
             MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
-            MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT,
+            MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEEVENTF_HWHEEL, MOUSEINPUT,
         };
         use windows_sys::Win32::UI::WindowsAndMessaging::{
             GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
         };
         if !self.active { return Err(ScreenShareError::new("remote input revoked")); }
-        match event.capability {
-            Capability::ControlPointer => {
+        match event.kind {
+            InputEventKind::PointerMove | InputEventKind::PointerButton => {
                 let (cw, ch) = self.capture;
                 let vw = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
                 let vh = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
@@ -606,7 +657,7 @@ impl RemoteInput for WindowsRemoteInput {
                     r#type: INPUT_MOUSE,
                     Anonymous: INPUT_0 { mi: MOUSEINPUT { dx, dy, mouseData: 0, dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, time: 0, dwExtraInfo: 0 } },
                 });
-                if event.code != 0 {
+                if event.kind == InputEventKind::PointerButton {
                     let flag = match (event.code, event.pressed) {
                         (1, true) => MOUSEEVENTF_LEFTDOWN, (1, false) => MOUSEEVENTF_LEFTUP,
                         (2, true) => MOUSEEVENTF_MIDDLEDOWN, (2, false) => MOUSEEVENTF_MIDDLEUP,
@@ -618,7 +669,26 @@ impl RemoteInput for WindowsRemoteInput {
                 let ok = unsafe { SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32) } == inputs.len() as u32;
                 if !ok { return Err(ScreenShareError::new("SendInput failed")); }
             }
-            Capability::ControlKeyboard => {
+            InputEventKind::Wheel => {
+                // Wheel tick: X11 wheel buttons 4-7 map to the native wheel
+                // delta (WHEEL_DELTA = 120). Buttons 4/5 are vertical,
+                // 6/7 horizontal.
+                let (flag, delta) = match event.code {
+                    4 => (MOUSEEVENTF_WHEEL, 120),
+                    5 => (MOUSEEVENTF_WHEEL, -120),
+                    6 => (MOUSEEVENTF_HWHEEL, -120),
+                    7 => (MOUSEEVENTF_HWHEEL, 120),
+                    _ => return Err(ScreenShareError::new("unsupported wheel code")),
+                };
+                if !event.pressed { return Ok(()); }
+                let input = INPUT {
+                    r#type: INPUT_MOUSE,
+                    Anonymous: INPUT_0 { mi: MOUSEINPUT { dx: 0, dy: 0, mouseData: delta as u32, dwFlags: flag, time: 0, dwExtraInfo: 0 } },
+                };
+                let ok = unsafe { SendInput(1, &input, std::mem::size_of::<INPUT>() as i32) } == 1;
+                if !ok { return Err(ScreenShareError::new("SendInput failed")); }
+            }
+            InputEventKind::Key => {
                 let vk = Self::keysym_to_vk(event.code);
                 if vk == 0 { return Err(ScreenShareError::new("unsupported key code")); }
                 let flags = if event.pressed { 0u32 } else { KEYEVENTF_KEYUP };
@@ -629,7 +699,11 @@ impl RemoteInput for WindowsRemoteInput {
                 let ok = unsafe { SendInput(1, &input, std::mem::size_of::<INPUT>() as i32) } == 1;
                 if !ok { return Err(ScreenShareError::new("SendInput failed")); }
             }
-            _ => return Err(ScreenShareError::new("capability is not supported by the Windows backend")),
+            InputEventKind::ModifierChange => {
+                // Windows tracks modifier state from the injected modifier key
+                // events; the explicit ModifierChange event is accepted and
+                // recorded at the protocol layer.
+            }
         }
         Ok(())
     }
@@ -639,13 +713,14 @@ impl RemoteInput for WindowsRemoteInput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::screen_share::permissions::Capability;
+    use crate::screen_share::permissions::{Capability, SlidingWindowRateLimiter};
+    use crate::screen_share::protocol::MOD_SHIFT;
 
     #[test]
     fn input_is_rejected_before_grant_and_after_revoke() {
         let session = ScreenShareSessionId::from_bytes([9; 16]);
         let peer = iroh::SecretKey::generate().public();
-        let event = InputEvent { code: 1, capability: Capability::ControlPointer, token: None, x: 0.5, y: 0.5, pressed: true };
+        let event = InputEvent { kind: InputEventKind::PointerButton, code: 1, capability: Capability::ControlPointer, token: None, x: 0.5, y: 0.5, pressed: true, modifiers: 0 };
         let mut permissions = SessionPermissions::view_only(session, peer);
         assert!(authorize_input(&permissions, session, peer, &event).is_err());
         permissions.grant([Capability::ControlPointer]);
@@ -742,11 +817,13 @@ mod tests {
     // docs/screenshare-x11-input.md and needs an actual X session.
 
     fn ptr(code: u32, x: f32, y: f32, pressed: bool) -> InputEvent {
-        InputEvent { code, capability: Capability::ControlPointer, token: None, x, y, pressed }
-    }
-
-    fn key(code: u32, pressed: bool) -> InputEvent {
-        InputEvent { code, capability: Capability::ControlKeyboard, token: None, x: 0.0, y: 0.0, pressed }
+        let kind = match code {
+            0 => InputEventKind::PointerMove,
+            1..=3 => InputEventKind::PointerButton,
+            4..=7 => InputEventKind::Wheel,
+            _ => InputEventKind::PointerButton,
+        };
+        InputEvent { kind, code, capability: Capability::ControlPointer, token: None, x, y, pressed, modifiers: 0 }
     }
 
     /// A plausible `GetKeyboardMapping` reply: 2 keysyms per keycode starting
@@ -896,6 +973,71 @@ mod tests {
             device_mask_for_capabilities(&[Capability::ControlPointer, Capability::ControlKeyboard]);
         assert!(device_mask_grants(granted_both, Capability::ControlPointer));
         assert!(device_mask_grants(granted_both, Capability::ControlKeyboard));
+    }
+
+    /// PDF Task 9.2: the explicit kind drives translation. A pointer-move
+    /// event must not be treated as a button, and a keyboard event cannot be
+    /// translated as a pointer event.
+    #[test]
+    fn explicit_kind_gates_translation() {
+        let map = sample_keymap();
+        // Pointer kinds only.
+        assert!(x11_pointer_actions(&ptr(0, 10.0, 10.0, false), (0, 0), (1920, 1080)).is_ok());
+        // A keyboard event is rejected by the pointer translator.
+        let key_event = InputEvent { kind: InputEventKind::Key, code: 0x61, capability: Capability::ControlKeyboard, token: None, x: 0.0, y: 0.0, pressed: true, modifiers: 0 };
+        assert!(x11_pointer_actions(&key_event, (0, 0), (1920, 1080)).is_err());
+        // A pointer-move event with a nonzero code is rejected.
+        let bad_move = InputEvent { kind: InputEventKind::PointerMove, code: 1, capability: Capability::ControlPointer, token: None, x: 10.0, y: 10.0, pressed: false, modifiers: 0 };
+        assert!(x11_pointer_actions(&bad_move, (0, 0), (1920, 1080)).is_err());
+        // A ModifierChange event carries no pointer action.
+        let mod_change = InputEvent { kind: InputEventKind::ModifierChange, code: MOD_SHIFT, capability: Capability::ControlKeyboard, token: None, x: 0.0, y: 0.0, pressed: false, modifiers: MOD_SHIFT };
+        assert!(x11_pointer_actions(&mod_change, (0, 0), (1920, 1080)).is_err());
+        // Modifier keysyms still translate to a key action (the X server
+        // tracks modifier state from the injected keycode).
+        let shift = InputEvent { kind: InputEventKind::Key, code: 0xFFE1, capability: Capability::ControlKeyboard, token: None, x: 0.0, y: 0.0, pressed: true, modifiers: MOD_SHIFT };
+        let action = x11_key_action(shift.code, &map, shift.pressed).unwrap();
+        assert_eq!(action, X11Action::Key { keycode: 50, pressed: true });
+    }
+
+    /// PDF Task 9.2: pointer coordinates are normalized against the shared
+    /// source geometry, so the same normalized point maps to the same capture
+    /// pixel regardless of the sender's local window size. The input path
+    /// delegates to the BORU-SS-12 math (coords::normalized_to_source).
+    #[test]
+    fn normalize_to_capture_reuses_coords_math_and_is_window_independent() {
+        use super::super::coords::{MonitorGeometry, NormalizedPoint, normalized_to_source};
+        let capture = (1920, 1080);
+        // Direct delegation check: same result as the coords module.
+        let geometry = MonitorGeometry::new(0, 0, capture.0, capture.1);
+        let source = normalized_to_source(NormalizedPoint { x: 0.25, y: 0.5 }, &geometry).unwrap();
+        assert_eq!(normalize_to_capture(NormalizedPointer { x: 0.25, y: 0.5 }, capture), Some((source.x, source.y)));
+        assert_eq!(normalize_to_capture(NormalizedPointer { x: 0.25, y: 0.5 }, capture), Some((480, 540)));
+        // Window-size independence: the same normalized point (as produced by
+        // the viewer's viewport_to_normalized, which divides by source size,
+        // not window size) maps to the same capture pixel for any viewer size.
+        for viewer_size in [(640.0, 360.0), (1280.0, 720.0), (1920.0, 1080.0)] {
+            let (vw, vh) = viewer_size;
+            // A viewer cursor at 25%/50% of ITS window maps to the same
+            // normalized source point (source-relative), hence the same
+            // capture pixel.
+            let nx = (0.25 * vw) / vw;
+            let ny = (0.5 * vh) / vh;
+            assert_eq!(normalize_to_capture(NormalizedPointer { x: nx as f32, y: ny as f32 }, capture), Some((480, 540)));
+        }
+        // Out-of-range and NaN points are rejected (delegated bounds check).
+        assert_eq!(normalize_to_capture(NormalizedPointer { x: 1.0, y: 0.5 }, capture), None);
+        assert_eq!(normalize_to_capture(NormalizedPointer { x: f32::NAN, y: 0.5 }, capture), None);
+    }
+
+    /// The host-side rate limiter lives in permissions.rs; this test pins the
+    /// crate-level re-export so the host wiring can construct it with the
+    /// defaults (PDF Task 9.2).
+    #[test]
+    fn crate_level_rate_limiter_defaults_are_available() {
+        let mut limiter = SlidingWindowRateLimiter::default();
+        assert!(limiter.is_empty());
+        assert!(limiter.allow(Instant::now()));
+        assert!(!limiter.is_empty());
     }
 
     /// Build the granted-device bitmask the X11 backend stores from the

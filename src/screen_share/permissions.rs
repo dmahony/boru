@@ -20,7 +20,7 @@
 
 use super::session::ScreenShareSessionId;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -29,6 +29,14 @@ pub const MAX_CAPABILITIES: usize = 4;
 pub const REQUEST_WINDOW: Duration = Duration::from_secs(10);
 pub const MAX_REQUESTS_PER_WINDOW: u32 = 4;
 pub const CONTROL_GRANT_TTL: Duration = Duration::from_secs(15 * 60);
+
+/// Input rate-limit window (PDF Task 9.2): pathological input streams are
+/// bounded per second. The viewer throttles pointer moves to ~30/s and key
+/// repeats to the OS repeat rate, so a sustained stream above this budget is
+/// by definition a flood (buggy or malicious) and is dropped by the host.
+pub const INPUT_RATE_WINDOW: Duration = Duration::from_secs(1);
+/// Maximum input events accepted per [`INPUT_RATE_WINDOW`] per session.
+pub const MAX_INPUT_EVENTS_PER_WINDOW: u32 = 200;
 
 impl Capability {
     /// True for the remote-control capabilities that require explicit consent
@@ -50,6 +58,48 @@ impl RequestRateLimiter {
         entry.1 += 1;
         true
     }
+}
+
+/// Sliding-window rate limiter for remote-control input streams (PDF Task 9.2).
+///
+/// The host drops input messages that exceed [`MAX_INPUT_EVENTS_PER_WINDOW`]
+/// within [`INPUT_RATE_WINDOW`], so a pathological viewer (buggy or malicious)
+/// cannot flood the platform injection backend. The window slides: an event
+/// older than the window is forgotten the next time [`allow`] is called, so a
+/// burst is bounded but a sustained low-rate stream passes.
+///
+/// [`allow`]: SlidingWindowRateLimiter::allow
+#[derive(Debug)]
+pub struct SlidingWindowRateLimiter {
+    window: Duration,
+    max_events: u32,
+    events: VecDeque<Instant>,
+}
+impl Default for SlidingWindowRateLimiter {
+    fn default() -> Self {
+        Self::new(INPUT_RATE_WINDOW, MAX_INPUT_EVENTS_PER_WINDOW)
+    }
+}
+impl SlidingWindowRateLimiter {
+    pub fn new(window: Duration, max_events: u32) -> Self {
+        Self { window, max_events, events: VecDeque::new() }
+    }
+    /// Record `now` and return whether the event is within budget. Events
+    /// older than the window are evicted first; when the window is full the
+    /// event is rejected without being recorded.
+    pub fn allow(&mut self, now: Instant) -> bool {
+        while self.events.front().is_some_and(|&t| now.saturating_duration_since(t) >= self.window) {
+            self.events.pop_front();
+        }
+        if self.events.len() as u32 >= self.max_events {
+            return false;
+        }
+        self.events.push_back(now);
+        true
+    }
+    /// Number of events currently inside the window (test/diagnostics helper).
+    pub fn len(&self) -> usize { self.events.len() }
+    pub fn is_empty(&self) -> bool { self.events.is_empty() }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -314,5 +364,42 @@ mod tests {
         assert!(!limiter.allow(peer, start + Duration::from_secs(1)));
         // A fresh window allows requests again.
         assert!(limiter.allow(peer, start + REQUEST_WINDOW));
+    }
+
+    /// PDF Task 9.2: pathological input streams are bounded by a sliding
+    /// window. A burst beyond the budget is dropped; events that age out of
+    /// the window free budget again; a sustained stream within the budget
+    /// passes.
+    #[test]
+    fn sliding_window_rate_limiter_bounds_input_streams() {
+        let window = Duration::from_secs(1);
+        let mut limiter = SlidingWindowRateLimiter::new(window, 3);
+        let start = Instant::now();
+        assert!(limiter.allow(start));
+        assert!(limiter.allow(start));
+        assert!(limiter.allow(start));
+        // Window full: the pathological 4th event is dropped.
+        assert!(!limiter.allow(start));
+        assert!(!limiter.allow(start + Duration::from_millis(500)));
+        assert_eq!(limiter.len(), 3);
+        // The window slides: the first events age out and budget frees.
+        assert!(limiter.allow(start + window));
+        assert_eq!(limiter.len(), 1);
+        assert!(limiter.allow(start + window + Duration::from_millis(1)));
+        assert!(limiter.allow(start + window + Duration::from_millis(2)));
+        assert!(!limiter.allow(start + window + Duration::from_millis(3)));
+    }
+
+    /// A long-running but bounded stream passes: the limiter only rejects
+    /// sustained floods, not normal human-rate input.
+    #[test]
+    fn sliding_window_rate_limiter_passes_sustained_low_rate() {
+        let mut limiter = SlidingWindowRateLimiter::default();
+        let start = Instant::now();
+        // 60 events spread over 2 seconds (well under the 200/s budget).
+        for i in 0..60 {
+            let t = start + Duration::from_millis(i * 33);
+            assert!(limiter.allow(t), "event {i} must pass at {t:?}");
+        }
     }
 }

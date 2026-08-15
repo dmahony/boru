@@ -266,6 +266,16 @@ pub(crate) fn view_screen_share_surface<'a>(
                 button: 1,
                 pressed: false,
             })
+            // Wheel is a first-class remote input event (PDF Task 9.2): the
+            // tick is forwarded with the last known pointer position so the
+            // host scrolls where the viewer's cursor is.
+            .on_scroll(move |delta| {
+                let (dx, dy) = match delta {
+                    iced::mouse::ScrollDelta::Lines { x, y } => (x, y),
+                    iced::mouse::ScrollDelta::Pixels { x, y } => (x, y),
+                };
+                AppMessage::ScreenShareWheel { x: lx, y: ly, dx, dy }
+            })
             .into()
     } else {
         // Local pan/zoom. Drag pans; wheel zooms around the cursor.

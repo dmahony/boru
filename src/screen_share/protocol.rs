@@ -46,6 +46,53 @@ pub enum Permission {
     Capabilities(Vec<Capability>),
 }
 
+/// Modifier-mask bits carried by every [`ControlMessage::Input`] and by the
+/// explicit `ModifierChange` event (PDF Task 9.2). The mask is the aggregate
+/// state of the modifier keys the viewer reports holding; a key event with
+/// `modifiers` set is unambiguous at the host (e.g. Ctrl+click vs click).
+pub const MOD_SHIFT: u32 = 1 << 0;
+pub const MOD_CTRL: u32 = 1 << 1;
+pub const MOD_ALT: u32 = 1 << 2;
+pub const MOD_META: u32 = 1 << 3;
+/// All valid modifier bits.
+pub const MAX_MODIFIER_MASK: u32 = MOD_SHIFT | MOD_CTRL | MOD_ALT | MOD_META;
+
+/// Explicit input event kinds (PDF Task 9.2). The wire `Input` message carries
+/// one of these so the receiver never has to guess intent from a bare button
+/// code: pointer motion, button press/release, wheel ticks, key down/up, and
+/// modifier-state changes are all first-class. `x`/`y` are always normalized
+/// viewer coordinates (`0..=1` relative to the shared source image rect) for
+/// pointer kinds, making them independent of the sender's local window size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InputEventKind {
+    /// Pointer moved to `(x, y)`. `code` must be 0.
+    PointerMove,
+    /// Pointer button changed; `code` is a button id (1-3), `pressed` down/up.
+    PointerButton,
+    /// Wheel tick; `code` is the X11 wheel button (4 up, 5 down, 6 left,
+    /// 7 right), `pressed` true for a tick.
+    Wheel,
+    /// Key changed; `code` is an X11 keysym, `pressed` down/up.
+    Key,
+    /// Modifier mask changed; `code` is the new held-modifier bitmask.
+    ModifierChange,
+}
+
+impl InputEventKind {
+    /// The capability a kind requires. Pointer kinds ride `ControlPointer`,
+    /// keyboard/modifier kinds ride `ControlKeyboard`.
+    pub fn capability(self) -> Capability {
+        match self {
+            Self::PointerMove | Self::PointerButton | Self::Wheel => Capability::ControlPointer,
+            Self::Key | Self::ModifierChange => Capability::ControlKeyboard,
+        }
+    }
+    /// True for the pointer kinds that carry normalized coordinates.
+    pub fn is_pointer(self) -> bool {
+        matches!(self, Self::PointerMove | Self::PointerButton | Self::Wheel)
+    }
+}
+
 /// Negotiation capabilities advertised by the host.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hello {
@@ -87,11 +134,13 @@ pub enum ControlMessage {
     /// Host revokes control without ending view-only streaming.
     RevokeControl { version: u16, session_id: ScreenShareSessionId },
     /// Input always carries the current grant nonce; stale input is rejected.
-    /// `code` is a button id (1-3) for pointer events or an X11 keysym for
-    /// keyboard; `x`/`y` are normalized viewer coordinates (0..1 relative to
-    /// the image rect) for pointer events and 0 for keyboard; `pressed` is the
-    /// key/button state.
-    Input { version: u16, session_id: ScreenShareSessionId, capability: Capability, nonce: [u8; 16], code: u32, x: f32, y: f32, pressed: bool },
+    /// `kind` says what kind of event this is (move/button/wheel/key/modifier);
+    /// `code` is a button id (1-3) for pointer buttons, an X11 wheel button
+    /// (4-7) for wheel ticks, or an X11 keysym for keyboard; `x`/`y` are
+    /// normalized viewer coordinates (0..1 relative to the image rect) for
+    /// pointer kinds and 0 for keyboard; `pressed` is the key/button state;
+    /// `modifiers` is the viewer's current held-modifier bitmask.
+    Input { version: u16, session_id: ScreenShareSessionId, nonce: [u8; 16], kind: InputEventKind, code: u32, x: f32, y: f32, pressed: bool, modifiers: u32 },
 }
 
 /// Stable user-facing protocol failure.
@@ -142,10 +191,26 @@ impl ControlMessage {
                 }
                 *version
             }
-            Self::Input { version, capability, code, x, y, .. } => {
-                if !matches!(capability, Capability::ControlPointer | Capability::ControlKeyboard) { return Err(ProtocolError::Malformed("input requires a control capability".into())); }
-                if *code > MAX_INPUT_CODE { return Err(ProtocolError::Malformed("input code out of range".into())); }
-                if !x.is_finite() || !y.is_finite() || !(0.0..=1.0).contains(x) || !(0.0..=1.0).contains(y) { return Err(ProtocolError::Malformed("input coordinates out of range".into())); }
+            Self::Input { version, kind, code, x, y, modifiers, .. } => {
+                // The kind determines the capability; there is no separate
+                // wire capability to mismatch (PDF Task 9.2).
+                if !kind.is_pointer() {
+                    // Keyboard/modifier events carry no pointer coordinates.
+                    if *code > MAX_INPUT_CODE { return Err(ProtocolError::Malformed("input code out of range".into())); }
+                    if *x != 0.0 || *y != 0.0 { return Err(ProtocolError::Malformed("keyboard input coordinates must be zero".into())); }
+                    if matches!(kind, InputEventKind::ModifierChange) && *code & !MAX_MODIFIER_MASK != 0 {
+                        return Err(ProtocolError::Malformed("modifier change code must be a valid modifier mask".into()));
+                    }
+                } else {
+                    if !x.is_finite() || !y.is_finite() || !(0.0..=1.0).contains(x) || !(0.0..=1.0).contains(y) { return Err(ProtocolError::Malformed("input coordinates out of range".into())); }
+                    match kind {
+                        InputEventKind::PointerMove => { if *code != 0 { return Err(ProtocolError::Malformed("pointer move code must be zero".into())); } }
+                        InputEventKind::PointerButton => { if !(1..=3).contains(code) { return Err(ProtocolError::Malformed("invalid pointer button code".into())); } }
+                        InputEventKind::Wheel => { if !(4..=7).contains(code) { return Err(ProtocolError::Malformed("invalid wheel code".into())); } }
+                        _ => {}
+                    }
+                }
+                if *modifiers & !MAX_MODIFIER_MASK != 0 { return Err(ProtocolError::Malformed("invalid modifier mask".into())); }
                 *version
             }
         };
@@ -732,10 +797,45 @@ mod tests {
     fn hello() -> Hello { Hello { version: 1, session_id: ScreenShareSessionId::from_bytes([1; 16]), host_id: iroh::SecretKey::generate().public(), conversation_id: 7, codecs: vec!["h264".into()], width: 1920, height: 1080, frame_rate: 30, permission: Permission::ViewOnly } }
     #[test] fn round_trip() { let message = ControlMessage::Hello(hello()); assert_eq!(decode(&encode(&message).unwrap()).unwrap(), message); }
     #[test] fn input_wire_round_trip_carries_pointer_state() {
-        let message = ControlMessage::Input { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: ScreenShareSessionId::from_bytes([7; 16]), capability: Capability::ControlPointer, nonce: [3; 16], code: 1, x: 0.5, y: 0.25, pressed: true };
+        let message = ControlMessage::Input { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: ScreenShareSessionId::from_bytes([7; 16]), nonce: [3; 16], kind: InputEventKind::PointerButton, code: 1, x: 0.5, y: 0.25, pressed: true, modifiers: MOD_SHIFT };
         assert_eq!(decode(&encode(&message).unwrap()).unwrap(), message);
-        let bad_x = ControlMessage::Input { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: ScreenShareSessionId::from_bytes([7; 16]), capability: Capability::ControlPointer, nonce: [3; 16], code: 1, x: 1.5, y: 0.25, pressed: true };
+        let bad_x = ControlMessage::Input { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: ScreenShareSessionId::from_bytes([7; 16]), nonce: [3; 16], kind: InputEventKind::PointerButton, code: 1, x: 1.5, y: 0.25, pressed: true, modifiers: 0 };
         assert!(encode(&bad_x).is_err());
+        // A wheel tick with a valid direction round-trips too.
+        let wheel = ControlMessage::Input { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: ScreenShareSessionId::from_bytes([7; 16]), nonce: [3; 16], kind: InputEventKind::Wheel, code: 4, x: 0.5, y: 0.25, pressed: true, modifiers: 0 };
+        assert_eq!(decode(&encode(&wheel).unwrap()).unwrap(), wheel);
+    }
+    #[test] fn input_kind_validation_is_explicit() {
+        let sid = ScreenShareSessionId::from_bytes([7; 16]);
+        // Pointer move must carry code 0 and normalized coordinates.
+        let move_ok = ControlMessage::Input { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid, nonce: [0; 16], kind: InputEventKind::PointerMove, code: 0, x: 0.5, y: 0.5, pressed: false, modifiers: 0 };
+        assert!(encode(&move_ok).is_ok());
+        let move_bad_code = ControlMessage::Input { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid, nonce: [0; 16], kind: InputEventKind::PointerMove, code: 1, x: 0.5, y: 0.5, pressed: false, modifiers: 0 };
+        assert!(encode(&move_bad_code).is_err());
+        // Pointer buttons are 1-3.
+        let button_bad = ControlMessage::Input { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid, nonce: [0; 16], kind: InputEventKind::PointerButton, code: 9, x: 0.5, y: 0.5, pressed: false, modifiers: 0 };
+        assert!(encode(&button_bad).is_err());
+        // Wheel is 4-7.
+        let wheel_bad = ControlMessage::Input { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid, nonce: [0; 16], kind: InputEventKind::Wheel, code: 1, x: 0.5, y: 0.5, pressed: false, modifiers: 0 };
+        assert!(encode(&wheel_bad).is_err());
+        // Keyboard events carry no coordinates.
+        let key_with_coords = ControlMessage::Input { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid, nonce: [0; 16], kind: InputEventKind::Key, code: 0x61, x: 0.5, y: 0.0, pressed: false, modifiers: 0 };
+        assert!(encode(&key_with_coords).is_err());
+        // Modifier mask is bounded to the known bits.
+        let bad_mods = ControlMessage::Input { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid, nonce: [0; 16], kind: InputEventKind::Key, code: 0x61, x: 0.0, y: 0.0, pressed: false, modifiers: 1 << 20 };
+        assert!(encode(&bad_mods).is_err());
+        // A modifier change with a valid mask round-trips.
+        let mod_change = ControlMessage::Input { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid, nonce: [0; 16], kind: InputEventKind::ModifierChange, code: MOD_SHIFT | MOD_CTRL, x: 0.0, y: 0.0, pressed: false, modifiers: MOD_SHIFT | MOD_CTRL };
+        assert_eq!(decode(&encode(&mod_change).unwrap()).unwrap(), mod_change);
+    }
+    #[test] fn input_kind_derives_control_capability() {
+        assert_eq!(InputEventKind::PointerMove.capability(), Capability::ControlPointer);
+        assert_eq!(InputEventKind::PointerButton.capability(), Capability::ControlPointer);
+        assert_eq!(InputEventKind::Wheel.capability(), Capability::ControlPointer);
+        assert_eq!(InputEventKind::Key.capability(), Capability::ControlKeyboard);
+        assert_eq!(InputEventKind::ModifierChange.capability(), Capability::ControlKeyboard);
+        assert!(InputEventKind::PointerMove.is_pointer());
+        assert!(!InputEventKind::Key.is_pointer());
     }
     #[test] fn malformed_and_unsupported_are_rejected() { assert!(decode(&[0xff]).is_err()); let mut message = hello(); message.version = 2; assert!(matches!(encode(&ControlMessage::Hello(message)), Err(ProtocolError::UnsupportedVersion { .. }))); }
     #[test] fn accept_is_explicit() { let mut manager = SessionManager::default(); let id = ScreenShareSessionId::from_bytes([2; 16]); let host = hello().host_id; let viewer = iroh::SecretKey::generate().public(); manager.start_invitation(id, host, viewer, 7); assert_eq!(manager.state(id), Some(SessionState::AwaitingAcceptance)); }

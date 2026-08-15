@@ -19,9 +19,9 @@ use super::{
     },
     capture::CaptureConfig,
     codec::{CodecConfig, OpenH264Encoder, VideoEncoder},
-    permissions::Capability,
+    permissions::{Capability, SlidingWindowRateLimiter},
     platform::{capture_dimensions, create_capture_source, CAPTURE_FPS},
-    protocol::{self, ControlMessage, ScreenShareMessage, SCREEN_SHARE_PROTOCOL_VERSION},
+    protocol::{self, ControlMessage, InputEventKind, ScreenShareMessage, SCREEN_SHARE_PROTOCOL_VERSION},
     reconnect::{retry_reconnect, ReconnectPolicy},
     remote_input::{self, create_platform_backend, InputEvent, NormalizedPointer, RemoteInput},
     session::{ScreenShareSessionId, SessionEvent, SessionManager, SessionState},
@@ -255,6 +255,12 @@ async fn run_host_session_inner(
     // is denied or the portal is absent — `create_platform_backend` fails
     // closed to `UnavailableInputBackend` and input simply does nothing.
     let mut backend: Option<Box<dyn RemoteInput>> = None;
+    // Pathological input streams are rate-limited (PDF Task 9.2): a sliding
+    // window bounds input events per second so a buggy or malicious viewer
+    // cannot flood the platform injection backend. Drops are counted for
+    // diagnostics; the share itself stays live.
+    let mut input_limiter = SlidingWindowRateLimiter::default();
+    let mut input_rate_drops: u64 = 0;
     let mut interval = tokio::time::interval(Duration::from_micros(1_000_000 / capture_fps as u64));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut media_drops: u64 = 0;
@@ -323,26 +329,34 @@ async fn run_host_session_inner(
             r = connection.accept_bi() => {
                 match r {
                     Ok((mut send, recv)) => match read_unit(recv).await {
-                        Ok(ReadUnit::Control(ControlMessage::Input { version: _, session_id: sid, capability, nonce, code, x, y, pressed })) => {
+                        Ok(ReadUnit::Control(ControlMessage::Input { version: _, session_id: sid, nonce, kind, code, x, y, pressed, modifiers })) => {
                             // Every input must carry the current grant nonce.
+                            let capability = kind.capability();
                             let authorized = manager.permissions(sid).is_some_and(|permissions| {
                                 remote_input::authorize_nonce(permissions, sid, peer, capability, nonce).is_ok()
                             });
                             if !authorized { continue 'streaming; }
+                            // Rate-limit pathological input streams (PDF Task
+                            // 9.2): a buggy or malicious viewer flooding the
+                            // control channel must not pin the platform input
+                            // backend. Drops are silent; the share stays live.
+                            if !input_limiter.allow(std::time::Instant::now()) {
+                                input_rate_drops += 1;
+                                if input_rate_drops == 1 || input_rate_drops % 500 == 0 {
+                                    tracing::warn!(input_rate_drops, "screen-share: host dropped pathological input stream (rate limited)");
+                                }
+                                continue 'streaming;
+                            }
                             // The backend exists iff control was granted; when
                             // it was denied/unavailable (None) input is dropped
                             // and the share continues view-only.
                             let Some(backend) = backend.as_mut() else { continue 'streaming; };
-                            match capability {
-                                Capability::ControlPointer => {
-                                    if let Some((px, py)) = remote_input::normalize_to_capture(NormalizedPointer { x, y }, (capture_width, capture_height)) {
-                                        let _ = backend.apply(InputEvent { code, capability, token: None, x: px as f32, y: py as f32, pressed }).await;
-                                    }
+                            if kind.is_pointer() {
+                                if let Some((px, py)) = remote_input::normalize_to_capture(NormalizedPointer { x, y }, (capture_width, capture_height)) {
+                                    let _ = backend.apply(InputEvent { kind, code, capability, token: None, x: px as f32, y: py as f32, pressed, modifiers }).await;
                                 }
-                                Capability::ControlKeyboard => {
-                                    let _ = backend.apply(InputEvent { code, capability, token: None, x: 0.0, y: 0.0, pressed }).await;
-                                }
-                                _ => {}
+                            } else {
+                                let _ = backend.apply(InputEvent { kind, code, capability, token: None, x: 0.0, y: 0.0, pressed, modifiers }).await;
                             }
                         }
                         Ok(ReadUnit::Control(message)) => {

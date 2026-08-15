@@ -58,13 +58,17 @@ pub use platform::{
     classify_display_server, detect_display_server, DisplayServer, X11Capture, X11Monitor,
 };
 pub use protocol::{
-    ControlMessage, Hello, InboundMedia, Permission, ScreenShareMessage, ScreenShareProtocol,
-    SCREEN_SHARE_ALPN, SCREEN_SHARE_PROTOCOL_VERSION, MAX_INPUT_CODE, MAX_SCREEN_SHARE_MESSAGE,
+    ControlMessage, Hello, InboundMedia, InputEventKind, Permission, ScreenShareMessage,
+    ScreenShareProtocol, SCREEN_SHARE_ALPN, SCREEN_SHARE_PROTOCOL_VERSION, MAX_INPUT_CODE,
+    MAX_MODIFIER_MASK, MAX_SCREEN_SHARE_MESSAGE, MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT,
 };
 pub use reconnect::{
     keyframe_request, retry_reconnect, ReconnectOutcome, ReconnectPolicy,
 };
-pub use permissions::{Capability, ControlToken, RequestRateLimiter, SessionPermissions};
+pub use permissions::{
+    Capability, ControlToken, RequestRateLimiter, SessionPermissions, SlidingWindowRateLimiter,
+    INPUT_RATE_WINDOW, MAX_INPUT_EVENTS_PER_WINDOW,
+};
 pub use remote_input::{
     authorize_input, authorize_nonce, build_keysym_to_keycode, device_mask_grants, map_pointer,
     normalize_to_capture, parse_devices_mask, x11_key_action, x11_pointer_actions, InputEvent,

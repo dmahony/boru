@@ -94,8 +94,9 @@ use boru_core::call::{CallId, CallKind};
 #[cfg(feature = "screen-sharing")]
 use boru_core::screen_share::{
     run_host_session, Capability, CapturedFrame, ControlMessage, HostCommand, InboundMedia,
-    OpenH264Decoder, PixelFormat, ScreenShareMessage, ScreenShareProtocol, ScreenShareSessionId,
-    SessionEvent, ViewerPipeline, DEFAULT_QUEUE_CAPACITY, SCREEN_SHARE_PROTOCOL_VERSION,
+    InputEventKind, OpenH264Decoder, PixelFormat, ScreenShareMessage, ScreenShareProtocol,
+    ScreenShareSessionId, SessionEvent, ViewerPipeline, DEFAULT_QUEUE_CAPACITY, MOD_ALT, MOD_CTRL,
+    MOD_META, MOD_SHIFT, SCREEN_SHARE_PROTOCOL_VERSION,
 };
 #[cfg(feature = "video-calls")]
 use boru_core::call::video::VideoFrame;
@@ -4275,6 +4276,10 @@ pub struct IcedChat {
     /// Last pointer position sent, to skip near-identical moves.
     screen_share_last_pointer_pos: Option<(f32, f32)>,
     #[cfg(feature = "screen-sharing")]
+    /// Current held-modifier bitmask (PDF Task 9.2), attached to every input
+    /// message and updated by modifier keysyms from the keyboard subscription.
+    screen_share_modifiers: u32,
+    #[cfg(feature = "screen-sharing")]
     /// Viewer surface presentation mode (fit / actual / explicit zoom).
     screen_share_view_mode: ScreenShareViewMode,
     #[cfg(feature = "screen-sharing")]
@@ -5653,6 +5658,9 @@ pub enum AppMessage {
     #[cfg(feature = "screen-sharing")]
     /// Viewer key press/release while control is active (code = X11 keysym).
     ScreenShareKeyEvent { code: u32, pressed: bool },
+    /// Viewer wheel tick while control is active (normalized x/y + pixel
+    /// deltas; the update maps the dominant axis to an X11 wheel button).
+    ScreenShareWheel { x: f32, y: f32, dx: f32, dy: f32 },
     #[cfg(feature = "screen-sharing")]
     /// Set the scalable surface presentation mode and pan center.
     ScreenShareSetView {
@@ -8250,6 +8258,8 @@ impl IcedChat {
             #[cfg(feature = "screen-sharing")]
             screen_share_last_pointer_pos: None,
             #[cfg(feature = "screen-sharing")]
+            screen_share_modifiers: 0,
+            #[cfg(feature = "screen-sharing")]
             screen_share_view_mode: ScreenShareViewMode::default(),
             #[cfg(feature = "screen-sharing")]
             screen_share_pan: None,
@@ -10136,6 +10146,8 @@ impl IcedChat {
             AppMessage::ScreenSharePointerButton { .. } => "ScreenSharePointerButton",
             #[cfg(feature = "screen-sharing")]
             AppMessage::ScreenShareKeyEvent { .. } => "ScreenShareKeyEvent",
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareWheel { .. } => "ScreenShareWheel",
             #[cfg(feature = "screen-sharing")]
             AppMessage::ScreenShareSetView { .. } => "ScreenShareSetView",
             #[cfg(feature = "screen-sharing")]
@@ -14563,15 +14575,42 @@ impl IcedChat {
             AppMessage::ScreenShareFullQuality => self.send_screen_share_quality(100, 100),
             #[cfg(feature = "screen-sharing")]
             AppMessage::ScreenSharePointerMove { x, y } => {
-                self.send_screen_share_input(Capability::ControlPointer, 0, x, y, false)
+                let modifiers = self.screen_share_modifiers;
+                self.send_screen_share_input(InputEventKind::PointerMove, 0, x, y, false, modifiers)
             }
             #[cfg(feature = "screen-sharing")]
             AppMessage::ScreenSharePointerButton { x, y, button, pressed } => {
-                self.send_screen_share_input(Capability::ControlPointer, button, x, y, pressed)
+                let modifiers = self.screen_share_modifiers;
+                self.send_screen_share_input(InputEventKind::PointerButton, button, x, y, pressed, modifiers)
+            }
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareWheel { x, y, dx, dy } => {
+                // Explicit wheel event (PDF Task 9.2): the direction maps to an
+                // X11 wheel button (4 up, 5 down, 6 left, 7 right) which every
+                // platform backend understands.
+                let direction = if dy.abs() >= dx.abs() {
+                    if dy > 0.0 { 4 } else if dy < 0.0 { 5 } else { return iced::Task::none(); }
+                } else if dx > 0.0 { 7 } else if dx < 0.0 { 6 } else { return iced::Task::none(); };
+                let modifiers = self.screen_share_modifiers;
+                self.send_screen_share_input(InputEventKind::Wheel, direction, x, y, true, modifiers)
             }
             #[cfg(feature = "screen-sharing")]
             AppMessage::ScreenShareKeyEvent { code, pressed } => {
-                self.send_screen_share_input(Capability::ControlKeyboard, code, 0.0, 0.0, pressed)
+                // Track held modifiers explicitly (PDF Task 9.2): modifier
+                // keysyms update the mask, every event carries the current
+                // mask, and a dedicated ModifierChange event is emitted so the
+                // host sees the state change as a first-class message even
+                // without the raw key event.
+                if let Some(bit) = keysym_modifier_bit(code) {
+                    if pressed { self.screen_share_modifiers |= bit; } else { self.screen_share_modifiers &= !bit; }
+                    let modifiers = self.screen_share_modifiers;
+                    return iced::Task::batch(vec![
+                        self.send_screen_share_input(InputEventKind::Key, code, 0.0, 0.0, pressed, modifiers),
+                        self.send_screen_share_input(InputEventKind::ModifierChange, modifiers, 0.0, 0.0, false, modifiers),
+                    ]);
+                }
+                let modifiers = self.screen_share_modifiers;
+                self.send_screen_share_input(InputEventKind::Key, code, 0.0, 0.0, pressed, modifiers)
             }
             #[cfg(feature = "screen-sharing")]
             AppMessage::ScreenShareSetView { mode, pan } => {
@@ -20418,6 +20457,19 @@ pub fn screen_share_keyboard_subscription() -> iced::Subscription<AppMessage> {
 }
 
 #[cfg(feature = "screen-sharing")]
+/// Map a keysym to its held-modifier bit (PDF Task 9.2). Shift/Control/Alt/
+/// Meta both sides map to the same bit; other keysyms return None.
+fn keysym_modifier_bit(code: u32) -> Option<u32> {
+    match code {
+        0xFFE1 | 0xFFE2 => Some(MOD_SHIFT), // Shift_L / Shift_R
+        0xFFE3 | 0xFFE4 => Some(MOD_CTRL),  // Control_L / Control_R
+        0xFFE9 | 0xFFEA => Some(MOD_ALT),   // Alt_L / Alt_R
+        0xFFE7 | 0xFFE8 | 0xFFEB | 0xFFEC => Some(MOD_META), // Meta / Super
+        _ => None,
+    }
+}
+
+#[cfg(feature = "screen-sharing")]
 /// Map an iced `keyboard::Key` to a portable X11 keysym (the wire input code;
 /// the Linux portal passes it straight to NotifyKeyboardKeysym, Windows maps
 /// it to a virtual-key code). Unsupported keys map to None and are dropped.
@@ -21086,19 +21138,22 @@ impl IcedChat {
     #[cfg(feature = "screen-sharing")]
     /// Send one authorized input event viewer → host. Pointer moves are
     /// throttled (~30/s) and near-identical points skipped; every event echoes
-    /// the host's grant nonce so stale input is rejected.
+    /// the host's grant nonce so stale input is rejected. The explicit `kind`
+    /// (PDF Task 9.2) says what the event is (move/button/wheel/key/modifier),
+    /// and `modifiers` carries the viewer's current held-modifier bitmask.
     fn send_screen_share_input(
         &mut self,
-        capability: Capability,
+        kind: InputEventKind,
         code: u32,
         x: f32,
         y: f32,
         pressed: bool,
+        modifiers: u32,
     ) -> iced::Task<AppMessage> {
         if !self.screen_share_viewing || !self.screen_share_control_active {
             return iced::Task::none();
         }
-        if capability == Capability::ControlPointer && !pressed {
+        if kind == InputEventKind::PointerMove && !pressed {
             let now = Instant::now();
             let throttled = self
                 .screen_share_last_pointer_sent
@@ -21133,12 +21188,13 @@ impl IcedChat {
                             ControlMessage::Input {
                                 version: SCREEN_SHARE_PROTOCOL_VERSION,
                                 session_id,
-                                capability,
                                 nonce,
+                                kind,
                                 code,
                                 x,
                                 y,
                                 pressed,
+                                modifiers,
                             },
                         )
                         .await
@@ -21378,6 +21434,7 @@ impl IcedChat {
         self.screen_share_control_active = false;
         self.screen_share_last_pointer_sent = None;
         self.screen_share_last_pointer_pos = None;
+        self.screen_share_modifiers = 0;
         self.screen_share_view_mode = ScreenShareViewMode::default();
         self.screen_share_pan = None;
         self.screen_share_drag = None;
