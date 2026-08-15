@@ -106,16 +106,27 @@ Manual verification checklist (requires a real Wayland desktop):
 
 **Result: PARTIAL.** The X11 fallback backend (`X11Capture` in
 `src/screen_share/platform/linux.rs`) has broad unit coverage, and — new in
-this task — two live tests were executed for real under Xvfb on DEBSRV (single
-monitor enumeration + capture, whole-root capture). Dual-monitor layouts,
-compositor differences, and physical monitor resizing still need a real X
-session.
+this task — live tests were executed for real under Xvfb on DEBSRV (single
+monitor enumeration + capture, whole-root capture, and — BORU-SS-36 — window
+enumeration + capture). Dual-monitor layouts, compositor differences, and
+physical monitor resizing still need a real X session.
 
 Automated coverage (unit, all pass):
 
 - Monitor source geometry / negative origins: `x11_monitor_source_advertises_geometry`,
   `x11_monitor_source_handles_negative_origin`, `x11_monitor_id_is_stable_and_distinct`,
   `clip_to_root_*` (4 tests), `coords.rs` mixed-DPI/negative-origin tests
+- Window sources (BORU-SS-36): `x11_window_source_advertises_kind_geometry_and_title`,
+  `x11_window_id_is_stable_and_namespaced_away_from_monitors`,
+  `x11_window_source_handles_negative_origin`, `x11_window_source_preserves_minimized_flag`,
+  `picker_label_distinguishes_source_kinds` (capture.rs), host
+  `window_source_fallback_keeps_then_switches` (minimized window still
+  enumerated → pause keeps it; closed window gone → fall back to a monitor),
+  plus the Windows-side id mapping `window_source_id_is_stable_and_namespaced_away_from_monitors`
+  / `window_source_advertises_kind_geometry_and_title` (windows_common.rs)
+- Portal source types (BORU-SS-36): `portal_source_types_bits_follow_spec`,
+  `select_sources_options_include_cursor_mode_when_negotiated` (types
+  Monitor|Window by default)
 - Capture fallback: `create_capture_source_falls_back_to_test_pattern`
 - Remote input: `x11_pointer_move_maps_capture_pixels_to_root`,
   `x11_pointer_move_applies_monitor_origin`, `x11_pointer_move_clamps_to_root_bounds`,
@@ -133,6 +144,12 @@ Live tests executed on DEBSRV under Xvfb (real X server, `--ignored`):
 - `x11_live_enumerates_and_captures_selected_monitor` — real RandR monitor
   enumeration + GetImage capture of the primary monitor
 - `x11_live_screen_capture_whole_root` — whole-root GetImage capture
+- `x11_live_enumerates_and_captures_a_window` (BORU-SS-36) — creates a real
+  mapped top-level X window, verifies `list_sources` advertises it as a
+  `CaptureSourceKind::Window` with a `[Window]` picker label, then captures
+  frames of the window's size
+- `x11_live_damage_tracking_skips_static_screen` — frame-level damage skip
+  end to end
 
 Manual verification checklist (requires a real X session):
 

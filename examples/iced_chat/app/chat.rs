@@ -428,9 +428,9 @@ impl IcedChat {
                         .map(|source| {
                             let is_selected = selected == Some(source.id);
                             let label = if is_selected {
-                                format!("✓ {}", source.title)
+                                format!("✓ {}", source.picker_label())
                             } else {
-                                source.title.clone()
+                                source.picker_label()
                             };
                             button(text(label).size(crate::fonts::TypeRole::SupportingText.size_px()))
                                 .on_press(AppMessage::ScreenShareSelectSource(source.id))

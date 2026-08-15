@@ -192,8 +192,10 @@ supported:
   to `Hidden` when Embedded is not advertised. `Metadata` is deliberately not
   requested: it requires cursor-sprite handling on the viewer side, which is
   PDF Phase 14 future work.
-- `select_sources_options(cursor_mode)` — pure builder for the options vardict
-  (unit-tested without a session bus).
+- `select_sources_options(cursor_mode, source_types)` — pure builder for the
+  options vardict (unit-tested without a session bus). `source_types` is the
+  `types` bitmask (1 = Monitor, 2 = Window, 4 = Virtual); Boru's default is
+  Monitor|Window so the portal picker can offer window sharing (BORU-SS-36).
 - `query_available_cursor_modes` — `org.freedesktop.DBus.Properties.Get` on
   the ScreenCast `AvailableCursorModes` property, mirroring the existing
   `query_portal_version`.

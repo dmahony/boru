@@ -1412,4 +1412,29 @@ mod tests {
         assert!(select_fallback_source(&[], Some(CaptureSourceId(2))).is_none());
         assert!(select_fallback_source(&[], None).is_none());
     }
+
+    /// BORU-SS-36 window handling: a minimized window is still enumerated, so
+    /// recovery keeps it selected (the host pauses, then resumes when the
+    /// window is restored); a CLOSED window disappears from the enumeration,
+    /// so recovery falls back to the first remaining source (a monitor).
+    #[test]
+    fn window_source_fallback_keeps_then_switches() {
+        let window = CaptureSource {
+            id: CaptureSourceId(0x1234_5678),
+            kind: CaptureSourceKind::Window,
+            title: "Terminal: 800x600".to_string(),
+            width: 800,
+            height: 600,
+            geometry: None,
+        };
+        let monitor = source(1, "DP-1", 1920, 1080);
+        // Minimized but still enumerated → keep the window.
+        let fallback =
+            select_fallback_source(&[monitor.clone(), window.clone()], Some(window.id))
+                .expect("fallback");
+        assert_eq!(fallback.id, window.id);
+        // Closed → gone from enumeration → fall back to the monitor.
+        let fallback = select_fallback_source(&[monitor.clone()], Some(window.id)).expect("fallback");
+        assert_eq!(fallback.id, monitor.id);
+    }
 }

@@ -213,6 +213,20 @@ pub struct CaptureSource {
     pub geometry: Option<MonitorGeometry>,
 }
 
+impl CaptureSource {
+    /// Human-readable picker label with a distinguishable kind marker
+    /// (BORU-SS-36: window sources appear alongside monitors in the
+    /// `SourcesEnumerated` picker, so they need a marker beyond the raw
+    /// title).
+    pub fn picker_label(&self) -> String {
+        match self.kind {
+            CaptureSourceKind::Window => format!("[Window] {}", self.title),
+            CaptureSourceKind::Monitor => format!("[Monitor] {}", self.title),
+            CaptureSourceKind::Desktop => self.title.clone(),
+        }
+    }
+}
+
 /// Configuration for a capture session.
 ///
 /// Carries both capture-side settings (`target_fps`,
@@ -626,5 +640,30 @@ mod tests {
         };
         let err = backend.start(CaptureSourceId(0), config).unwrap_err();
         assert!(err.to_string().contains("target fps"));
+    }
+
+    // ── Picker labels (BORU-SS-36) ──────────────────────────────────────────
+
+    fn picker_source(kind: CaptureSourceKind, title: &str) -> CaptureSource {
+        CaptureSource {
+            id: CaptureSourceId(1),
+            kind,
+            title: title.to_string(),
+            width: 100,
+            height: 100,
+            geometry: None,
+        }
+    }
+
+    /// Window sources get a distinguishable `[Window]` marker in the picker;
+    /// monitors get `[Monitor]`; the synthetic desktop keeps its plain title.
+    #[test]
+    fn picker_label_distinguishes_source_kinds() {
+        let window = picker_source(CaptureSourceKind::Window, "Terminal: 800x600");
+        assert_eq!(window.picker_label(), "[Window] Terminal: 800x600");
+        let monitor = picker_source(CaptureSourceKind::Monitor, "DP-1: 1920x1080");
+        assert_eq!(monitor.picker_label(), "[Monitor] DP-1: 1920x1080");
+        let desktop = picker_source(CaptureSourceKind::Desktop, "Portal output: 640x360");
+        assert_eq!(desktop.picker_label(), "Portal output: 640x360");
     }
 }

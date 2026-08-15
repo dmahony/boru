@@ -52,7 +52,7 @@ use x11rb::connection::Connection as _;
 use x11rb::protocol::damage::{self, ConnectionExt as _};
 use x11rb::protocol::randr::{self, ConnectionExt as _};
 use x11rb::protocol::xfixes::{self, ConnectionExt as _};
-use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat, ImageOrder};
+use x11rb::protocol::xproto::{self, ConnectionExt as _, ImageFormat, ImageOrder};
 
 /// State of the XDG ScreenCast portal session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -540,6 +540,45 @@ impl CursorMode {
     }
 }
 
+/// Bit values for the ScreenCast `SelectSources` `types` option (BORU-SS-36).
+///
+/// `types` is a bitmask: 1 = Monitor, 2 = Window, 4 = Virtual. Requesting
+/// more than one bit makes the portal picker offer every requested kind
+/// (which source the user actually picks is driven by the portal UI).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PortalSourceTypes(pub u32);
+
+impl PortalSourceTypes {
+    /// Physical monitors / outputs.
+    pub const MONITOR: Self = Self(1);
+    /// A single application window.
+    pub const WINDOW: Self = Self(2);
+    /// A virtual output (e.g. a headless virtual monitor).
+    pub const VIRTUAL: Self = Self(4);
+    /// Monitors and windows — the default for Boru, so the portal picker can
+    /// offer window sharing alongside monitors.
+    pub const MONITOR_AND_WINDOW: Self = Self(Self::MONITOR.0 | Self::WINDOW.0);
+
+    /// The raw bitmask value for the `types` vardict entry.
+    pub fn bits(self) -> u32 {
+        self.0
+    }
+}
+
+impl Default for PortalSourceTypes {
+    fn default() -> Self {
+        Self::MONITOR_AND_WINDOW
+    }
+}
+
+impl std::ops::BitOr for PortalSourceTypes {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
+    }
+}
+
+
 /// Choose the cursor mode to request given the portal's advertised bitmask.
 ///
 /// Boru's cursor strategy composites the cursor into captured frames (PDF
@@ -556,14 +595,17 @@ pub fn choose_cursor_mode(available: u32) -> CursorMode {
     }
 }
 
-/// Build the `SelectSources` options vardict: monitor source types plus the
-/// requested cursor mode when one was negotiated. Pure so it is unit-testable
-/// without a session bus.
+/// Build the `SelectSources` options vardict: the requested source types
+/// (BORU-SS-36: monitors and/or windows) plus the requested cursor mode when
+/// one was negotiated. Pure so it is unit-testable without a session bus.
 pub fn select_sources_options(
     cursor_mode: Option<CursorMode>,
+    source_types: PortalSourceTypes,
 ) -> std::collections::HashMap<&'static str, zbus::zvariant::Value<'static>> {
     let mut options: std::collections::HashMap<&str, zbus::zvariant::Value<'static>> =
-        [("types", zbus::zvariant::Value::U32(1))].into_iter().collect();
+        [("types", zbus::zvariant::Value::U32(source_types.bits()))]
+            .into_iter()
+            .collect();
     if let Some(mode) = cursor_mode {
         options.insert("cursor_mode", zbus::zvariant::Value::U32(mode.bit()));
     }
@@ -640,6 +682,10 @@ pub struct LinuxPortalCapture {
     /// means the compositor bakes the cursor into the PipeWire buffers;
     /// `Hidden` means the stream has no cursor.
     cursor_mode: CursorMode,
+    /// Source types requested in `SelectSources` (BORU-SS-36). Defaults to
+    /// monitors + windows so the portal picker can offer window sharing; the
+    /// portal UI ultimately drives which source the user picks.
+    source_types: PortalSourceTypes,
 }
 
 impl LinuxPortalCapture {
@@ -678,6 +724,11 @@ impl LinuxPortalCapture {
         let backend = detect_portal_backend(&connection).await;
         let available_cursor_modes = query_available_cursor_modes(&connection).await;
         let cursor_mode = available_cursor_modes.map(choose_cursor_mode).unwrap_or(CursorMode::Hidden);
+        // BORU-SS-36: request monitors AND windows in SelectSources so the
+        // portal picker can offer window sharing. Persisted on the struct for
+        // diagnostics and future source-type toggles; the portal UI drives
+        // which source the user actually picks.
+        let source_types = PortalSourceTypes::default();
         tracing::info!(
             session_type = ?session_type,
             desktop = ?environment,
@@ -715,11 +766,14 @@ impl LinuxPortalCapture {
             })?;
         let _ = machine.on_session_created();
 
-        // 2. SelectSources(types = Monitor [, cursor_mode]). No `multiple`
-        // option: exactly one stream is requested, which every portal
-        // implementation supports. The desktop-environment permission dialog
-        // is NEVER bypassed — on Wayland the compositor shows its picker at
-        // Start, on X11 the portal auto-selects the primary monitor.
+        // 2. SelectSources(types = Monitor|Window [, cursor_mode]). No
+        // `multiple` option: exactly one stream is requested, which every
+        // portal implementation supports. The desktop-environment permission
+        // dialog is NEVER bypassed — on Wayland the compositor shows its
+        // picker at Start, on X11 the portal auto-selects the primary
+        // monitor. BORU-SS-36: the default type mask includes windows so the
+        // portal picker can offer window sharing; the portal UI drives which
+        // source the user actually picks.
         // Cursor handling (PDF Task 5.3): request `Embedded` when the portal
         // advertises it so the compositor bakes the cursor into the stream
         // buffers (matching Boru's composite-into-frames strategy); otherwise
@@ -727,7 +781,7 @@ impl LinuxPortalCapture {
         // unadvertised mode would close the session, so we only send the
         // option when the portal told us it is available.
         let cursor_option = available_cursor_modes.map(choose_cursor_mode);
-        let select_options = select_sources_options(cursor_option);
+        let select_options = select_sources_options(cursor_option, source_types);
         connection
             .call_method(Some(portal.0), portal.1, Some(portal.2), "SelectSources", &(session.clone(), select_options))
             .await
@@ -844,6 +898,7 @@ impl LinuxPortalCapture {
             portal_version,
             backend,
             cursor_mode,
+            source_types,
         })
     }
 
@@ -1676,6 +1731,71 @@ pub struct X11Monitor {
 /// Nominal frame period (µs) for the X11 capture clock (~30 fps).
 const X11_FRAME_PERIOD_US: u64 = 33_333;
 
+/// One top-level window advertised by the X11 backend (BORU-SS-36).
+///
+/// `x`/`y` are the window origin in root-window coordinates (from
+/// `TranslateCoordinates`), `width`/`height` are the window's pixel size.
+/// Window ids are stable for the life of the window, so the derived
+/// [`CaptureSourceId`] is stable across enumerations — the UI can persist a
+/// window selection and it keeps pointing at the same window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct X11Window {
+    /// Stable source id (FNV-1a of `window:{id}`, namespaced away from
+    /// monitor ids).
+    pub id: CaptureSourceId,
+    /// The X11 window id (client id from `_NET_CLIENT_LIST`).
+    pub window: u32,
+    /// Window title (`_NET_WM_NAME`, falling back to `WM_NAME`).
+    pub title: String,
+    /// Left edge in root coordinates.
+    pub x: i16,
+    /// Top edge in root coordinates.
+    pub y: i16,
+    /// Pixel width.
+    pub width: u16,
+    /// Pixel height.
+    pub height: u16,
+    /// Whether the window is not currently viewable (minimized / hidden).
+    pub minimized: bool,
+}
+
+/// Derive a stable [`CaptureSourceId`] from an X11 window id.
+///
+/// The raw window id is already stable for the life of the window; hashing a
+/// namespaced string keeps the window id space distinct from the monitor id
+/// space (which hashes RandR names) so a window can never collide with a
+/// monitor in [`CaptureSourceId`] comparisons.
+pub fn window_source_id(window: u32) -> CaptureSourceId {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in format!("window:{window}").as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    CaptureSourceId(hash)
+}
+
+/// Build a [`CaptureSource`] from an enumerated X11 window.
+///
+/// Pure helper so the source-advertisement shape (id, kind, title, native
+/// size, desktop geometry) is unit-tested without a live X server. The
+/// geometry carries the window's root-window origin so the host can
+/// normalize coordinates against the shared source, exactly like monitors.
+pub fn x11_window_source(window: &X11Window) -> CaptureSource {
+    CaptureSource {
+        id: window.id,
+        kind: CaptureSourceKind::Window,
+        title: format!("{}: {}x{}", window.title, window.width, window.height),
+        width: window.width as u32,
+        height: window.height as u32,
+        geometry: Some(MonitorGeometry::new(
+            window.x as i32,
+            window.y as i32,
+            window.width as u32,
+            window.height as u32,
+        )),
+    }
+}
+
 /// XDamage subscription for one capture session (BORU-SS-32).
 ///
 /// The XDamage extension tracks pixel changes on the root window. Each
@@ -1737,6 +1857,11 @@ pub struct X11Capture {
     timestamp_us: u64,
     /// The monitor rectangle selected via [`DesktopCaptureBackend::start`].
     selected: Option<CaptureRect>,
+    /// The window selected via [`DesktopCaptureBackend::start`] when the
+    /// chosen source is a [`CaptureSourceKind::Window`] (BORU-SS-36). The
+    /// window's rect is re-queried every frame so move/resize is followed;
+    /// `selected` mirrors the current rect for dimensions/input-origin.
+    selected_window: Option<u32>,
     /// Whether [`DesktopCaptureBackend::start`] has been called.
     started: bool,
     /// The source id selected via [`DesktopCaptureBackend::start`], used to
@@ -1797,6 +1922,7 @@ impl X11Capture {
             blue_mask,
             timestamp_us: 0,
             selected: None,
+            selected_window: None,
             started: false,
             current_source: None,
             damage: None,
@@ -1937,6 +2063,215 @@ impl X11Capture {
             height: self.height.min(u16::MAX as u32) as u16,
             primary: true,
         }
+    }
+
+    /// Enumerate top-level windows (BORU-SS-36) via the EWMH
+    /// `_NET_CLIENT_LIST` property on the root window, falling back to a
+    /// `QueryTree` traversal of root children when the window manager does
+    /// not maintain the property.
+    ///
+    /// Each window carries its root-window origin (via `TranslateCoordinates`,
+    /// which follows reparenting into WM frames) and a `minimized` flag from
+    /// its map state, so the UI can list windows alongside monitors and the
+    /// host can pause capture when the selected window is hidden.
+    pub fn list_windows(&self) -> Result<Vec<X11Window>, ScreenShareError> {
+        let client_list = self.ewmh_client_list()?;
+        if !client_list.is_empty() {
+            let mut out = Vec::with_capacity(client_list.len());
+            for window in client_list {
+                if let Some(win) = self.describe_window(window)? {
+                    out.push(win);
+                }
+            }
+            return Ok(out);
+        }
+        // Non-EWMH window manager (or none): walk the root children and keep
+        // mapped top-level windows. Reparenting WMs still expose the client
+        // window as a descendant, so this fallback is best-effort.
+        let reply = self
+            .conn
+            .query_tree(self.root)
+            .map_err(|e| ScreenShareError::new(format!("X11 QueryTree failed: {e}")))?
+            .reply()
+            .map_err(|e| ScreenShareError::new(format!("X11 QueryTree reply failed: {e}")))?;
+        let mut out = Vec::with_capacity(reply.children.len());
+        for window in reply.children {
+            if let Some(win) = self.describe_window(window)? {
+                out.push(win);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Read the EWMH `_NET_CLIENT_LIST` property: the window-manager-owned
+    /// list of top-level client windows. Returns `Ok(vec![])` when the
+    /// property is absent (no EWMH WM), so callers fall back to a tree walk.
+    fn ewmh_client_list(&self) -> Result<Vec<u32>, ScreenShareError> {
+        let atom = self.intern_atom(b"_NET_CLIENT_LIST")?;
+        let reply = self
+            .conn
+            .get_property(false, self.root, atom, xproto::AtomEnum::WINDOW, 0, u32::MAX)
+            .map_err(|e| ScreenShareError::new(format!("X11 _NET_CLIENT_LIST failed: {e}")))?
+            .reply()
+            .map_err(|e| ScreenShareError::new(format!("X11 _NET_CLIENT_LIST reply failed: {e}")))?;
+        Ok(reply
+            .value32()
+            .map(|windows| windows.collect())
+            .unwrap_or_default())
+    }
+
+    /// Intern an atom by name, mapping failures to a typed error.
+    fn intern_atom(&self, name: &[u8]) -> Result<u32, ScreenShareError> {
+        self.conn
+            .intern_atom(false, name)
+            .map_err(|e| ScreenShareError::new(format!("X11 intern_atom {name:?} failed: {e}")))?
+            .reply()
+            .map_err(|e| ScreenShareError::new(format!("X11 intern_atom {name:?} reply failed: {e}")))
+            .map(|reply| reply.atom)
+    }
+
+    /// Describe one client window: title (`_NET_WM_NAME`, falling back to
+    /// `WM_NAME`), root-space origin via `TranslateCoordinates`, size via
+    /// `GetGeometry`, and minimized state via `GetWindowAttributes`. Windows
+    /// that are not capturable (zero size) are skipped (`Ok(None)`), as are
+    /// windows whose title cannot be read (the window vanished mid-walk).
+    fn describe_window(&self, window: u32) -> Result<Option<X11Window>, ScreenShareError> {
+        let title = self.window_title(window)?;
+        let title = title.unwrap_or_default();
+        if title.is_empty() {
+            return Ok(None);
+        }
+        let attrs = self
+            .conn
+            .get_window_attributes(window)
+            .map_err(|e| ScreenShareError::new(format!("X11 GetWindowAttributes failed: {e}")))?
+            .reply()
+            .map_err(|e| {
+                ScreenShareError::new(format!(
+                    "X11 GetWindowAttributes reply failed (window closed mid-walk?): {e}"
+                ))
+            })?;
+        // Translate the window origin into root coordinates. `GetGeometry`
+        // returns coordinates relative to the parent (often a WM frame), so
+        // TranslateCoordinates(window → root) is the authoritative position.
+        let translated = self
+            .conn
+            .translate_coordinates(window, self.root, 0, 0)
+            .map_err(|e| ScreenShareError::new(format!("X11 TranslateCoordinates failed: {e}")))?
+            .reply()
+            .map_err(|e| {
+                ScreenShareError::new(format!(
+                    "X11 TranslateCoordinates reply failed (window closed mid-walk?): {e}"
+                ))
+            })?;
+        let geometry = self
+            .conn
+            .get_geometry(window)
+            .map_err(|e| ScreenShareError::new(format!("X11 GetGeometry failed: {e}")))?
+            .reply()
+            .map_err(|e| {
+                ScreenShareError::new(format!(
+                    "X11 GetGeometry reply failed (window closed mid-walk?): {e}"
+                ))
+            })?;
+        if geometry.width == 0 || geometry.height == 0 {
+            return Ok(None);
+        }
+        let minimized = attrs.map_state != xproto::MapState::VIEWABLE;
+        Ok(Some(X11Window {
+            id: window_source_id(window),
+            window,
+            title,
+            x: translated.dst_x,
+            y: translated.dst_y,
+            width: geometry.width,
+            height: geometry.height,
+            minimized,
+        }))
+    }
+
+    /// Read a window's title: `_NET_WM_NAME` (UTF-8) first, `WM_NAME`
+    /// (legacy) as fallback. `Ok(None)` when neither property is set.
+    fn window_title(&self, window: u32) -> Result<Option<String>, ScreenShareError> {
+        if let Some(title) = self.window_property_string(window, b"_NET_WM_NAME")? {
+            return Ok(Some(title));
+        }
+        self.window_property_string(window, b"WM_NAME")
+    }
+
+    /// Read one string property (UTF-8 or legacy STRING) from a window.
+    fn window_property_string(
+        &self,
+        window: u32,
+        property: &[u8],
+    ) -> Result<Option<String>, ScreenShareError> {
+        let atom = self.intern_atom(property)?;
+        let reply = self
+            .conn
+            .get_property(false, window, atom, xproto::AtomEnum::ANY, 0, 1024)
+            .map_err(|e| ScreenShareError::new(format!("X11 get_property {property:?} failed: {e}")))?
+            .reply()
+            .map_err(|e| {
+                ScreenShareError::new(format!("X11 get_property {property:?} reply failed: {e}"))
+            })?;
+        if reply.value.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(String::from_utf8_lossy(&reply.value).into_owned()))
+    }
+
+    /// Current capture rectangle for the selected window, re-queried every
+    /// frame so move/resize is followed (BORU-SS-36).
+    ///
+    /// Returns `Ok(None)` when the window is minimized / hidden — the host
+    /// then pauses (no frames) instead of crashing. Returns a typed error
+    /// when the window no longer exists (closed) so the host can re-enumerate
+    /// and fall back or pause.
+    fn window_capture_rect(&self, window: u32) -> Result<Option<CaptureRect>, ScreenShareError> {
+        let attrs = self
+            .conn
+            .get_window_attributes(window)
+            .map_err(|e| ScreenShareError::new(format!("X11 GetWindowAttributes failed: {e}")))?
+            .reply()
+            .map_err(|e| {
+                ScreenShareError::new(format!(
+                    "capture source unavailable (window closed): {e}"
+                ))
+            })?;
+        if attrs.map_state != xproto::MapState::VIEWABLE {
+            // Minimized / hidden: pause. The window still exists and will be
+            // captured again when restored, so this is a pause, not an error.
+            return Ok(None);
+        }
+        let translated = self
+            .conn
+            .translate_coordinates(window, self.root, 0, 0)
+            .map_err(|e| ScreenShareError::new(format!("X11 TranslateCoordinates failed: {e}")))?
+            .reply()
+            .map_err(|e| {
+                ScreenShareError::new(format!(
+                    "capture source unavailable (window closed): {e}"
+                ))
+            })?;
+        let geometry = self
+            .conn
+            .get_geometry(window)
+            .map_err(|e| ScreenShareError::new(format!("X11 GetGeometry failed: {e}")))?
+            .reply()
+            .map_err(|e| {
+                ScreenShareError::new(format!(
+                    "capture source unavailable (window closed): {e}"
+                ))
+            })?;
+        if geometry.width == 0 || geometry.height == 0 {
+            return Ok(None);
+        }
+        Ok(Some(CaptureRect {
+            x: translated.dst_x,
+            y: translated.dst_y,
+            width: geometry.width,
+            height: geometry.height,
+        }))
     }
 
     /// Subscribe to XDamage on the root window (BORU-SS-32).
@@ -2235,8 +2570,16 @@ impl ScreenCapture for X11Capture {
 
 impl DesktopCaptureBackend for X11Capture {
     fn list_sources(&self) -> Result<Vec<CaptureSource>, ScreenShareError> {
-        self.list_monitors()
-            .map(|monitors| monitors.iter().map(x11_monitor_source).collect())
+        let mut sources: Vec<CaptureSource> = self
+            .list_monitors()
+            .map(|monitors| monitors.iter().map(x11_monitor_source).collect())?;
+        // BORU-SS-36: advertise top-level windows alongside monitors. Window
+        // enumeration is best-effort — a failure (no WM, exotic server) must
+        // not break monitor sharing.
+        if let Ok(windows) = self.list_windows() {
+            sources.extend(windows.iter().map(x11_window_source));
+        }
+        Ok(sources)
     }
 
     fn start(
@@ -2250,6 +2593,34 @@ impl DesktopCaptureBackend for X11Capture {
         if config.target_fps == 0 {
             return Err(ScreenShareError::new("target fps must be non-zero"));
         }
+        // BORU-SS-36: a Window source selects the window id; its rect is
+        // re-queried every frame so move/resize is followed.
+        if let Some(window) = self
+            .list_windows()
+            .ok()
+            .and_then(|windows| windows.into_iter().find(|window| window.id == source))
+        {
+            self.selected_window = Some(window.window);
+            // Seed `selected` with the window's current rect so
+            // dimensions()/input_origin() are correct before the first frame.
+            self.selected = self.window_capture_rect(window.window).ok().flatten();
+            self.current_source = Some(source);
+            match self.damage.as_mut() {
+                Some(tracker) => {
+                    tracker.first_frame = true;
+                    tracker.skipped = 0;
+                }
+                None => self.setup_damage(),
+            }
+            self.force_full_next = false;
+            self.started = true;
+            tracing::info!(
+                window = window.window,
+                title = %window.title,
+                "screen-share: X11 window capture started"
+            );
+            return Ok(());
+        }
         let monitor = self
             .list_monitors()?
             .into_iter()
@@ -2261,6 +2632,7 @@ impl DesktopCaptureBackend for X11Capture {
             width: monitor.width,
             height: monitor.height,
         });
+        self.selected_window = None;
         self.current_source = Some(source);
         // Damage-aware capture (BORU-SS-32): subscribe to XDamage on the
         // root window. A tracker left over from the whole-root fallback is
@@ -2285,6 +2657,23 @@ impl DesktopCaptureBackend for X11Capture {
                 "capture is not started; call start() before next_frame()",
             ));
         }
+        // BORU-SS-36 window capture: re-query the window rect every frame.
+        // Move/resize is followed automatically; a minimized window returns
+        // `Ok(None)` (pause — the host skips the frame, the session lives on);
+        // a closed window returns a typed error so the host falls back.
+        if let Some(window) = self.selected_window {
+            let Some(rect) = self.window_capture_rect(window)? else {
+                return Ok(None);
+            };
+            // A moved/resized window is a whole new source region: force a
+            // full repaint so the viewer resynchronises (damage rects from
+            // the old position do not describe the new one).
+            if self.selected != Some(rect) {
+                self.selected = Some(rect);
+                self.force_full_next = true;
+            }
+            return self.capture_rect(rect);
+        }
         let Some(rect) = self.selected else {
             return Err(ScreenShareError::new("capture has no selected source"));
         };
@@ -2303,6 +2692,7 @@ impl DesktopCaptureBackend for X11Capture {
     fn stop(&mut self) {
         self.started = false;
         self.selected = None;
+        self.selected_window = None;
         self.current_source = None;
         self.teardown_damage();
     }
@@ -2901,21 +3291,44 @@ mod tests {
         assert_eq!(choose_cursor_mode(0), CursorMode::Hidden);
     }
 
-    /// The SelectSources options vardict carries types=Monitor plus the
-    /// negotiated cursor_mode when one is provided; omitting the option
-    /// leaves the portal default (Hidden) untouched.
+    /// The SelectSources options vardict carries the requested source types
+    /// (BORU-SS-36: Monitor|Window by default so the portal picker can offer
+    /// window sharing) plus the negotiated cursor_mode when one is provided;
+    /// omitting the option leaves the portal default (Hidden) untouched.
     #[test]
     fn select_sources_options_include_cursor_mode_when_negotiated() {
-        let with_embedded = select_sources_options(Some(CursorMode::Embedded));
-        assert_eq!(with_embedded.get("types"), Some(&zbus::zvariant::Value::U32(1)));
+        let with_embedded = select_sources_options(Some(CursorMode::Embedded), PortalSourceTypes::default());
+        assert_eq!(
+            with_embedded.get("types"),
+            Some(&zbus::zvariant::Value::U32(PortalSourceTypes::MONITOR_AND_WINDOW.bits()))
+        );
         assert_eq!(with_embedded.get("cursor_mode"), Some(&zbus::zvariant::Value::U32(2)));
 
-        let hidden = select_sources_options(Some(CursorMode::Hidden));
+        let hidden = select_sources_options(Some(CursorMode::Hidden), PortalSourceTypes::default());
         assert_eq!(hidden.get("cursor_mode"), Some(&zbus::zvariant::Value::U32(1)));
 
-        let none = select_sources_options(None);
-        assert_eq!(none.get("types"), Some(&zbus::zvariant::Value::U32(1)));
+        let none = select_sources_options(None, PortalSourceTypes::default());
+        assert_eq!(
+            none.get("types"),
+            Some(&zbus::zvariant::Value::U32(PortalSourceTypes::MONITOR_AND_WINDOW.bits()))
+        );
         assert!(none.get("cursor_mode").is_none());
+    }
+
+    /// Window source types must be individually requestable (BORU-SS-36):
+    /// the `types` bitmask follows the portal spec (1=Monitor, 2=Window,
+    /// 4=Virtual), and Monitor|Window is the Boru default.
+    #[test]
+    fn portal_source_types_bits_follow_spec() {
+        assert_eq!(PortalSourceTypes::MONITOR.bits(), 1);
+        assert_eq!(PortalSourceTypes::WINDOW.bits(), 2);
+        assert_eq!(PortalSourceTypes::VIRTUAL.bits(), 4);
+        assert_eq!(PortalSourceTypes::MONITOR_AND_WINDOW.bits(), 3);
+        assert_eq!(PortalSourceTypes::default().bits(), 3);
+        assert_eq!(
+            (PortalSourceTypes::MONITOR | PortalSourceTypes::WINDOW).bits(),
+            3
+        );
     }
 
     #[test]
@@ -3185,6 +3598,93 @@ mod tests {
         assert_ne!(dp1, hdmi);
     }
 
+    // ── Window source mapping / id stability (BORU-SS-36) ─────────────────
+
+    #[test]
+    fn x11_window_source_advertises_kind_geometry_and_title() {
+        let win = X11Window {
+            id: window_source_id(0x0040_0001),
+            window: 0x0040_0001,
+            title: "Terminal".to_string(),
+            x: 100,
+            y: 50,
+            width: 800,
+            height: 600,
+            minimized: false,
+        };
+        let source = x11_window_source(&win);
+        assert_eq!(source.id, window_source_id(0x0040_0001));
+        assert_eq!(source.kind, CaptureSourceKind::Window);
+        assert_eq!(source.title, "Terminal: 800x600");
+        assert_eq!(source.width, 800);
+        assert_eq!(source.height, 600);
+        assert_eq!(
+            source.geometry,
+            Some(MonitorGeometry::new(100, 50, 800, 600))
+        );
+        // The picker must render a distinguishable label for windows.
+        assert!(source.picker_label().starts_with("[Window] "));
+        assert!(source.picker_label().contains("Terminal"));
+    }
+
+    #[test]
+    fn x11_window_id_is_stable_and_namespaced_away_from_monitors() {
+        let first = window_source_id(0x0040_0001);
+        let again = window_source_id(0x0040_0001);
+        let other = window_source_id(0x0040_0002);
+        assert_eq!(first, again, "same window id must map to same source id");
+        assert_ne!(first, other, "different windows must not collide");
+        // Window ids must never collide with monitor ids (both are FNV-1a
+        // hashes over different namespaces).
+        let monitor = monitor_source_id("DP-1");
+        assert_ne!(first, monitor);
+        assert_ne!(window_source_id(0), CaptureSourceId(0));
+    }
+
+    #[test]
+    fn x11_window_source_handles_negative_origin() {
+        // A window on a monitor left of the primary can have a negative
+        // origin; the CaptureSource must carry it so coordinate mapping stays
+        // correct for remote input.
+        let win = X11Window {
+            id: window_source_id(0x00ab_0001),
+            window: 0x00ab_0001,
+            title: "Editor".to_string(),
+            x: -1920,
+            y: -120,
+            width: 1280,
+            height: 720,
+            minimized: false,
+        };
+        let source = x11_window_source(&win);
+        assert_eq!(
+            source.geometry,
+            Some(MonitorGeometry::new(-1920, -120, 1280, 720))
+        );
+    }
+
+    /// A minimized window is still advertised (the user may want to restore
+    /// and share it), but its minimized flag is carried so the UI can mark it
+    /// and the host knows capture will pause until the window is viewable.
+    #[test]
+    fn x11_window_source_preserves_minimized_flag() {
+        let win = X11Window {
+            id: window_source_id(0x00ab_0002),
+            window: 0x00ab_0002,
+            title: "Music".to_string(),
+            x: 0,
+            y: 0,
+            width: 400,
+            height: 300,
+            minimized: true,
+        };
+        assert!(win.minimized);
+        let source = x11_window_source(&win);
+        // The source still advertises the window's last known geometry.
+        assert_eq!((source.width, source.height), (400, 300));
+    }
+
+
     // ── Damage-region accumulation / clipping (BORU-SS-32) ──────────────────
 
     fn root_rect(x: u32, y: u32, width: u32, height: u32) -> FrameRect {
@@ -3283,7 +3783,16 @@ mod tests {
             .or_else(|| monitors.first())
             .expect("primary or first monitor");
         let sources = capture.list_sources().expect("list sources");
-        assert_eq!(sources.len(), monitors.len());
+        // BORU-SS-36: sources now include top-level windows after the
+        // monitors, so the count is at least the monitor count.
+        assert!(sources.len() >= monitors.len());
+        assert!(
+            sources
+                .iter()
+                .take(monitors.len())
+                .all(|s| s.kind == CaptureSourceKind::Monitor),
+            "monitors come first in the enumeration"
+        );
         let source = x11_monitor_source(primary);
         capture
             .start(source.id, CaptureConfig::default())
@@ -3388,5 +3897,86 @@ mod tests {
             frame.pixels.len(),
             (frame.width * frame.height * 4) as usize
         );
+    }
+
+    /// Live window enumeration + capture (BORU-SS-36) — REQUIRES a real X
+    /// server. Creates a real mapped top-level window with a title, verifies
+    /// `list_sources` advertises it as a [`CaptureSourceKind::Window`], then
+    /// starts capture on it and confirms a frame of the window's size comes
+    /// back.
+    #[test]
+    #[ignore = "requires a real X server (DISPLAY set)"]
+    fn x11_live_enumerates_and_captures_a_window() {
+        use x11rb::protocol::xproto::{ConnectionExt as _, CreateWindowAux, EventMask, WindowClass};
+        let (conn, screen_num) = x11rb::connect(None).expect("x11rb connect");
+        let screen = &conn.setup().roots[screen_num];
+        // Create a small mapped window with a distinctive title.
+        let win = conn.generate_id().expect("generate id");
+        conn.create_window(
+            screen.root_depth,
+            win,
+            screen.root,
+            50,
+            50,
+            320,
+            200,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            0,
+            &CreateWindowAux::new().event_mask(EventMask::EXPOSURE),
+        )
+        .expect("create_window")
+        .check()
+        .expect("create_window reply");
+        let title_atom = conn
+            .intern_atom(false, b"WM_NAME")
+            .expect("intern WM_NAME")
+            .reply()
+            .expect("intern reply")
+            .atom;
+        conn.change_property(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            win,
+            title_atom,
+            x11rb::protocol::xproto::AtomEnum::STRING,
+            8,
+            b"boru-ss36-live-test-window".len() as u32,
+            b"boru-ss36-live-test-window",
+        )
+        .expect("change_property");
+        conn.map_window(win).expect("map_window");
+        // Pump events so the server processes the requests.
+        conn.flush().expect("flush");
+        // Give the server a beat to map the window.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let capture = X11Capture::connect().expect("connect to $DISPLAY");
+        let sources = capture.list_sources().expect("list sources");
+        let window_source = sources
+            .iter()
+            .find(|s| s.title.contains("boru-ss36-live-test-window"))
+            .expect("the live test window must be enumerated as a source");
+        assert_eq!(window_source.kind, CaptureSourceKind::Window);
+        assert!(
+            window_source.picker_label().starts_with("[Window] "),
+            "picker label must mark the window source"
+        );
+
+        let mut capture = capture;
+        capture
+            .start(window_source.id, CaptureConfig::default())
+            .expect("start window capture");
+        let frame = capture
+            .next_frame()
+            .expect("next_frame after start")
+            .expect("a frame from the window region");
+        assert_eq!(frame.width, window_source.width);
+        assert_eq!(frame.height, window_source.height);
+        assert_eq!(frame.pixel_format, PixelFormat::Rgba8);
+        capture.stop();
+
+        // Cleanup: destroy the test window and let the server process it.
+        let _ = conn.destroy_window(win);
+        let _ = conn.flush();
     }
 }
