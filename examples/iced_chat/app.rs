@@ -12631,6 +12631,10 @@ impl IcedChat {
                     self.update_home_drag(point);
                     return iced::Task::none();
                 }
+                if let DesignerMessage::ReorderHome { index, delta } = designer_message {
+                    self.reorder_home_from_tree(index, delta);
+                    return iced::Task::none();
+                }
                 if let DesignerMessage::UpdateResize(point) = designer_message {
                     self.update_resize(point);
                     return iced::Task::none();
@@ -19584,6 +19588,23 @@ impl IcedChat {
         self.designer.update(DesignerMessage::MarkDirty);
     }
 
+    #[cfg(feature = "dev-ui")]
+    fn reorder_home_from_tree(&mut self, index: usize, delta: isize) {
+        let len = self.active_layout.home.section_order.len();
+        if index >= len {
+            return;
+        }
+        let target = (index as isize + delta).clamp(0, len.saturating_sub(1) as isize) as usize;
+        if target == index {
+            return;
+        }
+        let mut layout = self.active_layout.clone();
+        let section = layout.home.section_order.remove(index);
+        layout.home.section_order.insert(target, section);
+        self.set_layout_config(layout);
+        self.designer.update(DesignerMessage::MarkDirty);
+    }
+
     /// Apply a resize gesture to the semantic layout field exposed by the
     /// selected component. Pointer coordinates are transient; only the typed
     /// width value is written back to the live LayoutConfig.
@@ -19682,16 +19703,21 @@ impl IcedChat {
     /// can render the 'Inspect UI' switch and its status line.
     #[cfg(feature = "dev-ui")]
     fn view_inspector_panel(&self) -> iced::Element<'_, AppMessage> {
-        crate::inspector::view_inspector(
-            &self.active_theme,
-            &self.active_layout,
-            &self.inspector_draft,
-            self.dark_mode,
-            self.designer.enabled,
-            self.inspect_ui_enabled,
-            self.inspect_hover,
-            self.inspect_selected,
-        )
+        iced::widget::column![
+            crate::designer::component_tree(&self.active_layout, self.designer.selected_component),
+            crate::inspector::view_inspector(
+                &self.active_theme,
+                &self.active_layout,
+                &self.inspector_draft,
+                self.dark_mode,
+                self.designer.enabled,
+                self.inspect_ui_enabled,
+                self.inspect_hover,
+                self.inspect_selected,
+            ),
+        ]
+        .spacing(8)
+        .into()
     }
 
     /// BORU-UI-11: wrap a supported component region in a mouse area that
@@ -20785,7 +20811,7 @@ impl IcedChat {
         // stays fully interactive beside it; closing (Ctrl+Shift+D or the ×
         // button) returns to the exact layout. Compiled only with dev-ui.
         #[cfg(feature = "dev-ui")]
-        let base = if self.inspector_visible {
+        let base = if self.inspector_visible || self.designer.enabled {
             let inspector = self.view_inspector_panel();
             container(
                 row![

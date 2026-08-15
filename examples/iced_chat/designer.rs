@@ -7,7 +7,7 @@
 //! other UI actions.
 
 use crate::layout::HomeSection;
-use iced::widget::{button, container, mouse_area, row, text, Stack};
+use iced::widget::{button, column, container, mouse_area, row, text, Stack};
 use iced::{Background, Border, Color, Element, Length, Padding, Point};
 use std::fmt;
 use std::str::FromStr;
@@ -244,6 +244,34 @@ pub(crate) fn overlay<'a>(
         .into()
 }
 
+/// Render the dev-only hierarchy over stable component IDs.
+pub(crate) fn component_tree<'a>(layout: &'a crate::layout::LayoutConfig, selected: Option<ComponentId>) -> Element<'a, crate::app::AppMessage> {
+    fn item<'a>(label: &'a str, id: ComponentId, selected: Option<ComponentId>) -> Element<'a, crate::app::AppMessage> {
+        let marker = if selected == Some(id) { "● " } else { "○ " };
+        button(text(format!("{marker}{label}")).size(12.0)).width(Length::Fill).padding([3, 6])
+            .on_press(crate::app::AppMessage::Designer(DesignerMessage::Select(Some(id)))).into()
+    }
+    fn home_item<'a>(label: &'a str, id: ComponentId, section: HomeSection, layout: &crate::layout::LayoutConfig, selected: Option<ComponentId>) -> Element<'a, crate::app::AppMessage> {
+        let mut controls = row![item(label, id, selected)].spacing(2);
+        if let Some(index) = layout.home.section_order.iter().position(|s| *s == section) {
+            controls = controls
+                .push(button(text("↑").size(11.0)).padding([2, 5]).on_press(crate::app::AppMessage::Designer(DesignerMessage::ReorderHome { index, delta: -1 })))
+                .push(button(text("↓").size(11.0)).padding([2, 5]).on_press(crate::app::AppMessage::Designer(DesignerMessage::ReorderHome { index, delta: 1 })));
+        }
+        controls.into()
+    }
+    let home = column![text("Home").size(12.0),
+        home_item("Welcome", ComponentId::HomeWelcome, HomeSection::Hero, layout, selected),
+        home_item("Quick Actions", ComponentId::HomeQuickActions, HomeSection::QuickActions, layout, selected),
+        home_item("Public Rooms", ComponentId::HomePublicRooms, HomeSection::MeshHealth, layout, selected),
+        home_item("Friends", ComponentId::HomeFriends, HomeSection::PeopleActivity, layout, selected),
+        home_item("Recent Activity", ComponentId::HomeRecentActivity, HomeSection::Tunnels, layout, selected)].spacing(2);
+    let sidebar = column![text("Sidebar").size(12.0), item("Header", ComponentId::Sidebar, selected), item("Conversations", ComponentId::Sidebar, selected), item("Groups", ComponentId::Sidebar, selected), item("Tunnels", ComponentId::Sidebar, selected)].spacing(2);
+    let chat = column![text("Chat").size(12.0), item("Header", ComponentId::ChatMessageList, selected), item("Message List", ComponentId::ChatMessageList, selected), item("Composer", ComponentId::ChatComposer, selected)].spacing(2);
+    container(column![text("COMPONENT TREE").size(13.0), home, sidebar, chat]).padding(8.0).width(Length::Fill)
+        .style(|_| container::Style { background: Some(Background::Color(Color::from_rgba(0.05, 0.08, 0.14, 0.96))), border: Border { color: Color::from_rgb(0.25, 0.38, 0.55), width: 1.0, radius: 4.0.into() }, ..Default::default() }).into()
+}
+
 impl ComponentId {
     /// Map stable designer surfaces to semantic home sections.
     pub(crate) const fn home_section(self) -> Option<HomeSection> {
@@ -350,6 +378,7 @@ pub enum DesignerMessage {
     UpdateDrag(Point),
     CommitDrag,
     CancelDrag,
+    ReorderHome { index: usize, delta: isize },
     StartResize {
         component: ComponentId,
         origin: Point,
@@ -398,6 +427,7 @@ impl DesignerState {
             }
             DesignerMessage::CommitDrag => self.drag_operation = None,
             DesignerMessage::CancelDrag => self.drag_operation = None,
+            DesignerMessage::ReorderHome { .. } => {}
             DesignerMessage::StartResize { component, origin } if self.enabled => {
                 self.resize_operation = Some(ResizeOperation {
                     component,
