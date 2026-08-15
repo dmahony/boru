@@ -17320,12 +17320,6 @@ impl IcedChat {
             // ── Dev UI Inspector (BORU-UI-09) ───────────────────────
             #[cfg(feature = "dev-ui")]
             AppMessage::Inspector(msg) => self.update_inspector(msg),
-            // ── Visual Designer (BORU-DESIGN-03) ────────────────────
-            #[cfg(feature = "dev-ui")]
-            AppMessage::Designer(msg) => {
-                self.designer.update(msg);
-                iced::Task::none()
-            }
             // ── File sharing dashboard (state layer) ────────────────
             AppMessage::OpenDownloadsFolder
             | AppMessage::DashboardSearchChanged(_)
