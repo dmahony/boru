@@ -56,6 +56,15 @@ pub(crate) struct ChatListDependency {
     pub(crate) layout_revision: u64,
     #[cfg(feature = "dev-ui")]
     pub(crate) drag_placeholder: Option<(crate::designer::ComponentId, usize)>,
+    /// Designer interaction state is part of the lazy key so enabling
+    /// Designer Mode or moving the pointer rebuilds the production Home
+    /// surface instead of leaving a cached, stale overlay tree in place.
+    #[cfg(feature = "dev-ui")]
+    pub(crate) designer_enabled: bool,
+    #[cfg(feature = "dev-ui")]
+    pub(crate) designer_hovered: Option<crate::designer::ComponentId>,
+    #[cfg(feature = "dev-ui")]
+    pub(crate) designer_selected: Option<crate::designer::ComponentId>,
     pub(crate) window_width_bits: u32,
     pub(crate) mesh_health: MeshHealthSnapshot,
     pub(crate) main_screen_reconnect_frame: u32,
@@ -1170,6 +1179,12 @@ impl IcedChat {
             reduced_motion: self.reduced_motion,
             #[cfg(feature = "dev-ui")]
             drag_placeholder,
+            #[cfg(feature = "dev-ui")]
+            designer_enabled: self.designer.enabled,
+            #[cfg(feature = "dev-ui")]
+            designer_hovered: self.designer.hovered_component,
+            #[cfg(feature = "dev-ui")]
+            designer_selected: self.designer.selected_component,
         }
     }
 
