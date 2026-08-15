@@ -95,6 +95,7 @@ use boru_core::call::{CallId, CallKind};
 use boru_core::screen_share::{
     run_host_session, Capability, CapturedFrame, ControlMessage, HostCommand, InboundMedia,
     InputEventKind, OpenH264Decoder, PixelFormat, ScreenShareMessage, ScreenShareProtocol,
+    MAX_CLIPBOARD_TEXT,
     ScreenShareSessionId, SessionEvent, ViewerPipeline, DEFAULT_QUEUE_CAPACITY, MOD_ALT, MOD_CTRL,
     MOD_META, MOD_SHIFT, SCREEN_SHARE_PROTOCOL_VERSION,
 };
@@ -4267,6 +4268,11 @@ pub struct IcedChat {
     /// Control active on either side (drives the indicator + input capture).
     screen_share_control_active: bool,
     #[cfg(feature = "screen-sharing")]
+    /// Clipboard sync granted on either side (PDF Task 9.3 / BORU-SS-25).
+    /// Set from the capabilities in `ControlChanged`; clipboard is a separate
+    /// optional capability, never implied by remote control.
+    screen_share_clipboard_active: bool,
+    #[cfg(feature = "screen-sharing")]
     /// Command sender into the host driver task (grants/revokes).
     screen_share_host_cmd_tx: Option<tokio::sync::mpsc::Sender<HostCommand>>,
     #[cfg(feature = "screen-sharing")]
@@ -5633,6 +5639,19 @@ pub enum AppMessage {
     #[cfg(feature = "screen-sharing")]
     /// Viewer requests explicit control (pointer + keyboard) from the host.
     ScreenShareRequestControl,
+    #[cfg(feature = "screen-sharing")]
+    /// Viewer requests the SEPARATE clipboard capability (PDF Task 9.3 /
+    /// BORU-SS-25) — clipboard sync is never implied by remote control.
+    ScreenShareRequestClipboard,
+    #[cfg(feature = "screen-sharing")]
+    /// Viewer pushes its local text clipboard to the host.
+    ScreenShareSendClipboard,
+    #[cfg(feature = "screen-sharing")]
+    /// Host pushes its local text clipboard to the viewer.
+    ScreenShareHostSendClipboard,
+    #[cfg(feature = "screen-sharing")]
+    /// Result of reading the local clipboard for screen-share sync.
+    ScreenShareClipboardRead(Option<String>),
     #[cfg(feature = "screen-sharing")]
     /// Host grants the given control capabilities to the viewer.
     ScreenShareGrantControl(Vec<Capability>),
@@ -8252,6 +8271,8 @@ impl IcedChat {
             #[cfg(feature = "screen-sharing")]
             screen_share_control_active: false,
             #[cfg(feature = "screen-sharing")]
+            screen_share_clipboard_active: false,
+            #[cfg(feature = "screen-sharing")]
             screen_share_host_cmd_tx: None,
             #[cfg(feature = "screen-sharing")]
             screen_share_last_pointer_sent: None,
@@ -10130,6 +10151,14 @@ impl IcedChat {
             AppMessage::ScreenShareCommandFinished(_) => "ScreenShareCommandFinished",
             #[cfg(feature = "screen-sharing")]
             AppMessage::ScreenShareRequestControl => "ScreenShareRequestControl",
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareRequestClipboard => "ScreenShareRequestClipboard",
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareSendClipboard => "ScreenShareSendClipboard",
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareHostSendClipboard => "ScreenShareHostSendClipboard",
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareClipboardRead(_) => "ScreenShareClipboardRead",
             #[cfg(feature = "screen-sharing")]
             AppMessage::ScreenShareGrantControl(_) => "ScreenShareGrantControl",
             #[cfg(feature = "screen-sharing")]
@@ -14549,6 +14578,16 @@ impl IcedChat {
             }
             #[cfg(feature = "screen-sharing")]
             AppMessage::ScreenShareRequestControl => self.request_screen_share_control(),
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareRequestClipboard => self.request_screen_share_clipboard(),
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareSendClipboard => self.screen_share_send_clipboard(),
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareHostSendClipboard => self.screen_share_host_send_clipboard(),
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareClipboardRead(text) => {
+                self.screen_share_apply_clipboard_read(text)
+            }
             #[cfg(feature = "screen-sharing")]
             AppMessage::ScreenShareGrantControl(capabilities) => {
                 if let Some(tx) = &self.screen_share_host_cmd_tx {
@@ -21207,6 +21246,120 @@ impl IcedChat {
     }
 
     #[cfg(feature = "screen-sharing")]
+    /// Viewer requests the SEPARATE clipboard capability (PDF Task 9.3 /
+    /// BORU-SS-25). This is a distinct `RequestControl` for `Clipboard` only —
+    /// it is never implied by requesting or granting remote control.
+    fn request_screen_share_clipboard(&self) -> iced::Task<AppMessage> {
+        if self.screen_share_clipboard_active {
+            return iced::Task::none();
+        }
+        let Some(protocol) = self.screen_share_protocol.clone() else {
+            return iced::Task::none();
+        };
+        let Some(session_id) = self.screen_share_view_session else {
+            return iced::Task::none();
+        };
+        iced::Task::perform(
+            async move {
+                protocol
+                    .send_control(
+                        session_id,
+                        ControlMessage::RequestControl {
+                            version: SCREEN_SHARE_PROTOCOL_VERSION,
+                            session_id,
+                            capabilities: vec![Capability::Clipboard],
+                        },
+                    )
+                    .await
+                    .map_err(|e| e.to_string())
+            },
+            |result| AppMessage::ScreenShareCommandFinished(result),
+        )
+    }
+
+    #[cfg(feature = "screen-sharing")]
+    /// Viewer pushes its local text clipboard to the host. Reads the local
+    /// clipboard asynchronously; the result is sent in
+    /// `screen_share_apply_clipboard_read` (which also gates on the granted
+    /// Clipboard capability).
+    fn screen_share_send_clipboard(&self) -> iced::Task<AppMessage> {
+        if !self.screen_share_viewing || !self.screen_share_clipboard_active {
+            return iced::Task::none();
+        }
+        iced::clipboard::read().map(AppMessage::ScreenShareClipboardRead)
+    }
+
+    #[cfg(feature = "screen-sharing")]
+    /// Host pushes its local text clipboard to the viewer. Reads the local
+    /// clipboard asynchronously; the result is applied in
+    /// `screen_share_apply_clipboard_read`.
+    fn screen_share_host_send_clipboard(&self) -> iced::Task<AppMessage> {
+        if self.screen_share_host_state != ScreenShareHostState::Streaming
+            || !self.screen_share_clipboard_active
+        {
+            return iced::Task::none();
+        }
+        iced::clipboard::read().map(AppMessage::ScreenShareClipboardRead)
+    }
+
+    #[cfg(feature = "screen-sharing")]
+    /// Apply the result of an async local-clipboard read. When clipboard sync
+    /// is granted, the text is pushed over the reliable control channel as a
+    /// versioned `ScreenShareMessage::Clipboard` — viewer→host via the
+    /// protocol handler, host→viewer via the host driver command. The local
+    /// `screen_share_clipboard_active` flag is the capability gate; an empty
+    /// clipboard or a missing grant is a no-op.
+    fn screen_share_apply_clipboard_read(&self, text: Option<String>) -> iced::Task<AppMessage> {
+        let Some(text) = text else { return iced::Task::none(); };
+        if text.is_empty() || text.len() > MAX_CLIPBOARD_TEXT {
+            return iced::Task::none();
+        }
+        if !self.screen_share_clipboard_active {
+            return iced::Task::none();
+        }
+        if self.screen_share_host_state == ScreenShareHostState::Streaming {
+            // Host → viewer: route through the host driver so the payload is
+            // sent on the same control channel the streaming loop owns.
+            if let Some(tx) = &self.screen_share_host_cmd_tx {
+                let _ = tx.try_send(HostCommand::SendClipboard(text));
+            }
+            return iced::Task::none();
+        }
+        let Some(protocol) = self.screen_share_protocol.clone() else {
+            return iced::Task::none();
+        };
+        let Some(session_id) = self.screen_share_view_session else {
+            return iced::Task::none();
+        };
+        let manager = protocol.manager();
+        iced::Task::perform(
+            async move {
+                let nonce = manager
+                    .lock()
+                    .await
+                    .permissions(session_id)
+                    .and_then(|permissions| permissions.token().map(|token| *token.nonce()));
+                match nonce {
+                    Some(nonce) => protocol
+                        .send_screen_share(
+                            session_id,
+                            ScreenShareMessage::Clipboard {
+                                version: SCREEN_SHARE_PROTOCOL_VERSION,
+                                session_id,
+                                nonce,
+                                text,
+                            },
+                        )
+                        .await
+                        .map_err(|e| e.to_string()),
+                    None => Err("clipboard capability not granted".to_string()),
+                }
+            },
+            |result| AppMessage::ScreenShareCommandFinished(result),
+        )
+    }
+
+    #[cfg(feature = "screen-sharing")]
     /// Accept the pending invitation: respond Accept on the inbound QUIC
     /// connection and spawn the viewer decode worker for the session.
     fn accept_screen_share(&mut self) -> iced::Task<AppMessage> {
@@ -21280,7 +21433,13 @@ impl IcedChat {
     #[cfg(feature = "screen-sharing")]
     /// Apply one protocol session event to the deterministic UI session state.
     fn apply_screen_share_event(&mut self, event: SessionEvent) -> iced::Task<AppMessage> {
-        tracing::info!(?event, "screen-share: session event received");
+        // Never Debug-log a ClipboardReceived event — it carries clipboard
+        // contents (PDF guardrail: never log clipboard contents).
+        if !matches!(event, SessionEvent::ClipboardReceived { .. }) {
+            tracing::info!(?event, "screen-share: session event received");
+        } else {
+            tracing::info!("screen-share: clipboard event received");
+        }
         match event {
             SessionEvent::Invitation {
                 session_id,
@@ -21405,12 +21564,26 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
-            SessionEvent::ControlChanged { active, .. } => {
+            SessionEvent::ControlChanged { active, capabilities, .. } => {
                 self.screen_share_control_active = active;
+                // Clipboard is a SEPARATE optional capability (PDF Task 9.3 /
+                // BORU-SS-25): it follows the granted capability list, not
+                // the `active` control flag. Granting remote control never
+                // enables clipboard sync on its own.
+                self.screen_share_clipboard_active =
+                    active && capabilities.contains(&Capability::Clipboard);
                 if !active {
                     self.screen_share_control_request = None;
                 }
                 iced::Task::none()
+            }
+            SessionEvent::ClipboardReceived { text, .. } => {
+                // Text-only clipboard sync (PDF Task 9.3 / BORU-SS-25). The
+                // payload was already authorized against the Clipboard
+                // capability by the screen-share layer; place it on the local
+                // clipboard. Never log the contents (PDF guardrail).
+                tracing::info!("screen-share: peer clipboard text applied");
+                return iced::clipboard::write(text);
             }
         }
     }
@@ -21432,6 +21605,7 @@ impl IcedChat {
         self.screen_share_frame_watch = None;
         self.screen_share_control_request = None;
         self.screen_share_control_active = false;
+        self.screen_share_clipboard_active = false;
         self.screen_share_last_pointer_sent = None;
         self.screen_share_last_pointer_pos = None;
         self.screen_share_modifiers = 0;

@@ -35,6 +35,9 @@ pub const MAX_RESOLUTIONS: usize = 16;
 /// this bound exists so a single `VideoPacket` (media payload) can be carried
 /// by a protocol message while still capping untrusted input.
 pub const MAX_SCREEN_SHARE_MESSAGE: usize = MAX_MEDIA_FRAME + 4096;
+/// Maximum UTF-8 bytes in one text-only clipboard payload (PDF Task 9.3).
+/// Text-only sync; files and rich clipboard formats are deferred.
+pub const MAX_CLIPBOARD_TEXT: usize = 512 * 1024;
 
 /// A bounded, explicit view-only permission. Remote control is intentionally absent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -401,6 +404,22 @@ pub enum ScreenShareMessage {
         /// Stable, user-safe message.
         message: String,
     },
+    /// One direction → other: a text-only clipboard payload (PDF Task 9.3 /
+    /// BORU-SS-25). Clipboard sync is a SEPARATE optional capability — it is
+    /// never enabled automatically with remote control, and the receiver
+    /// authorizes the payload against the explicitly granted `Clipboard`
+    /// capability before applying it to the local clipboard. Text-only for
+    /// now; files and rich clipboard formats are deferred.
+    Clipboard {
+        /// Wire protocol version.
+        version: u16,
+        /// Session the clipboard payload belongs to.
+        session_id: ScreenShareSessionId,
+        /// Current grant nonce (freshness gate, mirroring input messages).
+        nonce: [u8; 16],
+        /// UTF-8 text payload (bounded by [`MAX_CLIPBOARD_TEXT`]).
+        text: String,
+    },
 }
 
 impl ScreenShareMessage {
@@ -463,6 +482,11 @@ impl ScreenShareMessage {
                 if *session_id == ScreenShareSessionId::zero() { return Err(ProtocolError::Malformed("empty session id".into())); }
                 if *code == 0 { return Err(ProtocolError::Malformed("invalid error code".into())); }
                 if message.is_empty() || message.len() > MAX_REASON { return Err(ProtocolError::Malformed("invalid error message".into())); }
+                *version
+            }
+            Self::Clipboard { version, session_id, text, .. } => {
+                if *session_id == ScreenShareSessionId::zero() { return Err(ProtocolError::Malformed("empty session id".into())); }
+                if text.is_empty() || text.len() > MAX_CLIPBOARD_TEXT { return Err(ProtocolError::Malformed("invalid clipboard text".into())); }
                 *version
             }
         };
@@ -725,6 +749,34 @@ impl ScreenShareProtocol {
             ScreenShareMessage::ScreenShareStopped { session_id, .. } => {
                 self.connections.lock().await.remove(&session_id);
             }
+            // Text-only clipboard sync (PDF Task 9.3 / BORU-SS-25): the host
+            // pushes its local clipboard to the viewer. Clipboard is a
+            // SEPARATE optional capability — the payload is authorized
+            // against the explicitly granted Clipboard capability (with the
+            // current grant nonce as the freshness gate) and only then
+            // surfaced to the app, which places it on the local clipboard.
+            // Payloads are never logged (PDF guardrail).
+            ScreenShareMessage::Clipboard { session_id, nonce, text, .. } => {
+                let authorized = self
+                    .manager
+                    .lock()
+                    .await
+                    .permissions(session_id)
+                    .is_some_and(|permissions| {
+                        crate::screen_share::remote_input::authorize_nonce(
+                            permissions,
+                            session_id,
+                            remote_id,
+                            Capability::Clipboard,
+                            nonce,
+                        )
+                        .is_ok()
+                    });
+                if authorized {
+                    tracing::info!("screen-share: viewer applied host clipboard payload (text)");
+                    let _ = self.events.try_send(SessionEvent::ClipboardReceived { session_id, text });
+                }
+            }
             // Remaining lifecycle/media messages are handled by the host/viewer
             // once streaming starts (BORU-SS-09+); the negotiation loop does
             // not act on them.
@@ -853,13 +905,14 @@ mod tests {
     fn keyframe_request() -> ScreenShareMessage { ScreenShareMessage::KeyframeRequest { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid() } }
     fn quality_update() -> ScreenShareMessage { ScreenShareMessage::QualityUpdate { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid(), target_bitrate_bps: 1_000_000, max_frame_rate: 30, scale_factor: 100 } }
     fn protocol_error() -> ScreenShareMessage { ScreenShareMessage::Error { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid(), code: 1, message: "encode failure".into() } }
+    fn clipboard() -> ScreenShareMessage { ScreenShareMessage::Clipboard { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid(), nonce: [0xAB; 16], text: "hello clipboard".into() } }
 
-    /// Every one of the ten Task 2.3 message types must survive a postcard
-    /// encode → decode round trip unchanged.
+    /// Every one of the Task 2.3 message types plus the Task 9.3 Clipboard
+    /// message must survive a postcard encode → decode round trip unchanged.
     #[test]
-    fn round_trip_all_ten_screen_share_messages() {
-        let messages = [offer(), accept(), reject(), started(), stopped(), stream_config(), video_packet(), keyframe_request(), quality_update(), protocol_error()];
-        assert_eq!(messages.len(), 10, "the Task 2.3 message set must have exactly ten types");
+    fn round_trip_all_screen_share_messages() {
+        let messages = [offer(), accept(), reject(), started(), stopped(), stream_config(), video_packet(), keyframe_request(), quality_update(), protocol_error(), clipboard()];
+        assert_eq!(messages.len(), 11, "the Task 2.3 message set (ten) plus Task 9.3 Clipboard must have eleven types");
         for message in messages {
             let bytes = message.encode().expect("encode should succeed");
             assert_eq!(ScreenShareMessage::decode(&bytes).expect("decode should succeed"), message);
@@ -874,6 +927,28 @@ mod tests {
             let result = ScreenShareMessage::decode(&bytes[..cut]);
             assert!(result.is_err(), "truncated input at byte {cut} must be rejected, got {result:?}");
         }
+    }
+
+    /// PDF Task 9.3 / BORU-SS-25: the clipboard payload is bounded, must be
+    /// non-empty, and must reference a live session. A clipboard message with
+    /// no text, oversized text, or an empty session id is rejected.
+    #[test]
+    fn clipboard_validation_bounds_text_and_session() {
+        let base = clipboard();
+        // Empty text is rejected.
+        let mut empty = base.clone();
+        if let ScreenShareMessage::Clipboard { text, .. } = &mut empty { text.clear(); }
+        assert!(matches!(empty.encode(), Err(ProtocolError::Malformed(_))));
+        // Oversized text is rejected.
+        let mut huge = base.clone();
+        if let ScreenShareMessage::Clipboard { text, .. } = &mut huge { *text = "x".repeat(MAX_CLIPBOARD_TEXT + 1); }
+        assert!(matches!(huge.encode(), Err(ProtocolError::Malformed(_))));
+        // An empty session id is rejected.
+        let mut empty_session = base.clone();
+        if let ScreenShareMessage::Clipboard { session_id, .. } = &mut empty_session { *session_id = ScreenShareSessionId::zero(); }
+        assert!(matches!(empty_session.encode(), Err(ProtocolError::Malformed(_))));
+        // The valid fixture still round-trips.
+        assert_eq!(ScreenShareMessage::decode(&base.encode().unwrap()).unwrap(), base);
     }
 
     /// A message carrying a non-current protocol version is rejected cleanly on
@@ -896,8 +971,8 @@ mod tests {
     /// are rejected cleanly.
     #[test]
     fn unknown_discriminant_is_rejected_cleanly() {
-        // The enum has ten variants → postcard discriminants 0..=9.
-        assert!(ScreenShareMessage::decode(&[10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).is_err());
+        // The enum has eleven variants → postcard discriminants 0..=10.
+        assert!(ScreenShareMessage::decode(&[11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).is_err());
         // A multi-byte varint far outside the variant range.
         assert!(ScreenShareMessage::decode(&[0xff, 0xff, 0xff, 0xff]).is_err());
     }

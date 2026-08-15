@@ -61,6 +61,7 @@ pub use protocol::{
     ControlMessage, Hello, InboundMedia, InputEventKind, Permission, ScreenShareMessage,
     ScreenShareProtocol, SCREEN_SHARE_ALPN, SCREEN_SHARE_PROTOCOL_VERSION, MAX_INPUT_CODE,
     MAX_MODIFIER_MASK, MAX_SCREEN_SHARE_MESSAGE, MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT,
+    MAX_CLIPBOARD_TEXT,
 };
 pub use reconnect::{
     keyframe_request, retry_reconnect, ReconnectOutcome, ReconnectPolicy,

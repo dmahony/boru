@@ -71,6 +71,11 @@ pub enum SessionEvent {
     ControlRequest { session_id: ScreenShareSessionId, peer_id: iroh::PublicKey, capabilities: Vec<Capability> },
     /// Control became active or was revoked while viewing continues.
     ControlChanged { session_id: ScreenShareSessionId, active: bool, capabilities: Vec<Capability> },
+    /// A peer sent a text-only clipboard payload (PDF Task 9.3 / BORU-SS-25).
+    /// Emitted only after the payload was authorized against the explicitly
+    /// granted `Clipboard` capability — clipboard sync is never implied by
+    /// remote control. The app places the text on the local clipboard.
+    ClipboardReceived { session_id: ScreenShareSessionId, text: String },
 }
 
 #[derive(Debug, Clone)]

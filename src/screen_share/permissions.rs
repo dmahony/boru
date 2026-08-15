@@ -42,7 +42,8 @@ impl Capability {
     /// True for the remote-control capabilities that require explicit consent
     /// and ride the grant nonce. `ViewScreen` is the view-only baseline and is
     /// never granted through the control path; `Clipboard` is a separate
-    /// optional capability (PDF Task 9.3, BORU-SS-25).
+    /// optional capability (PDF Task 9.3, BORU-SS-25) — clipboard sync is
+    /// never implied by remote control and must be granted on its own.
     pub fn is_control(self) -> bool {
         matches!(self, Capability::ControlPointer | Capability::ControlKeyboard)
     }
@@ -152,20 +153,20 @@ impl SessionPermissions {
         self.active && self.granted.iter().all(|capability| *capability == Capability::ViewScreen)
     }
     /// Host-side explicit consent: add the given capabilities (control or
-    /// clipboard) and issue a fresh nonce token when any control capability is
+    /// clipboard) and issue a fresh nonce token whenever any capability is
     /// granted. `ViewScreen` is never granted through this path — it is the
     /// implied baseline. Returns false when the session is no longer active.
     pub fn grant(&mut self, capabilities: impl IntoIterator<Item = Capability>) -> bool {
         if !self.active { return false; }
-        let mut granted_control = false;
+        let mut granted_any = false;
         for capability in capabilities {
             if capability == Capability::ViewScreen { continue; }
             if !self.granted.contains(&capability) && self.granted.len() < MAX_CAPABILITIES {
                 self.granted.push(capability);
-                granted_control |= capability.is_control();
+                granted_any = true;
             }
         }
-        if granted_control {
+        if granted_any {
             let mut nonce = [0; 16];
             if getrandom::fill(&mut nonce).is_err() { return false; }
             self.token = Some(ControlToken { nonce, issued_at: Instant::now() });
@@ -178,15 +179,15 @@ impl SessionPermissions {
     /// never granted through this path.
     pub fn grant_with_nonce(&mut self, capabilities: impl IntoIterator<Item = Capability>, nonce: [u8; 16]) -> bool {
         if !self.active { return false; }
-        let mut granted_control = false;
+        let mut granted_any = false;
         for capability in capabilities {
             if capability == Capability::ViewScreen { continue; }
             if !self.granted.contains(&capability) && self.granted.len() < MAX_CAPABILITIES {
                 self.granted.push(capability);
-                granted_control |= capability.is_control();
+                granted_any = true;
             }
         }
-        if granted_control {
+        if granted_any {
             self.token = Some(ControlToken { nonce, issued_at: Instant::now() });
         }
         true
@@ -350,6 +351,37 @@ mod tests {
         assert!(permissions.nonce_matches(nonce, Instant::now()));
         assert!(!permissions.nonce_matches([0x00; 16], Instant::now()));
         assert!(permissions.allows(session, peer, Capability::ControlKeyboard));
+    }
+
+    /// PDF Task 9.3 / BORU-SS-25: clipboard sync is a SEPARATE optional
+    /// capability — granting remote control (pointer/keyboard) must NEVER
+    /// imply clipboard sync, and clipboard must be grantable on its own.
+    #[test]
+    fn clipboard_is_separate_from_remote_control() {
+        let session = session();
+        let peer = peer();
+        let mut permissions = SessionPermissions::view_only(session, peer);
+
+        // Granting remote control capabilities does not enable clipboard sync.
+        assert!(permissions.grant([Capability::ControlPointer, Capability::ControlKeyboard]));
+        assert!(permissions.allows(session, peer, Capability::ControlPointer));
+        assert!(permissions.allows(session, peer, Capability::ControlKeyboard));
+        assert!(!permissions.allows(session, peer, Capability::Clipboard));
+        assert!(!Capability::Clipboard.is_control(), "Clipboard must not be a control capability");
+
+        // A separate, explicit clipboard grant enables sync on its own and
+        // mints a fresh token so the wire GrantControl message can carry a nonce.
+        assert!(permissions.grant([Capability::Clipboard]));
+        assert!(permissions.allows(session, peer, Capability::Clipboard));
+        assert!(permissions.token().is_some());
+        // Clipboard alone never implies remote control.
+        let mut clipboard_only = SessionPermissions::view_only(session, peer);
+        assert!(clipboard_only.grant([Capability::Clipboard]));
+        assert!(clipboard_only.allows(session, peer, Capability::Clipboard));
+        assert!(!clipboard_only.allows(session, peer, Capability::ControlPointer));
+        assert!(!clipboard_only.allows(session, peer, Capability::ControlKeyboard));
+        assert!(!clipboard_only.has_control());
+        assert!(!clipboard_only.is_view_only());
     }
 
     #[test]

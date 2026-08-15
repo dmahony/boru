@@ -47,6 +47,10 @@ pub enum HostCommand {
     GrantControl(Vec<Capability>),
     /// Host revokes control without ending view-only sharing (emits RevokeControl).
     RevokeControl,
+    /// Host pushes its local text clipboard to the viewer (PDF Task 9.3).
+    /// Requires the explicitly granted `Clipboard` capability; never implied
+    /// by remote control.
+    SendClipboard(String),
 }
 
 /// Run a full host session: dial the viewer, negotiate consent, then stream
@@ -196,8 +200,10 @@ async fn run_host_session_inner(
                     Ok(ReadUnit::ScreenShare(message)) => {
                         // Versioned negotiation/lifecycle messages are the
                         // canonical protocol set (BORU-SS-08); the legacy
-                        // host loop does not consume them yet.
-                        tracing::debug!(?message, "screen-share: host ignored versioned message");
+                        // host loop does not consume them during negotiation.
+                        // Log only the variant discriminant — clipboard
+                        // payloads must never be logged (PDF guardrail).
+                        tracing::debug!(variant = ?std::mem::discriminant(&message), "screen-share: host ignored versioned message during negotiation");
                         false
                     }
                     Err(_) => return,
@@ -217,6 +223,10 @@ async fn run_host_session_inner(
                     }
                     false
                 }
+                // Clipboard sync (PDF Task 9.3) is only meaningful once the
+                // media path is streaming; during negotiation the payload is
+                // dropped (never logged — PDF guardrail).
+                Some(HostCommand::SendClipboard(_)) => false,
                 None => return,
             },
             _ = tokio::time::sleep(Duration::from_millis(250)) => false,
@@ -393,10 +403,29 @@ async fn run_host_session_inner(
                             ScreenShareMessage::Error { session_id: sid, message: peer_error, .. } if sid == session_id => {
                                 tracing::warn!(error = %peer_error, "screen-share: host received peer error");
                             }
+                            // Text-only clipboard sync (PDF Task 9.3 /
+                            // BORU-SS-25): the viewer pushes its local
+                            // clipboard to the host. Clipboard is a SEPARATE
+                            // optional capability — never implied by remote
+                            // control — so the payload is authorized against
+                            // the explicitly granted Clipboard capability
+                            // (with the current grant nonce as the freshness
+                            // gate, mirroring input). Unauthorized payloads
+                            // are dropped without applying or logging them.
+                            ScreenShareMessage::Clipboard { session_id: sid, nonce, text, .. } if sid == session_id => {
+                                let authorized = manager.permissions(sid).is_some_and(|permissions| {
+                                    remote_input::authorize_nonce(permissions, sid, peer, Capability::Clipboard, nonce).is_ok()
+                                });
+                                if !authorized { continue 'streaming; }
+                                tracing::info!("screen-share: host applied peer clipboard payload (text)");
+                                let _ = events.send(SessionEvent::ClipboardReceived { session_id: sid, text }).await;
+                            }
                             other => {
                                 // Other versioned lifecycle messages are not
-                                // consumed by the legacy host loop yet.
-                                tracing::debug!(?other, "screen-share: host ignored versioned message");
+                                // consumed by the legacy host loop yet. Log
+                                // only the variant discriminant — clipboard
+                                // payloads must never be logged (PDF guardrail).
+                                tracing::debug!(variant = ?std::mem::discriminant(&other), "screen-share: host ignored versioned message");
                             }
                         },
                         Ok(ReadUnit::Media(_, _)) => {}
@@ -410,13 +439,17 @@ async fn run_host_session_inner(
                     // Remote control is opt-in (PDF Task 9.1 / T5.3): the
                     // platform input backend (RemoteDesktop portal on
                     // Wayland/XWayland, XTest on native X11) is opened only
-                    // when the host user explicitly grants control, never for
-                    // view-only shares. If the platform is missing or the user
-                    // denies the portal dialog, `create_platform_backend`
-                    // fails closed to `UnavailableInputBackend` and the grant
-                    // still proceeds at the protocol level while input does
-                    // nothing — the share remains view-only and functional.
-                    if backend.is_none() {
+                    // when the host user explicitly grants CONTROL. A
+                    // clipboard-only grant (PDF Task 9.3) must never open the
+                    // input backend or pop the portal dialog — clipboard sync
+                    // is a separate optional capability. If the platform is
+                    // missing or the user denies the portal dialog,
+                    // `create_platform_backend` fails closed to
+                    // `UnavailableInputBackend` and the grant still proceeds
+                    // at the protocol level while input does nothing — the
+                    // share remains view-only and functional.
+                    let grants_control = capabilities.iter().any(|capability| capability.is_control());
+                    if grants_control && backend.is_none() {
                         tracing::info!("screen-share: host opening remote-input backend (explicit control grant)");
                         let backend_started = std::time::Instant::now();
                         backend = Some(create_platform_backend(
@@ -436,6 +469,27 @@ async fn run_host_session_inner(
                     if let Some(message) = manager.revoke_control(session_id, events) {
                         let _ = control.send(ControlOut::Legacy(message)).await;
                     }
+                }
+                Some(HostCommand::SendClipboard(text)) => {
+                    // Host pushes its text clipboard to the viewer (PDF
+                    // Task 9.3). Clipboard is a separate optional capability:
+                    // the payload rides the reliable control channel as a
+                    // versioned message and the viewer authorizes it against
+                    // the explicitly granted Clipboard capability. Bounded to
+                    // MAX_CLIPBOARD_TEXT (validation would reject larger).
+                    if text.len() > protocol::MAX_CLIPBOARD_TEXT { continue; }
+                    let nonce = manager
+                        .permissions(session_id)
+                        .and_then(|permissions| permissions.token().map(|token| *token.nonce()));
+                    let Some(nonce) = nonce else { continue; };
+                    let _ = control
+                        .send(ControlOut::Versioned(ScreenShareMessage::Clipboard {
+                            version: SCREEN_SHARE_PROTOCOL_VERSION,
+                            session_id,
+                            nonce,
+                            text,
+                        }))
+                        .await;
                 }
                 None => return,
             },

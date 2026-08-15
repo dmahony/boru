@@ -384,21 +384,47 @@ impl IcedChat {
                     .map(Self::capability_label)
                     .collect::<Vec<_>>()
                     .join(", ");
-                items.push(text(format!("{viewer} requests control: {caps}")).into());
-                items.push(
-                    row![
+                items.push(text(format!("{viewer} requests: {caps}")).into());
+                let wants_pointer = capabilities
+                    .iter()
+                    .any(|c| matches!(c, Capability::ControlPointer | Capability::ControlKeyboard));
+                let wants_clipboard = capabilities.contains(&Capability::Clipboard);
+                let mut grant_buttons: Vec<iced::Element<'_, AppMessage>> = Vec::new();
+                if wants_pointer {
+                    grant_buttons.push(
                         button(text(crate::i18n::t("screenshare.grant_pointer")))
                             .on_press(AppMessage::ScreenShareGrantControl(vec![
                                 Capability::ControlPointer,
-                            ])),
+                            ]))
+                            .into(),
+                    );
+                    grant_buttons.push(
                         button(text(crate::i18n::t("screenshare.grant_pointer_keyboard")))
                             .on_press(AppMessage::ScreenShareGrantControl(vec![
                                 Capability::ControlPointer,
                                 Capability::ControlKeyboard,
-                            ])),
-                        button(text(crate::i18n::t("common.deny"))).on_press(AppMessage::ScreenShareDenyControl),
-                    ].spacing(SPACE_8).into(),
+                            ]))
+                            .into(),
+                    );
+                }
+                // Clipboard is a SEPARATE optional capability (PDF Task 9.3 /
+                // BORU-SS-25): the host may grant it on its own, without
+                // granting pointer/keyboard control.
+                if wants_clipboard {
+                    grant_buttons.push(
+                        button(text(crate::i18n::t("screenshare.grant_clipboard")))
+                            .on_press(AppMessage::ScreenShareGrantControl(vec![
+                                Capability::Clipboard,
+                            ]))
+                            .into(),
+                    );
+                }
+                grant_buttons.push(
+                    button(text(crate::i18n::t("common.deny")))
+                        .on_press(AppMessage::ScreenShareDenyControl)
+                        .into(),
                 );
+                items.push(row(grant_buttons).spacing(SPACE_8).into());
             }
             if self.screen_share_control_active {
                 items.push(
@@ -408,6 +434,13 @@ impl IcedChat {
                 items.push(
                     button(text(crate::i18n::t("screenshare.revoke_control")))
                         .on_press(AppMessage::ScreenShareRevokeControl)
+                        .into(),
+                );
+            }
+            if self.screen_share_clipboard_active {
+                items.push(
+                    button(text(crate::i18n::t("screenshare.send_clipboard")))
+                        .on_press(AppMessage::ScreenShareHostSendClipboard)
                         .into(),
                 );
             }
@@ -486,6 +519,24 @@ impl IcedChat {
                         .into(),
                 );
             }
+            // Clipboard is a SEPARATE optional capability (PDF Task 9.3 /
+            // BORU-SS-25): the viewer requests it explicitly, and it is never
+            // enabled by granting or requesting remote control.
+            if self.screen_share_clipboard_active {
+                actions.push(
+                    button(text(crate::i18n::t("screenshare.send_clipboard")))
+                        .on_press(AppMessage::ScreenShareSendClipboard)
+                        .padding([2, 6])
+                        .into(),
+                );
+            } else {
+                actions.push(
+                    button(text(crate::i18n::t("screenshare.request_clipboard")))
+                        .on_press(AppMessage::ScreenShareRequestClipboard)
+                        .padding([2, 6])
+                        .into(),
+                );
+            }
             actions.push(
                 button(text(crate::i18n::t("screenshare.stop_viewing")))
                     .on_press(AppMessage::StopScreenShare)
@@ -525,7 +576,8 @@ impl IcedChat {
         match capability {
             Capability::ControlPointer => "pointer".to_string(),
             Capability::ControlKeyboard => "keyboard".to_string(),
-            _ => "other".to_string(),
+            Capability::Clipboard => "clipboard".to_string(),
+            Capability::ViewScreen => "view".to_string(),
         }
     }
 
