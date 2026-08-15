@@ -95,6 +95,12 @@ pub enum CaptureFailureKind {
     DeviceLost,
     /// The monitor/source is no longer available (unplugged, session ended).
     SourceUnavailable,
+    /// The shared MONITOR was unplugged / the laptop was undocked — the
+    /// capture item closed (WinRT `GraphicsCaptureItem.Closed`, PDF Phase 14
+    /// / BORU-SS-38). Distinct from [`Self::SourceUnavailable`] (which also
+    /// covers generic session-end) so the host can auto-fallback to the next
+    /// available monitor without ending the session.
+    MonitorLost,
     /// The workstation is locked; capture is paused (`E_CHANGED_STATE` with a
     /// still-attached monitor is treated as a lock-screen pause).
     ScreenLocked,
@@ -130,6 +136,10 @@ impl CaptureFailureKind {
             0x887A_0005 | 0x887A_0007 => Self::DeviceLost,
             // E_CHANGED_STATE (0x8000000C): the capture item changed or
             // became unavailable (unplug / session ended / screen locked).
+            // The caller distinguishes MonitorLost (unplug/dock-undock, PDF
+            // Phase 14 / BORU-SS-38) from ScreenLocked by re-checking
+            // whether the monitor is still attached; the raw code alone maps
+            // to the generic SourceUnavailable.
             0x8000_000C => Self::SourceUnavailable,
             _ => Self::Api(hresult),
         }
@@ -143,6 +153,7 @@ impl CaptureFailureKind {
             Self::SourceUnavailable => {
                 "capture source unavailable (monitor unplugged or session ended)".to_string()
             }
+            Self::MonitorLost => "capture monitor lost (unplugged or undocked)".to_string(),
             Self::ScreenLocked => "capture paused: workstation locked".to_string(),
             Self::SourceMinimized => "capture source minimized".to_string(),
             Self::Resized => "capture source resized".to_string(),

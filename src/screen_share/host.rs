@@ -17,7 +17,7 @@ use super::{
         audio_sample_ring, create_system_audio_capture, OpusAudioEncoder, SystemAudioCapture,
         AUDIO_FRAME_MS, AUDIO_RING_SAMPLES, AUDIO_SAMPLES_PER_FRAME,
     },
-    capture::{CaptureConfig, CaptureSource, CaptureSourceId, DirtyRegion},
+    capture::{CaptureConfig, CaptureSource, CaptureSourceId, CaptureSourceKind, DirtyRegion},
     channels::{
         ControlChannel, ControlOut, MediaChannel, DEFAULT_CONTROL_QUEUE_CAPACITY,
         DEFAULT_MEDIA_QUEUE_CAPACITY,
@@ -26,13 +26,14 @@ use super::{
     coords::{desktop_to_normalized, scale_sprite_to, CursorMeta, CursorSprite, MonitorGeometry},
     permissions::{Capability, SlidingWindowRateLimiter},
     platform::{capture_dimensions, create_capture_source, CAPTURE_FPS, ActiveCapture},
-    protocol::{self, ControlMessage, InputEventKind, RedactedText, ScreenShareMessage, SCREEN_SHARE_PROTOCOL_VERSION},
+    presets::QualityPreset,
+    protocol::{self, ControlMessage, InputEventKind, RedactedText, ScreenShareMessage, SourceMode, SCREEN_SHARE_PROTOCOL_VERSION},
     reconnect::{retry_reconnect, ReconnectPolicy},
     remote_input::{self, create_platform_backend, InputEvent, NormalizedPointer, RemoteInput},
     session::{ScreenShareSessionId, SessionEvent, SessionManager, SessionState},
     stats::{ScreenShareSessionMetrics, ScreenShareStats},
-    transport::{read_unit, AudioHeader, QuicScreenTransport, ReadUnit},
-    ScreenShareError, SCREEN_SHARE_ALPN,
+    transport::{read_unit, selected_path_kind, AudioHeader, PathKind, QuicScreenTransport, ReadUnit},
+    ScreenShareError, ScreenShareErrorKind, SCREEN_SHARE_ALPN,
 };
 use iroh::endpoint::Endpoint;
 use iroh::PublicKey;
@@ -69,6 +70,11 @@ pub enum HostCommand {
     /// drains every Opus frame. Disabling stops capture and audio packets.
     /// Emits `SessionEvent::AudioState` with the outcome.
     SetAudioEnabled(bool),
+    /// Sharer overrides the quality preset (BORU-SS-39). The chosen preset's
+    /// ceiling is applied immediately — the user's explicit choice wins over
+    /// the path-derived auto preset until the session ends. `None` restores
+    /// the path-derived preset (auto mode).
+    SetQualityPreset(Option<QualityPreset>),
 }
 
 /// Host-side cursor delivery state for `Metadata` cursor mode (BORU-SS-33 /
@@ -365,6 +371,15 @@ async fn run_host_session_inner(
             return SessionTermination::TransportFailed;
         }
     };
+    // BORU-SS-39: choose the initial quality preset from the selected QUIC
+    // path kind (Direct → LAN-high headroom, Relay → conservative ceiling,
+    // Unknown → balanced). The sharer can override it at any time via
+    // `HostCommand::SetQualityPreset`; a manual override wins over the
+    // path-derived preset until the session ends (`None` restores auto).
+    let initial_path = transport.path_kind();
+    let mut preset = QualityPreset::for_path(initial_path);
+    let mut user_override: Option<QualityPreset> = None;
+    let mut last_path_kind = initial_path;
     // Separate logical channels (PDF Task 3.2): a reliable control channel and
     // a dedicated bounded media channel. Chat traffic lives on a different
     // QUIC connection (gossip), so it cannot block screen-share frames; these
@@ -458,6 +473,16 @@ async fn run_host_session_inner(
                     }
                     false
                 }
+                // BORU-SS-39: the sharer picked a quality preset before the
+                // viewer accepted. The initial encoder config (created when
+                // streaming starts) uses it; a later override applies to the
+                // live adaptive controller.
+                Some(HostCommand::SetQualityPreset(override_preset)) => {
+                    preset = override_preset.unwrap_or_else(|| QualityPreset::for_path(last_path_kind));
+                    user_override = override_preset;
+                    tracing::info!(preset = preset.name(), override = user_override.is_some(), "screen-share: host preset selected before streaming");
+                    false
+                }
                 None => return SessionTermination::HostCommandClosed,
             },
             _ = tokio::time::sleep(Duration::from_millis(250)) => false,
@@ -485,7 +510,15 @@ async fn run_host_session_inner(
     let encode_width = capture_width & !1;
     let encode_height = capture_height & !1;
     if encode_width == 0 || encode_height == 0 { return SessionTermination::InvalidGeometry; }
+    // BORU-SS-39: the initial encoder config is derived from the capture
+    // session AND the quality preset chosen from the connection path (or the
+    // sharer's pre-streaming override). The pre-preset config is kept as the
+    // preset reference so later preset/path changes recompute the ceiling
+    // relative to the capture rates, independent of the current adaptive
+    // level.
     let mut config = CodecConfig::from_capture_config(&capture_config, encode_width, encode_height);
+    let preset_reference = config;
+    preset.apply_to_config(&mut config);
     let Ok(mut encoder) = OpenH264Encoder::new(config) else { return SessionTermination::EncodeInitFailed };
     // PDF Phase 12: one structured capture-start line with the negotiated
     // codec, dimensions, bitrate, frame rate and backend. Contains no media
@@ -498,8 +531,36 @@ async fn run_host_session_inner(
         height = encode_height,
         bitrate_bps = config.target_bitrate_bps,
         frame_rate = capture_fps,
+        preset = preset.name(),
+        path = ?last_path_kind,
         "screen-share: capture started"
     );
+    // BORU-SS-38: advertise the initial stream configuration (including the
+    // `source_mode` — Single / PerDisplay / Spanning) BEFORE the first video
+    // packet so the viewer knows how the shared desktop maps onto the stream.
+    // Old viewers that predate the field decode it as Single (backward
+    // compatible); new viewers use it to present the correct source model.
+    let initial_mode = current_source
+        .as_ref()
+        .map(source_mode_for_source)
+        .unwrap_or(SourceMode::Single);
+    if let Some(source) = current_source.as_ref() {
+        if let Ok(message) = stream_config_message(session_id, &config, source, capture_config.target_fps, initial_mode) {
+            let _ = control.send(ControlOut::Versioned(message)).await;
+        }
+    }
+    let _ = control
+        .send(ControlOut::Versioned(ScreenShareMessage::SourceChanged {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id,
+            source_id: current_source.as_ref().map_or(1, |source| source.id.0),
+            title: current_source.as_ref().map_or_else(|| format!("Screen: {encode_width}x{encode_height}"), |source| source.title.clone()),
+            width: encode_width.min(u16::MAX as u32) as u16,
+            height: encode_height.min(u16::MAX as u32) as u16,
+            frame_rate: capture_config.target_fps.min(u16::MAX as u32) as u16,
+            source_mode: initial_mode,
+        }))
+        .await;
     // PDF Phase 10: monitor unplug / laptop dock-undock handling. When no
     // source remains the stream PAUSES (no frames sent) instead of ending
     // the session; a periodic re-enumeration resumes with the first
@@ -673,6 +734,41 @@ async fn run_host_session_inner(
                             ScreenShareMessage::KeyframeRequest { session_id: sid, .. } if sid == session_id => {
                                 keyframe_requests += 1;
                                 encoder.force_keyframe();
+                            }
+                            // Viewer-initiated source switch (PDF Phase 14 /
+                            // BORU-SS-38). Policy: ANY viewer (view-only or
+                            // control-granted) may request; the host is the
+                            // final arbiter and honors the request only when
+                            // the requested source is in its CURRENT
+                            // enumeration — a monitor that was unplugged, or
+                            // an id that was never valid, is denied. Switching
+                            // which display is shown grants no control.
+                            ScreenShareMessage::RequestSource { session_id: sid, source_id, .. } if sid == session_id => {
+                                let requested = CaptureSourceId(source_id);
+                                let sources = capture.list_sources().unwrap_or_default();
+                                let permitted = sources.iter().any(|source| source.id == requested);
+                                if permitted {
+                                    tracing::info!(?source_id, "screen-share: host honoring viewer source request");
+                                    if let Some(geometry) = switch_capture_source(
+                                        &mut capture,
+                                        requested,
+                                        &capture_config,
+                                        &mut config,
+                                        &mut encoder,
+                                        &mut adaptive,
+                                        &control,
+                                        session_id,
+                                        events,
+                                    )
+                                    .await
+                                    {
+                                        announced_geometry = Some(geometry);
+                                        current_source = capture.current_source().or_else(|| current_source.clone());
+                                        stream_paused = false;
+                                    }
+                                } else {
+                                    tracing::warn!(?source_id, "screen-share: host denied viewer source request (source not in current enumeration)");
+                                }
                             }
                             // Manual lower-quality request from the viewer
                             // (PDF Task 7.3 / QualityUpdate path): clamp the
@@ -858,6 +954,22 @@ async fn run_host_session_inner(
                         tracing::info!(session = ?session_id, "screen-share: system audio sharing disabled");
                     }
                 }
+                // BORU-SS-39: the sharer overrides the quality preset (or
+                // restores the path-derived auto preset with None). The
+                // chosen ceiling applies immediately — user intent wins over
+                // the path-derived preset.
+                Some(HostCommand::SetQualityPreset(override_preset)) => {
+                    preset = override_preset.unwrap_or_else(|| QualityPreset::for_path(last_path_kind));
+                    user_override = override_preset;
+                    if apply_preset_override(&mut adaptive, &mut config, &mut encoder, &preset_reference, preset) {
+                        tracing::info!(preset = preset.name(), level = adaptive.level(),
+                            width = config.width, height = config.height,
+                            fps = config.target_fps, bitrate = config.target_bitrate_bps,
+                            "screen-share: host applied preset override");
+                    } else {
+                        tracing::info!(preset = preset.name(), "screen-share: host preset override (no config change)");
+                    }
+                }
                 None => return SessionTermination::HostCommandClosed,
             },
             _ = interval.tick() => {
@@ -1017,7 +1129,8 @@ async fn run_host_session_inner(
                             let geometry = (frame.width & !1, frame.height & !1);
                             if announced_geometry != Some(geometry) {
                                 let announced = if let Some(source) = capture.current_source() {
-                                    let message = source_changed_message(session_id, &source, capture_config.target_fps);
+                                    let mode = source_mode_for_source(&source);
+                                    let message = source_changed_message(session_id, &source, capture_config.target_fps, mode);
                                     control.send(ControlOut::Versioned(message)).await.is_ok()
                                 } else {
                                     false
@@ -1025,7 +1138,8 @@ async fn run_host_session_inner(
                                 if !announced {
                                     // No tracked source identity (e.g. the
                                     // whole-root fallback): announce the
-                                    // geometry change directly.
+                                    // geometry change directly. The whole-root
+                                    // fallback is `Spanning` (BORU-SS-38).
                                     let _ = control
                                         .send(ControlOut::Versioned(ScreenShareMessage::SourceChanged {
                                             version: SCREEN_SHARE_PROTOCOL_VERSION,
@@ -1035,6 +1149,7 @@ async fn run_host_session_inner(
                                             width: geometry.0.min(u16::MAX as u32) as u16,
                                             height: geometry.1.min(u16::MAX as u32) as u16,
                                             frame_rate: capture_config.target_fps.min(u16::MAX as u32) as u16,
+                                            source_mode: SourceMode::Spanning,
                                         }))
                                         .await;
                                 }
@@ -1123,6 +1238,38 @@ async fn run_host_session_inner(
                                         .map(|path| path.rtt().as_micros() as u64)
                                         .unwrap_or(0);
                                     stats.set_rtt_us(rtt_us);
+                                    // BORU-SS-39: detect a Direct↔Relay switch
+                                    // on the selected QUIC path and feed it to
+                                    // the adaptive controller conservatively.
+                                    // The ceiling is recomputed from the new
+                                    // path's preset: a lowered ceiling clamps
+                                    // immediately (never overshoot a relay); a
+                                    // raised ceiling is headroom only and
+                                    // recovery stays gradual. A user preset
+                                    // override wins over the path-derived
+                                    // preset.
+                                    let current_path = selected_path_kind(&connection);
+                                    if current_path != last_path_kind {
+                                        last_path_kind = current_path;
+                                        if current_path != PathKind::Unknown {
+                                            if user_override.is_none() {
+                                                let path_preset = QualityPreset::for_path(current_path);
+                                                if path_preset != preset {
+                                                    preset = path_preset;
+                                                    let mut ceiling = preset_reference;
+                                                    path_preset.apply_to_config(&mut ceiling);
+                                                    let decision = adaptive.set_ceiling(ceiling);
+                                                    if apply_quality_config(&mut encoder, &mut config, decision) {
+                                                        tracing::info!(path = ?current_path, preset = preset.name(),
+                                                            level = adaptive.level(), bitrate = config.target_bitrate_bps,
+                                                            fps = config.target_fps, "screen-share: path change applied quality preset ceiling");
+                                                    }
+                                                }
+                                            } else {
+                                                tracing::info!(path = ?current_path, preset = preset.name(), "screen-share: path changed; user preset override retained");
+                                            }
+                                        }
+                                    }
                                     let snapshot = stats.snapshot();
                                     let decision = adaptive.update(snapshot);
                                     // PDF Phase 12: expose developer metrics to
@@ -1143,6 +1290,9 @@ async fn run_host_session_inner(
                                         fps: config.target_fps,
                                         bitrate_bps: config.target_bitrate_bps as u64,
                                         backend: capture.backend_name().to_string(),
+                                        path_kind: last_path_kind,
+                                        preset,
+                                        adaptive_level: adaptive.level(),
                                         snapshot,
                                     };
                                     let _ = events.try_send(SessionEvent::Metrics { session_id, metrics });
@@ -1193,13 +1343,15 @@ async fn run_host_session_inner(
                         }
                     }
                     Err(error) => {
-                        tracing::warn!(error = %error, "screen-share: capture failed");
+                        tracing::warn!(error = %error, kind = ?error.kind(), "screen-share: capture failed");
                         // PDF Phase 10: monitor unplug / laptop dock-undock.
                         // Recover gracefully instead of ending the session:
                         // re-enumerate and fall back to the first remaining
                         // source, or pause the stream when none remains. The
                         // chat session and the screen-share session both
-                        // survive — no crash, no forced end.
+                        // survive — no crash, no forced end. The failure
+                        // kind (MonitorLost vs transient) drives the
+                        // recovery decision.
                         if !recover_capture_source(
                             &mut capture,
                             &mut current_source,
@@ -1210,6 +1362,7 @@ async fn run_host_session_inner(
                             &control,
                             session_id,
                             events,
+                            error.kind(),
                         )
                         .await
                         {
@@ -1369,10 +1522,11 @@ async fn wait_for_accept(
 
 /// Apply one adaptive-quality decision to the live encoder.
 ///
-/// Resolution/fps changes rebuild the encoder (config generation bump so the
-/// viewer re-initialises its decoder); a pure bitrate change uses the cheaper
-/// same-resolution rebuild (no generation bump, forced keyframe re-syncs the
-/// stream). Returns `true` when a change was applied.
+/// Resolution/fps/quality-profile changes rebuild the encoder (config
+/// generation bump so the viewer re-initialises its decoder); a pure bitrate
+/// change uses the cheaper same-resolution rebuild (no generation bump,
+/// forced keyframe re-syncs the stream). Returns `true` when a change was
+/// applied.
 fn apply_quality_config(
     encoder: &mut OpenH264Encoder,
     config: &mut CodecConfig,
@@ -1380,7 +1534,9 @@ fn apply_quality_config(
 ) -> bool {
     if !decision.changed { return false; }
     let next = decision.config;
-    if next.width != config.width || next.height != config.height || next.target_fps != config.target_fps {
+    if next.width != config.width || next.height != config.height || next.target_fps != config.target_fps
+        || next.quality_profile != config.quality_profile
+    {
         if encoder.reconfigure(next).is_err() { return false; }
     } else if next.target_bitrate_bps != config.target_bitrate_bps {
         if encoder.reconfigure_bitrate(next.target_bitrate_bps).is_err() { return false; }
@@ -1389,6 +1545,23 @@ fn apply_quality_config(
     }
     *config = next;
     true
+}
+
+/// Recompute the adaptive ceiling from a preset (relative to the stable
+/// preset reference, independent of the current adaptive level) and apply it
+/// to the live encoder immediately — the user-override path (BORU-SS-39).
+/// Returns `true` when a change was applied.
+fn apply_preset_override(
+    adaptive: &mut AdaptiveQuality,
+    config: &mut CodecConfig,
+    encoder: &mut OpenH264Encoder,
+    preset_reference: &CodecConfig,
+    preset: QualityPreset,
+) -> bool {
+    let mut ceiling = *preset_reference;
+    preset.apply_to_config(&mut ceiling);
+    let decision = adaptive.override_ceiling(ceiling);
+    apply_quality_config(encoder, config, decision)
 }
 
 /// Write one control response on an accepted stream (mirrors the protocol
@@ -1407,12 +1580,14 @@ async fn write_control_response(send: &mut iroh::endpoint::SendStream, message: 
 /// frame with the new geometry (PDF Phase 10: "send an explicit
 /// source-change/config-change message before media dimensions change").
 /// The dimensions are rounded down to even values to match what the encoder
-/// will actually produce. Pure helper so the sequencing contract is
-/// unit-testable without a live transport.
+/// will actually produce; `mode` carries the source_mode (PDF Phase 14 /
+/// BORU-SS-38). Pure helper so the sequencing contract is unit-testable
+/// without a live transport.
 fn source_changed_message(
     session_id: ScreenShareSessionId,
     source: &CaptureSource,
     target_fps: u32,
+    mode: SourceMode,
 ) -> ScreenShareMessage {
     ScreenShareMessage::SourceChanged {
         version: SCREEN_SHARE_PROTOCOL_VERSION,
@@ -1422,7 +1597,52 @@ fn source_changed_message(
         width: (source.width & !1).min(u16::MAX as u32) as u16,
         height: (source.height & !1).min(u16::MAX as u32) as u16,
         frame_rate: target_fps.min(u16::MAX as u32) as u16,
+        source_mode: mode,
     }
+}
+
+/// The `source_mode` the host should advertise for a source (PDF Phase 14 /
+/// BORU-SS-38). A `Desktop` (whole-root/portal) source is `Spanning`; a
+/// `Monitor` source is `PerDisplay` (one display at a time, the viewer may
+/// request switches); a `Window` source is `Single`. Pure helper so the
+/// mapping is unit-testable.
+fn source_mode_for_source(source: &CaptureSource) -> SourceMode {
+    match source.kind {
+        CaptureSourceKind::Desktop => SourceMode::Spanning,
+        CaptureSourceKind::Monitor => SourceMode::PerDisplay,
+        CaptureSourceKind::Window => SourceMode::Single,
+    }
+}
+
+/// Build the wire `StreamConfig` message for the given source + live codec
+/// config (BORU-SS-38). Sent BEFORE the first video packet of a
+/// configuration so the viewer can (re)initialize its decoder with the
+/// negotiated geometry AND the `source_mode`. Returns `None` when the
+/// geometry cannot be represented (zero/oversized).
+fn stream_config_message(
+    session_id: ScreenShareSessionId,
+    config: &CodecConfig,
+    source: &CaptureSource,
+    target_fps: u32,
+    source_mode: SourceMode,
+) -> Result<ScreenShareMessage, ScreenShareError> {
+    let width = (source.width & !1).min(u16::MAX as u32) as u16;
+    let height = (source.height & !1).min(u16::MAX as u32) as u16;
+    if width == 0 || height == 0 {
+        return Err(ScreenShareError::new("capture source has no valid geometry"));
+    }
+    Ok(ScreenShareMessage::StreamConfig {
+        version: SCREEN_SHARE_PROTOCOL_VERSION,
+        session_id,
+        width,
+        height,
+        frame_rate: target_fps.min(u16::MAX as u32) as u16,
+        target_bitrate_bps: config.target_bitrate_bps,
+        codec: "h264".to_string(),
+        keyframe_interval: config.keyframe_interval.min(u32::MAX as u64) as u32,
+        quality_profile: config.quality_profile.as_u8(),
+        source_mode,
+    })
 }
 
 /// Select the fallback source after the current source disappears (monitor
@@ -1464,7 +1684,8 @@ fn plan_source_switch(
     config.width = width;
     config.height = height;
     config.target_fps = target_fps;
-    Some((source_changed_message(session_id, source, target_fps), config))
+    let mode = source_mode_for_source(source);
+    Some((source_changed_message(session_id, source, target_fps, mode), config))
 }
 
 /// Execute a source switch (PDF Phase 10: the sharer switches the shared
@@ -1510,8 +1731,17 @@ async fn switch_capture_source(
         tracing::warn!(?source_id, width, height, "screen-share: switch source failed (no capturable geometry)");
         return None;
     }
-    // 1. Announce the change BEFORE any frame with the new geometry.
-    let message = source_changed_message(session_id, source, capture_config.target_fps);
+    // 1. Announce the change BEFORE any frame with the new geometry: first
+    // the full `StreamConfig` (geometry + bitrate + codec + source_mode),
+    // then the `SourceChanged` identity message.
+    let mode = source_mode_for_source(source);
+    if let Ok(config_message) = stream_config_message(session_id, config, source, capture_config.target_fps, mode) {
+        if let Err(error) = control.send(ControlOut::Versioned(config_message)).await {
+            tracing::warn!(error = %error, ?source_id, "screen-share: switch source failed (control channel, stream config)");
+            return None;
+        }
+    }
+    let message = source_changed_message(session_id, source, capture_config.target_fps, mode);
     if let Err(error) = control.send(ControlOut::Versioned(message)).await {
         tracing::warn!(error = %error, ?source_id, "screen-share: switch source failed (control channel)");
         return None;
@@ -1546,9 +1776,50 @@ async fn switch_capture_source(
         title: source.title.clone(),
         width: source.width,
         height: source.height,
+        source_mode: mode,
     }).await;
     tracing::info!(session = ?session_id, ?source_id, title = %source.title, width, height, "screen-share: host switched source");
     Some((width, height))
+}
+
+/// What the host should do after a capture failure (PDF Phase 10 /
+/// BORU-SS-38 monitor unplug handling). Pure decision so it is
+/// Linux-runnable unit-testable without a live backend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CaptureRecovery {
+    /// The current source is still enumerated: a transient failure. Pause
+    /// briefly and let the periodic re-check resume it.
+    KeepCurrent,
+    /// Switch to this source and continue streaming.
+    Fallback(CaptureSource),
+    /// No source remains; pause the stream (the session survives).
+    Pause,
+}
+
+/// Plan the recovery for a capture failure (PDF Phase 10 / BORU-SS-38).
+///
+/// On a monitor-lost failure (monitor unplug / dock-undock) the current
+/// source is gone: fall back to the first remaining source, or pause when
+/// none remains. On any OTHER failure the source may still be healthy, so
+/// keep it when it is still enumerated (pause briefly) and only fall back /
+/// pause when the current source actually disappeared. The session never
+/// ends on a capture failure — the caller resumes or pauses, never stalls.
+pub fn plan_capture_recovery(
+    failure: ScreenShareErrorKind,
+    sources: &[CaptureSource],
+    current: Option<CaptureSourceId>,
+) -> CaptureRecovery {
+    let current_still_present = current.is_some_and(|id| sources.iter().any(|s| s.id == id));
+    if current_still_present && failure != ScreenShareErrorKind::MonitorLost {
+        return CaptureRecovery::KeepCurrent;
+    }
+    match select_fallback_source(sources, current) {
+        Some(source) if !current_still_present || source.id != current.unwrap_or(source.id) => {
+            CaptureRecovery::Fallback(source)
+        }
+        Some(_) => CaptureRecovery::KeepCurrent,
+        None => CaptureRecovery::Pause,
+    }
 }
 
 /// Recover from a capture failure (PDF Phase 10: monitor unplug, laptop
@@ -1568,6 +1839,7 @@ async fn recover_capture_source(
     control: &ControlChannel,
     session_id: ScreenShareSessionId,
     events: &mpsc::Sender<SessionEvent>,
+    failure: ScreenShareErrorKind,
 ) -> bool {
     let sources = match capture.list_sources() {
         Ok(sources) => sources,
@@ -1578,27 +1850,34 @@ async fn recover_capture_source(
         }
     };
     let current_id = current_source.as_ref().map(|source| source.id);
-    let fallback = select_fallback_source(&sources, current_id);
-    let Some(fallback) = fallback else {
-        // No source remains — pause the stream (the session survives; a
-        // periodic re-enumeration resumes when a monitor re-appears).
-        let _ = events.send(SessionEvent::SourceUnavailable { session_id, reason: "no capture source remains (monitor unplugged?)".into(), fallback: None }).await;
-        return false;
-    };
-    // The current source is still enumerated: a transient failure. Pause
-    // briefly rather than re-arming the failing capture at frame rate; the
-    // paused recovery re-checks within a second.
-    if current_id == Some(fallback.id) {
-        let _ = events.send(SessionEvent::SourceUnavailable { session_id, reason: "capture failed; pausing until the source is stable".into(), fallback: Some(fallback.title.clone()) }).await;
-        return false;
-    }
-    // Switch to the first remaining source and continue streaming.
-    if switch_capture_source(capture, fallback.id, capture_config, config, encoder, adaptive, control, session_id, events).await.is_some() {
-        *current_source = Some(fallback.clone());
-        let _ = events.send(SessionEvent::SourceUnavailable { session_id, reason: "capture source changed after unplug".into(), fallback: Some(fallback.title.clone()) }).await;
-        true
-    } else {
-        false
+    match plan_capture_recovery(failure, &sources, current_id) {
+        CaptureRecovery::KeepCurrent => {
+            // The current source is still enumerated: a transient failure.
+            // Pause briefly rather than re-arming the failing capture at
+            // frame rate; the paused recovery re-checks within a second.
+            let reason = if failure == ScreenShareErrorKind::MonitorLost {
+                "capture source reported lost; waiting for it to stabilize".into()
+            } else {
+                "capture failed; pausing until the source is stable".into()
+            };
+            let _ = events.send(SessionEvent::SourceUnavailable { session_id, reason, fallback: current_source.as_ref().map(|s| s.title.clone()) }).await;
+            false
+        }
+        CaptureRecovery::Fallback(fallback) => {
+            if switch_capture_source(capture, fallback.id, capture_config, config, encoder, adaptive, control, session_id, events).await.is_some() {
+                *current_source = Some(fallback.clone());
+                let _ = events.send(SessionEvent::SourceUnavailable { session_id, reason: "capture source changed after unplug".into(), fallback: Some(fallback.title.clone()) }).await;
+                true
+            } else {
+                false
+            }
+        }
+        CaptureRecovery::Pause => {
+            // No source remains — pause the stream (the session survives; a
+            // periodic re-enumeration resumes when a monitor re-appears).
+            let _ = events.send(SessionEvent::SourceUnavailable { session_id, reason: "no capture source remains (monitor unplugged?)".into(), fallback: None }).await;
+            false
+        }
     }
 }
 
@@ -1616,6 +1895,117 @@ mod tests {
             width,
             height,
             geometry: Some(MonitorGeometry::new(0, 0, width, height)),
+        }
+    }
+
+    /// BORU-SS-38: the advertised source mode follows the source kind —
+    /// Desktop → Spanning, Monitor → PerDisplay, Window → Single.
+    #[test]
+    fn source_mode_follows_source_kind() {
+        let desktop = CaptureSource {
+            id: CaptureSourceId(9),
+            kind: CaptureSourceKind::Desktop,
+            title: "Entire desktop: 3840x2160".into(),
+            width: 3840,
+            height: 2160,
+            geometry: None,
+        };
+        let monitor = CaptureSource {
+            id: CaptureSourceId(10),
+            kind: CaptureSourceKind::Monitor,
+            title: "DP-1: 1920x1080".into(),
+            width: 1920,
+            height: 1080,
+            geometry: None,
+        };
+        let window = CaptureSource {
+            id: CaptureSourceId(11),
+            kind: CaptureSourceKind::Window,
+            title: "Firefox".into(),
+            width: 1280,
+            height: 800,
+            geometry: None,
+        };
+        assert_eq!(source_mode_for_source(&desktop), SourceMode::Spanning);
+        assert_eq!(source_mode_for_source(&monitor), SourceMode::PerDisplay);
+        assert_eq!(source_mode_for_source(&window), SourceMode::Single);
+    }
+
+    /// BORU-SS-38: the wire `StreamConfig` carries the negotiated geometry
+    /// AND the source_mode, and is valid on the wire.
+    #[test]
+    fn stream_config_message_carries_source_mode_and_geometry() {
+        let sid = ScreenShareSessionId::from_bytes([9; 16]);
+        let monitor = source(2, "HDMI-A-0", 2560, 1440);
+        let config = CodecConfig::default();
+        let message = stream_config_message(sid, &config, &monitor, 30, SourceMode::PerDisplay)
+            .expect("monitor config must build");
+        match &message {
+            ScreenShareMessage::StreamConfig { width, height, frame_rate, source_mode, keyframe_interval, quality_profile, .. } => {
+                assert_eq!((*width as u32, *height as u32), (2560, 1440));
+                assert_eq!(*frame_rate as u32, 30);
+                assert_eq!(*source_mode, SourceMode::PerDisplay);
+                assert_eq!(*keyframe_interval as u64, config.keyframe_interval);
+                assert_eq!(*quality_profile, config.quality_profile.as_u8());
+            }
+            other => panic!("expected StreamConfig, got {other:?}"),
+        }
+        // Wire-valid: passes its own validation.
+        let bytes = message.encode().expect("stream config must encode");
+        assert_eq!(ScreenShareMessage::decode(&bytes).unwrap(), message);
+        // A source with no capturable geometry is refused.
+        let degenerate = CaptureSource {
+            id: CaptureSourceId(3),
+            kind: CaptureSourceKind::Monitor,
+            title: "Tiny".into(),
+            width: 1,
+            height: 1,
+            geometry: None,
+        };
+        assert!(stream_config_message(sid, &config, &degenerate, 30, SourceMode::Single).is_err());
+    }
+
+    /// BORU-SS-38 unplug handling: a MonitorLost failure with a remaining
+    /// source falls back to the first remaining monitor (never ends the
+    /// session).
+    #[test]
+    fn monitor_lost_falls_back_to_next_available_source() {
+        // Monitor 2 was unplugged: it is NO LONGER in the enumeration, only
+        // monitor 1 remains.
+        let sources = vec![source(1, "DP-1", 1920, 1080)];
+        let recovery = plan_capture_recovery(ScreenShareErrorKind::MonitorLost, &sources, Some(CaptureSourceId(2)));
+        match recovery {
+            CaptureRecovery::Fallback(source) => assert_eq!(source.id, CaptureSourceId(1)),
+            other => panic!("expected fallback, got {other:?}"),
+        }
+        // No source remains: pause (the session survives).
+        let none_left = plan_capture_recovery(ScreenShareErrorKind::MonitorLost, &[], Some(CaptureSourceId(2)));
+        assert_eq!(none_left, CaptureRecovery::Pause);
+    }
+
+    /// BORU-SS-38 unplug handling: a transient (non-MonitorLost) failure with
+    /// the current source still enumerated keeps it — the caller pauses
+    /// briefly instead of needlessly switching.
+    #[test]
+    fn transient_failure_keeps_current_source_when_still_enumerated() {
+        let sources = vec![source(1, "DP-1", 1920, 1080), source(2, "HDMI-A-0", 1280, 720)];
+        let recovery = plan_capture_recovery(ScreenShareErrorKind::Generic, &sources, Some(CaptureSourceId(2)));
+        assert_eq!(recovery, CaptureRecovery::KeepCurrent);
+        // Even a MonitorLost classification with the source still enumerated
+        // keeps it (the classification may be stale after a re-enumeration).
+        let stale = plan_capture_recovery(ScreenShareErrorKind::MonitorLost, &sources, Some(CaptureSourceId(2)));
+        assert_eq!(stale, CaptureRecovery::KeepCurrent);
+    }
+
+    /// BORU-SS-38 unplug handling: a generic failure whose current source
+    /// disappeared still falls back to the first remaining source.
+    #[test]
+    fn generic_failure_with_missing_source_still_falls_back() {
+        let sources = vec![source(1, "DP-1", 1920, 1080)];
+        let recovery = plan_capture_recovery(ScreenShareErrorKind::Generic, &sources, Some(CaptureSourceId(99)));
+        match recovery {
+            CaptureRecovery::Fallback(source) => assert_eq!(source.id, CaptureSourceId(1)),
+            other => panic!("expected fallback, got {other:?}"),
         }
     }
 
@@ -1659,10 +2049,11 @@ mod tests {
     fn source_changed_message_rounds_to_even_dimensions() {
         let sid = ScreenShareSessionId::from_bytes([9; 16]);
         let odd = source(7, "OddPanel", 1919, 1079);
-        let message = source_changed_message(sid, &odd, 15);
+        let message = source_changed_message(sid, &odd, 15, SourceMode::PerDisplay);
         match &message {
-            ScreenShareMessage::SourceChanged { width, height, .. } => {
+            ScreenShareMessage::SourceChanged { width, height, source_mode, .. } => {
                 assert_eq!((*width, *height), (1918, 1078));
+                assert_eq!(*source_mode, SourceMode::PerDisplay);
             }
             other => panic!("expected SourceChanged, got {other:?}"),
         }

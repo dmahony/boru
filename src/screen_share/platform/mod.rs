@@ -20,7 +20,7 @@ pub use linux::{
     x11_window_source, ActiveCapture, CaptureRect, CursorMode, DesktopEnvironment, DisplayServer,
     LinuxPortalCapture, MachineError, PortalCapture, PortalEvent, PortalSessionMachine,
     PortalSourceTypes, PortalState, SessionFailure, SessionPhase, SessionType, X11Capture,
-    X11Monitor, X11Window, CAPTURE_FPS,
+    X11Monitor, X11Window, X11_DESKTOP_SOURCE_ID, CAPTURE_FPS,
 };
 
 /// Pure PipeWire format negotiation + CPU frame normalization (BORU-SS-14).

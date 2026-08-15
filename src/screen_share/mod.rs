@@ -13,6 +13,7 @@ pub mod coords;
 pub mod host;
 pub mod permissions;
 pub mod platform;
+pub mod presets;
 pub mod protocol;
 pub mod reconnect;
 pub mod remote_input;
@@ -69,10 +70,12 @@ pub use platform::{
 };
 pub use protocol::{
     ControlMessage, Hello, InboundAudio, InboundMedia, InputEventKind, Permission, RedactedText,
-    ScreenShareMessage, ScreenShareProtocol, SCREEN_SHARE_ALPN, SCREEN_SHARE_PROTOCOL_VERSION,
-    MAX_INPUT_CODE, MAX_MODIFIER_MASK, MAX_SCREEN_SHARE_MESSAGE, MOD_ALT, MOD_CTRL, MOD_META,
-    MOD_SHIFT, MAX_CLIPBOARD_TEXT, MAX_AUDIO_FRAME, MIN_AUDIO_SAMPLE_RATE, MAX_AUDIO_SAMPLE_RATE,
+    ScreenShareMessage, ScreenShareProtocol, SourceMode, SCREEN_SHARE_ALPN,
+    SCREEN_SHARE_PROTOCOL_VERSION, MAX_INPUT_CODE, MAX_MODIFIER_MASK,
+    MAX_SCREEN_SHARE_MESSAGE, MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT, MAX_CLIPBOARD_TEXT,
+    MAX_AUDIO_FRAME, MIN_AUDIO_SAMPLE_RATE, MAX_AUDIO_SAMPLE_RATE,
 };
+pub use presets::QualityPreset;
 pub use reconnect::{
     keyframe_request, retry_reconnect, ReconnectOutcome, ReconnectPolicy,
 };
@@ -118,6 +121,11 @@ pub enum ScreenShareErrorKind {
     /// capture or play shared system audio (e.g. no PipeWire runtime, no
     /// WASAPI loopback implementation, or no output device).
     AudioUnavailable,
+    /// The shared capture source (monitor) is no longer available —
+    /// monitor unplug / laptop dock-undock (PDF Phase 10 / BORU-SS-38).
+    /// The host recovers by falling back to the next available source or
+    /// pausing the stream; it never ends the session on this error.
+    MonitorLost,
 }
 
 /// Error returned by a screen-sharing boundary.
@@ -173,6 +181,13 @@ impl ScreenShareError {
     /// take.
     pub fn audio_unavailable(description: impl Into<String>) -> Self {
         Self::new(description).with_kind(ScreenShareErrorKind::AudioUnavailable)
+    }
+
+    /// Construct a monitor-lost error (monitor unplug / laptop dock-undock,
+    /// PDF Phase 10 / BORU-SS-38). The host falls back or pauses, never ends
+    /// the session on this error.
+    pub fn monitor_lost(description: impl Into<String>) -> Self {
+        Self::new(description).with_kind(ScreenShareErrorKind::MonitorLost)
     }
 
     /// Set the error kind (builder-style; used internally).
