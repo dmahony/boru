@@ -19563,7 +19563,22 @@ impl IcedChat {
             return content;
         }
         use iced::widget::mouse_area;
-        mouse_area(content)
+        // BORU-DESIGN-01 review fix: do NOT wrap a `Lazy` widget directly in a
+        // MouseArea. MouseArea does not override `size_hint()`, so the default
+        // forwards to `size()` which forwards to the content's `size()`. For a
+        // `Lazy` (e.g. the ChatList home screen), `Lazy::size()` calls
+        // `with_element()`, which unwraps the cached element — but the element
+        // is only populated during the iced `diff()` phase, which runs AFTER
+        // view construction. Any enclosing `Container::new` calls
+        // `size_hint()` eagerly, so `Container(MouseArea(Lazy))` panics with
+        // `Option::unwrap() on a None value` (iced_widget lazy.rs:65) on the
+        // first frame after enabling inspection mode. Wrapping the content in
+        // an explicit `Container` with Fill sizing means the MouseArea's size
+        // comes from the container's stored Lengths (never forwarded to the
+        // Lazy), and the Lazy element is produced normally during diff.
+        use iced::widget::container;
+        use iced::Length;
+        mouse_area(container(content).width(Length::Fill).height(Length::Fill))
             .on_enter(AppMessage::Inspector(crate::inspector::InspectorMsg::InspectHover(
                 Some(component),
             )))
