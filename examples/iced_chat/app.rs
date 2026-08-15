@@ -20,6 +20,11 @@ pub(crate) use calls::*;
 mod chat;
 pub(crate) use chat::*;
 
+#[cfg(feature = "screen-sharing")]
+mod screen_share_surface;
+#[cfg(feature = "screen-sharing")]
+pub(crate) use screen_share_surface::*;
+
 mod discover;
 pub(crate) use discover::*;
 
@@ -4269,6 +4274,22 @@ pub struct IcedChat {
     #[cfg(feature = "screen-sharing")]
     /// Last pointer position sent, to skip near-identical moves.
     screen_share_last_pointer_pos: Option<(f32, f32)>,
+    #[cfg(feature = "screen-sharing")]
+    /// Viewer surface presentation mode (fit / actual / explicit zoom).
+    screen_share_view_mode: ScreenShareViewMode,
+    #[cfg(feature = "screen-sharing")]
+    /// Pan center in source pixels (`None` = source center).
+    screen_share_pan: Option<(f32, f32)>,
+    #[cfg(feature = "screen-sharing")]
+    /// Active pan drag: last pointer position over the surface.
+    screen_share_drag: Option<iced::Point>,
+    #[cfg(feature = "screen-sharing")]
+    /// Last hover position over the surface (wheel-zoom anchor).
+    screen_share_hover: Option<iced::Point>,
+    #[cfg(feature = "screen-sharing")]
+    /// Size of the last decoded frame (`width`, `height`), for the surface
+    /// geometry. Set from `CapturedFrame` when a new frame arrives.
+    screen_share_src_size: Option<(u32, u32)>,
     /// Receiver for incoming inbox events.
     pub inbox_events_rx: Arc<Mutex<Receiver<InboxEvent>>>,
     /// Receiver for incoming whisper events.
@@ -5632,6 +5653,22 @@ pub enum AppMessage {
     #[cfg(feature = "screen-sharing")]
     /// Viewer key press/release while control is active (code = X11 keysym).
     ScreenShareKeyEvent { code: u32, pressed: bool },
+    #[cfg(feature = "screen-sharing")]
+    /// Set the scalable surface presentation mode and pan center.
+    ScreenShareSetView {
+        mode: ScreenShareViewMode,
+        pan: Option<(f32, f32)>,
+    },
+    #[cfg(feature = "screen-sharing")]
+    /// Begin a pan drag on the surface (viewer-only mode).
+    ScreenSharePanStart { pos: iced::Point },
+    #[cfg(feature = "screen-sharing")]
+    /// Continue a pan drag (viewer-only mode). `scale` is the surface scale
+    /// at the time the drag began, so viewport deltas map to source pixels.
+    ScreenSharePanMove { pos: iced::Point, scale: f32 },
+    #[cfg(feature = "screen-sharing")]
+    /// End a pan drag on the surface.
+    ScreenSharePanEnd,
     /// Forward one event from the call actor subscription.
     CallEventReceived(CallEvent),
     /// Update notification suppression state from the native window focus event.
@@ -8212,6 +8249,16 @@ impl IcedChat {
             screen_share_last_pointer_sent: None,
             #[cfg(feature = "screen-sharing")]
             screen_share_last_pointer_pos: None,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_view_mode: ScreenShareViewMode::default(),
+            #[cfg(feature = "screen-sharing")]
+            screen_share_pan: None,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_drag: None,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_hover: None,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_src_size: None,
             inbox_events_rx,
             whisper_events_rx,
             profile_image_handle,
@@ -10089,6 +10136,14 @@ impl IcedChat {
             AppMessage::ScreenSharePointerButton { .. } => "ScreenSharePointerButton",
             #[cfg(feature = "screen-sharing")]
             AppMessage::ScreenShareKeyEvent { .. } => "ScreenShareKeyEvent",
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareSetView { .. } => "ScreenShareSetView",
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenSharePanStart { .. } => "ScreenSharePanStart",
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenSharePanMove { .. } => "ScreenSharePanMove",
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenSharePanEnd => "ScreenSharePanEnd",
             AppMessage::CallEventReceived(_) => "CallEventReceived",
             AppMessage::WindowFocusChanged(_) => "WindowFocusChanged",
             AppMessage::AcceptIncomingCall(_) => "AcceptIncomingCall",
@@ -14466,6 +14521,7 @@ impl IcedChat {
                                 ),
                             );
                         }
+                        self.screen_share_src_size = Some((frame.width, frame.height));
                         self.screen_share_last_frame_ts = Some(frame.timestamp_us);
                     }
                 }
@@ -14517,6 +14573,55 @@ impl IcedChat {
             AppMessage::ScreenShareKeyEvent { code, pressed } => {
                 self.send_screen_share_input(Capability::ControlKeyboard, code, 0.0, 0.0, pressed)
             }
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareSetView { mode, pan } => {
+                self.screen_share_view_mode = mode;
+                // Fit/Actual reset the pan to the source center (None); an
+                // explicit pan (wheel zoom anchor) is preserved as given.
+                self.screen_share_pan = if matches!(mode, ScreenShareViewMode::Fit | ScreenShareViewMode::Actual) {
+                    None
+                } else {
+                    pan.or(self.screen_share_pan)
+                };
+                iced::Task::none()
+            }
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenSharePanStart { pos } => {
+                self.screen_share_drag = Some(pos);
+                self.screen_share_hover = Some(pos);
+                iced::Task::none()
+            }
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenSharePanMove { pos, scale } => {
+                self.screen_share_hover = Some(pos);
+                if let Some(start) = self.screen_share_drag {
+                    let (dx, dy) = (pos.x - start.x, pos.y - start.y);
+                    // Dragging content: the visible region follows the cursor.
+                    let (cx, cy) = self
+                        .screen_share_pan
+                        .unwrap_or_else(|| {
+                            self.screen_share_src_size
+                                .map(|(w, h)| (w as f32 / 2.0, h as f32 / 2.0))
+                                .unwrap_or((0.0, 0.0))
+                        });
+                    let scale = if scale > 0.0 { scale } else { 1.0 };
+                    let src = self
+                        .screen_share_src_size
+                        .map(|(w, h)| (w as f32, h as f32))
+                        .unwrap_or((0.0, 0.0));
+                    self.screen_share_pan = Some((
+                        (cx - dx / scale).clamp(0.0, src.0),
+                        (cy - dy / scale).clamp(0.0, src.1),
+                    ));
+                    self.screen_share_drag = Some(pos);
+                }
+                iced::Task::none()
+            }
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenSharePanEnd => {
+                self.screen_share_drag = None;
+                iced::Task::none()
+            }
             AppMessage::WindowFocusChanged(focused) => {
                 if focused {
                     self.window_focus_tracker.on_focused();
@@ -14558,6 +14663,11 @@ impl IcedChat {
                 if self.inline_video_expanded {
                     self.inline_video_expanded = false;
                     self.layout_cache.borrow_mut().clear();
+                    return iced::Task::none();
+                }
+                #[cfg(feature = "screen-sharing")]
+                if self.screen_share_fullscreen {
+                    self.screen_share_fullscreen = false;
                     return iced::Task::none();
                 }
                 if self.lightbox_image.is_some() {
@@ -20124,6 +20234,10 @@ impl IcedChat {
         if self.inline_video_expanded {
             return self.view_expanded_inline_video(base);
         }
+        #[cfg(feature = "screen-sharing")]
+        if self.screen_share_fullscreen && self.screen_share_viewing {
+            return self.view_screen_share_fullscreen(base);
+        }
 
         let result = if self.incoming_call.is_some() {
             self.view_incoming_call_overlay(base)
@@ -21264,6 +21378,11 @@ impl IcedChat {
         self.screen_share_control_active = false;
         self.screen_share_last_pointer_sent = None;
         self.screen_share_last_pointer_pos = None;
+        self.screen_share_view_mode = ScreenShareViewMode::default();
+        self.screen_share_pan = None;
+        self.screen_share_drag = None;
+        self.screen_share_hover = None;
+        self.screen_share_src_size = None;
     }
 
     pub fn subscription(

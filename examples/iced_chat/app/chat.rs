@@ -355,7 +355,7 @@ impl IcedChat {
     /// Conversation-local screen-share controls. Playback pauses when the
     /// viewer navigates away; no media is retained in the background.
     pub(crate) fn view_screen_share_panel(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, column, container, row, text};
+        use iced::widget::{button, column, container, responsive, row, text};
         use iced::Length;
         // BORU-UI-03: viewer box geometry comes from `ChatTheme::screen_share_*`
         // (640x360 capture aspect; the mouse-area Point maps 1:1 to normalized
@@ -414,57 +414,62 @@ impl IcedChat {
             items.push(button(text(crate::i18n::t("screenshare.stop_sharing"))).on_press(AppMessage::StopScreenShare).into());
             column(items).spacing(SPACE_6)
         } else if self.screen_share_viewing {
-            let video: iced::Element<'_, AppMessage> = if let Some(handle) = &self.screen_share_frame_handle {
-                if self.screen_share_control_active {
-                    // Fixed 640x360 box matches the capture aspect exactly, so
-                    // the mouse_area Point maps 1:1 to normalized coordinates.
-                    // Hoist the Copy dimensions into locals: the on_move
-                    // closure is returned as part of the widget, so it must
-                    // not borrow the function-local `btheme` (E0373).
-                    let screen_share_w = btheme.chat.screen_share_w;
-                    let screen_share_h = btheme.chat.screen_share_h;
-                    let image = iced::widget::Image::new(handle.clone())
-                        .width(Length::Fixed(screen_share_w))
-                        .height(Length::Fixed(screen_share_h))
-                        .content_fit(iced::ContentFit::Contain);
-                    let last = self.screen_share_last_pointer_pos.unwrap_or((0.0, 0.0));
-                    iced::widget::mouse_area(image)
-                        .on_move(move |pos| AppMessage::ScreenSharePointerMove {
-                            x: (pos.x / screen_share_w).clamp(0.0, 1.0),
-                            y: (pos.y / screen_share_h).clamp(0.0, 1.0),
-                        })
-                        .on_press(AppMessage::ScreenSharePointerButton {
-                            x: last.0,
-                            y: last.1,
-                            button: 1,
-                            pressed: true,
-                        })
-                        .on_release(AppMessage::ScreenSharePointerButton {
-                            x: last.0,
-                            y: last.1,
-                            button: 1,
-                            pressed: false,
-                        })
+            // Dedicated scalable surface (PDF Task 8.2). The surface fills
+            // the panel width; its height is capped so the chat log stays
+            // usable (fullscreen raises the cap). Fit/100%/zoom/pan are
+            // handled by the surface geometry; remote-control input maps
+            // through the same geometry so it stays correct under zoom.
+            let cap = if self.screen_share_fullscreen { 480.0 } else { 240.0 };
+            let video: iced::Element<'_, AppMessage> =
+                if let (Some(handle), Some((w, h))) =
+                    (&self.screen_share_frame_handle, self.screen_share_src_size)
+                {
+                    let src_size = iced::Size::new(w as f32, h as f32);
+                    let mode = self.screen_share_view_mode;
+                    let pan = self.screen_share_pan;
+                    let control_active = self.screen_share_control_active;
+                    let hover = self.screen_share_hover;
+                    let surface = responsive(move |size: iced::Size| {
+                        let viewport = iced::Size::new(size.width, cap);
+                        view_screen_share_surface(
+                            handle,
+                            src_size,
+                            viewport,
+                            mode,
+                            pan,
+                            control_active,
+                            hover,
+                        )
+                    });
+                    container(surface)
+                        .width(Length::Fill)
+                        .height(Length::Fixed(cap))
                         .into()
                 } else {
-                    iced::widget::Image::new(handle.clone())
-                        .width(Length::Fill)
-                        .height(Length::Fixed(if self.screen_share_fullscreen { 480.0 } else { 240.0 }))
-                        .content_fit(iced::ContentFit::Contain)
-                        .into()
-                }
-            } else {
-                text(crate::i18n::t("screenshare.waiting_frame")).into()
-            };
+                    text(crate::i18n::t("screenshare.waiting_frame")).into()
+                };
+            // Compact control row: view mode (fit/100%/−/+/reset) then the
+            // existing quality / remote-control / stop actions.
+            let scale = self
+                .screen_share_src_size
+                .map(|(w, h)| {
+                    SurfaceGeometry::new(
+                        iced::Size::new(self.window_width, cap),
+                        iced::Size::new(w as f32, h as f32),
+                        self.screen_share_view_mode,
+                        self.screen_share_pan,
+                    )
+                    .scale()
+                })
+                .unwrap_or(1.0);
             let mut actions: Vec<iced::Element<'_, AppMessage>> = vec![
-                button(text(if self.screen_share_fullscreen { "Inline" } else { "Fullscreen" }))
-                    .on_press(AppMessage::ToggleScreenShareFullscreen)
-                    .into(),
                 button(text(crate::i18n::t("screenshare.lower_quality")))
                     .on_press(AppMessage::ScreenShareLowerQuality)
+                    .padding([2, 6])
                     .into(),
                 button(text(crate::i18n::t("screenshare.full_quality")))
                     .on_press(AppMessage::ScreenShareFullQuality)
+                    .padding([2, 6])
                     .into(),
             ];
             if self.screen_share_control_active {
@@ -475,14 +480,29 @@ impl IcedChat {
                 actions.push(
                     button(text(crate::i18n::t("screenshare.request_control")))
                         .on_press(AppMessage::ScreenShareRequestControl)
+                        .padding([2, 6])
                         .into(),
                 );
             }
-            actions.push(button(text(crate::i18n::t("screenshare.stop_viewing"))).on_press(AppMessage::StopScreenShare).into());
+            actions.push(
+                button(text(crate::i18n::t("screenshare.stop_viewing")))
+                    .on_press(AppMessage::StopScreenShare)
+                    .padding([2, 6])
+                    .into(),
+            );
             column![
                 video,
-                row(actions).spacing(SPACE_8),
-            ].spacing(SPACE_6)
+                row![
+                    view_screen_share_view_controls(
+                        scale,
+                        self.screen_share_fullscreen,
+                    ),
+                    row(actions).spacing(SPACE_6),
+                ]
+                .spacing(SPACE_8)
+                .align_y(iced::Alignment::Center),
+            ]
+            .spacing(SPACE_6)
         } else {
             return iced::widget::Space::new().height(Length::Fixed(0.0)).into();
         };
@@ -505,6 +525,81 @@ impl IcedChat {
             Capability::ControlKeyboard => "keyboard".to_string(),
             _ => "other".to_string(),
         }
+    }
+
+    #[cfg(feature = "screen-sharing")]
+    /// Full-window screen-share viewer overlay (PDF Task 8.2 fullscreen).
+    ///
+    /// Covers the whole app with the scalable surface; a compact control
+    /// bar sits below the frame. Escape or the "Inline" button returns to
+    /// the normal chat layout.
+    pub(crate) fn view_screen_share_fullscreen<'a>(
+        &'a self,
+        base: iced::widget::Container<'a, AppMessage>,
+    ) -> iced::Element<'a, AppMessage> {
+        use iced::widget::{button, column, container, responsive, row, stack, text};
+        use iced::Length;
+
+        let Some(handle) = &self.screen_share_frame_handle else {
+            return base.into();
+        };
+        let Some((w, h)) = self.screen_share_src_size else {
+            return base.into();
+        };
+        let src_size = iced::Size::new(w as f32, h as f32);
+        let mode = self.screen_share_view_mode;
+        let pan = self.screen_share_pan;
+        let control_active = self.screen_share_control_active;
+        let hover = self.screen_share_hover;
+        let scale = SurfaceGeometry::new(
+            iced::Size::new(self.window_width, 600.0),
+            src_size,
+            mode,
+            pan,
+        )
+        .scale();
+
+        let surface = responsive(move |size: iced::Size| {
+            view_screen_share_surface(handle, src_size, size, mode, pan, control_active, hover)
+        });
+
+        let controls = row![
+            view_screen_share_view_controls(scale, true),
+            button(text(crate::i18n::t("screenshare.stop_viewing")))
+                .on_press(AppMessage::StopScreenShare)
+                .padding([2, 6]),
+        ]
+        .spacing(SPACE_8)
+        .align_y(iced::Alignment::Center);
+
+        let panel = container(
+            column![
+                row![
+                    text(crate::i18n::t("screenshare.fullscreen_active"))
+                        .size(crate::fonts::TypeRole::SupportingText.size_px())
+                        .color(Self::muted_color(self.dark_mode)),
+                    iced::widget::Space::new().width(Length::Fill),
+                    button(text(crate::i18n::t("screenshare.inline")))
+                        .on_press(AppMessage::ToggleScreenShareFullscreen)
+                        .padding([2, 6]),
+                ]
+                .align_y(iced::Alignment::Center),
+                surface,
+                controls,
+            ]
+            .spacing(SPACE_8),
+        )
+        .padding(SPACE_12)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(|t| iced::widget::container::Style {
+            background: Some(iced::Background::Color(
+                crate::theme::BoruTheme::for_theme(t).colors.expanded_video_backdrop,
+            )),
+            ..Default::default()
+        });
+
+        stack![base, panel].into()
     }
 
     // ── Chat screen view ─────────────────────────────────────────────

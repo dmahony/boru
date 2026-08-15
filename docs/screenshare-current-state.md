@@ -601,16 +601,32 @@ Notes:
   consent prompt, ControlChanged → indicator.
 
 ### Viewing a share
-- **Viewer panel** `view_screen_share_panel` (`app/chat.rs:354-491`),
+- **Viewer panel** `view_screen_share_panel` (`app/chat.rs:354-507`),
   rendered inside the chat column (`app/chat.rs:99`). States:
   - Invitation prompt (`app/chat.rs:364-371`),
   - Host state (waiting/streaming + control consent + revoke)
     (`app/chat.rs:372-414`),
-  - Viewer: decoded frame as an iced `Image` (`app/chat.rs:416-457`) with
-    **Fullscreen/Inline** toggle (`app/chat.rs:459-461`), **Request Control**
-    button (`app/chat.rs:468-472`), **Stop Viewing** (`app/chat.rs:474`),
-    and a mouse-area that emits `ScreenSharePointerMove`/`Button` events when
-    control is active (`app/chat.rs:417-447`).
+  - Viewer: a **dedicated scalable surface** (PDF Task 8.2) built by
+    `view_screen_share_surface` (`app/screen_share_surface.rs:195-292`)
+    instead of a raw fixed-box `Image`. The surface preserves the source
+    aspect ratio and supports **Fit** (scale to window), **100%** (actual
+    pixels), **zoom in/out** (+/− buttons and mouse-wheel, anchored at the
+    cursor), **pan** (drag), and **fullscreen** (whole-window overlay
+    `view_screen_share_fullscreen`, `app/chat.rs:529-597`, Esc or
+    Inline exits). Geometry is pure and unit-tested:
+    `SurfaceGeometry` (`app/screen_share_surface.rs:52-188`) computes
+    fit scale, visible crop region, display rect, and viewport→source /
+    viewport→normalized mapping under any pan/zoom.
+  - A compact control row (`view_screen_share_view_controls`,
+    `app/screen_share_surface.rs:299-350`) holds Fit / 100% / − / + /
+    Reset / Fullscreen, then the existing **Lower Quality**, **Full
+    Quality**, **Request Control** (or control-granted label), and
+    **Stop Viewing** buttons.
+  - Remote control input maps through the surface geometry
+    (`app/screen_share_surface.rs:238-261`): a viewport point becomes a
+    normalized source point, so `ScreenSharePointerMove`/`Button` events
+    stay correct under pan/zoom instead of assuming the old fixed 640x360
+    box.
 - **Decode worker:** `decode_worker` (`app.rs:20498-20552`) drains inbound
   media for the session, feeds `ViewerPipeline<OpenH264Decoder>`, publishes
   newest frames to a watch channel (`app.rs:21103-21108`), and emits
@@ -654,7 +670,8 @@ Notes:
   tests from BORU-SS-13, and 10 BORU-SS-16 display-server / geometry /
   monitor-source tests], platform/linux_pw 13, platform/windows_common
   10, plus the channels/reconnect/session tests added by later BORU-SS
-  tasks) — see per-file table above. Two live-X11 tests
+  tasks) — see per-file table above. Plus 10 surface-geometry tests
+  (`screen_share_surface.rs`, PDF Task 8.2). Two live-X11 tests
   (`x11_live_*`) are `#[ignore]`d because they need a real X server.
 - **End-to-end protocol test:** `protocol.rs:322-412`
   (`end_to_end_invite_accept_media_decode`) — two real iroh endpoints, Hello →
@@ -683,6 +700,7 @@ Notes:
 | Portal cursor modes (ScreenCast `cursor_mode`, BORU-SS-15) | Implemented |
 | Remote-control consent gating (view-only default, explicit grant, lazy backend, BORU-SS-15) | Implemented |
 | Viewer decode pipeline | Implemented |
+| Scalable viewer surface: fit/100%/zoom/pan/fullscreen, aspect preserved, geometry unit-tested (PDF Task 8.2) | Implemented |
 | Frame pacing: latest-frame queue, capped lengths, drop counters (PDF Task 7.2) | Implemented |
 | Adaptive quality controller (queue depth, throughput, RTT, encode time, drops; hysteresis; viewer QualityUpdate ceiling) (PDF Task 7.3) | Implemented + wired into host.rs |
 | Developer metrics/overlay | Counters implemented, **not surfaced** in UI |
