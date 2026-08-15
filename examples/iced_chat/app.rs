@@ -12622,8 +12622,32 @@ impl IcedChat {
         let task = match message {
             #[cfg(feature = "dev-ui")]
             AppMessage::Designer(designer_message) => {
+                let selection = match &designer_message {
+                    DesignerMessage::Select(component) => Some(*component),
+                    _ => None,
+                };
                 self.designer.update(designer_message);
-                iced::Task::none()
+                if let Some(Some(component)) = selection {
+                    let inspector_component = component.inspector_component();
+                    let section = inspector_component.section();
+                    self.inspect_selected = Some(inspector_component);
+                    self.inspect_hover = Some(inspector_component);
+                    self.inspector_draft.collapsed_sections.remove(&section);
+                    let offset = crate::inspector::section_scroll_offset(
+                        section,
+                        &self.inspector_draft.collapsed_sections,
+                    );
+                    iced::widget::operation::scroll_to(
+                        crate::inspector::INSPECTOR_SCROLL_ID,
+                        iced::widget::operation::AbsoluteOffset { x: 0.0, y: offset },
+                    )
+                } else if selection.is_some() {
+                    self.inspect_selected = None;
+                    self.inspect_hover = None;
+                    iced::Task::none()
+                } else {
+                    iced::Task::none()
+                }
             }
             // ── Navigation ────────────────────────────────────────────
             AppMessage::GoToChatList => {
@@ -14985,6 +15009,19 @@ impl IcedChat {
             | AppMessage::InviteSendWhisper => self.update_chat(message),
             // ── Global keyboard shortcuts ───────────────────────────
             AppMessage::Shortcut(Shortcut::Escape) => {
+                #[cfg(feature = "dev-ui")]
+                if self.designer.enabled
+                    && (self.designer.drag_operation.is_some()
+                        || self.designer.resize_operation.is_some()
+                        || self.designer.selected_component.is_some())
+                {
+                    self.designer.update(DesignerMessage::CancelDrag);
+                    self.designer.update(DesignerMessage::CancelResize);
+                    self.designer.update(DesignerMessage::Select(None));
+                    self.inspect_selected = None;
+                    self.inspect_hover = None;
+                    return iced::Task::none();
+                }
                 // Close any open overlay/dialog, outermost first.
                 //
                 // Safety: a dialog that is mid-submit must NOT be dismissed
@@ -20491,6 +20528,7 @@ impl IcedChat {
             sidebar,
             self.designer.enabled,
             self.designer.hovered_component,
+            self.designer.selected_component,
         );
         #[cfg(feature = "dev-ui")]
         let main_panel = self.inspect_region(self.component_id_for_screen(), main_panel);
@@ -20701,6 +20739,15 @@ impl IcedChat {
                 .push(top)
                 .width(iced::Length::Fill)
                 .height(iced::Length::Fill)
+                .into()
+        } else {
+            result
+        };
+
+        #[cfg(feature = "dev-ui")]
+        let result = if self.designer.enabled {
+            iced::widget::mouse_area(result)
+                .on_press(AppMessage::Designer(DesignerMessage::Select(None)))
                 .into()
         } else {
             result

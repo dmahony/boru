@@ -1079,8 +1079,11 @@ impl IcedChat {
         // renderer can resolve the active breakpoint from the window width.
         let responsive = self.boru_layout().responsive;
         #[cfg(feature = "dev-ui")]
-        let (designer_enabled, designer_hovered) =
-            (self.designer.enabled, self.designer.hovered_component);
+        let (designer_enabled, designer_hovered, designer_selected) = (
+            self.designer.enabled,
+            self.designer.hovered_component,
+            self.designer.selected_component,
+        );
         iced::widget::lazy(dep, move |dep| {
             Self::view_chat_list_content(
                 dep,
@@ -1088,9 +1091,11 @@ impl IcedChat {
                 home_layout.clone(),
                 responsive,
                 #[cfg(feature = "dev-ui")]
-                self.designer.enabled,
+                designer_enabled,
                 #[cfg(feature = "dev-ui")]
-                self.designer.hovered_component,
+                designer_hovered,
+                #[cfg(feature = "dev-ui")]
+                designer_selected,
             )
         })
         .into()
@@ -1161,6 +1166,7 @@ impl IcedChat {
         responsive: crate::layout::ResponsiveLayout,
         #[cfg(feature = "dev-ui")] designer_enabled: bool,
         #[cfg(feature = "dev-ui")] designer_hovered: Option<crate::designer::ComponentId>,
+        #[cfg(feature = "dev-ui")] designer_selected: Option<crate::designer::ComponentId>,
     ) -> iced::Element<'static, AppMessage> {
         use iced::widget::{button, container, row, Column, Row, Space};
         use iced::{Alignment, Length};
@@ -1317,6 +1323,7 @@ impl IcedChat {
             hero_card,
             designer_enabled,
             designer_hovered,
+            designer_selected,
         );
 
         // ── Mesh Health card ──
@@ -1489,6 +1496,7 @@ impl IcedChat {
             action_grid,
             designer_enabled,
             designer_hovered,
+            designer_selected,
         );
 
         // DLMGR-01: home entry point — a compact outline button beside the
@@ -1553,6 +1561,7 @@ impl IcedChat {
             people_activity_card.into(),
             designer_enabled,
             designer_hovered,
+            designer_selected,
         );
         let tunnels_card = iced::widget::lazy(dep.tunnels.clone(), move |card_dep| {
             Self::view_tunnels_card(card_dep, btheme)

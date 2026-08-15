@@ -77,11 +77,13 @@ pub(crate) fn overlay<'a>(
     content: Element<'a, crate::app::AppMessage>,
     enabled: bool,
     hovered: Option<ComponentId>,
+    selected: Option<ComponentId>,
 ) -> Element<'a, crate::app::AppMessage> {
     if !enabled {
         return content;
     }
     let active = hovered == Some(component);
+    let is_selected = selected == Some(component);
     let label: Element<'a, crate::app::AppMessage> = if active {
         container(text(component.as_str()).size(11.0).color(Color::WHITE))
             .padding(Padding::from(3.0))
@@ -100,7 +102,13 @@ pub(crate) fn overlay<'a>(
     };
     let layered = Stack::new()
         .push(container(content).style(move |_| container::Style {
-            border: if active {
+            border: if is_selected {
+                Border {
+                    color: Color::from_rgb(1.0, 0.72, 0.16),
+                    width: 3.0,
+                    radius: 4.0.into(),
+                }
+            } else if active {
                 Border {
                     color: Color::from_rgb(0.25, 0.68, 1.0),
                     width: 2.0,
@@ -115,7 +123,25 @@ pub(crate) fn overlay<'a>(
     mouse_area(layered)
         .on_enter(crate::app::AppMessage::Designer(DesignerMessage::Hover(Some(component))))
         .on_exit(crate::app::AppMessage::Designer(DesignerMessage::Hover(None)))
+        .on_press(crate::app::AppMessage::Designer(DesignerMessage::Select(Some(component))))
         .into()
+}
+
+impl ComponentId {
+    /// Map a designer surface to the existing inspector's authoritative
+    /// component hierarchy. Several fine-grained designer surfaces share the
+    /// same theme/layout section.
+    pub(crate) fn inspector_component(self) -> crate::inspector::ComponentId {
+        match self {
+            Self::HomeWelcome
+            | Self::HomeQuickActions
+            | Self::HomePublicRooms
+            | Self::HomeFriends
+            | Self::HomeRecentActivity => crate::inspector::ComponentId::Home,
+            Self::Sidebar => crate::inspector::ComponentId::Sidebar,
+            Self::ChatMessageList | Self::ChatComposer => crate::inspector::ComponentId::Chat,
+        }
+    }
 }
 
 /// Responsive preview bands exposed by the designer.

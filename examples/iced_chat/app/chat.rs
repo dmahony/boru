@@ -113,6 +113,7 @@ impl IcedChat {
             chat_log.into(),
             self.designer.enabled,
             self.designer.hovered_component,
+            self.designer.selected_component,
         );
         let composer = self.view_composer();
         #[cfg(feature = "dev-ui")]
@@ -121,6 +122,7 @@ impl IcedChat {
             composer,
             self.designer.enabled,
             self.designer.hovered_component,
+            self.designer.selected_component,
         );
         let content = content
         .push(chat_log)
