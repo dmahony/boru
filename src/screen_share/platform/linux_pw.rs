@@ -29,6 +29,23 @@
 //! field, and delivers a [`CapturedFrame`](crate::screen_share::CapturedFrame)
 //! with `gpu_handle` set instead of CPU pixels — the pod constants, format
 //! mapping, and renegotiation logic in this module are shared by both paths.
+//!
+//! ## Damage metadata (`spa_meta_region`) — intentionally not consumed
+//!
+//! PipeWire buffers can carry a `SPA_META_Region` metadata chunk describing
+//! which region of the frame changed since the previous buffer, which would
+//! let the portal path attach a [`DirtyRegion`](crate::screen_share::DirtyRegion)
+//! like the X11 damage path does. In practice the xdg-desktop-portal
+//! ScreenCast stream (which is what this backend negotiates) does not emit
+//! per-buffer damage: the portal composites and delivers complete frames, and
+//! the `spa_meta_region` metadata is only produced by compositors that opt
+//! into explicit damage signalling for their own streams. Consuming it would
+//! therefore add dlopen plumbing for a metadata type the portal almost never
+//! provides, and the frames would still have to be treated as full-frame in
+//! the common case. Decision (BORU-SS-32): the portal/PipeWire path stays
+//! full-frame (`dirty_region: None`); damage-awareness is delivered by the
+//! direct X11 backend, which owns the pixel pipeline and the damage
+//! extension.
 
 // SPA constants intentionally mirror PipeWire's C enum names (RGBx, BGRx,
 // SPA_TYPE_OBJECT_Format, ...) so they can be cross-checked against the

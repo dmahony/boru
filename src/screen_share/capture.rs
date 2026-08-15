@@ -53,6 +53,16 @@ pub enum DirtyRegion {
     Rects(Vec<FrameRect>),
 }
 
+impl DirtyRegion {
+    /// Whether the region describes NO changed pixels (the frame is
+    /// identical to the previous one). `None` (no damage information) and
+    /// `Full` are never empty — both mean the whole frame must be treated
+    /// as new.
+    pub fn is_empty(&self) -> bool {
+        matches!(self, DirtyRegion::Rects(rects) if rects.is_empty())
+    }
+}
+
 /// One owned frame shared by every capture backend and the encoder boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturedFrame {

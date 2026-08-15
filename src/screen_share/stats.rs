@@ -11,6 +11,11 @@ pub struct ScreenShareStatsSnapshot {
     pub sender_fps: u32,
     pub encoded_fps: u32,
     pub dropped_capture_frames: u64,
+    /// Cumulative ticks that produced no encoded frame because nothing
+    /// changed (damage-aware capture: X11 damage skip, empty dirty region,
+    /// or a momentarily empty portal queue). Consumed by the host metrics
+    /// logging to show the static-screen reduction (BORU-SS-32).
+    pub skipped_frames: u64,
     pub encode_time_us: u64,
     pub bitrate_bps: u64,
     pub bytes_in_flight: u64,
@@ -50,6 +55,8 @@ pub struct ScreenShareStats {
     decoded: u64,
     rendered: u64,
     dropped_capture_frames: u64,
+    /// Cumulative capture ticks with no frame to encode (damage-aware skip).
+    skipped_frames: u64,
     late_drops: u64,
     decode_errors: u64,
     keyframe_requests: u64,
@@ -106,7 +113,7 @@ impl ScreenShareStats {
     pub fn new() -> Self {
         let now = Instant::now();
         Self { started: now, last_snapshot: now, captured: 0, encoded: 0, decoded: 0,
-            rendered: 0, dropped_capture_frames: 0, late_drops: 0, decode_errors: 0,
+            rendered: 0, dropped_capture_frames: 0, skipped_frames: 0, late_drops: 0, decode_errors: 0,
             keyframe_requests: 0,
             encode_time_us: 0, decode_time_us: 0, bytes_sent: 0, bytes_in_flight: 0,
             media_resets: 0, frame_age_us: 0, send_queue_depth: 0, rtt_us: 0,
@@ -115,6 +122,10 @@ impl ScreenShareStats {
     }
     pub fn observe_capture(&mut self) { self.captured = self.captured.saturating_add(1); }
     pub fn observe_capture_drop(&mut self) { self.dropped_capture_frames = self.dropped_capture_frames.saturating_add(1); }
+    /// Count a capture tick that produced no frame to encode (damage-aware
+    /// skip: unchanged screen or empty portal queue). Keeps the static-screen
+    /// reduction measurable alongside capture/encode fps and bytes/sec.
+    pub fn observe_skip(&mut self) { self.skipped_frames = self.skipped_frames.saturating_add(1); }
     pub fn observe_encode(&mut self, elapsed: Duration) { self.encoded = self.encoded.saturating_add(1); self.encode_time_us = self.encode_time_us.saturating_add(elapsed.as_micros() as u64); }
     pub fn observe_send(&mut self, bytes: usize) { self.bytes_sent = self.bytes_sent.saturating_add(bytes as u64); }
     pub fn observe_send_delay(&mut self, elapsed: Duration) {
@@ -159,6 +170,7 @@ impl ScreenShareStats {
             sender_fps: (self.captured as f64 / seconds).round() as u32,
             encoded_fps: (self.encoded as f64 / seconds).round() as u32,
             dropped_capture_frames: self.dropped_capture_frames,
+            skipped_frames: self.skipped_frames,
             encode_time_us: self.encode_time_us,
             bitrate_bps: (self.bytes_sent as f64 * 8.0 / now.saturating_duration_since(self.started).as_secs_f64().max(0.001)) as u64,
             bytes_in_flight: self.bytes_in_flight,
@@ -189,13 +201,14 @@ mod tests {
     #[test]
     fn snapshot_contains_pipeline_stages_and_monotonic_counters() {
         let mut stats = ScreenShareStats::new();
-        stats.observe_capture(); stats.observe_capture_drop(); stats.observe_encode(Duration::from_micros(12));
+        stats.observe_capture(); stats.observe_capture_drop(); stats.observe_skip(); stats.observe_encode(Duration::from_micros(12));
         stats.observe_send(1_000); stats.set_bytes_in_flight(55); stats.observe_receive(0, Instant::now());
         stats.observe_decode(Duration::from_micros(8), false); stats.observe_render(); stats.observe_late_drop(); stats.observe_media_reset();
         stats.observe_keyframe_request(); stats.observe_keyframe_request();
         stats.set_send_queue_depth(2); stats.set_rtt_us(40_000); stats.observe_pacing_drop(3); stats.observe_media_drop();
         let snapshot = stats.snapshot();
         assert_eq!(snapshot.dropped_capture_frames, 1);
+        assert_eq!(snapshot.skipped_frames, 1, "damage-aware skip counter exposed");
         assert_eq!(snapshot.bytes_in_flight, 55);
         assert_eq!(snapshot.late_drops, 1);
         assert_eq!(snapshot.media_resets, 1);
