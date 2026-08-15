@@ -181,10 +181,51 @@ pub fn monitor_source_id(device_name: &str) -> CaptureSourceId {
     CaptureSourceId(hash)
 }
 
+/// Derive a stable [`CaptureSourceId`] from a native `HWND` value
+/// (BORU-SS-36 window capture).
+///
+/// `HWND` is an opaque pointer that is stable for the life of the window, so
+/// the public id is a stable FNV-1a hash of the raw pointer. The value is
+/// namespaced (via the `hwnd:{value}` string) so a window can never collide
+/// with a monitor id in [`CaptureSourceId`] comparisons.
+pub fn window_source_id(hwnd: usize) -> CaptureSourceId {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in format!("hwnd:{hwnd}").as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    CaptureSourceId(hash)
+}
+
 /// Human-readable monitor title for source pickers, e.g.
 /// `\\.\DISPLAY1: 1920x1080`.
 pub fn monitor_title(device_name: &str, width: u32, height: u32) -> String {
     format!("{device_name}: {width}x{height}")
+}
+
+/// Build a [`CaptureSource`] for a top-level window (BORU-SS-36).
+///
+/// Pure helper so the source-advertisement shape (id, kind, title, native
+/// size, desktop geometry) is unit-tested without WinRT. The geometry
+/// carries the window's virtual-desktop rect (from `GetWindowRect`), so the
+/// host can normalize coordinates against the shared source exactly like
+/// monitors.
+pub fn window_source(
+    hwnd: usize,
+    title: &str,
+    left: i32,
+    top: i32,
+    width: u32,
+    height: u32,
+) -> CaptureSource {
+    CaptureSource {
+        id: window_source_id(hwnd),
+        kind: CaptureSourceKind::Window,
+        title: format!("{title}: {width}x{height}"),
+        width,
+        height,
+        geometry: Some(MonitorGeometry::new(left, top, width, height)),
+    }
 }
 
 /// Build a [`CaptureSource`] from enumerated monitor geometry.
@@ -334,6 +375,33 @@ mod tests {
         let second = monitor_source_id(r"\\.\DISPLAY2");
         assert_eq!(first, again, "same device must map to same id");
         assert_ne!(first, second, "different devices must not collide");
+    }
+
+    #[test]
+    fn window_source_id_is_stable_and_namespaced_away_from_monitors() {
+        let first = window_source_id(0x0002_0001);
+        let again = window_source_id(0x0002_0001);
+        let other = window_source_id(0x0002_0002);
+        assert_eq!(first, again, "same HWND must map to same id");
+        assert_ne!(first, other, "different HWNDs must not collide");
+        // Window ids must never collide with monitor ids.
+        let monitor = monitor_source_id(r"\\.\DISPLAY1");
+        assert_ne!(first, monitor);
+    }
+
+    #[test]
+    fn window_source_advertises_kind_geometry_and_title() {
+        let source = window_source(0x0002_0001, "Terminal", 100, 50, 800, 600);
+        assert_eq!(source.id, window_source_id(0x0002_0001));
+        assert_eq!(source.kind, CaptureSourceKind::Window);
+        assert_eq!(source.title, "Terminal: 800x600");
+        assert_eq!((source.width, source.height), (800, 600));
+        assert_eq!(
+            source.geometry,
+            Some(MonitorGeometry::new(100, 50, 800, 600))
+        );
+        // The picker must render a distinguishable label for windows.
+        assert!(source.picker_label().starts_with("[Window] "));
     }
 
     #[test]

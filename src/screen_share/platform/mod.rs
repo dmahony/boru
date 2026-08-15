@@ -16,11 +16,11 @@ pub mod linux;
 pub use linux::{
     capture_dimensions, choose_cursor_mode, classify_desktop_environment, classify_display_server,
     classify_session_type, clip_to_root, create_capture_source, detect_desktop_environment,
-    detect_display_server, detect_session_type, select_sources_options, ActiveCapture,
-    CaptureRect, CursorMode, DesktopEnvironment, DisplayServer, LinuxPortalCapture,
-    MachineError, PortalCapture, PortalEvent, PortalSessionMachine, PortalState,
-    SessionFailure, SessionPhase, SessionType, X11Capture, X11Monitor, X11_DESKTOP_SOURCE_ID,
-    CAPTURE_FPS,
+    detect_display_server, detect_session_type, select_sources_options, window_source_id,
+    x11_window_source, ActiveCapture, CaptureRect, CursorMode, DesktopEnvironment, DisplayServer,
+    LinuxPortalCapture, MachineError, PortalCapture, PortalEvent, PortalSessionMachine,
+    PortalSourceTypes, PortalState, SessionFailure, SessionPhase, SessionType, X11Capture,
+    X11Monitor, X11Window, X11_DESKTOP_SOURCE_ID, CAPTURE_FPS,
 };
 
 /// Pure PipeWire format negotiation + CPU frame normalization (BORU-SS-14).
