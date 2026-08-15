@@ -93,13 +93,16 @@ pub enum SessionEvent {
     /// renegotiated the capture geometry). Carries the NEW source identity
     /// and dimensions; the wire `SourceChanged` message is sent BEFORE any
     /// frame with the new geometry, and this event surfaces the same change
-    /// to the app UI.
+    /// to the app UI. `source_mode` tells the viewer how the desktop maps
+    /// onto the stream (Single / PerDisplay / Spanning, PDF Phase 14 /
+    /// BORU-SS-38).
     SourceChanged {
         session_id: ScreenShareSessionId,
         source_id: u64,
         title: String,
         width: u32,
         height: u32,
+        source_mode: super::protocol::SourceMode,
     },
     /// BORU-SS-33: the host delivered a new cursor SHAPE (PDF Task 5.3
     /// `Metadata` cursor mode). The viewer caches the sprite and composites

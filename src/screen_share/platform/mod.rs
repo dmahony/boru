@@ -19,7 +19,8 @@ pub use linux::{
     detect_display_server, detect_session_type, select_sources_options, ActiveCapture,
     CaptureRect, CursorMode, DesktopEnvironment, DisplayServer, LinuxPortalCapture,
     MachineError, PortalCapture, PortalEvent, PortalSessionMachine, PortalState,
-    SessionFailure, SessionPhase, SessionType, X11Capture, X11Monitor, CAPTURE_FPS,
+    SessionFailure, SessionPhase, SessionType, X11Capture, X11Monitor, X11_DESKTOP_SOURCE_ID,
+    CAPTURE_FPS,
 };
 
 /// Pure PipeWire format negotiation + CPU frame normalization (BORU-SS-14).

@@ -1723,6 +1723,11 @@ pub struct X11Monitor {
 /// Nominal frame period (µs) for the X11 capture clock (~30 fps).
 const X11_FRAME_PERIOD_US: u64 = 33_333;
 
+/// Stable source id for the whole-root `Spanning` source (BORU-SS-38).
+/// Deliberately distinct from every RandR monitor id (which are FNV-1a
+/// hashes of monitor names) so it can never collide with a real monitor.
+pub const X11_DESKTOP_SOURCE_ID: CaptureSourceId = CaptureSourceId(0xFFFF_FFFF_FFFF_FFFF);
+
 /// XDamage subscription for one capture session (BORU-SS-32).
 ///
 /// The XDamage extension tracks pixel changes on the root window. Each
@@ -1986,6 +1991,62 @@ impl X11Capture {
         }
     }
 
+    /// The whole-root `Spanning` source advertised alongside the monitors
+    /// (BORU-SS-38). Selecting it captures the entire virtual desktop as one
+    /// stream — the same GetImage path the unstarted fallback uses, but with
+    /// `started` tracking + damage metadata.
+    fn desktop_source(&self) -> CaptureSource {
+        let width = self.width.min(u16::MAX as u32) as u16;
+        let height = self.height.min(u16::MAX as u32) as u16;
+        CaptureSource {
+            id: X11_DESKTOP_SOURCE_ID,
+            kind: CaptureSourceKind::Desktop,
+            title: format!("Entire desktop: {width}x{height}"),
+            width: width as u32,
+            height: height as u32,
+            geometry: Some(MonitorGeometry::new(0, 0, width as u32, height as u32)),
+        }
+    }
+
+    /// Capture the whole root window (BORU-SS-38 spanning mode / unstarted
+    /// fallback): refresh geometry, force a full repaint on resize, set up
+    /// damage tracking lazily, then capture the full root rect.
+    fn capture_whole_root(&mut self) -> Result<Option<CapturedFrame>, ScreenShareError> {
+        // Refresh geometry every frame (the screen can resize); the capture
+        // buffer is rebuilt only when the size actually changed.
+        let geometry = self
+            .conn
+            .get_geometry(self.root)
+            .map_err(|e| ScreenShareError::new(format!("X11 get_geometry failed: {e}")))?
+            .reply()
+            .map_err(|e| ScreenShareError::new(format!("X11 get_geometry reply failed: {e}")))?;
+        let width = geometry.width as u32;
+        let height = geometry.height as u32;
+        if width == 0 || height == 0 {
+            return Ok(None);
+        }
+        // A root resize makes the whole frame new: force a full repaint even
+        // when the damage region is empty, so the viewer resynchronises to
+        // the new geometry promptly.
+        if width != self.width || height != self.height {
+            self.force_full_next = true;
+        }
+        self.width = width;
+        self.height = height;
+        // The unstarted whole-root fallback never goes through
+        // `DesktopCaptureBackend::start`, so subscribe to XDamage lazily on
+        // the first capture.
+        if self.damage.is_none() {
+            self.setup_damage();
+        }
+        self.capture_rect(CaptureRect {
+            x: 0,
+            y: 0,
+            width: width.min(u16::MAX as u32) as u16,
+            height: height.min(u16::MAX as u32) as u16,
+        })
+    }
+
     /// Subscribe to XDamage on the root window (BORU-SS-32).
     ///
     /// Negotiates DAMAGE 1.0 and XFIXES 5.0 (each version query must precede
@@ -2244,46 +2305,25 @@ impl X11Capture {
 
 impl ScreenCapture for X11Capture {
     fn capture(&mut self) -> Result<Option<CapturedFrame>, ScreenShareError> {
-        // Refresh geometry every frame (the screen can resize); the capture
-        // buffer is rebuilt only when the size actually changed.
-        let geometry = self
-            .conn
-            .get_geometry(self.root)
-            .map_err(|e| ScreenShareError::new(format!("X11 get_geometry failed: {e}")))?
-            .reply()
-            .map_err(|e| ScreenShareError::new(format!("X11 get_geometry reply failed: {e}")))?;
-        let width = geometry.width as u32;
-        let height = geometry.height as u32;
-        if width == 0 || height == 0 {
-            return Ok(None);
-        }
-        // A root resize makes the whole frame new: force a full repaint even
-        // when the damage region is empty, so the viewer resynchronises to
-        // the new geometry promptly.
-        if width != self.width || height != self.height {
-            self.force_full_next = true;
-        }
-        self.width = width;
-        self.height = height;
-        // The unstarted whole-root fallback never goes through
-        // `DesktopCaptureBackend::start`, so subscribe to XDamage lazily on
-        // the first capture.
-        if self.damage.is_none() {
-            self.setup_damage();
-        }
-        self.capture_rect(CaptureRect {
-            x: 0,
-            y: 0,
-            width: width.min(u16::MAX as u32) as u16,
-            height: height.min(u16::MAX as u32) as u16,
-        })
+        // Whole-root capture (used by the unstarted fallback AND the
+        // BORU-SS-38 `Spanning` desktop source): refresh geometry, force a
+        // full repaint on resize, then capture the full root rect.
+        self.capture_whole_root()
     }
 }
 
 impl DesktopCaptureBackend for X11Capture {
     fn list_sources(&self) -> Result<Vec<CaptureSource>, ScreenShareError> {
-        self.list_monitors()
-            .map(|monitors| monitors.iter().map(x11_monitor_source).collect())
+        let mut sources: Vec<CaptureSource> = self
+            .list_monitors()
+            .map(|monitors| monitors.iter().map(x11_monitor_source).collect())?;
+        // BORU-SS-38: expose the whole-root desktop as a selectable
+        // `Spanning` source in ADDITION to the per-monitor sources. The
+        // host can switch to it at any time without ending the session
+        // (the whole-root capture path is the same GetImage the unstarted
+        // fallback uses, but with `started` tracking + damage metadata).
+        sources.push(self.desktop_source());
+        Ok(sources)
     }
 
     fn start(
@@ -2297,18 +2337,28 @@ impl DesktopCaptureBackend for X11Capture {
         if config.target_fps == 0 {
             return Err(ScreenShareError::new("target fps must be non-zero"));
         }
-        let monitor = self
-            .list_monitors()?
-            .into_iter()
-            .find(|monitor| monitor.id == source)
-            .ok_or_else(|| ScreenShareError::new("unknown X11 capture source"))?;
-        self.selected = Some(CaptureRect {
-            x: monitor.x,
-            y: monitor.y,
-            width: monitor.width,
-            height: monitor.height,
-        });
-        self.current_source = Some(source);
+        if source == X11_DESKTOP_SOURCE_ID {
+            // BORU-SS-38 spanning mode: capture the whole root window as one
+            // stream. `selected` stays None, which `next_frame` interprets as
+            // whole-root capture (the same geometry the unstarted fallback
+            // uses), but `started` + `current_source` are set so the backend
+            // tracks the active source for `SourceChanged`/recovery.
+            self.selected = None;
+            self.current_source = Some(source);
+        } else {
+            let monitor = self
+                .list_monitors()?
+                .into_iter()
+                .find(|monitor| monitor.id == source)
+                .ok_or_else(|| ScreenShareError::new("unknown X11 capture source"))?;
+            self.selected = Some(CaptureRect {
+                x: monitor.x,
+                y: monitor.y,
+                width: monitor.width,
+                height: monitor.height,
+            });
+            self.current_source = Some(source);
+        }
         // Damage-aware capture (BORU-SS-32): subscribe to XDamage on the
         // root window. A tracker left over from the whole-root fallback is
         // reset so the first frame of the newly selected source is reported
@@ -2333,14 +2383,17 @@ impl DesktopCaptureBackend for X11Capture {
             ));
         }
         let Some(rect) = self.selected else {
-            return Err(ScreenShareError::new("capture has no selected source"));
+            // BORU-SS-38 spanning mode: no monitor rect selected — capture
+            // the whole root window (same path as the unstarted fallback).
+            return self.capture_whole_root();
         };
         // A monitor whose rectangle lies entirely outside the root window is
-        // gone (unplugged / undocked). Surface it as a typed error instead of
-        // a silent "no frame" so the host can recover gracefully (PDF Phase
-        // 10: re-enumerate, fall back to a remaining source, or pause).
+        // gone (unplugged / undocked). Surface it as a typed MonitorLost
+        // error instead of a silent "no frame" so the host can recover
+        // gracefully (PDF Phase 10: re-enumerate, fall back to a remaining
+        // source, or pause).
         if clip_to_root(rect, self.width, self.height).is_none() {
-            return Err(ScreenShareError::new(
+            return Err(ScreenShareError::monitor_lost(
                 "capture source unavailable (monitor unplugged or outside the root)",
             ));
         }

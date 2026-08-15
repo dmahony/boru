@@ -68,7 +68,9 @@ use crate::screen_share::capture::{
     CaptureConfig, CaptureSource, CaptureSourceId, DesktopCaptureBackend, FrameSink,
 };
 use crate::screen_share::coords::{composite_cursor, CursorSprite, DesktopPoint, MonitorGeometry};
-use crate::screen_share::{CapturedFrame, PixelFormat, ScreenCapture, ScreenShareError};
+use crate::screen_share::{
+    CapturedFrame, PixelFormat, ScreenCapture, ScreenShareError, ScreenShareErrorKind,
+};
 
 /// Number of buffered frames in the WinRT frame pool. Two lets the compositor
 /// produce a frame while the previous one is being staged to CPU.
@@ -340,9 +342,13 @@ impl DesktopCaptureBackend for GraphicsCapture {
             let kind = if monitor_attached(hmon) {
                 CaptureFailureKind::ScreenLocked
             } else {
-                CaptureFailureKind::SourceUnavailable
+                CaptureFailureKind::MonitorLost
             };
-            return Err(ScreenShareError::new(kind.describe()));
+            let mut error = ScreenShareError::new(kind.describe());
+            if kind == CaptureFailureKind::MonitorLost {
+                error = error.with_kind(ScreenShareErrorKind::MonitorLost);
+            }
+            return Err(error);
         }
         let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
             &winrt_device,
@@ -408,7 +414,8 @@ impl DesktopCaptureBackend for GraphicsCapture {
         if content.Width <= 0 || content.Height <= 0 {
             // The frame reports no content: on a locked workstation Windows
             // stops delivering frames (typed ScreenLocked); if the monitor
-            // itself is gone this is an unplug (typed SourceUnavailable).
+            // itself is gone this is an unplug (typed MonitorLost, PDF Phase
+            // 14 / BORU-SS-38).
             let hmon = self
                 .active_source
                 .and_then(|id| self.sources.get(&id).copied())
@@ -417,10 +424,14 @@ impl DesktopCaptureBackend for GraphicsCapture {
             let kind = if monitor_attached(hmon) {
                 CaptureFailureKind::ScreenLocked
             } else {
-                CaptureFailureKind::SourceUnavailable
+                CaptureFailureKind::MonitorLost
             };
             let _ = frame.Close();
-            return Err(ScreenShareError::new(kind.describe()));
+            let mut error = ScreenShareError::new(kind.describe());
+            if kind == CaptureFailureKind::MonitorLost {
+                error = error.with_kind(ScreenShareErrorKind::MonitorLost);
+            }
+            return Err(error);
         }
         let width = content.Width as u32;
         let height = content.Height as u32;
