@@ -19569,7 +19569,11 @@ impl IcedChat {
         };
         // Pointer coordinates are transient interaction data. The semantic
         // result is only an insertion index in the typed sections array.
-        let shift = ((current.y - operation.origin.y) / 120.0).round() as isize;
+        let shift = crate::designer::snap_layout_slot(
+            (current.y - operation.origin.y) / 120.0,
+            1.0,
+            self.designer.fine_adjust,
+        ) as isize;
         let max_index = order.len().saturating_sub(1) as isize;
         operation.proposed_index = Some((source as isize + shift).clamp(0, max_index) as usize);
     }
@@ -19631,19 +19635,32 @@ impl IcedChat {
         let mut layout = self.active_layout.clone();
         let value = match component {
             crate::designer::ComponentId::Sidebar => {
-                let value = (layout.sidebar.width + delta)
+                let value = crate::designer::snap_layout_dimension(
+                    layout.sidebar.width + delta,
+                    8.0,
+                    self.designer.fine_adjust,
+                )
                     .clamp(layout.sidebar.width_min, layout.sidebar.width_max);
                 layout.sidebar.width = value;
                 value
             }
             crate::designer::ComponentId::ChatMessageList => {
-                let value = (layout.chat.message_max_width + delta)
+                let value = crate::designer::snap_layout_dimension(
+                    layout.chat.message_max_width + delta,
+                    8.0,
+                    self.designer.fine_adjust,
+                )
                     .clamp(1.0, layout.chat.bubble_max_width);
                 layout.chat.message_max_width = value;
                 value
             }
             crate::designer::ComponentId::ChatComposer => {
-                let value = (layout.chat.bubble_max_width + delta).clamp(1.0, 1200.0);
+                let value = crate::designer::snap_layout_dimension(
+                    layout.chat.bubble_max_width + delta,
+                    8.0,
+                    self.designer.fine_adjust,
+                )
+                .clamp(1.0, 1200.0);
                 layout.chat.bubble_max_width = value;
                 value
             }
@@ -21052,10 +21069,20 @@ pub fn keyboard_shortcuts_subscription() -> iced::Subscription<AppMessage> {
                             crate::inspector::InspectorMsg::ToggleVisible,
                         ));
                     }
+                    #[cfg(feature = "dev-ui")]
+                    key::Key::Named(key::Named::Shift) | key::Key::Named(key::Named::Alt) => {
+                        return Some(AppMessage::Designer(DesignerMessage::SetFineAdjust(true)));
+                    }
                     _ => {}
                 }
                 shortcut_from_key(&key, modifiers)
                     .map(AppMessage::Shortcut)
+            }
+            #[cfg(feature = "dev-ui")]
+            keyboard::Event::KeyReleased { key, .. }
+                if matches!(key, key::Key::Named(key::Named::Shift | key::Named::Alt)) =>
+            {
+                Some(AppMessage::Designer(DesignerMessage::SetFineAdjust(false)))
             }
             _ => None,
         }

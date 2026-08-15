@@ -344,6 +344,8 @@ pub struct DesignerState {
     pub selected_component: Option<ComponentId>,
     pub drag_operation: Option<DragOperation>,
     pub resize_operation: Option<ResizeOperation>,
+    /// Shift/Alt temporarily disables snapping for fine pointer adjustment.
+    pub fine_adjust: bool,
     pub preview_breakpoint: PreviewBreakpoint,
     pub dirty: bool,
     pub validation_errors: Vec<String>,
@@ -357,6 +359,7 @@ impl Default for DesignerState {
             selected_component: None,
             drag_operation: None,
             resize_operation: None,
+            fine_adjust: false,
             preview_breakpoint: PreviewBreakpoint::default(),
             dirty: false,
             validation_errors: Vec::new(),
@@ -391,6 +394,8 @@ pub enum DesignerMessage {
     MarkDirty,
     SetValidationErrors(Vec<String>),
     ClearValidationErrors,
+    /// Update the transient modifier state used by drag/resize gestures.
+    SetFineAdjust(bool),
 }
 
 impl DesignerState {
@@ -406,6 +411,7 @@ impl DesignerState {
                 self.selected_component = None;
                 self.drag_operation = None;
                 self.resize_operation = None;
+                self.fine_adjust = false;
             }
             DesignerMessage::Hover(component) => self.hovered_component = component,
             DesignerMessage::Select(component) => self.selected_component = component,
@@ -442,6 +448,7 @@ impl DesignerState {
                 }
             }
             DesignerMessage::CancelResize => self.resize_operation = None,
+            DesignerMessage::SetFineAdjust(fine_adjust) => self.fine_adjust = fine_adjust,
             DesignerMessage::SetBreakpoint(breakpoint) => self.preview_breakpoint = breakpoint,
             DesignerMessage::AdjustGridColumns(_) => {}
             DesignerMessage::MarkDirty => self.dirty = true,
@@ -449,6 +456,22 @@ impl DesignerState {
             DesignerMessage::ClearValidationErrors => self.validation_errors.clear(),
         }
     }
+}
+
+/// Snap a pointer-derived semantic position to the nearest layout slot.
+/// Pointer coordinates remain transient; callers persist only the resulting
+/// insertion/index or typed layout value.
+pub(crate) fn snap_layout_slot(value: f32, slot: f32, fine_adjust: bool) -> f32 {
+    if fine_adjust || slot <= 0.0 {
+        value
+    } else {
+        (value / slot).round() * slot
+    }
+}
+
+/// Snap a responsive dimension to a sensible semantic increment.
+pub(crate) fn snap_layout_dimension(value: f32, increment: f32, fine_adjust: bool) -> f32 {
+    snap_layout_slot(value, increment, fine_adjust)
 }
 
 #[cfg(test)]
@@ -514,5 +537,12 @@ mod tests {
         assert_eq!(operation.current, Point::new(42.0, 24.0));
         state.update(DesignerMessage::CancelResize);
         assert!(state.resize_operation.is_none());
+    }
+
+    #[test]
+    fn semantic_snap_can_be_bypassed_for_fine_adjustment() {
+        assert_eq!(snap_layout_slot(2.4, 1.0, false), 2.0);
+        assert_eq!(snap_layout_dimension(317.0, 8.0, false), 320.0);
+        assert_eq!(snap_layout_dimension(317.0, 8.0, true), 317.0);
     }
 }
