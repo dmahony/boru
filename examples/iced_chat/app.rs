@@ -12643,6 +12643,11 @@ impl IcedChat {
                     self.adjust_selected_grid_columns(delta);
                     return iced::Task::none();
                 }
+                if let DesignerMessage::SetCustomWidth(value) = &designer_message {
+                    self.designer
+                        .update(DesignerMessage::SetCustomWidth(value.clone()));
+                    return iced::Task::none();
+                }
                 if matches!(designer_message, DesignerMessage::CommitDrag) {
                     self.commit_home_drag();
                     self.designer.update(DesignerMessage::CommitDrag);
@@ -19734,7 +19739,12 @@ impl IcedChat {
     #[cfg(feature = "dev-ui")]
     fn view_inspector_panel(&self) -> iced::Element<'_, AppMessage> {
         iced::widget::column![
-            crate::designer::component_tree(&self.active_layout, self.designer.selected_component),
+            crate::designer::component_tree(
+                &self.active_layout,
+                self.designer.selected_component,
+                self.designer.preview_breakpoint,
+                self.designer.custom_preview_width,
+            ),
             crate::inspector::view_inspector(
                 &self.active_theme,
                 &self.active_layout,
@@ -20445,7 +20455,8 @@ impl IcedChat {
                 crate::layout_inspector::LayoutField::HomeQuickColumnsMid
             }
             crate::designer::PreviewBreakpoint::Reference
-            | crate::designer::PreviewBreakpoint::Large => {
+            | crate::designer::PreviewBreakpoint::Large
+            | crate::designer::PreviewBreakpoint::Custom => {
                 crate::layout_inspector::LayoutField::HomeQuickColumnsWide
             }
         };

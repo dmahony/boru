@@ -1136,11 +1136,21 @@ impl IcedChat {
                 age_secs: now.saturating_duration_since(event.recorded_at).as_secs(),
             })
             .collect();
+        #[cfg(feature = "dev-ui")]
+        let preview_width = if self.designer.enabled {
+            self.designer
+                .preview_breakpoint
+                .width(self.designer.custom_preview_width)
+        } else {
+            self.window_width
+        };
+        #[cfg(not(feature = "dev-ui"))]
+        let preview_width = self.window_width;
         ChatListDependency {
             dark_mode: self.dark_mode,
             theme_revision: self.theme_revision,
             layout_revision: self.layout_revision,
-            window_width_bits: (self.window_width * 100.0) as u32,
+            window_width_bits: (preview_width * 100.0) as u32,
             mesh_health: MeshHealthSnapshot::from(&self.mesh_health),
             main_screen_reconnect_frame: self.main_screen_reconnect_frame as u32,
             local_label: self.local_label.clone(),

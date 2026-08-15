@@ -7,7 +7,7 @@
 //! other UI actions.
 
 use crate::layout::HomeSection;
-use iced::widget::{button, column, container, mouse_area, row, text, Stack};
+use iced::widget::{button, column, container, mouse_area, row, text, text_input, Stack};
 use iced::{Background, Border, Color, Element, Length, Padding, Point};
 use std::fmt;
 use std::str::FromStr;
@@ -245,7 +245,12 @@ pub(crate) fn overlay<'a>(
 }
 
 /// Render the dev-only hierarchy over stable component IDs.
-pub(crate) fn component_tree<'a>(layout: &'a crate::layout::LayoutConfig, selected: Option<ComponentId>) -> Element<'a, crate::app::AppMessage> {
+pub(crate) fn component_tree<'a>(
+    layout: &'a crate::layout::LayoutConfig,
+    selected: Option<ComponentId>,
+    breakpoint: PreviewBreakpoint,
+    custom_width: f32,
+) -> Element<'a, crate::app::AppMessage> {
     fn item<'a>(label: &'a str, id: ComponentId, selected: Option<ComponentId>) -> Element<'a, crate::app::AppMessage> {
         let marker = if selected == Some(id) { "● " } else { "○ " };
         button(text(format!("{marker}{label}")).size(12.0)).width(Length::Fill).padding([3, 6])
@@ -260,7 +265,30 @@ pub(crate) fn component_tree<'a>(layout: &'a crate::layout::LayoutConfig, select
         }
         controls.into()
     }
-    let home = column![text("Home").size(12.0),
+    let preview_button = |label: &'static str, value: PreviewBreakpoint| {
+        button(text(label).size(10.0))
+            .padding([2, 5])
+            .on_press(crate::app::AppMessage::Designer(DesignerMessage::SetBreakpoint(value)))
+    };
+    let custom_width_input = text_input("width", &format!("{custom_width:.0}"))
+        .width(Length::Fixed(58.0))
+        .padding([2, 4])
+        .size(10.0)
+        .on_input(|value| crate::app::AppMessage::Designer(DesignerMessage::SetCustomWidth(value)));
+    let preview_controls = column![
+        text("PREVIEW WIDTH").size(10.0),
+        row![
+            preview_button("Narrow", PreviewBreakpoint::Compact),
+            preview_button("Desktop", PreviewBreakpoint::Medium),
+            preview_button("Wide", PreviewBreakpoint::Reference),
+            preview_button("Max", PreviewBreakpoint::Large),
+            custom_width_input,
+        ]
+        .spacing(2),
+        text(format!("Active: {} · {:.0}px", breakpoint.label(), breakpoint.width(custom_width))).size(10.0),
+    ]
+    .spacing(2);
+    let home = column![preview_controls, text("Home").size(12.0),
         home_item("Welcome", ComponentId::HomeWelcome, HomeSection::Hero, layout, selected),
         home_item("Quick Actions", ComponentId::HomeQuickActions, HomeSection::QuickActions, layout, selected),
         home_item("Public Rooms", ComponentId::HomePublicRooms, HomeSection::MeshHealth, layout, selected),
@@ -308,6 +336,30 @@ pub enum PreviewBreakpoint {
     Medium,
     Reference,
     Large,
+    Custom,
+}
+
+impl PreviewBreakpoint {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Compact => "Narrow",
+            Self::Medium => "Desktop",
+            Self::Reference => "Wide",
+            Self::Large => "Maximized",
+            Self::Custom => "Custom",
+        }
+    }
+
+    pub(crate) fn width(self, custom_width: f32) -> f32 {
+        match self {
+            Self::Compact => 320.0,
+            Self::Medium => 1024.0,
+            Self::Reference => 1280.0,
+            Self::Large => 1920.0,
+            Self::Custom => custom_width,
+        }
+        .clamp(240.0, 3840.0)
+    }
 }
 
 impl Default for PreviewBreakpoint {
@@ -347,6 +399,7 @@ pub struct DesignerState {
     /// Shift/Alt temporarily disables snapping for fine pointer adjustment.
     pub fine_adjust: bool,
     pub preview_breakpoint: PreviewBreakpoint,
+    pub custom_preview_width: f32,
     pub dirty: bool,
     pub validation_errors: Vec<String>,
 }
@@ -361,6 +414,7 @@ impl Default for DesignerState {
             resize_operation: None,
             fine_adjust: false,
             preview_breakpoint: PreviewBreakpoint::default(),
+            custom_preview_width: 1280.0,
             dirty: false,
             validation_errors: Vec::new(),
         }
@@ -389,6 +443,7 @@ pub enum DesignerMessage {
     UpdateResize(Point),
     CancelResize,
     SetBreakpoint(PreviewBreakpoint),
+    SetCustomWidth(String),
     /// Increment/decrement the selected grid at the active preview breakpoint.
     AdjustGridColumns(i8),
     MarkDirty,
@@ -450,6 +505,12 @@ impl DesignerState {
             DesignerMessage::CancelResize => self.resize_operation = None,
             DesignerMessage::SetFineAdjust(fine_adjust) => self.fine_adjust = fine_adjust,
             DesignerMessage::SetBreakpoint(breakpoint) => self.preview_breakpoint = breakpoint,
+            DesignerMessage::SetCustomWidth(value) => {
+                if let Ok(width) = value.trim().parse::<f32>() {
+                    self.custom_preview_width = width.clamp(240.0, 3840.0);
+                    self.preview_breakpoint = PreviewBreakpoint::Custom;
+                }
+            }
             DesignerMessage::AdjustGridColumns(_) => {}
             DesignerMessage::MarkDirty => self.dirty = true,
             DesignerMessage::SetValidationErrors(errors) => self.validation_errors = errors,

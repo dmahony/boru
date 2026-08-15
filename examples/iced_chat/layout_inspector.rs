@@ -1326,6 +1326,25 @@ impl Default for LayoutReloadStatus {
 
 // ── View ─────────────────────────────────────────────────────────────
 
+fn field_scope(field: LayoutField) -> &'static str {
+    match field {
+        LayoutField::ResponsiveHomeColumnsNarrow
+        | LayoutField::ResponsiveHomeColumnsDesktop
+        | LayoutField::ResponsiveHomeColumnsUltraWide
+        | LayoutField::ResponsiveHomePaddingXNarrow
+        | LayoutField::ResponsiveHomePaddingXDesktop
+        | LayoutField::ResponsiveHomePaddingXUltraWide
+        // Quick-action grid column counts are per-tier slots too
+        // (`columns_wide`/`columns_mid`/`columns_narrow`); the designer
+        // writes the active breakpoint's slot via
+        // `adjust_selected_grid_columns`.
+        | LayoutField::HomeQuickColumnsWide
+        | LayoutField::HomeQuickColumnsMid
+        | LayoutField::HomeQuickColumnsNarrow => "breakpoint-specific",
+        _ => "global",
+    }
+}
+
 /// Render one layout field row (dispatches by [`FieldKind`]).
 pub fn layout_field_row(
     layout: &LayoutConfig,
@@ -1357,7 +1376,9 @@ fn layout_float_row(
         .cloned()
         .unwrap_or_else(|| format!("{current:.1}"));
 
-    let label = text(field.label()).size(11.0).color(muted_text(dark_mode));
+    let label = text(format!("{} · {}", field.label(), field_scope(field)))
+        .size(11.0)
+        .color(muted_text(dark_mode));
     let value = text(format!("{current:.1}"))
         .size(11.0)
         .color(value_text(dark_mode));
@@ -1401,7 +1422,9 @@ fn layout_int_row(
         .cloned()
         .unwrap_or_else(|| current.to_string());
 
-    let label = text(field.label()).size(11.0).color(muted_text(dark_mode));
+    let label = text(format!("{} · {}", field.label(), field_scope(field)))
+        .size(11.0)
+        .color(muted_text(dark_mode));
     let value = text(current.to_string())
         .size(11.0)
         .color(value_text(dark_mode));
@@ -1440,7 +1463,9 @@ fn layout_choice_row(
     let options = field.choices().to_vec();
     let selected = read_layout_choice(layout, field);
 
-    let label = text(field.label()).size(11.0).color(muted_text(dark_mode));
+    let label = text(format!("{} · {}", field.label(), field_scope(field)))
+        .size(11.0)
+        .color(muted_text(dark_mode));
     let hint = matches!(
         field,
         LayoutField::ComponentMetadataAlignment
@@ -1484,7 +1509,9 @@ fn layout_sections_row(
         .cloned()
         .unwrap_or(current);
 
-    let label = text(field.label()).size(11.0).color(muted_text(dark_mode));
+    let label = text(format!("{} · {}", field.label(), field_scope(field)))
+        .size(11.0)
+        .color(muted_text(dark_mode));
     let hint = text("comma-separated")
         .size(8.0)
         .color(muted_text(dark_mode));
@@ -2163,6 +2190,39 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn field_scope_marks_per_tier_slots_breakpoint_specific() {
+        use LayoutField::*;
+        // Every per-tier / per-breakpoint value slot must be labelled
+        // breakpoint-specific (BORU-DESIGN-17 acceptance: clearly indicate
+        // whether a property applies globally or only to the active
+        // breakpoint). Global properties must NOT be labelled so.
+        for field in [
+            ResponsiveHomeColumnsNarrow,
+            ResponsiveHomeColumnsDesktop,
+            ResponsiveHomeColumnsUltraWide,
+            ResponsiveHomePaddingXNarrow,
+            ResponsiveHomePaddingXDesktop,
+            ResponsiveHomePaddingXUltraWide,
+            HomeQuickColumnsWide,
+            HomeQuickColumnsMid,
+            HomeQuickColumnsNarrow,
+        ] {
+            assert_eq!(
+                field_scope(field),
+                "breakpoint-specific",
+                "{field:?} is a per-tier slot but not labelled breakpoint-specific"
+            );
+        }
+        for field in [HomeMode, HomeSectionOrder, HomeGapsCardGap, HomeGridColumnGap] {
+            assert_eq!(
+                field_scope(field),
+                "global",
+                "{field:?} is a global property but not labelled global"
+            );
         }
     }
 }
