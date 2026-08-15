@@ -12,6 +12,7 @@ pub mod coords;
 pub mod host;
 pub mod permissions;
 pub mod platform;
+pub mod presets;
 pub mod protocol;
 pub mod reconnect;
 pub mod remote_input;
@@ -64,6 +65,7 @@ pub use protocol::{
     SCREEN_SHARE_PROTOCOL_VERSION, MAX_INPUT_CODE, MAX_MODIFIER_MASK,
     MAX_SCREEN_SHARE_MESSAGE, MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT, MAX_CLIPBOARD_TEXT,
 };
+pub use presets::QualityPreset;
 pub use reconnect::{
     keyframe_request, retry_reconnect, ReconnectOutcome, ReconnectPolicy,
 };

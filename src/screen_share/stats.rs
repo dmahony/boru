@@ -6,6 +6,9 @@
 
 use std::time::{Duration, Instant};
 
+use super::presets::QualityPreset;
+use super::transport::PathKind;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScreenShareStatsSnapshot {
     pub sender_fps: u32,
@@ -101,6 +104,15 @@ pub struct ScreenShareSessionMetrics {
     pub bitrate_bps: u64,
     /// Capture backend name (e.g. `"x11"`, `"pipewire"`, `"test-pattern"`).
     pub backend: String,
+    /// BORU-SS-39: connection path kind (Direct/Relay/Unknown) that chose
+    /// the active quality preset.
+    pub path_kind: PathKind,
+    /// BORU-SS-39: active quality preset (auto-selected from the path kind
+    /// or the sharer's manual override).
+    pub preset: QualityPreset,
+    /// BORU-SS-39: adaptive-quality ladder step (0 = best; higher = more
+    /// reduced under congestion).
+    pub adaptive_level: u8,
     /// Live pipeline counters/rates for the overlay.
     pub snapshot: ScreenShareStatsSnapshot,
 }
@@ -240,6 +252,9 @@ mod tests {
             fps: 30,
             bitrate_bps: 2_000_000,
             backend: "x11".to_string(),
+            path_kind: PathKind::Direct,
+            preset: QualityPreset::LanHigh,
+            adaptive_level: 1,
             snapshot,
         };
         assert_eq!(metrics.codec, "h264");

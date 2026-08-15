@@ -94,10 +94,10 @@ use boru_core::call::{CallId, CallKind};
 #[cfg(feature = "screen-sharing")]
 use boru_core::screen_share::{
     run_host_session, Capability, CapturedFrame, CaptureSource, CaptureSourceId, ControlMessage,
-    CursorSprite, HostCommand, InboundMedia, InputEventKind, OpenH264Decoder, PixelFormat,
-    RedactedText, ScreenShareMessage, ScreenShareProtocol, ScreenShareSessionMetrics,
-    ScreenShareStatsSnapshot, MAX_CLIPBOARD_TEXT, ScreenShareSessionId, SessionEvent,
-    ViewerPipeline, DEFAULT_QUEUE_CAPACITY, MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT,
+    CursorSprite, HostCommand, InboundMedia, InputEventKind, OpenH264Decoder, PathKind,
+    PixelFormat, QualityPreset, RedactedText, ScreenShareMessage, ScreenShareProtocol,
+    ScreenShareSessionMetrics, ScreenShareStatsSnapshot, MAX_CLIPBOARD_TEXT, ScreenShareSessionId,
+    SessionEvent, ViewerPipeline, DEFAULT_QUEUE_CAPACITY, MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT,
     SCREEN_SHARE_PROTOCOL_VERSION, composite_cursor_rgba, SourcePoint,
 };
 #[cfg(feature = "video-calls")]
@@ -5758,6 +5758,11 @@ pub enum AppMessage {
     /// `SourceChanged` message) or is still deciding (pre-acceptance switch).
     ScreenShareSelectSource(CaptureSourceId),
     #[cfg(feature = "screen-sharing")]
+    /// Sharer overrides the quality preset (BORU-SS-39). `None` restores the
+    /// path-derived auto preset. Sends `HostCommand::SetQualityPreset` to the
+    /// host driver.
+    ScreenShareSetPreset(Option<QualityPreset>),
+    #[cfg(feature = "screen-sharing")]
     /// Dismiss the terminal `Stopped` / `Error` notice and return to `Idle`.
     ScreenShareDismissNotice,
     #[cfg(feature = "screen-sharing")]
@@ -10311,6 +10316,8 @@ impl IcedChat {
             AppMessage::ScreenSharePanMove { .. } => "ScreenSharePanMove",
             #[cfg(feature = "screen-sharing")]
             AppMessage::ScreenSharePanEnd => "ScreenSharePanEnd",
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareSetPreset(_) => "ScreenShareSetPreset",
             AppMessage::CallEventReceived(_) => "CallEventReceived",
             AppMessage::WindowFocusChanged(_) => "WindowFocusChanged",
             AppMessage::AcceptIncomingCall(_) => "AcceptIncomingCall",
@@ -14766,6 +14773,17 @@ impl IcedChat {
                 self.screen_share_selected_source = Some(source_id);
                 if let Some(tx) = &self.screen_share_host_cmd_tx {
                     let _ = tx.try_send(HostCommand::SwitchSource(source_id));
+                }
+                iced::Task::none()
+            }
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareSetPreset(preset) => {
+                // BORU-SS-39: sharer overrides the quality preset (None
+                // restores the path-derived auto preset). The host driver
+                // applies the ceiling whether streaming already started or
+                // the viewer is still deciding.
+                if let Some(tx) = &self.screen_share_host_cmd_tx {
+                    let _ = tx.try_send(HostCommand::SetQualityPreset(preset));
                 }
                 iced::Task::none()
             }

@@ -468,6 +468,79 @@ impl IcedChat {
                 );
             }
 
+            // BORU-SS-39: active quality preset + connection path +
+            // adaptation state, published ~1 Hz by the host streaming loop.
+            // Always visible while streaming (not gated by the dev overlay).
+            if let Some(metrics) = &self.screen_share_host_metrics {
+                let preset_label = match metrics.preset {
+                    QualityPreset::LanHigh => crate::i18n::t("screenshare.preset_lan_high"),
+                    QualityPreset::Balanced => crate::i18n::t("screenshare.preset_balanced"),
+                    QualityPreset::RelayConservative => crate::i18n::t("screenshare.preset_relay"),
+                };
+                let path_label = match metrics.path_kind {
+                    boru_core::screen_share::PathKind::Direct => {
+                        crate::i18n::t("screenshare.path_direct")
+                    }
+                    boru_core::screen_share::PathKind::Relay => {
+                        crate::i18n::t("screenshare.path_relay")
+                    }
+                    boru_core::screen_share::PathKind::Unknown => {
+                        crate::i18n::t("screenshare.path_unknown")
+                    }
+                };
+                items.push(
+                    text(crate::i18n::t_args(
+                        "screenshare.quality_line",
+                        &[
+                            ("preset", &preset_label),
+                            ("path", &path_label),
+                            ("level", &metrics.adaptive_level.to_string()),
+                        ],
+                    ))
+                    .size(crate::fonts::TypeRole::SupportingText.size_px())
+                    .color(Self::muted_color(self.dark_mode))
+                    .into(),
+                );
+            }
+            // BORU-SS-39: preset override buttons (None restores the
+            // path-derived auto preset). Visible in every active sharer
+            // state so the choice can be made before the viewer accepts.
+            let preset_buttons: Vec<iced::Element<'_, AppMessage>> = vec![
+                button(text(crate::i18n::t("screenshare.preset_lan_high")))
+                    .on_press(AppMessage::ScreenShareSetPreset(Some(
+                        QualityPreset::LanHigh,
+                    )))
+                    .padding([2, 6])
+                    .into(),
+                button(text(crate::i18n::t("screenshare.preset_balanced")))
+                    .on_press(AppMessage::ScreenShareSetPreset(Some(
+                        QualityPreset::Balanced,
+                    )))
+                    .padding([2, 6])
+                    .into(),
+                button(text(crate::i18n::t("screenshare.preset_relay")))
+                    .on_press(AppMessage::ScreenShareSetPreset(Some(
+                        QualityPreset::RelayConservative,
+                    )))
+                    .padding([2, 6])
+                    .into(),
+                button(text(crate::i18n::t("screenshare.preset_auto")))
+                    .on_press(AppMessage::ScreenShareSetPreset(None))
+                    .padding([2, 6])
+                    .into(),
+            ];
+            items.push(
+                row![
+                    text(crate::i18n::t("screenshare.preset"))
+                        .size(crate::fonts::TypeRole::SupportingText.size_px())
+                        .color(Self::muted_color(self.dark_mode)),
+                    row(preset_buttons).spacing(SPACE_4),
+                ]
+                .spacing(SPACE_6)
+                .align_y(iced::Alignment::Center)
+                .into(),
+            );
+
             // Explicit consent prompt: the host picks the granted capabilities.
             if let Some((_, viewer, capabilities)) = &self.screen_share_control_request {
                 let caps = capabilities
@@ -654,6 +727,12 @@ impl IcedChat {
                         fps: 0,
                         bitrate_bps: 0,
                         backend: "viewer".to_string(),
+                        // The viewer pipeline has no host-side preset/path
+                        // state; the overlay shows the negotiated host values
+                        // when the host publishes them.
+                        path_kind: boru_core::screen_share::PathKind::Unknown,
+                        preset: QualityPreset::Balanced,
+                        adaptive_level: 0,
                         snapshot: stats,
                     };
                     iced::widget::stack![video, view_screen_share_metrics_overlay(metrics)].into()
@@ -820,6 +899,9 @@ impl IcedChat {
                     fps: 0,
                     bitrate_bps: 0,
                     backend: "viewer".to_string(),
+                    path_kind: boru_core::screen_share::PathKind::Unknown,
+                    preset: QualityPreset::Balanced,
+                    adaptive_level: 0,
                     snapshot: stats,
                 };
                 iced::widget::stack![surface, view_screen_share_metrics_overlay(metrics)].into()
