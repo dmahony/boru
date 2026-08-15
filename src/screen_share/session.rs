@@ -108,13 +108,17 @@ impl SessionManager {
     }
     /// Explicitly decline an invitation and remove all state/resources.
     pub fn reject_invitation(&mut self, id: ScreenShareSessionId, reason: impl Into<String>) -> Option<ControlMessage> {
+        self.permissions.remove(&id);
         if self.sessions.remove(&id).is_some() { Some(ControlMessage::Reject { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id, reason: reason.into() }) } else { None }
     }
     /// End a session idempotently; unknown/already-ended sessions produce no wire message.
+    /// The permission record is ended too, so any late input/view attempt fails
+    /// authorization immediately (PDF Task 9.1 stop condition).
     pub fn end(&mut self, id: ScreenShareSessionId) -> Option<ControlMessage> {
         let record = self.sessions.get_mut(&id)?;
         if record.state == SessionState::Ended { return None; }
         record.state = SessionState::Ended;
+        if let Some(permissions) = self.permissions.get_mut(&id) { permissions.end(); }
         Some(ControlMessage::EndSession { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id })
     }
     /// Enter the reconnecting state after a transient media failure (PDF Task
@@ -153,6 +157,7 @@ impl SessionManager {
         let Some(record) = self.sessions.get_mut(&id) else { return false };
         if record.state != SessionState::Reconnecting { return false; }
         record.state = SessionState::Ended;
+        if let Some(permissions) = self.permissions.get_mut(&id) { permissions.end(); }
         let _ = events.try_send(SessionEvent::Ended { session_id: id });
         tracing::warn!(session = ?id, "screen-share: reconnect failed, session ended");
         true
@@ -255,19 +260,55 @@ impl SessionManager {
                 None
             }
             ControlMessage::RequestControl { session_id, capabilities, .. } => {
-                if self.sessions.get(&session_id).and_then(|r| r.peer_id).is_some_and(|id| id == peer_id) {
-                    let _ = events.try_send(SessionEvent::ControlRequest { session_id, peer_id, capabilities });
+                // RequestControl is a viewer → host message. Only the
+                // INVITEE (record.peer_id, and never the host itself) may
+                // request control; the host UI decides with an explicit
+                // grant. A RequestControl from the host (e.g. on the viewer
+                // side) is ignored.
+                if let Some(record) = self.sessions.get(&session_id) {
+                    if record.peer_id == Some(peer_id) && record.host_id != peer_id {
+                        let _ = events.try_send(SessionEvent::ControlRequest { session_id, peer_id, capabilities });
+                    }
                 }
                 None
             }
             ControlMessage::GrantControl { session_id, capabilities, nonce, .. } => {
-                // The viewer stores the HOST's nonce so it can echo it back in
-                // every Input message; host-side validation uses that nonce.
-                if let Some(permissions) = self.permissions.get_mut(&session_id) { if permissions.peer_id() == peer_id { permissions.grant_with_nonce(capabilities.clone(), nonce); let _ = events.try_send(SessionEvent::ControlChanged { session_id, active: true, capabilities }); } }
+                // GrantControl is a host → viewer message. Only the HOST
+                // (record.host_id) may grant control; the viewer stores the
+                // host's nonce so it can echo it back in every Input message,
+                // and host-side validation uses that nonce. A GrantControl
+                // from the viewer (a forged self-grant attempt on the host)
+                // is ignored — remote control is never granted by the peer
+                // that would receive it.
+                let from_host = self
+                    .sessions
+                    .get(&session_id)
+                    .is_some_and(|record| record.host_id == peer_id);
+                if from_host {
+                    if let Some(permissions) = self.permissions.get_mut(&session_id) {
+                        if permissions.peer_id() == peer_id {
+                            permissions.grant_with_nonce(capabilities.clone(), nonce);
+                            let _ = events.try_send(SessionEvent::ControlChanged { session_id, active: true, capabilities });
+                        }
+                    }
+                }
                 None
             }
             ControlMessage::RevokeControl { session_id, .. } => {
-                if let Some(permissions) = self.permissions.get_mut(&session_id) { if permissions.peer_id() == peer_id { permissions.revoke_control(); let _ = events.try_send(SessionEvent::ControlChanged { session_id, active: false, capabilities: vec![Capability::ViewScreen] }); } }
+                // RevokeControl is a host → viewer message; only the HOST may
+                // revoke. A forged RevokeControl from the viewer is ignored.
+                let from_host = self
+                    .sessions
+                    .get(&session_id)
+                    .is_some_and(|record| record.host_id == peer_id);
+                if from_host {
+                    if let Some(permissions) = self.permissions.get_mut(&session_id) {
+                        if permissions.peer_id() == peer_id {
+                            permissions.revoke_control();
+                            let _ = events.try_send(SessionEvent::ControlChanged { session_id, active: false, capabilities: vec![Capability::ViewScreen] });
+                        }
+                    }
+                }
                 None
             }
             ControlMessage::Input { .. } => None,
@@ -275,13 +316,18 @@ impl SessionManager {
                 if let Some(record) = self.sessions.get(&session_id) {
                     if record.host_id != peer_id && record.peer_id != Some(peer_id) { return None; }
                 }
+                self.permissions.remove(&session_id);
                 if self.sessions.remove(&session_id).is_some() { let _ = events.try_send(SessionEvent::Rejected { session_id, reason }); }
                 None
             }
             ControlMessage::EndSession { session_id, .. } => {
                 if let Some(record) = self.sessions.get_mut(&session_id) {
                     if record.host_id != peer_id && record.peer_id != Some(peer_id) { return None; }
-                    if record.state != SessionState::Ended { record.state = SessionState::Ended; let _ = events.try_send(SessionEvent::Ended { session_id }); }
+                    if record.state != SessionState::Ended {
+                        record.state = SessionState::Ended;
+                        if let Some(permissions) = self.permissions.get_mut(&session_id) { permissions.end(); }
+                        let _ = events.try_send(SessionEvent::Ended { session_id });
+                    }
                 }
                 None
             }
@@ -978,6 +1024,160 @@ mod tests {
         assert!(matches!(rx.try_recv(), Ok(SessionEvent::ControlRequest { session_id, .. }) if session_id == id));
         assert!(!manager.permissions(id).unwrap().allows(id, viewer, Capability::ControlPointer));
         assert!(!manager.permissions(id).unwrap().allows(id, viewer, Capability::ControlKeyboard));
+    }
+
+    /// PDF Task 9.1 hardening: a viewer must not be able to grant ITSELF
+    /// control by sending a forged GrantControl to the host. Only the HOST
+    /// (record.host_id) may grant; on the host side a GrantControl from the
+    /// viewer is ignored, so the session stays view-only.
+    #[test]
+    fn forged_grant_control_from_viewer_is_ignored_on_host() {
+        let host = iroh::SecretKey::generate().public();
+        let viewer = iroh::SecretKey::generate().public();
+        let mut manager = SessionManager::default();
+        let id = ScreenShareSessionId::generate();
+        manager.start_invitation(id, host, viewer, 7);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        manager.apply_remote(viewer, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id }, &tx);
+        assert!(matches!(rx.try_recv(), Ok(SessionEvent::Accepted { session_id, .. }) if session_id == id));
+        // The viewer tries to grant itself control with a self-chosen nonce.
+        manager.apply_remote(
+            viewer,
+            ControlMessage::GrantControl {
+                version: SCREEN_SHARE_PROTOCOL_VERSION,
+                session_id: id,
+                capabilities: vec![Capability::ControlPointer],
+                nonce: [0x42; 16],
+            },
+            &tx,
+        );
+        // The forged grant must NOT change permission state.
+        let permissions = manager.permissions(id).unwrap();
+        assert!(!permissions.allows(id, viewer, Capability::ControlPointer));
+        assert!(permissions.token().is_none());
+        assert!(!permissions.nonce_matches([0x42; 16], std::time::Instant::now()));
+        // No ControlChanged(active:true) event was emitted for the forgery.
+        assert!(matches!(rx.try_recv(), Err(_)));
+        // And a forged RevokeControl from the viewer is equally ignored.
+        manager.grant_control(id, vec![Capability::ControlPointer], &tx);
+        assert!(manager.permissions(id).unwrap().has_control());
+        manager.apply_remote(
+            viewer,
+            ControlMessage::RevokeControl { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id },
+            &tx,
+        );
+        assert!(manager.permissions(id).unwrap().has_control(), "viewer cannot revoke the host's grant");
+    }
+
+    /// The reverse direction: on the VIEWER side, a GrantControl arriving from
+    /// the HOST is applied — the viewer stores the host's nonce and may now
+    /// inject input (echoing the nonce back in every Input message).
+    #[test]
+    fn host_grant_control_is_applied_on_viewer() {
+        let host = iroh::SecretKey::generate().public();
+        let mut manager = SessionManager::default();
+        let id = ScreenShareSessionId::generate();
+        let hello = crate::screen_share::protocol::Hello {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: id,
+            host_id: host,
+            conversation_id: 7,
+            codecs: vec!["h264".into()],
+            width: 640,
+            height: 360,
+            frame_rate: 15,
+            permission: Permission::ViewOnly,
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        manager.apply_remote(host, ControlMessage::Hello(hello), &tx);
+        manager.apply_remote(host, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id }, &tx);
+        // Drain the Invitation + Accepted emitted by the Hello/Accept before
+        // the GrantControl.
+        let _ = rx.try_recv();
+        let _ = rx.try_recv();
+        let nonce = [0x77; 16];
+        manager.apply_remote(
+            host,
+            ControlMessage::GrantControl {
+                version: SCREEN_SHARE_PROTOCOL_VERSION,
+                session_id: id,
+                capabilities: vec![Capability::ControlPointer, Capability::ControlKeyboard],
+                nonce,
+            },
+            &tx,
+        );
+        let permissions = manager.permissions(id).unwrap();
+        assert!(permissions.allows(id, host, Capability::ControlPointer));
+        assert!(permissions.allows(id, host, Capability::ControlKeyboard));
+        assert!(permissions.nonce_matches(nonce, std::time::Instant::now()));
+        // ControlChanged(active:true) surfaced so the viewer UI shows the
+        // persistent indicator.
+        assert!(matches!(rx.try_recv(), Ok(SessionEvent::ControlChanged { active: true, .. })));
+    }
+
+    /// A RequestControl from the HOST is a viewer → host message; on the
+    /// viewer side it must not surface a consent prompt (which would confuse
+    /// the UI and could be abused to spam prompts).
+    #[test]
+    fn request_control_from_host_is_ignored_on_viewer() {
+        let host = iroh::SecretKey::generate().public();
+        let mut manager = SessionManager::default();
+        let id = ScreenShareSessionId::generate();
+        let hello = crate::screen_share::protocol::Hello {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: id,
+            host_id: host,
+            conversation_id: 7,
+            codecs: vec!["h264".into()],
+            width: 640,
+            height: 360,
+            frame_rate: 15,
+            permission: Permission::ViewOnly,
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        manager.apply_remote(host, ControlMessage::Hello(hello), &tx);
+        manager.apply_remote(host, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id }, &tx);
+        // Drain the invitation + accepted events before the RequestControl.
+        let _ = rx.try_recv();
+        let _ = rx.try_recv();
+        manager.apply_remote(
+            host,
+            ControlMessage::RequestControl {
+                version: SCREEN_SHARE_PROTOCOL_VERSION,
+                session_id: id,
+                capabilities: vec![Capability::ControlPointer],
+            },
+            &tx,
+        );
+        assert!(matches!(rx.try_recv(), Err(_)), "no ControlRequest prompt on the viewer side");
+        assert!(!manager.permissions(id).unwrap().has_control());
+    }
+
+    /// PDF Task 9.1 stop condition: when the session ends (peer EndSession),
+    /// the permission record is ended immediately so any late input/view
+    /// attempt fails authorization.
+    #[test]
+    fn end_session_ends_permissions() {
+        let host = iroh::SecretKey::generate().public();
+        let viewer = iroh::SecretKey::generate().public();
+        let mut manager = SessionManager::default();
+        let id = ScreenShareSessionId::generate();
+        manager.start_invitation(id, host, viewer, 7);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        manager.apply_remote(viewer, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id }, &tx);
+        assert!(manager.grant_control(id, vec![Capability::ControlPointer], &tx).is_some());
+        let _ = rx.try_recv(); // Accepted
+        let _ = rx.try_recv(); // ControlChanged(active:true)
+        let token = manager.permissions(id).unwrap().token().unwrap();
+        manager.apply_remote(viewer, ControlMessage::EndSession { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: id }, &tx);
+        let permissions = manager.permissions(id).unwrap();
+        assert!(!permissions.is_active());
+        assert!(!permissions.allows(id, viewer, Capability::ViewScreen));
+        assert!(!permissions.allows_token(id, viewer, token, Capability::ControlPointer, std::time::Instant::now()));
+        // A late input with the (now-ended) token is rejected by the same
+        // authorization gate the host loop uses.
+        assert!(!permissions.nonce_matches(*token.nonce(), std::time::Instant::now()));
+        assert!(matches!(rx.try_recv(), Ok(SessionEvent::Ended { session_id }) if session_id == id));
     }
 
     /// A stranger's Accept must never transition the session.

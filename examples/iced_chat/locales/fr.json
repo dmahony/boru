@@ -459,6 +459,7 @@
   "profile.unblock": "Débloquer",
   "profile.unknown": "Inconnu",
   "screenshare.control_granted": "Contrôle accordé — déplacez la souris ou tapez pour contrôler l'hôte",
+  "screenshare.control_badge": "Contrôle à distance actif",
   "screenshare.grant_pointer": "Accorder la souris",
   "screenshare.grant_pointer_keyboard": "Accorder souris + clavier",
   "screenshare.remote_control_active": "Contrôle à distance actif — le spectateur pilote la souris/le clavier",

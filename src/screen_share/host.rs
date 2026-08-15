@@ -348,7 +348,14 @@ async fn run_host_session_inner(
                         Ok(ReadUnit::Control(message)) => {
                             let response = manager.apply_remote(peer, message, events);
                             if let Some(response) = response { let _ = write_control_response(&mut send, &response).await; }
-                            if manager.state(session_id) == Some(SessionState::Ended) { return; }
+                            if manager.state(session_id) == Some(SessionState::Ended) {
+                                // Stop condition (PDF Task 9.1): sharing ended
+                                // (peer EndSession) — shut the remote-input
+                                // backend down immediately so no further input
+                                // can be injected, then leave the loop.
+                                if let Some(mut backend) = backend.take() { backend.shutdown().await; }
+                                return;
+                            }
                         }
                         Ok(ReadUnit::ScreenShare(message)) => match message {
                             // Keyframe requests travel on the reliable control
@@ -440,7 +447,10 @@ async fn run_host_session_inner(
                         // frames.
                         pacing.push(frame);
                         stats.observe_capture();
-                        let Some(frame) = pacing.pop_latest() else { return };
+                        let Some(frame) = pacing.pop_latest() else {
+                            if let Some(mut backend) = backend.take() { backend.shutdown().await; }
+                            return;
+                        };
                         // Feed the pacing drop counters into the stats collector
                         // (delta since the last tick).
                         let pacing_drops = pacing.counters().dropped_queue_full.saturating_add(pacing.counters().dropped_obsolete);
@@ -454,6 +464,7 @@ async fn run_host_session_inner(
                         if frame.width != config.width || frame.height != config.height {
                             if frame.width == 0 || frame.height == 0 || frame.width % 2 != 0 || frame.height % 2 != 0 {
                                 tracing::warn!(width = frame.width, height = frame.height, "screen-share: capture produced invalid geometry, ending session");
+                                if let Some(mut backend) = backend.take() { backend.shutdown().await; }
                                 return;
                             }
                             // Track the new capture geometry in the adaptive
@@ -557,6 +568,7 @@ async fn run_host_session_inner(
                     Ok(None) => {}
                     Err(error) => {
                         tracing::warn!(error = %error, "screen-share: capture failed, ending session");
+                        if let Some(mut backend) = backend.take() { backend.shutdown().await; }
                         return;
                     }
                 }

@@ -208,7 +208,7 @@ pub(crate) fn view_screen_share_surface<'a>(
     hover: Option<iced::Point>,
     last_pointer_norm: Option<(f32, f32)>,
 ) -> iced::Element<'a, AppMessage> {
-    use iced::widget::{container, image, mouse_area};
+    use iced::widget::{container, image, mouse_area, text};
     use iced::Length;
 
     let geom = SurfaceGeometry::new(viewport, source, mode, pan);
@@ -242,7 +242,7 @@ pub(crate) fn view_screen_share_surface<'a>(
         .align_x(iced::Alignment::Center)
         .align_y(iced::Alignment::Center);
 
-    if control_active {
+    let surface_el: iced::Element<'a, AppMessage> = if control_active {
         // Remote control: forward pointer motion/buttons using the same
         // geometry, so normalized coordinates stay correct under pan/zoom.
         // Press/release use the last sent normalized position (updated on
@@ -300,6 +300,39 @@ pub(crate) fn view_screen_share_surface<'a>(
                 }
             })
             .into()
+    };
+
+    if control_active {
+        // Persistent visual indicator (PDF Task 9.1): a compact badge pinned
+        // to the top-right of the shared surface while remote control is
+        // active. The overlay container is not interactive — mouse events
+        // fall through to the surface, so control input keeps working under
+        // the indicator.
+        let badge = container(
+            text(crate::i18n::t("screenshare.control_badge"))
+                .size(10)
+                .color(iced::Color::WHITE),
+        )
+        .padding([3, 8])
+        .style(|_| iced::widget::container::Style {
+            background: Some(iced::Background::Color(
+                iced::Color::from_rgb8(0xB3, 0x26, 0x1E),
+            )),
+            border: iced::Border {
+                radius: 4.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let overlay = container(badge)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Right)
+            .align_y(iced::alignment::Vertical::Top)
+            .padding(6);
+        iced::widget::stack![surface_el, overlay].into()
+    } else {
+        surface_el
     }
 }
 

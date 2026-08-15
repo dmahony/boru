@@ -580,6 +580,7 @@
   "profile.unblock": "Unblock",
   "profile.unknown": "Unknown",
   "screenshare.control_granted": "Control granted — move the mouse or type to control the host",
+  "screenshare.control_badge": "Remote control active",
   "screenshare.grant_pointer": "Grant Pointer",
   "screenshare.grant_pointer_keyboard": "Grant Pointer + Keyboard",
   "screenshare.remote_control_active": "Remote control active — the viewer is driving the pointer/keyboard",
