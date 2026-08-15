@@ -19,7 +19,7 @@ edition = "2021"
 readme = "README.md"
 description = "private, peer-to-peer communication built on Iroh"
 license = "MIT/Apache-2.0"
-authors = ["n0 team"]
+authors = ["n0 team", "Daniel Mahony"]
 repository = "https://github.com/dmahony/boru"
 resolver = "2"
 # examples/ is auto-discovered by default, which would re-expose
