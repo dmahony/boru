@@ -433,6 +433,17 @@ pub(crate) fn screen_share_metrics_lines(metrics: &ScreenShareSessionMetrics) ->
             metrics.fps,
             metrics.bitrate_bps / 1000,
         ),
+        // BORU-SS-39: quality preset + connection path + adaptive level.
+        format!(
+            "preset {} · path {} · adaptive L{}",
+            metrics.preset.name(),
+            match metrics.path_kind {
+                PathKind::Direct => "direct",
+                PathKind::Relay => "relay",
+                PathKind::Unknown => "?",
+            },
+            metrics.adaptive_level,
+        ),
         format!(
             "backend {} · capture {} fps · encode {} fps",
             metrics.backend, s.sender_fps, s.encoded_fps,

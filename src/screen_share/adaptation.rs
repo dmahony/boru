@@ -57,6 +57,10 @@ pub struct AdaptiveQuality {
     congested: u8,
     stable: u8,
     viewer_request: Option<ViewerQualityRequest>,
+    /// BORU-SS-39: the base ceiling was raised (path improved or a preset
+    /// override) while the current config was preserved; recovery climbs
+    /// toward the new base gradually instead of jumping.
+    raised_ceiling: bool,
     last_dropped_frames: u64,
     last_late_drops: u64,
 }
@@ -64,7 +68,7 @@ pub struct AdaptiveQuality {
 impl AdaptiveQuality {
     pub fn new(base: CodecConfig) -> Self {
         Self { base, current: base, level: 0, congested: 0, stable: 0,
-            viewer_request: None, last_dropped_frames: 0, last_late_drops: 0 }
+            viewer_request: None, raised_ceiling: false, last_dropped_frames: 0, last_late_drops: 0 }
     }
     pub fn config(&self) -> CodecConfig { self.current }
     pub fn level(&self) -> u8 { self.level }
@@ -83,6 +87,7 @@ impl AdaptiveQuality {
         self.level = 0;
         self.congested = 0;
         self.stable = 0;
+        self.raised_ceiling = false;
         self.last_dropped_frames = 0;
         self.last_late_drops = 0;
         self.recompute()
@@ -95,8 +100,59 @@ impl AdaptiveQuality {
         self.level = 0;
         self.congested = 0;
         self.stable = 0;
+        self.raised_ceiling = false;
         self.last_dropped_frames = 0;
         self.last_late_drops = 0;
+        self.recompute()
+    }
+
+    /// Adopt a new rate/profile ceiling after a connection-path change
+    /// (BORU-SS-39). Conservative by design:
+    ///
+    /// - A LOWER ceiling (path worsened, e.g. Direct→Relay) clamps the
+    ///   current config to the ceiling immediately — never overshoot the
+    ///   relay.
+    /// - A RAISED ceiling (path improved, e.g. Relay→Direct) is headroom
+    ///   only: the current config is preserved and recovery climbs toward
+    ///   the new base gradually through the normal recovery hysteresis
+    ///   (one half-gap step per 8 clean ticks) — never a sudden jump.
+    ///
+    /// Capture geometry is preserved; only bitrate/fps/profile ceilings
+    /// follow the new path's preset.
+    pub fn set_ceiling(&mut self, ceiling: CodecConfig) -> QualityDecision {
+        let old = self.current;
+        let lowered = old.target_bitrate_bps > ceiling.target_bitrate_bps
+            || old.target_fps > ceiling.target_fps;
+        self.base.target_bitrate_bps = ceiling.target_bitrate_bps;
+        self.base.target_fps = ceiling.target_fps.max(1);
+        self.base.quality_profile = ceiling.quality_profile;
+        self.congested = 0;
+        self.stable = 0;
+        if lowered {
+            // Conservative: clamp to the new (lower) ceiling right away.
+            self.level = 0;
+            self.raised_ceiling = false;
+            self.recompute()
+        } else {
+            // Raised: never a sudden jump. Keep the current config this
+            // call; the raised_ceiling climb raises it gradually afterwards.
+            self.raised_ceiling = true;
+            QualityDecision { config: old, changed: false }
+        }
+    }
+
+    /// Apply a user-selected preset ceiling immediately (BORU-SS-39). Unlike
+    /// the path-change signal, a manual override takes effect right away in
+    /// both directions: lowering clamps down, raising applies the new
+    /// ceiling now (the sharer asked for it).
+    pub fn override_ceiling(&mut self, ceiling: CodecConfig) -> QualityDecision {
+        self.base.target_bitrate_bps = ceiling.target_bitrate_bps;
+        self.base.target_fps = ceiling.target_fps.max(1);
+        self.base.quality_profile = ceiling.quality_profile;
+        self.level = 0;
+        self.congested = 0;
+        self.stable = 0;
+        self.raised_ceiling = false;
         self.recompute()
     }
 
@@ -144,9 +200,65 @@ impl AdaptiveQuality {
         } else {
             self.congested = 0;
             self.stable = self.stable.saturating_add(1);
-            if self.stable >= STABLE_TICKS_TO_STEP { self.level = self.level.saturating_sub(1); self.stable = 0; }
+            if self.stable >= STABLE_TICKS_TO_STEP {
+                if self.level > 0 { self.level = self.level.saturating_sub(1); }
+                self.stable = 0;
+                // BORU-SS-39: after a raised ceiling (path improved), the
+                // preserved config is below the new base. Climb toward it one
+                // half-gap step per recovery period instead of jumping.
+                if self.raised_ceiling && self.below_base() {
+                    return self.climb_toward_base();
+                }
+            }
         }
         self.recompute()
+    }
+
+    /// Whether the current config sits below the base ceiling (only
+    /// possible at level 0 after a raised ceiling — the ladder normally
+    /// recomputes to the base at level 0).
+    fn below_base(&self) -> bool {
+        self.current.target_bitrate_bps < self.base.target_bitrate_bps
+            || self.current.target_fps < self.base.target_fps
+    }
+
+    /// Climb one step toward the base ceiling after a raised ceiling
+    /// (BORU-SS-39). The step halves the remaining bitrate/fps gap (a
+    /// geometric climb that terminates via the snap conditions below); the
+    /// viewer's manual request ceiling still applies to the result.
+    fn climb_toward_base(&mut self) -> QualityDecision {
+        let mut next = self.current;
+        let bitrate_gap = self.base.target_bitrate_bps.saturating_sub(next.target_bitrate_bps);
+        let fps_gap = self.base.target_fps.saturating_sub(next.target_fps);
+        next.target_bitrate_bps = next
+            .target_bitrate_bps
+            .saturating_add(bitrate_gap / 2)
+            .min(self.base.target_bitrate_bps);
+        next.target_fps = next.target_fps.saturating_add(fps_gap / 2).min(self.base.target_fps);
+        next.quality_profile = self.base.quality_profile;
+        // Snap residual gaps so the geometric climb terminates.
+        if bitrate_gap > 0 && bitrate_gap <= 100_000 {
+            next.target_bitrate_bps = self.base.target_bitrate_bps;
+        }
+        if fps_gap > 0 && fps_gap <= 2 {
+            next.target_fps = self.base.target_fps;
+        }
+        // The viewer's manual ceiling still clamps the climbed config.
+        if let Some(request) = &self.viewer_request {
+            next.target_bitrate_bps = next.target_bitrate_bps.min(request.target_bitrate_bps);
+            next.target_fps = next.target_fps.min(request.max_frame_rate as u32).max(1);
+            let scale = (request.scale_factor as u32).clamp(1, 100);
+            let width = ((self.base.width * scale) / 100).max(2) & !1;
+            let height = ((self.base.height * scale) / 100).max(2) & !1;
+            next.width = next.width.min(width).max(2) & !1;
+            next.height = next.height.min(height).max(2) & !1;
+        }
+        let changed = next != self.current;
+        self.current = next;
+        if !self.below_base() {
+            self.raised_ceiling = false;
+        }
+        QualityDecision { config: next, changed }
     }
 
     fn recompute(&mut self) -> QualityDecision {
@@ -445,6 +557,105 @@ mod tests {
         for _ in 0..3 { quality.update(stats(1024 * 1024, 0, 0)); }
         assert_eq!(quality.level(), 1);
         assert!(quality.config().target_bitrate_bps < 3_000_000, "congestion reduces below the ceiling");
+    }
+
+    // ---- BORU-SS-39: path-change / preset ceilings ----
+
+    fn relay_ceiling() -> CodecConfig {
+        let base = CodecConfig::default();
+        CodecConfig {
+            target_bitrate_bps: base.target_bitrate_bps / 2,
+            target_fps: (base.target_fps / 2).max(5),
+            ..base
+        }
+    }
+
+    fn lan_ceiling() -> CodecConfig {
+        let base = CodecConfig::default();
+        CodecConfig {
+            target_bitrate_bps: base.target_bitrate_bps * 2,
+            ..base
+        }
+    }
+
+    #[test]
+    fn lowered_ceiling_clamps_immediately() {
+        // Direct → Relay: the relay ceiling applies right away so a relayed
+        // path is never overshot.
+        let mut quality = AdaptiveQuality::new(lan_ceiling());
+        let decision = quality.set_ceiling(relay_ceiling());
+        assert!(decision.changed);
+        assert_eq!(
+            quality.config().target_bitrate_bps,
+            relay_ceiling().target_bitrate_bps
+        );
+        assert_eq!(quality.config().target_fps, relay_ceiling().target_fps);
+    }
+
+    #[test]
+    fn raised_ceiling_never_jumps_and_recovers_gradually() {
+        // Congested session on the relay ceiling, then the path improves to
+        // LAN: the config must NOT jump to the LAN ceiling.
+        let mut quality = AdaptiveQuality::new(relay_ceiling());
+        for _ in 0..3 {
+            quality.update(stats(1024 * 1024, 300_000, 2));
+        }
+        assert_eq!(quality.level(), 1);
+        let before = quality.config();
+        let decision = quality.set_ceiling(lan_ceiling());
+        assert!(!decision.changed, "a raise must not jump in the same call");
+        assert_eq!(quality.config(), before, "current config preserved on raise");
+        // Recovery climbs gradually — one half-gap step per 8 clean ticks —
+        // and never reaches the LAN ceiling until several recovery periods.
+        for _ in 0..8 {
+            quality.update(base_stats());
+        }
+        assert!(
+            quality.config().target_bitrate_bps < lan_ceiling().target_bitrate_bps,
+            "recovery must be gradual, not an immediate jump"
+        );
+        for _ in 0..64 {
+            quality.update(base_stats());
+        }
+        assert_eq!(
+            quality.config().target_bitrate_bps,
+            lan_ceiling().target_bitrate_bps,
+            "eventually reaches the LAN ceiling"
+        );
+        assert_eq!(quality.config().target_fps, lan_ceiling().target_fps);
+    }
+
+    #[test]
+    fn override_ceiling_applies_immediately_in_both_directions() {
+        // A manual preset override (the user explicitly picks LAN high) takes
+        // effect right away, even upward.
+        let mut quality = AdaptiveQuality::new(relay_ceiling());
+        let decision = quality.override_ceiling(lan_ceiling());
+        assert!(decision.changed);
+        assert_eq!(
+            quality.config().target_bitrate_bps,
+            lan_ceiling().target_bitrate_bps
+        );
+        // And downward again (user picks relay conservatively).
+        let decision = quality.override_ceiling(relay_ceiling());
+        assert!(decision.changed);
+        assert_eq!(
+            quality.config().target_bitrate_bps,
+            relay_ceiling().target_bitrate_bps
+        );
+    }
+
+    #[test]
+    fn ceiling_changes_preserve_capture_geometry() {
+        let mut base = CodecConfig::default();
+        base.width = 1280;
+        base.height = 720;
+        let mut ceiling = base;
+        ceiling.target_bitrate_bps = base.target_bitrate_bps / 2;
+        let mut quality = AdaptiveQuality::new(base);
+        let _ = quality.set_ceiling(ceiling);
+        assert_eq!(quality.config().width, 1280);
+        assert_eq!(quality.config().height, 720);
     }
 
     // ---- PacingController (PDF Task 7.2) ----

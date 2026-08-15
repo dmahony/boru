@@ -34,6 +34,30 @@ const SCREEN_SHARE_KIND: u8 = 0x03;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathKind { Unknown, Direct, Relay }
 
+/// Classify the SELECTED path of a live iroh connection (BORU-SS-39).
+///
+/// iroh reports one path per address family; the selected path is the one
+/// actually carrying traffic. A relay path (via the configured relay server)
+/// is `Relay`; an IP path is `Direct`; anything else (not yet selected,
+/// pathless) is `Unknown`. Used by the host to pick the initial quality
+/// preset and to detect mid-session Direct↔Relay switches.
+pub fn selected_path_kind(connection: &iroh::endpoint::Connection) -> PathKind {
+    connection
+        .paths()
+        .iter()
+        .find(|path| path.is_selected())
+        .map(|path| {
+            if path.is_relay() {
+                PathKind::Relay
+            } else if path.is_ip() {
+                PathKind::Direct
+            } else {
+                PathKind::Unknown
+            }
+        })
+        .unwrap_or(PathKind::Unknown)
+}
+
 /// Counters useful to a viewer/debug harness. They are monotonic and contain no peer-identifying data.
 #[derive(Debug, Default)]
 pub struct TransportCounters {
@@ -126,7 +150,7 @@ pub struct QuicScreenTransport { connection: iroh::endpoint::Connection, pub cou
 impl QuicScreenTransport {
     pub fn new(connection: iroh::endpoint::Connection, session_id: [u8; 16]) -> Result<Self, ScreenShareError> { if session_id == [0; 16] { return Err(ScreenShareError::new("session id is empty")); } Ok(Self { connection, counters: std::sync::Arc::new(TransportCounters::default()), session_id }) }
     pub fn session_id(&self) -> [u8; 16] { self.session_id }
-    pub fn path_kind(&self) -> PathKind { self.connection.paths().iter().find(|p| p.is_selected()).map(|p| if p.is_relay() { PathKind::Relay } else if p.is_ip() { PathKind::Direct } else { PathKind::Unknown }).unwrap_or(PathKind::Unknown) }
+    pub fn path_kind(&self) -> PathKind { selected_path_kind(&self.connection) }
     pub async fn send_control(&self, message: &ControlMessage) -> Result<(), ScreenShareError> {
         let bytes = protocol::encode(message).map_err(|e| ScreenShareError::new(e.to_string()))?;
         let (mut send, _) = self.connection.open_bi().await.map_err(|e| ScreenShareError::new(e.to_string()))?;

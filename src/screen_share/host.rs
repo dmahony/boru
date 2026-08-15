@@ -22,12 +22,13 @@ use super::{
     coords::{desktop_to_normalized, scale_sprite_to, CursorMeta, CursorSprite, MonitorGeometry},
     permissions::{Capability, SlidingWindowRateLimiter},
     platform::{capture_dimensions, create_capture_source, CAPTURE_FPS, ActiveCapture},
+    presets::QualityPreset,
     protocol::{self, ControlMessage, InputEventKind, RedactedText, ScreenShareMessage, SCREEN_SHARE_PROTOCOL_VERSION},
     reconnect::{retry_reconnect, ReconnectPolicy},
     remote_input::{self, create_platform_backend, InputEvent, NormalizedPointer, RemoteInput},
     session::{ScreenShareSessionId, SessionEvent, SessionManager, SessionState},
     stats::{ScreenShareSessionMetrics, ScreenShareStats},
-    transport::{read_unit, QuicScreenTransport, ReadUnit},
+    transport::{read_unit, selected_path_kind, PathKind, QuicScreenTransport, ReadUnit},
     ScreenShareError, SCREEN_SHARE_ALPN,
 };
 use iroh::endpoint::Endpoint;
@@ -58,6 +59,11 @@ pub enum HostCommand {
     /// frame with the new geometry, re-selects the capture source, forces a
     /// keyframe, and surfaces `SessionEvent::SourceChanged` to the app.
     SwitchSource(CaptureSourceId),
+    /// Sharer overrides the quality preset (BORU-SS-39). The chosen preset's
+    /// ceiling is applied immediately — the user's explicit choice wins over
+    /// the path-derived auto preset until the session ends. `None` restores
+    /// the path-derived preset (auto mode).
+    SetQualityPreset(Option<QualityPreset>),
 }
 
 /// Host-side cursor delivery state for `Metadata` cursor mode (BORU-SS-33 /
@@ -354,6 +360,15 @@ async fn run_host_session_inner(
             return SessionTermination::TransportFailed;
         }
     };
+    // BORU-SS-39: choose the initial quality preset from the selected QUIC
+    // path kind (Direct → LAN-high headroom, Relay → conservative ceiling,
+    // Unknown → balanced). The sharer can override it at any time via
+    // `HostCommand::SetQualityPreset`; a manual override wins over the
+    // path-derived preset until the session ends (`None` restores auto).
+    let initial_path = transport.path_kind();
+    let mut preset = QualityPreset::for_path(initial_path);
+    let mut user_override: Option<QualityPreset> = None;
+    let mut last_path_kind = initial_path;
     // Separate logical channels (PDF Task 3.2): a reliable control channel and
     // a dedicated bounded media channel. Chat traffic lives on a different
     // QUIC connection (gossip), so it cannot block screen-share frames; these
@@ -441,6 +456,16 @@ async fn run_host_session_inner(
                     }
                     false
                 }
+                // BORU-SS-39: the sharer picked a quality preset before the
+                // viewer accepted. The initial encoder config (created when
+                // streaming starts) uses it; a later override applies to the
+                // live adaptive controller.
+                Some(HostCommand::SetQualityPreset(override_preset)) => {
+                    preset = override_preset.unwrap_or_else(|| QualityPreset::for_path(last_path_kind));
+                    user_override = override_preset;
+                    tracing::info!(preset = preset.name(), override = user_override.is_some(), "screen-share: host preset selected before streaming");
+                    false
+                }
                 None => return SessionTermination::HostCommandClosed,
             },
             _ = tokio::time::sleep(Duration::from_millis(250)) => false,
@@ -468,7 +493,15 @@ async fn run_host_session_inner(
     let encode_width = capture_width & !1;
     let encode_height = capture_height & !1;
     if encode_width == 0 || encode_height == 0 { return SessionTermination::InvalidGeometry; }
+    // BORU-SS-39: the initial encoder config is derived from the capture
+    // session AND the quality preset chosen from the connection path (or the
+    // sharer's pre-streaming override). The pre-preset config is kept as the
+    // preset reference so later preset/path changes recompute the ceiling
+    // relative to the capture rates, independent of the current adaptive
+    // level.
     let mut config = CodecConfig::from_capture_config(&capture_config, encode_width, encode_height);
+    let preset_reference = config;
+    preset.apply_to_config(&mut config);
     let Ok(mut encoder) = OpenH264Encoder::new(config) else { return SessionTermination::EncodeInitFailed };
     // PDF Phase 12: one structured capture-start line with the negotiated
     // codec, dimensions, bitrate, frame rate and backend. Contains no media
@@ -481,6 +514,8 @@ async fn run_host_session_inner(
         height = encode_height,
         bitrate_bps = config.target_bitrate_bps,
         frame_rate = capture_fps,
+        preset = preset.name(),
+        path = ?last_path_kind,
         "screen-share: capture started"
     );
     // PDF Phase 10: monitor unplug / laptop dock-undock handling. When no
@@ -773,6 +808,22 @@ async fn run_host_session_inner(
                         stream_paused = false;
                     }
                 }
+                // BORU-SS-39: the sharer overrides the quality preset (or
+                // restores the path-derived auto preset with None). The
+                // chosen ceiling applies immediately — user intent wins over
+                // the path-derived preset.
+                Some(HostCommand::SetQualityPreset(override_preset)) => {
+                    preset = override_preset.unwrap_or_else(|| QualityPreset::for_path(last_path_kind));
+                    user_override = override_preset;
+                    if apply_preset_override(&mut adaptive, &mut config, &mut encoder, &preset_reference, preset) {
+                        tracing::info!(preset = preset.name(), level = adaptive.level(),
+                            width = config.width, height = config.height,
+                            fps = config.target_fps, bitrate = config.target_bitrate_bps,
+                            "screen-share: host applied preset override");
+                    } else {
+                        tracing::info!(preset = preset.name(), "screen-share: host preset override (no config change)");
+                    }
+                }
                 None => return SessionTermination::HostCommandClosed,
             },
             _ = interval.tick() => {
@@ -1038,6 +1089,38 @@ async fn run_host_session_inner(
                                         .map(|path| path.rtt().as_micros() as u64)
                                         .unwrap_or(0);
                                     stats.set_rtt_us(rtt_us);
+                                    // BORU-SS-39: detect a Direct↔Relay switch
+                                    // on the selected QUIC path and feed it to
+                                    // the adaptive controller conservatively.
+                                    // The ceiling is recomputed from the new
+                                    // path's preset: a lowered ceiling clamps
+                                    // immediately (never overshoot a relay); a
+                                    // raised ceiling is headroom only and
+                                    // recovery stays gradual. A user preset
+                                    // override wins over the path-derived
+                                    // preset.
+                                    let current_path = selected_path_kind(&connection);
+                                    if current_path != last_path_kind {
+                                        last_path_kind = current_path;
+                                        if current_path != PathKind::Unknown {
+                                            if user_override.is_none() {
+                                                let path_preset = QualityPreset::for_path(current_path);
+                                                if path_preset != preset {
+                                                    preset = path_preset;
+                                                    let mut ceiling = preset_reference;
+                                                    path_preset.apply_to_config(&mut ceiling);
+                                                    let decision = adaptive.set_ceiling(ceiling);
+                                                    if apply_quality_config(&mut encoder, &mut config, decision) {
+                                                        tracing::info!(path = ?current_path, preset = preset.name(),
+                                                            level = adaptive.level(), bitrate = config.target_bitrate_bps,
+                                                            fps = config.target_fps, "screen-share: path change applied quality preset ceiling");
+                                                    }
+                                                }
+                                            } else {
+                                                tracing::info!(path = ?current_path, preset = preset.name(), "screen-share: path changed; user preset override retained");
+                                            }
+                                        }
+                                    }
                                     let snapshot = stats.snapshot();
                                     let decision = adaptive.update(snapshot);
                                     // PDF Phase 12: expose developer metrics to
@@ -1058,6 +1141,9 @@ async fn run_host_session_inner(
                                         fps: config.target_fps,
                                         bitrate_bps: config.target_bitrate_bps as u64,
                                         backend: capture.backend_name().to_string(),
+                                        path_kind: last_path_kind,
+                                        preset,
+                                        adaptive_level: adaptive.level(),
                                         snapshot,
                                     };
                                     let _ = events.try_send(SessionEvent::Metrics { session_id, metrics });
@@ -1244,10 +1330,11 @@ async fn wait_for_accept(
 
 /// Apply one adaptive-quality decision to the live encoder.
 ///
-/// Resolution/fps changes rebuild the encoder (config generation bump so the
-/// viewer re-initialises its decoder); a pure bitrate change uses the cheaper
-/// same-resolution rebuild (no generation bump, forced keyframe re-syncs the
-/// stream). Returns `true` when a change was applied.
+/// Resolution/fps/quality-profile changes rebuild the encoder (config
+/// generation bump so the viewer re-initialises its decoder); a pure bitrate
+/// change uses the cheaper same-resolution rebuild (no generation bump,
+/// forced keyframe re-syncs the stream). Returns `true` when a change was
+/// applied.
 fn apply_quality_config(
     encoder: &mut OpenH264Encoder,
     config: &mut CodecConfig,
@@ -1255,7 +1342,9 @@ fn apply_quality_config(
 ) -> bool {
     if !decision.changed { return false; }
     let next = decision.config;
-    if next.width != config.width || next.height != config.height || next.target_fps != config.target_fps {
+    if next.width != config.width || next.height != config.height || next.target_fps != config.target_fps
+        || next.quality_profile != config.quality_profile
+    {
         if encoder.reconfigure(next).is_err() { return false; }
     } else if next.target_bitrate_bps != config.target_bitrate_bps {
         if encoder.reconfigure_bitrate(next.target_bitrate_bps).is_err() { return false; }
@@ -1264,6 +1353,23 @@ fn apply_quality_config(
     }
     *config = next;
     true
+}
+
+/// Recompute the adaptive ceiling from a preset (relative to the stable
+/// preset reference, independent of the current adaptive level) and apply it
+/// to the live encoder immediately — the user-override path (BORU-SS-39).
+/// Returns `true` when a change was applied.
+fn apply_preset_override(
+    adaptive: &mut AdaptiveQuality,
+    config: &mut CodecConfig,
+    encoder: &mut OpenH264Encoder,
+    preset_reference: &CodecConfig,
+    preset: QualityPreset,
+) -> bool {
+    let mut ceiling = *preset_reference;
+    preset.apply_to_config(&mut ceiling);
+    let decision = adaptive.override_ceiling(ceiling);
+    apply_quality_config(encoder, config, decision)
 }
 
 /// Write one control response on an accepted stream (mirrors the protocol
