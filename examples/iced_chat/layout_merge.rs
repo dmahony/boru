@@ -208,6 +208,7 @@ merge_leaf! {
         two_col_breakpoint: clamp_size_pos,
         card_padding_y: clamp_size0,
         card_padding_x: clamp_size0,
+        gap: clamp_size0,
     }
 }
 

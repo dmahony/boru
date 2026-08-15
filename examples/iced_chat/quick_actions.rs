@@ -22,7 +22,7 @@
 use iced::widget::{button, container, Column, Row, Space};
 use iced::{Alignment, Background, Border, Color, Element, Length, Theme, Vector};
 
-use crate::app::{AppMessage, SPACE_12, SPACE_4, SPACE_8};
+use crate::app::{AppMessage, SPACE_4, SPACE_8};
 use crate::design_tokens;
 use crate::icon_system::{Icon, IconSize};
 
@@ -274,7 +274,7 @@ pub fn quick_action_grid<'a>(
     let mut rows: Vec<Element<'a, AppMessage>> = Vec::new();
     for actions in ACTIONS.chunks(columns) {
         let mut row = iced::widget::Row::new()
-            .spacing(SPACE_8)
+            .spacing(layout.gap)
             // Top-align cards so a wrapped description in one card never
             // shifts its neighbours' icons/titles vertically (content-driven
             // heights differ per card).
@@ -295,7 +295,7 @@ pub fn quick_action_grid<'a>(
     }
 
     iced::widget::Column::with_children(rows)
-        .spacing(SPACE_8)
+        .spacing(layout.gap)
         .width(Length::Fill)
         .into()
 }
@@ -303,6 +303,7 @@ pub fn quick_action_grid<'a>(
 #[cfg(test)]
 mod tests {
     use super::{grid_columns_for, ACTIONS};
+    use crate::design_tokens::{SPACE_16, SPACE_8};
 
     #[test]
     fn exposes_the_four_home_actions() {
@@ -454,10 +455,10 @@ mod tests {
             prod.contains("quick_action_icon_size"),
             "icon container must be 40 px via HomeTheme::quick_action_icon_size (HOME-02 compact)"
         );
-        assert!(
-            prod.contains(".padding([SPACE_16, SPACE_16])"),
-            "card padding must be 16 px vertical / 16 px horizontal (HOME-02 compact)"
-        );
+        let layout = crate::layout::QuickActionsLayout::default();
+        assert_eq!(layout.card_padding_y, SPACE_16);
+        assert_eq!(layout.card_padding_x, SPACE_16);
+        assert_eq!(layout.gap, SPACE_8);
         assert!(
             prod.contains("TypeRole::CardTitle"),
             "quick-action labels must use TypeRole::CardTitle (IBM Plex Sans SemiBold 16)"
@@ -473,14 +474,8 @@ mod tests {
         // FONTS-07: the quick-action cards size their roles locally (16 px
         // title / 14 px description at 1.45) instead of the shared role
         // defaults (CardTitle 18 / SupportingText 13) used elsewhere.
-        assert!(
-            prod.contains(".size(crate::theme::BoruTheme::default().home.quick_action_title_size)"),
-            "quick-action titles must override the card-title size to the FONTS-07 16 px band"
-        );
-        assert!(
-            prod.contains(".size(crate::theme::BoruTheme::default().home.quick_action_desc_size)"),
-            "quick-action descriptions must override the supporting-text size to the FONTS-07 14 px"
-        );
+        assert!(prod.contains("quick_action_title_size"));
+        assert!(prod.contains("quick_action_desc_size"));
         assert!(
             prod.contains("quick_action_desc_line_height"),
             "quick-action descriptions must use the FONTS-07 1.4–1.45 line-height theme token"

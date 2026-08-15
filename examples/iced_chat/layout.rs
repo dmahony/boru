@@ -231,6 +231,8 @@ pub struct QuickActionsLayout {
     pub card_padding_y: f32,
     /// Horizontal padding inside each quick-action card.
     pub card_padding_x: f32,
+    /// Gap between quick-action cards, both horizontally and vertically.
+    pub gap: f32,
 }
 
 impl Default for QuickActionsLayout {
@@ -243,6 +245,7 @@ impl Default for QuickActionsLayout {
             two_col_breakpoint: crate::design_tokens::HOME_QUICK_ONE_COL_CONTENT,
             card_padding_y: crate::design_tokens::SPACE_16,
             card_padding_x: crate::design_tokens::SPACE_16,
+            gap: crate::design_tokens::SPACE_8,
         }
     }
 }
@@ -1239,6 +1242,7 @@ layout_override_group! {
         two_col_breakpoint: f32,
         card_padding_y: f32,
         card_padding_x: f32,
+        gap: f32,
     }
 }
 

@@ -102,6 +102,7 @@ pub enum LayoutField {
     HomeQuickTwoColBreakpoint,
     HomeQuickCardPaddingY,
     HomeQuickCardPaddingX,
+    HomeQuickGap,
     // ── Home: canvas ──
     HomeMaxContentWidth,
     // ── Home: padding ──
@@ -200,6 +201,7 @@ impl LayoutField {
             HomeQuickTwoColBreakpoint => "2-col breakpoint",
             HomeQuickCardPaddingY => "Quick-action card padding y",
             HomeQuickCardPaddingX => "Quick-action card padding x",
+            HomeQuickGap => "Quick-action grid gap",
             HomeMaxContentWidth => "Max content width",
             HomePaddingTop => "Top padding",
             HomePaddingBottom => "Bottom padding",
@@ -285,6 +287,7 @@ impl LayoutField {
             | HomeQuickTwoColBreakpoint
             | HomeQuickCardPaddingY
             | HomeQuickCardPaddingX
+            | HomeQuickGap
             | HomeMaxContentWidth
             | HomePaddingTop
             | HomePaddingBottom
@@ -410,6 +413,7 @@ impl LayoutField {
             | HomeQuickTwoColBreakpoint
             | HomeQuickCardPaddingY
             | HomeQuickCardPaddingX
+            | HomeQuickGap
             | ComponentVideoNarrowBreakpoint
             | ComponentVideoMediumBreakpoint
             | ResponsiveHomeIllustrationFullContent
@@ -507,6 +511,7 @@ pub fn read_layout_float(layout: &LayoutConfig, field: LayoutField) -> f32 {
         HomeQuickTwoColBreakpoint => h.quick_actions.two_col_breakpoint,
         HomeQuickCardPaddingY => h.quick_actions.card_padding_y,
         HomeQuickCardPaddingX => h.quick_actions.card_padding_x,
+        HomeQuickGap => h.quick_actions.gap,
         HomeMaxContentWidth => h.max_content_width,
         HomePaddingTop => h.padding.top,
         HomePaddingBottom => h.padding.bottom,
@@ -759,6 +764,7 @@ pub fn apply_layout_float(
         HomeQuickTwoColBreakpoint => set(&mut ov_home_quick(overrides).two_col_breakpoint),
         HomeQuickCardPaddingY => set(&mut ov_home_quick(overrides).card_padding_y),
         HomeQuickCardPaddingX => set(&mut ov_home_quick(overrides).card_padding_x),
+        HomeQuickGap => set(&mut ov_home_quick(overrides).gap),
         HomeMaxContentWidth => set(&mut ov_home(overrides).max_content_width),
         HomePaddingTop => set(&mut ov_home_padding(overrides).top),
         HomePaddingBottom => set(&mut ov_home_padding(overrides).bottom),
