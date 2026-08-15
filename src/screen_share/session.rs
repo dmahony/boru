@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use super::capture::CaptureSource;
+use super::coords::CursorSprite;
 use super::permissions::{Capability, SessionPermissions};
 use super::protocol::ScreenShareMessage;
 use super::protocol::{ControlMessage, Hello, Permission, RedactedText, SCREEN_SHARE_PROTOCOL_VERSION};
@@ -47,7 +48,7 @@ pub enum SessionState {
 }
 
 /// Events exposed to the conversation/UI layer. They contain no media data.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SessionEvent {
     /// A recipient-visible invitation that requires an explicit action.
     Invitation { session_id: ScreenShareSessionId, host_id: iroh::PublicKey, conversation_id: u64, hello: Hello },
@@ -99,6 +100,24 @@ pub enum SessionEvent {
         title: String,
         width: u32,
         height: u32,
+    },
+    /// BORU-SS-33: the host delivered a new cursor SHAPE (PDF Task 5.3
+    /// `Metadata` cursor mode). The viewer caches the sprite and composites
+    /// it over the decoded frame at the latest reported position. Contains
+    /// no screen content — only the bounded cursor sprite pixels.
+    CursorShape {
+        session_id: ScreenShareSessionId,
+        sprite: CursorSprite,
+    },
+    /// BORU-SS-33: the host delivered a cursor POSITION move (PDF Task 5.3
+    /// `Metadata` cursor mode). Position is normalized against the shared
+    /// source (`0..=1`), matching the input coordinate contract; the viewer
+    /// re-composites the cached sprite at this position.
+    CursorPosition {
+        session_id: ScreenShareSessionId,
+        x: f32,
+        y: f32,
+        visible: bool,
     },
     /// The shared source disappeared (monitor unplug / laptop dock-undock).
     /// The host re-enumerated; `fallback` names the source it fell back to,

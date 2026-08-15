@@ -730,6 +730,7 @@ impl IcedChat {
                     view_screen_share_view_controls(
                         scale,
                         self.screen_share_fullscreen,
+                        self.screen_share_cursor_enabled,
                     ),
                     row(actions).spacing(SPACE_6),
                 ]
@@ -830,7 +831,7 @@ impl IcedChat {
         };
 
         let controls = row![
-            view_screen_share_view_controls(scale, true),
+            view_screen_share_view_controls(scale, true, self.screen_share_cursor_enabled),
             button(text(crate::i18n::t("screenshare.stop_viewing")))
                 .on_press(AppMessage::StopScreenShare)
                 .padding([2, 6]),

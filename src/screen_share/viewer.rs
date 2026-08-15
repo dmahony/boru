@@ -247,7 +247,7 @@ mod tests {
             self.outputs.pop_front().unwrap_or_else(|| Ok(Some(CapturedFrame {
                 timestamp_us: frame.timestamp_us, width: 2, height: 2,
                 pixel_format: PixelFormat::Rgba8, stride: 8, pixels: vec![1; 16],
-                gpu_handle: None, dirty_region: None,
+                gpu_handle: None, dirty_region: None, cursor: None,
             })))
         }
         fn metadata(&self) -> crate::screen_share::CodecMetadata { panic!("unused") }
@@ -324,6 +324,7 @@ mod tests {
         outputs.push_back(Ok(Some(CapturedFrame {
             timestamp_us: 1, width: 2, height: 2, pixel_format: PixelFormat::Rgba8,
             stride: 8, pixels: vec![1; 16], gpu_handle: None, dirty_region: None,
+            cursor: None,
         })));
         outputs.push_back(Ok(None));
         let mut p = ViewerPipeline::new(FakeDecoder { outputs, resets: 0 }, [7; 16], 4).unwrap();

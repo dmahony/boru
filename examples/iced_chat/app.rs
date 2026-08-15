@@ -94,10 +94,11 @@ use boru_core::call::{CallId, CallKind};
 #[cfg(feature = "screen-sharing")]
 use boru_core::screen_share::{
     run_host_session, Capability, CapturedFrame, CaptureSource, CaptureSourceId, ControlMessage,
-    HostCommand, InboundMedia, InputEventKind, OpenH264Decoder, PixelFormat, RedactedText,
-    ScreenShareMessage, ScreenShareProtocol, ScreenShareSessionMetrics, ScreenShareStatsSnapshot,
-    MAX_CLIPBOARD_TEXT, ScreenShareSessionId, SessionEvent, ViewerPipeline, DEFAULT_QUEUE_CAPACITY,
-    MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT, SCREEN_SHARE_PROTOCOL_VERSION,
+    CursorSprite, HostCommand, InboundMedia, InputEventKind, OpenH264Decoder, PixelFormat,
+    RedactedText, ScreenShareMessage, ScreenShareProtocol, ScreenShareSessionMetrics,
+    ScreenShareStatsSnapshot, MAX_CLIPBOARD_TEXT, ScreenShareSessionId, SessionEvent,
+    ViewerPipeline, DEFAULT_QUEUE_CAPACITY, MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT,
+    SCREEN_SHARE_PROTOCOL_VERSION, composite_cursor_rgba, SourcePoint,
 };
 #[cfg(feature = "video-calls")]
 use boru_core::call::video::VideoFrame;
@@ -4296,6 +4297,28 @@ pub struct IcedChat {
     /// Rendered handle of the latest decoded frame (RGBA).
     screen_share_frame_handle: Option<iced::widget::image::Handle>,
     #[cfg(feature = "screen-sharing")]
+    /// Latest cursor sprite received via `CursorShape` (BORU-SS-33). `None`
+    /// until the host sends a shape; the viewer composites it over decoded
+    /// frames at the latest position when `screen_share_cursor_visible` and
+    /// `screen_share_cursor_enabled` are true.
+    screen_share_cursor_sprite: Option<CursorSprite>,
+    #[cfg(feature = "screen-sharing")]
+    /// Latest normalized cursor position received via `CursorPosition`
+    /// (BORU-SS-33); `None` until the host reports a position.
+    screen_share_cursor_pos: Option<(f32, f32)>,
+    #[cfg(feature = "screen-sharing")]
+    /// Whether the host reports the remote cursor as visible.
+    screen_share_cursor_visible: bool,
+    #[cfg(feature = "screen-sharing")]
+    /// Viewer toggle (CUR-1): show/hide the remote cursor overlay.
+    screen_share_cursor_enabled: bool,
+    #[cfg(feature = "screen-sharing")]
+    /// Cached raw RGBA pixels of the latest decoded frame, so a cursor
+    /// shape/position/toggle update can re-composite WITHOUT waiting for a
+    /// new video frame (BORU-SS-33: cursor moves must not force re-encode).
+    /// `(width, height, pixels)`.
+    screen_share_cursor_frame_rgba: Option<(u32, u32, Vec<u8>)>,
+    #[cfg(feature = "screen-sharing")]
     /// Host-side pending control request (session id, viewer label, caps).
     screen_share_control_request: Option<(ScreenShareSessionId, String, Vec<Capability>)>,
     #[cfg(feature = "screen-sharing")]
@@ -5765,6 +5788,9 @@ pub enum AppMessage {
     #[cfg(feature = "screen-sharing")]
     /// End a pan drag on the surface.
     ScreenSharePanEnd,
+    #[cfg(feature = "screen-sharing")]
+    /// Toggle the viewer's remote-cursor overlay (CUR-1 / BORU-SS-33).
+    ToggleScreenShareCursor,
     /// Forward one event from the call actor subscription.
     CallEventReceived(CallEvent),
     /// Update notification suppression state from the native window focus event.
@@ -8344,6 +8370,16 @@ impl IcedChat {
             #[cfg(feature = "screen-sharing")]
             screen_share_frame_handle: None,
             #[cfg(feature = "screen-sharing")]
+            screen_share_cursor_sprite: None,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_cursor_pos: None,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_cursor_visible: false,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_cursor_enabled: true,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_cursor_frame_rgba: None,
+            #[cfg(feature = "screen-sharing")]
             screen_share_control_request: None,
             #[cfg(feature = "screen-sharing")]
             screen_share_control_active: false,
@@ -10225,6 +10261,8 @@ impl IcedChat {
             AppMessage::DeclineScreenShare => "DeclineScreenShare",
             #[cfg(feature = "screen-sharing")]
             AppMessage::ToggleScreenShareFullscreen => "ToggleScreenShareFullscreen",
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ToggleScreenShareCursor => "ToggleScreenShareCursor",
             #[cfg(feature = "screen-sharing")]
             AppMessage::ScreenShareEventReceived(_) => "ScreenShareEventReceived",
             #[cfg(feature = "screen-sharing")]
@@ -14646,13 +14684,19 @@ impl IcedChat {
                     // frame arrives; the worker publishes newest-frame-wins.
                     if self.screen_share_last_frame_ts != Some(frame.timestamp_us) {
                         if frame.pixel_format == PixelFormat::Rgba8 {
-                            self.screen_share_frame_handle = Some(
-                                iced::widget::image::Handle::from_rgba(
-                                    frame.width,
-                                    frame.height,
-                                    frame.pixels,
-                                ),
-                            );
+                            // Cache the raw RGBA so a cursor shape/position/
+                            // toggle update re-composites WITHOUT waiting for
+                            // a new video frame (BORU-SS-33: cursor motion
+                            // must not force a full-frame re-encode).
+                            self.screen_share_cursor_frame_rgba =
+                                Some((frame.width, frame.height, frame.pixels.clone()));
+                            if let Some(handle) = self.screen_share_build_cursor_frame(
+                                frame.width,
+                                frame.height,
+                                frame.pixels,
+                            ) {
+                                self.screen_share_frame_handle = Some(handle);
+                            }
                         }
                         self.screen_share_src_size = Some((frame.width, frame.height));
                         self.screen_share_last_frame_ts = Some(frame.timestamp_us);
@@ -14780,6 +14824,19 @@ impl IcedChat {
                 } else {
                     pan.or(self.screen_share_pan)
                 };
+                iced::Task::none()
+            }
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ToggleScreenShareCursor => {
+                self.screen_share_cursor_enabled = !self.screen_share_cursor_enabled;
+                // Re-composite the cached frame with the new cursor state so
+                // the overlay toggles immediately without waiting for a new
+                // video frame.
+                if let Some((w, h, pixels)) = self.screen_share_cursor_frame_rgba.take() {
+                    if let Some(handle) = self.screen_share_build_cursor_frame(w, h, pixels) {
+                        self.screen_share_frame_handle = Some(handle);
+                    }
+                }
                 iced::Task::none()
             }
             #[cfg(feature = "screen-sharing")]
@@ -21831,6 +21888,32 @@ impl IcedChat {
                 self.screen_share_selected_source = Some(CaptureSourceId(source_id));
                 iced::Task::none()
             }
+            SessionEvent::CursorShape { sprite, .. } => {
+                // BORU-SS-33: cache the new sprite and re-composite the
+                // latest frame immediately so the shape update is visible
+                // without waiting for a new video frame.
+                self.screen_share_cursor_sprite = Some(sprite);
+                if let Some((w, h, pixels)) = self.screen_share_cursor_frame_rgba.take() {
+                    if let Some(handle) = self.screen_share_build_cursor_frame(w, h, pixels) {
+                        self.screen_share_frame_handle = Some(handle);
+                    }
+                }
+                iced::Task::none()
+            }
+            SessionEvent::CursorPosition { x, y, visible, .. } => {
+                // BORU-SS-33: update the overlay position and re-composite
+                // the cached frame. The host sends CursorPosition per move
+                // and skips re-encoding when only the cursor moved, so this
+                // path must not require a new video frame.
+                self.screen_share_cursor_pos = Some((x, y));
+                self.screen_share_cursor_visible = visible;
+                if let Some((w, h, pixels)) = self.screen_share_cursor_frame_rgba.take() {
+                    if let Some(handle) = self.screen_share_build_cursor_frame(w, h, pixels) {
+                        self.screen_share_frame_handle = Some(handle);
+                    }
+                }
+                iced::Task::none()
+            }
             SessionEvent::SourceUnavailable { reason, fallback, .. } => {
                 // PDF Phase 10: monitor unplug / laptop dock-undock handled
                 // gracefully. The host either fell back to another source
@@ -21878,6 +21961,11 @@ impl IcedChat {
         self.screen_share_fullscreen = false;
         self.screen_share_last_frame_ts = None;
         self.screen_share_frame_handle = None;
+        self.screen_share_cursor_sprite = None;
+        self.screen_share_cursor_pos = None;
+        self.screen_share_cursor_visible = false;
+        self.screen_share_cursor_enabled = true;
+        self.screen_share_cursor_frame_rgba = None;
         self.screen_share_frame_watch = None;
         self.screen_share_stats_watch = None;
         self.screen_share_viewer_stats = None;
@@ -21896,6 +21984,33 @@ impl IcedChat {
         self.screen_share_sources = None;
         self.screen_share_selected_source = None;
         self.screen_share_notice_ticks = 0;
+    }
+
+    /// Build the rendered handle for a fresh RGBA frame, compositing the
+    /// remote cursor overlay (BORU-SS-33) when one is cached, enabled, and
+    /// visible. Returns `None` only when the frame is unusable.
+    #[cfg(feature = "screen-sharing")]
+    fn screen_share_build_cursor_frame(
+        &self,
+        width: u32,
+        height: u32,
+        mut pixels: Vec<u8>,
+    ) -> Option<iced::widget::image::Handle> {
+        let expected = (width as usize).checked_mul(height as usize)?.checked_mul(4)?;
+        if pixels.len() != expected {
+            return None;
+        }
+        if self.screen_share_cursor_enabled && self.screen_share_cursor_visible {
+            if let (Some(sprite), Some((x, y))) = (&self.screen_share_cursor_sprite, self.screen_share_cursor_pos)
+            {
+                // Position is normalized against the shared source; scale to
+                // this frame's pixel space (frame == source dimensions).
+                let sx = ((x * width as f32).round() as i64).clamp(0, width as i64 - 1) as u32;
+                let sy = ((y * height as f32).round() as i64).clamp(0, height as i64 - 1) as u32;
+                composite_cursor_rgba(&mut pixels, width, height, SourcePoint { x: sx, y: sy }, sprite);
+            }
+        }
+        Some(iced::widget::image::Handle::from_rgba(width, height, pixels))
     }
 
     pub fn subscription(

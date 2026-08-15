@@ -40,12 +40,12 @@ use std::time::Duration;
 
 use crate::screen_share::{
     capture::FrameSink, CapturedFrame, CaptureConfig, CaptureSource, CaptureSourceId,
-    CaptureSourceKind, DesktopCaptureBackend, DirtyRegion, FrameRect, MonitorGeometry, PixelFormat,
-    ScreenCapture, ScreenShareError, TestPatternCapture,
+    CaptureSourceKind, CursorMeta, DesktopCaptureBackend, DesktopPoint, DirtyRegion, FrameRect,
+    MonitorGeometry, PixelFormat, ScreenCapture, ScreenShareError, TestPatternCapture,
 };
 use super::linux_pw::{
-    build_format_pod, normalize_buffer, parse_format_pod, NegotiatedFormat, SPA_PARAM_Buffers,
-    SPA_PARAM_Format,
+    build_format_pod, normalize_buffer, parse_format_pod, parse_spa_cursor_meta, NegotiatedFormat,
+    SPA_META_Cursor, SPA_PARAM_Buffers, SPA_PARAM_Format,
 };
 use super::windows_common::monitor_source_id;
 use x11rb::connection::Connection as _;
@@ -581,14 +581,18 @@ impl std::ops::BitOr for PortalSourceTypes {
 
 /// Choose the cursor mode to request given the portal's advertised bitmask.
 ///
-/// Boru's cursor strategy composites the cursor into captured frames (PDF
-/// Task 4.2 / BORU-SS-12), so `Embedded` is the natural Wayland equivalent:
-/// the compositor bakes the cursor into the PipeWire buffers and every viewer
-/// sees it with zero extra work. When the portal does not advertise
-/// `Embedded`, fall back to `Hidden` — never request a mode the portal
-/// advertises as unavailable (that closes the session).
+/// Boru prefers `Metadata` (BORU-SS-33 / PDF Task 5.3): the compositor sends
+/// the cursor as `spa_meta_cursor` stream metadata instead of compositing it
+/// into the PipeWire buffers, so the host can forward shape-on-change +
+/// position-per-move control messages and SKIP re-encoding the frame when
+/// only the cursor moved. `Embedded` is the fallback for portals that do not
+/// advertise metadata mode — the cursor is baked into the buffers and every
+/// viewer sees it with zero extra work (BORU-SS-12 fallback). Never request a
+/// mode the portal advertises as unavailable (that closes the session).
 pub fn choose_cursor_mode(available: u32) -> CursorMode {
-    if available & CursorMode::Embedded.bit() != 0 {
+    if available & CursorMode::Metadata.bit() != 0 {
+        CursorMode::Metadata
+    } else if available & CursorMode::Embedded.bit() != 0 {
         CursorMode::Embedded
     } else {
         CursorMode::Hidden
@@ -1098,6 +1102,15 @@ struct SpaBuffer {
     datas: *mut SpaData,
 }
 
+/// Minimal spa_meta mirror (layout matches `struct spa_meta` in buffer.h).
+/// Each meta is `{ uint32 type; uint32 size; void *data; }`.
+#[repr(C)]
+struct SpaMeta {
+    type_: u32,
+    size: u32,
+    data: *mut c_void,
+}
+
 /// Minimal spa_data mirror (layout matches `struct spa_data` in buffer.h).
 #[repr(C)]
 struct SpaData {
@@ -1546,6 +1559,24 @@ unsafe extern "C" fn stream_process(data: *mut c_void) {
         return;
     }
     let spa = (*buffer).buffer;
+    // BORU-SS-33: in Metadata cursor mode (4) the cursor arrives as
+    // `spa_meta_cursor` buffer metadata instead of being composited into the
+    // pixels. Parse the metas BEFORE the CPU path so the cursor can ride the
+    // same frame as separate shape/position metadata.
+    let mut spa_cursor = None;
+    if !spa.is_null() && (*spa).n_metas > 0 && !(*spa).metas.is_null() {
+        let metas = std::slice::from_raw_parts((*spa).metas as *const SpaMeta, (*spa).n_metas as usize);
+        for meta in metas {
+            if meta.type_ == SPA_META_Cursor && !meta.data.is_null() && meta.size > 0 {
+                // SAFETY: `data` is a valid pointer for `size` bytes owned by
+                // the buffer (PipeWire owns the meta blob); the parser only
+                // reads within bounds.
+                let meta_bytes = std::slice::from_raw_parts(meta.data as *const u8, meta.size as usize);
+                spa_cursor = parse_spa_cursor_meta(meta_bytes);
+                break;
+            }
+        }
+    }
     if !spa.is_null() && (*spa).n_datas > 0 {
         let dat = (*spa).datas;
         if !dat.is_null() && !(*dat).data.is_null() {
@@ -1577,6 +1608,22 @@ unsafe extern "C" fn stream_process(data: *mut c_void) {
                             pixels,
                         ) {
                             Ok(frame) => {
+                                let frame = if let Some(cursor) = &spa_cursor {
+                                    let meta = match &cursor.sprite {
+                                        Some(sprite) => CursorMeta::with_sprite(
+                                            DesktopPoint { x: cursor.x, y: cursor.y },
+                                            cursor.visible,
+                                            sprite.clone(),
+                                        ),
+                                        None => CursorMeta::position(
+                                            DesktopPoint { x: cursor.x, y: cursor.y },
+                                            cursor.visible,
+                                        ),
+                                    };
+                                    frame.with_cursor(meta)
+                                } else {
+                                    frame
+                                };
                                 let _ = (*user).frame_tx.try_send(frame);
                             }
                             Err(error) => {
@@ -3276,18 +3323,21 @@ mod tests {
         assert_eq!(classify_session_type("mir"), SessionType::Unknown);
     }
 
-    /// Cursor-mode selection (PDF Task 5.3): Embedded is preferred when the
-    /// portal advertises it (compositor bakes the cursor into the stream,
-    /// matching the composite-into-frames strategy); otherwise Hidden.
+    /// Cursor-mode selection (BORU-SS-33 / PDF Task 5.3): Metadata is
+    /// preferred when the portal advertises it (the compositor sends the
+    /// cursor as `spa_meta_cursor` stream metadata, so cursor motion does
+    /// not force a full-frame re-encode); Embedded is the composited
+    /// fallback; Hidden only when neither is available.
     #[test]
-    fn cursor_mode_prefers_embedded_when_advertised() {
-        // Embedded (2) advertised on its own or alongside others.
+    fn cursor_mode_prefers_metadata_then_embedded_when_advertised() {
+        // Metadata (4) advertised on its own or alongside others.
+        assert_eq!(choose_cursor_mode(4), CursorMode::Metadata);
+        assert_eq!(choose_cursor_mode(1 | 2 | 4), CursorMode::Metadata);
+        assert_eq!(choose_cursor_mode(2 | 4), CursorMode::Metadata);
+        // Only Embedded (2) advertised → Embedded fallback (composited).
         assert_eq!(choose_cursor_mode(2), CursorMode::Embedded);
-        assert_eq!(choose_cursor_mode(1 | 2 | 4), CursorMode::Embedded);
-        assert_eq!(choose_cursor_mode(2 | 4), CursorMode::Embedded);
-        // Only Hidden (1) or Metadata (4) advertised → Hidden fallback.
+        // Only Hidden (1) or nothing advertised → Hidden fallback.
         assert_eq!(choose_cursor_mode(1), CursorMode::Hidden);
-        assert_eq!(choose_cursor_mode(4), CursorMode::Hidden);
         assert_eq!(choose_cursor_mode(0), CursorMode::Hidden);
     }
 

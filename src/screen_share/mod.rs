@@ -32,9 +32,10 @@ pub use capture::{
     TestPatternCapture,
 };
 pub use coords::{
-    composite_cursor, desktop_to_normalized, desktop_to_source, geometry_from_logical,
-    logical_to_physical, normalized_to_desktop, normalized_to_source, physical_to_logical,
-    source_to_desktop, CursorSprite, DesktopPoint, MonitorGeometry, NormalizedPoint, SourcePoint,
+    composite_cursor, composite_cursor_rgba, cursor_viewport_rect, desktop_to_normalized,
+    desktop_to_source, geometry_from_logical, logical_to_physical, normalized_to_desktop,
+    normalized_to_source, physical_to_logical, scale_sprite_to, source_to_desktop, CursorMeta,
+    CursorSprite, DesktopPoint, MonitorGeometry, NormalizedPoint, SourcePoint,
 };
 pub use channels::{
     BoundedFrameQueue, ControlChannel, ControlOut, MediaChannel, DEFAULT_CONTROL_QUEUE_CAPACITY,
@@ -204,9 +205,11 @@ mod tests {
     }
     impl VideoDecoder for FakeCodec {
         fn decode(&mut self, frame: &EncodedFrame) -> Result<Option<CapturedFrame>, ScreenShareError> {
-            Ok(Some(CapturedFrame { timestamp_us: frame.timestamp_us, width: 1, height: 1,
+            Ok(Some(CapturedFrame {
+                timestamp_us: frame.timestamp_us, width: 1, height: 1,
                 pixel_format: PixelFormat::Bgra8, stride: 4, pixels: frame.bytes.clone(),
-                gpu_handle: None, dirty_region: None }))
+                gpu_handle: None, dirty_region: None, cursor: None,
+            }))
         }
         fn metadata(&self) -> CodecMetadata { <Self as VideoEncoder>::metadata(self) }
         fn reset(&mut self) -> Result<(), ScreenShareError> { Ok(()) }
@@ -234,6 +237,7 @@ mod tests {
                 pixels: vec![1, 2, 3],
                 gpu_handle: None,
                 dirty_region: None,
+                cursor: None,
             }),
         };
         let frame = capture.capture().unwrap().unwrap();
