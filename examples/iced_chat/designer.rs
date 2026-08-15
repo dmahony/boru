@@ -148,7 +148,7 @@ pub(crate) fn overlay<'a>(
         origin: Point::ORIGIN,
     }))
     .on_move(|point| crate::app::AppMessage::Designer(DesignerMessage::UpdateResize(point)))
-    .on_release(crate::app::AppMessage::Designer(DesignerMessage::CancelResize));
+    .on_release(crate::app::AppMessage::Designer(DesignerMessage::CommitResize));
     let resize_label = resize_value.map(|value| {
         container(text(format!("{value:.0}px")).size(11.0).color(Color::WHITE))
             .padding(Padding::from(3.0))
@@ -404,6 +404,57 @@ pub struct DesignerState {
     pub validation_errors: Vec<String>,
 }
 
+/// Bounded history of semantic layout edits. Pointer motion is transient and
+/// is intentionally represented by one snapshot per completed transaction.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DesignerHistory {
+    undo: Vec<crate::layout::LayoutConfig>,
+    redo: Vec<crate::layout::LayoutConfig>,
+    pending: Option<crate::layout::LayoutConfig>,
+    capacity: usize,
+}
+
+impl DesignerHistory {
+    pub const DEFAULT_CAPACITY: usize = 64;
+
+    pub fn new(capacity: usize) -> Self {
+        Self { undo: Vec::new(), redo: Vec::new(), pending: None, capacity: capacity.max(1) }
+    }
+
+    pub fn begin(&mut self, before: &crate::layout::LayoutConfig) {
+        self.pending = Some(before.clone());
+    }
+
+    pub fn cancel(&mut self) { self.pending = None; }
+
+    pub fn commit(&mut self, after: &crate::layout::LayoutConfig) {
+        let Some(before) = self.pending.take() else { return };
+        self.record(&before, after);
+    }
+
+    pub fn record(&mut self, before: &crate::layout::LayoutConfig, after: &crate::layout::LayoutConfig) {
+        if before == after { return; }
+        self.undo.push(before.clone());
+        if self.undo.len() > self.capacity { self.undo.remove(0); }
+        self.redo.clear();
+    }
+
+    pub fn undo(&mut self, current: &crate::layout::LayoutConfig) -> Option<crate::layout::LayoutConfig> {
+        let previous = self.undo.pop()?;
+        self.redo.push(current.clone());
+        Some(previous)
+    }
+
+    pub fn redo(&mut self, current: &crate::layout::LayoutConfig) -> Option<crate::layout::LayoutConfig> {
+        let next = self.redo.pop()?;
+        self.undo.push(current.clone());
+        Some(next)
+    }
+
+    #[cfg(test)]
+    fn undo_len(&self) -> usize { self.undo.len() }
+}
+
 impl Default for DesignerState {
     fn default() -> Self {
         Self {
@@ -441,6 +492,7 @@ pub enum DesignerMessage {
         origin: Point,
     },
     UpdateResize(Point),
+    CommitResize,
     CancelResize,
     SetBreakpoint(PreviewBreakpoint),
     SetCustomWidth(String),
@@ -503,7 +555,9 @@ impl DesignerState {
                     operation.current = current;
                 }
             }
-            DesignerMessage::CancelResize => self.resize_operation = None,
+            DesignerMessage::CommitResize | DesignerMessage::CancelResize => {
+                self.resize_operation = None
+            }
             DesignerMessage::SetFineAdjust(fine_adjust) => self.fine_adjust = fine_adjust,
             DesignerMessage::SetBreakpoint(breakpoint) => self.preview_breakpoint = breakpoint,
             DesignerMessage::SetCustomWidth(value) => {
@@ -607,5 +661,22 @@ mod tests {
         assert_eq!(snap_layout_slot(2.4, 1.0, false), 2.0);
         assert_eq!(snap_layout_dimension(317.0, 8.0, false), 320.0);
         assert_eq!(snap_layout_dimension(317.0, 8.0, true), 317.0);
+    }
+
+    #[test]
+    fn history_is_bounded_and_redo_is_cleared_by_new_edit() {
+        let base = crate::layout::LayoutConfig::default();
+        let mut one = base.clone();
+        one.sidebar.width += 8.0;
+        let mut two = one.clone();
+        two.sidebar.width += 8.0;
+        let mut history = DesignerHistory::new(1);
+        history.record(&base, &one);
+        history.record(&one, &two);
+        assert_eq!(history.undo_len(), 1);
+        assert_eq!(history.undo(&two), Some(one.clone()));
+        assert_eq!(history.redo(&one), Some(two.clone()));
+        history.record(&one, &two);
+        assert!(history.redo(&two).is_none());
     }
 }

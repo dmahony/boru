@@ -62,7 +62,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::card_shell::{CardShell, CARD_ROW_HEIGHT, StatusBadgeKind};
 #[cfg(feature = "dev-ui")]
-use crate::designer::{DesignerMessage, DesignerState};
+use crate::designer::{DesignerHistory, DesignerMessage, DesignerState};
 use crate::link_preview;
 use crate::notification::backend::NoopBackend;
 use crate::notification::event::{
@@ -3678,6 +3678,8 @@ pub struct IcedChat {
     /// separate from all production chat/network/room state.
     #[cfg(feature = "dev-ui")]
     pub designer: DesignerState,
+    #[cfg(feature = "dev-ui")]
+    designer_history: DesignerHistory,
     // ── Navigation ──
     pub screen: Screen,
     /// Embedded terminal tab (feature `terminal`). Spawned eagerly with the
@@ -5423,6 +5425,12 @@ pub enum Shortcut {
     DashboardTabPrevious,
     /// Ctrl+2 or Right arrow — select next dashboard tab.
     DashboardTabNext,
+    /// Ctrl+Z — undo the last completed designer transaction.
+    #[cfg(feature = "dev-ui")]
+    DesignerUndo,
+    /// Ctrl+Shift+Z or Ctrl+Y — redo a designer transaction.
+    #[cfg(feature = "dev-ui")]
+    DesignerRedo,
 }
 
 #[derive(Debug, Clone)]
@@ -8282,6 +8290,8 @@ impl IcedChat {
             scroll_to_bottom_pending: false,
             #[cfg(feature = "dev-ui")]
             designer: DesignerState::default(),
+            #[cfg(feature = "dev-ui")]
+            designer_history: DesignerHistory::new(DesignerHistory::DEFAULT_CAPACITY),
             settings: app_settings.clone(),
             settings_return_to: None,
             friend_requests_return_to: None,
@@ -10699,6 +10709,10 @@ impl IcedChat {
                 Shortcut::FocusPrevious => "Shortcut(FocusPrevious)",
                 Shortcut::DashboardTabPrevious => "Shortcut(DashboardTabPrevious)",
                 Shortcut::DashboardTabNext => "Shortcut(DashboardTabNext)",
+                #[cfg(feature = "dev-ui")]
+                Shortcut::DesignerUndo => "Shortcut(DesignerUndo)",
+                #[cfg(feature = "dev-ui")]
+                Shortcut::DesignerRedo => "Shortcut(DesignerRedo)",
             },
             AppMessage::DownloadProgress(_) => "DownloadProgress",
             AppMessage::ShowCreateGroupDialog => "ShowCreateGroupDialog",
@@ -12627,6 +12641,9 @@ impl IcedChat {
                     DesignerMessage::StartDrag { component, .. } => Some(Some(*component)),
                     _ => None,
                 };
+                if matches!(designer_message, DesignerMessage::StartDrag { .. }) {
+                    self.designer_history.begin(&self.active_layout);
+                }
                 if let DesignerMessage::UpdateDrag(point) = designer_message {
                     self.update_home_drag(point);
                     return iced::Task::none();
@@ -12650,10 +12667,15 @@ impl IcedChat {
                 }
                 if matches!(designer_message, DesignerMessage::CommitDrag) {
                     self.commit_home_drag();
+                    self.designer_history.commit(&self.active_layout);
                     self.designer.update(DesignerMessage::CommitDrag);
                     return iced::Task::none();
                 }
+                if matches!(designer_message, DesignerMessage::CancelDrag) {
+                    self.designer_history.cancel();
+                }
                 if let DesignerMessage::StartResize { component, .. } = designer_message {
+                    self.designer_history.begin(&self.active_layout);
                     self.designer.update(DesignerMessage::StartResize {
                         component,
                         origin: iced::Point::ORIGIN,
@@ -12664,6 +12686,11 @@ impl IcedChat {
                     self.inspect_selected = Some(inspector_component);
                     self.inspect_hover = Some(inspector_component);
                     self.inspector_draft.collapsed_sections.remove(&section);
+                    return iced::Task::none();
+                }
+                if matches!(designer_message, DesignerMessage::CommitResize) {
+                    self.designer_history.commit(&self.active_layout);
+                    self.designer.update(DesignerMessage::CommitResize);
                     return iced::Task::none();
                 }
                 self.designer.update(designer_message);
@@ -15156,6 +15183,26 @@ impl IcedChat {
                 iced::Task::none()
             }
             AppMessage::Shortcut(Shortcut::NewChat) => iced::Task::done(AppMessage::CreateNewRoom),
+            #[cfg(feature = "dev-ui")]
+            AppMessage::Shortcut(Shortcut::DesignerUndo) => {
+                if self.designer.enabled {
+                    if let Some(layout) = self.designer_history.undo(&self.active_layout) {
+                        self.set_layout_config(layout);
+                        self.designer.update(DesignerMessage::MarkDirty);
+                    }
+                }
+                iced::Task::none()
+            }
+            #[cfg(feature = "dev-ui")]
+            AppMessage::Shortcut(Shortcut::DesignerRedo) => {
+                if self.designer.enabled {
+                    if let Some(layout) = self.designer_history.redo(&self.active_layout) {
+                        self.set_layout_config(layout);
+                        self.designer.update(DesignerMessage::MarkDirty);
+                    }
+                }
+                iced::Task::none()
+            }
             AppMessage::Shortcut(Shortcut::BackToChatList) => {
                 if matches!(self.screen, Screen::Chat { .. }) {
                     iced::Task::done(AppMessage::GoToChatList)
@@ -19620,10 +19667,12 @@ impl IcedChat {
         if target == index {
             return;
         }
-        let mut layout = self.active_layout.clone();
+        let before = self.active_layout.clone();
+        let mut layout = before.clone();
         let section = layout.home.section_order.remove(index);
         layout.home.section_order.insert(target, section);
         self.set_layout_config(layout);
+        self.designer_history.record(&before, &self.active_layout);
         self.designer.update(DesignerMessage::MarkDirty);
     }
 
@@ -20520,10 +20569,12 @@ impl IcedChat {
         if next == current {
             return;
         }
+        let before = self.active_layout.clone();
         let mut overrides = self.layout_overrides.clone();
         match crate::layout_inspector::apply_layout_int(&mut overrides, field, next) {
             Ok(()) => {
                 self.set_layout_overrides(overrides);
+                self.designer_history.record(&before, &self.active_layout);
                 self.designer.update(DesignerMessage::MarkDirty);
             }
             Err(error) => tracing::warn!(%error, ?field, "designer: rejected grid column edit"),
@@ -21077,6 +21128,14 @@ pub fn shortcut_from_key(
     use iced::keyboard::key;
     let ctrl = modifiers.control();
     match key {
+        #[cfg(feature = "dev-ui")]
+        key::Key::Character(c) if ctrl && c.eq_ignore_ascii_case("z") => {
+            if modifiers.shift() { Some(Shortcut::DesignerRedo) } else { Some(Shortcut::DesignerUndo) }
+        }
+        #[cfg(feature = "dev-ui")]
+        key::Key::Character(c) if ctrl && c.eq_ignore_ascii_case("y") => {
+            Some(Shortcut::DesignerRedo)
+        }
         key::Key::Named(key::Named::Escape) => Some(Shortcut::Escape),
         key::Key::Named(key::Named::Backspace) if ctrl => Some(Shortcut::BackToChatList),
         key::Key::Character(c) if ctrl && c.eq_ignore_ascii_case("n") => Some(Shortcut::NewChat),
