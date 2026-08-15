@@ -3,8 +3,9 @@
 
 use std::collections::VecDeque;
 
-use super::coords::MonitorGeometry;
 use super::codec::QualityProfile;
+use super::coords::CursorMeta;
+use super::coords::MonitorGeometry;
 use super::ScreenShareError;
 
 /// Pixel layout of a normalized captured frame.
@@ -85,6 +86,12 @@ pub struct CapturedFrame {
     /// Optional dirty-region metadata. `None` means the backend did not
     /// provide damage information (the whole frame should be treated as new).
     pub dirty_region: Option<DirtyRegion>,
+    /// Optional cursor shape+position metadata delivered SEPARATELY from the
+    /// frame pixels (PDF Task 5.3 `Metadata` cursor mode). When `Some`, the
+    /// host sends cursor shape/position control messages instead of
+    /// compositing the cursor into the frame; when `None` the frame already
+    /// contains the composited cursor (BORU-SS-12 fallback).
+    pub cursor: Option<CursorMeta>,
 }
 
 impl CapturedFrame {
@@ -145,6 +152,7 @@ impl CapturedFrame {
             pixels,
             gpu_handle: None,
             dirty_region: None,
+            cursor: None,
         })
     }
 
@@ -159,12 +167,19 @@ impl CapturedFrame {
             pixels: Vec::new(),
             gpu_handle: Some(handle),
             dirty_region: None,
+            cursor: None,
         }
     }
 
     /// Attach dirty-region metadata to the frame.
     pub fn with_dirty_region(mut self, region: DirtyRegion) -> Self {
         self.dirty_region = Some(region);
+        self
+    }
+
+    /// Attach cursor shape+position metadata (PDF Task 5.3 `Metadata` mode).
+    pub fn with_cursor(mut self, cursor: CursorMeta) -> Self {
+        self.cursor = Some(cursor);
         self
     }
 }

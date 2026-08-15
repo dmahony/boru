@@ -350,10 +350,14 @@ pub(crate) fn view_screen_share_surface<'a>(
 ///
 /// `scale` is the current effective scale (computed by the caller from the
 /// same geometry the surface used) so the +/- buttons zoom relative to what
-/// the user currently sees, including fit mode.
+/// the user currently sees, including fit mode. `cursor_enabled` drives the
+/// remote-cursor overlay toggle (CUR-1 / BORU-SS-33): the button flips
+/// `AppMessage::ToggleScreenShareCursor`, which re-composites the cached
+/// frame without waiting for a new video frame.
 pub(crate) fn view_screen_share_view_controls<'a>(
     scale: f32,
     fullscreen: bool,
+    cursor_enabled: bool,
 ) -> iced::Element<'a, AppMessage> {
     use iced::widget::{button, row, text};
 
@@ -391,6 +395,13 @@ pub(crate) fn view_screen_share_view_controls<'a>(
                 pan: None,
             })
             .padding([2, 6]),
+        button(text(if cursor_enabled {
+            crate::i18n::t("screenshare.cursor_on")
+        } else {
+            crate::i18n::t("screenshare.cursor_off")
+        }))
+        .on_press(AppMessage::ToggleScreenShareCursor)
+        .padding([2, 6]),
         button(text(if fullscreen {
             crate::i18n::t("screenshare.inline")
         } else {

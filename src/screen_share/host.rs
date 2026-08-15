@@ -19,6 +19,7 @@ use super::{
         DEFAULT_MEDIA_QUEUE_CAPACITY,
     },
     codec::{CodecConfig, OpenH264Encoder, VideoEncoder},
+    coords::{desktop_to_normalized, scale_sprite_to, CursorMeta, CursorSprite, MonitorGeometry},
     permissions::{Capability, SlidingWindowRateLimiter},
     platform::{capture_dimensions, create_capture_source, CAPTURE_FPS, ActiveCapture},
     protocol::{self, ControlMessage, InputEventKind, RedactedText, ScreenShareMessage, SCREEN_SHARE_PROTOCOL_VERSION},
@@ -57,6 +58,115 @@ pub enum HostCommand {
     /// frame with the new geometry, re-selects the capture source, forces a
     /// keyframe, and surfaces `SessionEvent::SourceChanged` to the app.
     SwitchSource(CaptureSourceId),
+}
+
+/// Host-side cursor delivery state for `Metadata` cursor mode (BORU-SS-33 /
+/// PDF Task 5.3).
+///
+/// The capture backend attaches [`CursorMeta`] to frames instead of
+/// compositing the cursor into the pixels. The host converts that metadata
+/// into `CursorShape` (on shape change) + `CursorPosition` (per move) control
+/// messages and — when only the cursor moved — skips the full-frame re-encode
+/// entirely. This struct tracks what the viewer already knows so the host
+/// never re-sends an unchanged shape or a duplicate position.
+#[derive(Debug, Clone, Default)]
+struct CursorTracker {
+    /// Last scaled sprite actually sent (bytes + dims + hotspot).
+    last_sprite: Option<CursorSprite>,
+    /// Last normalized position actually sent.
+    last_position: Option<(f32, f32)>,
+    /// Last visibility actually sent.
+    last_visible: Option<bool>,
+    /// Monotonic counter for shape ids (never reused within a session).
+    next_shape_id: u32,
+}
+
+/// Decide whether a captured frame can be SKIPPED because only the cursor
+/// moved (BORU-SS-33 metadata mode).
+///
+/// Skipping is only allowed when ALL of:
+/// - the backend delivered cursor metadata (`metadata_mode`) — in fallback
+///   mode the cursor is composited into the pixels, so an unchanged frame
+///   cannot be detected and skipping would drop real content;
+/// - the encoder does NOT have a keyframe pending (reconnect / source
+///   switch / viewer recovery request must always produce a frame);
+/// - the frame pixels are byte-identical to the last frame actually encoded.
+fn should_skip_unchanged_frame(
+    metadata_mode: bool,
+    keyframe_pending: bool,
+    last_encoded_pixels: Option<&[u8]>,
+    frame_pixels: &[u8],
+) -> bool {
+    metadata_mode && !keyframe_pending && last_encoded_pixels.is_some_and(|last| last == frame_pixels)
+}
+
+impl CursorTracker {
+    /// Build a `CursorShape` message when the sprite changed, updating the
+    /// tracker. The sprite is scaled from the source resolution to the
+    /// encode resolution so the viewer composites it 1:1 into the frame it
+    /// actually decodes (BORU-SS-33). Returns `None` when the sprite is
+    /// byte-identical to the last shape sent.
+    fn shape_message(
+        &mut self,
+        session_id: ScreenShareSessionId,
+        meta: &CursorMeta,
+        source: (u32, u32),
+        encode: (u32, u32),
+    ) -> Option<ScreenShareMessage> {
+        let sprite = meta.sprite.as_ref()?;
+        let scaled = scale_sprite_to(sprite, source.0, source.1, encode.0, encode.1);
+        if self.last_sprite.as_ref() == Some(&scaled) {
+            return None;
+        }
+        self.next_shape_id = self.next_shape_id.wrapping_add(1);
+        self.last_sprite = Some(scaled.clone());
+        Some(ScreenShareMessage::CursorShape {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id,
+            shape_id: self.next_shape_id,
+            width: scaled.width.min(u16::MAX as u32) as u16,
+            height: scaled.height.min(u16::MAX as u32) as u16,
+            hotspot_x: scaled.hotspot_x.min(u16::MAX as u32) as u16,
+            hotspot_y: scaled.hotspot_y.min(u16::MAX as u32) as u16,
+            pixels: scaled.pixels,
+        })
+    }
+
+    /// Build a `CursorPosition` message when the normalized position or
+    /// visibility changed, updating the tracker. Position is normalized
+    /// against the shared source using the source geometry (or treated as
+    /// source-relative when no geometry is known).
+    fn position_message(
+        &mut self,
+        session_id: ScreenShareSessionId,
+        meta: &CursorMeta,
+        geometry: Option<&MonitorGeometry>,
+        source: (u32, u32),
+    ) -> Option<ScreenShareMessage> {
+        let normalized = if let Some(geometry) = geometry {
+            desktop_to_normalized(meta.position, geometry)
+        } else {
+            Some(super::coords::NormalizedPoint {
+                x: meta.position.x.max(0) as f64 / source.0.max(1) as f64,
+                y: meta.position.y.max(0) as f64 / source.1.max(1) as f64,
+            })
+        };
+        let Some(normalized) = normalized else { return None; };
+        let x = normalized.x.clamp(0.0, 1.0) as f32;
+        let y = normalized.y.clamp(0.0, 1.0) as f32;
+        if self.last_position == Some((x, y)) && self.last_visible == Some(meta.visible) {
+            return None;
+        }
+        self.last_position = Some((x, y));
+        self.last_visible = Some(meta.visible);
+        Some(ScreenShareMessage::CursorPosition {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id,
+            x,
+            y,
+            visible: meta.visible,
+        })
+    }
 }
 
 /// Reason a host screen-share session terminated, for structured logging
@@ -426,6 +536,17 @@ async fn run_host_session_inner(
     // Pacing counters are cumulative; track the last seen total so new drops
     // since the previous tick can be fed to the stats snapshot.
     let mut last_pacing_drops: u64 = 0;
+    // BORU-SS-33: metadata cursor mode. When the capture backend attaches
+    // cursor metadata to frames (PipeWire spa_meta_cursor / XFixes notify),
+    // the host delivers shape-on-change + position-per-move control messages
+    // and — when only the cursor moved — skips re-encoding the frame.
+    let mut cursor_tracker = CursorTracker::default();
+    let mut cursor_shapes_sent: u64 = 0;
+    let mut cursor_positions_sent: u64 = 0;
+    let mut skipped_unchanged_frames: u64 = 0;
+    // Last frame PIXELS that were actually encoded (for unchanged-content
+    // detection in metadata mode). None until the first frame is encoded.
+    let mut last_encoded_pixels: Option<Vec<u8>> = None;
     // Run the control loop every N encoded frames (≈ 1s at 25fps): often
     // enough to react to congestion without making every frame a decision.
     let adapt_interval_frames: u64 = 25;
@@ -717,6 +838,61 @@ async fn run_host_session_inner(
                             }
                             continue 'streaming;
                         }
+                        // BORU-SS-33: metadata cursor mode. When the capture
+                        // backend delivers the cursor SEPARATELY from the
+                        // frame pixels, the host sends shape-on-change +
+                        // position-per-move control messages instead of
+                        // compositing into the encoded frame.
+                        let cursor_meta = frame.cursor.clone();
+                        let metadata_mode = cursor_meta.is_some();
+                        let geometry = current_source.as_ref().and_then(|source| source.geometry);
+                        if let Some(meta) = &cursor_meta {
+                            let source_dims = (frame.width, frame.height);
+                            let encode_dims = (config.width, config.height);
+                            if let Some(message) =
+                                cursor_tracker.shape_message(session_id, meta, source_dims, encode_dims)
+                            {
+                                if control.send(ControlOut::Versioned(message)).await.is_ok() {
+                                    cursor_shapes_sent += 1;
+                                }
+                            }
+                            if let Some(message) =
+                                cursor_tracker.position_message(session_id, meta, geometry.as_ref(), source_dims)
+                            {
+                                if control.send(ControlOut::Versioned(message)).await.is_ok() {
+                                    cursor_positions_sent += 1;
+                                }
+                            }
+                        }
+                        // Unchanged-content skip in metadata mode (BORU-SS-33):
+                        // when only the cursor moved, the frame pixels are
+                        // identical to the last encoded frame, so re-encoding
+                        // wastes CPU/bandwidth for nothing — the viewer keeps
+                        // the last decoded frame and re-composites the cursor
+                        // at the new position. Never skip while a keyframe is
+                        // pending (reconnect/source-switch/recovery) or when
+                        // the encoder has no previous frame. In fallback mode
+                        // (no cursor metadata) frames are never skipped — the
+                        // cursor is composited into the pixels, so an
+                        // unchanged frame cannot be detected.
+                        let content_unchanged = should_skip_unchanged_frame(
+                            metadata_mode,
+                            encoder.is_keyframe_pending(),
+                            last_encoded_pixels.as_deref(),
+                            frame.pixels.as_slice(),
+                        );
+                        if content_unchanged {
+                            skipped_unchanged_frames += 1;
+                            if skipped_unchanged_frames == 1 || skipped_unchanged_frames % 150 == 0 {
+                                tracing::info!(
+                                    skipped_unchanged_frames,
+                                    cursor_shapes_sent,
+                                    cursor_positions_sent,
+                                    "screen-share: metadata cursor mode skipped unchanged frame (cursor-only move)"
+                                );
+                            }
+                            continue 'streaming;
+                        }
                         // The pacing queue is bounded (max_queue_depth): if the
                         // encoder/network fell behind and the queue is full, the
                         // oldest stale frame is dropped (counted) and the newest
@@ -791,6 +967,9 @@ async fn run_host_session_inner(
                         match encoder.encode(&frame) {
                             Ok(encoded) => {
                                 stats.observe_encode(encode_started.elapsed());
+                                // Record the encoded pixels for the metadata
+                                // cursor-mode unchanged-content skip.
+                                last_encoded_pixels = Some(frame.pixels.clone());
                                 if encoded.sequence == 0 || encoded.sequence % 25 == 0 {
                                     let stats_paths: Vec<String> = connection
                                         .paths()
@@ -892,6 +1071,9 @@ async fn run_host_session_inner(
                                         queue_depth = snapshot.send_queue_depth,
                                         decode_fps = snapshot.receiver_fps,
                                         latency_us = snapshot.frame_age_us,
+                                        cursor_shapes_sent,
+                                        cursor_positions_sent,
+                                        skipped_unchanged_frames,
                                         "screen-share: performance metrics"
                                     );
                                     if apply_quality_config(&mut encoder, &mut config, decision) {
@@ -1298,7 +1480,7 @@ async fn recover_capture_source(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::screen_share::coords::MonitorGeometry;
+    use crate::screen_share::coords::{DesktopPoint, MonitorGeometry};
     use crate::screen_share::capture::{CaptureSource, CaptureSourceId, CaptureSourceKind};
 
     fn source(id: u64, name: &str, width: u32, height: u32) -> CaptureSource {
@@ -1411,5 +1593,119 @@ mod tests {
     fn fallback_returns_none_when_no_source_remains() {
         assert!(select_fallback_source(&[], Some(CaptureSourceId(2))).is_none());
         assert!(select_fallback_source(&[], None).is_none());
+    }
+
+    /// BORU-SS-33: the cursor tracker emits a shape message exactly once per
+    /// sprite change (never per frame) and a position message per move.
+    #[test]
+    fn cursor_tracker_emits_shape_once_and_position_per_move() {
+        let sid = ScreenShareSessionId::from_bytes([7; 16]);
+        let sprite = CursorSprite::new(32, 32, 16, 16, vec![255u8; 32 * 32 * 4]).unwrap();
+        let mut tracker = CursorTracker::default();
+        let meta = CursorMeta::with_sprite(DesktopPoint { x: 10, y: 10 }, true, sprite.clone());
+        let shape = tracker.shape_message(sid, &meta, (1920, 1080), (640, 360));
+        assert!(shape.is_some(), "first shape must be emitted");
+        let shape2 = tracker.shape_message(sid, &meta, (1920, 1080), (640, 360));
+        assert!(shape2.is_none(), "identical shape must not re-send");
+        let moved = CursorMeta::with_sprite(
+            DesktopPoint { x: 20, y: 10 },
+            true,
+            CursorSprite::new(24, 24, 12, 12, vec![128u8; 24 * 24 * 4]).unwrap(),
+        );
+        let shape3 = tracker.shape_message(sid, &moved, (1920, 1080), (640, 360));
+        assert!(shape3.is_some(), "changed sprite must re-send");
+        // A position-only update (no sprite) still sends the move.
+        let position_only = CursorMeta::position(DesktopPoint { x: 30, y: 10 }, true);
+        let pos = tracker.position_message(sid, &position_only, None, (1920, 1080));
+        assert!(pos.is_some(), "first position must be emitted");
+        let pos2 = tracker.position_message(sid, &position_only, None, (1920, 1080));
+        assert!(pos2.is_none(), "duplicate position must not re-send");
+        let hidden = CursorMeta::position(DesktopPoint { x: 30, y: 10 }, false);
+        let pos3 = tracker.position_message(sid, &hidden, None, (1920, 1080));
+        assert!(pos3.is_some(), "visibility change must re-send position");
+    }
+
+    /// BORU-SS-33: the cursor tracker normalizes a desktop position against
+    /// the source geometry when provided, and treats it as source-relative
+    /// when no geometry exists (portal stream coordinates).
+    #[test]
+    fn cursor_tracker_normalizes_position_with_and_without_geometry() {
+        let sid = ScreenShareSessionId::from_bytes([8; 16]);
+        let mut tracker = CursorTracker::default();
+        let geometry = MonitorGeometry::new(-1920, 0, 1920, 1080);
+        // Desktop (-960, 540) is source-relative (960, 540) → 0.5, 0.5.
+        let meta = CursorMeta::position(DesktopPoint { x: -960, y: 540 }, true);
+        let Some(ScreenShareMessage::CursorPosition { x, y, visible, .. }) =
+            tracker.position_message(sid, &meta, Some(&geometry), (1920, 1080))
+        else {
+            panic!("position must be emitted");
+        };
+        assert!((x - 0.5).abs() < 1e-4, "x = {x}");
+        assert!((y - 0.5).abs() < 1e-4, "y = {y}");
+        assert!(visible);
+        // Without geometry: position treated as source-relative pixels.
+        let mut no_geom = CursorTracker::default();
+        let meta2 = CursorMeta::position(DesktopPoint { x: 960, y: 540 }, true);
+        let Some(ScreenShareMessage::CursorPosition { x, y, .. }) =
+            no_geom.position_message(sid, &meta2, None, (1920, 1080))
+        else {
+            panic!("position must be emitted");
+        };
+        assert!((x - 0.5).abs() < 1e-4, "x = {x}");
+        assert!((y - 0.5).abs() < 1e-4, "y = {y}");
+    }
+
+    /// BORU-SS-33: a shape message carries the sprite scaled to the encode
+    /// resolution (so the viewer composites 1:1 into the decoded frame).
+    #[test]
+    fn cursor_tracker_shape_scales_sprite_to_encode_dims() {
+        let sid = ScreenShareSessionId::from_bytes([9; 16]);
+        let sprite = CursorSprite::new(32, 32, 16, 16, vec![255u8; 32 * 32 * 4]).unwrap();
+        let mut tracker = CursorTracker::default();
+        let meta = CursorMeta::with_sprite(DesktopPoint { x: 0, y: 0 }, true, sprite);
+        let Some(ScreenShareMessage::CursorShape { width, height, hotspot_x, hotspot_y, pixels, .. }) =
+            tracker.shape_message(sid, &meta, (1920, 1080), (640, 360))
+        else {
+            panic!("shape must be emitted");
+        };
+        assert_eq!(width, 11);
+        assert_eq!(height, 11);
+        assert_eq!(hotspot_x, 5);
+        assert_eq!(hotspot_y, 5);
+        assert_eq!(pixels.len(), 11 * 11 * 4);
+        // Wire-valid: the message passes its own validation.
+        let message = ScreenShareMessage::CursorShape {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: sid,
+            shape_id: 1,
+            width,
+            height,
+            hotspot_x,
+            hotspot_y,
+            pixels,
+        };
+        message.validate().expect("scaled shape must validate");
+    }
+
+    /// BORU-SS-33 fallback behaviour: when the capture backend does NOT
+    /// deliver cursor metadata (composited-cursor fallback), the unchanged-
+    /// content skip is never taken — an unchanged frame is still encoded,
+    /// preserving the BORU-SS-12 composited behaviour exactly.
+    #[test]
+    fn unchanged_frame_never_skipped_without_cursor_metadata() {
+        let pixels: &[u8] = &[1, 2, 3, 4];
+        // No metadata → never skip, even with identical pixels and no
+        // keyframe pending.
+        assert!(!should_skip_unchanged_frame(false, false, Some(pixels), pixels));
+        // With metadata + identical pixels + no keyframe → skip.
+        assert!(should_skip_unchanged_frame(true, false, Some(pixels), pixels));
+        // With metadata but a pending keyframe → never skip (recovery frame
+        // must be delivered even when pixels are unchanged).
+        assert!(!should_skip_unchanged_frame(true, true, Some(pixels), pixels));
+        // With metadata but no previous encoded frame → never skip (first
+        // frame must be encoded).
+        assert!(!should_skip_unchanged_frame(true, false, None, pixels));
+        // With metadata but CHANGED pixels → never skip (real content).
+        assert!(!should_skip_unchanged_frame(true, false, Some(&[9, 9, 9, 9]), pixels));
     }
 }

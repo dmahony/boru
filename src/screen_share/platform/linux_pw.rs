@@ -52,6 +52,7 @@
 // upstream headers; the `non_upper_case_globals` lint is suppressed for them.
 #![allow(non_upper_case_globals)]
 
+use crate::screen_share::coords::CursorSprite;
 use crate::screen_share::{PixelFormat, ScreenShareError};
 
 // ── SPA constants (values from PipeWire's headers, see module docs) ────────
@@ -384,6 +385,7 @@ pub(crate) fn normalize_buffer(
         .checked_mul(height as usize)
         .and_then(|n| n.checked_mul(4))
         .ok_or_else(|| ScreenShareError::stream("frame dimensions overflow"))?;
+
     let mut out = Vec::with_capacity(out_len);
     let mut row = offset;
     match layout {
@@ -405,6 +407,132 @@ pub(crate) fn normalize_buffer(
         }
     }
     Ok(out)
+}
+
+// ── spa_meta_cursor parsing (BORU-SS-33 / PDF Task 5.3) ───────────────────
+//
+// When the portal runs in `Metadata` cursor mode (4), the compositor does
+// NOT bake the cursor into the PipeWire buffers. Instead each buffer carries
+// a `spa_meta_cursor` meta (type `SPA_META_Cursor` = 5) whose data is laid
+// out exactly as the upstream C structs (spa/include/spa/buffer/meta.h):
+//
+//   struct spa_meta_cursor {
+//       uint32_t id;             // 0 = no new cursor data
+//       uint32_t flags;          // SPA_META_CURSOR_FLAG_HIDE = 1
+//       struct spa_point position; // { int32 x, y } in stream coordinates
+//       struct spa_point hotspot;  // { int32 x, y }
+//       uint32_t bitmap_offset;    // offset of spa_meta_bitmap, 0 = none
+//   };
+//   struct spa_meta_bitmap {
+//       uint32_t format;         // spa_video_format (ARGB = 13)
+//       struct spa_rectangle size; // { uint32 width, height }
+//       int32_t stride;
+//       uint32_t offset;         // offset of bitmap data in this struct
+//   };
+//
+// The bitmap is ARGB8888 (the portal cursor format); Boru's shared
+// [`CursorSprite`](crate::screen_share::CursorSprite) is BGRA8, so the
+// parser swaps R/B while copying.
+
+/// `SPA_META_Cursor` buffer meta type id (`spa/include/spa/buffer/meta.h`).
+pub(crate) const SPA_META_Cursor: u32 = 5;
+/// `SPA_META_CURSOR_FLAG_HIDE` — cursor hidden flag value.
+pub(crate) const SPA_META_CURSOR_FLAG_HIDE: u32 = 1;
+/// `SPA_VIDEO_FORMAT_ARGB` — cursor bitmaps are ARGB8888.
+pub(crate) const SPA_VIDEO_FORMAT_ARGB: u32 = 13;
+
+/// Parsed `spa_meta_cursor` from one PipeWire buffer (BORU-SS-33).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ParsedSpaCursor {
+    /// Cursor position in stream (source) coordinates, physical pixels.
+    pub x: i32,
+    /// Cursor position in stream (source) coordinates, physical pixels.
+    pub y: i32,
+    /// Whether the cursor is visible (`SPA_META_CURSOR_FLAG_HIDE` unset).
+    pub visible: bool,
+    /// Sprite pixels as BGRA8 (`width * height * 4`) when a bitmap was
+    /// attached in this buffer; `None` for position-only updates.
+    pub sprite: Option<CursorSprite>,
+}
+
+/// Parse a `spa_meta_cursor` data blob (the bytes pointed to by a
+/// `SPA_META_Cursor` meta). Returns `None` when the blob is too short or
+/// reports no new cursor data (`id == 0`). The bitmap, when present, is
+/// converted from ARGB8888 to BGRA8 so it can ride the shared
+/// [`CursorSprite`](crate::screen_share::CursorSprite) type directly.
+pub(crate) fn parse_spa_cursor_meta(bytes: &[u8]) -> Option<ParsedSpaCursor> {
+    if bytes.len() < 28 {
+        return None;
+    }
+    let id = u32::from_le_bytes(bytes[0..4].try_into().ok()?);
+    if id == 0 {
+        return None;
+    }
+    let flags = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
+    let x = i32::from_le_bytes(bytes[8..12].try_into().ok()?);
+    let y = i32::from_le_bytes(bytes[12..16].try_into().ok()?);
+    let bitmap_offset = u32::from_le_bytes(bytes[24..28].try_into().ok()?);
+    let visible = flags & SPA_META_CURSOR_FLAG_HIDE == 0;
+
+    let sprite = parse_spa_cursor_bitmap(bytes, bitmap_offset)?;
+    Some(ParsedSpaCursor { x, y, visible, sprite })
+}
+
+/// Parse the `spa_meta_bitmap` pointed to by `bitmap_offset` inside the
+/// cursor meta blob. Returns `None` when there is no bitmap (position-only
+/// update) or the bitmap is malformed.
+fn parse_spa_cursor_bitmap(bytes: &[u8], bitmap_offset: u32) -> Option<Option<CursorSprite>> {
+    if bitmap_offset == 0 {
+        return Some(None);
+    }
+    let start = bitmap_offset as usize;
+    // spa_meta_bitmap = format(4) + size(8) + stride(4) + offset(4) = 20.
+    if start + 20 > bytes.len() {
+        return None;
+    }
+    let format = u32::from_le_bytes(bytes[start..start + 4].try_into().ok()?);
+    let width = u32::from_le_bytes(bytes[start + 4..start + 8].try_into().ok()?);
+    let height = u32::from_le_bytes(bytes[start + 8..start + 12].try_into().ok()?);
+    let stride = i32::from_le_bytes(bytes[start + 12..start + 16].try_into().ok()?);
+    let data_offset = u32::from_le_bytes(bytes[start + 16..start + 20].try_into().ok()?);
+    if width == 0 || height == 0 || width > 128 || height > 128 {
+        return None;
+    }
+    if data_offset == 0 || data_offset < 20 {
+        return Some(None);
+    }
+    let data_start = start.checked_add(data_offset as usize)?;
+    let row_stride = if stride > 0 { stride as usize } else { width as usize * 4 };
+    let needed = row_stride.checked_mul(height as usize)?;
+    if data_start.checked_add(needed)? > bytes.len() {
+        return None;
+    }
+    // Cursor bitmaps are ARGB8888 (portal contract). Convert ARGB → BGRA:
+    // source bytes [A,R,G,B] → BGRA [B,G,R,A]. BGRA (12) passes through.
+    let mut pixels = Vec::with_capacity((width as usize) * (height as usize) * 4);
+    for row in 0..height as usize {
+        let row_start = data_start + row * row_stride;
+        for col in 0..width as usize {
+            let i = row_start + col * 4;
+            let (a, r, g, b) = match format {
+                SPA_VIDEO_FORMAT_ARGB => {
+                    (bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3])
+                }
+                SPA_VIDEO_FORMAT_BGRA => {
+                    (bytes[i + 3], bytes[i + 2], bytes[i + 1], bytes[i])
+                }
+                _ => return None,
+            };
+            pixels.extend_from_slice(&[b, g, r, a]);
+        }
+    }
+    Some(Some(CursorSprite {
+        width,
+        height,
+        hotspot_x: 0,
+        hotspot_y: 0,
+        pixels,
+    }))
 }
 
 #[cfg(test)]
@@ -660,5 +788,99 @@ mod tests {
             err.kind(),
             crate::screen_share::ScreenShareErrorKind::Stream
         );
+    }
+
+    /// Build a synthetic `spa_meta_cursor` blob: header (id, flags,
+    /// position, hotspot, bitmap_offset) plus an inline `spa_meta_bitmap`
+    /// and ARGB8888 pixel data at the bitmap struct's `offset`.
+    fn cursor_meta_blob(
+        id: u32,
+        flags: u32,
+        x: i32,
+        y: i32,
+        bitmap: Option<(u32, u32, u32, u32, Vec<u8>)>,
+    ) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&id.to_le_bytes());
+        bytes.extend_from_slice(&flags.to_le_bytes());
+        bytes.extend_from_slice(&x.to_le_bytes());
+        bytes.extend_from_slice(&y.to_le_bytes());
+        bytes.extend_from_slice(&8i32.to_le_bytes()); // hotspot x (unused)
+        bytes.extend_from_slice(&8i32.to_le_bytes()); // hotspot y (unused)
+        match bitmap {
+            Some((format, width, height, stride, pixels)) => {
+                // bitmap struct begins immediately after the 28-byte header.
+                let bitmap_offset = 28u32;
+                bytes.extend_from_slice(&bitmap_offset.to_le_bytes());
+                bytes.extend_from_slice(&format.to_le_bytes());
+                bytes.extend_from_slice(&width.to_le_bytes());
+                bytes.extend_from_slice(&height.to_le_bytes());
+                bytes.extend_from_slice(&(stride as i32).to_le_bytes());
+                // Pixel data offset relative to the bitmap struct start:
+                // 28 (header) + 20 (bitmap struct) = 48.
+                bytes.extend_from_slice(&20u32.to_le_bytes());
+                bytes.extend_from_slice(&pixels);
+            }
+            None => {
+                bytes.extend_from_slice(&0u32.to_le_bytes());
+            }
+        }
+        bytes
+    }
+
+    #[test]
+    fn spa_cursor_meta_parses_position_and_bitmap() {
+        // A 2x2 ARGB8888 bitmap: white opaque pixel + transparent pixel.
+        let pixels = vec![
+            255, 255, 255, 255, // [A,R,G,B] → white
+            0, 255, 0, 255,     // transparent red → BGRA [B,G,R,A] with A=0
+            255, 0, 255, 0,     // opaque green
+            255, 0, 0, 255,     // opaque blue → BGRA red
+        ];
+        let blob = cursor_meta_blob(7, 0, 123, 456, Some((SPA_VIDEO_FORMAT_ARGB, 2, 2, 8, pixels)));
+        let parsed = parse_spa_cursor_meta(&blob).expect("parse");
+        assert_eq!(parsed.x, 123);
+        assert_eq!(parsed.y, 456);
+        assert!(parsed.visible);
+        let sprite = parsed.sprite.expect("sprite present");
+        assert_eq!((sprite.width, sprite.height), (2, 2));
+        // First pixel: ARGB (A=255,R=255,G=255,B=255) → BGRA white.
+        assert_eq!(&sprite.pixels[0..4], &[255, 255, 255, 255]);
+        // Third pixel: ARGB (A=255,R=0,G=255,B=0) → BGRA (0,255,0,255).
+        assert_eq!(&sprite.pixels[8..12], &[0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn spa_cursor_meta_hide_flag_and_position_only() {
+        // HIDE flag set → visible = false.
+        let hidden = cursor_meta_blob(1, SPA_META_CURSOR_FLAG_HIDE, 10, 20, None);
+        let parsed = parse_spa_cursor_meta(&hidden).expect("parse hidden");
+        assert!(!parsed.visible);
+        assert!(parsed.sprite.is_none(), "no bitmap → position-only");
+        // id == 0 → no new cursor data.
+        let none = cursor_meta_blob(0, 0, 10, 20, None);
+        assert!(parse_spa_cursor_meta(&none).is_none());
+        // Truncated blob → None.
+        assert!(parse_spa_cursor_meta(&[0u8; 8]).is_none());
+    }
+
+    #[test]
+    fn spa_cursor_meta_rejects_malformed_bitmap() {
+        // Bitmap claims 200x200 (over the 128 cap) → whole blob rejected.
+        let blob = cursor_meta_blob(1, 0, 0, 0, Some((SPA_VIDEO_FORMAT_ARGB, 200, 200, 0, vec![])));
+        assert!(parse_spa_cursor_meta(&blob).is_none());
+        // Bitmap with unknown format → rejected.
+        let blob = cursor_meta_blob(1, 0, 0, 0, Some((99, 2, 2, 8, vec![0u8; 16])));
+        assert!(parse_spa_cursor_meta(&blob).is_none());
+    }
+
+    #[test]
+    fn spa_cursor_meta_accepts_bgra_bitmap_passthrough() {
+        // BGRA8 (12) sprite passes through without channel swap.
+        let pixels = vec![1u8, 2, 3, 255, 5, 6, 7, 255];
+        let blob = cursor_meta_blob(2, 0, 0, 0, Some((SPA_VIDEO_FORMAT_BGRA, 2, 1, 8, pixels)));
+        let parsed = parse_spa_cursor_meta(&blob).expect("parse bgra");
+        assert_eq!(&parsed.sprite.as_ref().expect("sprite").pixels[0..4], &[1, 2, 3, 255]);
+        assert_eq!(&parsed.sprite.as_ref().unwrap().pixels[4..8], &[5, 6, 7, 255]);
     }
 }
