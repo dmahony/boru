@@ -588,6 +588,8 @@
   "screenshare.stop_sharing": "Stop Sharing",
   "screenshare.stop_viewing": "Stop Viewing",
   "screenshare.waiting_frame": "Waiting for the next decoded frame…",
+  "screenshare.lower_quality": "Lower Quality",
+  "screenshare.full_quality": "Full Quality",
   "settings.accent_color": "Accent color",
   "settings.add_file": "Add File",
   "settings.appearance": "APPEARANCE",

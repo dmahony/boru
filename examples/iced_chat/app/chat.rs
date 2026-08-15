@@ -460,6 +460,12 @@ impl IcedChat {
                 button(text(if self.screen_share_fullscreen { "Inline" } else { "Fullscreen" }))
                     .on_press(AppMessage::ToggleScreenShareFullscreen)
                     .into(),
+                button(text(crate::i18n::t("screenshare.lower_quality")))
+                    .on_press(AppMessage::ScreenShareLowerQuality)
+                    .into(),
+                button(text(crate::i18n::t("screenshare.full_quality")))
+                    .on_press(AppMessage::ScreenShareFullQuality)
+                    .into(),
             ];
             if self.screen_share_control_active {
                 actions.push(

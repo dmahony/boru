@@ -59,7 +59,7 @@ definitive file list:
 | `viewer.rs` | 243 | `ViewerPipeline` (bounded receiver decode pipeline), `DecodedFrame` | Implemented |
 | `permissions.rs` | 117 | `Capability`, `ControlToken`, `RequestRateLimiter`, `SessionPermissions` | Implemented |
 | `remote_input.rs` | ~640 | `InputEvent`, `RemoteInput` trait, Linux RemoteDesktop portal / Windows SendInput backends + X11 XTest backend (BORU-SS-17), `device_mask_grants` + `parse_devices_mask` gates (BORU-SS-15) | Implemented |
-| `adaptation.rs` | 264 | `AdaptiveQuality`, `QualityDecision`, `PacingController`/`PacingCounters` (latest-frame queue + drop counters, BORU-SS-19) | `AdaptiveQuality` unused; `PacingController` wired into host.rs |
+| `adaptation.rs` | ~500 | `AdaptiveQuality` (congestion control: queue depth, throughput, RTT, encode time, drops; hysteresis; viewer `QualityUpdate` ceiling), `ViewerQualityRequest`, `QualityDecision`, `PacingController`/`PacingCounters` (latest-frame queue + drop counters, BORU-SS-19) | Implemented + wired into host.rs (BORU-SS-20) |
 | `stats.rs` | 121 | `ScreenShareStats`, `ScreenShareStatsSnapshot` | Implemented (internal to viewer; not surfaced to UI) |
 | `platform/mod.rs` | 103 | Per-OS dispatch, `ActiveCapture`, `create_capture_source` | Implemented |
 | `platform/linux.rs` | 2544 | Portal/PipeWire capture (lifecycle machine + clean teardown) + X11 fallback (`DesktopCaptureBackend` with RandR monitor enumeration, BORU-SS-16) + dlopen PipeWire client | Implemented |
@@ -162,19 +162,27 @@ xdg-desktop-portal RemoteDesktop backend via zbus (`remote_input.rs:110-175`),
 real Windows `SendInput` backend via windows-sys (`remote_input.rs:184-273`,
 incl. X11-keysym → virtual-key map `remote_input.rs:198-213`). 4 unit tests.
 
-**adaptation.rs** — `AdaptiveQuality` congestion controller with 4 quality
-levels (bitrate → fps → resolution, `adaptation.rs:24-60`) and hysteresis
-tests. Also `PacingController`/`PacingCounters` (BORU-SS-19 / PDF Task 7.2):
-a bounded latest-frame queue between capture and encode that drops obsolete
-frames over building latency, caps queue length at `max_queue_depth`, and
-records drop counters (`dropped_queue_full`, `dropped_obsolete`). Wired into
-`host.rs` streaming (BORU-SS-19) with skipped-tick accounting; counters are
-exposed for BORU-SS-28 metrics. `AdaptiveQuality` itself still has **no
-production caller**: `grep` for `AdaptiveQuality`/`QualityDecision` outside
-`adaptation.rs`/`mod.rs` returns nothing in `src/`, `examples/`, or
-`tests/`. Exported at `mod.rs:44` but never instantiated by the host or
-viewer loops. This is the PDF Phase 7/adaptive-quality gap — the next chain
-steps can wire it into `host.rs`.
+**adaptation.rs** — `AdaptiveQuality` congestion controller (PDF Task 7.3,
+BORU-SS-20) with 4 quality levels (bitrate → fps → resolution,
+`adaptation.rs:280-303`), hysteresis (3 congested ticks to step down, 8 stable
+ticks to step up — recovery is ~3x more conservative than reduction), and
+signals for send-queue depth (`send_queue_depth`, `bytes_in_flight`), measured
+throughput (`measured_throughput_bps`), RTT (`rtt_us`, 0 = not available),
+encode time (`encode_time_avg_us` vs frame period) and dropped frames
+(delta-based `dropped_frames` / `late_drops` so an old cumulative value never
+sticks forever). **Wired into `host.rs` streaming** (BORU-SS-20): a
+`ScreenShareStats` collector observes capture/encode/send/pacing/media drops,
+the host snapshots every 25 frames, feeds `AdaptiveQuality::update`, and
+`apply_quality_config` applies the decision (resolution/fps → reconfigure with
+generation bump; bitrate-only → `reconfigure_bitrate`). Viewer manual request:
+`ScreenShareMessage::QualityUpdate` → `AdaptiveQuality::apply_viewer_request`
+clamps the config to the requested ceiling (bitrate/fps/scale); recovery never
+exceeds it; `clear_viewer_request` restores full adaptive behaviour. Also
+`PacingController`/`PacingCounters` (BORU-SS-19 / PDF Task 7.2): bounded
+latest-frame queue between capture and encode that drops obsolete frames over
+building latency, caps queue length at `max_queue_depth`, records drop counters
+(`dropped_queue_full`, `dropped_obsolete`), wired into `host.rs` streaming with
+skipped-tick accounting; counters exposed for BORU-SS-28 metrics.
 
 **stats.rs** — `ScreenShareStatsSnapshot` (`stats.rs:10-25`) and
 `ScreenShareStats` (`stats.rs:28-103`): monotonic counters for
@@ -490,6 +498,42 @@ a Boru-owned quality knob:
   round-trip, target-profile values, every-profile encode/decode, and
   CaptureConfig→CodecConfig application.
 
+### 2.9 Adaptive quality (BORU-SS-20 / PDF Task 7.3)
+
+The adaptive controller from BORU-SS-03 is now **wired into the host
+streaming loop** and extended to the full PDF Task 7.3 signal set:
+
+- **Signals tracked** (`ScreenShareStatsSnapshot` gains fields): send-queue
+  depth in frames (`send_queue_depth`) and bytes (`bytes_in_flight`),
+  interval measured throughput (`measured_throughput_bps`), RTT when
+  available (`rtt_us`, 0 = unknown — read from the selected QUIC path),
+  interval average encode time (`encode_time_avg_us`), and a monotonic total
+  drop counter (`dropped_frames` = capture + pacing + media + late drops).
+  The host's `ScreenShareStats` collector observes every capture/encode/send
+  and pacing/media drops; `snapshot()` derives interval rates from deltas so
+  the controller sees current pipeline health, not lifetime averages.
+- **Hysteresis.** 3 consecutive congested ticks step quality down one level
+  (bitrate 65% → bitrate 45% + fps/2 → + resolution/2); 8 clean ticks step up
+  one level — recovery is ~3x more conservative than reduction. Drop signals
+  are delta-based, so a burst is visible but an old counter never sticks.
+- **Viewer manual request.** `ScreenShareMessage::QualityUpdate` →
+  `AdaptiveQuality::apply_viewer_request` clamps the config to the requested
+  ceiling (bitrate/fps/scale factor); recovery never exceeds it. The viewer
+  UI has "Lower Quality" (1 Mbps / 10 fps / 60%) and "Full Quality"
+  (at-or-above-base) buttons in the screen-share panel.
+- **Application.** `apply_quality_config` in host.rs picks the cheapest
+  path: resolution/fps changes rebuild the encoder (generation bump → decoder
+  re-initialises), pure bitrate changes use `reconfigure_bitrate` (no bump,
+  forced keyframe). Capture geometry changes (portal renegotiation) update the
+  controller base via `set_capture_geometry` instead of fighting the adaptive
+  resolution. Adaptation runs every 25 encoded frames.
+- **Tests.** 7 new/updated control-loop tests: sustained pressure steps
+  bitrate→fps→resolution, recovery is gradual/hysteretic, queue-depth
+  pressure, RTT pressure, encode-time pressure, throughput saturation only
+  with queue growth, dropped-burst pressure that does not stick, manual viewer
+  request honored as a ceiling, and congestion still reducing below a viewer
+  ceiling.
+
 ## 3. Dependency usage map (within the screen-share subsystem)
 
 | Dependency | Cargo.toml | Where used (file:line) | Purpose |
@@ -626,30 +670,29 @@ Notes:
 | Remote-control consent gating (view-only default, explicit grant, lazy backend, BORU-SS-15) | Implemented |
 | Viewer decode pipeline | Implemented |
 | Frame pacing: latest-frame queue, capped lengths, drop counters (PDF Task 7.2) | Implemented |
-| Adaptive quality controller | Implemented but **unwired** (no production caller) |
+| Adaptive quality controller (queue depth, throughput, RTT, encode time, drops; hysteresis; viewer QualityUpdate ceiling) (PDF Task 7.3) | Implemented + wired into host.rs |
 | Developer metrics/overlay | Counters implemented, **not surfaced** in UI |
 | UI: start/stop/view/accept/decline/control | Implemented |
 | Capability-gated peer negotiation | Implemented |
 
 ## 7. Follow-up notes (for later BORU-SS tasks — NOT fixed here)
 
-1. **Adaptive quality is dead code.** `AdaptiveQuality`
-   (`src/screen_share/adaptation.rs`) is exported but never called. PDF
-   Phase 7/adaptive-quality should wire it into the `host.rs` streaming loop
-   (it already consumes `ScreenShareStatsSnapshot`, which the viewer emits).
-2. **Metrics not surfaced.** `ViewerPipeline::stats()` exists but the GUI
+1. **Metrics not surfaced.** `ViewerPipeline::stats()` exists but the GUI
    never reads it; PDF Phase 12 (developer overlay, structured logs) needs a
    consumer.
-3. **macOS backend missing** (PDF Phase 4/5 scope is Windows + Wayland first,
+2. **macOS backend missing** (PDF Phase 4/5 scope is Windows + Wayland first,
    so this is a known gap, not a regression).
-4. **Windows backend not CI-tested** in this snapshot — compiled only on
+3. **Windows backend not CI-tested** in this snapshot — compiled only on
    Windows targets (release.yaml matrix); no Windows runner evidence in repo.
-5. **No monitor/source selection UI.** Capture is the primary monitor
+4. **No monitor/source selection UI.** Capture is the primary monitor
    (Windows `MONITOR_DEFAULTTOPRIMARY`, `windows.rs:120-124`) or the portal
    default (Linux); PDF Phase 10 (multi-monitor, source switching) is open.
-6. **No quality presets / manual viewer-side quality request** (PDF Phase
-   7.3) — `QualityUpdate` messages are not in the protocol.
-7. **VNC prototype is a separate feature** (`experimental-vnc`) and must not
+5. **Quality presets are fixed absolute ceilings.** The viewer "Lower
+   Quality" button sends a 1 Mbps / 10 fps / 60% scale `QualityUpdate`;
+   "Full Quality" sends an at-or-above-base request (100 Mbps / 240 fps /
+   100%). The host clamps to its own base either way, so the request is a
+   ceiling, not a precise preset (PDF Phase 7.3).
+6. **VNC prototype is a separate feature** (`experimental-vnc`) and must not
    be conflated with the native subsystem; the PDF forbids tunnelling an
    external remote-desktop product into the native path.
 

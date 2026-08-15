@@ -22,6 +22,20 @@ pub struct ScreenShareStatsSnapshot {
     pub decoded_frames: u64,
     pub rendered_frames: u64,
     pub decode_errors: u64,
+    /// Current send-queue depth in frames (frames waiting in the media
+    /// channel). 0 when the queue is empty.
+    pub send_queue_depth: u64,
+    /// Measured throughput (bits/sec) over the last snapshot interval.
+    pub measured_throughput_bps: u64,
+    /// Average encode duration (microseconds) per frame over the last
+    /// snapshot interval; 0 when no frames were encoded.
+    pub encode_time_avg_us: u64,
+    /// Round-trip time estimate in microseconds, 0 when not available.
+    pub rtt_us: u64,
+    /// Total frames dropped across the pipeline since the last snapshot
+    /// (capture drops + pacing queue-full/obsolete + media queue + late
+    /// drops). Monotonic; consumers compute deltas.
+    pub dropped_frames: u64,
 }
 
 #[derive(Debug)]
@@ -41,6 +55,18 @@ pub struct ScreenShareStats {
     bytes_in_flight: u64,
     media_resets: u64,
     frame_age_us: u64,
+    send_queue_depth: u64,
+    rtt_us: u64,
+    /// Cumulative frames dropped by the pacing queue (queue-full + obsolete).
+    pacing_dropped: u64,
+    /// Cumulative frames dropped by the media channel (queue full).
+    media_dropped: u64,
+    /// Bytes sent at the previous snapshot (interval throughput derivation).
+    last_bytes_sent: u64,
+    /// Encode-time total at the previous snapshot (interval average derivation).
+    last_encode_time_us: u64,
+    /// Encoded count at the previous snapshot (interval average derivation).
+    last_encoded: u64,
 }
 
 impl Default for ScreenShareStats {
@@ -53,7 +79,9 @@ impl ScreenShareStats {
         Self { started: now, last_snapshot: now, captured: 0, encoded: 0, decoded: 0,
             rendered: 0, dropped_capture_frames: 0, late_drops: 0, decode_errors: 0,
             encode_time_us: 0, decode_time_us: 0, bytes_sent: 0, bytes_in_flight: 0,
-            media_resets: 0, frame_age_us: 0 }
+            media_resets: 0, frame_age_us: 0, send_queue_depth: 0, rtt_us: 0,
+            pacing_dropped: 0, media_dropped: 0, last_bytes_sent: 0,
+            last_encode_time_us: 0, last_encoded: 0 }
     }
     pub fn observe_capture(&mut self) { self.captured = self.captured.saturating_add(1); }
     pub fn observe_capture_drop(&mut self) { self.dropped_capture_frames = self.dropped_capture_frames.saturating_add(1); }
@@ -63,6 +91,10 @@ impl ScreenShareStats {
         self.frame_age_us = self.frame_age_us.max(elapsed.as_micros().min(u64::MAX as u128) as u64);
     }
     pub fn set_bytes_in_flight(&mut self, bytes: u64) { self.bytes_in_flight = bytes; }
+    pub fn set_send_queue_depth(&mut self, frames: u64) { self.send_queue_depth = frames; }
+    pub fn set_rtt_us(&mut self, rtt_us: u64) { self.rtt_us = rtt_us; }
+    pub fn observe_pacing_drop(&mut self, count: u64) { self.pacing_dropped = self.pacing_dropped.saturating_add(count); }
+    pub fn observe_media_drop(&mut self) { self.media_dropped = self.media_dropped.saturating_add(1); }
     pub fn observe_receive(&mut self, timestamp_us: u64, now: Instant) {
         self.frame_age_us = now
             .saturating_duration_since(self.started)
@@ -82,7 +114,16 @@ impl ScreenShareStats {
         let now = Instant::now();
         let elapsed = now.saturating_duration_since(self.last_snapshot).max(Duration::from_millis(1));
         let seconds = elapsed.as_secs_f64();
+        // Interval measurements derive from deltas since the previous
+        // snapshot: recent throughput and average encode time, not lifetime
+        // averages, so the adaptive controller sees current pipeline health.
+        let interval_bytes = self.bytes_sent.saturating_sub(self.last_bytes_sent);
+        let interval_encode_time_us = self.encode_time_us.saturating_sub(self.last_encode_time_us);
+        let interval_encoded = self.encoded.saturating_sub(self.last_encoded);
         self.last_snapshot = now;
+        self.last_bytes_sent = self.bytes_sent;
+        self.last_encode_time_us = self.encode_time_us;
+        self.last_encoded = self.encoded;
         ScreenShareStatsSnapshot {
             sender_fps: (self.captured as f64 / seconds).round() as u32,
             encoded_fps: (self.encoded as f64 / seconds).round() as u32,
@@ -98,6 +139,14 @@ impl ScreenShareStats {
             decoded_frames: self.decoded,
             rendered_frames: self.rendered,
             decode_errors: self.decode_errors,
+            send_queue_depth: self.send_queue_depth,
+            measured_throughput_bps: (interval_bytes as f64 * 8.0 / seconds) as u64,
+            encode_time_avg_us: if interval_encoded > 0 { interval_encode_time_us / interval_encoded } else { 0 },
+            rtt_us: self.rtt_us,
+            dropped_frames: self.dropped_capture_frames
+                .saturating_add(self.pacing_dropped)
+                .saturating_add(self.media_dropped)
+                .saturating_add(self.late_drops),
         }
     }
 }
@@ -111,11 +160,18 @@ mod tests {
         stats.observe_capture(); stats.observe_capture_drop(); stats.observe_encode(Duration::from_micros(12));
         stats.observe_send(1_000); stats.set_bytes_in_flight(55); stats.observe_receive(0, Instant::now());
         stats.observe_decode(Duration::from_micros(8), false); stats.observe_render(); stats.observe_late_drop(); stats.observe_media_reset();
+        stats.set_send_queue_depth(2); stats.set_rtt_us(40_000); stats.observe_pacing_drop(3); stats.observe_media_drop();
         let snapshot = stats.snapshot();
         assert_eq!(snapshot.dropped_capture_frames, 1);
         assert_eq!(snapshot.bytes_in_flight, 55);
         assert_eq!(snapshot.late_drops, 1);
         assert_eq!(snapshot.media_resets, 1);
         assert!(snapshot.encode_time_us >= 12 && snapshot.decode_time_us >= 8);
+        // Adaptive-quality signals ride the snapshot.
+        assert_eq!(snapshot.send_queue_depth, 2);
+        assert_eq!(snapshot.rtt_us, 40_000);
+        assert!(snapshot.measured_throughput_bps > 0, "interval throughput derived from bytes sent");
+        assert!(snapshot.encode_time_avg_us >= 12, "interval encode average derived from encode time");
+        assert_eq!(snapshot.dropped_frames, 1 + 3 + 1 + 1, "capture + pacing + media + late drops");
     }
 }

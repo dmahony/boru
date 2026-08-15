@@ -12,7 +12,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use super::{
-    adaptation::PacingController,
+    adaptation::{AdaptiveQuality, PacingController, QualityDecision, ViewerQualityRequest},
     channels::{
         ControlChannel, ControlOut, MediaChannel, DEFAULT_CONTROL_QUEUE_CAPACITY,
         DEFAULT_MEDIA_QUEUE_CAPACITY,
@@ -25,6 +25,7 @@ use super::{
     reconnect::{retry_reconnect, ReconnectPolicy},
     remote_input::{self, create_platform_backend, InputEvent, NormalizedPointer, RemoteInput},
     session::{ScreenShareSessionId, SessionEvent, SessionManager, SessionState},
+    stats::ScreenShareStats,
     transport::{read_unit, QuicScreenTransport, ReadUnit},
     ScreenShareError, SCREEN_SHARE_ALPN,
 };
@@ -267,6 +268,20 @@ async fn run_host_session_inner(
     // can be counted as dropped obsolete frames when the pipeline fell behind.
     let frame_period_us = 1_000_000 / capture_fps as u64;
     let mut last_tick = std::time::Instant::now();
+    // Adaptive quality (PDF Task 7.3): a host-side stats collector feeds a
+    // congestion controller that gradually reduces bitrate/fps/resolution
+    // under sustained congestion and recovers conservatively. The viewer's
+    // manual lower-quality request (QualityUpdate) clamps the controller to
+    // the requested ceiling.
+    let mut stats = ScreenShareStats::new();
+    let mut adaptive = AdaptiveQuality::new(config);
+    // Pacing counters are cumulative; track the last seen total so new drops
+    // since the previous tick can be fed to the stats snapshot.
+    let mut last_pacing_drops: u64 = 0;
+    // Run the control loop every N encoded frames (≈ 1s at 25fps): often
+    // enough to react to congestion without making every frame a decision.
+    let adapt_interval_frames: u64 = 25;
+    let mut frames_since_adapt: u64 = 0;
     // Reconnect-aware streaming loop (PDF Task 3.3): on a transient media
     // failure (media/control channel failed, connection dropped, stream
     // read error) the session does NOT end — it transitions to Reconnecting,
@@ -343,6 +358,17 @@ async fn run_host_session_inner(
                                 keyframe_requests += 1;
                                 encoder.force_keyframe();
                             }
+                            // Manual lower-quality request from the viewer
+                            // (PDF Task 7.3 / QualityUpdate path): clamp the
+                            // adaptive controller to the requested ceiling
+                            // and apply the resulting config immediately.
+                            ScreenShareMessage::QualityUpdate { session_id: sid, target_bitrate_bps, max_frame_rate, scale_factor, .. } if sid == session_id => {
+                                let request = ViewerQualityRequest { target_bitrate_bps, max_frame_rate, scale_factor };
+                                let decision = adaptive.apply_viewer_request(request);
+                                if apply_quality_config(&mut encoder, &mut config, decision) {
+                                    tracing::info!(target_bitrate_bps, max_frame_rate, scale_factor, level = adaptive.level(), "screen-share: host applied viewer quality request");
+                                }
+                            }
                             ScreenShareMessage::Error { session_id: sid, message: peer_error, .. } if sid == session_id => {
                                 tracing::warn!(error = %peer_error, "screen-share: host received peer error");
                             }
@@ -413,7 +439,15 @@ async fn run_host_session_inner(
                         // survives — never build latency by queueing obsolete
                         // frames.
                         pacing.push(frame);
+                        stats.observe_capture();
                         let Some(frame) = pacing.pop_latest() else { return };
+                        // Feed the pacing drop counters into the stats collector
+                        // (delta since the last tick).
+                        let pacing_drops = pacing.counters().dropped_queue_full.saturating_add(pacing.counters().dropped_obsolete);
+                        if pacing_drops > last_pacing_drops {
+                            stats.observe_pacing_drop(pacing_drops - last_pacing_drops);
+                        }
+                        last_pacing_drops = pacing_drops;
                         // Real portal captures negotiate their geometry after
                         // streaming starts; reconfigure the encoder when the
                         // frame size differs from the initial config.
@@ -422,12 +456,16 @@ async fn run_host_session_inner(
                                 tracing::warn!(width = frame.width, height = frame.height, "screen-share: capture produced invalid geometry, ending session");
                                 return;
                             }
-                            let new_config = CodecConfig { width: frame.width, height: frame.height, ..config };
-                            if encoder.reconfigure(new_config).is_err() { return; }
-                            config = new_config;
+                            // Track the new capture geometry in the adaptive
+                            // controller (level preserved, viewer ceiling
+                            // re-scaled) and apply its decision.
+                            let decision = adaptive.set_capture_geometry(frame.width, frame.height);
+                            let _ = apply_quality_config(&mut encoder, &mut config, decision);
                         }
+                        let encode_started = std::time::Instant::now();
                         match encoder.encode(&frame) {
                             Ok(encoded) => {
+                                stats.observe_encode(encode_started.elapsed());
                                 if encoded.sequence == 0 || encoded.sequence % 25 == 0 {
                                     let stats_paths: Vec<String> = connection
                                         .paths()
@@ -459,9 +497,11 @@ async fn run_host_session_inner(
                                 let sequence = encoded.sequence;
                                 let bytes_len = encoded.bytes.len();
                                 let encode_age_us = encoded.encode_timestamp_us.saturating_sub(encoded.timestamp_us);
+                                stats.observe_send(bytes_len);
                                 let dropped = media.send_frame(encoded).await;
                                 if dropped {
                                     media_drops += 1;
+                                    stats.observe_media_drop();
                                 }
                                 if sequence == 0 || sequence % 150 == 0 {
                                     let pacing_counters = pacing.counters();
@@ -473,6 +513,40 @@ async fn run_host_session_inner(
                                 }
                                 if media_drops > 0 && media_drops % 150 == 0 {
                                     tracing::warn!(media_drops, "screen-share: host dropping stale media frames (queue full)");
+                                }
+                                // Adaptive quality (PDF Task 7.3): feed the
+                                // congestion controller every N frames with a
+                                // stats snapshot (queue depth, throughput,
+                                // RTT, encode time, drops) and apply its
+                                // decision to the encoder.
+                                frames_since_adapt += 1;
+                                if frames_since_adapt >= adapt_interval_frames {
+                                    frames_since_adapt = 0;
+                                    let queue_depth = media.len().await as u64;
+                                    stats.set_send_queue_depth(queue_depth);
+                                    stats.set_bytes_in_flight(queue_depth.saturating_mul(bytes_len as u64));
+                                    // RTT from the selected QUIC path, when
+                                    // available (0 when unknown).
+                                    let rtt_us = connection
+                                        .paths()
+                                        .iter()
+                                        .find(|path| path.is_selected())
+                                        .map(|path| path.rtt().as_micros() as u64)
+                                        .unwrap_or(0);
+                                    stats.set_rtt_us(rtt_us);
+                                    let snapshot = stats.snapshot();
+                                    let decision = adaptive.update(snapshot);
+                                    if apply_quality_config(&mut encoder, &mut config, decision) {
+                                        let pacing_counters = pacing.counters();
+                                        tracing::info!(level = adaptive.level(), width = config.width, height = config.height,
+                                            fps = config.target_fps, bitrate = config.target_bitrate_bps,
+                                            queue_depth, rtt_us, measured_bps = snapshot.measured_throughput_bps,
+                                            encode_avg_us = snapshot.encode_time_avg_us, dropped = snapshot.dropped_frames,
+                                            pacing_captured = pacing_counters.captured, pacing_encoded = pacing_counters.encoded,
+                                            pacing_dropped_queue_full = pacing_counters.dropped_queue_full,
+                                            pacing_dropped_obsolete = pacing_counters.dropped_obsolete,
+                                            "screen-share: adaptive quality changed");
+                                    }
                                 }
                             }
                             Err(error) => {
@@ -593,6 +667,30 @@ async fn wait_for_accept(
             Err(error) => return Err(error),
         }
     }
+}
+
+/// Apply one adaptive-quality decision to the live encoder.
+///
+/// Resolution/fps changes rebuild the encoder (config generation bump so the
+/// viewer re-initialises its decoder); a pure bitrate change uses the cheaper
+/// same-resolution rebuild (no generation bump, forced keyframe re-syncs the
+/// stream). Returns `true` when a change was applied.
+fn apply_quality_config(
+    encoder: &mut OpenH264Encoder,
+    config: &mut CodecConfig,
+    decision: QualityDecision,
+) -> bool {
+    if !decision.changed { return false; }
+    let next = decision.config;
+    if next.width != config.width || next.height != config.height || next.target_fps != config.target_fps {
+        if encoder.reconfigure(next).is_err() { return false; }
+    } else if next.target_bitrate_bps != config.target_bitrate_bps {
+        if encoder.reconfigure_bitrate(next.target_bitrate_bps).is_err() { return false; }
+    } else {
+        return false;
+    }
+    *config = next;
+    true
 }
 
 /// Write one control response on an accepted stream (mirrors the protocol

@@ -5617,6 +5617,13 @@ pub enum AppMessage {
     /// Host revokes control while keeping view-only sharing active.
     ScreenShareRevokeControl,
     #[cfg(feature = "screen-sharing")]
+    /// Viewer asks the host to lower the stream quality manually
+    /// (sends a versioned `QualityUpdate`).
+    ScreenShareLowerQuality,
+    #[cfg(feature = "screen-sharing")]
+    /// Viewer asks the host to restore full quality (clears the manual ceiling).
+    ScreenShareFullQuality,
+    #[cfg(feature = "screen-sharing")]
     /// Viewer pointer motion over the image (normalized 0..1, image-relative).
     ScreenSharePointerMove { x: f32, y: f32 },
     #[cfg(feature = "screen-sharing")]
@@ -10073,6 +10080,10 @@ impl IcedChat {
             #[cfg(feature = "screen-sharing")]
             AppMessage::ScreenShareRevokeControl => "ScreenShareRevokeControl",
             #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareLowerQuality => "ScreenShareLowerQuality",
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareFullQuality => "ScreenShareFullQuality",
+            #[cfg(feature = "screen-sharing")]
             AppMessage::ScreenSharePointerMove { .. } => "ScreenSharePointerMove",
             #[cfg(feature = "screen-sharing")]
             AppMessage::ScreenSharePointerButton { .. } => "ScreenSharePointerButton",
@@ -14490,6 +14501,10 @@ impl IcedChat {
                 }
                 iced::Task::none()
             }
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareLowerQuality => self.send_screen_share_quality(60, 60),
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareFullQuality => self.send_screen_share_quality(100, 100),
             #[cfg(feature = "screen-sharing")]
             AppMessage::ScreenSharePointerMove { x, y } => {
                 self.send_screen_share_input(Capability::ControlPointer, 0, x, y, false)
@@ -20881,6 +20896,48 @@ impl IcedChat {
                                 Capability::ControlPointer,
                                 Capability::ControlKeyboard,
                             ],
+                        },
+                    )
+                    .await
+                    .map_err(|e| e.to_string())
+            },
+            |result| AppMessage::ScreenShareCommandFinished(result),
+        )
+    }
+
+    #[cfg(feature = "screen-sharing")]
+    /// Viewer requests a manual quality change (PDF Task 7.3 / QualityUpdate
+    /// path). `scale_percent` maps to the viewer-facing "Lower quality" (60%)
+    /// and "Full quality" (100%) buttons. The host clamps its adaptive
+    /// controller to the requested ceiling.
+    fn send_screen_share_quality(&self, scale_percent: u8, bitrate_percent: u8) -> iced::Task<AppMessage> {
+        let Some(protocol) = self.screen_share_protocol.clone() else {
+            return iced::Task::none();
+        };
+        let Some(session_id) = self.screen_share_view_session else {
+            return iced::Task::none();
+        };
+        // Absolute presets: the host clamps to its own base, so "full" sends
+        // values at/above any sane base (bitrate unlimited by validation,
+        // fps capped at the protocol max 240) and "lower" sends a conservative
+        // reduced ceiling (1 Mbps @ 10 fps @ 60% resolution).
+        let (target_bitrate_bps, max_frame_rate, scale_factor) = if bitrate_percent >= 100 {
+            (100_000_000, 240u16, scale_percent.clamp(1, 100))
+        } else {
+            (1_000_000, 10u16, scale_percent.clamp(1, 100))
+        };
+        let session_id_for_message = session_id;
+        iced::Task::perform(
+            async move {
+                protocol
+                    .send_screen_share(
+                        session_id_for_message,
+                        ScreenShareMessage::QualityUpdate {
+                            version: SCREEN_SHARE_PROTOCOL_VERSION,
+                            session_id: session_id_for_message,
+                            target_bitrate_bps,
+                            max_frame_rate,
+                            scale_factor,
                         },
                     )
                     .await

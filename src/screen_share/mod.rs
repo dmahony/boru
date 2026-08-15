@@ -40,7 +40,7 @@ pub use channels::{
     BoundedFrameQueue, ControlChannel, ControlOut, MediaChannel, DEFAULT_CONTROL_QUEUE_CAPACITY,
     DEFAULT_MEDIA_QUEUE_CAPACITY,
 };
-pub use adaptation::{AdaptiveQuality, PacingController, PacingCounters, QualityDecision};
+pub use adaptation::{AdaptiveQuality, PacingController, PacingCounters, QualityDecision, ViewerQualityRequest};
 pub use codec::{
     CodecConfig, CodecKind, CodecMetadata, EncodedFrame, EncodedPacket, OpenH264Decoder,
     OpenH264Encoder, QualityProfile, ScreenShareCodec, VideoDecoder, VideoEncoder,

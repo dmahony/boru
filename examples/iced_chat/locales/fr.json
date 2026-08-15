@@ -467,6 +467,8 @@
   "screenshare.stop_sharing": "Arrêter le partage",
   "screenshare.stop_viewing": "Arrêter de regarder",
   "screenshare.waiting_frame": "En attente de la prochaine image décodée…",
+  "screenshare.lower_quality": "Qualité réduite",
+  "screenshare.full_quality": "Qualité complète",
   "settings.add_file": "Ajouter un fichier",
   "settings.appearance": "APPARENCE",
   "settings.change_image": "Changer l'image",
