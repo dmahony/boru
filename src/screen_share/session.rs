@@ -119,6 +119,15 @@ pub enum SessionEvent {
         session_id: ScreenShareSessionId,
         metrics: ScreenShareSessionMetrics,
     },
+    /// System-audio sharing state changed (BORU-SS-37). Emitted when the host
+    /// enables/disables shared audio (audio is opt-in) or the capture backend
+    /// fails. `error` carries a typed, user-safe reason when capture could
+    /// not start (e.g. no PipeWire runtime). Contains no media data.
+    AudioState {
+        session_id: ScreenShareSessionId,
+        enabled: bool,
+        error: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone)]

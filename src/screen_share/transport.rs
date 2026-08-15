@@ -28,6 +28,10 @@ const CONTROL_KIND: u8 = 0x01;
 const MEDIA_KIND: u8 = 0x02;
 /// Versioned protocol message (negotiation and lifecycle) frame kind.
 const SCREEN_SHARE_KIND: u8 = 0x03;
+/// Encoded Opus audio frame kind (BORU-SS-37). Audio rides a dedicated
+/// stream kind on the media path: drop-tolerant, never blocks video, and
+/// independently bounded from the reliable control channel.
+const AUDIO_KIND: u8 = 0x04;
 
 /// Diagnostics describing the selected QUIC path. Transport behavior never
 /// depends on this value.
@@ -106,6 +110,66 @@ pub fn decode_media(bytes: &[u8]) -> Result<(MediaHeader, Vec<u8>), ScreenShareE
     Ok((header, payload.to_vec()))
 }
 
+/// Compact audio header. Payload bytes are kept outside the postcard header
+/// (BORU-SS-37), mirroring the media framing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioHeader {
+    pub version: u16,
+    pub session_id: [u8; 16],
+    pub sequence: u64,
+    pub timestamp_us: u64,
+    /// Sample rate of the decoded PCM in Hz (8000..=48000, RFC 6716).
+    pub sample_rate: u32,
+    /// Channel count of the decoded PCM (1 = mono, 2 = stereo).
+    pub channels: u16,
+    pub payload_len: u32,
+}
+
+impl AudioHeader {
+    /// Maximum encoded audio frame carried in one unit.
+    pub const MAX_AUDIO_PAYLOAD: usize = super::protocol::MAX_AUDIO_FRAME;
+    pub fn validate(&self) -> Result<(), ScreenShareError> {
+        if self.version != SCREEN_SHARE_PROTOCOL_VERSION { return Err(ScreenShareError::new("unsupported audio protocol version")); }
+        if self.session_id == [0; 16] { return Err(ScreenShareError::new("audio session id is empty")); }
+        if self.sequence == 0 { return Err(ScreenShareError::new("audio sequence is zero")); }
+        if self.sample_rate < super::protocol::MIN_AUDIO_SAMPLE_RATE || self.sample_rate > super::protocol::MAX_AUDIO_SAMPLE_RATE { return Err(ScreenShareError::new("audio sample rate out of range")); }
+        if self.channels == 0 || self.channels > 2 { return Err(ScreenShareError::new("invalid audio channel count")); }
+        if self.payload_len == 0 || self.payload_len as usize > Self::MAX_AUDIO_PAYLOAD { return Err(ScreenShareError::new("audio payload exceeds limit")); }
+        Ok(())
+    }
+}
+
+/// Encode a bounded Opus audio unit for a disposable QUIC stream.
+/// `session_id` mirrors the media-path API (the transport stamps it into the
+/// header via `send_audio`); the unit itself carries the header verbatim.
+pub fn encode_audio(_session_id: [u8; 16], header: &AudioHeader, payload: &[u8]) -> Result<Vec<u8>, ScreenShareError> {
+    let mut header = *header;
+    if payload.is_empty() || payload.len() > AudioHeader::MAX_AUDIO_PAYLOAD { return Err(ScreenShareError::new("encoded audio exceeds limit")); }
+    header.payload_len = payload.len() as u32;
+    header.validate()?;
+    let header_bytes = postcard::to_stdvec(&header).map_err(|e| ScreenShareError::new(e.to_string()))?;
+    if header_bytes.len() > MAX_MEDIA_HEADER { return Err(ScreenShareError::new("audio header exceeds limit")); }
+    let mut out = Vec::with_capacity(1 + 2 + header_bytes.len() + payload.len());
+    out.push(AUDIO_KIND);
+    out.extend_from_slice(&(header_bytes.len() as u16).to_be_bytes());
+    out.extend_from_slice(&header_bytes);
+    out.extend_from_slice(payload);
+    Ok(out)
+}
+
+/// Decode and validate one complete audio unit before allocating based on its
+/// header.
+pub fn decode_audio(bytes: &[u8]) -> Result<(AudioHeader, Vec<u8>), ScreenShareError> {
+    if bytes.len() < 3 || bytes[0] != AUDIO_KIND { return Err(ScreenShareError::new("invalid audio unit")); }
+    let header_len = u16::from_be_bytes([bytes[1], bytes[2]]) as usize;
+    if header_len == 0 || header_len > MAX_MEDIA_HEADER || bytes.len() < 3 + header_len { return Err(ScreenShareError::new("invalid audio header length")); }
+    let header: AudioHeader = postcard::from_bytes(&bytes[3..3 + header_len]).map_err(|e| ScreenShareError::new(e.to_string()))?;
+    header.validate()?;
+    let payload = &bytes[3 + header_len..];
+    if payload.len() != header.payload_len as usize { return Err(ScreenShareError::new("audio payload length mismatch")); }
+    Ok((header, payload.to_vec()))
+}
+
 /// A bounded latest-frame queue. It intentionally discards stale non-keyframes.
 #[derive(Debug)]
 pub struct LatestFrameQueue { latest: Option<(MediaHeader, Vec<u8>)>, max_depth: usize }
@@ -158,6 +222,16 @@ impl QuicScreenTransport {
         self.counters.frames_sent.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
+    /// Send one encoded Opus audio unit (BORU-SS-37) on a disposable stream.
+    pub async fn send_audio(&self, header: &AudioHeader, payload: &[u8]) -> Result<(), ScreenShareError> {
+        let unit = encode_audio(self.session_id, header, payload)?;
+        let (mut send, _) = self.connection.open_bi().await.map_err(|e| ScreenShareError::new(e.to_string()))?;
+        send.write_all(&unit).await.map_err(|e| ScreenShareError::new(e.to_string()))?;
+        send.finish().map_err(|e| ScreenShareError::new(e.to_string()))?;
+        self.counters.bytes_sent.fetch_add(unit.len() as u64, Ordering::Relaxed);
+        self.counters.frames_sent.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
 }
 
 /// Read a bounded control or media stream. The caller owns session lifecycle decisions.
@@ -181,12 +255,17 @@ pub async fn read_unit(mut recv: iroh::endpoint::RecvStream) -> Result<ReadUnit,
             let mut unit = Vec::with_capacity(1 + rest.len()); unit.push(MEDIA_KIND); unit.extend_from_slice(&rest);
             decode_media(&unit).map(|(header, payload)| ReadUnit::Media(header, payload))
         }
+        AUDIO_KIND => {
+            let rest = recv.read_to_end(AudioHeader::MAX_AUDIO_PAYLOAD + MAX_MEDIA_HEADER + 3).await.map_err(|e| ScreenShareError::new(e.to_string()))?;
+            let mut unit = Vec::with_capacity(1 + rest.len()); unit.push(AUDIO_KIND); unit.extend_from_slice(&rest);
+            decode_audio(&unit).map(|(header, payload)| ReadUnit::Audio(header, payload))
+        }
         _ => Err(ScreenShareError::new("unknown screen-share stream kind")),
     }
 }
 
 #[derive(Debug)]
-pub enum ReadUnit { Control(ControlMessage), ScreenShare(ScreenShareMessage), Media(MediaHeader, Vec<u8>) }
+pub enum ReadUnit { Control(ControlMessage), ScreenShare(ScreenShareMessage), Media(MediaHeader, Vec<u8>), Audio(AudioHeader, Vec<u8>) }
 
 #[cfg(test)]
 mod tests {
@@ -199,6 +278,32 @@ mod tests {
         assert_eq!(header.sequence, 9); assert_eq!(payload, frame.bytes);
         assert_eq!(header.encode_timestamp_us, 9, "encode timestamp must ride the wire");
         assert!(decode_media(&bytes[..bytes.len() - 1]).is_err());
+    }
+    /// BORU-SS-37: an Opus audio unit round-trips through the dedicated
+    /// AUDIO_KIND framing, carrying sample rate/channels, and hostile input
+    /// is rejected before payload use.
+    #[test]
+    fn audio_round_trip_and_bounds() {
+        let mut header = AudioHeader { version: 1, session_id: [1; 16], sequence: 1, timestamp_us: 7, sample_rate: 48_000, channels: 2, payload_len: 0 };
+        let payload = vec![0xAB; 64];
+        let bytes = encode_audio([1; 16], &header, &payload).unwrap();
+        let (decoded, decoded_payload) = decode_audio(&bytes).unwrap();
+        assert_eq!(decoded.sequence, 1);
+        assert_eq!(decoded.sample_rate, 48_000);
+        assert_eq!(decoded.channels, 2);
+        assert_eq!(decoded_payload, payload);
+        // Truncated input is rejected, never panics.
+        assert!(decode_audio(&bytes[..bytes.len() - 1]).is_err());
+        // Zero sequence is rejected on encode.
+        header.sequence = 0;
+        assert!(encode_audio([1; 16], &header, &payload).is_err());
+        // Out-of-range sample rate is rejected.
+        header.sequence = 1;
+        header.sample_rate = 96_000;
+        assert!(encode_audio([1; 16], &header, &payload).is_err());
+        // Empty payload is rejected.
+        header.sample_rate = 48_000;
+        assert!(encode_audio([1; 16], &header, &[]).is_err());
     }
     #[test]
     fn queue_keeps_current_state_bounded() {

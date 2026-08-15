@@ -298,7 +298,10 @@ video-playback = ["gui", "dep:iced_video_player"]
 terminal = ["gui", "dep:iced_term"]
 # Screen sharing is deliberately opt-in while the subsystem is integrated.
 # Reuse the OpenH264 dependency already used by video-calls.
-screen-sharing = ["net", "dep:openh264", "dep:zbus", "dep:libloading", "dep:windows-sys", "dep:windows", "dep:x11rb"]
+# System-audio sharing (BORU-SS-37) reuses the same cpal/opus/rtrb stack as
+# voice-calls: cpal for loopback playback on the viewer, opus (RFC 6716,
+# BSD-3) for the audio codec, rtrb for the bounded SPSC sample rings.
+screen-sharing = ["net", "dep:openh264", "dep:zbus", "dep:libloading", "dep:windows-sys", "dep:windows", "dep:x11rb", "dep:cpal", "dep:opus", "dep:rtrb"]
 # Developer-only live UI editor gate (BORU-UI-08). Enabling this feature
 # turns the live UI editor on in ANY build (including release): boru-ui.toml
 # is loaded, the file watcher runs and live theme redraw is active. It is

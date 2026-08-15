@@ -13,6 +13,10 @@ use tokio::sync::mpsc;
 
 use super::{
     adaptation::{AdaptiveQuality, PacingController, QualityDecision, ViewerQualityRequest},
+    audio::{
+        audio_sample_ring, create_system_audio_capture, OpusAudioEncoder, SystemAudioCapture,
+        AUDIO_FRAME_MS, AUDIO_RING_SAMPLES, AUDIO_SAMPLES_PER_FRAME,
+    },
     capture::{CaptureConfig, CaptureSource, CaptureSourceId, DirtyRegion},
     channels::{
         ControlChannel, ControlOut, MediaChannel, DEFAULT_CONTROL_QUEUE_CAPACITY,
@@ -26,7 +30,7 @@ use super::{
     remote_input::{self, create_platform_backend, InputEvent, NormalizedPointer, RemoteInput},
     session::{ScreenShareSessionId, SessionEvent, SessionManager, SessionState},
     stats::{ScreenShareSessionMetrics, ScreenShareStats},
-    transport::{read_unit, QuicScreenTransport, ReadUnit},
+    transport::{read_unit, AudioHeader, QuicScreenTransport, ReadUnit},
     ScreenShareError, SCREEN_SHARE_ALPN,
 };
 use iroh::endpoint::Endpoint;
@@ -57,6 +61,13 @@ pub enum HostCommand {
     /// frame with the new geometry, re-selects the capture source, forces a
     /// keyframe, and surfaces `SessionEvent::SourceChanged` to the app.
     SwitchSource(CaptureSourceId),
+    /// Host user toggles system-audio sharing (BORU-SS-37). Audio is a
+    /// SEPARATE optional capability: enabling it grants `Capability::Audio`
+    /// (mirroring clipboard) and starts the platform capture backend; the
+    /// capture thread pushes PCM into a bounded ring that the streaming loop
+    /// drains every Opus frame. Disabling stops capture and audio packets.
+    /// Emits `SessionEvent::AudioState` with the outcome.
+    SetAudioEnabled(bool),
 }
 
 /// Reason a host screen-share session terminated, for structured logging
@@ -281,6 +292,9 @@ async fn run_host_session_inner(
                         manager.state(session_id) == Some(SessionState::Streaming)
                     }
                     Ok(ReadUnit::Media(_, _)) => false,
+                    // BORU-SS-37: audio only flows once streaming starts; a
+                    // unit arriving during negotiation is ignored.
+                    Ok(ReadUnit::Audio(_, _)) => false,
                     Ok(ReadUnit::ScreenShare(message)) => {
                         // Versioned negotiation/lifecycle messages are the
                         // canonical protocol set (BORU-SS-08); the legacy
@@ -311,6 +325,9 @@ async fn run_host_session_inner(
                 // media path is streaming; during negotiation the payload is
                 // dropped (never logged — PDF guardrail).
                 Some(HostCommand::SendClipboard(_)) => false,
+                // Audio sharing (BORU-SS-37) only starts once the media path
+                // is streaming; during negotiation the toggle is a no-op.
+                Some(HostCommand::SetAudioEnabled(_)) => false,
                 // Source selection (PDF Phase 10/13): the sharer picks the
                 // monitor BEFORE the viewer accepts, so the offer that leads
                 // to streaming starts with the chosen source. Re-select the
@@ -439,6 +456,21 @@ async fn run_host_session_inner(
     let mut connection = connection;
     let mut control = control;
     let mut media = media;
+    // BORU-SS-37 system-audio sharing (opt-in). The capture backend runs on
+    // its own thread and pushes interleaved f32 PCM into a bounded ring; this
+    // loop drains one Opus frame (20 ms) per audio tick and sends it on the
+    // control channel with try_send (drop-on-full) so audio can NEVER block
+    // the video path. The backend's Drop stops its thread, so every session
+    // exit path cleans up automatically.
+    let mut audio_enabled = false;
+    let mut audio_capture: Option<Box<dyn SystemAudioCapture>> = None;
+    let mut audio_consumer: Option<super::audio::AudioSampleConsumer> = None;
+    let mut audio_encoder: Option<OpusAudioEncoder> = None;
+    let mut audio_sequence: u64 = 0;
+    let mut audio_timestamp_us: u64 = 0;
+    let mut audio_dropped_packets: u64 = 0;
+    let mut audio_interval = tokio::time::interval(Duration::from_millis(AUDIO_FRAME_MS));
+    audio_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     'streaming: loop {
         if stop.load(Ordering::Relaxed) {
             if let Some(mut backend) = backend.take() { backend.shutdown().await; }
@@ -564,6 +596,9 @@ async fn run_host_session_inner(
                             }
                         },
                         Ok(ReadUnit::Media(_, _)) => {}
+                        // BORU-SS-37: audio is host→viewer only; a unit from
+                        // the viewer is ignored (never blocks the video path).
+                        Ok(ReadUnit::Audio(_, _)) => {}
                         Err(_) => { need_reconnect = true; }
                     },
                     Err(_) => { need_reconnect = true; }
@@ -650,6 +685,56 @@ async fn run_host_session_inner(
                         announced_geometry = Some(geometry);
                         current_source = capture.current_source().or_else(|| current_source.clone());
                         stream_paused = false;
+                    }
+                }
+                Some(HostCommand::SetAudioEnabled(enabled)) => {
+                    // BORU-SS-37: system audio is a SEPARATE optional
+                    // capability (opt-in, like clipboard). Enabling grants
+                    // the Audio capability (viewer authorizes packets against
+                    // it) and starts the platform capture backend; the
+                    // capture thread pushes PCM into a bounded ring that the
+                    // audio tick drains. A typed unavailable error (no
+                    // PipeWire, no WASAPI implementation) keeps the session
+                    // view-only — video is never affected.
+                    if enabled && !audio_enabled {
+                        if let Some(message) = manager.grant_control(session_id, vec![Capability::Audio], events) {
+                            let _ = control.send(ControlOut::Legacy(message)).await;
+                        }
+                        let mut capture = create_system_audio_capture();
+                        let (producer, consumer) = audio_sample_ring(AUDIO_RING_SAMPLES);
+                        match capture.start(producer) {
+                            Ok(()) => match OpusAudioEncoder::new() {
+                                Ok(encoder) => {
+                                    audio_enabled = true;
+                                    audio_capture = Some(capture);
+                                    audio_consumer = Some(consumer);
+                                    audio_encoder = Some(encoder);
+                                    audio_sequence = 0;
+                                    audio_timestamp_us = 0;
+                                    let _ = events.send(SessionEvent::AudioState { session_id, enabled: true, error: None }).await;
+                                    tracing::info!(session = ?session_id, "screen-share: system audio sharing enabled");
+                                }
+                                Err(error) => {
+                                    let _ = events.send(SessionEvent::AudioState { session_id, enabled: false, error: Some(error.to_string()) }).await;
+                                    tracing::warn!(error = %error, "screen-share: audio encoder unavailable");
+                                }
+                            },
+                            Err(error) => {
+                                let _ = events.send(SessionEvent::AudioState { session_id, enabled: false, error: Some(error.to_string()) }).await;
+                                tracing::warn!(kind = ?error.kind(), error = %error, "screen-share: system audio capture unavailable; continuing view-only");
+                            }
+                        }
+                    } else if !enabled && audio_enabled {
+                        // Stopping capture is enough to stop the stream; the
+                        // capability grant itself is per-session and cleared
+                        // on session end. The viewer stops receiving packets
+                        // and the app surfaces the disabled state.
+                        audio_capture = None; // Drop stops the capture thread.
+                        audio_consumer = None;
+                        audio_encoder = None;
+                        audio_enabled = false;
+                        let _ = events.send(SessionEvent::AudioState { session_id, enabled: false, error: None }).await;
+                        tracing::info!(session = ?session_id, "screen-share: system audio sharing disabled");
                     }
                 }
                 None => return SessionTermination::HostCommandClosed,
@@ -952,6 +1037,46 @@ async fn run_host_session_inner(
                     }
                 }
             }
+            _ = audio_interval.tick() => {
+                // BORU-SS-37: drain one Opus frame (20 ms) per audio tick and
+                // send it. try_send (drop-on-full) means a slow control
+                // channel drops audio, never blocks the video capture loop.
+                if !audio_enabled {
+                    continue 'streaming;
+                }
+                let Some(consumer) = audio_consumer.as_mut() else { continue 'streaming; };
+                let Some(encoder) = audio_encoder.as_mut() else { continue 'streaming; };
+                let mut frame = vec![0.0f32; AUDIO_SAMPLES_PER_FRAME];
+                while consumer.slots() >= AUDIO_SAMPLES_PER_FRAME {
+                    let got = consumer.pop_partial_slice(&mut frame).0.len();
+                    if got < AUDIO_SAMPLES_PER_FRAME {
+                        break;
+                    }
+                    let Some(packet) = encoder.encode_frame(&frame).ok().flatten() else {
+                        continue;
+                    };
+                    audio_sequence += 1;
+                    audio_timestamp_us += AUDIO_FRAME_MS * 1_000;
+                    // Audio rides the dedicated AUDIO_KIND stream (BORU-SS-37)
+                    // so it never shares a queue with control traffic and the
+                    // viewer authorizes it against the Audio grant.
+                    let header = AudioHeader {
+                        version: SCREEN_SHARE_PROTOCOL_VERSION,
+                        session_id: *session_id.as_bytes(),
+                        sequence: audio_sequence,
+                        timestamp_us: audio_timestamp_us,
+                        sample_rate: encoder.sample_rate(),
+                        channels: encoder.channels(),
+                        payload_len: packet.len() as u32,
+                    };
+                    if control.try_send(ControlOut::Audio(header, packet)).is_err() {
+                        audio_dropped_packets += 1;
+                        if audio_dropped_packets == 1 || audio_dropped_packets % 500 == 0 {
+                            tracing::warn!(audio_dropped_packets, "screen-share: host dropped audio packets (control queue full)");
+                        }
+                    }
+                }
+            }
         }
         if need_reconnect {
             match reconnect_media(&endpoint, peer, session_id, manager, &events, stop.as_ref(), hello.clone()).await {
@@ -1052,7 +1177,7 @@ async fn wait_for_accept(
             Ok(ReadUnit::Control(ControlMessage::Accept { session_id: id, .. })) if id == session_id => {
                 return Ok(());
             }
-            Ok(ReadUnit::Control(_)) | Ok(ReadUnit::ScreenShare(_)) | Ok(ReadUnit::Media(_, _)) => {
+            Ok(ReadUnit::Control(_)) | Ok(ReadUnit::ScreenShare(_)) | Ok(ReadUnit::Media(_, _)) | Ok(ReadUnit::Audio(_, _)) => {
                 let _ = send.reset(0u32.into());
             }
             Err(error) => return Err(error),

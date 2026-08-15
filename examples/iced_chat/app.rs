@@ -94,10 +94,11 @@ use boru_core::call::{CallId, CallKind};
 #[cfg(feature = "screen-sharing")]
 use boru_core::screen_share::{
     run_host_session, Capability, CapturedFrame, CaptureSource, CaptureSourceId, ControlMessage,
-    HostCommand, InboundMedia, InputEventKind, OpenH264Decoder, PixelFormat, RedactedText,
-    ScreenShareMessage, ScreenShareProtocol, ScreenShareSessionMetrics, ScreenShareStatsSnapshot,
-    MAX_CLIPBOARD_TEXT, ScreenShareSessionId, SessionEvent, ViewerPipeline, DEFAULT_QUEUE_CAPACITY,
-    MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT, SCREEN_SHARE_PROTOCOL_VERSION,
+    AudioOutput, HostCommand, InboundAudio, InboundMedia, InputEventKind, OpenH264Decoder,
+    OpusAudioDecoder, PixelFormat, RedactedText, ScreenShareMessage, ScreenShareProtocol,
+    ScreenShareSessionMetrics, ScreenShareStatsSnapshot, MAX_CLIPBOARD_TEXT, ScreenShareSessionId,
+    SessionEvent, ViewerPipeline, DEFAULT_QUEUE_CAPACITY, AUDIO_SAMPLES_PER_FRAME, MOD_ALT,
+    MOD_CTRL, MOD_META, MOD_SHIFT, SCREEN_SHARE_PROTOCOL_VERSION,
 };
 #[cfg(feature = "video-calls")]
 use boru_core::call::video::VideoFrame;
@@ -4243,6 +4244,19 @@ pub struct IcedChat {
     /// Receiver for inbound screen-share media units (set by main.rs).
     pub screen_share_media_rx: Option<Arc<Mutex<Receiver<InboundMedia>>>>,
     #[cfg(feature = "screen-sharing")]
+    /// Receiver for inbound screen-share audio units (set by main.rs).
+    /// Audio is only delivered after the host grants `Capability::Audio`.
+    pub screen_share_audio_rx: Option<Arc<Mutex<Receiver<InboundAudio>>>>,
+    #[cfg(feature = "screen-sharing")]
+    /// Stop flag for the viewer audio playback worker (BORU-SS-37).
+    screen_share_audio_stop: Option<Arc<AtomicBool>>,
+    #[cfg(feature = "screen-sharing")]
+    /// System-audio sharing active on either side (BORU-SS-37). Driven by
+    /// `SessionEvent::ControlChanged` (viewer) and `SessionEvent::AudioState`
+    /// (host); audio is a separate optional capability, never implied by
+    /// remote control.
+    screen_share_audio_active: bool,
+    #[cfg(feature = "screen-sharing")]
     /// Sender the host session task uses to emit session events (set by main.rs).
     pub screen_share_events_tx: Option<tokio::sync::mpsc::Sender<SessionEvent>>,
     #[cfg(feature = "screen-sharing")]
@@ -5717,6 +5731,12 @@ pub enum AppMessage {
     #[cfg(feature = "screen-sharing")]
     /// Host declines the pending control request (no wire message).
     ScreenShareDenyControl,
+    #[cfg(feature = "screen-sharing")]
+    /// Host toggles system-audio sharing (BORU-SS-37). Audio is a SEPARATE
+    /// optional capability — never enabled automatically with the share; the
+    /// host must opt in (mirroring clipboard). Sends
+    /// `HostCommand::SetAudioEnabled` into the host driver.
+    ScreenShareToggleAudio,
     #[cfg(feature = "screen-sharing")]
     /// Host revokes control while keeping view-only sharing active.
     ScreenShareRevokeControl,
@@ -8313,6 +8333,12 @@ impl IcedChat {
             #[cfg(feature = "screen-sharing")]
             screen_share_media_rx: None,
             #[cfg(feature = "screen-sharing")]
+            screen_share_audio_rx: None,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_audio_stop: None,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_audio_active: false,
+            #[cfg(feature = "screen-sharing")]
             screen_share_events_tx: None,
             #[cfg(feature = "screen-sharing")]
             screen_share_protocol: None,
@@ -10251,6 +10277,8 @@ impl IcedChat {
             AppMessage::ScreenShareGrantControl(_) => "ScreenShareGrantControl",
             #[cfg(feature = "screen-sharing")]
             AppMessage::ScreenShareDenyControl => "ScreenShareDenyControl",
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareToggleAudio => "ScreenShareToggleAudio",
             #[cfg(feature = "screen-sharing")]
             AppMessage::ScreenShareRevokeControl => "ScreenShareRevokeControl",
             #[cfg(feature = "screen-sharing")]
@@ -14702,6 +14730,17 @@ impl IcedChat {
             #[cfg(feature = "screen-sharing")]
             AppMessage::ScreenShareDenyControl => {
                 self.screen_share_control_request = None;
+                iced::Task::none()
+            }
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareToggleAudio => {
+                // BORU-SS-37: host toggles system-audio sharing (opt-in).
+                // The host driver grants the Audio capability and starts/
+                // stops capture; the viewer authorizes packets against the
+                // grant. Audio never affects the video path.
+                if let Some(tx) = &self.screen_share_host_cmd_tx {
+                    let _ = tx.try_send(HostCommand::SetAudioEnabled(!self.screen_share_audio_active));
+                }
                 iced::Task::none()
             }
             #[cfg(feature = "screen-sharing")]
@@ -20918,6 +20957,83 @@ async fn decode_worker(
 }
 
 #[cfg(feature = "screen-sharing")]
+/// Drain inbound audio for one viewer session (BORU-SS-37): decode each Opus
+/// packet and push PCM into the cpal playback sink. Runs on the tokio runtime
+/// (never the UI thread); exits when the session ends, the channel closes, or
+/// `stop` is set. Missing/corrupt audio packets are dropped (drop-tolerant
+/// path) and never affect the video decode worker. When no output device is
+/// available, playback fails with a typed unavailable error and audio is
+/// silently dropped (the session continues view-only).
+async fn audio_worker(
+    audio_rx: Arc<Mutex<Receiver<InboundAudio>>>,
+    session_id: ScreenShareSessionId,
+    stop: Arc<AtomicBool>,
+) {
+    // Open the output sink once. On headless/no-device environments this
+    // returns a typed AudioUnavailable error; log it and drop audio for the
+    // rest of the session instead of failing the viewer.
+    let mut output = match AudioOutput::open() {
+        Ok(output) => {
+            tracing::info!("screen-share: viewer audio playback started");
+            Some(output)
+        }
+        Err(error) => {
+            tracing::warn!(kind = ?error.kind(), error = %error, "screen-share: viewer audio playback unavailable; dropping audio");
+            None
+        }
+    };
+    let mut decoder: Option<OpusAudioDecoder> = None;
+    let mut frame = vec![0.0f32; AUDIO_SAMPLES_PER_FRAME];
+    let mut dropped_packets: u64 = 0;
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        let mut guard = audio_rx.lock().await;
+        let unit = tokio::select! {
+            unit = guard.recv() => match unit {
+                Some(unit) => unit,
+                None => break,
+            },
+            _ = tokio::time::sleep(Duration::from_millis(50)) => continue,
+        };
+        drop(guard);
+        if unit.session_id != session_id {
+            continue;
+        }
+        if output.is_none() {
+            continue;
+        }
+        // The decoder is created with the first packet's format; a stream
+        // format change would need a fresh decoder (v1: fixed 48k stereo).
+        if decoder.is_none() {
+            match OpusAudioDecoder::new(unit.header.sample_rate, unit.header.channels) {
+                Ok(decoder_instance) => decoder = Some(decoder_instance),
+                Err(error) => {
+                    tracing::warn!(error = %error, "screen-share: viewer audio decoder unavailable");
+                    break;
+                }
+            }
+        }
+        let Some(decoder_instance) = decoder.as_mut() else { continue; };
+        match decoder_instance.decode_frame(&unit.payload, &mut frame) {
+            Ok(decoded) if decoded > 0 => {
+                if let Some(output) = output.as_mut() {
+                    let _ = output.push_pcm(&frame[..decoded]);
+                }
+            }
+            Ok(_) => {}
+            Err(error) => {
+                dropped_packets += 1;
+                if dropped_packets == 1 || dropped_packets % 500 == 0 {
+                    tracing::warn!(dropped_packets, error = %error, "screen-share: viewer dropped audio packet (decode failed)");
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "screen-sharing")]
 struct ScreenShareEventsRxHandle(Arc<Mutex<Receiver<SessionEvent>>>);
 
 #[cfg(feature = "screen-sharing")]
@@ -21637,6 +21753,18 @@ impl IcedChat {
         runtime_handle.spawn(async move {
             decode_worker(media_rx, session_id, pipeline, watch_tx, stats_tx, protocol, decode_stop).await;
         });
+        // Spawn the audio playback worker (BORU-SS-37): drains inbound audio
+        // for this session, decodes Opus and plays through cpal. Runs on the
+        // same tokio runtime; a missing output device (headless) logs a typed
+        // unavailable error and the viewer continues view-only.
+        if let Some(audio_rx) = self.screen_share_audio_rx.clone() {
+            let audio_stop = Arc::new(AtomicBool::new(false));
+            self.screen_share_audio_stop = Some(audio_stop.clone());
+            let runtime_handle = self.runtime_handle.clone();
+            runtime_handle.spawn(async move {
+                audio_worker(audio_rx, session_id, audio_stop).await;
+            });
+        }
         send_task
     }
 
@@ -21764,6 +21892,13 @@ impl IcedChat {
                         stop.store(true, Ordering::Relaxed);
                     }
                     self.screen_share_decode_stop = None;
+                    // Stop the audio playback worker (BORU-SS-37) and clear
+                    // the audio-active flag; the session is over.
+                    if let Some(stop) = &self.screen_share_audio_stop {
+                        stop.store(true, Ordering::Relaxed);
+                    }
+                    self.screen_share_audio_stop = None;
+                    self.screen_share_audio_active = false;
                 }
                 if self.screen_share_host_state != ScreenShareHostState::Idle {
                     // Terminal notice: the share stopped (peer ended it or
@@ -21795,8 +21930,26 @@ impl IcedChat {
                 // enables clipboard sync on its own.
                 self.screen_share_clipboard_active =
                     active && capabilities.contains(&Capability::Clipboard);
+                // System audio is likewise a SEPARATE optional capability
+                // (BORU-SS-37); it follows the granted list like clipboard.
+                self.screen_share_audio_active =
+                    active && capabilities.contains(&Capability::Audio);
                 if !active {
                     self.screen_share_control_request = None;
+                }
+                iced::Task::none()
+            }
+            SessionEvent::AudioState { enabled, error, .. } => {
+                // BORU-SS-37: the host reports audio sharing state. `error`
+                // carries a typed, user-safe reason when capture could not
+                // start (e.g. no PipeWire runtime); the session continues
+                // view-only and the toast tells the sharer why.
+                self.screen_share_audio_active = enabled;
+                if let Some(reason) = error {
+                    let message = format!("System audio unavailable — {reason}");
+                    tracing::warn!("{message}");
+                    self.toast_message = Some(message);
+                    self.toast_counter = 160;
                 }
                 iced::Task::none()
             }
@@ -21889,6 +22042,8 @@ impl IcedChat {
         self.screen_share_control_request = None;
         self.screen_share_control_active = false;
         self.screen_share_clipboard_active = false;
+        self.screen_share_audio_stop = None;
+        self.screen_share_audio_active = false;
         self.screen_share_last_pointer_sent = None;
         self.screen_share_last_pointer_pos = None;
         self.screen_share_modifiers = 0;

@@ -42,6 +42,14 @@ pub const MAX_CLIPBOARD_TEXT: usize = 512 * 1024;
 /// message (PDF Phase 10). Monitor names are short (`DP-1: 1920x1080`);
 /// this bound keeps untrusted peer text out of unbounded allocations.
 pub const MAX_SOURCE_NAME: usize = 128;
+/// Maximum encoded audio frame accepted in one `AudioPacket` (BORU-SS-37).
+/// Opus packets are at most 1275 bytes (RFC 6716 §3.2); 4096 gives headroom
+/// for future codecs while keeping untrusted peer input bounded.
+pub const MAX_AUDIO_FRAME: usize = 4096;
+/// Minimum Opus sample rate (RFC 6716 §2.1.1 supports 8/12/16/24/48 kHz).
+pub const MIN_AUDIO_SAMPLE_RATE: u32 = 8_000;
+/// Maximum Opus sample rate.
+pub const MAX_AUDIO_SAMPLE_RATE: u32 = 48_000;
 
 /// A text payload that must NEVER be formatted into logs (PDF Phase 12:
 /// "Never log screen contents, raw frame bytes, clipboard contents, or
@@ -459,6 +467,31 @@ pub enum ScreenShareMessage {
         /// contents into logs (PDF Phase 12 guardrail).
         text: RedactedText,
     },
+    /// Host → viewer: one encoded Opus audio frame (BORU-SS-37 / PDF Phase 14
+    /// system-audio sharing). System audio is a SEPARATE optional capability —
+    /// it is never enabled automatically with the screen share; the host
+    /// grants `Capability::Audio` (mirroring clipboard, PDF Task 9.3) before
+    /// the first packet, and the viewer authorizes each packet against that
+    /// grant. The payload is an Opus access unit (RFC 6716), bounded by
+    /// [`MAX_AUDIO_FRAME`]. Audio rides a dedicated audio stream kind on the
+    /// media path (drop-tolerant, never blocks video); this message is the
+    /// canonical versioned representation used for negotiation/tests.
+    AudioPacket {
+        /// Wire protocol version.
+        version: u16,
+        /// Session the audio belongs to.
+        session_id: ScreenShareSessionId,
+        /// Monotonic packet sequence number. Must be non-zero.
+        sequence: u64,
+        /// Capture timestamp in microseconds.
+        timestamp_us: u64,
+        /// Sample rate of the decoded PCM in Hz (8000..=48000, RFC 6716).
+        sample_rate: u32,
+        /// Channel count of the decoded PCM (1 = mono, 2 = stereo).
+        channels: u16,
+        /// Encoded Opus access-unit bytes.
+        payload: Vec<u8>,
+    },
     /// Host → viewer: the shared source (monitor/window) changed and the
     /// following media units use the NEW geometry. Sent BEFORE the first
     /// frame with the new dimensions so the viewer can re-initialise its
@@ -553,6 +586,14 @@ impl ScreenShareMessage {
                 if text.as_str().is_empty() || text.as_str().len() > MAX_CLIPBOARD_TEXT { return Err(ProtocolError::Malformed("invalid clipboard text".into())); }
                 *version
             }
+            Self::AudioPacket { version, session_id, sequence, sample_rate, channels, payload, .. } => {
+                if *session_id == ScreenShareSessionId::zero() { return Err(ProtocolError::Malformed("empty session id".into())); }
+                if *sequence == 0 { return Err(ProtocolError::Malformed("invalid audio sequence".into())); }
+                if *sample_rate < MIN_AUDIO_SAMPLE_RATE || *sample_rate > MAX_AUDIO_SAMPLE_RATE { return Err(ProtocolError::Malformed("invalid audio sample rate".into())); }
+                if *channels == 0 || *channels > 2 { return Err(ProtocolError::Malformed("invalid audio channel count".into())); }
+                if payload.is_empty() || payload.len() > MAX_AUDIO_FRAME { return Err(ProtocolError::Malformed("invalid audio payload".into())); }
+                *version
+            }
             Self::SourceChanged { version, session_id, source_id, title, width, height, frame_rate } => {
                 if *session_id == ScreenShareSessionId::zero() { return Err(ProtocolError::Malformed("empty session id".into())); }
                 if *source_id == 0 { return Err(ProtocolError::Malformed("empty source id".into())); }
@@ -597,6 +638,20 @@ pub struct InboundMedia {
     pub payload: Vec<u8>,
 }
 
+/// One validated audio unit forwarded from an inbound connection to the app
+/// (BORU-SS-37). The capability gate is enforced by the protocol before the
+/// unit is forwarded: audio is only delivered when the session holds an
+/// explicit `Capability::Audio` grant.
+#[derive(Debug, Clone)]
+pub struct InboundAudio {
+    /// Session the audio belongs to; the app's audio worker filters on this.
+    pub session_id: ScreenShareSessionId,
+    /// Validated audio header (sample rate / channels / sequence).
+    pub header: super::transport::AudioHeader,
+    /// Encoded Opus access-unit bytes (bounded by transport validation).
+    pub payload: Vec<u8>,
+}
+
 /// Iroh protocol handler for `boru/screen-share/1`.
 #[derive(Debug, Clone)]
 pub struct ScreenShareProtocol {
@@ -604,6 +659,10 @@ pub struct ScreenShareProtocol {
     negotiations: Arc<Mutex<NegotiationManager>>,
     events: mpsc::Sender<SessionEvent>,
     media_tx: mpsc::Sender<InboundMedia>,
+    /// Audio units (BORU-SS-37), delivered only after the `Audio` capability
+    /// is granted. Bounded; a full queue drops the newest audio (audio is
+    /// real-time and drop-tolerant, never blocks video).
+    audio_tx: mpsc::Sender<InboundAudio>,
     /// Inbound connections per session so the app can respond (Accept/Reject/
     /// EndSession) on the same connection the invitation arrived on.
     connections: Arc<Mutex<HashMap<ScreenShareSessionId, (usize, iroh::endpoint::Connection)>>>,
@@ -613,19 +672,23 @@ impl ScreenShareProtocol {
     /// Create a handler and its session state store. Media units are dropped.
     pub fn new(events: mpsc::Sender<SessionEvent>) -> Self {
         let (media_tx, _dropped_rx) = mpsc::channel(1);
-        Self::with_channels(events, media_tx)
+        let (audio_tx, _dropped_audio_rx) = mpsc::channel(1);
+        Self::with_channels(events, media_tx, audio_tx)
     }
 
-    /// Create a handler that forwards inbound media to `media_tx`.
+    /// Create a handler that forwards inbound media to `media_tx` and
+    /// inbound audio to `audio_tx`.
     pub fn with_channels(
         events: mpsc::Sender<SessionEvent>,
         media_tx: mpsc::Sender<InboundMedia>,
+        audio_tx: mpsc::Sender<InboundAudio>,
     ) -> Self {
         Self {
             manager: Arc::new(Mutex::new(SessionManager::default())),
             negotiations: Arc::new(Mutex::new(NegotiationManager::default())),
             events,
             media_tx,
+            audio_tx,
             connections: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -746,6 +809,41 @@ impl iroh::protocol::ProtocolHandler for ScreenShareProtocol {
                                 .is_err();
                             if dropped {
                                 tracing::warn!(sequence, "screen-share: viewer media dropped (channel full)");
+                            }
+                        }
+                        Ok(ReadUnit::Audio(header, payload)) => {
+                            // BORU-SS-37: audio is a SEPARATE optional
+                            // capability. A packet is only forwarded to the
+                            // app when the session holds an explicit Audio
+                            // grant (the host grants it via GrantControl
+                            // before streaming; the viewer's permissions are
+                            // the consent record). Unauthorized audio is
+                            // dropped without applying or logging payload
+                            // contents.
+                            let session_id = ScreenShareSessionId::from_bytes(header.session_id);
+                            let authorized = self
+                                .manager
+                                .lock()
+                                .await
+                                .permissions(session_id)
+                                .is_some_and(|permissions| {
+                                    permissions.allows(session_id, remote_id, Capability::Audio)
+                                });
+                            if !authorized {
+                                tracing::warn!(session = ?session_id, "screen-share: viewer dropped unauthorized audio packet");
+                                continue;
+                            }
+                            let sequence = header.sequence;
+                            let dropped = self
+                                .audio_tx
+                                .try_send(InboundAudio {
+                                    session_id,
+                                    header,
+                                    payload,
+                                })
+                                .is_err();
+                            if dropped {
+                                tracing::warn!(sequence, "screen-share: viewer audio dropped (channel full)");
                             }
                         }
                         Err(_error) => { let _ = send.reset(0u32.into()); }
@@ -928,7 +1026,7 @@ mod tests {
     use crate::screen_share::{
         codec::{CodecConfig, OpenH264Decoder, OpenH264Encoder, VideoEncoder, DEFAULT_QUEUE_CAPACITY},
         capture::{PixelFormat, ScreenCapture},
-        transport::{read_unit, QuicScreenTransport, ReadUnit},
+        transport::{read_unit, AudioHeader, QuicScreenTransport, ReadUnit},
         viewer::ViewerPipeline,
         TestPatternCapture,
     };
@@ -995,15 +1093,16 @@ mod tests {
     fn quality_update() -> ScreenShareMessage { ScreenShareMessage::QualityUpdate { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid(), target_bitrate_bps: 1_000_000, max_frame_rate: 30, scale_factor: 100 } }
     fn protocol_error() -> ScreenShareMessage { ScreenShareMessage::Error { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid(), code: 1, message: "encode failure".into() } }
     fn clipboard() -> ScreenShareMessage { ScreenShareMessage::Clipboard { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid(), nonce: [0xAB; 16], text: RedactedText::new("hello clipboard".into()) } }
+    fn audio_packet() -> ScreenShareMessage { ScreenShareMessage::AudioPacket { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid(), sequence: 1, timestamp_us: 1_000, sample_rate: 48_000, channels: 2, payload: vec![0xAA; 32] } }
     fn source_changed() -> ScreenShareMessage { ScreenShareMessage::SourceChanged { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid(), source_id: 7, title: "DP-1: 1920x1080".into(), width: 1920, height: 1080, frame_rate: 30 } }
 
-    /// Every one of the Task 2.3 message types plus the Task 9.3 Clipboard
-    /// and Task 10 SourceChanged messages must survive a postcard encode →
-    /// decode round trip unchanged.
+    /// Every one of the Task 2.3 message types plus the Task 9.3 Clipboard,
+    /// Task 10 SourceChanged, and BORU-SS-37 AudioPacket messages must
+    /// survive a postcard encode → decode round trip unchanged.
     #[test]
     fn round_trip_all_screen_share_messages() {
-        let messages = [offer(), accept(), reject(), started(), stopped(), stream_config(), video_packet(), keyframe_request(), quality_update(), protocol_error(), clipboard(), source_changed()];
-        assert_eq!(messages.len(), 12, "the Task 2.3 message set (ten) plus Task 9.3 Clipboard and Task 10 SourceChanged must have twelve types");
+        let messages = [offer(), accept(), reject(), started(), stopped(), stream_config(), video_packet(), keyframe_request(), quality_update(), protocol_error(), clipboard(), audio_packet(), source_changed()];
+        assert_eq!(messages.len(), 13, "the Task 2.3 message set (ten) plus Task 9.3 Clipboard, Task 10 SourceChanged and BORU-SS-37 AudioPacket must have thirteen types");
         for message in messages {
             let bytes = message.encode().expect("encode should succeed");
             assert_eq!(ScreenShareMessage::decode(&bytes).expect("decode should succeed"), message);
@@ -1062,10 +1161,47 @@ mod tests {
     /// are rejected cleanly.
     #[test]
     fn unknown_discriminant_is_rejected_cleanly() {
-        // The enum has twelve variants → postcard discriminants 0..=11.
-        assert!(ScreenShareMessage::decode(&[12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).is_err());
+        // The enum has thirteen variants → postcard discriminants 0..=12.
+        assert!(ScreenShareMessage::decode(&[13, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).is_err());
         // A multi-byte varint far outside the variant range.
         assert!(ScreenShareMessage::decode(&[0xff, 0xff, 0xff, 0xff]).is_err());
+    }
+
+    /// BORU-SS-37: the audio packet is bounded and must reference a live
+    /// session. A packet with no session, zero sequence, an out-of-range
+    /// sample rate/channel count, or an empty/oversized payload is rejected.
+    #[test]
+    fn audio_packet_validation_bounds_fields() {
+        let base = audio_packet();
+        // Empty session id is rejected.
+        let mut empty_session = base.clone();
+        if let ScreenShareMessage::AudioPacket { session_id, .. } = &mut empty_session { *session_id = ScreenShareSessionId::zero(); }
+        assert!(matches!(empty_session.encode(), Err(ProtocolError::Malformed(_))));
+        // Zero sequence is rejected.
+        let mut zero_seq = base.clone();
+        if let ScreenShareMessage::AudioPacket { sequence, .. } = &mut zero_seq { *sequence = 0; }
+        assert!(matches!(zero_seq.encode(), Err(ProtocolError::Malformed(_))));
+        // Out-of-range sample rate is rejected.
+        let mut bad_rate = base.clone();
+        if let ScreenShareMessage::AudioPacket { sample_rate, .. } = &mut bad_rate { *sample_rate = 96_000; }
+        assert!(matches!(bad_rate.encode(), Err(ProtocolError::Malformed(_))));
+        // Zero / >2 channels are rejected.
+        let mut zero_channels = base.clone();
+        if let ScreenShareMessage::AudioPacket { channels, .. } = &mut zero_channels { *channels = 0; }
+        assert!(matches!(zero_channels.encode(), Err(ProtocolError::Malformed(_))));
+        let mut many_channels = base.clone();
+        if let ScreenShareMessage::AudioPacket { channels, .. } = &mut many_channels { *channels = 3; }
+        assert!(matches!(many_channels.encode(), Err(ProtocolError::Malformed(_))));
+        // Empty payload is rejected.
+        let mut empty_payload = base.clone();
+        if let ScreenShareMessage::AudioPacket { payload, .. } = &mut empty_payload { payload.clear(); }
+        assert!(matches!(empty_payload.encode(), Err(ProtocolError::Malformed(_))));
+        // Oversized payload is rejected.
+        let mut huge_payload = base.clone();
+        if let ScreenShareMessage::AudioPacket { payload, .. } = &mut huge_payload { *payload = vec![0; MAX_AUDIO_FRAME + 1]; }
+        assert!(matches!(huge_payload.encode(), Err(ProtocolError::Malformed(_))));
+        // The valid fixture still round-trips.
+        assert_eq!(ScreenShareMessage::decode(&base.encode().unwrap()).unwrap(), base);
     }
 
     /// PDF Phase 10: the source-change message is bounded and must reference a
@@ -1255,7 +1391,8 @@ mod tests {
         let viewer = iroh::Endpoint::bind(presets::Minimal).await.unwrap();
         let (events_tx, mut events_rx) = mpsc::channel(32);
         let (media_tx, mut media_rx) = mpsc::channel(64);
-        let protocol = ScreenShareProtocol::with_channels(events_tx, media_tx);
+        let (audio_tx, _audio_rx) = mpsc::channel(8);
+        let protocol = ScreenShareProtocol::with_channels(events_tx, media_tx, audio_tx);
         let router = Router::builder(viewer.clone())
             .accept(SCREEN_SHARE_ALPN, protocol.clone())
             .spawn();
@@ -1355,7 +1492,8 @@ mod tests {
         let viewer = iroh::Endpoint::bind(presets::Minimal).await.unwrap();
         let (events_tx, mut events_rx) = mpsc::channel(32);
         let (media_tx, _media_rx) = mpsc::channel(64);
-        let protocol = ScreenShareProtocol::with_channels(events_tx.clone(), media_tx);
+        let (audio_tx, _audio_rx) = mpsc::channel(8);
+        let protocol = ScreenShareProtocol::with_channels(events_tx.clone(), media_tx, audio_tx);
         let router = Router::builder(viewer.clone())
             .accept(SCREEN_SHARE_ALPN, protocol.clone())
             .spawn();
@@ -1523,6 +1661,102 @@ mod tests {
         router.shutdown().await.unwrap();
     }
 
+    /// BORU-SS-37: the host streams encoded Opus audio on the dedicated audio
+    /// stream kind; the viewer's protocol forwards it to the app-facing audio
+    /// channel ONLY when the session holds an explicit Audio grant, and drops
+    /// it otherwise (audio is a separate optional capability, like clipboard).
+    #[tokio::test]
+    async fn end_to_end_audio_packet_delivery_is_grant_gated() {
+        // Viewer endpoint with the protocol handler registered on the router.
+        let viewer = iroh::Endpoint::bind(presets::Minimal).await.unwrap();
+        let (events_tx, mut events_rx) = mpsc::channel(32);
+        let (media_tx, _media_rx) = mpsc::channel(64);
+        let (audio_tx, mut audio_rx) = mpsc::channel(8);
+        let protocol = ScreenShareProtocol::with_channels(events_tx.clone(), media_tx, audio_tx);
+        let router = Router::builder(viewer.clone())
+            .accept(SCREEN_SHARE_ALPN, protocol.clone())
+            .spawn();
+
+        // Host dials the viewer and negotiates view-only like the real driver.
+        let host = iroh::Endpoint::bind(presets::Minimal).await.unwrap();
+        let host_pk = host.secret_key().public();
+        let connection = host.connect(viewer.addr(), SCREEN_SHARE_ALPN).await.unwrap();
+        let session_id = ScreenShareSessionId::generate();
+        let transport = QuicScreenTransport::new(connection.clone(), *session_id.as_bytes()).unwrap();
+        let hello = Hello {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id,
+            host_id: host_pk,
+            conversation_id: 7,
+            codecs: vec!["h264".into()],
+            width: 640,
+            height: 360,
+            frame_rate: 15,
+            permission: Permission::ViewOnly,
+        };
+        transport.send_control(&ControlMessage::Hello(hello)).await.unwrap();
+        let event = events_rx.recv().await.unwrap();
+        let SessionEvent::Invitation { session_id: got_id, .. } = event else {
+            panic!("expected Invitation, got {event:?}");
+        };
+        assert_eq!(got_id, session_id);
+        protocol
+            .send_control(session_id, ControlMessage::Accept { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id })
+            .await
+            .unwrap();
+        let (mut send, recv) = connection.accept_bi().await.unwrap();
+        match read_unit(recv).await.unwrap() {
+            ReadUnit::Control(ControlMessage::Accept { session_id: id, .. }) => {
+                assert_eq!(id, session_id);
+            }
+            other => panic!("expected Accept control, got {other:?}"),
+        }
+        drop(send);
+
+        // WITHOUT the Audio grant, an audio unit must be dropped (capability
+        // gate): the viewer never forwards unauthorized audio to the app.
+        let header = AudioHeader {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: *session_id.as_bytes(),
+            sequence: 1,
+            timestamp_us: 1_000,
+            sample_rate: 48_000,
+            channels: 2,
+            payload_len: 3,
+        };
+        transport.send_audio(&header, &[1, 2, 3]).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), audio_rx.recv()).await.is_err(),
+            "audio must be dropped without an Audio grant"
+        );
+
+        // Grant the Audio capability (separate optional capability).
+        protocol
+            .manager()
+            .lock()
+            .await
+            .grant_control(session_id, vec![Capability::Audio], &events_tx);
+        let event = events_rx.recv().await.unwrap();
+        assert!(
+            matches!(event, SessionEvent::ControlChanged { session_id: id, active: true, .. } if id == session_id),
+            "expected ControlChanged(active:true), got {event:?}"
+        );
+
+        // With the grant, the same unit is forwarded to the app-facing channel.
+        transport.send_audio(&header, &[9, 8, 7]).await.unwrap();
+        let audio = tokio::time::timeout(Duration::from_secs(2), audio_rx.recv())
+            .await
+            .expect("audio delivered within timeout")
+            .expect("audio channel open");
+        assert_eq!(audio.session_id, session_id);
+        assert_eq!(audio.header.sequence, 1);
+        assert_eq!(audio.header.sample_rate, 48_000);
+        assert_eq!(audio.header.channels, 2);
+        assert_eq!(audio.payload, vec![9, 8, 7]);
+
+        router.shutdown().await.unwrap();
+    }
+
     /// Versioned negotiation over real QUIC (PDF Task 3.1): the initiator
     /// sends a ScreenShareOffer with codecs/resolutions/fps range, the
     /// recipient's protocol handler emits a NegotiationInvitation and keeps
@@ -1536,7 +1770,8 @@ mod tests {
         let (events_tx, mut events_rx) = mpsc::channel(32);
         let negotiation_events_tx = events_tx.clone();
         let (media_tx, _media_rx) = mpsc::channel(64);
-        let protocol = ScreenShareProtocol::with_channels(events_tx, media_tx);
+        let (audio_tx, _audio_rx) = mpsc::channel(8);
+        let protocol = ScreenShareProtocol::with_channels(events_tx, media_tx, audio_tx);
         let router = Router::builder(viewer.clone())
             .accept(SCREEN_SHARE_ALPN, protocol.clone())
             .spawn();
