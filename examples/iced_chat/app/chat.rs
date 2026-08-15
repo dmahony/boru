@@ -444,6 +444,20 @@ impl IcedChat {
                         .into(),
                 );
             }
+            // PDF Phase 12: developer diagnostics overlay — only when the
+            // dev-ui gate is on (`--dev-ui` / `BORU_DEV_UI=1` / dev-ui feature).
+            if self.screen_share_dev_overlay {
+                if let Some(metrics) = &self.screen_share_host_metrics {
+                    for line in screen_share_metrics_lines(metrics) {
+                        items.push(
+                            text(line)
+                                .size(10)
+                                .color(Self::muted_color(self.dark_mode))
+                                .into(),
+                        );
+                    }
+                }
+            }
             items.push(button(text(crate::i18n::t("screenshare.stop_sharing"))).on_press(AppMessage::StopScreenShare).into());
             column(items).spacing(SPACE_6)
         } else if self.screen_share_viewing {
@@ -483,6 +497,29 @@ impl IcedChat {
                 } else {
                     text(crate::i18n::t("screenshare.waiting_frame")).into()
                 };
+            // PDF Phase 12: developer diagnostics overlay — only when the
+            // dev-ui gate is on. The viewer side shows its own measured
+            // pipeline stats (decode FPS, dropped frames, queue depth,
+            // end-to-end latency) over the surface.
+            let video = if self.screen_share_dev_overlay {
+                if let Some(stats) = self.screen_share_viewer_stats {
+                    let (w, h) = self.screen_share_src_size.unwrap_or((0, 0));
+                    let metrics = ScreenShareSessionMetrics {
+                        codec: "h264".to_string(),
+                        width: w,
+                        height: h,
+                        fps: 0,
+                        bitrate_bps: 0,
+                        backend: "viewer".to_string(),
+                        snapshot: stats,
+                    };
+                    iced::widget::stack![video, view_screen_share_metrics_overlay(metrics)].into()
+                } else {
+                    video
+                }
+            } else {
+                video
+            };
             // Compact control row: view mode (fit/100%/−/+/reset) then the
             // existing quality / remote-control / stop actions.
             let scale = self
@@ -626,6 +663,26 @@ impl IcedChat {
                 last_pointer_norm,
             )
         });
+        // PDF Phase 12: developer diagnostics overlay (dev-ui gate only).
+        let surface: iced::Element<'_, AppMessage> = if self.screen_share_dev_overlay {
+            if let Some(stats) = self.screen_share_viewer_stats {
+                let (w, h) = self.screen_share_src_size.unwrap_or((0, 0));
+                let metrics = ScreenShareSessionMetrics {
+                    codec: "h264".to_string(),
+                    width: w,
+                    height: h,
+                    fps: 0,
+                    bitrate_bps: 0,
+                    backend: "viewer".to_string(),
+                    snapshot: stats,
+                };
+                iced::widget::stack![surface, view_screen_share_metrics_overlay(metrics)].into()
+            } else {
+                surface.into()
+            }
+        } else {
+            surface.into()
+        };
 
         let controls = row![
             view_screen_share_view_controls(scale, true),

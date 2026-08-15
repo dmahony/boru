@@ -73,6 +73,31 @@ pub struct ScreenShareStats {
     last_encoded: u64,
 }
 
+/// Negotiated session configuration plus a live pipeline snapshot, published
+/// to the app for the developer diagnostics overlay (PDF Phase 12).
+///
+/// Local-only; contains no media payloads. The snapshot's interval fields
+/// (throughput, encode average, FPS) are measured over the interval since the
+/// previous snapshot, so a ~1 Hz publish cadence gives current pipeline
+/// health rather than lifetime averages.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenShareSessionMetrics {
+    /// Negotiated codec name (e.g. `"h264"`).
+    pub codec: String,
+    /// Active capture width in pixels (even, encoder-adjusted).
+    pub width: u32,
+    /// Active capture height in pixels (even, encoder-adjusted).
+    pub height: u32,
+    /// Target capture frame rate (frames per second).
+    pub fps: u32,
+    /// Target encoder bitrate (bits per second).
+    pub bitrate_bps: u64,
+    /// Capture backend name (e.g. `"x11"`, `"pipewire"`, `"test-pattern"`).
+    pub backend: String,
+    /// Live pipeline counters/rates for the overlay.
+    pub snapshot: ScreenShareStatsSnapshot,
+}
+
 impl Default for ScreenShareStats {
     fn default() -> Self { Self::new() }
 }
@@ -182,5 +207,40 @@ mod tests {
         assert!(snapshot.measured_throughput_bps > 0, "interval throughput derived from bytes sent");
         assert!(snapshot.encode_time_avg_us >= 12, "interval encode average derived from encode time");
         assert_eq!(snapshot.dropped_frames, 1 + 3 + 1 + 1, "capture + pacing + media + late drops");
+    }
+
+    #[test]
+    fn session_metrics_carries_negotiated_config_and_snapshot() {
+        // The developer metrics struct must carry every field the diagnostics
+        // overlay shows (PDF Phase 12): negotiated codec, dimensions, bitrate,
+        // frame rate, backend, plus the live pipeline snapshot.
+        let mut stats = ScreenShareStats::new();
+        stats.observe_capture();
+        stats.observe_encode(Duration::from_micros(9));
+        stats.observe_send(2_000);
+        stats.set_send_queue_depth(3);
+        let snapshot = stats.snapshot();
+        let metrics = ScreenShareSessionMetrics {
+            codec: "h264".to_string(),
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate_bps: 2_000_000,
+            backend: "x11".to_string(),
+            snapshot,
+        };
+        assert_eq!(metrics.codec, "h264");
+        assert_eq!((metrics.width, metrics.height), (1920, 1080));
+        assert_eq!(metrics.fps, 30);
+        assert_eq!(metrics.bitrate_bps, 2_000_000);
+        assert_eq!(metrics.backend, "x11");
+        // Snapshot carries capture FPS (sender), encode FPS, avg encode time,
+        // bitrate (bytes/sec = bitrate_bps/8), dropped frames, queue depth.
+        assert!(metrics.snapshot.sender_fps >= 1, "capture FPS exposed");
+        assert!(metrics.snapshot.encode_time_avg_us >= 9, "encode avg exposed");
+        assert!(metrics.snapshot.bitrate_bps > 0, "bitrate exposed");
+        assert_eq!(metrics.snapshot.send_queue_depth, 3, "queue depth exposed");
+        // Clone/Eq so it can ride SessionEvent (which is Clone/PartialEq/Eq).
+        assert_eq!(metrics, metrics.clone());
     }
 }

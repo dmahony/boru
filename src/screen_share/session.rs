@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 use super::capture::CaptureSource;
 use super::permissions::{Capability, SessionPermissions};
 use super::protocol::ScreenShareMessage;
-use super::protocol::{ControlMessage, Hello, Permission, SCREEN_SHARE_PROTOCOL_VERSION};
+use super::protocol::{ControlMessage, Hello, Permission, RedactedText, SCREEN_SHARE_PROTOCOL_VERSION};
+use super::stats::ScreenShareSessionMetrics;
 
 /// Opaque identifier for one negotiation, independent of a conversation.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -76,7 +77,9 @@ pub enum SessionEvent {
     /// Emitted only after the payload was authorized against the explicitly
     /// granted `Clipboard` capability — clipboard sync is never implied by
     /// remote control. The app places the text on the local clipboard.
-    ClipboardReceived { session_id: ScreenShareSessionId, text: String },
+    /// The text is wrapped in [`RedactedText`] so Debug formatting can never
+    /// leak clipboard contents into logs (PDF Phase 12 guardrail).
+    ClipboardReceived { session_id: ScreenShareSessionId, text: RedactedText },
     /// The capture sources (monitors) available to the host, emitted before
     /// the share starts (PDF Phase 10: "enumerate available monitors before
     /// starting a share"). The app may present the list so the sharer can
@@ -106,6 +109,15 @@ pub enum SessionEvent {
         session_id: ScreenShareSessionId,
         reason: String,
         fallback: Option<String>,
+    },
+    /// Periodic developer metrics for the diagnostics overlay (PDF Phase 12).
+    /// Emitted ~1 Hz from the host streaming loop; carries negotiated codec /
+    /// dimensions / bitrate / frame rate / backend plus a live pipeline
+    /// snapshot. Local-only — never sent on the wire, contains no media
+    /// payloads. Consumers that don't render an overlay ignore it.
+    Metrics {
+        session_id: ScreenShareSessionId,
+        metrics: ScreenShareSessionMetrics,
     },
 }
 

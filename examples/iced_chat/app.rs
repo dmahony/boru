@@ -94,9 +94,10 @@ use boru_core::call::{CallId, CallKind};
 #[cfg(feature = "screen-sharing")]
 use boru_core::screen_share::{
     run_host_session, Capability, CapturedFrame, CaptureSource, ControlMessage, HostCommand,
-    InboundMedia, InputEventKind, OpenH264Decoder, PixelFormat, ScreenShareMessage,
-    ScreenShareProtocol, MAX_CLIPBOARD_TEXT, ScreenShareSessionId, SessionEvent, ViewerPipeline,
-    DEFAULT_QUEUE_CAPACITY, MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT, SCREEN_SHARE_PROTOCOL_VERSION,
+    InboundMedia, InputEventKind, OpenH264Decoder, PixelFormat, RedactedText, ScreenShareMessage,
+    ScreenShareProtocol, ScreenShareSessionMetrics, ScreenShareStatsSnapshot, MAX_CLIPBOARD_TEXT,
+    ScreenShareSessionId, SessionEvent, ViewerPipeline, DEFAULT_QUEUE_CAPACITY, MOD_ALT, MOD_CTRL,
+    MOD_META, MOD_SHIFT, SCREEN_SHARE_PROTOCOL_VERSION,
 };
 #[cfg(feature = "video-calls")]
 use boru_core::call::video::VideoFrame;
@@ -4233,6 +4234,22 @@ pub struct IcedChat {
     /// Watch receiver delivering the latest decoded frame to the viewer panel.
     pub screen_share_frame_watch: Option<Arc<Mutex<tokio::sync::watch::Receiver<Option<CapturedFrame>>>>>,
     #[cfg(feature = "screen-sharing")]
+    /// Watch receiver delivering periodic viewer pipeline stats (~1 Hz) for
+    /// the developer diagnostics overlay (PDF Phase 12).
+    pub screen_share_stats_watch: Option<Arc<Mutex<tokio::sync::watch::Receiver<Option<ScreenShareStatsSnapshot>>>>>,
+    #[cfg(feature = "screen-sharing")]
+    /// Latest viewer-side pipeline stats for the diagnostics overlay.
+    screen_share_viewer_stats: Option<ScreenShareStatsSnapshot>,
+    #[cfg(feature = "screen-sharing")]
+    /// Latest host-side session metrics (config + pipeline snapshot) for the
+    /// diagnostics overlay, published by the host streaming loop.
+    screen_share_host_metrics: Option<ScreenShareSessionMetrics>,
+    #[cfg(feature = "screen-sharing")]
+    /// Developer diagnostics overlay on the screen-share surface. Mirrors the
+    /// `--dev-ui` / `BORU_DEV_UI=1` / `dev-ui`-feature gate wired in main.rs
+    /// (PDF Phase 12: overlay behind a debug flag).
+    pub screen_share_dev_overlay: bool,
+    #[cfg(feature = "screen-sharing")]
     /// Host-side sharing state; drives the persistent indicator.
     screen_share_host_state: ScreenShareHostState,
     #[cfg(feature = "screen-sharing")]
@@ -5638,6 +5655,10 @@ pub enum AppMessage {
     #[cfg(feature = "screen-sharing")]
     /// Forward the latest decoded frame from the viewer decode worker.
     ScreenShareFrameReceived(Option<CapturedFrame>),
+    #[cfg(feature = "screen-sharing")]
+    /// Periodic viewer pipeline stats for the developer diagnostics overlay
+    /// (PDF Phase 12), published ~1 Hz by the decode worker.
+    ScreenShareStatsReceived(Option<ScreenShareStatsSnapshot>),
     #[cfg(feature = "screen-sharing")]
     /// A screen-share control send finished (Accept/Reject/EndSession/Input).
     ScreenShareCommandFinished(Result<(), String>),
@@ -8254,6 +8275,14 @@ impl IcedChat {
             #[cfg(feature = "screen-sharing")]
             screen_share_frame_watch: None,
             #[cfg(feature = "screen-sharing")]
+            screen_share_stats_watch: None,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_viewer_stats: None,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_host_metrics: None,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_dev_overlay: false,
+            #[cfg(feature = "screen-sharing")]
             screen_share_host_state: ScreenShareHostState::Idle,
             #[cfg(feature = "screen-sharing")]
             screen_share_host_stop: None,
@@ -10154,6 +10183,8 @@ impl IcedChat {
             AppMessage::ScreenShareEventReceived(_) => "ScreenShareEventReceived",
             #[cfg(feature = "screen-sharing")]
             AppMessage::ScreenShareFrameReceived(_) => "ScreenShareFrameReceived",
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareStatsReceived(_) => "ScreenShareStatsReceived",
             #[cfg(feature = "screen-sharing")]
             AppMessage::ScreenShareCommandFinished(_) => "ScreenShareCommandFinished",
             #[cfg(feature = "screen-sharing")]
@@ -14573,6 +14604,13 @@ impl IcedChat {
                         self.screen_share_last_frame_ts = Some(frame.timestamp_us);
                     }
                 }
+                iced::Task::none()
+            }
+            #[cfg(feature = "screen-sharing")]
+            AppMessage::ScreenShareStatsReceived(stats) => {
+                // Developer diagnostics overlay (PDF Phase 12): keep the
+                // latest viewer-side snapshot; no payload data is carried.
+                self.screen_share_viewer_stats = stats;
                 iced::Task::none()
             }
             #[cfg(feature = "screen-sharing")]
@@ -20714,12 +20752,33 @@ async fn decode_worker(
     session_id: ScreenShareSessionId,
     mut pipeline: ViewerPipeline<OpenH264Decoder>,
     watch_tx: tokio::sync::watch::Sender<Option<CapturedFrame>>,
+    stats_watch_tx: tokio::sync::watch::Sender<Option<ScreenShareStatsSnapshot>>,
     protocol: Option<ScreenShareProtocol>,
     stop: Arc<AtomicBool>,
 ) {
+    let mut last_stats = std::time::Instant::now();
     loop {
         if stop.load(Ordering::Relaxed) {
             break;
+        }
+        // PDF Phase 12: publish viewer pipeline stats (~1 Hz) for the
+        // developer diagnostics overlay and log the eight developer metrics.
+        // The pipeline stats snapshot is local-only and carries no media data.
+        if last_stats.elapsed() >= Duration::from_secs(1) {
+            last_stats = std::time::Instant::now();
+            let snapshot = pipeline.stats();
+            let _ = stats_watch_tx.send(Some(snapshot));
+            tracing::info!(
+                capture_fps = snapshot.sender_fps,
+                encode_fps = snapshot.encoded_fps,
+                encode_avg_us = snapshot.encode_time_avg_us,
+                bytes_per_sec = snapshot.bitrate_bps / 8,
+                dropped_frames = snapshot.dropped_frames,
+                queue_depth = snapshot.send_queue_depth,
+                decode_fps = snapshot.receiver_fps,
+                latency_us = snapshot.frame_age_us,
+                "screen-share: viewer performance metrics"
+            );
         }
         // Hold the receiver guard across the select so the recv() future does
         // not borrow a temporary guard (single media consumer in M7).
@@ -20831,6 +20890,42 @@ fn screen_share_frame_subscription(
             let frame = guard.borrow_and_update().clone();
             drop(guard);
             Some((AppMessage::ScreenShareFrameReceived(frame), rx))
+        }))
+    })
+}
+
+#[cfg(feature = "screen-sharing")]
+struct ScreenShareStatsWatchHandle(Arc<Mutex<tokio::sync::watch::Receiver<Option<ScreenShareStatsSnapshot>>>>);
+
+#[cfg(feature = "screen-sharing")]
+impl std::hash::Hash for ScreenShareStatsWatchHandle {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (Arc::as_ptr(&self.0) as usize).hash(state);
+    }
+}
+
+#[cfg(feature = "screen-sharing")]
+fn screen_share_stats_subscription(
+    watch: Option<Arc<Mutex<tokio::sync::watch::Receiver<Option<ScreenShareStatsSnapshot>>>>>,
+) -> iced::Subscription<AppMessage> {
+    // Closed fallback matches the frame-watch pattern: a real watch receiver
+    // has a different Arc identity and therefore a different subscription
+    // recipe when screen sharing starts.
+    let watch = watch.unwrap_or_else(|| {
+        let (tx, rx) = tokio::sync::watch::channel(None);
+        drop(tx);
+        Arc::new(tokio::sync::Mutex::new(rx))
+    });
+    iced::Subscription::run_with(ScreenShareStatsWatchHandle(watch), |handle| {
+        let rx = Arc::clone(&handle.0);
+        Box::pin(n0_future::stream::unfold(rx, |rx| async move {
+            let mut guard = rx.lock().await;
+            if guard.changed().await.is_err() {
+                return None;
+            }
+            let stats = guard.borrow_and_update().clone();
+            drop(guard);
+            Some((AppMessage::ScreenShareStatsReceived(stats), rx))
         }))
     })
 }
@@ -21328,7 +21423,9 @@ impl IcedChat {
             // Host → viewer: route through the host driver so the payload is
             // sent on the same control channel the streaming loop owns.
             if let Some(tx) = &self.screen_share_host_cmd_tx {
-                let _ = tx.try_send(HostCommand::SendClipboard(text));
+                // Wrap the payload so Debug/log of the command can never leak
+                // clipboard contents (PDF Phase 12 guardrail).
+                let _ = tx.try_send(HostCommand::SendClipboard(RedactedText::new(text)));
             }
             return iced::Task::none();
         }
@@ -21354,7 +21451,7 @@ impl IcedChat {
                                 version: SCREEN_SHARE_PROTOCOL_VERSION,
                                 session_id,
                                 nonce,
-                                text,
+                                text: RedactedText::new(text),
                             },
                         )
                         .await
@@ -21429,10 +21526,14 @@ impl IcedChat {
         self.screen_share_decode_stop = Some(decode_stop.clone());
         let (watch_tx, watch_rx) = tokio::sync::watch::channel(None);
         self.screen_share_frame_watch = Some(Arc::new(tokio::sync::Mutex::new(watch_rx)));
+        // Viewer pipeline stats watch for the developer diagnostics overlay
+        // (PDF Phase 12), fed ~1 Hz by the decode worker.
+        let (stats_tx, stats_rx) = tokio::sync::watch::channel(None);
+        self.screen_share_stats_watch = Some(Arc::new(tokio::sync::Mutex::new(stats_rx)));
         let protocol = self.screen_share_protocol.clone();
         let runtime_handle = self.runtime_handle.clone();
         runtime_handle.spawn(async move {
-            decode_worker(media_rx, session_id, pipeline, watch_tx, protocol, decode_stop).await;
+            decode_worker(media_rx, session_id, pipeline, watch_tx, stats_tx, protocol, decode_stop).await;
         });
         send_task
     }
@@ -21590,7 +21691,7 @@ impl IcedChat {
                 // capability by the screen-share layer; place it on the local
                 // clipboard. Never log the contents (PDF guardrail).
                 tracing::info!("screen-share: peer clipboard text applied");
-                return iced::clipboard::write(text);
+                return iced::clipboard::write(text.into_inner());
             }
             SessionEvent::SourcesEnumerated { sources, .. } => {
                 // PDF Phase 10: the host enumerated its monitors before the
@@ -21622,6 +21723,13 @@ impl IcedChat {
                 self.toast_counter = 160;
                 iced::Task::none()
             }
+            SessionEvent::Metrics { metrics, .. } => {
+                // Developer diagnostics overlay (PDF Phase 12): keep the
+                // latest host-side metrics (config + pipeline snapshot).
+                // Local-only; contains no media payloads.
+                self.screen_share_host_metrics = Some(metrics);
+                iced::Task::none()
+            }
         }
     }
 
@@ -21640,6 +21748,9 @@ impl IcedChat {
         self.screen_share_last_frame_ts = None;
         self.screen_share_frame_handle = None;
         self.screen_share_frame_watch = None;
+        self.screen_share_stats_watch = None;
+        self.screen_share_viewer_stats = None;
+        self.screen_share_host_metrics = None;
         self.screen_share_control_request = None;
         self.screen_share_control_active = false;
         self.screen_share_clipboard_active = false;
@@ -21670,6 +21781,8 @@ impl IcedChat {
         screen_share_events_rx: Option<Arc<Mutex<Receiver<SessionEvent>>>>,
         #[cfg(feature = "screen-sharing")]
         screen_share_frame_watch: Option<Arc<Mutex<tokio::sync::watch::Receiver<Option<CapturedFrame>>>>>,
+        #[cfg(feature = "screen-sharing")]
+        screen_share_stats_watch: Option<Arc<Mutex<tokio::sync::watch::Receiver<Option<ScreenShareStatsSnapshot>>>>>,
     ) -> iced::Subscription<AppMessage> {
         let mut subs: Vec<iced::Subscription<AppMessage>> = vec![
             iced::time::every(std::time::Duration::from_secs(1))
@@ -21778,6 +21891,8 @@ impl IcedChat {
         subs.push(screen_share_events_subscription(screen_share_events_rx));
         #[cfg(feature = "screen-sharing")]
         subs.push(screen_share_frame_subscription(screen_share_frame_watch));
+        #[cfg(feature = "screen-sharing")]
+        subs.push(screen_share_stats_subscription(screen_share_stats_watch));
         #[cfg(feature = "screen-sharing")]
         subs.push(screen_share_keyboard_subscription());
         iced::Subscription::batch(subs)

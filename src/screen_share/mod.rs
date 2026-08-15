@@ -49,7 +49,7 @@ pub use codec::{
     TARGET_720P30_BITRATE_BPS, TARGET_1080P30_WIDTH, TARGET_1080P30_HEIGHT,
     TARGET_1080P30_BITRATE_BPS,
 };
-pub use host::{run_host_session, HostCommand, DEMO_FPS, DEMO_HEIGHT, DEMO_WIDTH};
+pub use host::{run_host_session, HostCommand, SessionTermination, DEMO_FPS, DEMO_HEIGHT, DEMO_WIDTH};
 pub use platform::{
     capture_dimensions, create_capture_source, ActiveCapture, CAPTURE_FPS,
 };
@@ -58,10 +58,10 @@ pub use platform::{
     classify_display_server, detect_display_server, DisplayServer, X11Capture, X11Monitor,
 };
 pub use protocol::{
-    ControlMessage, Hello, InboundMedia, InputEventKind, Permission, ScreenShareMessage,
-    ScreenShareProtocol, SCREEN_SHARE_ALPN, SCREEN_SHARE_PROTOCOL_VERSION, MAX_INPUT_CODE,
-    MAX_MODIFIER_MASK, MAX_SCREEN_SHARE_MESSAGE, MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT,
-    MAX_CLIPBOARD_TEXT,
+    ControlMessage, Hello, InboundMedia, InputEventKind, Permission, RedactedText,
+    ScreenShareMessage, ScreenShareProtocol, SCREEN_SHARE_ALPN, SCREEN_SHARE_PROTOCOL_VERSION,
+    MAX_INPUT_CODE, MAX_MODIFIER_MASK, MAX_SCREEN_SHARE_MESSAGE, MOD_ALT, MOD_CTRL, MOD_META,
+    MOD_SHIFT, MAX_CLIPBOARD_TEXT,
 };
 pub use reconnect::{
     keyframe_request, retry_reconnect, ReconnectOutcome, ReconnectPolicy,
@@ -83,7 +83,7 @@ pub use session::{
 pub use transport::{decode_media, encode_media, LatestFrameQueue, MediaHeader, PathKind,
     QuicScreenTransport, ReadUnit, ScreenTransport, TransportCounters, MAX_MEDIA_FRAME};
 pub use viewer::{DecodedFrame, ViewerPipeline};
-pub use stats::{ScreenShareStats, ScreenShareStatsSnapshot};
+pub use stats::{ScreenShareSessionMetrics, ScreenShareStats, ScreenShareStatsSnapshot};
 
 /// Classification of a screen-sharing failure, used for diagnostics and
 /// actionable runtime errors (PDF Task 5.2: "clear runtime errors when
@@ -175,6 +175,7 @@ impl std::error::Error for ScreenShareError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use n0_tracing_test::traced_test;
 
     struct FakeCapture {
         next: Option<CapturedFrame>,
@@ -285,5 +286,73 @@ mod tests {
         // Errors remain clone/equatable for state-machine comparison tests.
         assert_eq!(pipewire, pipewire.clone());
         assert_ne!(pipewire.kind(), portal.kind());
+    }
+
+    /// PDF Phase 12 redaction guardrail: never log screen contents, raw frame
+    /// bytes, clipboard contents, or sensitive keystrokes.
+    ///
+    /// Runs the REAL viewer decode pipeline with a distinctive frame payload,
+    /// then Debug-formats the clipboard-carrying types; none of the sensitive
+    /// values may appear in tracing output. Clipboard redaction is structural
+    /// ([`RedactedText`] hides the payload in Debug), so even a stray
+    /// `?event` / `?message` log can never leak it.
+    #[test]
+    #[traced_test]
+    fn screen_share_logging_never_exposes_frame_bytes_or_clipboard() {
+        // 1. Frame bytes through the decode pipeline.
+        let mut pixels = vec![0u8; 64];
+        for (i, b) in pixels.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(31).wrapping_add(7);
+        }
+        let pixel_hex = hex::encode(&pixels);
+        let mut pipeline = ViewerPipeline::new(FakeCodec, [7; 16], 4).expect("pipeline");
+        let header = MediaHeader {
+            version: 1,
+            session_id: [7; 16],
+            sequence: 1,
+            timestamp_us: 1,
+            encode_timestamp_us: 1,
+            codec: 1,
+            flags: MediaHeader::FLAG_KEYFRAME,
+            width: 2,
+            height: 2,
+            config_generation: 0,
+            payload_len: pixels.len() as u32,
+        };
+        pipeline.enqueue(header, pixels.clone()).expect("enqueue");
+        pipeline.process();
+        let frame = pipeline.take_frame().expect("decoded frame");
+        assert_eq!(frame.pixels, pixels, "pipeline must decode the payload");
+
+        // 2. Clipboard contents must never reach Debug/log formatting.
+        let secret = "super-secret-clipboard-value-987654321";
+        let message = ScreenShareMessage::Clipboard {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: ScreenShareSessionId::from_bytes([7; 16]),
+            nonce: [0xAB; 16],
+            text: RedactedText::new(secret.to_string()),
+        };
+        let debug_message = format!("{message:?}");
+        assert!(
+            !debug_message.contains(secret),
+            "Debug of Clipboard must redact the payload: {debug_message}"
+        );
+        let event = SessionEvent::ClipboardReceived {
+            session_id: ScreenShareSessionId::from_bytes([7; 16]),
+            text: RedactedText::new(secret.to_string()),
+        };
+        let debug_event = format!("{event:?}");
+        assert!(
+            !debug_event.contains(secret),
+            "Debug of ClipboardReceived must redact the payload: {debug_event}"
+        );
+
+        // 3. The traced run must not contain frame bytes or clipboard text.
+        for forbidden in [pixel_hex.as_str(), secret] {
+            assert!(
+                !logs_contain(forbidden),
+                "sensitive value appeared in tracing output: {forbidden}"
+            );
+        }
     }
 }

@@ -403,6 +403,86 @@ pub(crate) fn view_screen_share_view_controls<'a>(
     .into()
 }
 
+/// The eight developer metrics for the diagnostics overlay (PDF Phase 12):
+/// capture FPS, encode FPS, average encode time, bytes/sec, dropped frames,
+/// queue depth, decode FPS, and estimated end-to-end latency — plus the
+/// negotiated codec/dimensions/bitrate/backend line.
+///
+/// Rendered as compact lines so the same helper serves the host panel and the
+/// viewer overlay. Contains no media data (never screen contents, raw frame
+/// bytes, clipboard text, or keystrokes).
+pub(crate) fn screen_share_metrics_lines(metrics: &ScreenShareSessionMetrics) -> Vec<String> {
+    let s = metrics.snapshot;
+    vec![
+        format!(
+            "{} · {}x{} @ {}fps · {} kbps",
+            metrics.codec,
+            metrics.width,
+            metrics.height,
+            metrics.fps,
+            metrics.bitrate_bps / 1000,
+        ),
+        format!(
+            "backend {} · capture {} fps · encode {} fps",
+            metrics.backend, s.sender_fps, s.encoded_fps,
+        ),
+        format!(
+            "encode avg {:.2} ms · {} B/s",
+            s.encode_time_avg_us as f64 / 1000.0,
+            s.bitrate_bps / 8,
+        ),
+        format!(
+            "queue {} · dropped {}",
+            s.send_queue_depth, s.dropped_frames,
+        ),
+        format!(
+            "decode {} fps · latency ~{:.0} ms",
+            s.receiver_fps,
+            s.frame_age_us as f64 / 1000.0,
+        ),
+    ]
+}
+
+/// Developer diagnostics overlay pinned to the top-right of the viewer
+/// surface (PDF Phase 12, behind the `screen_share_dev_overlay` flag).
+/// Non-interactive: mouse events fall through to the surface below.
+/// Takes ownership of the metrics so the returned element is `'static`
+/// (no borrowed locals escape the view function).
+pub(crate) fn view_screen_share_metrics_overlay(
+    metrics: ScreenShareSessionMetrics,
+) -> iced::Element<'static, AppMessage> {
+    use iced::widget::{column, container, text};
+    use iced::Length;
+
+    let lines = screen_share_metrics_lines(&metrics);
+    let col = column(
+        lines
+            .into_iter()
+            .map(|line| text(line).size(10).color(iced::Color::WHITE).into())
+            .collect::<Vec<iced::Element<'static, AppMessage>>>(),
+    )
+    .spacing(2);
+    let panel = container(col)
+        .padding(6)
+        .style(|_| iced::widget::container::Style {
+            background: Some(iced::Background::Color(iced::Color::from_rgba8(
+                0, 0, 0, 0.55,
+            ))),
+            border: iced::Border {
+                radius: 4.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+    container(panel)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(iced::alignment::Horizontal::Right)
+        .align_y(iced::alignment::Vertical::Top)
+        .padding(6)
+        .into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

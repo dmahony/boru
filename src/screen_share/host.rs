@@ -21,11 +21,11 @@ use super::{
     codec::{CodecConfig, OpenH264Encoder, VideoEncoder},
     permissions::{Capability, SlidingWindowRateLimiter},
     platform::{capture_dimensions, create_capture_source, CAPTURE_FPS, ActiveCapture},
-    protocol::{self, ControlMessage, InputEventKind, ScreenShareMessage, SCREEN_SHARE_PROTOCOL_VERSION},
+    protocol::{self, ControlMessage, InputEventKind, RedactedText, ScreenShareMessage, SCREEN_SHARE_PROTOCOL_VERSION},
     reconnect::{retry_reconnect, ReconnectPolicy},
     remote_input::{self, create_platform_backend, InputEvent, NormalizedPointer, RemoteInput},
     session::{ScreenShareSessionId, SessionEvent, SessionManager, SessionState},
-    stats::ScreenShareStats,
+    stats::{ScreenShareSessionMetrics, ScreenShareStats},
     transport::{read_unit, QuicScreenTransport, ReadUnit},
     ScreenShareError, SCREEN_SHARE_ALPN,
 };
@@ -49,13 +49,61 @@ pub enum HostCommand {
     RevokeControl,
     /// Host pushes its local text clipboard to the viewer (PDF Task 9.3).
     /// Requires the explicitly granted `Clipboard` capability; never implied
-    /// by remote control.
-    SendClipboard(String),
+    /// by remote control. The payload is wrapped in [`RedactedText`] so a
+    /// stray Debug/log of the command can never leak clipboard contents.
+    SendClipboard(RedactedText),
     /// Host user switches the shared monitor without ending the chat session
     /// (PDF Phase 10). The host sends a `SourceChanged` message BEFORE any
     /// frame with the new geometry, re-selects the capture source, forces a
     /// keyframe, and surfaces `SessionEvent::SourceChanged` to the app.
     SwitchSource(CaptureSourceId),
+}
+
+/// Reason a host screen-share session terminated, for structured logging
+/// (PDF Phase 12: capture stop must record the reason for termination).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionTermination {
+    /// The host user stopped sharing (stop flag or explicit EndSession).
+    UserStopped,
+    /// The viewer ended the session (peer EndSession).
+    PeerEnded,
+    /// The initial QUIC connection to the viewer failed.
+    ConnectFailed,
+    /// Negotiation ended without streaming (rejected, timed out, protocol error).
+    NegotiationFailed,
+    /// The media/control transport could not be established.
+    TransportFailed,
+    /// The capture source had no valid (even, non-zero) geometry.
+    InvalidGeometry,
+    /// The encoder could not be initialised with the negotiated config.
+    EncodeInitFailed,
+    /// The pacing controller could not be initialised.
+    PacingInitFailed,
+    /// Re-establishing the media path after a transient failure was abandoned.
+    ReconnectFailed,
+    /// An internal pipeline error (e.g. pacing queue returned no frame).
+    PipelineError,
+    /// The app's command channel closed.
+    HostCommandClosed,
+}
+
+impl std::fmt::Display for SessionTermination {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::UserStopped => "user_stopped",
+            Self::PeerEnded => "peer_ended",
+            Self::ConnectFailed => "connect_failed",
+            Self::NegotiationFailed => "negotiation_failed",
+            Self::TransportFailed => "transport_failed",
+            Self::InvalidGeometry => "invalid_geometry",
+            Self::EncodeInitFailed => "encode_init_failed",
+            Self::PacingInitFailed => "pacing_init_failed",
+            Self::ReconnectFailed => "reconnect_failed",
+            Self::PipelineError => "pipeline_error",
+            Self::HostCommandClosed => "host_command_closed",
+        };
+        f.write_str(s)
+    }
 }
 
 /// Run a full host session: dial the viewer, negotiate consent, then stream
@@ -72,9 +120,10 @@ pub async fn run_host_session(
     commands: mpsc::Receiver<HostCommand>,
 ) {
     let session_id = ScreenShareSessionId::generate();
+    let started = std::time::Instant::now();
     let mut manager = SessionManager::default();
     manager.start_invitation(session_id, local_public, peer, conversation_id);
-    run_host_session_inner(
+    let termination = run_host_session_inner(
         endpoint,
         peer,
         session_id,
@@ -84,6 +133,13 @@ pub async fn run_host_session(
         commands,
     )
     .await;
+    // PDF Phase 12: every host exit records the reason for termination plus
+    // the session duration in one structured line (no media data).
+    tracing::info!(
+        reason = %termination,
+        duration_ms = started.elapsed().as_millis() as u64,
+        "screen-share: capture stopped"
+    );
     // Every silent exit path (transport error, capture failure, peer drop)
     // otherwise leaves the host UI stuck on the "Screen sharing active"
     // indicator and blocks starting the next share. Emit Ended so the app
@@ -103,7 +159,7 @@ async fn run_host_session_inner(
     events: &mpsc::Sender<SessionEvent>,
     stop: &Arc<AtomicBool>,
     mut commands: mpsc::Receiver<HostCommand>,
-) {
+) -> SessionTermination {
     // Select the capture source up front so the Hello advertises the ACTIVE
     // geometry: a real portal/PipeWire capture when available, otherwise the
     // synthetic test pattern (demo/CI path).
@@ -134,7 +190,7 @@ async fn run_host_session_inner(
         }
     }
     let (capture_width, capture_height) = capture_dimensions(&capture);
-    let Some(hello) = manager.hello(session_id, vec!["h264".to_string()], capture_width.min(u16::MAX as u32) as u16, capture_height.min(u16::MAX as u32) as u16, capture_fps as u16) else { return };
+    let Some(hello) = manager.hello(session_id, vec!["h264".to_string()], capture_width.min(u16::MAX as u32) as u16, capture_height.min(u16::MAX as u32) as u16, capture_fps as u16) else { return SessionTermination::NegotiationFailed };
     let addr = endpoint
         .remote_info(peer)
         .await
@@ -150,7 +206,7 @@ async fn run_host_session_inner(
         Ok(connection) => connection,
         Err(error) => {
             let _ = events.send(SessionEvent::Rejected { session_id, reason: error.to_string() }).await;
-            return;
+            return SessionTermination::ConnectFailed;
         }
     };
     let remote_addrs = endpoint
@@ -185,7 +241,7 @@ async fn run_host_session_inner(
         Ok(transport) => transport,
         Err(error) => {
             let _ = events.send(SessionEvent::Rejected { session_id, reason: error.to_string() }).await;
-            return;
+            return SessionTermination::TransportFailed;
         }
     };
     // Separate logical channels (PDF Task 3.2): a reliable control channel and
@@ -197,19 +253,19 @@ async fn run_host_session_inner(
         Ok(channel) => channel,
         Err(error) => {
             let _ = events.send(SessionEvent::Rejected { session_id, reason: error.to_string() }).await;
-            return;
+            return SessionTermination::TransportFailed;
         }
     };
     let media = match MediaChannel::new(transport.clone(), DEFAULT_MEDIA_QUEUE_CAPACITY) {
         Ok(channel) => channel,
         Err(error) => {
             let _ = events.send(SessionEvent::Rejected { session_id, reason: error.to_string() }).await;
-            return;
+            return SessionTermination::TransportFailed;
         }
     };
     if let Err(error) = control.send(ControlOut::Legacy(ControlMessage::Hello(hello.clone()))).await {
         let _ = events.send(SessionEvent::Rejected { session_id, reason: error.to_string() }).await;
-        return;
+        return SessionTermination::TransportFailed;
     }
     // Negotiation: wait for the viewer's explicit Accept/Reject, honouring
     // host commands (grants can be issued once streaming starts).
@@ -234,9 +290,9 @@ async fn run_host_session_inner(
                         tracing::debug!(variant = ?std::mem::discriminant(&message), "screen-share: host ignored versioned message during negotiation");
                         false
                     }
-                    Err(_) => return,
+                    Err(_) => return SessionTermination::NegotiationFailed,
                 },
-                Err(_) => return,
+                Err(_) => return SessionTermination::ConnectFailed,
             },
             cmd = commands.recv() => match cmd {
                 Some(HostCommand::GrantControl(capabilities)) => {
@@ -258,22 +314,22 @@ async fn run_host_session_inner(
                 // Source switching (PDF Phase 10) only applies once the media
                 // path is streaming; during negotiation it is ignored.
                 Some(HostCommand::SwitchSource(_)) => false,
-                None => return,
+                None => return SessionTermination::HostCommandClosed,
             },
             _ = tokio::time::sleep(Duration::from_millis(250)) => false,
         };
         if accepted { break; }
         if !matches!(manager.state(session_id), Some(SessionState::AwaitingAcceptance) | Some(SessionState::Connecting) | Some(SessionState::Streaming)) {
             tracing::warn!(session = ?session_id, state = ?manager.state(session_id), "screen-share: host negotiation exited without streaming");
-            return;
+            return SessionTermination::NegotiationFailed;
         }
     }
     tracing::info!(session = ?session_id, "screen-share: host entering streaming");
     if stop.load(Ordering::Relaxed) {
         let _ = control.send(ControlOut::Legacy(ControlMessage::EndSession { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id })).await;
-        return;
+        return SessionTermination::UserStopped;
     }
-    if manager.state(session_id) != Some(SessionState::Streaming) { return; }
+    if manager.state(session_id) != Some(SessionState::Streaming) { return SessionTermination::NegotiationFailed; }
     // Streaming: capture → encode → send, apply consent-gated input, honour
     // host commands and stop. The codec is configured from the ACTIVE
     // capture's geometry (the encoder requires even dimensions; real portal
@@ -284,9 +340,22 @@ async fn run_host_session_inner(
     let (capture_width, capture_height) = capture_dimensions(&capture);
     let encode_width = capture_width & !1;
     let encode_height = capture_height & !1;
-    if encode_width == 0 || encode_height == 0 { return; }
+    if encode_width == 0 || encode_height == 0 { return SessionTermination::InvalidGeometry; }
     let mut config = CodecConfig::from_capture_config(&capture_config, encode_width, encode_height);
-    let Ok(mut encoder) = OpenH264Encoder::new(config) else { return };
+    let Ok(mut encoder) = OpenH264Encoder::new(config) else { return SessionTermination::EncodeInitFailed };
+    // PDF Phase 12: one structured capture-start line with the negotiated
+    // codec, dimensions, bitrate, frame rate and backend. Contains no media
+    // data (never screen contents or raw frame bytes).
+    tracing::info!(
+        event = "capture_start",
+        backend = capture.backend_name(),
+        codec = "h264",
+        width = encode_width,
+        height = encode_height,
+        bitrate_bps = config.target_bitrate_bps,
+        frame_rate = capture_fps,
+        "screen-share: capture started"
+    );
     // PDF Phase 10: monitor unplug / laptop dock-undock handling. When no
     // source remains the stream PAUSES (no frames sent) instead of ending
     // the session; a periodic re-enumeration resumes with the first
@@ -319,7 +388,7 @@ async fn run_host_session_inner(
     // and encode. When the encoder or network falls behind, obsolete frames
     // are dropped instead of building latency; queue length is capped at the
     // codec's max_queue_depth and drops are counted for BORU-SS-28 metrics.
-    let Ok(mut pacing) = PacingController::new(config.max_queue_depth) else { return };
+    let Ok(mut pacing) = PacingController::new(config.max_queue_depth) else { return SessionTermination::PacingInitFailed };
     // Track the frame period so skipped interval ticks (MissedTickBehavior::Skip)
     // can be counted as dropped obsolete frames when the pipeline fell behind.
     let frame_period_us = 1_000_000 / capture_fps as u64;
@@ -351,7 +420,7 @@ async fn run_host_session_inner(
         if stop.load(Ordering::Relaxed) {
             if let Some(mut backend) = backend.take() { backend.shutdown().await; }
             let _ = control.send(ControlOut::Legacy(ControlMessage::EndSession { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id })).await;
-            return;
+            return SessionTermination::UserStopped;
         }
         if media.failed() || control.failed() {
             match reconnect_media(&endpoint, peer, session_id, manager, &events, stop.as_ref(), hello.clone()).await {
@@ -370,7 +439,7 @@ async fn run_host_session_inner(
                 None => {
                     if let Some(mut backend) = backend.take() { backend.shutdown().await; }
                     let _ = control.send(ControlOut::Legacy(ControlMessage::EndSession { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id })).await;
-                    return;
+                    return SessionTermination::ReconnectFailed;
                 }
             }
         }
@@ -418,7 +487,7 @@ async fn run_host_session_inner(
                                 // backend down immediately so no further input
                                 // can be injected, then leave the loop.
                                 if let Some(mut backend) = backend.take() { backend.shutdown().await; }
-                                return;
+                                return SessionTermination::PeerEnded;
                             }
                         }
                         Ok(ReadUnit::ScreenShare(message)) => match message {
@@ -458,6 +527,9 @@ async fn run_host_session_inner(
                                 });
                                 if !authorized { continue 'streaming; }
                                 tracing::info!("screen-share: host applied peer clipboard payload (text)");
+                                // The event carries the RedactedText wrapper so
+                                // Debug can never leak the payload (PDF Phase
+                                // 12); the app unwraps it for the clipboard.
                                 let _ = events.send(SessionEvent::ClipboardReceived { session_id: sid, text }).await;
                             }
                             other => {
@@ -517,7 +589,7 @@ async fn run_host_session_inner(
                     // versioned message and the viewer authorizes it against
                     // the explicitly granted Clipboard capability. Bounded to
                     // MAX_CLIPBOARD_TEXT (validation would reject larger).
-                    if text.len() > protocol::MAX_CLIPBOARD_TEXT { continue; }
+                    if text.as_str().len() > protocol::MAX_CLIPBOARD_TEXT { continue; }
                     let nonce = manager
                         .permissions(session_id)
                         .and_then(|permissions| permissions.token().map(|token| *token.nonce()));
@@ -557,7 +629,7 @@ async fn run_host_session_inner(
                         stream_paused = false;
                     }
                 }
-                None => return,
+                None => return SessionTermination::HostCommandClosed,
             },
             _ = interval.tick() => {
                 // Pacing (PDF Task 7.2): with MissedTickBehavior::Skip, when
@@ -616,7 +688,7 @@ async fn run_host_session_inner(
                         stats.observe_capture();
                         let Some(frame) = pacing.pop_latest() else {
                             if let Some(mut backend) = backend.take() { backend.shutdown().await; }
-                            return;
+                            return SessionTermination::PipelineError;
                         };
                         // Feed the pacing drop counters into the stats collector
                         // (delta since the last tick).
@@ -632,7 +704,7 @@ async fn run_host_session_inner(
                             if frame.width == 0 || frame.height == 0 || frame.width % 2 != 0 || frame.height % 2 != 0 {
                                 tracing::warn!(width = frame.width, height = frame.height, "screen-share: capture produced invalid geometry, ending session");
                                 if let Some(mut backend) = backend.take() { backend.shutdown().await; }
-                                return;
+                                return SessionTermination::InvalidGeometry;
                             }
                             // PDF Phase 10: send the explicit source-change /
                             // config-change message BEFORE the media
@@ -751,6 +823,38 @@ async fn run_host_session_inner(
                                     stats.set_rtt_us(rtt_us);
                                     let snapshot = stats.snapshot();
                                     let decision = adaptive.update(snapshot);
+                                    // PDF Phase 12: expose developer metrics to
+                                    // the diagnostics overlay and logs — capture
+                                    // FPS, encode FPS, average encode time,
+                                    // bytes/sec, dropped frames, queue depth,
+                                    // decode FPS, estimated end-to-end latency.
+                                    // Reuses THIS snapshot (the same one the
+                                    // adaptive controller just consumed) so the
+                                    // extra publish never perturbs its interval
+                                    // measurements. try_send so a full events
+                                    // channel never stalls capture. No media
+                                    // data is ever included.
+                                    let metrics = ScreenShareSessionMetrics {
+                                        codec: "h264".to_string(),
+                                        width: config.width,
+                                        height: config.height,
+                                        fps: config.target_fps,
+                                        bitrate_bps: config.target_bitrate_bps as u64,
+                                        backend: capture.backend_name().to_string(),
+                                        snapshot,
+                                    };
+                                    let _ = events.try_send(SessionEvent::Metrics { session_id, metrics });
+                                    tracing::info!(
+                                        capture_fps = snapshot.sender_fps,
+                                        encode_fps = snapshot.encoded_fps,
+                                        encode_avg_us = snapshot.encode_time_avg_us,
+                                        bytes_per_sec = snapshot.bitrate_bps / 8,
+                                        dropped_frames = snapshot.dropped_frames,
+                                        queue_depth = snapshot.send_queue_depth,
+                                        decode_fps = snapshot.receiver_fps,
+                                        latency_us = snapshot.frame_age_us,
+                                        "screen-share: performance metrics"
+                                    );
                                     if apply_quality_config(&mut encoder, &mut config, decision) {
                                         let pacing_counters = pacing.counters();
                                         tracing::info!(level = adaptive.level(), width = config.width, height = config.height,
@@ -812,7 +916,7 @@ async fn run_host_session_inner(
                 None => {
                     if let Some(mut backend) = backend.take() { backend.shutdown().await; }
                     let _ = control.send(ControlOut::Legacy(ControlMessage::EndSession { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id })).await;
-                    return;
+                    return SessionTermination::ReconnectFailed;
                 }
             }
         }

@@ -43,6 +43,39 @@ pub const MAX_CLIPBOARD_TEXT: usize = 512 * 1024;
 /// this bound keeps untrusted peer text out of unbounded allocations.
 pub const MAX_SOURCE_NAME: usize = 128;
 
+/// A text payload that must NEVER be formatted into logs (PDF Phase 12:
+/// "Never log screen contents, raw frame bytes, clipboard contents, or
+/// sensitive keystrokes").
+///
+/// The `Debug` impl prints a fixed redaction marker, so a stray
+/// `tracing::debug!(?message, ...)` or `{:?}` format can never leak
+/// clipboard contents even if a future caller forgets to redact by hand.
+/// The inner text stays fully accessible through the accessors and
+/// serde/postcard (wire format is identical to a bare `String`).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedactedText(String);
+
+impl RedactedText {
+    /// Wrap a text payload.
+    pub fn new(text: String) -> Self {
+        Self(text)
+    }
+    /// Borrow the payload for validation/use.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+    /// Consume and return the payload.
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for RedactedText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RedactedText(<redacted>)")
+    }
+}
+
 /// A bounded, explicit view-only permission. Remote control is intentionally absent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Permission {
@@ -421,8 +454,10 @@ pub enum ScreenShareMessage {
         session_id: ScreenShareSessionId,
         /// Current grant nonce (freshness gate, mirroring input messages).
         nonce: [u8; 16],
-        /// UTF-8 text payload (bounded by [`MAX_CLIPBOARD_TEXT`]).
-        text: String,
+        /// UTF-8 text payload (bounded by [`MAX_CLIPBOARD_TEXT`]). Wrapped in
+        /// [`RedactedText`] so Debug formatting can never leak clipboard
+        /// contents into logs (PDF Phase 12 guardrail).
+        text: RedactedText,
     },
     /// Host → viewer: the shared source (monitor/window) changed and the
     /// following media units use the NEW geometry. Sent BEFORE the first
@@ -515,7 +550,7 @@ impl ScreenShareMessage {
             }
             Self::Clipboard { version, session_id, text, .. } => {
                 if *session_id == ScreenShareSessionId::zero() { return Err(ProtocolError::Malformed("empty session id".into())); }
-                if text.is_empty() || text.len() > MAX_CLIPBOARD_TEXT { return Err(ProtocolError::Malformed("invalid clipboard text".into())); }
+                if text.as_str().is_empty() || text.as_str().len() > MAX_CLIPBOARD_TEXT { return Err(ProtocolError::Malformed("invalid clipboard text".into())); }
                 *version
             }
             Self::SourceChanged { version, session_id, source_id, title, width, height, frame_rate } => {
@@ -811,6 +846,9 @@ impl ScreenShareProtocol {
                     });
                 if authorized {
                     tracing::info!("screen-share: viewer applied host clipboard payload (text)");
+                    // The event carries the RedactedText wrapper so Debug can
+                    // never leak the payload (PDF Phase 12); the app unwraps
+                    // it when placing the text on the local clipboard.
                     let _ = self.events.try_send(SessionEvent::ClipboardReceived { session_id, text });
                 }
             }
@@ -956,7 +994,7 @@ mod tests {
     fn keyframe_request() -> ScreenShareMessage { ScreenShareMessage::KeyframeRequest { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid() } }
     fn quality_update() -> ScreenShareMessage { ScreenShareMessage::QualityUpdate { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid(), target_bitrate_bps: 1_000_000, max_frame_rate: 30, scale_factor: 100 } }
     fn protocol_error() -> ScreenShareMessage { ScreenShareMessage::Error { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid(), code: 1, message: "encode failure".into() } }
-    fn clipboard() -> ScreenShareMessage { ScreenShareMessage::Clipboard { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid(), nonce: [0xAB; 16], text: "hello clipboard".into() } }
+    fn clipboard() -> ScreenShareMessage { ScreenShareMessage::Clipboard { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid(), nonce: [0xAB; 16], text: RedactedText::new("hello clipboard".into()) } }
     fn source_changed() -> ScreenShareMessage { ScreenShareMessage::SourceChanged { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid(), source_id: 7, title: "DP-1: 1920x1080".into(), width: 1920, height: 1080, frame_rate: 30 } }
 
     /// Every one of the Task 2.3 message types plus the Task 9.3 Clipboard
@@ -990,11 +1028,11 @@ mod tests {
         let base = clipboard();
         // Empty text is rejected.
         let mut empty = base.clone();
-        if let ScreenShareMessage::Clipboard { text, .. } = &mut empty { text.clear(); }
+        if let ScreenShareMessage::Clipboard { text, .. } = &mut empty { text.0.clear(); }
         assert!(matches!(empty.encode(), Err(ProtocolError::Malformed(_))));
         // Oversized text is rejected.
         let mut huge = base.clone();
-        if let ScreenShareMessage::Clipboard { text, .. } = &mut huge { *text = "x".repeat(MAX_CLIPBOARD_TEXT + 1); }
+        if let ScreenShareMessage::Clipboard { text, .. } = &mut huge { *text = RedactedText::new("x".repeat(MAX_CLIPBOARD_TEXT + 1)); }
         assert!(matches!(huge.encode(), Err(ProtocolError::Malformed(_))));
         // An empty session id is rejected.
         let mut empty_session = base.clone();
