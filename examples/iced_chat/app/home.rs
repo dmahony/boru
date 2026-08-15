@@ -1078,8 +1078,20 @@ impl IcedChat {
         // column counts / padding) is captured the same way so the static
         // renderer can resolve the active breakpoint from the window width.
         let responsive = self.boru_layout().responsive;
+        #[cfg(feature = "dev-ui")]
+        let (designer_enabled, designer_hovered) =
+            (self.designer.enabled, self.designer.hovered_component);
         iced::widget::lazy(dep, move |dep| {
-            Self::view_chat_list_content(dep, btheme, home_layout.clone(), responsive)
+            Self::view_chat_list_content(
+                dep,
+                btheme,
+                home_layout.clone(),
+                responsive,
+                #[cfg(feature = "dev-ui")]
+                self.designer.enabled,
+                #[cfg(feature = "dev-ui")]
+                self.designer.hovered_component,
+            )
         })
         .into()
     }
@@ -1147,6 +1159,8 @@ impl IcedChat {
         btheme: crate::theme::BoruTheme,
         layout: crate::layout::HomeLayout,
         responsive: crate::layout::ResponsiveLayout,
+        #[cfg(feature = "dev-ui")] designer_enabled: bool,
+        #[cfg(feature = "dev-ui")] designer_hovered: Option<crate::designer::ComponentId>,
     ) -> iced::Element<'static, AppMessage> {
         use iced::widget::{button, container, row, Column, Row, Space};
         use iced::{Alignment, Length};
@@ -1297,6 +1311,13 @@ impl IcedChat {
                 card_radius: btheme.radii.card,
                 sizing: layout.card_sizing,
             });
+        #[cfg(feature = "dev-ui")]
+        let hero_card = crate::designer::overlay(
+            crate::designer::ComponentId::HomeWelcome,
+            hero_card,
+            designer_enabled,
+            designer_hovered,
+        );
 
         // ── Mesh Health card ──
         // UI-HOME-05: full dashboard card. Header carries a mesh glyph +
@@ -1462,6 +1483,13 @@ impl IcedChat {
             layout.quick_actions,
             layout.card_sizing.quick_action_icon_size,
         );
+        #[cfg(feature = "dev-ui")]
+        let action_grid = crate::designer::overlay(
+            crate::designer::ComponentId::HomeQuickActions,
+            action_grid,
+            designer_enabled,
+            designer_hovered,
+        );
 
         // DLMGR-01: home entry point — a compact outline button beside the
         // status pill opens the Download Manager (all active transfers in
@@ -1519,6 +1547,13 @@ impl IcedChat {
             iced::widget::lazy(dep.people_activity.clone(), move |card_dep| {
                 Self::view_people_activity_card(card_dep, btheme, people_layout.clone())
             });
+        #[cfg(feature = "dev-ui")]
+        let people_activity_card = crate::designer::overlay(
+            crate::designer::ComponentId::HomeFriends,
+            people_activity_card.into(),
+            designer_enabled,
+            designer_hovered,
+        );
         let tunnels_card = iced::widget::lazy(dep.tunnels.clone(), move |card_dep| {
             Self::view_tunnels_card(card_dep, btheme)
         });

@@ -104,11 +104,27 @@ impl IcedChat {
         {
             content = content.push(self.view_screen_share_panel());
         }
-        let content = content
-        .push(widget::responsive(|size: iced::Size| {
+        let chat_log = widget::responsive(|size: iced::Size| {
             self.view_chat_log(size.width, size.height).into()
-        }))
-        .push(self.view_composer())
+        });
+        #[cfg(feature = "dev-ui")]
+        let chat_log = crate::designer::overlay(
+            crate::designer::ComponentId::ChatMessageList,
+            chat_log.into(),
+            self.designer.enabled,
+            self.designer.hovered_component,
+        );
+        let composer = self.view_composer();
+        #[cfg(feature = "dev-ui")]
+        let composer = crate::designer::overlay(
+            crate::designer::ComponentId::ChatComposer,
+            composer,
+            self.designer.enabled,
+            self.designer.hovered_component,
+        );
+        let content = content
+        .push(chat_log)
+        .push(composer)
         .push(widget::Space::new().height(Length::Fixed(SPACE_8)))
         .push(self.view_chat_footer())
         // Make the column itself participate in the parent height

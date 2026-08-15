@@ -6,7 +6,8 @@
 //! `AppMessage`, so designer changes use the same Iced update pipeline as all
 //! other UI actions.
 
-use iced::Point;
+use iced::widget::{container, mouse_area, text, Stack};
+use iced::{Background, Border, Color, Element, Length, Padding, Point};
 use std::fmt;
 use std::str::FromStr;
 
@@ -66,6 +67,55 @@ impl FromStr for ComponentId {
             .find(|id| id.as_str() == value)
             .ok_or_else(|| format!("unknown designer component ID: {value}"))
     }
+}
+
+/// Compose the transient outline and semantic label for an editable region.
+/// Nested regions can be wrapped independently; iced dispatches pointer events
+/// to the most specific child first, keeping hit-testing predictable.
+pub(crate) fn overlay<'a>(
+    component: ComponentId,
+    content: Element<'a, crate::app::AppMessage>,
+    enabled: bool,
+    hovered: Option<ComponentId>,
+) -> Element<'a, crate::app::AppMessage> {
+    if !enabled {
+        return content;
+    }
+    let active = hovered == Some(component);
+    let label: Element<'a, crate::app::AppMessage> = if active {
+        container(text(component.as_str()).size(11.0).color(Color::WHITE))
+            .padding(Padding::from(3.0))
+            .style(|_| container::Style {
+                background: Some(Background::Color(Color::from_rgba(0.08, 0.32, 0.72, 0.94))),
+                border: Border {
+                    color: Color::from_rgb(0.55, 0.78, 1.0),
+                    width: 1.0,
+                    radius: 3.0.into(),
+                },
+                ..Default::default()
+            })
+            .into()
+    } else {
+        container(text("")).into()
+    };
+    let layered = Stack::new()
+        .push(container(content).style(move |_| container::Style {
+            border: if active {
+                Border {
+                    color: Color::from_rgb(0.25, 0.68, 1.0),
+                    width: 2.0,
+                    radius: 4.0.into(),
+                }
+            } else {
+                Border::default()
+            },
+            ..Default::default()
+        }))
+        .push(container(label).width(Length::Shrink).height(Length::Shrink));
+    mouse_area(layered)
+        .on_enter(crate::app::AppMessage::Designer(DesignerMessage::Hover(Some(component))))
+        .on_exit(crate::app::AppMessage::Designer(DesignerMessage::Hover(None)))
+        .into()
 }
 
 /// Responsive preview bands exposed by the designer.

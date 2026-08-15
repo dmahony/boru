@@ -20486,6 +20486,13 @@ impl IcedChat {
         #[cfg(feature = "dev-ui")]
         let sidebar = self.inspect_region(crate::inspector::ComponentId::Sidebar, sidebar);
         #[cfg(feature = "dev-ui")]
+        let sidebar = crate::designer::overlay(
+            crate::designer::ComponentId::Sidebar,
+            sidebar,
+            self.designer.enabled,
+            self.designer.hovered_component,
+        );
+        #[cfg(feature = "dev-ui")]
         let main_panel = self.inspect_region(self.component_id_for_screen(), main_panel);
 
         // Responsive sidebar width – clamps to 288–320 px based on window width.
