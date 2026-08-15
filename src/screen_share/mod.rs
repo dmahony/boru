@@ -55,12 +55,13 @@ pub use channels::{
 };
 pub use adaptation::{AdaptiveQuality, PacingController, PacingCounters, QualityDecision, ViewerQualityRequest};
 pub use codec::{
-    available_encoder_codecs, create_encoder, create_encoder_for, CodecConfig, CodecKind,
-    CodecMetadata, EncodedFrame, EncodedPacket, OpenH264Decoder, OpenH264Encoder, QualityProfile,
-    ScreenShareCodec, VideoDecoder, VideoEncoder, DEFAULT_QUEUE_CAPACITY, DEFAULT_WIDTH,
-    DEFAULT_HEIGHT, DEFAULT_FPS, DEFAULT_BITRATE_BPS, DEFAULT_KEYFRAME_INTERVAL,
-    TARGET_720P30_WIDTH, TARGET_720P30_HEIGHT, TARGET_720P30_BITRATE_BPS, TARGET_1080P30_WIDTH,
-    TARGET_1080P30_HEIGHT, TARGET_1080P30_BITRATE_BPS,
+    available_encoder_codecs, create_decoder, create_encoder, create_encoder_for, Av1Decoder,
+    Av1Encoder, CodecConfig, CodecKind, CodecMetadata, EncodedFrame, EncodedPacket,
+    OpenH264Decoder, OpenH264Encoder, QualityProfile, ScreenShareCodec, VideoDecoder,
+    VideoEncoder, DEFAULT_QUEUE_CAPACITY, DEFAULT_WIDTH, DEFAULT_HEIGHT, DEFAULT_FPS,
+    DEFAULT_BITRATE_BPS, DEFAULT_KEYFRAME_INTERVAL, TARGET_720P30_WIDTH, TARGET_720P30_HEIGHT,
+    TARGET_720P30_BITRATE_BPS, TARGET_1080P30_WIDTH, TARGET_1080P30_HEIGHT,
+    TARGET_1080P30_BITRATE_BPS,
 };
 #[cfg(target_os = "linux")]
 pub use vaapi::VaapiEncoder;

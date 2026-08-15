@@ -153,6 +153,15 @@ pub enum CodecKind {
     /// unavailable on non-Windows builds; on Windows it is behind the same
     /// [`VideoEncoder`] boundary.
     H264Mf,
+    /// AV1 via rav1e (BSD-2-Clause) encode / rav1d (BSD-2-Clause) decode.
+    ///
+    /// AV1 is royalty-free (AOMedia) and both libraries are permissively
+    /// licensed, keeping Boru MIT/Apache-2.0-compatible. See
+    /// docs/screenshare-feature-review.md §3.5 and the BORU-SS-35 commit for
+    /// the H.265/HEVC licensing gate — H.265 is deliberately NOT added here
+    /// (patent-encumbered: HEVC Advance / MPEG LA pools; a software encoder
+    /// like x265 is GPL and must not be linked).
+    Av1,
 }
 
 impl CodecKind {
@@ -166,6 +175,7 @@ impl CodecKind {
             Self::H264 => "h264",
             Self::H264Vaapi => "h264_vaapi",
             Self::H264Mf => "h264_mf",
+            Self::Av1 => "av1",
         }
     }
 
@@ -175,8 +185,19 @@ impl CodecKind {
             "h264" => Some(Self::H264),
             "h264_vaapi" | "vaapi" => Some(Self::H264Vaapi),
             "h264_mf" | "mf" => Some(Self::H264Mf),
+            "av1" => Some(Self::Av1),
             _ => None,
         }
+    }
+
+    /// Back-compat alias for [`Self::wire_name`] (BORU-SS-35 name).
+    pub const fn name(self) -> &'static str {
+        self.wire_name()
+    }
+
+    /// Back-compat alias for [`Self::from_wire_name`] (BORU-SS-35 name).
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::from_wire_name(name)
     }
 
     /// The software fallback for every kind (OpenH264 produces a baseline
@@ -185,9 +206,10 @@ impl CodecKind {
         Self::H264
     }
 
-    /// Whether this kind is a hardware-accelerated encoder.
+    /// Whether this kind is a hardware-accelerated encoder (as opposed to a
+    /// software encoder like OpenH264 or rav1e).
     pub const fn is_hardware(self) -> bool {
-        !matches!(self, Self::H264)
+        matches!(self, Self::H264Vaapi | Self::H264Mf)
     }
 }
 
@@ -285,41 +307,11 @@ fn fail(error: impl std::fmt::Display) -> ScreenShareError { ScreenShareError::n
 ///
 /// # Fallback orchestration (PDF Task 2.2 hardware path)
 ///
-/// On Linux the factory first attempts the VA-API hardware encoder
-/// ([`crate::screen_share::vaapi::VaapiEncoder`]); any init failure — missing
-/// `libva`, no render node, no permission, no H.264 encode entrypoint, driver
-/// error — is a typed [`ScreenShareErrorKind::HardwareAccelerationUnavailable`]
-/// error that is logged clearly and swallowed in favour of the
-/// always-available OpenH264 encoder. The viewer never notices which backend
-/// produced the stream: both emit the same baseline H.264 the decoder expects.
-pub fn create_encoder(config: CodecConfig) -> Result<Box<dyn VideoEncoder>, ScreenShareError> {
-    #[cfg(target_os = "linux")]
-    {
-        match crate::screen_share::vaapi::VaapiEncoder::new(config) {
-            Ok(encoder) => {
-                tracing::info!(
-                    codec = CodecKind::H264Vaapi.wire_name(),
-                    "screen-share: hardware encoder initialised (VA-API)"
-                );
-                return Ok(Box::new(encoder));
-            }
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    kind = ?error.kind(),
-                    codec = CodecKind::H264Vaapi.wire_name(),
-                    "screen-share: VA-API hardware encoder unavailable; falling back to OpenH264"
-                );
-            }
-        }
-    }
-    Ok(Box::new(OpenH264Encoder::new(config)?))
-}
-
 /// The codec names this host can actually encode with, ordered by preference
-/// (hardware first). Used to build `Hello.codecs` / `ScreenShareOffer.codecs`
-/// so negotiation advertises the real encoder; the viewer still decodes the
-/// resulting baseline H.264 with its existing decoder.
+/// (hardware H.264 first, then the software H.264 baseline, then AV1). Used to
+/// build `Hello.codecs` / `ScreenShareOffer.codecs` so negotiation advertises
+/// the real encoders; the viewer still decodes the resulting baseline H.264
+/// with its existing decoder.
 pub fn available_encoder_codecs() -> Vec<String> {
     let mut codecs = Vec::new();
     #[cfg(target_os = "linux")]
@@ -327,6 +319,7 @@ pub fn available_encoder_codecs() -> Vec<String> {
         codecs.push(CodecKind::H264Vaapi.wire_name().to_string());
     }
     codecs.push(CodecKind::H264.wire_name().to_string());
+    codecs.push(CodecKind::Av1.wire_name().to_string());
     codecs
 }
 
@@ -379,6 +372,7 @@ pub fn create_encoder_for(kind: CodecKind, config: CodecConfig) -> Result<Box<dy
                 "Windows Media Foundation H.264 encoder (h264_mf) is not wired in this build; use the OpenH264 fallback",
             ))
         }
+        CodecKind::Av1 => Ok(Box::new(Av1Encoder::new(config)?)),
     }
 }
 
@@ -576,6 +570,513 @@ impl VideoDecoder for OpenH264Decoder {
     }
     fn metadata(&self) -> CodecMetadata { self.metadata }
     fn reset(&mut self) -> Result<(), ScreenShareError> { self.decoder = openh264::decoder::Decoder::new().map_err(fail)?; self.waiting_for_keyframe = true; Ok(()) }
+}
+
+/// Convert an RGB8 (packed 3 bytes/pixel) buffer to planar I420 YUV.
+///
+/// 4:2:0 subsampling: each 2×2 luma block shares one U and one V sample
+/// (average of the four pixels). Coefficients are the standard BT.601
+/// full-range conversion used by the H.264 path's `write_yuv` converter so
+/// both codecs agree on color semantics.
+fn rgb_to_i420(rgb: &[u8], width: u32, height: u32) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let w = width as usize;
+    let h = height as usize;
+    let mut y = vec![0u8; w * h];
+    let mut u = vec![0u8; (w / 2) * (h / 2)];
+    let mut v = vec![0u8; (w / 2) * (h / 2)];
+    for row in 0..h {
+        for col in 0..w {
+            let i = (row * w + col) * 3;
+            let r = rgb[i] as f32;
+            let g = rgb[i + 1] as f32;
+            let b = rgb[i + 2] as f32;
+            let yy = (0.299 * r + 0.587 * g + 0.114 * b).round().clamp(0.0, 255.0) as u8;
+            y[row * w + col] = yy;
+            if row % 2 == 0 && col % 2 == 0 {
+                let mut r_acc = 0.0f32;
+                let mut g_acc = 0.0f32;
+                let mut b_acc = 0.0f32;
+                for dy in 0..2 {
+                    for dx in 0..2 {
+                        let ii = ((row + dy).min(h - 1) * w + (col + dx).min(w - 1)) * 3;
+                        r_acc += rgb[ii] as f32;
+                        g_acc += rgb[ii + 1] as f32;
+                        b_acc += rgb[ii + 2] as f32;
+                    }
+                }
+                let r = r_acc / 4.0;
+                let g = g_acc / 4.0;
+                let b = b_acc / 4.0;
+                u[(row / 2) * (w / 2) + col / 2] =
+                    (-0.169 * r - 0.331 * g + 0.5 * b + 128.0).round().clamp(0.0, 255.0) as u8;
+                v[(row / 2) * (w / 2) + col / 2] =
+                    (0.5 * r - 0.419 * g - 0.081 * b + 128.0).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    (y, u, v)
+}
+
+/// Convert planar I420 YUV to RGBA8 (BT.601 full-range inverse of
+/// [`rgb_to_i420`]).
+fn i420_to_rgba(y: &[u8], u: &[u8], v: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let w = width as usize;
+    let h = height as usize;
+    let mut rgba = vec![0u8; w * h * 4];
+    for row in 0..h {
+        for col in 0..w {
+            let yy = y[row * w + col] as f32;
+            let uu = u[(row / 2) * (w / 2) + col / 2] as f32 - 128.0;
+            let vv = v[(row / 2) * (w / 2) + col / 2] as f32 - 128.0;
+            let r = (yy + 1.402 * vv).round().clamp(0.0, 255.0) as u8;
+            let g = (yy - 0.344 * uu - 0.714 * vv).round().clamp(0.0, 255.0) as u8;
+            let b = (yy + 1.772 * uu).round().clamp(0.0, 255.0) as u8;
+            let o = (row * w + col) * 4;
+            rgba[o..o + 4].copy_from_slice(&[r, g, b, 255]);
+        }
+    }
+    rgba
+}
+
+/// AV1 encoder backed by rav1e (BSD-2-Clause).
+///
+/// The codec boundary is identical to [`OpenH264Encoder`]: configure, encode,
+/// force_keyframe, reconfigure_bitrate, shutdown. rav1e is configured for
+/// low-latency screen content (speed preset 10, single-frame RDO lookahead,
+/// fixed keyframe interval, constant-bitrate mode).
+///
+/// Licensing note (BORU-SS-35): rav1e and rav1d are both BSD-2-Clause /
+/// AOM-style permissively licensed, so AV1 keeps Boru MIT/Apache-2.0
+/// compatible. H.265/HEVC is deliberately NOT added: x265 is GPL-2.0 and
+/// even BSD-licensed HEVC encoders are patent-encumbered (HEVC Advance /
+/// MPEG LA pools); see docs/screenshare-feature-review.md §3.5.
+#[allow(missing_debug_implementations)]
+pub struct Av1Encoder {
+    ctx: rav1e::Context<u8>,
+    config: CodecConfig,
+    generation: u64,
+    sequence: u64,
+    frames_since_keyframe: u64,
+    keyframe_requested: bool,
+    shutdown: bool,
+    /// Metadata for frames submitted to rav1e whose packets have not yet been
+    /// drained. rav1e's low-latency pipeline holds several frames in its RDO
+    /// lookahead before emitting the first packet (measured: ~4 frames at
+    /// speed preset 10), so each `encode()` call may produce the packet for an
+    /// EARLIER frame. The queue maps emitted packets back to the correct
+    /// timestamp/sequence.
+    pending: std::collections::VecDeque<(u64, u64)>,
+    /// Packets drained from rav1e that could not be returned on the call that
+    /// produced them. `encode()` returns exactly one packet per call, so when
+    /// rav1e emits one packet per submitted frame (steady state after the
+    /// fixed lookahead warm-up) this queue holds at most one entry; it exists
+    /// so a burst (e.g. keyframe request absorption) never drops a packet.
+    ready: std::collections::VecDeque<EncodedPacket>,
+}
+
+fn make_rav1e_context(config: CodecConfig) -> Result<rav1e::Context<u8>, ScreenShareError> {
+    use rav1e::prelude::*;
+    let mut enc = rav1e::EncoderConfig::with_speed_preset(10);
+    enc.width = config.width as usize;
+    enc.height = config.height as usize;
+    enc.bit_depth = 8;
+    enc.chroma_sampling = ChromaSampling::Cs420;
+    enc.time_base = Rational::new(1, config.target_fps as u64);
+    enc.bitrate = config.target_bitrate_bps as i32;
+    enc.low_latency = true;
+    enc.speed_settings.rdo_lookahead_frames = 1;
+    enc.speed_settings.scene_detection_mode = SceneDetectionSpeed::None;
+    enc.set_key_frame_interval(config.keyframe_interval, config.keyframe_interval);
+    let cfg = rav1e::Config::new()
+        .with_encoder_config(enc)
+        .with_threads(1);
+    cfg.new_context::<u8>().map_err(fail)
+}
+
+impl Av1Encoder {
+    pub fn new(config: CodecConfig) -> Result<Self, ScreenShareError> {
+        let config = config.validate()?;
+        Ok(Self {
+            ctx: make_rav1e_context(config)?,
+            config,
+            generation: 0,
+            sequence: 0,
+            frames_since_keyframe: 0,
+            keyframe_requested: true,
+            shutdown: false,
+            pending: std::collections::VecDeque::new(),
+            ready: std::collections::VecDeque::new(),
+        })
+    }
+    pub fn default_profile() -> Result<Self, ScreenShareError> {
+        Self::new(CodecConfig::default())
+    }
+
+    fn ensure_running(&self) -> Result<(), ScreenShareError> {
+        if self.shutdown {
+            return Err(ScreenShareError::new("encoder is shut down"));
+        }
+        Ok(())
+    }
+}
+
+impl VideoEncoder for Av1Encoder {
+    fn configure(&mut self, config: CodecConfig) -> Result<(), ScreenShareError> {
+        self.ensure_running()?;
+        let config = config.validate()?;
+        self.ctx = make_rav1e_context(config)?;
+        self.config = config;
+        self.generation += 1;
+        self.frames_since_keyframe = 0;
+        self.keyframe_requested = true;
+        self.pending.clear();
+        self.ready.clear();
+        Ok(())
+    }
+
+    fn encode(&mut self, frame: &CapturedFrame) -> Result<EncodedPacket, ScreenShareError> {
+        use rav1e::prelude::*;
+        self.ensure_running()?;
+        if frame.width == 0 || frame.height == 0 {
+            return Err(ScreenShareError::new("frame dimensions must be non-zero"));
+        }
+        let rgb = scale_rgb(
+            &rgba_to_rgb(frame)?,
+            frame.width,
+            frame.height,
+            self.config.width,
+            self.config.height,
+        );
+        let (y, u, v) = rgb_to_i420(&rgb, self.config.width, self.config.height);
+        let mut rav_frame = self.ctx.new_frame();
+        rav_frame.planes[0].copy_from_raw_u8(&y, self.config.width as usize, 1);
+        rav_frame.planes[1].copy_from_raw_u8(&u, (self.config.width / 2) as usize, 1);
+        rav_frame.planes[2].copy_from_raw_u8(&v, (self.config.width / 2) as usize, 1);
+        rav_frame.planes[0].pad(self.config.width as usize, self.config.height as usize);
+        rav_frame.planes[1].pad(self.config.width as usize, self.config.height as usize);
+        rav_frame.planes[2].pad(self.config.width as usize, self.config.height as usize);
+
+        let force_key = self.keyframe_requested
+            || self.frames_since_keyframe >= self.config.keyframe_interval;
+        self.keyframe_requested = false;
+        if force_key {
+            let params = FrameParameters {
+                frame_type_override: FrameTypeOverride::Key,
+                ..Default::default()
+            };
+            self.ctx.send_frame((rav_frame, params)).map_err(fail)?;
+        } else {
+            self.ctx.send_frame(rav_frame).map_err(fail)?;
+        }
+        // Record the frame we just submitted; its packet will be emitted on a
+        // later call (rav1e holds one frame in the RDO lookahead).
+        self.pending.push_back((frame.timestamp_us, self.sequence));
+        self.sequence += 1;
+
+        // Drain every packet rav1e has ready into our ready-queue. rav1e's
+        // low-latency pipeline holds several frames in its RDO lookahead
+        // (measured: ~4 frames at speed preset 10), so the first few calls
+        // produce no packet at all, then each call produces one packet per
+        // submitted frame. Each packet corresponds to the OLDEST pending frame
+        // (rav1e emits in submission order in low-latency mode), so pop_front
+        // keeps timestamp/sequence aligned. The ready-queue absorbs any burst
+        // so no packet is dropped; this method returns exactly one.
+        loop {
+            let packet = match self.ctx.receive_packet() {
+                Ok(packet) => packet,
+                Err(EncoderStatus::NeedMoreData) => break,
+                Err(EncoderStatus::Encoded) => continue,
+                Err(e) => return Err(fail(e)),
+            };
+            let Some((timestamp_us, sequence)) = self.pending.pop_front() else {
+                return Err(ScreenShareError::new("av1: packet without a pending frame"));
+            };
+            let keyframe = packet.frame_type.all_intra();
+            if keyframe {
+                self.frames_since_keyframe = 0;
+            } else {
+                self.frames_since_keyframe += 1;
+            }
+            self.ready.push_back(EncodedPacket {
+                timestamp_us,
+                encode_timestamp_us: now_micros(),
+                sequence,
+                keyframe,
+                config_generation: self.generation,
+                width: self.config.width,
+                height: self.config.height,
+                bytes: packet.data,
+            });
+        }
+        self.ready.pop_front().ok_or_else(|| {
+            ScreenShareError::new("av1 encoder warming up (packet for the previous frame not ready)")
+        })
+    }
+
+    fn force_keyframe(&mut self) {
+        self.keyframe_requested = true;
+    }
+
+    fn is_keyframe_pending(&self) -> bool {
+        self.keyframe_requested
+    }
+
+    fn reconfigure_bitrate(&mut self, bitrate_bps: u32) -> Result<(), ScreenShareError> {
+        self.ensure_running()?;
+        if bitrate_bps == 0 {
+            return Err(ScreenShareError::new("bitrate must be non-zero"));
+        }
+        if bitrate_bps == self.config.target_bitrate_bps {
+            return Ok(());
+        }
+        // rav1e has no live bitrate setter; rebuild the context with the same
+        // resolution/fps and the new bitrate, exactly like the OpenH264 path.
+        let mut next = self.config;
+        next.target_bitrate_bps = bitrate_bps;
+        self.ctx = make_rav1e_context(next)?;
+        self.config = next;
+        self.frames_since_keyframe = 0;
+        self.keyframe_requested = true;
+        self.pending.clear();
+        self.ready.clear();
+        Ok(())
+    }
+
+    fn shutdown(&mut self) -> Result<(), ScreenShareError> {
+        self.shutdown = true;
+        Ok(())
+    }
+
+    fn metadata(&self) -> CodecMetadata {
+        CodecMetadata {
+            codec: CodecKind::Av1,
+            config: self.config,
+            generation: self.generation,
+        }
+    }
+}
+
+/// AV1 decoder backed by rav1d (BSD-2-Clause) through its C ABI.
+///
+/// Mirrors [`OpenH264Decoder`]: non-keyframes are dropped until an
+/// independently decodable unit arrives, and a config-generation change
+/// recreates the decoder.
+///
+/// `Send` safety: `Dav1dContext` is an opaque `RawArc` pointer whose pointee
+/// (`Rav1dContext`) is declared `Send + Sync` by rav1d itself (see
+/// `src/internal.rs`); the raw-pointer wrapper is not auto-`Send` only
+/// because `NonNull` is conservatively `!Send` in current Rust. The decoder
+/// is used from a single decode task, matching rav1d's own contract.
+#[allow(missing_debug_implementations)]
+pub struct Av1Decoder {
+    ctx: Option<rav1d::include::dav1d::dav1d::Dav1dContext>,
+    metadata: CodecMetadata,
+    waiting_for_keyframe: bool,
+    shutdown: bool,
+}
+
+// SAFETY: the wrapped `Rav1dContext` is `Send + Sync` (rav1d's own unsafe
+// impls); the decoder serialises all access through `decode`/`reset` and is
+// driven from one task, so moving the opaque context between threads is
+// sound. See the struct docs above.
+unsafe impl Send for Av1Decoder {}
+
+impl Av1Decoder {
+    pub fn new(config: CodecConfig) -> Result<Self, ScreenShareError> {
+        let config = config.validate()?;
+        let ctx = open_rav1d()?;
+        Ok(Self {
+            ctx: Some(ctx),
+            metadata: CodecMetadata {
+                codec: CodecKind::Av1,
+                config,
+                generation: 0,
+            },
+            waiting_for_keyframe: false,
+            shutdown: false,
+        })
+    }
+    pub fn default_profile() -> Result<Self, ScreenShareError> {
+        Self::new(CodecConfig::default())
+    }
+
+    fn close(&mut self) {
+        if let Some(ctx) = self.ctx.take() {
+            unsafe {
+                let mut slot = Some(ctx);
+                rav1d::src::lib::dav1d_close(Some(std::ptr::NonNull::from(&mut slot)));
+            }
+        }
+    }
+}
+
+/// Open a fresh rav1d context with 8-bit I420 output.
+fn open_rav1d() -> Result<rav1d::include::dav1d::dav1d::Dav1dContext, ScreenShareError> {
+    use rav1d::include::dav1d::dav1d::Dav1dSettings;
+    let mut settings = unsafe { std::mem::MaybeUninit::<Dav1dSettings>::uninit() };
+    unsafe {
+        rav1d::src::lib::dav1d_default_settings(std::ptr::NonNull::from(&mut settings).cast());
+    }
+    let mut settings = unsafe { settings.assume_init() };
+    // Deterministic single-thread decode; the decoder is used from one task.
+    settings.n_threads = 1;
+    settings.max_frame_delay = 1;
+    let mut ctx: Option<rav1d::include::dav1d::dav1d::Dav1dContext> = None;
+    let result = unsafe {
+        rav1d::src::lib::dav1d_open(
+            Some(std::ptr::NonNull::from(&mut ctx)),
+            Some(std::ptr::NonNull::from(&settings)),
+        )
+    };
+    if result.0 != 0 {
+        return Err(ScreenShareError::new("rav1d: dav1d_open failed"));
+    }
+    ctx.ok_or_else(|| ScreenShareError::new("rav1d: open returned no context"))
+}
+
+impl Drop for Av1Decoder {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+impl VideoDecoder for Av1Decoder {
+    fn decode(&mut self, frame: &EncodedFrame) -> Result<Option<CapturedFrame>, ScreenShareError> {
+        use rav1d::include::dav1d::headers::DAV1D_PIXEL_LAYOUT_I420;
+        use rav1d::include::dav1d::picture::Dav1dPicture;
+        if self.shutdown {
+            return Err(ScreenShareError::new("decoder is shut down"));
+        }
+        if frame.bytes.is_empty() || (self.waiting_for_keyframe && !frame.keyframe) {
+            return Ok(None);
+        }
+        if frame.config_generation != self.metadata.generation {
+            self.metadata.generation = frame.config_generation;
+            self.metadata.config.width = frame.width;
+            self.metadata.config.height = frame.height;
+            self.close();
+            self.ctx = Some(open_rav1d()?);
+            self.waiting_for_keyframe = !frame.keyframe;
+            if self.waiting_for_keyframe {
+                return Ok(None);
+            }
+        }
+        let ctx = self
+            .ctx
+            .ok_or_else(|| ScreenShareError::new("rav1d: no context"))?;
+
+        // Wrap the packet bytes in a Dav1dData owned by the decoder.
+        let mut data: rav1d::include::dav1d::data::Dav1dData = Default::default();
+        let ptr = unsafe { rav1d::src::lib::dav1d_data_create(Some(std::ptr::NonNull::from(&mut data)), frame.bytes.len()) };
+        if ptr.is_null() {
+            return Err(ScreenShareError::new("rav1d: data allocation failed"));
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(frame.bytes.as_ptr(), ptr, frame.bytes.len());
+        }
+        let result = unsafe { rav1d::src::lib::dav1d_send_data(Some(ctx), Some(std::ptr::NonNull::from(&mut data))) };
+        if result.0 != 0 {
+            // EAGAIN: the decoder still holds a prior buffer. Our send path is
+            // one packet in → one picture out, so this only happens on a
+            // decode that needed more data; the pipeline's keyframe request
+            // recovers.
+            unsafe { rav1d::src::lib::dav1d_data_unref(Some(std::ptr::NonNull::from(&mut data))) };
+            return Ok(None);
+        }
+
+        let mut picture: Dav1dPicture = Default::default();
+        let result = unsafe { rav1d::src::lib::dav1d_get_picture(Some(ctx), Some(std::ptr::NonNull::from(&mut picture))) };
+        if result.0 != 0 {
+            // EAGAIN: no picture ready yet; needs more data.
+            return Ok(None);
+        }
+
+        let width = picture.p.w as u32;
+        let height = picture.p.h as u32;
+        if width == 0 || height == 0 || picture.p.layout != DAV1D_PIXEL_LAYOUT_I420 || picture.p.bpc != 8 {
+            unsafe { rav1d::src::lib::dav1d_picture_unref(Some(std::ptr::NonNull::from(&mut picture))) };
+            return Err(ScreenShareError::new("rav1d: unsupported picture layout"));
+        }
+        let y_stride = picture.stride[0] as usize;
+        let uv_stride = picture.stride[1] as usize;
+        let y_len = y_stride * height as usize;
+        let uv_len = uv_stride * (height as usize / 2);
+        let y_ptr = picture.data[0].map(|p| p.as_ptr() as *const u8);
+        let u_ptr = picture.data[1].map(|p| p.as_ptr() as *const u8);
+        let v_ptr = picture.data[2].map(|p| p.as_ptr() as *const u8);
+        let (Some(y_ptr), Some(u_ptr), Some(v_ptr)) = (y_ptr, u_ptr, v_ptr) else {
+            unsafe { rav1d::src::lib::dav1d_picture_unref(Some(std::ptr::NonNull::from(&mut picture))) };
+            return Err(ScreenShareError::new("rav1d: missing planes"));
+        };
+        let y = unsafe { std::slice::from_raw_parts(y_ptr, y_len) }.to_vec();
+        let u = unsafe { std::slice::from_raw_parts(u_ptr, uv_len) }.to_vec();
+        let v = unsafe { std::slice::from_raw_parts(v_ptr, uv_len) }.to_vec();
+        unsafe { rav1d::src::lib::dav1d_picture_unref(Some(std::ptr::NonNull::from(&mut picture))) };
+
+        let rgba = i420_to_rgba(&y, &u, &v, width, height);
+        Ok(Some(CapturedFrame {
+            timestamp_us: frame.timestamp_us,
+            width,
+            height,
+            pixel_format: PixelFormat::Rgba8,
+            stride: width * 4,
+            pixels: rgba,
+            gpu_handle: None,
+            dirty_region: None,
+            cursor: None,
+        }))
+    }
+
+    fn metadata(&self) -> CodecMetadata {
+        self.metadata
+    }
+
+    fn reset(&mut self) -> Result<(), ScreenShareError> {
+        self.close();
+        self.ctx = Some(open_rav1d()?);
+        self.waiting_for_keyframe = true;
+        Ok(())
+    }
+}
+
+/// Build the concrete encoder for a negotiated codec name.
+///
+/// `codec_name` is the lowercase wire name from `Hello.codecs` /
+/// `ScreenShareOffer.codecs` (e.g. "h264", "h264_vaapi" or "av1"). Unknown
+/// names are a clean rejection — the caller falls back to H.264 (which is
+/// always in the advertised list) before this is reached. Hardware kinds
+/// (`h264_vaapi`) fall back to OpenH264 on any init failure; `h264_mf`
+/// returns a typed unavailable error in this build.
+pub fn create_encoder(
+    codec_name: &str,
+    config: CodecConfig,
+) -> Result<Box<dyn VideoEncoder>, ScreenShareError> {
+    let kind = CodecKind::from_wire_name(codec_name).ok_or_else(|| {
+        ScreenShareError::new(format!("unsupported codec: {codec_name}"))
+    })?;
+    create_encoder_for(kind, config)
+}
+
+/// Build the concrete decoder for a negotiated codec name (see
+/// [`create_encoder`]).
+pub fn create_decoder(
+    codec_name: &str,
+    config: CodecConfig,
+) -> Result<Box<dyn VideoDecoder>, ScreenShareError> {
+    match CodecKind::from_name(codec_name) {
+        Some(CodecKind::H264) => Ok(Box::new(OpenH264Decoder::new(config)?)),
+        Some(CodecKind::Av1) => Ok(Box::new(Av1Decoder::new(config)?)),
+        // h264_vaapi / h264_mf are encoder-side wire names; decoding is
+        // always the software baseline (the viewer never needs to know the
+        // encoder backend).
+        Some(other) => Err(ScreenShareError::new(format!(
+            "unsupported decoder codec: {}",
+            other.wire_name()
+        ))),
+        None => Err(ScreenShareError::new(format!(
+            "unsupported codec: {codec_name}"
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -960,5 +1461,161 @@ mod tests {
         assert_eq!(defaults.target_bitrate_bps, DEFAULT_BITRATE_BPS);
         assert_eq!(defaults.keyframe_interval, DEFAULT_KEYFRAME_INTERVAL);
         assert_eq!(defaults.quality_profile, QualityProfile::Balanced);
+    }
+
+    #[test]
+    fn codec_kind_name_mapping_is_bidirectional_and_case_insensitive() {
+        for (kind, name) in [(CodecKind::H264, "h264"), (CodecKind::Av1, "av1")] {
+            assert_eq!(kind.name(), name);
+            assert_eq!(CodecKind::from_name(name), Some(kind));
+            assert_eq!(CodecKind::from_name(&name.to_uppercase()), Some(kind));
+        }
+        assert_eq!(CodecKind::from_name("vp8"), None, "unknown codec rejects");
+        assert_eq!(CodecKind::from_name(""), None);
+    }
+
+    /// rav1e's low-latency pipeline holds several frames in its RDO lookahead
+    /// before emitting the first packet (measured: ~4 frames at speed preset
+    /// 10). Feed frames and return every packet that emerges; the first few
+    /// calls produce nothing (the encoder returns a warming-up error the host
+    /// logs and continues).
+    fn feed(
+        encoder: &mut Av1Encoder,
+        count: u64,
+        start_us: u64,
+    ) -> Vec<EncodedPacket> {
+        let mut packets = Vec::new();
+        for i in 0..count {
+            if let Ok(packet) = encoder.encode(&pattern(32, 24, start_us + i * 33_333)) {
+                packets.push(packet);
+            }
+        }
+        packets
+    }
+
+    #[test]
+    fn av1_synthetic_pattern_round_trips_with_bounded_metadata() {
+        let cfg = config(32, 24);
+        let mut encoder = Av1Encoder::new(cfg).unwrap();
+        let mut decoder = Av1Decoder::new(cfg).unwrap();
+        // Feed 8 frames: the fixed lookahead swallows the first four, so we
+        // get packets for frames 0..3.
+        let packets = feed(&mut encoder, 8, 0);
+        assert_eq!(packets.len(), 4, "one packet per frame after warm-up");
+        assert!(!packets[0].bytes.is_empty(), "keyframe must encode");
+        let keyframes = packets.iter().filter(|p| p.keyframe).count();
+        assert_eq!(keyframes, 1, "exactly one keyframe in a 4-frame run");
+        let mut decoded = 0;
+        for packet in &packets {
+            if let Some(decoded_frame) = decoder.decode(packet).unwrap() {
+                assert_eq!((decoded_frame.width, decoded_frame.height), (32, 24));
+                assert_eq!(decoded_frame.pixels.len(), (32 * 24 * 4) as usize);
+                assert_ne!(
+                    decoded_frame
+                        .pixels
+                        .iter()
+                        .fold(0u64, |sum, b| sum + *b as u64),
+                    0,
+                    "decoded pixels must be non-zero"
+                );
+                decoded += 1;
+            }
+        }
+        assert!(decoded >= 1, "at least the keyframe must decode");
+    }
+
+    #[test]
+    fn av1_force_keyframe_controls_the_next_access_unit() {
+        let cfg = config(32, 24);
+        let mut encoder = Av1Encoder::new(cfg).unwrap();
+        // Warm up and consume the first four packets: [key, delta, delta, delta].
+        let first_batch = feed(&mut encoder, 8, 0);
+        assert_eq!(first_batch.len(), 4);
+        assert!(first_batch[0].keyframe, "first unit is a keyframe");
+        assert!(!first_batch[1].keyframe, "subsequent unit is a delta frame");
+        // force_keyframe marks the NEXT submitted frame; its packet emerges
+        // after the fixed lookahead (5 more calls: 4 deltas then the key).
+        encoder.force_keyframe();
+        let forced = feed(&mut encoder, 5, 200_000);
+        assert_eq!(forced.len(), 5);
+        assert!(
+            forced.last().unwrap().keyframe,
+            "force_keyframe must make the next unit a keyframe"
+        );
+    }
+
+    #[test]
+    fn av1_reconfigure_bitrate_keeps_resolution_and_stays_decodable() {
+        let cfg = config(32, 24);
+        let mut encoder = Av1Encoder::new(cfg).unwrap();
+        let mut decoder = Av1Decoder::new(cfg).unwrap();
+        let first_batch = feed(&mut encoder, 8, 0);
+        assert!(!first_batch.is_empty());
+        assert!(decoder.decode(&first_batch[0]).unwrap().is_some());
+        let gen_before = encoder.metadata().generation;
+        encoder.reconfigure_bitrate(1_200_000).unwrap();
+        assert_eq!(
+            encoder.metadata().generation,
+            gen_before,
+            "bitrate change must not bump config generation"
+        );
+        assert_eq!(
+            (
+                encoder.metadata().config.width,
+                encoder.metadata().config.height
+            ),
+            (32, 24)
+        );
+        // The rebuild resets the lookahead, so the next few calls warm up
+        // again; the first packet after the rebuild is a fresh keyframe.
+        let next_batch = feed(&mut encoder, 8, 400_000);
+        assert!(!next_batch.is_empty());
+        assert!(
+            next_batch[0].keyframe,
+            "bitrate reconfigure forces a keyframe for re-sync"
+        );
+        assert!(
+            decoder.decode(&next_batch[0]).unwrap().is_some(),
+            "stream must stay decodable after bitrate change"
+        );
+        encoder.reconfigure_bitrate(1_200_000).unwrap();
+        assert_eq!(encoder.metadata().config.target_bitrate_bps, 1_200_000);
+    }
+
+    #[test]
+    fn av1_configure_changes_resolution_without_session_restart() {
+        let mut encoder = Av1Encoder::new(config(32, 24)).unwrap();
+        // Warm-up on the old resolution.
+        let _ = feed(&mut encoder, 4, 0);
+        encoder.configure(config(48, 32)).unwrap();
+        assert_eq!(
+            encoder.metadata().generation,
+            1,
+            "resolution change bumps generation"
+        );
+        // Rebuild resets the lookahead: feed enough to get a packet at the
+        // new resolution.
+        let packets = feed(&mut encoder, 8, 0);
+        assert!(!packets.is_empty());
+        let frame = &packets[0];
+        assert_eq!((frame.width, frame.height), (48, 32));
+        assert!(frame.keyframe, "post-configure unit is a keyframe");
+    }
+
+    #[test]
+    fn create_encoder_and_decoder_dispatch_on_codec_name() {
+        let cfg = config(32, 24);
+        let enc_h264 = create_encoder("h264", cfg).unwrap();
+        assert_eq!(enc_h264.metadata().codec, CodecKind::H264);
+        let enc_av1 = create_encoder("av1", cfg).unwrap();
+        assert_eq!(enc_av1.metadata().codec, CodecKind::Av1);
+        let dec_h264 = create_decoder("h264", cfg).unwrap();
+        assert_eq!(dec_h264.metadata().codec, CodecKind::H264);
+        let dec_av1 = create_decoder("av1", cfg).unwrap();
+        assert_eq!(dec_av1.metadata().codec, CodecKind::Av1);
+        // Unknown codec names are a clean rejection (callers fall back to
+        // H.264 before this point).
+        assert!(create_encoder("vp9", cfg).is_err());
+        assert!(create_decoder("vp9", cfg).is_err());
     }
 }

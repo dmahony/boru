@@ -317,6 +317,12 @@ async fn run_host_session_inner(
         }
     }
     let (capture_width, capture_height) = capture_dimensions(&capture);
+    // BORU-SS-34/35: advertise every codec this host can encode, ordered by
+    // preference — hardware VA-API H.264 when usable, then the OpenH264
+    // baseline, then AV1. The runtime legacy Accept carries no codec choice,
+    // so the host falls back to the first advertised codec; the versioned
+    // negotiation path (`ScreenShareOffer`/`ScreenShareAccept`, tested in
+    // session.rs) carries the real selection, and `create_encoder` honours it.
     let Some(hello) = manager.hello(session_id, available_encoder_codecs(), capture_width.min(u16::MAX as u32) as u16, capture_height.min(u16::MAX as u32) as u16, capture_fps as u16) else { return SessionTermination::NegotiationFailed };
     let addr = endpoint
         .remote_info(peer)
@@ -519,7 +525,14 @@ async fn run_host_session_inner(
     let mut config = CodecConfig::from_capture_config(&capture_config, encode_width, encode_height);
     let preset_reference = config;
     preset.apply_to_config(&mut config);
-    let Ok(mut encoder) = create_encoder(config) else { return SessionTermination::EncodeInitFailed };
+    // BORU-SS-34/35: build the encoder for the first advertised codec (the
+    // legacy runtime Accept carries no codec choice, so the host falls back
+    // to the first codec it advertised — hardware VA-API when usable, else
+    // OpenH264; the versioned negotiation path carries the real selection).
+    // `create_encoder` internally falls back to OpenH264 when a hardware
+    // path fails to initialise.
+    let host_codec = available_encoder_codecs().into_iter().next().unwrap_or_else(|| "h264".to_string());
+    let Ok(mut encoder) = create_encoder(&host_codec, config) else { return SessionTermination::EncodeInitFailed };
     let encoder_codec = encoder.metadata().codec.wire_name();
     // PDF Phase 12: one structured capture-start line with the negotiated
     // codec, dimensions, bitrate, frame rate and backend. Contains no media
