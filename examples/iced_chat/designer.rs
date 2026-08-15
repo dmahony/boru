@@ -573,6 +573,14 @@ impl DesignerState {
             DesignerMessage::ClearValidationErrors => self.validation_errors.clear(),
         }
     }
+
+    /// Record a rejected designer operation for the developer UI without
+    /// changing the live layout model.
+    pub fn reject(&mut self, message: impl Into<String>) {
+        self.drag_operation = None;
+        self.resize_operation = None;
+        self.validation_errors = vec![message.into()];
+    }
 }
 
 /// Snap a pointer-derived semantic position to the nearest layout slot.
@@ -692,5 +700,12 @@ mod tests {
         history.commit(&changed);
 
         assert!(history.undo(&changed).is_none());
+    }
+
+    #[test]
+    fn rejected_operation_is_retained_for_visual_feedback() {
+        let mut state = DesignerState::default();
+        state.reject("sidebar width is outside its constraints");
+        assert_eq!(state.validation_errors.len(), 1);
     }
 }

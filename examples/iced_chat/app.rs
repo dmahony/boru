@@ -19736,6 +19736,7 @@ impl IcedChat {
             return;
         };
         let (Some(section), Some(target)) = (operation.section, operation.proposed_index) else {
+            self.designer.reject("Drop rejected: no valid Home layout slot was selected");
             return;
         };
         let Some(source) = self
@@ -19745,6 +19746,7 @@ impl IcedChat {
             .iter()
             .position(|candidate| *candidate == section)
         else {
+            self.designer.reject("Drop rejected: the selected section is not in the Home layout");
             return;
         };
         if source == target {
@@ -19793,8 +19795,14 @@ impl IcedChat {
                     layout.sidebar.width + delta,
                     8.0,
                     self.designer.fine_adjust,
-                )
-                    .clamp(layout.sidebar.width_min, layout.sidebar.width_max);
+                );
+                if value < layout.sidebar.width_min || value > layout.sidebar.width_max {
+                    self.designer.reject(format!(
+                        "Resize rejected: sidebar width must stay between {:.0}px and {:.0}px",
+                        layout.sidebar.width_min, layout.sidebar.width_max
+                    ));
+                    return;
+                }
                 layout.sidebar.width = value;
                 value
             }
@@ -19803,8 +19811,14 @@ impl IcedChat {
                     layout.chat.message_max_width + delta,
                     8.0,
                     self.designer.fine_adjust,
-                )
-                    .clamp(1.0, layout.chat.bubble_max_width);
+                );
+                if value < 1.0 || value > layout.chat.bubble_max_width {
+                    self.designer.reject(format!(
+                        "Resize rejected: message width must stay between 1px and {:.0}px",
+                        layout.chat.bubble_max_width
+                    ));
+                    return;
+                }
                 layout.chat.message_max_width = value;
                 value
             }
@@ -19813,8 +19827,11 @@ impl IcedChat {
                     layout.chat.bubble_max_width + delta,
                     8.0,
                     self.designer.fine_adjust,
-                )
-                .clamp(1.0, 1200.0);
+                );
+                if value < 1.0 || value > 1200.0 {
+                    self.designer.reject("Resize rejected: composer width must stay between 1px and 1200px");
+                    return;
+                }
                 layout.chat.bubble_max_width = value;
                 value
             }
@@ -19863,7 +19880,34 @@ impl IcedChat {
             tracing::warn!(issues = ?validation_errors, "layout override rejected by validation");
             return;
         }
+        #[cfg(feature = "dev-ui")]
+        {
+            let serialized = match crate::layout_config::layout_config_to_toml(&overrides) {
+                Ok(text) => text,
+                Err(error) => {
+                    self.designer.reject(format!(
+                        "Layout rejected: cannot serialize configuration: {error}"
+                    ));
+                    return;
+                }
+            };
+            let round_tripped = match crate::layout_config::parse_layout_config(&serialized) {
+                Ok(candidate) => candidate,
+                Err(error) => {
+                    self.designer.reject(format!(
+                        "Layout rejected: serialized configuration cannot be reloaded: {error}"
+                    ));
+                    return;
+                }
+            };
+            if let Some(error) = crate::layout_config::validate_layout_overrides(&round_tripped).first() {
+                self.designer.reject(format!("Layout rejected after serialization: {error}"));
+                return;
+            }
+        }
         self.layout_overrides = overrides;
+        #[cfg(feature = "dev-ui")]
+        self.designer.validation_errors.clear();
         let (merged, warnings) = crate::layout_merge::merge_layout_config(
             &crate::layout::LayoutConfig::default(),
             &self.layout_overrides,
@@ -21225,16 +21269,33 @@ impl IcedChat {
 
         #[cfg(feature = "dev-ui")]
         let result = if self.designer.enabled {
+            let has_errors = !self.designer.validation_errors.is_empty();
+            let banner_text = if has_errors {
+                format!(
+                    "DESIGNER ERROR: {}",
+                    self.designer.validation_errors.first().cloned().unwrap_or_default()
+                )
+            } else {
+                "VISUAL DESIGNER ACTIVE".to_string()
+            };
             let banner = container(
-                text("VISUAL DESIGNER ACTIVE")
+                text(banner_text)
                     .size(12.0)
                     .color(Color::WHITE),
             )
             .padding(iced::Padding::from(5.0))
             .style(move |_| container::Style {
-                background: Some(iced::Background::Color(Color::from_rgb(0.12, 0.42, 0.28))),
+                background: Some(iced::Background::Color(if has_errors {
+                    Color::from_rgb(0.58, 0.12, 0.12)
+                } else {
+                    Color::from_rgb(0.12, 0.42, 0.28)
+                })),
                 border: iced::Border {
-                    color: Color::from_rgb(0.55, 0.95, 0.7),
+                    color: if has_errors {
+                        Color::from_rgb(1.0, 0.55, 0.55)
+                    } else {
+                        Color::from_rgb(0.55, 0.95, 0.7)
+                    },
                     width: 1.0,
                     radius: iced::border::Radius::from(4.0),
                 },
