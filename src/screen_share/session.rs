@@ -6,9 +6,10 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use super::protocol::{ControlMessage, Hello, Permission, SCREEN_SHARE_PROTOCOL_VERSION};
-use super::protocol::ScreenShareMessage;
+use super::capture::CaptureSource;
 use super::permissions::{Capability, SessionPermissions};
+use super::protocol::ScreenShareMessage;
+use super::protocol::{ControlMessage, Hello, Permission, SCREEN_SHARE_PROTOCOL_VERSION};
 
 /// Opaque identifier for one negotiation, independent of a conversation.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -76,6 +77,36 @@ pub enum SessionEvent {
     /// granted `Clipboard` capability — clipboard sync is never implied by
     /// remote control. The app places the text on the local clipboard.
     ClipboardReceived { session_id: ScreenShareSessionId, text: String },
+    /// The capture sources (monitors) available to the host, emitted before
+    /// the share starts (PDF Phase 10: "enumerate available monitors before
+    /// starting a share"). The app may present the list so the sharer can
+    /// choose the initial source; monitor switching UX is BORU-SS-29.
+    SourcesEnumerated {
+        session_id: ScreenShareSessionId,
+        sources: Vec<CaptureSource>,
+    },
+    /// The shared source changed (the host switched monitor, or the platform
+    /// renegotiated the capture geometry). Carries the NEW source identity
+    /// and dimensions; the wire `SourceChanged` message is sent BEFORE any
+    /// frame with the new geometry, and this event surfaces the same change
+    /// to the app UI.
+    SourceChanged {
+        session_id: ScreenShareSessionId,
+        source_id: u64,
+        title: String,
+        width: u32,
+        height: u32,
+    },
+    /// The shared source disappeared (monitor unplug / laptop dock-undock).
+    /// The host re-enumerated; `fallback` names the source it fell back to,
+    /// or `None` when no source remains and the stream is paused (the chat
+    /// session and the screen-share session itself survive — PDF Phase 10
+    /// requires graceful handling, not a crash or forced end).
+    SourceUnavailable {
+        session_id: ScreenShareSessionId,
+        reason: String,
+        fallback: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone)]

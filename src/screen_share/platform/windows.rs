@@ -113,6 +113,12 @@ impl std::fmt::Debug for GraphicsCapture {
 }
 
 impl GraphicsCapture {
+    /// The source id currently being captured, when the backend is streaming
+    /// a monitor (PDF Phase 10 source tracking).
+    pub fn active_source_id(&self) -> Option<CaptureSourceId> {
+        self.active_source
+    }
+
     pub fn new(queue_capacity: usize) -> Result<Self, ScreenShareError> {
         Ok(Self {
             state: GraphicsCaptureState::Idle,

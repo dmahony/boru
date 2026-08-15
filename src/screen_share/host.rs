@@ -13,14 +13,14 @@ use tokio::sync::mpsc;
 
 use super::{
     adaptation::{AdaptiveQuality, PacingController, QualityDecision, ViewerQualityRequest},
+    capture::{CaptureConfig, CaptureSource, CaptureSourceId},
     channels::{
         ControlChannel, ControlOut, MediaChannel, DEFAULT_CONTROL_QUEUE_CAPACITY,
         DEFAULT_MEDIA_QUEUE_CAPACITY,
     },
-    capture::CaptureConfig,
     codec::{CodecConfig, OpenH264Encoder, VideoEncoder},
     permissions::{Capability, SlidingWindowRateLimiter},
-    platform::{capture_dimensions, create_capture_source, CAPTURE_FPS},
+    platform::{capture_dimensions, create_capture_source, CAPTURE_FPS, ActiveCapture},
     protocol::{self, ControlMessage, InputEventKind, ScreenShareMessage, SCREEN_SHARE_PROTOCOL_VERSION},
     reconnect::{retry_reconnect, ReconnectPolicy},
     remote_input::{self, create_platform_backend, InputEvent, NormalizedPointer, RemoteInput},
@@ -51,6 +51,11 @@ pub enum HostCommand {
     /// Requires the explicitly granted `Clipboard` capability; never implied
     /// by remote control.
     SendClipboard(String),
+    /// Host user switches the shared monitor without ending the chat session
+    /// (PDF Phase 10). The host sends a `SourceChanged` message BEFORE any
+    /// frame with the new geometry, re-selects the capture source, forces a
+    /// keyframe, and surfaces `SessionEvent::SourceChanged` to the app.
+    SwitchSource(CaptureSourceId),
 }
 
 /// Run a full host session: dial the viewer, negotiate consent, then stream
@@ -104,8 +109,31 @@ async fn run_host_session_inner(
     // synthetic test pattern (demo/CI path).
     let mut capture = create_capture_source(false).await;
     tracing::info!(backend = capture.backend_name(), "screen-share capture backend selected");
-    let (capture_width, capture_height) = capture_dimensions(&capture);
     let capture_fps = CAPTURE_FPS;
+    let capture_config = CaptureConfig { target_fps: capture_fps, ..CaptureConfig::default() };
+    // PDF Phase 10: enumerate available monitors before starting the share
+    // and select the initial source (primary/first monitor). Monitor-based
+    // backends (X11, Windows) enumerate real sources via list_sources; the
+    // portal exposes a single pseudo-source (Wayland selection happens in
+    // the portal dialog); the test-pattern backend exposes its one source.
+    let mut current_source: Option<CaptureSource> = None;
+    match capture.list_sources() {
+        Ok(sources) => {
+            let initial = sources.first().cloned();
+            current_source = initial.clone();
+            if let Some(source) = &initial {
+                if let Err(error) = capture.start(source.id, &capture_config) {
+                    tracing::warn!(error = %error, "screen-share: initial source start failed; continuing with backend fallback");
+                    current_source = None;
+                }
+            }
+            let _ = events.send(SessionEvent::SourcesEnumerated { session_id, sources }).await;
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "screen-share: source enumeration failed; continuing without a monitor list");
+        }
+    }
+    let (capture_width, capture_height) = capture_dimensions(&capture);
     let Some(hello) = manager.hello(session_id, vec!["h264".to_string()], capture_width.min(u16::MAX as u32) as u16, capture_height.min(u16::MAX as u32) as u16, capture_fps as u16) else { return };
     let addr = endpoint
         .remote_info(peer)
@@ -227,6 +255,9 @@ async fn run_host_session_inner(
                 // media path is streaming; during negotiation the payload is
                 // dropped (never logged — PDF guardrail).
                 Some(HostCommand::SendClipboard(_)) => false,
+                // Source switching (PDF Phase 10) only applies once the media
+                // path is streaming; during negotiation it is ignored.
+                Some(HostCommand::SwitchSource(_)) => false,
                 None => return,
             },
             _ = tokio::time::sleep(Duration::from_millis(250)) => false,
@@ -254,9 +285,18 @@ async fn run_host_session_inner(
     let encode_width = capture_width & !1;
     let encode_height = capture_height & !1;
     if encode_width == 0 || encode_height == 0 { return; }
-    let capture_config = CaptureConfig { target_fps: capture_fps, ..CaptureConfig::default() };
     let mut config = CodecConfig::from_capture_config(&capture_config, encode_width, encode_height);
     let Ok(mut encoder) = OpenH264Encoder::new(config) else { return };
+    // PDF Phase 10: monitor unplug / laptop dock-undock handling. When no
+    // source remains the stream PAUSES (no frames sent) instead of ending
+    // the session; a periodic re-enumeration resumes with the first
+    // available source (dock-in).
+    let mut stream_paused = false;
+    let mut paused_check = std::time::Instant::now();
+    // The geometry last announced via SourceChanged, so a spontaneous
+    // platform renegotiation (monitor resize / portal format change) that
+    // the encoder cannot fully adopt does not re-announce on every frame.
+    let mut announced_geometry: Option<(u32, u32)> = None;
     // The remote-input backend is created LAZILY, only when the host
     // explicitly grants control (PDF Task 9.1 / T5.3: "Remote control must be
     // separately offered and explicitly accepted by the sharer"). A view-only
@@ -491,6 +531,32 @@ async fn run_host_session_inner(
                         }))
                         .await;
                 }
+                Some(HostCommand::SwitchSource(source_id)) => {
+                    // PDF Phase 10: the sharer switches the shared monitor
+                    // WITHOUT ending the Boru chat session. Sequencing
+                    // contract: the SourceChanged message is sent BEFORE any
+                    // frame with the new geometry, then the capture backend
+                    // re-selects the source, the encoder reconfigures and a
+                    // keyframe is forced so the viewer resynchronises
+                    // immediately.
+                    if let Some(geometry) = switch_capture_source(
+                        &mut capture,
+                        source_id,
+                        &capture_config,
+                        &mut config,
+                        &mut encoder,
+                        &mut adaptive,
+                        &control,
+                        session_id,
+                        events,
+                    )
+                    .await
+                    {
+                        announced_geometry = Some(geometry);
+                        current_source = capture.current_source().or_else(|| current_source.clone());
+                        stream_paused = false;
+                    }
+                }
                 None => return,
             },
             _ = interval.tick() => {
@@ -505,6 +571,39 @@ async fn run_host_session_inner(
                 last_tick = now;
                 if elapsed_us > frame_period_us {
                     pacing.note_missed_frames(elapsed_us / frame_period_us - 1);
+                }
+                if stream_paused {
+                    // PDF Phase 10: the shared source disappeared (monitor
+                    // unplug / dock-undock) and no fallback remained, so the
+                    // stream paused. Periodically re-enumerate: a dock-in may
+                    // have restored a monitor. Resume with the first
+                    // available source; the session (and the chat session it
+                    // belongs to) survived the whole time.
+                    if paused_check.elapsed() >= Duration::from_millis(1000) {
+                        paused_check = std::time::Instant::now();
+                        let sources = capture.list_sources().unwrap_or_default();
+                        if let Some(source) = sources.first().cloned() {
+                            if let Some(geometry) = switch_capture_source(
+                                &mut capture,
+                                source.id,
+                                &capture_config,
+                                &mut config,
+                                &mut encoder,
+                                &mut adaptive,
+                                &control,
+                                session_id,
+                                events,
+                            )
+                            .await
+                            {
+                                announced_geometry = Some(geometry);
+                                current_source = Some(source);
+                                stream_paused = false;
+                                tracing::info!(session = ?session_id, "screen-share: stream resumed after source reappeared");
+                            }
+                        }
+                    }
+                    continue 'streaming;
                 }
                 match capture.capture() {
                     Ok(Some(frame)) => {
@@ -535,6 +634,43 @@ async fn run_host_session_inner(
                                 if let Some(mut backend) = backend.take() { backend.shutdown().await; }
                                 return;
                             }
+                            // PDF Phase 10: send the explicit source-change /
+                            // config-change message BEFORE the media
+                            // dimensions change (platform renegotiation,
+                            // monitor resize without an explicit switch),
+                            // then force a keyframe so the viewer
+                            // resynchronises. The announcement is made at
+                            // most once per geometry to avoid flooding the
+                            // control channel when the encoder cannot fully
+                            // adopt the new size (adaptive clamping).
+                            let geometry = (frame.width & !1, frame.height & !1);
+                            if announced_geometry != Some(geometry) {
+                                let announced = if let Some(source) = capture.current_source() {
+                                    let message = source_changed_message(session_id, &source, capture_config.target_fps);
+                                    control.send(ControlOut::Versioned(message)).await.is_ok()
+                                } else {
+                                    false
+                                };
+                                if !announced {
+                                    // No tracked source identity (e.g. the
+                                    // whole-root fallback): announce the
+                                    // geometry change directly.
+                                    let _ = control
+                                        .send(ControlOut::Versioned(ScreenShareMessage::SourceChanged {
+                                            version: SCREEN_SHARE_PROTOCOL_VERSION,
+                                            session_id,
+                                            source_id: 1,
+                                            title: format!("Screen: {}x{}", frame.width, frame.height),
+                                            width: geometry.0.min(u16::MAX as u32) as u16,
+                                            height: geometry.1.min(u16::MAX as u32) as u16,
+                                            frame_rate: capture_config.target_fps.min(u16::MAX as u32) as u16,
+                                        }))
+                                        .await;
+                                }
+                                announced_geometry = Some(geometry);
+                                tracing::info!(session = ?session_id, width = frame.width, height = frame.height, "screen-share: announced capture geometry change before media");
+                            }
+                            encoder.force_keyframe();
                             // Track the new capture geometry in the adaptive
                             // controller (level preserved, viewer ceiling
                             // re-scaled) and apply its decision.
@@ -635,9 +771,29 @@ async fn run_host_session_inner(
                     }
                     Ok(None) => {}
                     Err(error) => {
-                        tracing::warn!(error = %error, "screen-share: capture failed, ending session");
-                        if let Some(mut backend) = backend.take() { backend.shutdown().await; }
-                        return;
+                        tracing::warn!(error = %error, "screen-share: capture failed");
+                        // PDF Phase 10: monitor unplug / laptop dock-undock.
+                        // Recover gracefully instead of ending the session:
+                        // re-enumerate and fall back to the first remaining
+                        // source, or pause the stream when none remains. The
+                        // chat session and the screen-share session both
+                        // survive — no crash, no forced end.
+                        if !recover_capture_source(
+                            &mut capture,
+                            &mut current_source,
+                            &capture_config,
+                            &mut config,
+                            &mut encoder,
+                            &mut adaptive,
+                            &control,
+                            session_id,
+                            events,
+                        )
+                        .await
+                        {
+                            stream_paused = true;
+                            paused_check = std::time::Instant::now();
+                        }
                     }
                 }
             }
@@ -783,4 +939,322 @@ async fn write_control_response(send: &mut iroh::endpoint::SendStream, message: 
     send.write_all(&bytes).await.map_err(|e| ScreenShareError::new(e.to_string()))?;
     send.finish().map_err(|e| ScreenShareError::new(e.to_string()))?;
     Ok(())
+}
+
+/// Build the wire `SourceChanged` message that MUST be sent BEFORE the first
+/// frame with the new geometry (PDF Phase 10: "send an explicit
+/// source-change/config-change message before media dimensions change").
+/// The dimensions are rounded down to even values to match what the encoder
+/// will actually produce. Pure helper so the sequencing contract is
+/// unit-testable without a live transport.
+fn source_changed_message(
+    session_id: ScreenShareSessionId,
+    source: &CaptureSource,
+    target_fps: u32,
+) -> ScreenShareMessage {
+    ScreenShareMessage::SourceChanged {
+        version: SCREEN_SHARE_PROTOCOL_VERSION,
+        session_id,
+        source_id: source.id.0,
+        title: source.title.clone(),
+        width: (source.width & !1).min(u16::MAX as u32) as u16,
+        height: (source.height & !1).min(u16::MAX as u32) as u16,
+        frame_rate: target_fps.min(u16::MAX as u32) as u16,
+    }
+}
+
+/// Select the fallback source after the current source disappears (monitor
+/// unplug / laptop dock-undock, PDF Phase 10). Keeps the current source when
+/// it is still enumerated (a transient error); otherwise falls back to the
+/// first remaining source. Returns `None` when no source remains — the
+/// stream pauses instead of ending the session.
+fn select_fallback_source(
+    sources: &[CaptureSource],
+    current: Option<CaptureSourceId>,
+) -> Option<CaptureSource> {
+    if let Some(current) = current {
+        if let Some(source) = sources.iter().find(|source| source.id == current) {
+            return Some(source.clone());
+        }
+    }
+    sources.first().cloned()
+}
+
+/// Plan a source switch (PDF Phase 10). Returns the wire `SourceChanged`
+/// message — which MUST be sent before any frame with the new geometry —
+/// and the encoder config the source requires, or `None` when `source_id`
+/// is not in the current enumeration (e.g. a monitor that was unplugged) or
+/// the source has no capturable even-sized geometry.
+fn plan_source_switch(
+    session_id: ScreenShareSessionId,
+    sources: &[CaptureSource],
+    source_id: CaptureSourceId,
+    target_fps: u32,
+    current: &CodecConfig,
+) -> Option<(ScreenShareMessage, CodecConfig)> {
+    let source = sources.iter().find(|source| source.id == source_id)?;
+    let width = source.width & !1;
+    let height = source.height & !1;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let mut config = *current;
+    config.width = width;
+    config.height = height;
+    config.target_fps = target_fps;
+    Some((source_changed_message(session_id, source, target_fps), config))
+}
+
+/// Execute a source switch (PDF Phase 10: the sharer switches the shared
+/// monitor without ending the Boru chat session). Sequencing contract:
+/// 1. the `SourceChanged` message is sent BEFORE any frame with the new
+///    geometry;
+/// 2. the capture backend re-selects the source (stop + start);
+/// 3. the encoder reconfigures to the new geometry (config-generation bump
+///    so the viewer re-initialises its decoder) and a keyframe is forced so
+///    the viewer resynchronises immediately;
+/// 4. `SessionEvent::SourceChanged` surfaces the change to the app UI.
+/// Returns `Some((width, height))` — the announced even-sized geometry — on
+/// success, `None` when the switch could not be applied (unknown source,
+/// transport failure), in which case the previous source stays active.
+#[allow(clippy::too_many_arguments)]
+async fn switch_capture_source(
+    capture: &mut ActiveCapture,
+    source_id: CaptureSourceId,
+    capture_config: &CaptureConfig,
+    config: &mut CodecConfig,
+    encoder: &mut OpenH264Encoder,
+    adaptive: &mut AdaptiveQuality,
+    control: &ControlChannel,
+    session_id: ScreenShareSessionId,
+    events: &mpsc::Sender<SessionEvent>,
+) -> Option<(u32, u32)> {
+    // Validate against the CURRENT enumeration (an unplugged monitor is no
+    // longer a valid switch target).
+    let sources = match capture.list_sources() {
+        Ok(sources) => sources,
+        Err(error) => {
+            tracing::warn!(error = %error, ?source_id, "screen-share: switch source failed (enumeration error)");
+            return None;
+        }
+    };
+    let Some(source) = sources.iter().find(|source| source.id == source_id) else {
+        tracing::warn!(?source_id, "screen-share: switch source failed (unknown source)");
+        return None;
+    };
+    let width = source.width & !1;
+    let height = source.height & !1;
+    if width == 0 || height == 0 {
+        tracing::warn!(?source_id, width, height, "screen-share: switch source failed (no capturable geometry)");
+        return None;
+    }
+    // 1. Announce the change BEFORE any frame with the new geometry.
+    let message = source_changed_message(session_id, source, capture_config.target_fps);
+    if let Err(error) = control.send(ControlOut::Versioned(message)).await {
+        tracing::warn!(error = %error, ?source_id, "screen-share: switch source failed (control channel)");
+        return None;
+    }
+    // 2. Re-select the source on the capture backend.
+    if let Err(error) = capture.switch_source(source.id, capture_config) {
+        tracing::warn!(error = %error, ?source_id, "screen-share: switch source failed (capture backend)");
+        return None;
+    }
+    // 3. Reconfigure the encoder for the new geometry. The adaptive
+    // controller's base is updated FIRST so its next update tick cannot
+    // revert the encoder to the OLD geometry; the encoder then adopts the
+    // decision (or the full source geometry when the decision is a no-op,
+    // e.g. switching between two same-sized monitors — the generation bump
+    // still tells the viewer to re-initialise its decoder).
+    let decision = adaptive.set_capture_geometry(width, height);
+    let changed = apply_quality_config(encoder, config, decision);
+    if !changed {
+        let mut next = *config;
+        next.width = width;
+        next.height = height;
+        next.target_fps = capture_config.target_fps;
+        let _ = encoder.reconfigure(next);
+        *config = next;
+    }
+    // Force a keyframe after the source/resolution change (PDF Phase 10).
+    encoder.force_keyframe();
+    // 4. Surface the change to the app UI.
+    let _ = events.send(SessionEvent::SourceChanged {
+        session_id,
+        source_id: source.id.0,
+        title: source.title.clone(),
+        width: source.width,
+        height: source.height,
+    }).await;
+    tracing::info!(session = ?session_id, ?source_id, title = %source.title, width, height, "screen-share: host switched source");
+    Some((width, height))
+}
+
+/// Recover from a capture failure (PDF Phase 10: monitor unplug, laptop
+/// dock/undock). Re-enumerates the backend; when the current source is gone
+/// it falls back to the first remaining source (announcing the change and
+/// forcing a keyframe), and when no source remains it pauses. Returns true
+/// when streaming should continue, false to pause. The chat session and the
+/// screen-share session survive either way — no crash, no forced end.
+#[allow(clippy::too_many_arguments)]
+async fn recover_capture_source(
+    capture: &mut ActiveCapture,
+    current_source: &mut Option<CaptureSource>,
+    capture_config: &CaptureConfig,
+    config: &mut CodecConfig,
+    encoder: &mut OpenH264Encoder,
+    adaptive: &mut AdaptiveQuality,
+    control: &ControlChannel,
+    session_id: ScreenShareSessionId,
+    events: &mpsc::Sender<SessionEvent>,
+) -> bool {
+    let sources = match capture.list_sources() {
+        Ok(sources) => sources,
+        Err(error) => {
+            tracing::warn!(error = %error, "screen-share: source re-enumeration failed during recovery; pausing");
+            let _ = events.send(SessionEvent::SourceUnavailable { session_id, reason: error.to_string(), fallback: None }).await;
+            return false;
+        }
+    };
+    let current_id = current_source.as_ref().map(|source| source.id);
+    let fallback = select_fallback_source(&sources, current_id);
+    let Some(fallback) = fallback else {
+        // No source remains — pause the stream (the session survives; a
+        // periodic re-enumeration resumes when a monitor re-appears).
+        let _ = events.send(SessionEvent::SourceUnavailable { session_id, reason: "no capture source remains (monitor unplugged?)".into(), fallback: None }).await;
+        return false;
+    };
+    // The current source is still enumerated: a transient failure. Pause
+    // briefly rather than re-arming the failing capture at frame rate; the
+    // paused recovery re-checks within a second.
+    if current_id == Some(fallback.id) {
+        let _ = events.send(SessionEvent::SourceUnavailable { session_id, reason: "capture failed; pausing until the source is stable".into(), fallback: Some(fallback.title.clone()) }).await;
+        return false;
+    }
+    // Switch to the first remaining source and continue streaming.
+    if switch_capture_source(capture, fallback.id, capture_config, config, encoder, adaptive, control, session_id, events).await.is_some() {
+        *current_source = Some(fallback.clone());
+        let _ = events.send(SessionEvent::SourceUnavailable { session_id, reason: "capture source changed after unplug".into(), fallback: Some(fallback.title.clone()) }).await;
+        true
+    } else {
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::screen_share::coords::MonitorGeometry;
+    use crate::screen_share::capture::{CaptureSource, CaptureSourceId, CaptureSourceKind};
+
+    fn source(id: u64, name: &str, width: u32, height: u32) -> CaptureSource {
+        CaptureSource {
+            id: CaptureSourceId(id),
+            kind: CaptureSourceKind::Monitor,
+            title: format!("{name}: {width}x{height}"),
+            width,
+            height,
+            geometry: Some(MonitorGeometry::new(0, 0, width, height)),
+        }
+    }
+
+    /// PDF Phase 10 sequencing contract: the `SourceChanged` message is
+    /// produced together with the encoder config that follows it, carries
+    /// the SAME new geometry, and is wire-valid BEFORE the dimensions
+    /// change. A source switch can never reconfigure the encoder without
+    /// first announcing the change.
+    #[test]
+    fn source_switch_plan_announces_before_dimensions_change() {
+        let sid = ScreenShareSessionId::from_bytes([9; 16]);
+        let sources = vec![
+            source(1, "DP-1", 1920, 1080),
+            source(2, "HDMI-A-0", 2560, 1440),
+        ];
+        let current = CodecConfig::default();
+        let (message, config) = plan_source_switch(sid, &sources, CaptureSourceId(2), 15, &current)
+            .expect("switch to the second monitor must plan");
+        match &message {
+            ScreenShareMessage::SourceChanged { source_id, title, width, height, frame_rate, .. } => {
+                assert_eq!(*source_id, 2);
+                assert_eq!(title, "HDMI-A-0: 2560x1440");
+                // The announced dimensions are exactly what the encoder will
+                // be reconfigured to (rounded to even).
+                assert_eq!((*width as u32, *height as u32), (config.width, config.height));
+                assert_eq!((config.width, config.height), (2560, 1440));
+                assert_eq!(*frame_rate as u32, config.target_fps);
+                assert_eq!(config.target_fps, 15);
+            }
+            other => panic!("expected SourceChanged plan, got {other:?}"),
+        }
+        // The message must be wire-valid before any frame with the new
+        // geometry arrives.
+        let bytes = message.encode().expect("announcement must be wire-valid");
+        assert_eq!(ScreenShareMessage::decode(&bytes).unwrap(), message);
+    }
+
+    /// The announcement message rounds odd source dimensions down to even
+    /// values so it always matches what the encoder will actually produce.
+    #[test]
+    fn source_changed_message_rounds_to_even_dimensions() {
+        let sid = ScreenShareSessionId::from_bytes([9; 16]);
+        let odd = source(7, "OddPanel", 1919, 1079);
+        let message = source_changed_message(sid, &odd, 15);
+        match &message {
+            ScreenShareMessage::SourceChanged { width, height, .. } => {
+                assert_eq!((*width, *height), (1918, 1078));
+            }
+            other => panic!("expected SourceChanged, got {other:?}"),
+        }
+        assert!(message.encode().is_ok(), "rounded announcement must validate");
+    }
+
+    /// A switch to a source that is NOT in the current enumeration (e.g. a
+    /// monitor that was unplugged) must not plan — the caller keeps the
+    /// previous source.
+    #[test]
+    fn plan_source_switch_rejects_unknown_or_absent_source() {
+        let sid = ScreenShareSessionId::from_bytes([9; 16]);
+        let sources = vec![source(1, "DP-1", 1920, 1080)];
+        assert!(
+            plan_source_switch(sid, &sources, CaptureSourceId(99), 15, &CodecConfig::default())
+                .is_none(),
+            "a monitor that is no longer enumerated must be rejected"
+        );
+        // A source with no capturable geometry (1x1 rounds to 0x0) is also
+        // rejected — it cannot be encoded.
+        let degenerate = vec![source(3, "Tiny", 1, 1)];
+        assert!(
+            plan_source_switch(sid, &degenerate, CaptureSourceId(3), 15, &CodecConfig::default())
+                .is_none()
+        );
+    }
+
+    /// PDF Phase 10 unplug handling: when the CURRENT source is still
+    /// enumerated, a transient capture failure keeps it (no needless
+    /// switch); the caller pauses briefly instead of looping.
+    #[test]
+    fn fallback_keeps_current_source_when_still_enumerated() {
+        let sources = vec![source(1, "DP-1", 1920, 1080), source(2, "HDMI-A-0", 1280, 720)];
+        let fallback = select_fallback_source(&sources, Some(CaptureSourceId(2))).expect("fallback");
+        assert_eq!(fallback.id, CaptureSourceId(2), "current source is still present");
+    }
+
+    /// PDF Phase 10 unplug handling: when the CURRENT source disappears from
+    /// the enumeration, the first remaining source is chosen as the
+    /// fallback so the stream continues without ending the session.
+    #[test]
+    fn fallback_picks_first_remaining_source_after_unplug() {
+        let remaining = vec![source(1, "DP-1", 1920, 1080)];
+        let fallback = select_fallback_source(&remaining, Some(CaptureSourceId(2))).expect("fallback");
+        assert_eq!(fallback.id, CaptureSourceId(1), "fall back to the remaining monitor");
+        assert_eq!(fallback.title, "DP-1: 1920x1080");
+    }
+
+    /// PDF Phase 10 unplug handling: when NO source remains the fallback is
+    /// None — the host pauses the stream (the session survives) instead of
+    /// ending it.
+    #[test]
+    fn fallback_returns_none_when_no_source_remains() {
+        assert!(select_fallback_source(&[], Some(CaptureSourceId(2))).is_none());
+        assert!(select_fallback_source(&[], None).is_none());
+    }
 }

@@ -62,6 +62,69 @@ impl ActiveCapture {
             Self::Graphics(_, dimensions) | Self::TestPattern(_, dimensions) => *dimensions,
         }
     }
+    /// Enumerate the capturable sources (monitors) for this backend
+    /// (PDF Phase 10: enumerate monitors before starting a share).
+    pub fn list_sources(
+        &self,
+    ) -> Result<Vec<crate::screen_share::CaptureSource>, crate::screen_share::ScreenShareError> {
+        match self {
+            Self::Graphics(capture, _) => {
+                crate::screen_share::capture::DesktopCaptureBackend::list_sources(capture)
+            }
+            Self::TestPattern(capture, _) => {
+                crate::screen_share::capture::DesktopCaptureBackend::list_sources(capture)
+            }
+        }
+    }
+    /// Begin capturing `source`; monitor-based backends select the monitor.
+    pub fn start(
+        &mut self,
+        source: crate::screen_share::CaptureSourceId,
+        config: &crate::screen_share::CaptureConfig,
+    ) -> Result<(), crate::screen_share::ScreenShareError> {
+        use crate::screen_share::capture::DesktopCaptureBackend;
+        match self {
+            Self::Graphics(capture, _) => DesktopCaptureBackend::start(capture, source, config.clone()),
+            Self::TestPattern(capture, _) => DesktopCaptureBackend::start(capture, source, config.clone()),
+        }
+    }
+    /// Switch the shared source without recreating the backend (PDF Phase
+    /// 10); monitor-based backends re-select (stop + start).
+    pub fn switch_source(
+        &mut self,
+        source: crate::screen_share::CaptureSourceId,
+        config: &crate::screen_share::CaptureConfig,
+    ) -> Result<(), crate::screen_share::ScreenShareError> {
+        use crate::screen_share::capture::DesktopCaptureBackend;
+        match self {
+            Self::Graphics(capture, _) => {
+                DesktopCaptureBackend::stop(capture);
+                DesktopCaptureBackend::start(capture, source, config.clone())
+            }
+            Self::TestPattern(capture, _) => {
+                if source != crate::screen_share::CaptureSourceId(0) {
+                    return Err(crate::screen_share::ScreenShareError::new("unknown capture source"));
+                }
+                Ok(())
+            }
+        }
+    }
+    /// The source currently being captured, when the backend tracks one.
+    pub fn current_source(&self) -> Option<crate::screen_share::CaptureSource> {
+        use crate::screen_share::capture::DesktopCaptureBackend;
+        match self {
+            Self::Graphics(capture, _) => {
+                let active = capture.active_source_id()?;
+                DesktopCaptureBackend::list_sources(capture)
+                    .ok()?
+                    .into_iter()
+                    .find(|source| source.id == active)
+            }
+            Self::TestPattern(capture, _) => DesktopCaptureBackend::list_sources(capture)
+                .ok()
+                .and_then(|mut sources| sources.pop()),
+        }
+    }
     /// Input backends on non-Linux platforms do not need a root-window
     /// origin (Windows SendInput uses virtual-screen coordinates; the portal
     /// uses relative motion), so the origin is always `(0, 0)` here.
@@ -92,6 +155,49 @@ impl ActiveCapture {
     pub fn dimensions(&self) -> (u32, u32) {
         match self {
             Self::TestPattern(_, dimensions) => *dimensions,
+        }
+    }
+    /// Enumerate the capturable sources for this backend (PDF Phase 10).
+    pub fn list_sources(
+        &self,
+    ) -> Result<Vec<crate::screen_share::CaptureSource>, crate::screen_share::ScreenShareError> {
+        match self {
+            Self::TestPattern(capture, _) => {
+                crate::screen_share::capture::DesktopCaptureBackend::list_sources(capture)
+            }
+        }
+    }
+    /// Begin capturing `source`; the synthetic backend accepts only its one
+    /// source.
+    pub fn start(
+        &mut self,
+        source: crate::screen_share::CaptureSourceId,
+        config: &crate::screen_share::CaptureConfig,
+    ) -> Result<(), crate::screen_share::ScreenShareError> {
+        use crate::screen_share::capture::DesktopCaptureBackend;
+        match self {
+            Self::TestPattern(capture, _) => DesktopCaptureBackend::start(capture, source, config.clone()),
+        }
+    }
+    /// Switch the shared source without recreating the backend (PDF Phase
+    /// 10); the synthetic backend accepts only its single source.
+    pub fn switch_source(
+        &mut self,
+        source: crate::screen_share::CaptureSourceId,
+        _config: &crate::screen_share::CaptureConfig,
+    ) -> Result<(), crate::screen_share::ScreenShareError> {
+        if source != crate::screen_share::CaptureSourceId(0) {
+            return Err(crate::screen_share::ScreenShareError::new("unknown capture source"));
+        }
+        Ok(())
+    }
+    /// The source currently being captured, when the backend tracks one.
+    pub fn current_source(&self) -> Option<crate::screen_share::CaptureSource> {
+        use crate::screen_share::capture::DesktopCaptureBackend;
+        match self {
+            Self::TestPattern(capture, _) => DesktopCaptureBackend::list_sources(capture)
+                .ok()
+                .and_then(|mut sources| sources.pop()),
         }
     }
     pub fn input_origin(&self) -> (i32, i32) {

@@ -93,11 +93,10 @@ use boru_core::call::history::{event_text as call_history_text, CallHistoryOutco
 use boru_core::call::{CallId, CallKind};
 #[cfg(feature = "screen-sharing")]
 use boru_core::screen_share::{
-    run_host_session, Capability, CapturedFrame, ControlMessage, HostCommand, InboundMedia,
-    InputEventKind, OpenH264Decoder, PixelFormat, ScreenShareMessage, ScreenShareProtocol,
-    MAX_CLIPBOARD_TEXT,
-    ScreenShareSessionId, SessionEvent, ViewerPipeline, DEFAULT_QUEUE_CAPACITY, MOD_ALT, MOD_CTRL,
-    MOD_META, MOD_SHIFT, SCREEN_SHARE_PROTOCOL_VERSION,
+    run_host_session, Capability, CapturedFrame, CaptureSource, ControlMessage, HostCommand,
+    InboundMedia, InputEventKind, OpenH264Decoder, PixelFormat, ScreenShareMessage,
+    ScreenShareProtocol, MAX_CLIPBOARD_TEXT, ScreenShareSessionId, SessionEvent, ViewerPipeline,
+    DEFAULT_QUEUE_CAPACITY, MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT, SCREEN_SHARE_PROTOCOL_VERSION,
 };
 #[cfg(feature = "video-calls")]
 use boru_core::call::video::VideoFrame;
@@ -4301,6 +4300,12 @@ pub struct IcedChat {
     /// Size of the last decoded frame (`width`, `height`), for the surface
     /// geometry. Set from `CapturedFrame` when a new frame arrives.
     screen_share_src_size: Option<(u32, u32)>,
+    #[cfg(feature = "screen-sharing")]
+    /// Monitors available to the host, captured before the share starts
+    /// (PDF Phase 10: "enumerate available monitors before starting a
+    /// share"). Populated by `SessionEvent::SourcesEnumerated`; the monitor
+    /// switching UX (BORU-SS-29) presents this list to the sharer.
+    screen_share_sources: Option<Vec<CaptureSource>>,
     /// Receiver for incoming inbox events.
     pub inbox_events_rx: Arc<Mutex<Receiver<InboxEvent>>>,
     /// Receiver for incoming whisper events.
@@ -8290,6 +8295,8 @@ impl IcedChat {
             screen_share_hover: None,
             #[cfg(feature = "screen-sharing")]
             screen_share_src_size: None,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_sources: None,
             inbox_events_rx,
             whisper_events_rx,
             profile_image_handle,
@@ -21585,6 +21592,36 @@ impl IcedChat {
                 tracing::info!("screen-share: peer clipboard text applied");
                 return iced::clipboard::write(text);
             }
+            SessionEvent::SourcesEnumerated { sources, .. } => {
+                // PDF Phase 10: the host enumerated its monitors before the
+                // share started. Store the list for the monitor-switching UX
+                // (BORU-SS-29); nothing else changes here.
+                self.screen_share_sources = Some(sources);
+                iced::Task::none()
+            }
+            SessionEvent::SourceChanged { width, height, title, .. } => {
+                // PDF Phase 10: the shared source changed (host switched
+                // monitor or the platform renegotiated geometry). The wire
+                // SourceChanged message already went out BEFORE the media
+                // dimensions change; keep the viewer surface geometry in
+                // sync here.
+                tracing::info!(title = %title, width, height, "screen-share: source changed");
+                self.screen_share_src_size = Some((width, height));
+                iced::Task::none()
+            }
+            SessionEvent::SourceUnavailable { reason, fallback, .. } => {
+                // PDF Phase 10: monitor unplug / laptop dock-undock handled
+                // gracefully. The host either fell back to another source or
+                // paused the stream; the chat session survives either way.
+                let message = match fallback {
+                    Some(name) => format!("Screen share paused — {reason} (using {name})"),
+                    None => format!("Screen share paused — {reason}"),
+                };
+                tracing::warn!("{message}");
+                self.toast_message = Some(message);
+                self.toast_counter = 160;
+                iced::Task::none()
+            }
         }
     }
 
@@ -21614,6 +21651,7 @@ impl IcedChat {
         self.screen_share_drag = None;
         self.screen_share_hover = None;
         self.screen_share_src_size = None;
+        self.screen_share_sources = None;
     }
 
     pub fn subscription(

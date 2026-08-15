@@ -1697,6 +1697,9 @@ pub struct X11Capture {
     selected: Option<CaptureRect>,
     /// Whether [`DesktopCaptureBackend::start`] has been called.
     started: bool,
+    /// The source id selected via [`DesktopCaptureBackend::start`], used to
+    /// report the current source for source-change handling (PDF Phase 10).
+    current_source: Option<CaptureSourceId>,
 }
 
 impl X11Capture {
@@ -1746,6 +1749,7 @@ impl X11Capture {
             timestamp_us: 0,
             selected: None,
             started: false,
+            current_source: None,
         })
     }
 
@@ -1968,6 +1972,7 @@ impl DesktopCaptureBackend for X11Capture {
             width: monitor.width,
             height: monitor.height,
         });
+        self.current_source = Some(source);
         self.started = true;
         Ok(())
     }
@@ -1981,12 +1986,22 @@ impl DesktopCaptureBackend for X11Capture {
         let Some(rect) = self.selected else {
             return Err(ScreenShareError::new("capture has no selected source"));
         };
+        // A monitor whose rectangle lies entirely outside the root window is
+        // gone (unplugged / undocked). Surface it as a typed error instead of
+        // a silent "no frame" so the host can recover gracefully (PDF Phase
+        // 10: re-enumerate, fall back to a remaining source, or pause).
+        if clip_to_root(rect, self.width, self.height).is_none() {
+            return Err(ScreenShareError::new(
+                "capture source unavailable (monitor unplugged or outside the root)",
+            ));
+        }
         self.capture_rect(rect)
     }
 
     fn stop(&mut self) {
         self.started = false;
         self.selected = None;
+        self.current_source = None;
     }
 }
 
@@ -2105,7 +2120,17 @@ impl ActiveCapture {
     pub fn capture(&mut self) -> Result<Option<CapturedFrame>, ScreenShareError> {
         match self {
             ActiveCapture::Portal(capture) => capture.capture(),
-            ActiveCapture::X11(capture) => capture.capture(),
+            // The X11 backend captures the SELECTED monitor once started
+            // (PDF Phase 10 monitor sharing); before start it falls back to
+            // whole-root capture so an unstarted backend still produces
+            // frames instead of erroring out.
+            ActiveCapture::X11(capture) => {
+                if capture.started {
+                    <X11Capture as DesktopCaptureBackend>::next_frame(capture)
+                } else {
+                    <X11Capture as ScreenCapture>::capture(capture)
+                }
+            }
             ActiveCapture::TestPattern(capture, _) => capture.capture(),
         }
     }
@@ -2116,8 +2141,106 @@ impl ActiveCapture {
             ActiveCapture::Portal(capture) => {
                 capture.negotiated_size().unwrap_or((DEMO_WIDTH, DEMO_HEIGHT))
             }
-            ActiveCapture::X11(capture) => (capture.width, capture.height),
+            // Once a monitor is selected, the shared source IS that monitor
+            // (PDF Phase 10); before selection fall back to the root size.
+            ActiveCapture::X11(capture) => capture
+                .selected
+                .map(|rect| (rect.width as u32, rect.height as u32))
+                .unwrap_or((capture.width, capture.height)),
             ActiveCapture::TestPattern(_, size) => *size,
+        }
+    }
+
+    /// Enumerate the capturable sources (monitors) available to this backend
+    /// (PDF Phase 10: "enumerate available monitors before starting a
+    /// share"). The portal backend exposes a single pseudo-source because
+    /// Wayland monitor selection is performed by the portal dialog, not by
+    /// the capture client; the test-pattern backend exposes its one source.
+    pub fn list_sources(&self) -> Result<Vec<CaptureSource>, ScreenShareError> {
+        match self {
+            ActiveCapture::Portal(capture) => {
+                let (width, height) = capture.negotiated_size().unwrap_or((DEMO_WIDTH, DEMO_HEIGHT));
+                Ok(vec![CaptureSource {
+                    id: CaptureSourceId(1),
+                    kind: CaptureSourceKind::Desktop,
+                    title: format!("Portal output: {width}x{height}"),
+                    width,
+                    height,
+                    geometry: None,
+                }])
+            }
+            ActiveCapture::X11(capture) => DesktopCaptureBackend::list_sources(capture),
+            ActiveCapture::TestPattern(capture, _) => DesktopCaptureBackend::list_sources(capture),
+        }
+    }
+
+    /// Begin capturing `source`. Monitor-based backends select the monitor
+    /// (X11 RandR rect); the portal and test-pattern backends capture a
+    /// fixed surface, so start is a no-op / single-source validation.
+    pub fn start(
+        &mut self,
+        source: CaptureSourceId,
+        config: &CaptureConfig,
+    ) -> Result<(), ScreenShareError> {
+        match self {
+            ActiveCapture::Portal(_) => Ok(()),
+            ActiveCapture::X11(capture) => DesktopCaptureBackend::start(capture, source, config.clone()),
+            ActiveCapture::TestPattern(capture, _) => DesktopCaptureBackend::start(capture, source, config.clone()),
+        }
+    }
+
+    /// Switch the shared source without recreating the backend (PDF Phase
+    /// 10: the sharer can switch monitors without ending the chat session).
+    /// Monitor-based backends re-select the source (stop + start); the
+    /// portal backend returns a typed error because Wayland source switching
+    /// requires a fresh portal selection; the test-pattern backend accepts
+    /// only its single source.
+    pub fn switch_source(
+        &mut self,
+        source: CaptureSourceId,
+        config: &CaptureConfig,
+    ) -> Result<(), ScreenShareError> {
+        match self {
+            ActiveCapture::Portal(_) => Err(ScreenShareError::new(
+                "portal backend cannot switch sources; re-select through the portal",
+            )),
+            ActiveCapture::X11(capture) => {
+                DesktopCaptureBackend::stop(capture);
+                DesktopCaptureBackend::start(capture, source, config.clone())
+            }
+            ActiveCapture::TestPattern(capture, _) => {
+                if source != CaptureSourceId(0) {
+                    return Err(ScreenShareError::new("unknown capture source"));
+                }
+                // The synthetic source is a no-op switch; ensure the backend
+                // is started so the lifecycle stays consistent (an already
+                // started backend reports "already started", which is fine).
+                let _ = DesktopCaptureBackend::start(capture, source, config.clone());
+                Ok(())
+            }
+        }
+    }
+
+    /// The source currently being captured, when the backend tracks one.
+    pub fn current_source(&self) -> Option<CaptureSource> {
+        match self {
+            ActiveCapture::Portal(capture) => {
+                let (width, height) = capture.negotiated_size().unwrap_or((DEMO_WIDTH, DEMO_HEIGHT));
+                Some(CaptureSource {
+                    id: CaptureSourceId(1),
+                    kind: CaptureSourceKind::Desktop,
+                    title: format!("Portal output: {width}x{height}"),
+                    width,
+                    height,
+                    geometry: None,
+                })
+            }
+            ActiveCapture::X11(capture) => capture
+                .current_source
+                .and_then(|id| capture.list_sources().ok()?.into_iter().find(|source| source.id == id)),
+            ActiveCapture::TestPattern(capture, _) => {
+                DesktopCaptureBackend::list_sources(capture).ok().and_then(|mut sources| sources.pop())
+            }
         }
     }
 

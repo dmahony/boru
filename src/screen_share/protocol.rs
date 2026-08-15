@@ -38,6 +38,10 @@ pub const MAX_SCREEN_SHARE_MESSAGE: usize = MAX_MEDIA_FRAME + 4096;
 /// Maximum UTF-8 bytes in one text-only clipboard payload (PDF Task 9.3).
 /// Text-only sync; files and rich clipboard formats are deferred.
 pub const MAX_CLIPBOARD_TEXT: usize = 512 * 1024;
+/// Maximum UTF-8 bytes in a source title advertised by a `SourceChanged`
+/// message (PDF Phase 10). Monitor names are short (`DP-1: 1920x1080`);
+/// this bound keeps untrusted peer text out of unbounded allocations.
+pub const MAX_SOURCE_NAME: usize = 128;
 
 /// A bounded, explicit view-only permission. Remote control is intentionally absent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -420,6 +424,31 @@ pub enum ScreenShareMessage {
         /// UTF-8 text payload (bounded by [`MAX_CLIPBOARD_TEXT`]).
         text: String,
     },
+    /// Host → viewer: the shared source (monitor/window) changed and the
+    /// following media units use the NEW geometry. Sent BEFORE the first
+    /// frame with the new dimensions so the viewer can re-initialise its
+    /// decoder / update its UI before the dimensions actually change (PDF
+    /// Phase 10: "send an explicit source-change/config-change message
+    /// before media dimensions change"). Also sent when the platform
+    /// renegotiates the capture geometry (monitor resize, portal format
+    /// change) with the host's current source identity.
+    SourceChanged {
+        /// Wire protocol version.
+        version: u16,
+        /// Session the source change applies to.
+        session_id: ScreenShareSessionId,
+        /// Stable id of the newly selected source (monitor). Non-zero.
+        source_id: u64,
+        /// Human-readable source name (e.g. `DP-1: 1920x1080`), bounded by
+        /// [`MAX_SOURCE_NAME`].
+        title: String,
+        /// New capture width in pixels.
+        width: u16,
+        /// New capture height in pixels.
+        height: u16,
+        /// New target frame rate in frames per second.
+        frame_rate: u16,
+    },
 }
 
 impl ScreenShareMessage {
@@ -487,6 +516,14 @@ impl ScreenShareMessage {
             Self::Clipboard { version, session_id, text, .. } => {
                 if *session_id == ScreenShareSessionId::zero() { return Err(ProtocolError::Malformed("empty session id".into())); }
                 if text.is_empty() || text.len() > MAX_CLIPBOARD_TEXT { return Err(ProtocolError::Malformed("invalid clipboard text".into())); }
+                *version
+            }
+            Self::SourceChanged { version, session_id, source_id, title, width, height, frame_rate } => {
+                if *session_id == ScreenShareSessionId::zero() { return Err(ProtocolError::Malformed("empty session id".into())); }
+                if *source_id == 0 { return Err(ProtocolError::Malformed("empty source id".into())); }
+                if title.is_empty() || title.len() > MAX_SOURCE_NAME || !title.is_ascii() { return Err(ProtocolError::Malformed("invalid source title".into())); }
+                if *width == 0 || *height == 0 || *width > 16_384 || *height > 16_384 { return Err(ProtocolError::Malformed("invalid dimensions".into())); }
+                if *frame_rate == 0 || *frame_rate > 240 { return Err(ProtocolError::Malformed("invalid frame rate".into())); }
                 *version
             }
         };
@@ -777,6 +814,20 @@ impl ScreenShareProtocol {
                     let _ = self.events.try_send(SessionEvent::ClipboardReceived { session_id, text });
                 }
             }
+            // PDF Phase 10: the host switched the shared source (monitor) or
+            // the platform renegotiated geometry. Surface the change to the
+            // app BEFORE the following media units carry the new dimensions
+            // so the viewer can update its UI / decoder state in time.
+            ScreenShareMessage::SourceChanged { session_id, source_id, title, width, height, frame_rate, .. } => {
+                tracing::info!(session = ?session_id, source_id, title = %title, width, height, frame_rate, "screen-share: viewer source change announced");
+                let _ = self.events.try_send(SessionEvent::SourceChanged {
+                    session_id,
+                    source_id,
+                    title,
+                    width: width as u32,
+                    height: height as u32,
+                });
+            }
             // Remaining lifecycle/media messages are handled by the host/viewer
             // once streaming starts (BORU-SS-09+); the negotiation loop does
             // not act on them.
@@ -906,13 +957,15 @@ mod tests {
     fn quality_update() -> ScreenShareMessage { ScreenShareMessage::QualityUpdate { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid(), target_bitrate_bps: 1_000_000, max_frame_rate: 30, scale_factor: 100 } }
     fn protocol_error() -> ScreenShareMessage { ScreenShareMessage::Error { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid(), code: 1, message: "encode failure".into() } }
     fn clipboard() -> ScreenShareMessage { ScreenShareMessage::Clipboard { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid(), nonce: [0xAB; 16], text: "hello clipboard".into() } }
+    fn source_changed() -> ScreenShareMessage { ScreenShareMessage::SourceChanged { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid(), source_id: 7, title: "DP-1: 1920x1080".into(), width: 1920, height: 1080, frame_rate: 30 } }
 
     /// Every one of the Task 2.3 message types plus the Task 9.3 Clipboard
-    /// message must survive a postcard encode → decode round trip unchanged.
+    /// and Task 10 SourceChanged messages must survive a postcard encode →
+    /// decode round trip unchanged.
     #[test]
     fn round_trip_all_screen_share_messages() {
-        let messages = [offer(), accept(), reject(), started(), stopped(), stream_config(), video_packet(), keyframe_request(), quality_update(), protocol_error(), clipboard()];
-        assert_eq!(messages.len(), 11, "the Task 2.3 message set (ten) plus Task 9.3 Clipboard must have eleven types");
+        let messages = [offer(), accept(), reject(), started(), stopped(), stream_config(), video_packet(), keyframe_request(), quality_update(), protocol_error(), clipboard(), source_changed()];
+        assert_eq!(messages.len(), 12, "the Task 2.3 message set (ten) plus Task 9.3 Clipboard and Task 10 SourceChanged must have twelve types");
         for message in messages {
             let bytes = message.encode().expect("encode should succeed");
             assert_eq!(ScreenShareMessage::decode(&bytes).expect("decode should succeed"), message);
@@ -971,10 +1024,49 @@ mod tests {
     /// are rejected cleanly.
     #[test]
     fn unknown_discriminant_is_rejected_cleanly() {
-        // The enum has eleven variants → postcard discriminants 0..=10.
-        assert!(ScreenShareMessage::decode(&[11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).is_err());
+        // The enum has twelve variants → postcard discriminants 0..=11.
+        assert!(ScreenShareMessage::decode(&[12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).is_err());
         // A multi-byte varint far outside the variant range.
         assert!(ScreenShareMessage::decode(&[0xff, 0xff, 0xff, 0xff]).is_err());
+    }
+
+    /// PDF Phase 10: the source-change message is bounded and must reference a
+    /// real source. A SourceChanged message with no source id, no title, an
+    /// oversized/non-ASCII title, invalid dimensions, or an invalid frame rate
+    /// is rejected.
+    #[test]
+    fn source_changed_validation_bounds_fields() {
+        let base = source_changed();
+        // Empty source id is rejected.
+        let mut empty_id = base.clone();
+        if let ScreenShareMessage::SourceChanged { source_id, .. } = &mut empty_id { *source_id = 0; }
+        assert!(matches!(empty_id.encode(), Err(ProtocolError::Malformed(_))));
+        // Empty title is rejected.
+        let mut empty_title = base.clone();
+        if let ScreenShareMessage::SourceChanged { title, .. } = &mut empty_title { title.clear(); }
+        assert!(matches!(empty_title.encode(), Err(ProtocolError::Malformed(_))));
+        // Oversized title is rejected.
+        let mut huge_title = base.clone();
+        if let ScreenShareMessage::SourceChanged { title, .. } = &mut huge_title { *title = "x".repeat(MAX_SOURCE_NAME + 1); }
+        assert!(matches!(huge_title.encode(), Err(ProtocolError::Malformed(_))));
+        // Non-ASCII titles are rejected (untrusted peer text stays ASCII).
+        let mut bad_title = base.clone();
+        if let ScreenShareMessage::SourceChanged { title, .. } = &mut bad_title { *title = "モニター".into(); }
+        assert!(matches!(bad_title.encode(), Err(ProtocolError::Malformed(_))));
+        // Zero dimensions are rejected.
+        let mut zero_dims = base.clone();
+        if let ScreenShareMessage::SourceChanged { width, .. } = &mut zero_dims { *width = 0; }
+        assert!(matches!(zero_dims.encode(), Err(ProtocolError::Malformed(_))));
+        // Zero frame rate is rejected.
+        let mut zero_fps = base.clone();
+        if let ScreenShareMessage::SourceChanged { frame_rate, .. } = &mut zero_fps { *frame_rate = 0; }
+        assert!(matches!(zero_fps.encode(), Err(ProtocolError::Malformed(_))));
+        // An empty session id is rejected.
+        let mut empty_session = base.clone();
+        if let ScreenShareMessage::SourceChanged { session_id, .. } = &mut empty_session { *session_id = ScreenShareSessionId::zero(); }
+        assert!(matches!(empty_session.encode(), Err(ProtocolError::Malformed(_))));
+        // The valid fixture still round-trips.
+        assert_eq!(ScreenShareMessage::decode(&base.encode().unwrap()).unwrap(), base);
     }
 
     /// Semantic invariants are enforced by validate() on both encode and
