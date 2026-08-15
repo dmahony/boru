@@ -1501,6 +1501,8 @@ pub enum ThemeReloadStatus {
     None,
     /// The last "Reload From Disk" action reloaded `boru-ui.toml`.
     Reloaded,
+    /// An external reload arrived while the designer had unsaved changes.
+    Conflict(String),
     /// The last "Reload From Disk" action failed; the message (path +
     /// parser detail, per BORU-UI-18) is shown in the panel.
     Failed(String),
@@ -2260,6 +2262,10 @@ fn reload_theme_row(dark_mode: bool, status: &ThemeReloadStatus) -> Element<'sta
             } else {
                 Color::from_rgb(0.1, 0.55, 0.25)
             },
+        ),
+        ThemeReloadStatus::Conflict(e) => (
+            format!("⚠ conflict: {}", e.chars().take(120).collect::<String>()),
+            Color::from_rgb(0.95, 0.55, 0.15),
         ),
         ThemeReloadStatus::Failed(e) => {
             // Keep the panel compact: the full error is in the logs, the

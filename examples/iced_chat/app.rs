@@ -19910,6 +19910,16 @@ impl IcedChat {
         self.ui_theme_reload_tracker.mark_applied(generation);
         match result {
             Ok(config) => {
+                #[cfg(feature = "dev-ui")]
+                if self.designer.dirty {
+                    let message =
+                        "external boru-ui.toml change conflicts with unsaved designer edits"
+                            .to_string();
+                    self.inspector_draft.reload_status =
+                        crate::inspector::ThemeReloadStatus::Conflict(message.clone());
+                    tracing::warn!(generation, "{message}");
+                    return iced::Task::none();
+                }
                 tracing::info!(
                     generation,
                     "boru-ui.toml reloaded; applying live theme"
@@ -19965,6 +19975,16 @@ impl IcedChat {
 
         match result {
             Ok(overrides) => {
+                #[cfg(feature = "dev-ui")]
+                if self.designer.dirty {
+                    let message =
+                        "external boru-layout.toml change conflicts with unsaved designer edits"
+                            .to_string();
+                    self.inspector_draft.layout_reload_status =
+                        crate::layout_inspector::LayoutReloadStatus::Conflict(message.clone());
+                    tracing::warn!(generation, "{message}");
+                    return iced::Task::none();
+                }
                 tracing::info!(
                     generation,
                     "boru-layout.toml reloaded; merging + applying live layout"
@@ -20085,6 +20105,7 @@ impl IcedChat {
                     Ok(path) => {
                         self.inspector_draft.save_status =
                             crate::inspector::ThemeSaveStatus::Saved;
+                        self.designer.update(DesignerMessage::ClearDirty);
                         tracing::info!(
                             path = %path.display(),
                             "UI Inspector: theme saved to boru-ui.toml"
@@ -20140,7 +20161,10 @@ impl IcedChat {
                 self.inspector_draft.float_text.remove(&field);
                 let mut cfg = self.ui_theme_config.clone();
                 match crate::inspector::apply_float(&mut cfg, field, value) {
-                    Ok(()) => self.set_ui_theme_config(cfg),
+                    Ok(()) => {
+                        self.set_ui_theme_config(cfg);
+                        self.designer.update(DesignerMessage::MarkDirty);
+                    }
                     Err(e) => tracing::warn!(error = %e, "inspector: rejected float edit"),
                 }
                 iced::Task::none()
@@ -20151,7 +20175,10 @@ impl IcedChat {
                 // name and falls back gracefully if it is unknown.
                 let mut cfg = self.ui_theme_config.clone();
                 match crate::inspector::apply_choice(&mut cfg, field, &value) {
-                    Ok(()) => self.set_ui_theme_config(cfg),
+                    Ok(()) => {
+                        self.set_ui_theme_config(cfg);
+                        self.designer.update(DesignerMessage::MarkDirty);
+                    }
                     Err(e) => tracing::warn!(error = %e, "inspector: rejected choice edit"),
                 }
                 iced::Task::none()
@@ -20159,7 +20186,10 @@ impl IcedChat {
             InspectorMsg::SetBool { field, value } => {
                 let mut cfg = self.ui_theme_config.clone();
                 match crate::inspector::apply_bool(&mut cfg, field, value) {
-                    Ok(()) => self.set_ui_theme_config(cfg),
+                    Ok(()) => {
+                        self.set_ui_theme_config(cfg);
+                        self.designer.update(DesignerMessage::MarkDirty);
+                    }
                     Err(e) => tracing::warn!(error = %e, "inspector: rejected toggle edit"),
                 }
                 iced::Task::none()
@@ -20169,7 +20199,10 @@ impl IcedChat {
                 if let Ok(value) = text.trim().parse::<f32>() {
                     let mut cfg = self.ui_theme_config.clone();
                     match crate::inspector::apply_float(&mut cfg, field, value) {
-                        Ok(()) => self.set_ui_theme_config(cfg),
+                        Ok(()) => {
+                            self.set_ui_theme_config(cfg);
+                            self.designer.update(DesignerMessage::MarkDirty);
+                        }
                         Err(e) => tracing::warn!(error = %e, "inspector: rejected numeric input"),
                     }
                 }
@@ -20180,7 +20213,10 @@ impl IcedChat {
                 if let Some(cv) = crate::inspector::parse_hex_rgba(text.trim()) {
                     let mut cfg = self.ui_theme_config.clone();
                     match crate::inspector::apply_color(&mut cfg, field, cv) {
-                        Ok(()) => self.set_ui_theme_config(cfg),
+                        Ok(()) => {
+                            self.set_ui_theme_config(cfg);
+                            self.designer.update(DesignerMessage::MarkDirty);
+                        }
                         Err(e) => tracing::warn!(error = %e, "inspector: rejected colour input"),
                     }
                 }
@@ -20303,6 +20339,7 @@ impl IcedChat {
                     Ok(path) => {
                         self.inspector_draft.layout_save_status =
                             crate::layout_inspector::LayoutSaveStatus::Saved;
+                        self.designer.update(DesignerMessage::ClearDirty);
                         tracing::info!(
                             path = %path.display(),
                             "UI Inspector: layout saved to boru-layout.toml"
@@ -20354,7 +20391,10 @@ impl IcedChat {
                     field,
                     value,
                 ) {
-                    Ok(()) => self.set_layout_overrides(overrides),
+                    Ok(()) => {
+                        self.set_layout_overrides(overrides);
+                        self.designer.update(DesignerMessage::MarkDirty);
+                    }
                     Err(e) => {
                         tracing::warn!(error = %e, "inspector: rejected layout float edit")
                     }
@@ -20365,7 +20405,10 @@ impl IcedChat {
                 self.inspector_draft.layout_int_text.remove(&field);
                 let mut overrides = self.layout_overrides.clone();
                 match crate::layout_inspector::apply_layout_int(&mut overrides, field, value) {
-                    Ok(()) => self.set_layout_overrides(overrides),
+                    Ok(()) => {
+                        self.set_layout_overrides(overrides);
+                        self.designer.update(DesignerMessage::MarkDirty);
+                    }
                     Err(e) => tracing::warn!(error = %e, "inspector: rejected layout int edit"),
                 }
                 iced::Task::none()
@@ -20373,7 +20416,10 @@ impl IcedChat {
             InspectorMsg::SetLayoutChoice { field, value } => {
                 let mut overrides = self.layout_overrides.clone();
                 match crate::layout_inspector::apply_layout_choice(&mut overrides, field, &value) {
-                    Ok(()) => self.set_layout_overrides(overrides),
+                    Ok(()) => {
+                        self.set_layout_overrides(overrides);
+                        self.designer.update(DesignerMessage::MarkDirty);
+                    }
                     Err(e) => tracing::warn!(error = %e, "inspector: rejected layout choice edit"),
                 }
                 iced::Task::none()
@@ -20384,7 +20430,10 @@ impl IcedChat {
                     let mut overrides = self.layout_overrides.clone();
                     match crate::layout_inspector::apply_layout_float(&mut overrides, field, value)
                     {
-                        Ok(()) => self.set_layout_overrides(overrides),
+                        Ok(()) => {
+                            self.set_layout_overrides(overrides);
+                            self.designer.update(DesignerMessage::MarkDirty);
+                        }
                         Err(e) => {
                             tracing::warn!(error = %e, "inspector: rejected layout numeric input")
                         }
@@ -20397,7 +20446,10 @@ impl IcedChat {
                 if let Ok(value) = text.trim().parse::<i64>() {
                     let mut overrides = self.layout_overrides.clone();
                     match crate::layout_inspector::apply_layout_int(&mut overrides, field, value) {
-                        Ok(()) => self.set_layout_overrides(overrides),
+                        Ok(()) => {
+                            self.set_layout_overrides(overrides);
+                            self.designer.update(DesignerMessage::MarkDirty);
+                        }
                         Err(e) => {
                             tracing::warn!(error = %e, "inspector: rejected layout int input")
                         }
@@ -20413,7 +20465,10 @@ impl IcedChat {
                     .insert(field, text.clone());
                 let mut overrides = self.layout_overrides.clone();
                 match crate::layout_inspector::apply_layout_sections(&mut overrides, field, &text) {
-                    Ok(()) => self.set_layout_overrides(overrides),
+                    Ok(()) => {
+                        self.set_layout_overrides(overrides);
+                        self.designer.update(DesignerMessage::MarkDirty);
+                    }
                     Err(e) => {
                         tracing::debug!(error = %e, "inspector: layout sections input not yet valid")
                     }

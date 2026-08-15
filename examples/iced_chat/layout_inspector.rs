@@ -1313,6 +1313,8 @@ pub enum LayoutReloadStatus {
     None,
     /// The last "Reload Layout From Disk" action reloaded `boru-layout.toml`.
     Reloaded,
+    /// An external reload arrived while the designer had unsaved changes.
+    Conflict(String),
     /// The last "Reload Layout From Disk" action failed; the message (path +
     /// parser detail) is shown in the panel.
     Failed(String),
@@ -1751,6 +1753,10 @@ pub fn reload_layout_row(
             } else {
                 Color::from_rgb(0.1, 0.55, 0.25)
             },
+        ),
+        LayoutReloadStatus::Conflict(e) => (
+            format!("⚠ conflict: {}", e.chars().take(120).collect::<String>()),
+            Color::from_rgb(0.95, 0.55, 0.15),
         ),
         LayoutReloadStatus::Failed(e) => {
             let preview: String = e.chars().take(120).collect();

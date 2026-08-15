@@ -447,6 +447,7 @@ pub enum DesignerMessage {
     /// Increment/decrement the selected grid at the active preview breakpoint.
     AdjustGridColumns(i8),
     MarkDirty,
+    ClearDirty,
     SetValidationErrors(Vec<String>),
     ClearValidationErrors,
     /// Update the transient modifier state used by drag/resize gestures.
@@ -513,6 +514,7 @@ impl DesignerState {
             }
             DesignerMessage::AdjustGridColumns(_) => {}
             DesignerMessage::MarkDirty => self.dirty = true,
+            DesignerMessage::ClearDirty => self.dirty = false,
             DesignerMessage::SetValidationErrors(errors) => self.validation_errors = errors,
             DesignerMessage::ClearValidationErrors => self.validation_errors.clear(),
         }
