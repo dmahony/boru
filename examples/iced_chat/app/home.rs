@@ -1658,7 +1658,11 @@ impl IcedChat {
             .copied()
             .filter(|s| is_rail_section(*s))
             .collect();
-        let list_mode = matches!(layout.mode, crate::layout::HomeLayoutMode::List);
+        let list_mode = matches!(
+            layout.mode,
+            crate::layout::HomeLayoutMode::List | crate::layout::HomeLayoutMode::Column
+        );
+        let row_mode = matches!(layout.mode, crate::layout::HomeLayoutMode::Row);
 
         // Consume the built section elements in model order (each visible
         // section appears in exactly one list below, so `remove` never
@@ -1710,7 +1714,19 @@ impl IcedChat {
             grid_columns
         };
 
-        let main_content: iced::Element<'_, AppMessage> = if list_mode {
+        let main_content: iced::Element<'_, AppMessage> = if row_mode {
+            // Row mode is intentionally a semantic, responsive flow: it uses
+            // the same typed section order but lays cards side-by-side. The
+            // content width remains Fill so cards shrink rather than
+            // overflowing the responsive canvas.
+            let mut row = Row::new().spacing(card_gap).width(Length::Fill);
+            for section in &visible_sections {
+                if let Some(element) = section_elements.remove(section) {
+                    row = row.push(element);
+                }
+            }
+            row.into()
+        } else if list_mode {
             // Single stacked column in model order (all visible sections).
             column_from_sections(&visible_sections).into()
         } else if effective_columns <= 1 {

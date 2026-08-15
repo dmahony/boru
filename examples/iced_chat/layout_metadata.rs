@@ -44,6 +44,7 @@ pub enum LayoutOperation {
     Reorder,
     ResizeWidth,
     ResizeHeight,
+    ChangeMode,
     ChangeColumns,
     ChangeOrientation,
     Visibility,
@@ -185,8 +186,9 @@ fn component_metadata(
             id,
             "home",
             current_bounds,
-            &[Reorder, ChangeColumns, Visibility, Spacing],
+            &[Reorder, ChangeMode, ChangeColumns, Visibility, Spacing],
         )
+        .property("home.mode", format!("{:?}", layout.home.mode))
         .property(
             "home.quick_actions.columns_wide",
             layout.home.quick_actions.columns_wide,
@@ -297,5 +299,12 @@ mod tests {
         assert_eq!(meta.current_bounds, Some(bounds));
         assert_eq!(meta.layout_properties["sidebar.width"], "300");
         assert_eq!(meta.constraints["width"], Constraint::range(288.0, 320.0));
+    }
+
+    #[test]
+    fn quick_actions_advertises_supported_mode_editing() {
+        let meta = metadata_for(&LayoutConfig::default(), ComponentId::HomeQuickActions, None);
+        assert!(meta.allowed_operations.contains(&LayoutOperation::ChangeMode));
+        assert_eq!(meta.layout_properties["home.mode"], "Grid");
     }
 }

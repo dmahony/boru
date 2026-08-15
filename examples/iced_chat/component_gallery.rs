@@ -432,6 +432,8 @@ fn responsive_preview_controls(
     let layout = state.layout_preset.layout_config();
     let columns = layout.responsive.home_columns_for_width(preview_width);
     let mode = match layout.home.mode {
+        crate::layout::HomeLayoutMode::Row => "row",
+        crate::layout::HomeLayoutMode::Column => "column",
         crate::layout::HomeLayoutMode::Grid => "grid",
         crate::layout::HomeLayoutMode::List => "list",
     };

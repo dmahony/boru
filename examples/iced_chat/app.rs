@@ -19650,6 +19650,14 @@ impl IcedChat {
     /// history, the selected conversation, scroll position and composer
     /// input are all untouched.
     pub(crate) fn set_layout_overrides(&mut self, overrides: crate::layout::LayoutOverrides) {
+        let validation_errors = crate::layout_config::validate_layout_overrides(&overrides);
+        if !validation_errors.is_empty() {
+            #[cfg(feature = "dev-ui")]
+            self.designer
+                .update(DesignerMessage::SetValidationErrors(validation_errors.clone()));
+            tracing::warn!(issues = ?validation_errors, "layout override rejected by validation");
+            return;
+        }
         self.layout_overrides = overrides;
         let (merged, warnings) = crate::layout_merge::merge_layout_config(
             &crate::layout::LayoutConfig::default(),
@@ -19663,6 +19671,8 @@ impl IcedChat {
             self.inspector_draft.layout_merge_warnings = warnings;
         }
         self.set_layout_config(merged);
+        #[cfg(feature = "dev-ui")]
+        self.designer.update(DesignerMessage::ClearValidationErrors);
     }
 
     /// BORU-UI-09: build the dev UI Inspector panel element. Reads the live

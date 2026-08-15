@@ -34,7 +34,10 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use crate::layout::LayoutOverrides;
+use crate::layout::{
+    ButtonPlacement, CardOrientation, ComponentPlacementOverrides, LayoutOverrides,
+    MetadataAlignment, ThumbnailPosition,
+};
 
 /// File name of the dev layout override file (inside the data dir).
 pub const LAYOUT_CONFIG_FILE_NAME: &str = "boru-layout.toml";
@@ -318,7 +321,63 @@ pub fn validate_layout_overrides(overrides: &LayoutOverrides) -> Vec<String> {
             &mut issues,
         );
     }
+    if let Some(component) = &overrides.component {
+        validate_component_placement(
+            "component",
+            component.thumbnail_position,
+            component.metadata_alignment,
+            component.button_placement,
+            component.card_orientation,
+            &mut issues,
+        );
+        if let Some(video_card) = &component.video_card {
+            validate_component_placement_overrides("component.video_card", video_card, &mut issues);
+        }
+        if let Some(shared_by_me) = &component.shared_by_me {
+            validate_component_placement_overrides("component.shared_by_me", shared_by_me, &mut issues);
+        }
+    }
     issues
+}
+
+fn validate_component_placement_overrides(
+    path: &str,
+    overrides: &ComponentPlacementOverrides,
+    issues: &mut Vec<String>,
+) {
+    let defaults = crate::layout::ComponentPlacement::default();
+    validate_component_placement(
+        path,
+        overrides.thumbnail_position.or(Some(defaults.thumbnail_position)),
+        overrides.metadata_alignment.or(Some(defaults.metadata_alignment)),
+        overrides.button_placement.or(Some(defaults.button_placement)),
+        overrides.card_orientation.or(Some(defaults.card_orientation)),
+        issues,
+    );
+}
+
+fn validate_component_placement(
+    path: &str,
+    thumbnail: Option<ThumbnailPosition>,
+    _metadata: Option<MetadataAlignment>,
+    buttons: Option<ButtonPlacement>,
+    orientation: Option<CardOrientation>,
+    issues: &mut Vec<String>,
+) {
+    let Some(orientation) = orientation else { return };
+    let thumbnail = thumbnail.unwrap_or(ThumbnailPosition::Left);
+    let buttons = buttons.unwrap_or(ButtonPlacement::Below);
+    let vertical_thumbnail = matches!(thumbnail, ThumbnailPosition::Top | ThumbnailPosition::Bottom);
+    let horizontal_thumbnail = matches!(thumbnail, ThumbnailPosition::Left | ThumbnailPosition::Right);
+    if matches!(orientation, CardOrientation::Vertical) && !vertical_thumbnail {
+        issues.push(format!("{path}.card_orientation = Vertical requires thumbnail_position Top or Bottom"));
+    }
+    if matches!(orientation, CardOrientation::Horizontal) && !horizontal_thumbnail {
+        issues.push(format!("{path}.card_orientation = Horizontal requires thumbnail_position Left or Right"));
+    }
+    if matches!(buttons, ButtonPlacement::Side) && !matches!(orientation, CardOrientation::Horizontal) {
+        issues.push(format!("{path}.button_placement = Side requires card_orientation Horizontal"));
+    }
 }
 
 /// Load layout overrides from `<data_dir>/boru-layout.toml`.
@@ -378,6 +437,10 @@ pub fn save_layout_config(
     data_dir: &Path,
     config: &LayoutOverrides,
 ) -> Result<PathBuf, String> {
+    let issues = validate_layout_overrides(config);
+    if !issues.is_empty() {
+        return Err(format!("invalid layout overrides: {}", issues.join("; ")));
+    }
     let path = data_dir.join(LAYOUT_CONFIG_FILE_NAME);
     let text = layout_config_to_toml(config).map_err(|e| {
         format!("cannot serialize {}: {e}", path.display())
@@ -472,6 +535,23 @@ mod tests {
             LayoutConfig::default(),
             "example file values are the baseline and must reproduce the default layout"
         );
+    }
+
+    #[test]
+    fn rejects_unsupported_card_orientation_combinations() {
+        let vertical_with_left = parse_layout_config(
+            "[component.video_card]\ncard_orientation = \"Vertical\"\nthumbnail_position = \"Left\"\n",
+        )
+        .expect("config parses");
+        let issues = validate_layout_overrides(&vertical_with_left);
+        assert!(issues.iter().any(|issue| issue.contains("Vertical requires")));
+
+        let horizontal_with_top = parse_layout_config(
+            "[component.shared_by_me]\ncard_orientation = \"Horizontal\"\nthumbnail_position = \"Top\"\n",
+        )
+        .expect("config parses");
+        let issues = validate_layout_overrides(&horizontal_with_top);
+        assert!(issues.iter().any(|issue| issue.contains("Horizontal requires")));
     }
 
     #[test]
@@ -919,6 +999,9 @@ section_order = ["Chats", "Chats"]
         cfg.component
             .get_or_insert_with(Default::default)
             .card_orientation = Some(CardOrientation::Vertical);
+        cfg.component
+            .get_or_insert_with(Default::default)
+            .thumbnail_position = Some(ThumbnailPosition::Top);
 
         let path = save_layout_config(&dir, &cfg).expect("save succeeds");
         assert_eq!(path.file_name().unwrap(), LAYOUT_CONFIG_FILE_NAME);

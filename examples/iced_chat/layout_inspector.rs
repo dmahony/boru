@@ -476,7 +476,7 @@ impl LayoutField {
     pub fn choices(self) -> &'static [&'static str] {
         use LayoutField::*;
         match self {
-            HomeMode => &["Grid", "List"],
+            HomeMode => &["Row", "Column", "Grid", "List"],
             ComponentThumbnailPosition
             | ComponentVideoCardThumbnailPosition
             | ComponentSharedByMeThumbnailPosition => &["Left", "Right", "Top", "Bottom", "Hidden"],
@@ -616,6 +616,8 @@ pub fn read_layout_choice(layout: &LayoutConfig, field: LayoutField) -> &'static
     let c = &layout.component;
     match field {
         HomeMode => match layout.home.mode {
+            Row => "Row",
+            Column => "Column",
             Grid => "Grid",
             List => "List",
         },

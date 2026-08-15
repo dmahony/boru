@@ -172,6 +172,10 @@ impl HomeLayout {
 /// Grid/list presentation mode for the home dashboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
 pub enum HomeLayoutMode {
+    /// Horizontal flow of the dashboard sections.
+    Row,
+    /// Vertical flow of the dashboard sections.
+    Column,
     /// Two-column dashboard grid (baseline): main column + right rail.
     #[default]
     Grid,
