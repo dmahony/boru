@@ -5804,6 +5804,7 @@ pub enum AppMessage {
     #[cfg(feature = "screen-sharing")]
     /// Viewer key press/release while control is active (code = X11 keysym).
     ScreenShareKeyEvent { code: u32, pressed: bool },
+    #[cfg(feature = "screen-sharing")]
     /// Viewer wheel tick while control is active (normalized x/y + pixel
     /// deltas; the update maps the dominant axis to an X11 wheel button).
     ScreenShareWheel { x: f32, y: f32, dx: f32, dy: f32 },
@@ -8448,8 +8449,11 @@ impl IcedChat {
             screen_share_src_size: None,
             #[cfg(feature = "screen-sharing")]
             screen_share_sources: None,
+            #[cfg(feature = "screen-sharing")]
             screen_share_selected_source: None,
+            #[cfg(feature = "screen-sharing")]
             screen_share_viewing_peer: None,
+            #[cfg(feature = "screen-sharing")]
             screen_share_notice_ticks: 0,
             inbox_events_rx,
             whisper_events_rx,
