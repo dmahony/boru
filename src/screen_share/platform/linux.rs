@@ -40,8 +40,8 @@ use std::time::Duration;
 
 use crate::screen_share::{
     capture::FrameSink, CapturedFrame, CaptureConfig, CaptureSource, CaptureSourceId,
-    CaptureSourceKind, DesktopCaptureBackend, MonitorGeometry, PixelFormat, ScreenCapture,
-    ScreenShareError, TestPatternCapture,
+    CaptureSourceKind, DesktopCaptureBackend, DirtyRegion, FrameRect, MonitorGeometry, PixelFormat,
+    ScreenCapture, ScreenShareError, TestPatternCapture,
 };
 use super::linux_pw::{
     build_format_pod, normalize_buffer, parse_format_pod, NegotiatedFormat, SPA_PARAM_Buffers,
@@ -49,7 +49,9 @@ use super::linux_pw::{
 };
 use super::windows_common::monitor_source_id;
 use x11rb::connection::Connection as _;
+use x11rb::protocol::damage::{self, ConnectionExt as _};
 use x11rb::protocol::randr::{self, ConnectionExt as _};
+use x11rb::protocol::xfixes::{self, ConnectionExt as _};
 use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat, ImageOrder};
 
 /// State of the XDG ScreenCast portal session.
@@ -1671,6 +1673,46 @@ pub struct X11Monitor {
     pub primary: bool,
 }
 
+/// Nominal frame period (µs) for the X11 capture clock (~30 fps).
+const X11_FRAME_PERIOD_US: u64 = 33_333;
+
+/// XDamage subscription for one capture session (BORU-SS-32).
+///
+/// The XDamage extension tracks pixel changes on the root window. Each
+/// capture tick the accumulated region is drained into an XFIXES region
+/// (`DamageSubtract` with `repair=None`) and read back (`FetchRegion`); the
+/// reported rectangles are in root-window coordinates and are
+/// clipped/translated to the selected capture geometry when attaching
+/// [`DirtyRegion`] metadata. DamageNotify events are delivered to the
+/// creating client automatically, so the event queue is drained each tick to
+/// keep the connection socket from filling — the region query, not the
+/// events, is the authoritative damage source.
+struct DamageTracker {
+    /// The XDamage object id (RAW_RECTANGLES level).
+    damage: damage::Damage,
+    /// XFIXES region receiving the accumulated damage on each subtract.
+    region: xfixes::Region,
+    /// True until the first frame after (re)start: the first frame is
+    /// always reported fully dirty so the viewer gets a complete baseline.
+    first_frame: bool,
+    /// Number of frames skipped because no damage occurred (metrics).
+    skipped: u64,
+}
+
+/// Result of querying the damage extension for one capture tick.
+enum DamageQuery {
+    /// DAMAGE/XFIXES unavailable (or tracking failed): capture every frame
+    /// as before, without dirty metadata.
+    Unavailable,
+    /// No pixels changed since the last frame — the frame can be skipped.
+    Clean,
+    /// The first frame after (re)start: capture and report `Full`.
+    Full,
+    /// Root-space damage rectangles that changed. May be empty after
+    /// clipping to the capture geometry (damage outside the capture).
+    Dirty(Vec<FrameRect>),
+}
+
 /// Direct X11 capture: grabs a rectangle of the root window via `GetImage`
 /// and converts the ZPixmap buffer to RGBA8. This is the no-portal fallback —
 /// it makes real desktop sharing work on any X11 display without
@@ -1700,6 +1742,13 @@ pub struct X11Capture {
     /// The source id selected via [`DesktopCaptureBackend::start`], used to
     /// report the current source for source-change handling (PDF Phase 10).
     current_source: Option<CaptureSourceId>,
+    /// XDamage tracking state; `None` when the server lacks DAMAGE/XFIXES or
+    /// tracking was not set up (falls back to always-capture).
+    damage: Option<DamageTracker>,
+    /// Forces the next captured frame to [`DirtyRegion::Full`] regardless of
+    /// the damage region (e.g. the root window resized and the whole frame
+    /// must be treated as new).
+    force_full_next: bool,
 }
 
 impl X11Capture {
@@ -1750,6 +1799,8 @@ impl X11Capture {
             selected: None,
             started: false,
             current_source: None,
+            damage: None,
+            force_full_next: false,
         })
     }
 
@@ -1888,23 +1939,235 @@ impl X11Capture {
         }
     }
 
+    /// Subscribe to XDamage on the root window (BORU-SS-32).
+    ///
+    /// Negotiates DAMAGE 1.0 and XFIXES 5.0 (each version query must precede
+    /// every other request of its extension — damageproto.txt §8,
+    /// xfixesproto.txt §8), then creates the damage object at
+    /// [`damage::ReportLevel::RAW_RECTANGLES`] — the most detailed report
+    /// level, one DamageNotify per modified rectangle — and an XFIXES region
+    /// that `DamageSubtract` fills with the accumulated region each frame.
+    /// Falls back to `damage: None` (always capture) when either extension
+    /// is missing or a setup request fails, so damage awareness never breaks
+    /// capture.
+    fn setup_damage(&mut self) {
+        let damage_present = self
+            .conn
+            .query_extension(b"DAMAGE")
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+            .is_some_and(|reply| reply.present);
+        let xfixes_present = self
+            .conn
+            .query_extension(b"XFIXES")
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+            .is_some_and(|reply| reply.present);
+        if !damage_present || !xfixes_present {
+            tracing::info!(
+                damage = damage_present,
+                xfixes = xfixes_present,
+                "screen-share: X11 damage tracking unavailable (DAMAGE/XFIXES extension missing)"
+            );
+            return;
+        }
+        let setup = (|| -> Result<(damage::Damage, xfixes::Region), ScreenShareError> {
+            self.conn
+                .damage_query_version(1, 0)
+                .map_err(|e| ScreenShareError::new(format!("X11 DAMAGE query_version failed: {e}")))?
+                .reply()
+                .map_err(|e| ScreenShareError::new(format!("X11 DAMAGE query_version reply failed: {e}")))?;
+            self.conn
+                .xfixes_query_version(5, 0)
+                .map_err(|e| ScreenShareError::new(format!("X11 XFIXES query_version failed: {e}")))?
+                .reply()
+                .map_err(|e| ScreenShareError::new(format!("X11 XFIXES query_version reply failed: {e}")))?;
+            let damage_id = self
+                .conn
+                .generate_id()
+                .map_err(|e| ScreenShareError::new(format!("X11 generate_id failed: {e}")))?;
+            self.conn
+                .damage_create(damage_id, self.root, damage::ReportLevel::RAW_RECTANGLES)
+                .map_err(|e| ScreenShareError::new(format!("X11 DamageCreate failed: {e}")))?;
+            let region_id = self
+                .conn
+                .generate_id()
+                .map_err(|e| ScreenShareError::new(format!("X11 generate_id failed: {e}")))?;
+            self.conn
+                .xfixes_create_region(region_id, &[])
+                .map_err(|e| ScreenShareError::new(format!("X11 XFIXES CreateRegion failed: {e}")))?;
+            Ok((damage_id, region_id))
+        })();
+        match setup {
+            Ok((damage_id, region_id)) => {
+                tracing::info!("screen-share: X11 damage tracking active (RAW_RECTANGLES on root)");
+                self.damage = Some(DamageTracker {
+                    damage: damage_id,
+                    region: region_id,
+                    first_frame: true,
+                    skipped: 0,
+                });
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "screen-share: X11 damage tracking setup failed; falling back to full capture");
+            }
+        }
+    }
+
+    /// Destroy the damage object and region (idempotent; safe on teardown).
+    fn teardown_damage(&mut self) {
+        if let Some(tracker) = self.damage.take() {
+            let _ = self.conn.damage_destroy(tracker.damage);
+            let _ = self.conn.xfixes_destroy_region(tracker.region);
+        }
+    }
+
+    /// Drain the X event queue so DamageNotify events never fill the
+    /// connection socket. The events are delivered to the damage-creating
+    /// client automatically, but the accumulated-region query
+    /// ([`Self::fetch_damage_rects`]) is the authoritative damage source.
+    fn drain_events(&self) {
+        while let Ok(Some(_)) = self.conn.poll_for_event() {}
+    }
+
+    /// Query whether anything changed since the last frame.
+    ///
+    /// - [`DamageQuery::Unavailable`] when damage tracking is off — callers
+    ///   keep the pre-damage behavior (capture every frame, no dirty
+    ///   metadata).
+    /// - [`DamageQuery::Full`] for the first frame after (re)start, so the
+    ///   viewer receives a complete baseline.
+    /// - [`DamageQuery::Clean`] when no pixel changed — callers skip the
+    ///   frame (no GetImage, no encode, no transmit).
+    /// - [`DamageQuery::Dirty`] with root-space rectangles otherwise.
+    ///
+    /// Damage-query failures (server dropped the damage object, etc.) are
+    /// non-fatal: tracking is disabled and capture continues in the
+    /// [`DamageQuery::Unavailable`] fallback.
+    fn query_damage(&mut self) -> DamageQuery {
+        if self.damage.is_none() {
+            return DamageQuery::Unavailable;
+        }
+        self.drain_events();
+        // A resize/geometry change forces a full repaint regardless of the
+        // damage region (the whole frame is new to the viewer).
+        if self.force_full_next {
+            self.force_full_next = false;
+            return DamageQuery::Full;
+        }
+        // The first frame after (re)start is always fully dirty: the viewer
+        // needs a complete baseline even if nothing changed since the
+        // damage object was created.
+        if self.damage.as_ref().is_some_and(|tracker| tracker.first_frame) {
+            let tracker = self.damage.as_mut().expect("checked above");
+            tracker.first_frame = false;
+            return DamageQuery::Full;
+        }
+        match self.fetch_damage_rects() {
+            Ok(rects) if rects.is_empty() => {
+                if let Some(tracker) = self.damage.as_mut() {
+                    tracker.skipped += 1;
+                }
+                DamageQuery::Clean
+            }
+            Ok(rects) => DamageQuery::Dirty(rects),
+            Err(error) => {
+                tracing::warn!(error = %error, "screen-share: X11 damage query failed; disabling damage tracking");
+                self.damage = None;
+                DamageQuery::Unavailable
+            }
+        }
+    }
+
+    /// Drain the accumulated damage into the XFIXES region (`DamageSubtract`
+    /// with `repair=None` — per damageproto.txt §9 this sets the region to
+    /// the accumulated damage and clears the object) and read the resulting
+    /// root-space rectangles back (`FetchRegion`).
+    fn fetch_damage_rects(&mut self) -> Result<Vec<FrameRect>, ScreenShareError> {
+        let Some(tracker) = self.damage.as_ref() else {
+            return Ok(Vec::new());
+        };
+        self.conn
+            .damage_subtract(tracker.damage, 0u32, tracker.region)
+            .map_err(|e| ScreenShareError::new(format!("X11 DamageSubtract failed: {e}")))?;
+        let reply = self
+            .conn
+            .xfixes_fetch_region(tracker.region)
+            .map_err(|e| ScreenShareError::new(format!("X11 XFIXES FetchRegion failed: {e}")))?
+            .reply()
+            .map_err(|e| ScreenShareError::new(format!("X11 XFIXES FetchRegion reply failed: {e}")))?;
+        Ok(reply
+            .rectangles
+            .iter()
+            .map(|rect| FrameRect {
+                x: rect.x.max(0) as u32,
+                y: rect.y.max(0) as u32,
+                width: rect.width as u32,
+                height: rect.height as u32,
+            })
+            .filter(|rect| rect.width > 0 && rect.height > 0)
+            .collect())
+    }
+
+    /// Number of frames skipped by damage tracking since (re)start.
+    pub fn damage_skipped_frames(&self) -> u64 {
+        self.damage.as_ref().map_or(0, |tracker| tracker.skipped)
+    }
+
     /// Capture the given root-window rectangle, converting ZPixmap to RGBA8.
     /// The rectangle is clipped to the root bounds (RandR monitors can sit
     /// partially outside after resolution changes).
+    ///
+    /// Damage-aware (BORU-SS-32): when XDamage tracking is active the
+    /// accumulated region is queried first and an unchanged screen returns
+    /// `Ok(None)` without a GetImage — the host then skips encode and
+    /// transmit entirely. Frames that ARE captured carry their [`DirtyRegion`]
+    /// (first frame / resize → `Full`, otherwise the clipped rectangles), so
+    /// downstream stages can skip unchanged regions in the future.
     fn capture_rect(&mut self, rect: CaptureRect) -> Result<Option<CapturedFrame>, ScreenShareError> {
         let Some((x, y, width, height)) = clip_to_root(rect, self.width, self.height) else {
             return Ok(None);
         };
+        let clipped = CaptureRect { x, y, width, height };
+        // Skip the GetImage entirely when the DAMAGE extension reports no
+        // pixel change since the last frame.
+        let region = match self.query_damage() {
+            DamageQuery::Unavailable => None,
+            DamageQuery::Clean => {
+                self.advance_skipped_clock();
+                return Ok(None);
+            }
+            DamageQuery::Full => Some(DirtyRegion::Full),
+            DamageQuery::Dirty(rects) => {
+                let region = damage_region_for_capture(&rects, clipped);
+                if region.is_empty() {
+                    // Damage occurred but lies entirely outside the capture
+                    // geometry (e.g. another monitor repainted): nothing to
+                    // send for this source.
+                    self.advance_skipped_clock();
+                    return Ok(None);
+                }
+                Some(region)
+            }
+        };
         let reply = self
             .conn
-            .get_image(ImageFormat::Z_PIXMAP, self.root, x, y, width, height, u32::MAX)
+            .get_image(
+                ImageFormat::Z_PIXMAP,
+                self.root,
+                clipped.x,
+                clipped.y,
+                clipped.width,
+                clipped.height,
+                u32::MAX,
+            )
             .map_err(|e| ScreenShareError::new(format!("X11 GetImage failed: {e}")))?
             .reply()
             .map_err(|e| ScreenShareError::new(format!("X11 GetImage reply failed: {e}")))?;
         let pixels = convert_zpixmap_rgba(
             &reply.data,
-            width as usize,
-            height as usize,
+            clipped.width as usize,
+            clipped.height as usize,
             self.depth,
             self.lsb_first,
             self.red_mask,
@@ -1912,9 +2175,23 @@ impl X11Capture {
             self.blue_mask,
         )?;
         let timestamp_us = self.timestamp_us;
-        self.timestamp_us = self.timestamp_us.saturating_add(33_333);
-        CapturedFrame::cpu(timestamp_us, width as u32, height as u32, PixelFormat::Rgba8, pixels)
-            .map(Some)
+        self.timestamp_us = self.timestamp_us.saturating_add(X11_FRAME_PERIOD_US);
+        let mut frame = CapturedFrame::cpu(
+            timestamp_us,
+            clipped.width as u32,
+            clipped.height as u32,
+            PixelFormat::Rgba8,
+            pixels,
+        )?;
+        frame.dirty_region = region;
+        Ok(Some(frame))
+    }
+
+    /// Advance the frame clock by one frame period without capturing
+    /// (damage-aware skip), so the next captured frame's timestamp stays
+    /// close to wall-clock instead of jumping after a long static period.
+    fn advance_skipped_clock(&mut self) {
+        self.timestamp_us = self.timestamp_us.saturating_add(X11_FRAME_PERIOD_US);
     }
 }
 
@@ -1933,8 +2210,20 @@ impl ScreenCapture for X11Capture {
         if width == 0 || height == 0 {
             return Ok(None);
         }
+        // A root resize makes the whole frame new: force a full repaint even
+        // when the damage region is empty, so the viewer resynchronises to
+        // the new geometry promptly.
+        if width != self.width || height != self.height {
+            self.force_full_next = true;
+        }
         self.width = width;
         self.height = height;
+        // The unstarted whole-root fallback never goes through
+        // `DesktopCaptureBackend::start`, so subscribe to XDamage lazily on
+        // the first capture.
+        if self.damage.is_none() {
+            self.setup_damage();
+        }
         self.capture_rect(CaptureRect {
             x: 0,
             y: 0,
@@ -1973,6 +2262,19 @@ impl DesktopCaptureBackend for X11Capture {
             height: monitor.height,
         });
         self.current_source = Some(source);
+        // Damage-aware capture (BORU-SS-32): subscribe to XDamage on the
+        // root window. A tracker left over from the whole-root fallback is
+        // reset so the first frame of the newly selected source is reported
+        // fully dirty — the viewer needs a fresh baseline for the new
+        // geometry.
+        match self.damage.as_mut() {
+            Some(tracker) => {
+                tracker.first_frame = true;
+                tracker.skipped = 0;
+            }
+            None => self.setup_damage(),
+        }
+        self.force_full_next = false;
         self.started = true;
         Ok(())
     }
@@ -2002,6 +2304,7 @@ impl DesktopCaptureBackend for X11Capture {
         self.started = false;
         self.selected = None;
         self.current_source = None;
+        self.teardown_damage();
     }
 }
 
@@ -2024,6 +2327,45 @@ pub fn clip_to_root(
         return None;
     }
     Some((left as i16, top as i16, (right - left) as u16, (bottom - top) as u16))
+}
+
+/// Translate a root-space damage region into a capture-local [`DirtyRegion`]
+/// (BORU-SS-32).
+///
+/// `capture` is the root-space rectangle that was actually captured (already
+/// clipped to the root bounds), so every returned rectangle is guaranteed to
+/// lie inside the captured frame. Rectangles outside the capture are
+/// dropped; when the damage does not intersect the capture at all the result
+/// is [`DirtyRegion::Rects`] with no entries (the caller should skip the
+/// frame). When more than [`MAX_DIRTY_RECTS`] rectangles survive, the region
+/// collapses to [`DirtyRegion::Full`] — the metadata stays bounded and a
+/// near-full repaint is cheaper to encode as a full frame.
+pub fn damage_region_for_capture(rects: &[FrameRect], capture: CaptureRect) -> DirtyRegion {
+    const MAX_DIRTY_RECTS: usize = 16;
+    let x0 = capture.x.max(0) as u32;
+    let y0 = capture.y.max(0) as u32;
+    let right_limit = x0 + capture.width as u32;
+    let bottom_limit = y0 + capture.height as u32;
+    let mut out = Vec::with_capacity(rects.len().min(MAX_DIRTY_RECTS));
+    for rect in rects {
+        let left = rect.x.max(x0);
+        let top = rect.y.max(y0);
+        let right = (rect.x + rect.width).min(right_limit);
+        let bottom = (rect.y + rect.height).min(bottom_limit);
+        if left >= right || top >= bottom {
+            continue;
+        }
+        out.push(FrameRect {
+            x: left - x0,
+            y: top - y0,
+            width: right - left,
+            height: bottom - top,
+        });
+        if out.len() > MAX_DIRTY_RECTS {
+            return DirtyRegion::Full;
+        }
+    }
+    DirtyRegion::Rects(out)
 }
 
 /// Build a [`CaptureSource`] from an enumerated X11 monitor.
@@ -2843,6 +3185,85 @@ mod tests {
         assert_ne!(dp1, hdmi);
     }
 
+    // ── Damage-region accumulation / clipping (BORU-SS-32) ──────────────────
+
+    fn root_rect(x: u32, y: u32, width: u32, height: u32) -> FrameRect {
+        FrameRect { x, y, width, height }
+    }
+
+    #[test]
+    fn damage_region_clips_and_translates_to_capture_coords() {
+        // Root 1920x1080, capturing the monitor at (960, 0) size 960x540.
+        let capture = CaptureRect { x: 960, y: 0, width: 960, height: 540 };
+        let region = damage_region_for_capture(
+            &[
+                root_rect(1000, 100, 100, 50),
+                // Starts inside the capture, straddles its right edge →
+                // clamped, not dropped.
+                root_rect(1800, 400, 100, 100),
+                // Entirely outside the capture (right of x=1920) → dropped.
+                root_rect(1920, 0, 100, 100),
+            ],
+            capture,
+        );
+        assert_eq!(
+            region,
+            DirtyRegion::Rects(vec![
+                root_rect(40, 100, 100, 50),
+                root_rect(840, 400, 100, 100),
+            ])
+        );
+        assert!(!region.is_empty());
+    }
+
+    #[test]
+    fn damage_region_fully_outside_capture_is_empty() {
+        // Damage on another monitor (left of the captured one) must not
+        // trigger a frame for this source.
+        let capture = CaptureRect { x: 1920, y: 0, width: 1920, height: 1080 };
+        let region = damage_region_for_capture(&[root_rect(10, 10, 50, 50)], capture);
+        assert!(matches!(region, DirtyRegion::Rects(ref r) if r.is_empty()));
+        assert!(region.is_empty());
+    }
+
+    #[test]
+    fn damage_region_clamps_to_capture_bounds() {
+        // Damage rect straddling the capture edge is clamped, not dropped.
+        let capture = CaptureRect { x: 0, y: 0, width: 100, height: 100 };
+        let region = damage_region_for_capture(&[root_rect(80, 80, 100, 100)], capture);
+        assert_eq!(region, DirtyRegion::Rects(vec![root_rect(80, 80, 20, 20)]));
+    }
+
+    #[test]
+    fn damage_region_collapses_to_full_when_too_many_rects() {
+        // A near-full repaint reports many rectangles; collapsing to Full
+        // keeps the metadata bounded.
+        let capture = CaptureRect { x: 0, y: 0, width: 1024, height: 1024 };
+        let rects: Vec<FrameRect> = (0..20)
+            .map(|i| root_rect(i * 40, i * 40, 40, 40))
+            .collect();
+        let region = damage_region_for_capture(&rects, capture);
+        assert_eq!(region, DirtyRegion::Full);
+        assert!(!region.is_empty(), "Full is never 'empty'");
+    }
+
+    #[test]
+    fn damage_region_handles_negative_capture_origin() {
+        // A monitor left of the root origin captures from root (0,0); damage
+        // rects are root-relative and translate into capture-local coords.
+        let capture = CaptureRect { x: -1920, y: 0, width: 1920, height: 1080 };
+        let region = damage_region_for_capture(&[root_rect(0, 0, 100, 100)], capture);
+        assert_eq!(region, DirtyRegion::Rects(vec![root_rect(0, 0, 100, 100)]));
+    }
+
+    #[test]
+    fn empty_dirty_region_semantics() {
+        // Rects(empty) means "nothing changed"; Full and None never do.
+        assert!(DirtyRegion::Rects(vec![]).is_empty());
+        assert!(!DirtyRegion::Full.is_empty());
+        assert!(!DirtyRegion::Rects(vec![root_rect(0, 0, 1, 1)]).is_empty());
+    }
+
     /// Live X11 backend test — REQUIRES a real X server (`$DISPLAY` set, e.g.
     /// a desktop session, Xvfb, or Xwayland). Skipped by default; run with
     /// `cargo test --features screen-sharing -- --ignored x11_live_`.
@@ -2874,6 +3295,17 @@ mod tests {
         assert_eq!(frame.width, primary.width as u32);
         assert_eq!(frame.height, primary.height as u32);
         assert_eq!(frame.pixel_format, PixelFormat::Rgba8);
+        // Damage-aware capture (BORU-SS-32): when the DAMAGE/XFIXES
+        // extensions are present the first frame is the full baseline and
+        // every captured frame carries dirty metadata. (Without the
+        // extensions, `dirty_region` stays None and behaviour is unchanged.)
+        if capture.damage.is_some() {
+            assert_eq!(
+                frame.dirty_region,
+                Some(DirtyRegion::Full),
+                "first frame after start must be the full baseline"
+            );
+        }
         // Lifecycle enforcement: double start is an error, next_frame after
         // stop is an error, stop is idempotent.
         assert!(capture
@@ -2882,6 +3314,65 @@ mod tests {
         capture.stop();
         capture.stop(); // idempotent
         assert!(capture.next_frame().is_err());
+    }
+
+    /// Live damage-skip — REQUIRES a real X server with the DAMAGE and
+    /// XFIXES extensions (Xvfb provides both). Verifies the frame-level skip
+    /// end to end: the first frame is fully dirty, then a static screen
+    /// produces `None` (no GetImage, no encode) on subsequent ticks.
+    #[test]
+    #[ignore = "requires a real X server (DISPLAY set)"]
+    fn x11_live_damage_tracking_skips_static_screen() {
+        let mut capture = X11Capture::connect().expect("connect to $DISPLAY");
+        let monitors = capture.list_monitors().expect("enumerate monitors");
+        let source = monitors
+            .iter()
+            .find(|m| m.primary)
+            .or_else(|| monitors.first())
+            .map(x11_monitor_source)
+            .expect("primary or first monitor");
+        capture
+            .start(source.id, CaptureConfig::default())
+            .expect("start primary monitor");
+        if capture.damage.is_none() {
+            eprintln!("skipping: DAMAGE/XFIXES extensions unavailable on this server");
+            capture.stop();
+            return;
+        }
+        let first = capture
+            .next_frame()
+            .expect("next_frame after start")
+            .expect("first frame from GetImage");
+        assert_eq!(first.dirty_region, Some(DirtyRegion::Full));
+        // A static Xvfb root produces no further damage: most of the next
+        // ticks must be skipped (Ok(None)) rather than GetImage+encode every
+        // tick. A real desktop may repaint (clock, cursor) so the assertion
+        // tolerates a few returned frames — but a fully static screen must
+        // never return 20/20 frames.
+        let mut frames = 0u32;
+        let mut skips = 0u64;
+        for _ in 0..20 {
+            match capture.next_frame() {
+                Ok(Some(frame)) => {
+                    assert!(
+                        frame.dirty_region.is_some(),
+                        "captured frame must carry dirty metadata"
+                    );
+                    frames += 1;
+                }
+                Ok(None) => skips += 1,
+                Err(error) => panic!("next_frame failed: {error}"),
+            }
+        }
+        assert!(
+            skips >= 1,
+            "static screen must skip at least one frame (frames={frames}, skips={skips})"
+        );
+        assert!(
+            capture.damage_skipped_frames() >= skips,
+            "backend skip counter must reflect observed skips"
+        );
+        capture.stop();
     }
 
     /// Live whole-root capture — REQUIRES a real X server. Exercises the

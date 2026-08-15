@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 
 use super::{
     adaptation::{AdaptiveQuality, PacingController, QualityDecision, ViewerQualityRequest},
-    capture::{CaptureConfig, CaptureSource, CaptureSourceId},
+    capture::{CaptureConfig, CaptureSource, CaptureSourceId, DirtyRegion},
     channels::{
         ControlChannel, ControlOut, MediaChannel, DEFAULT_CONTROL_QUEUE_CAPACITY,
         DEFAULT_MEDIA_QUEUE_CAPACITY,
@@ -401,6 +401,12 @@ async fn run_host_session_inner(
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut media_drops: u64 = 0;
     let mut keyframe_requests: u64 = 0;
+    // Damage-aware capture (BORU-SS-32): ticks the host chose not to encode
+    // + transmit because nothing changed — either the backend returned no
+    // frame (X11 damage skip; portal queue momentarily empty) or it attached
+    // DirtyRegion::Rects(empty). Counted so the static-screen reduction is
+    // measurable in the metrics/logs (capture/encode fps and bytes/sec drop).
+    let mut skipped_frames: u64 = 0;
     // Frame pacing (PDF Task 7.2): bounded latest-frame queue between capture
     // and encode. When the encoder or network falls behind, obsolete frames
     // are dropped instead of building latency; queue length is capped at the
@@ -696,6 +702,21 @@ async fn run_host_session_inner(
                 }
                 match capture.capture() {
                     Ok(Some(frame)) => {
+                        // Damage-aware capture (BORU-SS-32): a backend that
+                        // observed no pixel change attaches
+                        // DirtyRegion::Rects(empty). Skip encode+transmit
+                        // entirely — the viewer already holds an identical
+                        // frame — and count the skip so the reduction is
+                        // visible in the metrics (capture/encode fps and
+                        // bytes/sec drop on a static screen).
+                        if frame.dirty_region.as_ref().is_some_and(DirtyRegion::is_empty) {
+                            skipped_frames += 1;
+                            stats.observe_skip();
+                            if skipped_frames == 1 || skipped_frames % 500 == 0 {
+                                tracing::info!(skipped_frames, "screen-share: host skipped unchanged frame (empty dirty region)");
+                            }
+                            continue 'streaming;
+                        }
                         // The pacing queue is bounded (max_queue_depth): if the
                         // encoder/network fell behind and the queue is full, the
                         // oldest stale frame is dropped (counted) and the newest
@@ -864,6 +885,7 @@ async fn run_host_session_inner(
                                     tracing::info!(
                                         capture_fps = snapshot.sender_fps,
                                         encode_fps = snapshot.encoded_fps,
+                                        skipped_frames = snapshot.skipped_frames,
                                         encode_avg_us = snapshot.encode_time_avg_us,
                                         bytes_per_sec = snapshot.bitrate_bps / 8,
                                         dropped_frames = snapshot.dropped_frames,
@@ -890,7 +912,19 @@ async fn run_host_session_inner(
                             }
                         }
                     }
-                    Ok(None) => {}
+                    Ok(None) => {
+                        // Damage-aware capture (BORU-SS-32): the X11 backend
+                        // returns no frame when the DAMAGE extension reports
+                        // nothing changed (the frame-level skip); portal
+                        // backends return none when the frame queue is
+                        // momentarily empty. Either way no encode happens
+                        // this tick — count it so the reduction is visible.
+                        skipped_frames += 1;
+                        stats.observe_skip();
+                        if skipped_frames == 1 || skipped_frames % 500 == 0 {
+                            tracing::info!(skipped_frames, "screen-share: host tick produced no frame (unchanged screen or empty queue)");
+                        }
+                    }
                     Err(error) => {
                         tracing::warn!(error = %error, "screen-share: capture failed");
                         // PDF Phase 10: monitor unplug / laptop dock-undock.

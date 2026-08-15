@@ -157,10 +157,12 @@ windows = { version = "0.58", default-features = false, features = [
 # x11rb: direct X11 capture (GetImage) fallback for the Linux ScreenCast
 # backend — used when xdg-desktop-portal/PipeWire are unavailable, so real
 # desktop sharing works on any X11 display. The `randr` feature enables
-# monitor enumeration (RandR 1.5 GetMonitors, with a CRTC-walk fallback) and
-# the `xtest` feature enables XTest fake-input injection for remote control
-# (PDF Task 6.2).
-x11rb = { version = "0.13", optional = true, features = ["randr", "xtest"] }
+# monitor enumeration (RandR 1.5 GetMonitors, with a CRTC-walk fallback), the
+# `xtest` feature enables XTest fake-input injection for remote control
+# (PDF Task 6.2), and `damage`+`xfixes` enable damage-aware capture
+# (BORU-SS-32): the XDamage extension tracks pixel changes and an XFIXES
+# region carries the accumulated dirty rectangles into each frame.
+x11rb = { version = "0.13", optional = true, features = ["randr", "xtest", "damage", "xfixes"] }
 
 # filesystem notification for shared folder monitoring
 notify = { version = "6", features = [] }
