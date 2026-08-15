@@ -1814,7 +1814,8 @@ mod tests {
         let viewer = iroh::Endpoint::bind(presets::Minimal).await.unwrap();
         let (events_tx, mut events_rx) = mpsc::channel(32);
         let (media_tx, mut media_rx) = mpsc::channel(64);
-        let protocol = ScreenShareProtocol::with_channels(events_tx, media_tx);
+        let (audio_tx, _audio_rx) = mpsc::channel(8);
+        let protocol = ScreenShareProtocol::with_channels(events_tx, media_tx, audio_tx);
         let router = Router::builder(viewer.clone())
             .accept(SCREEN_SHARE_ALPN, protocol.clone())
             .spawn();
