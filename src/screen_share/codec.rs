@@ -273,6 +273,15 @@ impl OpenH264Encoder {
         if self.shutdown { return Err(ScreenShareError::new("encoder is shut down")); }
         Ok(())
     }
+
+    /// Whether the next encode must produce an independently decodable
+    /// keyframe (BORU-SS-33). The host uses this to decide whether a
+    /// cursor-only metadata frame can be SKIPPED: when a keyframe is
+    /// pending (reconnect, source switch, viewer recovery request), the
+    /// frame must be encoded even if the pixels are unchanged.
+    pub fn is_keyframe_pending(&self) -> bool {
+        self.keyframe_requested
+    }
 }
 
 fn make_encoder(config: CodecConfig) -> Result<openh264::encoder::Encoder, ScreenShareError> {
@@ -408,6 +417,7 @@ impl VideoDecoder for OpenH264Decoder {
             pixels: rgba,
             gpu_handle: None,
             dirty_region: None,
+            cursor: None,
         }))
     }
     fn metadata(&self) -> CodecMetadata { self.metadata }

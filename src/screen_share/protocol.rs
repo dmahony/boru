@@ -23,6 +23,12 @@ pub const SCREEN_SHARE_PROTOCOL_VERSION: u16 = 1;
 pub const MAX_INPUT_CODE: u32 = 0xFFFF;
 /// Maximum encoded control frame, including no transport framing overhead.
 pub const MAX_CONTROL_FRAME: usize = 16 * 1024;
+/// Maximum cursor sprite edge in pixels (BORU-SS-33). Cursor sprites are tiny
+/// (typically <= 64x64); the cap keeps a `CursorShape` message far below the
+/// control-frame bound even after hotspot padding.
+pub const MAX_CURSOR_DIM: u16 = 128;
+/// Maximum cursor sprite payload bytes (BORU-SS-33): `MAX_CURSOR_DIM^2 * 4`.
+pub const MAX_CURSOR_SHAPE_BYTES: usize = (MAX_CURSOR_DIM as usize) * (MAX_CURSOR_DIM as usize) * 4;
 /// Maximum codec names in one Hello.
 pub const MAX_CODECS: usize = 16;
 /// Maximum bytes in one codec name.
@@ -301,7 +307,7 @@ pub fn decode(bytes: &[u8]) -> Result<ControlMessage, ProtocolError> {
 /// [`ControlMessage`], which remains the wire encoding used by the current
 /// session/host/viewer wiring. The negotiation and transport tasks that follow
 /// (session negotiation, channel separation) consume this versioned set.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ScreenShareMessage {
     /// Initiator → recipient: propose a screen-share session. No capture
     /// begins merely because this is received; the recipient must accept.
@@ -517,6 +523,48 @@ pub enum ScreenShareMessage {
         /// New target frame rate in frames per second.
         frame_rate: u16,
     },
+    /// Host → viewer: a cursor SHAPE update (PDF Task 5.3 `Metadata` cursor
+    /// mode / BORU-SS-33). Sent on shape change only, never per move; the
+    /// viewer caches the sprite and re-composites it at the latest
+    /// [`Self::CursorPosition`].
+    CursorShape {
+        /// Wire protocol version.
+        version: u16,
+        /// Session the cursor shape belongs to.
+        session_id: ScreenShareSessionId,
+        /// Opaque shape identity assigned by the host (a monotonic counter).
+        /// The viewer uses it to dedupe repeated shapes.
+        shape_id: u32,
+        /// Sprite width in pixels (1..=[`MAX_CURSOR_DIM`]).
+        width: u16,
+        /// Sprite height in pixels (1..=[`MAX_CURSOR_DIM`]).
+        height: u16,
+        /// Hotspot offset from the sprite's top-left (the pixel that "is"
+        /// the cursor position).
+        hotspot_x: u16,
+        /// Hotspot offset from the sprite's top edge.
+        hotspot_y: u16,
+        /// BGRA8 sprite pixels, `width * height * 4` bytes, bounded by
+        /// [`MAX_CURSOR_SHAPE_BYTES`].
+        pixels: Vec<u8>,
+    },
+    /// Host → viewer: a cursor POSITION update (PDF Task 5.3 `Metadata`
+    /// cursor mode / BORU-SS-33). Sent per move; the viewer re-composites
+    /// the cached sprite at the normalized position. Position is normalized
+    /// against the shared source image rect (`0..=1`), matching the input
+    /// coordinate contract.
+    CursorPosition {
+        /// Wire protocol version.
+        version: u16,
+        /// Session the cursor position belongs to.
+        session_id: ScreenShareSessionId,
+        /// Normalized horizontal position within the source (`0..=1`).
+        x: f32,
+        /// Normalized vertical position within the source (`0..=1`).
+        y: f32,
+        /// Whether the cursor is currently visible.
+        visible: bool,
+    },
 }
 
 impl ScreenShareMessage {
@@ -600,6 +648,20 @@ impl ScreenShareMessage {
                 if title.is_empty() || title.len() > MAX_SOURCE_NAME || !title.is_ascii() { return Err(ProtocolError::Malformed("invalid source title".into())); }
                 if *width == 0 || *height == 0 || *width > 16_384 || *height > 16_384 { return Err(ProtocolError::Malformed("invalid dimensions".into())); }
                 if *frame_rate == 0 || *frame_rate > 240 { return Err(ProtocolError::Malformed("invalid frame rate".into())); }
+                *version
+            }
+            Self::CursorShape { version, session_id, width, height, hotspot_x, hotspot_y, pixels, .. } => {
+                if *session_id == ScreenShareSessionId::zero() { return Err(ProtocolError::Malformed("empty session id".into())); }
+                if *width == 0 || *height == 0 || *width > MAX_CURSOR_DIM || *height > MAX_CURSOR_DIM { return Err(ProtocolError::Malformed("invalid cursor dimensions".into())); }
+                if *hotspot_x >= *width || *hotspot_y >= *height { return Err(ProtocolError::Malformed("cursor hotspot outside sprite".into())); }
+                let expected = (*width as usize) * (*height as usize) * 4;
+                if pixels.len() != expected { return Err(ProtocolError::Malformed("cursor sprite pixel buffer mismatch".into())); }
+                if pixels.len() > MAX_CURSOR_SHAPE_BYTES { return Err(ProtocolError::Malformed("cursor sprite exceeds size limit".into())); }
+                *version
+            }
+            Self::CursorPosition { version, session_id, x, y, .. } => {
+                if *session_id == ScreenShareSessionId::zero() { return Err(ProtocolError::Malformed("empty session id".into())); }
+                if !x.is_finite() || !y.is_finite() || !(0.0..=1.0).contains(x) || !(0.0..=1.0).contains(y) { return Err(ProtocolError::Malformed("cursor position out of range".into())); }
                 *version
             }
         };
@@ -964,6 +1026,26 @@ impl ScreenShareProtocol {
                     height: height as u32,
                 });
             }
+            // BORU-SS-33: metadata cursor mode (PDF Task 5.3). The host
+            // delivers the cursor as shape-on-change + position-per-move
+            // control messages; the viewer re-composites the cached sprite
+            // at the reported position instead of receiving it baked into
+            // the video frames. Surface both to the app so the viewer can
+            // render the remote cursor as an overlay.
+            ScreenShareMessage::CursorShape { session_id, width, height, hotspot_x, hotspot_y, pixels, .. } => {
+                if let Ok(sprite) = crate::screen_share::coords::CursorSprite::new(
+                    width as u32,
+                    height as u32,
+                    hotspot_x as u32,
+                    hotspot_y as u32,
+                    pixels,
+                ) {
+                    let _ = self.events.try_send(SessionEvent::CursorShape { session_id, sprite });
+                }
+            }
+            ScreenShareMessage::CursorPosition { session_id, x, y, visible, .. } => {
+                let _ = self.events.try_send(SessionEvent::CursorPosition { session_id, x, y, visible });
+            }
             // Remaining lifecycle/media messages are handled by the host/viewer
             // once streaming starts (BORU-SS-09+); the negotiation loop does
             // not act on them.
@@ -1095,14 +1177,35 @@ mod tests {
     fn clipboard() -> ScreenShareMessage { ScreenShareMessage::Clipboard { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid(), nonce: [0xAB; 16], text: RedactedText::new("hello clipboard".into()) } }
     fn audio_packet() -> ScreenShareMessage { ScreenShareMessage::AudioPacket { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid(), sequence: 1, timestamp_us: 1_000, sample_rate: 48_000, channels: 2, payload: vec![0xAA; 32] } }
     fn source_changed() -> ScreenShareMessage { ScreenShareMessage::SourceChanged { version: SCREEN_SHARE_PROTOCOL_VERSION, session_id: sid(), source_id: 7, title: "DP-1: 1920x1080".into(), width: 1920, height: 1080, frame_rate: 30 } }
+    fn cursor_shape() -> ScreenShareMessage {
+        ScreenShareMessage::CursorShape {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: sid(),
+            shape_id: 1,
+            width: 32,
+            height: 32,
+            hotspot_x: 16,
+            hotspot_y: 16,
+            pixels: vec![0xCD; 32 * 32 * 4],
+        }
+    }
+    fn cursor_position() -> ScreenShareMessage {
+        ScreenShareMessage::CursorPosition {
+            version: SCREEN_SHARE_PROTOCOL_VERSION,
+            session_id: sid(),
+            x: 0.5,
+            y: 0.25,
+            visible: true,
+        }
+    }
 
     /// Every one of the Task 2.3 message types plus the Task 9.3 Clipboard,
     /// Task 10 SourceChanged, and BORU-SS-37 AudioPacket messages must
     /// survive a postcard encode → decode round trip unchanged.
     #[test]
     fn round_trip_all_screen_share_messages() {
-        let messages = [offer(), accept(), reject(), started(), stopped(), stream_config(), video_packet(), keyframe_request(), quality_update(), protocol_error(), clipboard(), audio_packet(), source_changed()];
-        assert_eq!(messages.len(), 13, "the Task 2.3 message set (ten) plus Task 9.3 Clipboard, Task 10 SourceChanged and BORU-SS-37 AudioPacket must have thirteen types");
+        let messages = [offer(), accept(), reject(), started(), stopped(), stream_config(), video_packet(), keyframe_request(), quality_update(), protocol_error(), clipboard(), audio_packet(), source_changed(), cursor_shape(), cursor_position()];
+        assert_eq!(messages.len(), 15, "the Task 2.3 message set (ten) plus Clipboard, SourceChanged, CursorShape, CursorPosition and BORU-SS-37 AudioPacket must have fifteen types");
         for message in messages {
             let bytes = message.encode().expect("encode should succeed");
             assert_eq!(ScreenShareMessage::decode(&bytes).expect("decode should succeed"), message);
@@ -1161,8 +1264,8 @@ mod tests {
     /// are rejected cleanly.
     #[test]
     fn unknown_discriminant_is_rejected_cleanly() {
-        // The enum has thirteen variants → postcard discriminants 0..=12.
-        assert!(ScreenShareMessage::decode(&[13, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).is_err());
+        // The enum has fifteen variants → postcard discriminants 0..=14.
+        assert!(ScreenShareMessage::decode(&[15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).is_err());
         // A multi-byte varint far outside the variant range.
         assert!(ScreenShareMessage::decode(&[0xff, 0xff, 0xff, 0xff]).is_err());
     }
@@ -1241,6 +1344,59 @@ mod tests {
         assert!(matches!(empty_session.encode(), Err(ProtocolError::Malformed(_))));
         // The valid fixture still round-trips.
         assert_eq!(ScreenShareMessage::decode(&base.encode().unwrap()).unwrap(), base);
+    }
+
+    /// BORU-SS-33: cursor shape/position messages are bounded — oversized
+    /// sprites, malformed hotspots, wrong-size pixel buffers, out-of-range
+    /// normalized positions, and empty session ids are all rejected cleanly.
+    #[test]
+    fn cursor_validation_bounds_shape_and_position() {
+        let base = cursor_shape();
+        // Zero or oversized dimensions are rejected.
+        let mut zero_dim = base.clone();
+        if let ScreenShareMessage::CursorShape { width, .. } = &mut zero_dim { *width = 0; }
+        assert!(matches!(zero_dim.encode(), Err(ProtocolError::Malformed(_))));
+        let mut huge_dim = base.clone();
+        if let ScreenShareMessage::CursorShape { width, .. } = &mut huge_dim { *width = MAX_CURSOR_DIM + 1; }
+        assert!(matches!(huge_dim.encode(), Err(ProtocolError::Malformed(_))));
+        // A hotspot at/outside the sprite edge is rejected.
+        let mut bad_hotspot = base.clone();
+        if let ScreenShareMessage::CursorShape { hotspot_x, width, .. } = &mut bad_hotspot { *hotspot_x = *width; }
+        assert!(matches!(bad_hotspot.encode(), Err(ProtocolError::Malformed(_))));
+        // A pixel buffer that does not match width*height*4 is rejected.
+        let mut short_pixels = base.clone();
+        if let ScreenShareMessage::CursorShape { pixels, .. } = &mut short_pixels { pixels.pop(); }
+        assert!(matches!(short_pixels.encode(), Err(ProtocolError::Malformed(_))));
+        // A pixel buffer over the bounded shape size is rejected.
+        let mut huge_pixels = base.clone();
+        if let ScreenShareMessage::CursorShape { width, height, pixels, .. } = &mut huge_pixels {
+            *width = MAX_CURSOR_DIM;
+            *height = MAX_CURSOR_DIM;
+            pixels.extend_from_slice(&[0u8; 4]);
+        }
+        assert!(matches!(huge_pixels.encode(), Err(ProtocolError::Malformed(_))));
+        // An empty session id is rejected.
+        let mut empty_session = base.clone();
+        if let ScreenShareMessage::CursorShape { session_id, .. } = &mut empty_session { *session_id = ScreenShareSessionId::zero(); }
+        assert!(matches!(empty_session.encode(), Err(ProtocolError::Malformed(_))));
+
+        let pos = cursor_position();
+        // Out-of-range or non-finite normalized positions are rejected.
+        let mut out_of_range = pos.clone();
+        if let ScreenShareMessage::CursorPosition { x, .. } = &mut out_of_range { *x = 1.5; }
+        assert!(matches!(out_of_range.encode(), Err(ProtocolError::Malformed(_))));
+        let mut negative = pos.clone();
+        if let ScreenShareMessage::CursorPosition { y, .. } = &mut negative { *y = -0.1; }
+        assert!(matches!(negative.encode(), Err(ProtocolError::Malformed(_))));
+        let mut nan = pos.clone();
+        if let ScreenShareMessage::CursorPosition { x, .. } = &mut nan { *x = f32::NAN; }
+        assert!(matches!(nan.encode(), Err(ProtocolError::Malformed(_))));
+        let mut empty_session = pos.clone();
+        if let ScreenShareMessage::CursorPosition { session_id, .. } = &mut empty_session { *session_id = ScreenShareSessionId::zero(); }
+        assert!(matches!(empty_session.encode(), Err(ProtocolError::Malformed(_))));
+        // The valid fixtures still round-trip.
+        assert_eq!(ScreenShareMessage::decode(&base.encode().unwrap()).unwrap(), base);
+        assert_eq!(ScreenShareMessage::decode(&pos.encode().unwrap()).unwrap(), pos);
     }
 
     /// Semantic invariants are enforced by validate() on both encode and

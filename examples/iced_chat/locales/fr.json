@@ -480,6 +480,8 @@
   "screenshare.reset_view": "Réinitialiser",
   "screenshare.fullscreen": "Plein écran",
   "screenshare.inline": "Intégré",
+  "screenshare.cursor_on": "Curseur : ON",
+  "screenshare.cursor_off": "Curseur : OFF",
   "screenshare.fullscreen_active": "Partage d'écran — plein écran",
   "screenshare.zoom_hint": "Molette pour zoomer · glisser pour déplacer",
   "screenshare.requesting": "Demande de partage d'écran…",

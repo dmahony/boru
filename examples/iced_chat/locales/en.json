@@ -601,6 +601,8 @@
   "screenshare.reset_view": "Reset",
   "screenshare.fullscreen": "Fullscreen",
   "screenshare.inline": "Inline",
+  "screenshare.cursor_on": "Cursor: ON",
+  "screenshare.cursor_off": "Cursor: OFF",
   "screenshare.fullscreen_active": "Screen share — fullscreen",
   "screenshare.zoom_hint": "Scroll to zoom · drag to pan",
   "screenshare.requesting": "Requesting screen share…",

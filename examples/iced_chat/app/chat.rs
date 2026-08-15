@@ -428,9 +428,9 @@ impl IcedChat {
                         .map(|source| {
                             let is_selected = selected == Some(source.id);
                             let label = if is_selected {
-                                format!("✓ {}", source.title)
+                                format!("✓ {}", source.picker_label())
                             } else {
-                                source.title.clone()
+                                source.picker_label()
                             };
                             button(text(label).size(crate::fonts::TypeRole::SupportingText.size_px()))
                                 .on_press(AppMessage::ScreenShareSelectSource(source.id))
@@ -747,6 +747,7 @@ impl IcedChat {
                     view_screen_share_view_controls(
                         scale,
                         self.screen_share_fullscreen,
+                        self.screen_share_cursor_enabled,
                     ),
                     row(actions).spacing(SPACE_6),
                 ]
@@ -849,7 +850,7 @@ impl IcedChat {
         };
 
         let controls = row![
-            view_screen_share_view_controls(scale, true),
+            view_screen_share_view_controls(scale, true, self.screen_share_cursor_enabled),
             button(text(crate::i18n::t("screenshare.stop_viewing")))
                 .on_press(AppMessage::StopScreenShare)
                 .padding([2, 6]),

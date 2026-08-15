@@ -3,8 +3,9 @@
 
 use std::collections::VecDeque;
 
-use super::coords::MonitorGeometry;
 use super::codec::QualityProfile;
+use super::coords::CursorMeta;
+use super::coords::MonitorGeometry;
 use super::ScreenShareError;
 
 /// Pixel layout of a normalized captured frame.
@@ -85,6 +86,12 @@ pub struct CapturedFrame {
     /// Optional dirty-region metadata. `None` means the backend did not
     /// provide damage information (the whole frame should be treated as new).
     pub dirty_region: Option<DirtyRegion>,
+    /// Optional cursor shape+position metadata delivered SEPARATELY from the
+    /// frame pixels (PDF Task 5.3 `Metadata` cursor mode). When `Some`, the
+    /// host sends cursor shape/position control messages instead of
+    /// compositing the cursor into the frame; when `None` the frame already
+    /// contains the composited cursor (BORU-SS-12 fallback).
+    pub cursor: Option<CursorMeta>,
 }
 
 impl CapturedFrame {
@@ -145,6 +152,7 @@ impl CapturedFrame {
             pixels,
             gpu_handle: None,
             dirty_region: None,
+            cursor: None,
         })
     }
 
@@ -159,12 +167,19 @@ impl CapturedFrame {
             pixels: Vec::new(),
             gpu_handle: Some(handle),
             dirty_region: None,
+            cursor: None,
         }
     }
 
     /// Attach dirty-region metadata to the frame.
     pub fn with_dirty_region(mut self, region: DirtyRegion) -> Self {
         self.dirty_region = Some(region);
+        self
+    }
+
+    /// Attach cursor shape+position metadata (PDF Task 5.3 `Metadata` mode).
+    pub fn with_cursor(mut self, cursor: CursorMeta) -> Self {
+        self.cursor = Some(cursor);
         self
     }
 }
@@ -211,6 +226,20 @@ pub struct CaptureSource {
     /// (e.g. the synthetic test pattern) leave this `None`, in which case the
     /// source is treated as a primary-at-origin desktop.
     pub geometry: Option<MonitorGeometry>,
+}
+
+impl CaptureSource {
+    /// Human-readable picker label with a distinguishable kind marker
+    /// (BORU-SS-36: window sources appear alongside monitors in the
+    /// `SourcesEnumerated` picker, so they need a marker beyond the raw
+    /// title).
+    pub fn picker_label(&self) -> String {
+        match self.kind {
+            CaptureSourceKind::Window => format!("[Window] {}", self.title),
+            CaptureSourceKind::Monitor => format!("[Monitor] {}", self.title),
+            CaptureSourceKind::Desktop => self.title.clone(),
+        }
+    }
 }
 
 /// Configuration for a capture session.
@@ -626,5 +655,30 @@ mod tests {
         };
         let err = backend.start(CaptureSourceId(0), config).unwrap_err();
         assert!(err.to_string().contains("target fps"));
+    }
+
+    // ── Picker labels (BORU-SS-36) ──────────────────────────────────────────
+
+    fn picker_source(kind: CaptureSourceKind, title: &str) -> CaptureSource {
+        CaptureSource {
+            id: CaptureSourceId(1),
+            kind,
+            title: title.to_string(),
+            width: 100,
+            height: 100,
+            geometry: None,
+        }
+    }
+
+    /// Window sources get a distinguishable `[Window]` marker in the picker;
+    /// monitors get `[Monitor]`; the synthetic desktop keeps its plain title.
+    #[test]
+    fn picker_label_distinguishes_source_kinds() {
+        let window = picker_source(CaptureSourceKind::Window, "Terminal: 800x600");
+        assert_eq!(window.picker_label(), "[Window] Terminal: 800x600");
+        let monitor = picker_source(CaptureSourceKind::Monitor, "DP-1: 1920x1080");
+        assert_eq!(monitor.picker_label(), "[Monitor] DP-1: 1920x1080");
+        let desktop = picker_source(CaptureSourceKind::Desktop, "Portal output: 640x360");
+        assert_eq!(desktop.picker_label(), "Portal output: 640x360");
     }
 }

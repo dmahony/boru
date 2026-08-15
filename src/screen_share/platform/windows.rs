@@ -41,7 +41,7 @@ use windows::Graphics::Capture::{
     Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
 };
 use windows::Graphics::DirectX::{Direct3D11::IDirect3DDevice, DirectXPixelFormat};
-use windows::Win32::Foundation::{BOOL, LPARAM, RECT};
+use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0};
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_CPU_ACCESS_READ,
@@ -58,11 +58,12 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::WinRT::Direct3D11::CreateDirect3D11DeviceFromDXGIDevice;
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 use windows::Win32::UI::WindowsAndMessaging::{
-    DrawIconEx, GetCursorInfo, GetDesktopWindow, GetIconInfo, CURSORINFO, CURSORINFO_FLAGS,
-    CURSOR_SHOWING, DI_NORMAL, ICONINFO,
+    DrawIconEx, EnumWindows, GetCursorInfo, GetDesktopWindow, GetIconInfo, GetWindowRect,
+    GetWindowTextW, IsWindowVisible, CURSORINFO, CURSORINFO_FLAGS, CURSOR_SHOWING, DI_NORMAL,
+    ICONINFO,
 };
 
-use super::windows_common::{monitor_source, CaptureFailureKind};
+use super::windows_common::{monitor_source, window_source, CaptureFailureKind};
 pub use super::windows_common::{GraphicsCaptureEvent, GraphicsCaptureState};
 use crate::screen_share::capture::{
     CaptureConfig, CaptureSource, CaptureSourceId, DesktopCaptureBackend, FrameSink,
@@ -81,6 +82,9 @@ pub struct GraphicsCapture {
     format: Option<(u32, u32)>,
     events: VecDeque<GraphicsCaptureEvent>,
     sources: HashMap<CaptureSourceId, usize>,
+    /// Top-level windows enumerated via `EnumWindows` (BORU-SS-36), mapped
+    /// from stable [`CaptureSourceId`] to raw `HWND` (`isize`).
+    windows: HashMap<CaptureSourceId, isize>,
     active_source: Option<CaptureSourceId>,
     /// Virtual-desktop geometry of the active monitor, used to normalize
     /// cursor coordinates against the shared source (PDF T4.2).
@@ -126,6 +130,7 @@ impl GraphicsCapture {
             format: None,
             events: VecDeque::new(),
             sources: HashMap::new(),
+            windows: HashMap::new(),
             active_source: None,
             active_geometry: None,
             pool: None,
@@ -139,7 +144,8 @@ impl GraphicsCapture {
         })
     }
 
-    /// Enumerate the current monitors into the private `sources` map.
+    /// Enumerate the current monitors into the private `sources` map, plus
+    /// top-level windows into the `windows` map (BORU-SS-36).
     fn refresh_sources(&mut self) -> Result<(), ScreenShareError> {
         let monitors =
             enumerate_monitors().map_err(|kind| ScreenShareError::new(kind.describe()))?;
@@ -147,6 +153,14 @@ impl GraphicsCapture {
             .into_iter()
             .map(|(id, hmon)| (id, hmon.0 as usize))
             .collect();
+        // Window enumeration is best-effort: a failure must not break monitor
+        // sharing.
+        if let Ok(windows) = enumerate_windows() {
+            self.windows = windows
+                .into_iter()
+                .map(|(id, hwnd, _title, _rect)| (id, hwnd.0 as isize))
+                .collect();
+        }
         Ok(())
     }
 
@@ -232,7 +246,7 @@ impl ScreenCapture for GraphicsCapture {
 
 impl DesktopCaptureBackend for GraphicsCapture {
     fn list_sources(&self) -> Result<Vec<CaptureSource>, ScreenShareError> {
-        enumerate_monitors()
+        let mut sources: Vec<CaptureSource> = enumerate_monitors()
             .map(|monitors| {
                 monitors
                     .into_iter()
@@ -248,7 +262,18 @@ impl DesktopCaptureBackend for GraphicsCapture {
                     })
                     .collect()
             })
-            .map_err(|kind| ScreenShareError::new(kind.describe()))
+            .map_err(|kind| ScreenShareError::new(kind.describe()))?;
+        // BORU-SS-36: advertise top-level windows alongside monitors. Window
+        // enumeration is best-effort — a failure must not break monitor
+        // sharing.
+        if let Ok(windows) = enumerate_windows() {
+            sources.extend(windows.into_iter().map(|(_, hwnd, title, rect)| {
+                let width = (rect.right.saturating_sub(rect.left)).max(0) as u32;
+                let height = (rect.bottom.saturating_sub(rect.top)).max(0) as u32;
+                window_source(hwnd.0 as usize, &title, rect.left, rect.top, width, height)
+            }));
+        }
+        Ok(sources)
     }
 
     fn start(
@@ -263,26 +288,35 @@ impl DesktopCaptureBackend for GraphicsCapture {
             .state
             .start()
             .map_err(|kind| ScreenShareError::new(kind.describe()))?;
-        // Ensure the monitor map is populated (list_sources may not have been
-        // called yet).
+        // Ensure the monitor/window map is populated (list_sources may not
+        // have been called yet).
         if self.sources.is_empty() {
             self.refresh_sources()?;
         }
-        let hmon =
-            self.sources.get(&source).copied().ok_or_else(|| {
-                ScreenShareError::new(CaptureFailureKind::UnknownSource.describe())
-            })?;
-        let hmon = HMONITOR(hmon as *mut core::ffi::c_void);
-        let info = monitor_info(hmon);
-        if info.rect_width == 0 || info.rect_height == 0 {
-            return Err(ScreenShareError::new(
-                CaptureFailureKind::SourceUnavailable.describe(),
-            ));
+        // BORU-SS-36: a Window source captures a single application window
+        // via `GraphicsCaptureItem.CreateForWindow`, falling back to the
+        // primary monitor if window capture fails. A Monitor source uses the
+        // existing `CreateForMonitor` path.
+        let window_target = self.windows.get(&source).copied();
+        let hmon = if window_target.is_none() {
+            self.sources.get(&source).copied()
+        } else {
+            None
+        };
+        let hmon = hmon.map(|raw| HMONITOR(raw as *mut core::ffi::c_void));
+
+        let info = hmon.map(monitor_info);
+        if let Some(info) = &info {
+            if info.rect_width == 0 || info.rect_height == 0 {
+                return Err(ScreenShareError::new(
+                    CaptureFailureKind::SourceUnavailable.describe(),
+                ));
+            }
         }
-        let size = windows::Graphics::SizeInt32 {
+        let size = info.as_ref().map(|info| windows::Graphics::SizeInt32 {
             Width: info.rect_width as i32,
             Height: info.rect_height as i32,
-        };
+        });
 
         // D3D11 device with BGRA support (Graphics Capture requires it).
         let mut device = None;
@@ -324,12 +358,87 @@ impl DesktopCaptureBackend for GraphicsCapture {
                     CaptureFailureKind::classify(e.code().0 as u32).describe()
                 ))
             })?;
-        let item: GraphicsCaptureItem = unsafe { interop.CreateForMonitor(hmon) }.map_err(|e| {
-            ScreenShareError::new(format!(
-                "{} (CreateForMonitor: {e})",
-                CaptureFailureKind::classify(e.code().0 as u32).describe()
-            ))
-        })?;
+        // BORU-SS-36: window capture first; fall back to the primary monitor
+        // when CreateForWindow fails (window closed between enumeration and
+        // start, permission denied, etc.). The returned tuple carries the
+        // ACTUAL source id captured (the monitor id after a fallback), so
+        // `active_source`/`current_source()` stay truthful about what is on
+        // the wire.
+        let (item, active_geometry, active_source_id) = if let Some(hwnd) = window_target {
+            let hwnd = HWND(hwnd as *mut core::ffi::c_void);
+            let window_item = unsafe { interop.CreateForWindow(hwnd) };
+            match window_item {
+                Ok(item) => {
+                    // The capture geometry is the window's virtual-desktop
+                    // rect (GetWindowRect gives the outer frame origin), but
+                    // the shared source dims come from the capture item's
+                    // client size so geometry matches the frames.
+                    let item_size = item
+                        .Size()
+                        .map_err(|e| ScreenShareError::new(format!("capture item size: {e}")))?;
+                    let mut rect = RECT::default();
+                    let got_rect = unsafe { GetWindowRect(hwnd, &mut rect) };
+                    let (left, top) = if got_rect.is_ok() {
+                        (rect.left, rect.top)
+                    } else {
+                        (0, 0)
+                    };
+                    let width = item_size.Width.max(0) as u32;
+                    let height = item_size.Height.max(0) as u32;
+                    (
+                        item,
+                        MonitorGeometry::new(left, top, width, height),
+                        source,
+                    )
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "screen-share: CreateForWindow failed; falling back to primary monitor capture"
+                    );
+                    let hmon = unsafe { MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY) };
+                    let info = monitor_info(hmon);
+                    let fallback_id = self
+                        .sources
+                        .iter()
+                        .find(|(_, raw)| *raw == hmon.0 as usize)
+                        .map(|(id, _)| *id)
+                        .unwrap_or(source);
+                    let item = unsafe { interop.CreateForMonitor(hmon) }.map_err(|e| {
+                        ScreenShareError::new(format!(
+                            "{} (CreateForMonitor fallback: {e})",
+                            CaptureFailureKind::classify(e.code().0 as u32).describe()
+                        ))
+                    })?;
+                    (
+                        item,
+                        MonitorGeometry::new(
+                            info.left,
+                            info.top,
+                            info.rect_width,
+                            info.rect_height,
+                        ),
+                        fallback_id,
+                    )
+                }
+            }
+        } else {
+            let hmon = hmon.ok_or_else(|| {
+                ScreenShareError::new(CaptureFailureKind::UnknownSource.describe())
+            })?;
+            let info = monitor_info(hmon);
+            let item = unsafe { interop.CreateForMonitor(hmon) }.map_err(|e| {
+                ScreenShareError::new(format!(
+                    "{} (CreateForMonitor: {e})",
+                    CaptureFailureKind::classify(e.code().0 as u32).describe()
+                ))
+            })?;
+            (
+                item,
+                MonitorGeometry::new(info.left, info.top, info.rect_width, info.rect_height),
+                source,
+            )
+        };
         let item_size = item
             .Size()
             .map_err(|e| ScreenShareError::new(format!("capture item size: {e}")))?;
@@ -337,8 +446,12 @@ impl DesktopCaptureBackend for GraphicsCapture {
             // The monitor exists but reports no captureable area: on a locked
             // workstation Windows stops delivering frames and the item can
             // shrink to zero.
-            let kind = if monitor_attached(hmon) {
-                CaptureFailureKind::ScreenLocked
+            let kind = if let Some(hmon) = hmon {
+                if monitor_attached(hmon) {
+                    CaptureFailureKind::ScreenLocked
+                } else {
+                    CaptureFailureKind::SourceUnavailable
+                }
             } else {
                 CaptureFailureKind::SourceUnavailable
             };
@@ -348,7 +461,7 @@ impl DesktopCaptureBackend for GraphicsCapture {
             &winrt_device,
             DirectXPixelFormat::B8G8R8A8UIntNormalized,
             FRAME_POOL_BUFFERS,
-            size,
+            size.unwrap_or(item_size),
         )
         .map_err(|e| ScreenShareError::new(format!("frame pool: {e}")))?;
         let session = pool
@@ -363,13 +476,8 @@ impl DesktopCaptureBackend for GraphicsCapture {
 
         self.state = next_state;
         self.format = Some((item_size.Width as u32, item_size.Height as u32));
-        self.active_source = Some(source);
-        self.active_geometry = Some(MonitorGeometry::new(
-            info.left,
-            info.top,
-            info.rect_width,
-            info.rect_height,
-        ));
+        self.active_source = Some(active_source_id);
+        self.active_geometry = Some(active_geometry);
         self.pool = Some(pool);
         self.session = Some(session);
         self.item = Some(item);
@@ -755,6 +863,52 @@ unsafe extern "system" fn enum_monitor_proc(
         let id = super::windows_common::monitor_source_id(&info.device_name);
         result.push((id, hmon));
     }
+    BOOL(1)
+}
+
+/// Enumerate visible top-level windows into (stable id, HWND, title, rect)
+/// tuples (BORU-SS-36).
+///
+/// Only windows that are visible (`IsWindowVisible`), have a non-empty title,
+/// and a non-zero client rect are advertised — tooltips, popups and
+/// background helper windows are noise for a sharing source picker. The raw
+/// `HWND` is kept so [`DesktopCaptureBackend::start`] can call
+/// `GraphicsCaptureItem.CreateForWindow`; the title/rect feed the advertised
+/// [`CaptureSource`].
+fn enumerate_windows() -> Result<Vec<(CaptureSourceId, HWND, String, RECT)>, CaptureFailureKind> {
+    let mut result: Vec<(CaptureSourceId, HWND, String, RECT)> = Vec::new();
+    let data = &mut result as *mut Vec<(CaptureSourceId, HWND, String, RECT)>;
+    unsafe {
+        EnumWindows(Some(enum_window_proc), LPARAM(data as isize))
+            .map_err(|e| CaptureFailureKind::Api(e.code().0 as u32))?;
+    }
+    Ok(result)
+}
+
+unsafe extern "system" fn enum_window_proc(
+    hwnd: HWND,
+    data: LPARAM,
+) -> BOOL {
+    let result = unsafe { &mut *(data.0 as *mut Vec<(CaptureSourceId, HWND, String, RECT)>) };
+    if unsafe { IsWindowVisible(hwnd) }.0 == 0 {
+        return BOOL(1); // skip hidden windows
+    }
+    let mut title = [0u16; 512];
+    let len = unsafe { GetWindowTextW(hwnd, &mut title) };
+    if len <= 0 {
+        return BOOL(1); // skip windows without a title
+    }
+    let title = utf16_to_string(&title[..len as usize]);
+    if title.is_empty() {
+        return BOOL(1);
+    }
+    let mut rect = RECT::default();
+    let got = unsafe { GetWindowRect(hwnd, &mut rect) };
+    if got.is_err() || rect.right <= rect.left || rect.bottom <= rect.top {
+        return BOOL(1); // skip zero-size / invalid windows
+    }
+    let id = super::windows_common::window_source_id(hwnd.0 as usize);
+    result.push((id, hwnd, title, rect));
     BOOL(1)
 }
 
