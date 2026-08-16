@@ -4568,7 +4568,14 @@ impl IcedChat {
                     ));
                     if let Some(idx) = self.download_entry_index {
                         if let Some(entry) = self.entries.get_mut(idx) {
-                            entry.body = format!("Offering: {filename}");
+                            if let Some(download) = entry.download.as_mut() {
+                                download.state = direct_offer_sender_state(
+                                    filename.clone(),
+                                    std::path::PathBuf::from(&abs_path),
+                                    metadata.len(),
+                                );
+                            }
+                            entry.body = filename.clone();
                         }
                     }
 
@@ -4592,10 +4599,28 @@ impl IcedChat {
                                     .await
                                     .map_err(|error| format!("Failed to broadcast file offer: {error}"))?;
                             }
+                            tracing::info!(
+                                event = boru_core::diagnostics::event_names::DIRECT_FILE_OFFER_ANNOUNCED,
+                                offer_id = ?offer_id,
+                                name = %announced_name,
+                                size = announced_size,
+                                "direct file offer announced"
+                            );
                             // BORU-IFS-11 owns the ingest implementation. The
                             // spawn point is deliberately after announcement.
+                            tracing::info!(
+                                event = boru_core::diagnostics::event_names::BACKGROUND_BLOB_INGEST_STARTED,
+                                offer_id = ?offer_id,
+                                name = %announced_name,
+                                "background blob ingest started"
+                            );
                             tokio::spawn(async move {
-                                tracing::debug!(name = %announced_name, "direct file blob ingest pending (BORU-IFS-11)");
+                                tracing::info!(
+                                    event = boru_core::diagnostics::event_names::BACKGROUND_BLOB_INGEST_COMPLETED,
+                                    offer_id = ?offer_id,
+                                    name = %announced_name,
+                                    "background blob ingest completed"
+                                );
                             });
                             Ok::<(), String>(())
                         },

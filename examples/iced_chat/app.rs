@@ -2168,6 +2168,17 @@ impl DownloadState {
     }
 }
 
+/// State used for the sender's attachment as soon as its direct offer is
+/// registered. The local blob cache is populated independently and must not
+/// make an already-downloadable offer look like an in-progress upload.
+fn direct_offer_sender_state(name: String, path: std::path::PathBuf, size: u64) -> DownloadState {
+    DownloadState::Shared {
+        name,
+        path,
+        size: (size > 0).then_some(size),
+    }
+}
+
 /// Whether the user-initiated Download/Retry action may (re)start a transfer
 /// for this download state (VIDCARD-20 functional matrix: "Retry works where
 /// supported", "Deleted local files show a useful state").
@@ -23521,6 +23532,18 @@ fn format_file_size(bytes: u64) -> String {
 mod tests {
     use super::*;
     use boru_core::call::manager::{CallEndReason, CallError};
+
+    #[test]
+    fn direct_offer_sender_card_is_shared_not_uploading() {
+        let state = direct_offer_sender_state(
+            "notes.txt".to_string(),
+            std::path::PathBuf::from("/tmp/notes.txt"),
+            12,
+        );
+
+        assert!(matches!(state, DownloadState::Shared { .. }));
+        assert!(!matches!(state, DownloadState::Active { .. } | DownloadState::Ready { .. }));
+    }
     use boru_core::gif_provider::GifMediaSource;
 
     /// A closed dummy receiver for the dev-theme reload channel (BORU-UI-06).

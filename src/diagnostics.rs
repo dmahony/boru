@@ -472,6 +472,12 @@ impl std::fmt::Display for ErrorCategory {
 
 /// Stable event name strings for transfer lifecycle events.
 pub mod event_names {
+    /// A direct file offer was announced before local blob ingestion.
+    pub const DIRECT_FILE_OFFER_ANNOUNCED: &str = "direct_file_offer_announced";
+    /// Background local blob ingestion started after the direct offer.
+    pub const BACKGROUND_BLOB_INGEST_STARTED: &str = "background_blob_ingest_started";
+    /// Background local blob ingestion completed.
+    pub const BACKGROUND_BLOB_INGEST_COMPLETED: &str = "background_blob_ingest_completed";
     /// Durable download work was accepted before networking was scheduled.
     pub const DOWNLOAD_QUEUED: &str = "download_queued";
     /// A fresh access/permission request was sent.
