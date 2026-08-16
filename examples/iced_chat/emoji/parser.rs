@@ -414,4 +414,287 @@ mod tests {
             );
         }
     }
+
+    // ── BORU-TWEMOJI-21: comprehensive sequence coverage ──────────────
+    //
+    // The PDF Task 21 suite: representative single-codepoint emoji,
+    // variation-selector forms, all Fitzpatrick skin tones, regional-
+    // indicator flag pairs, ZWJ sequences, symbol sequences, and mixed
+    // strings with plain text + punctuation. Resolver tests assert the
+    // exact vendored key; parser tests assert fragment boundaries (one
+    // visual emoji = one fragment, never split into its codepoints).
+
+    #[test]
+    fn resolves_representative_single_codepoint_emoji() {
+        // 😂 U+1F602 face with tears of joy — a second single-codepoint
+        // representative beyond the T07 basics.
+        assert_eq!(emoji_asset("😂").map(|a| a.key), Some("1f602"));
+        // ✅ U+2705 check / ❌ U+274C cross — symbol sequences.
+        assert_eq!(emoji_asset("✅").map(|a| a.key), Some("2705"));
+        assert_eq!(emoji_asset("❌").map(|a| a.key), Some("274c"));
+        // 🔥 U+1F525 fire / 🎉 U+1F389 celebration.
+        assert_eq!(emoji_asset("🔥").map(|a| a.key), Some("1f525"));
+        assert_eq!(emoji_asset("🎉").map(|a| a.key), Some("1f389"));
+    }
+
+    #[test]
+    fn resolves_symbol_sequences_with_variation_selectors() {
+        // ✔️ U+2714 U+FE0F — emoji presentation strips VS16 to the
+        // vendored base key "2714" (raw "2714-fe0f" is not bundled).
+        assert_eq!(emoji_asset("\u{2714}\u{fe0f}").map(|a| a.key), Some("2714"));
+        // ⚠️ U+26A0 U+FE0F — warning, same strip-to-base rule.
+        assert_eq!(emoji_asset("\u{26a0}\u{fe0f}").map(|a| a.key), Some("26a0"));
+    }
+
+    #[test]
+    fn resolves_text_presentation_variation_selector_forms() {
+        // ☺︎ U+263A U+FE0E — text presentation. Twemoji vendors no
+        // text-presentation keys, so FE0E is dropped and the text-default
+        // base key resolves.
+        assert_eq!(emoji_asset("\u{263a}\u{fe0e}").map(|a| a.key), Some("263a"));
+        // ☠︎ U+2620 U+FE0E — same rule for the skull.
+        assert_eq!(emoji_asset("\u{2620}\u{fe0e}").map(|a| a.key), Some("2620"));
+    }
+
+    #[test]
+    fn resolves_ireland_and_australia_flags() {
+        // 🇮🇪 = U+1F1EE U+1F1EA — one flag pair, one key.
+        assert_eq!(
+            emoji_asset("\u{1f1ee}\u{1f1ea}").map(|a| a.key),
+            Some("1f1ee-1f1ea")
+        );
+        // 🇦🇺 = U+1F1E6 U+1F1FA.
+        assert_eq!(
+            emoji_asset("\u{1f1e6}\u{1f1fa}").map(|a| a.key),
+            Some("1f1e6-1f1fa")
+        );
+    }
+
+    #[test]
+    fn resolves_all_five_fitzpatrick_skin_tone_modifiers() {
+        // 👍 + U+1F3FB..U+1F3FF — every Fitzpatrick modifier resolves to a
+        // distinct vendored key (never a base-with-modifier split).
+        let tones = [
+            ("\u{1f44d}\u{1f3fb}", "1f44d-1f3fb"), // light
+            ("\u{1f44d}\u{1f3fc}", "1f44d-1f3fc"), // medium-light
+            ("\u{1f44d}\u{1f3fd}", "1f44d-1f3fd"), // medium
+            ("\u{1f44d}\u{1f3fe}", "1f44d-1f3fe"), // medium-dark
+            ("\u{1f44d}\u{1f3ff}", "1f44d-1f3ff"), // dark
+        ];
+        for (grapheme, expected) in tones {
+            assert_eq!(
+                emoji_asset(grapheme).map(|a| a.key),
+                Some(expected),
+                "skin tone grapheme {grapheme:?} must resolve to {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolves_profession_gender_and_flag_zwj_sequences() {
+        // 👨💻 = U+1F468 ZWJ U+1F4BB (man technologist) — the male
+        // counterpart of the existing woman-technologist case.
+        assert_eq!(
+            emoji_asset("\u{1f468}\u{200d}\u{1f4bb}").map(|a| a.key),
+            Some("1f468-200d-1f4bb")
+        );
+        // 🏳️🌈 = U+1F3F3 U+FE0F ZWJ U+1F308 — rainbow flag: Twemoji KEEPS
+        // VS16 inside this ZWJ sequence, so the raw candidate must win.
+        assert_eq!(
+            emoji_asset("\u{1f3f3}\u{fe0f}\u{200d}\u{1f308}").map(|a| a.key),
+            Some("1f3f3-fe0f-200d-1f308")
+        );
+        // 🏴☠️ = U+1F3F4 ZWJ U+2620 U+FE0F — pirate flag, VS16 kept.
+        assert_eq!(
+            emoji_asset("\u{1f3f4}\u{200d}\u{2620}\u{fe0f}").map(|a| a.key),
+            Some("1f3f4-200d-2620-fe0f")
+        );
+    }
+
+    #[test]
+    fn returns_none_for_sequence_classes_without_vendored_assets() {
+        // 🇽🇽 = U+1F1FD U+1F1FD — "XX" is not an assigned ISO 3166-1 pair
+        // (the manifest vendors real pairs, incl. 1f1fd-1f1f0 "XK", but
+        // not this one). A valid grapheme, an unvendored key.
+        assert_eq!(emoji_asset("\u{1f1fd}\u{1f1fd}"), None);
+        // 😀‍😀 = U+1F600 ZWJ U+1F600 — a valid ZWJ grapheme cluster that is
+        // not a registered emoji; the joined key is not bundled.
+        assert_eq!(emoji_asset("\u{1f600}\u{200d}\u{1f600}"), None);
+        // Codepoint-level fallbacks (newer-than-vendored 🫩 U+1FAE9 and
+        // private-use U+10FFFF) are covered by
+        // `returns_none_for_unknown_or_newer_emoji` above.
+    }
+
+    #[test]
+    fn split_fragments_variation_selector_emoji_is_one_fragment() {
+        // ❤️ = U+2764 U+FE0F — VS16 is part of the grapheme; the whole
+        // cluster is ONE Emoji fragment resolving to the stripped base key.
+        let fragments = split_fragments("\u{2764}\u{fe0f}");
+        assert_eq!(fragments.len(), 1);
+        assert!(matches!(
+            &fragments[0],
+            MessageFragment::Emoji { unicode, asset }
+                if *unicode == "\u{2764}\u{fe0f}" && asset.key == "2764"
+        ));
+    }
+
+    #[test]
+    fn split_fragments_each_skin_tone_is_one_fragment() {
+        // All five Fitzpatrick tones back-to-back: five Emoji fragments,
+        // the modifier never split off into its own Text run, no gap runs.
+        let input = "\u{1f44d}\u{1f3fb}\u{1f44d}\u{1f3fc}\u{1f44d}\u{1f3fd}\
+                     \u{1f44d}\u{1f3fe}\u{1f44d}\u{1f3ff}";
+        let fragments = split_fragments(input);
+        let expected_keys = [
+            "1f44d-1f3fb",
+            "1f44d-1f3fc",
+            "1f44d-1f3fd",
+            "1f44d-1f3fe",
+            "1f44d-1f3ff",
+        ];
+        assert_eq!(fragments.len(), expected_keys.len());
+        for (i, (fragment, key)) in fragments.iter().zip(expected_keys).enumerate() {
+            assert!(
+                matches!(fragment, MessageFragment::Emoji { asset, .. } if asset.key == key),
+                "fragment {i} must be Emoji with key {key}, got {fragment:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn split_fragments_ireland_and_australia_flags_are_single_fragments() {
+        let fragments = split_fragments("\u{1f1ee}\u{1f1ea} \u{1f1e6}\u{1f1fa}");
+        assert_eq!(fragments.len(), 3);
+        assert!(matches!(
+            &fragments[0],
+            MessageFragment::Emoji { unicode, asset }
+                if *unicode == "\u{1f1ee}\u{1f1ea}" && asset.key == "1f1ee-1f1ea"
+        ));
+        assert_eq!(fragments[1], MessageFragment::Text(" "));
+        assert!(matches!(
+            &fragments[2],
+            MessageFragment::Emoji { unicode, asset }
+                if *unicode == "\u{1f1e6}\u{1f1fa}" && asset.key == "1f1e6-1f1fa"
+        ));
+    }
+
+    #[test]
+    fn split_fragments_profession_and_flag_zwj_are_single_fragments() {
+        // 👨💻 man technologist — ZWJ, one fragment.
+        let man_tech = "\u{1f468}\u{200d}\u{1f4bb}";
+        let fragments = split_fragments(man_tech);
+        assert_eq!(fragments.len(), 1);
+        assert!(matches!(
+            &fragments[0],
+            MessageFragment::Emoji { unicode, asset }
+                if *unicode == man_tech && asset.key == "1f468-200d-1f4bb"
+        ));
+
+        // 🏳️🌈 rainbow flag (VS16 inside the ZWJ sequence) — one fragment.
+        let rainbow = "\u{1f3f3}\u{fe0f}\u{200d}\u{1f308}";
+        let fragments = split_fragments(rainbow);
+        assert_eq!(fragments.len(), 1);
+        assert!(matches!(
+            &fragments[0],
+            MessageFragment::Emoji { unicode, asset }
+                if *unicode == rainbow && asset.key == "1f3f3-fe0f-200d-1f308"
+        ));
+
+        // 🏴☠️ pirate flag — one fragment.
+        let pirate = "\u{1f3f4}\u{200d}\u{2620}\u{fe0f}";
+        let fragments = split_fragments(pirate);
+        assert_eq!(fragments.len(), 1);
+        assert!(matches!(
+            &fragments[0],
+            MessageFragment::Emoji { unicode, asset }
+                if *unicode == pirate && asset.key == "1f3f4-200d-2620-fe0f"
+        ));
+
+        // The 4-component family ZWJ is covered as a single fragment by
+        // `split_fragments_keeps_multicodepoint_emoji_as_single_fragment`.
+    }
+
+    #[test]
+    fn split_fragments_symbol_sequences_each_one_fragment() {
+        // ✅ ❌ ⚠️ 🔥 🎉 — every symbol is its own Emoji fragment; adjacent
+        // emoji produce no empty Text runs between them.
+        let fragments = split_fragments("✅❌\u{26a0}\u{fe0f}🔥🎉");
+        let expected = ["2705", "274c", "26a0", "1f525", "1f389"];
+        assert_eq!(fragments.len(), expected.len());
+        for (i, (fragment, key)) in fragments.iter().zip(expected).enumerate() {
+            assert!(
+                matches!(fragment, MessageFragment::Emoji { asset, .. } if asset.key == key),
+                "fragment {i} must be Emoji with key {key}, got {fragment:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn split_fragments_mixed_complex_string_with_punctuation() {
+        // A realistic chat bubble: plain text, punctuation, multi-codepoint
+        // emoji (skin tones, flag pairs, VS16 heart), symbols and emoji
+        // clusters — every fragment boundary and the full roundtrip must
+        // hold. This is the PDF Task 21 mixed-string case.
+        let input = "Ship it! ✅🚀 See you at 9am 🇮🇪🇦🇺 — keep 👍🏻👍🏿 and ❤️. 🎉🔥";
+        let fragments = split_fragments(input);
+        let expected: Vec<(Option<&str>, &str)> = vec![
+            (None, "Ship it! "),
+            (Some("2705"), "✅"),
+            (Some("1f680"), "🚀"),
+            (None, " See you at 9am "),
+            (Some("1f1ee-1f1ea"), "🇮🇪"),
+            (Some("1f1e6-1f1fa"), "🇦🇺"),
+            (None, " — keep "),
+            (Some("1f44d-1f3fb"), "👍🏻"),
+            (Some("1f44d-1f3ff"), "👍🏿"),
+            (None, " and "),
+            (Some("2764"), "❤️"),
+            (None, ". "),
+            (Some("1f389"), "🎉"),
+            (Some("1f525"), "🔥"),
+        ];
+        assert_eq!(
+            fragments.len(),
+            expected.len(),
+            "fragment count mismatch: {fragments:?}"
+        );
+        for (i, (fragment, (expected_key, expected_unicode))) in
+            fragments.iter().zip(expected).enumerate()
+        {
+            match (fragment, expected_key) {
+                (MessageFragment::Text(text), None) => {
+                    assert_eq!(*text, expected_unicode, "Text fragment {i}");
+                }
+                (MessageFragment::Emoji { unicode, asset }, Some(key)) => {
+                    assert_eq!(*unicode, expected_unicode, "Emoji fragment {i} unicode");
+                    assert_eq!(asset.key, key, "Emoji fragment {i} key");
+                }
+                (fragment, key) => {
+                    panic!("fragment {i} mismatch: got {fragment:?} but expected key {key:?}")
+                }
+            }
+        }
+        // Roundtrip: concatenating all fragment Unicode reproduces the
+        // input byte-for-byte — parsing never alters the message text.
+        let joined: String = fragments
+            .iter()
+            .map(|f| match f {
+                MessageFragment::Text(s) => *s,
+                MessageFragment::Emoji { unicode, .. } => *unicode,
+            })
+            .collect();
+        assert_eq!(joined, input);
+    }
+
+    #[test]
+    fn split_fragments_unvendored_sequences_stay_in_text_run() {
+        // 🇽🇽 (fake flag pair) and 😀‍😀 (unregistered ZWJ) are valid
+        // grapheme clusters with no vendored asset: they must be preserved
+        // verbatim inside the surrounding text run — never split into
+        // their codepoints, never suppressed.
+        let input = "go \u{1f1fd}\u{1f1fd} \u{1f600}\u{200d}\u{1f600} now";
+        let fragments = split_fragments(input);
+        assert_eq!(fragments.len(), 1);
+        assert_eq!(fragments[0], MessageFragment::Text(input));
+    }
 }

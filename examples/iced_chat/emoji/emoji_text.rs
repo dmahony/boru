@@ -830,4 +830,85 @@ mod tests {
             );
         }
     }
+
+    // ── BORU-TWEMOJI-21: complex-sequence plan coverage ────────────────
+    //
+    // The parser tests (emoji/parser.rs) pin fragment boundaries; these
+    // tests pin the artwork plan a chat bubble would render from those
+    // fragments — mixed complex emoji with punctuation, and a multi-
+    // codepoint ZWJ family staying ONE Svg artwork.
+
+    #[test]
+    fn plan_mixed_complex_emoji_with_punctuation() {
+        let r = super::super::renderer::TwemojiRenderer;
+        // Plain text + punctuation + a flag pair + skin tone + symbol +
+        // celebration: the plan alternates Text/Svg exactly like the
+        // parser's fragments, in input order. Note the single spaces
+        // between emoji are their own Text runs (no merging across an
+        // emoji) — 9 pieces total.
+        let input = "Status: ✅ 🇮🇪🇦🇺 👍🏽 — done! 🎉";
+        let plan = plan_emoji_text(&r, input);
+        assert_eq!(plan.len(), 9, "plan mismatch: {plan:?}");
+        let expected = [
+            (Some("Status: "), None),
+            (None, Some("2705")),
+            (Some(" "), None),
+            (None, Some("1f1ee-1f1ea")),
+            (None, Some("1f1e6-1f1fa")),
+            (Some(" "), None),
+            (None, Some("1f44d-1f3fd")),
+            (Some(" — done! "), None),
+            (None, Some("1f389")),
+        ];
+        for (i, (text, key)) in expected.iter().enumerate() {
+            match (&plan[i], text, key) {
+                (EmojiTextArtwork::Text(t), Some(expected_text), None) => {
+                    assert_eq!(*t, *expected_text, "Text piece {i}");
+                }
+                (EmojiTextArtwork::Svg { key: k, .. }, None, Some(expected_key)) => {
+                    assert_eq!(k, expected_key, "Svg piece {i} key");
+                }
+                (piece, text, key) => {
+                    panic!("piece {i} mismatch: got {piece:?}, expected text {text:?} key {key:?}")
+                }
+            }
+        }
+        // Every Svg artwork carries the original Unicode grapheme.
+        let unicode_pieces: Vec<&str> = plan
+            .iter()
+            .filter_map(|item| match item {
+                EmojiTextArtwork::Svg { unicode, .. } => Some(*unicode),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(unicode_pieces, vec!["✅", "🇮🇪", "🇦🇺", "👍🏽", "🎉"]);
+        // Roundtrip: the artwork plan reproduces the input byte-for-byte.
+        let joined: String = plan
+            .iter()
+            .map(|item| match item {
+                EmojiTextArtwork::Text(t) => *t,
+                EmojiTextArtwork::Svg { unicode, .. } => *unicode,
+            })
+            .collect();
+        assert_eq!(joined, input);
+    }
+
+    #[test]
+    fn plan_family_zwj_sequence_is_one_svg_artwork() {
+        let r = super::super::renderer::TwemojiRenderer;
+        // 👨👩👧👦 = U+1F468 ZWJ U+1F469 ZWJ U+1F467 ZWJ U+1F466 — the
+        // longest sequence in the vendored set must stay ONE artwork whose
+        // Unicode span is the whole 7-codepoint grapheme (a naive
+        // char-based renderer would emit four separate images here).
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{200d}\u{1f466}";
+        let plan = plan_emoji_text(&r, family);
+        assert_eq!(plan.len(), 1, "plan mismatch: {plan:?}");
+        match &plan[0] {
+            EmojiTextArtwork::Svg { unicode, key, .. } => {
+                assert_eq!(*unicode, family, "whole ZWJ family must stay one artwork");
+                assert_eq!(*key, "1f468-200d-1f469-200d-1f467-200d-1f466");
+            }
+            other => panic!("expected Svg artwork, got {other:?}"),
+        }
+    }
 }
