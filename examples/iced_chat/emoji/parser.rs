@@ -3,9 +3,10 @@
 //! The central resolver [`emoji_asset`] converts a single Unicode emoji
 //! grapheme into a Twemoji asset key (lowercase hex codepoints joined with
 //! `-`) and validates it against the generated vendored-asset manifest
-//! (BORU-TWEMOJI-06). Grapheme *segmentation* of full message text (walking
-//! clusters and coalescing plain runs) is BORU-TWEMOJI-16; this module owns
-//! the resolution half — callers pass one grapheme at a time.
+//! (BORU-TWEMOJI-06). Grapheme *segmentation* of full message text — walking
+//! clusters and coalescing plain runs into [`MessageFragment`]s — lives here
+//! too ([`split_fragments`], BORU-TWEMOJI-16); the resolution half
+//! ([`emoji_asset`]) accepts one grapheme at a time.
 //!
 //! Guardrails:
 //! - Never assume one Rust `char` equals one visual emoji. The resolver
@@ -17,6 +18,7 @@
 
 use crate::emoji::asset_manifest;
 use crate::emoji::renderer::EmojiAsset;
+use unicode_segmentation::UnicodeSegmentation;
 
 /// Variation selector 16 (U+FE0F) — forces emoji presentation. Twemoji
 /// vendors keys with FE0F kept inside ZWJ sequences (e.g.
@@ -114,12 +116,58 @@ fn hex_key(grapheme: &str, strip_variation_selectors: bool) -> Option<String> {
 
 /// Split message text into text/emoji fragments.
 ///
-/// Skeleton implementation: returns the whole input as a single `Text`
-/// fragment. BORU-TWEMOJI-16 walks grapheme clusters and coalesces adjacent
-/// non-emoji runs; this keeps the interface stable until then. The
-/// per-grapheme resolution half already lives in [`emoji_asset`].
+/// Walks the input by Unicode grapheme cluster (never by Rust `char` — a
+/// single visual emoji is frequently several codepoints: skin-tone
+/// modifiers, regional-indicator flag pairs, ZWJ sequences), resolves each
+/// cluster through [`emoji_asset`], and coalesces adjacent non-emoji
+/// graphemes into a single `Text` run so the renderer pays per-run layout
+/// cost instead of per-grapheme.
+///
+/// Guarantees:
+/// - Output order matches input order; the concatenation of every fragment's
+///   Unicode (Text payload + Emoji `unicode`) is exactly the input.
+/// - An emoji cluster that resolves to a vendored asset becomes exactly one
+///   `Emoji` fragment carrying the *whole* grapheme (e.g. `👍🏻` stays one
+///   fragment, not `👍` + modifier).
+/// - An emoji cluster with no vendored asset (newer/unknown emoji) is
+///   preserved inside a `Text` run — original Unicode, never suppressed.
+/// - Empty input yields no fragments.
 pub fn split_fragments(input: &str) -> Vec<MessageFragment<'_>> {
-    vec![MessageFragment::Text(input)]
+    let mut fragments: Vec<MessageFragment<'_>> = Vec::new();
+    // Byte offset where the current plain-text run starts. `None` when no
+    // run is open. Runs are closed when an emoji cluster is emitted.
+    let mut run_start: Option<usize> = None;
+
+    let mut offset = 0usize;
+    for grapheme in input.graphemes(true) {
+        if let Some(asset) = emoji_asset(grapheme) {
+            flush_text_run(&mut fragments, &mut run_start, input, offset);
+            fragments.push(MessageFragment::Emoji {
+                unicode: grapheme,
+                asset,
+            });
+        } else if run_start.is_none() {
+            run_start = Some(offset);
+        }
+        offset += grapheme.len();
+    }
+    flush_text_run(&mut fragments, &mut run_start, input, input.len());
+    fragments
+}
+
+/// Push the accumulated plain-text run `input[start..end]` as a [`Text`]
+/// fragment, if any run is open (`run_start` is `Some`). Takes `input`
+/// explicitly (rather than capturing it in a closure) so the emitted slice
+/// keeps the input's lifetime `'a`.
+fn flush_text_run<'a>(
+    fragments: &mut Vec<MessageFragment<'a>>,
+    run_start: &mut Option<usize>,
+    input: &'a str,
+    end: usize,
+) {
+    if let Some(start) = run_start.take() {
+        fragments.push(MessageFragment::Text(&input[start..end]));
+    }
 }
 
 #[cfg(test)]
@@ -236,12 +284,134 @@ mod tests {
     }
 
     #[test]
-    fn split_fragments_skeleton_is_single_text_run() {
-        let fragments = split_fragments("hello 😀 world");
+    fn split_fragments_coalesces_plain_text_into_one_run() {
+        let fragments = split_fragments("hello world");
+        assert_eq!(fragments.len(), 1);
+        assert_eq!(fragments[0], MessageFragment::Text("hello world"));
+    }
+
+    #[test]
+    fn split_fragments_mixed_text_and_emoji_preserve_order() {
+        let fragments = split_fragments("hi 😀 there 🍕 bye");
+        assert_eq!(fragments.len(), 5);
+        assert_eq!(fragments[0], MessageFragment::Text("hi "));
+        assert!(matches!(
+            &fragments[1],
+            MessageFragment::Emoji { unicode, asset }
+                if *unicode == "😀" && asset.key == "1f600"
+        ));
+        assert_eq!(fragments[2], MessageFragment::Text(" there "));
+        assert!(matches!(
+            &fragments[3],
+            MessageFragment::Emoji { unicode, asset }
+                if *unicode == "🍕" && asset.key == "1f355"
+        ));
+        assert_eq!(fragments[4], MessageFragment::Text(" bye"));
+    }
+
+    #[test]
+    fn split_fragments_keeps_multicodepoint_emoji_as_single_fragment() {
+        // 🇺🇸 = U+1F1FA U+1F1F8 — a two-codepoint flag pair is ONE fragment.
+        let fragments = split_fragments("🇺🇸");
         assert_eq!(fragments.len(), 1);
         assert!(matches!(
-            fragments[0],
-            MessageFragment::Text("hello 😀 world")
+            &fragments[0],
+            MessageFragment::Emoji { unicode, asset }
+                if *unicode == "🇺🇸" && asset.key == "1f1fa-1f1f8"
         ));
+
+        // 👍🏻 = U+1F44D U+1F3FB — base + skin-tone modifier is ONE fragment.
+        let fragments = split_fragments("👍🏻");
+        assert_eq!(fragments.len(), 1);
+        assert!(matches!(
+            &fragments[0],
+            MessageFragment::Emoji { unicode, asset }
+                if *unicode == "👍🏻" && asset.key == "1f44d-1f3fb"
+        ));
+
+        // 👩💻 = U+1F469 ZWJ U+1F4BB — a ZWJ sequence is ONE fragment.
+        // (Uses explicit escapes: the U+200D joiner is invisible in source
+        // and easy to drop accidentally when composing the literal.)
+        let fragments = split_fragments("\u{1f469}\u{200d}\u{1f4bb}");
+        assert_eq!(fragments.len(), 1);
+        assert!(matches!(
+            &fragments[0],
+            MessageFragment::Emoji { unicode, asset }
+                if *unicode == "\u{1f469}\u{200d}\u{1f4bb}" && asset.key == "1f469-200d-1f4bb"
+        ));
+
+        // A ZWJ family sequence (4 components + 3 joiners) stays ONE fragment.
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{200d}\u{1f466}";
+        let fragments = split_fragments(family);
+        assert_eq!(fragments.len(), 1);
+        assert!(matches!(
+            &fragments[0],
+            MessageFragment::Emoji { unicode, asset }
+                if *unicode == family && asset.key == "1f468-200d-1f469-200d-1f467-200d-1f466"
+        ));
+    }
+
+    #[test]
+    fn split_fragments_adjacent_emoji_have_no_gap_runs() {
+        // Two emoji back-to-back produce two Emoji fragments with no empty
+        // Text fragment between them.
+        let fragments = split_fragments("😀🍕");
+        assert_eq!(fragments.len(), 2);
+        assert!(matches!(
+            &fragments[0],
+            MessageFragment::Emoji { unicode, .. } if *unicode == "😀"
+        ));
+        assert!(matches!(
+            &fragments[1],
+            MessageFragment::Emoji { unicode, .. } if *unicode == "🍕"
+        ));
+    }
+
+    #[test]
+    fn split_fragments_unknown_emoji_stays_in_text_run() {
+        // 🫩 (Unicode 16.0, not vendored) must not be suppressed: it stays
+        // inside the surrounding plain-text run as original Unicode.
+        let fragments = split_fragments("hi 🫩 bye");
+        assert_eq!(fragments.len(), 1);
+        assert_eq!(fragments[0], MessageFragment::Text("hi 🫩 bye"));
+    }
+
+    #[test]
+    fn split_fragments_empty_input_yields_no_fragments() {
+        assert!(split_fragments("").is_empty());
+    }
+
+    #[test]
+    fn split_fragments_roundtrips_full_unicode_text() {
+        // Concatenating every fragment's Unicode reproduces the input
+        // exactly — nothing lost, reordered, or replaced.
+        let input = "hello 😀 world 🇺🇸 👍🏻 \u{1f469}\u{200d}\u{1f4bb} bye";
+        let fragments = split_fragments(input);
+        let joined: String = fragments
+            .iter()
+            .map(|f| match f {
+                MessageFragment::Text(s) => *s,
+                MessageFragment::Emoji { unicode, .. } => *unicode,
+            })
+            .collect();
+        assert_eq!(joined, input);
+    }
+
+    #[test]
+    fn split_fragments_is_deterministic() {
+        let inputs = [
+            "hello 😀 world",
+            "🇺🇸 👍🏻 \u{1f469}\u{200d}\u{1f4bb}",
+            "a😀b🍕c",
+            "",
+            "plain text",
+        ];
+        for input in inputs {
+            assert_eq!(
+                split_fragments(input),
+                split_fragments(input),
+                "split must be deterministic for {input:?}"
+            );
+        }
     }
 }
