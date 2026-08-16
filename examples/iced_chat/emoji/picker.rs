@@ -743,6 +743,49 @@ mod tests {
         }
     }
 
+    // ── Composer parity (BORU-TWEMOJI-19) ───────────────────────────────
+
+    /// The composer stays a plain Unicode text buffer: applying the picker's
+    /// insert message through the handler's exact operation
+    /// (`composer_text.push_str(&emoji)`, app/chat.rs) yields byte-identical
+    /// `prefix + grapheme` — the same result as typing the characters — and
+    /// a run of inserts preserves typing order. Locks in "no custom rich-text
+    /// editor is introduced in this task set" at the message level.
+    #[test]
+    fn picker_insert_into_composer_buffer_is_plain_text_parity() {
+        let prefix = "Hello, world! ";
+        for emoji in common_emojis() {
+            let mut composer = prefix.to_string();
+            match insert_message(emoji) {
+                AppMessage::InsertEmoji(s) => {
+                    // Exactly what `AppMessage::InsertEmoji` does in the
+                    // GUI: append the full Unicode grapheme to the buffer.
+                    composer.push_str(&s);
+                    assert_eq!(
+                        composer,
+                        format!("{prefix}{}", emoji.unicode),
+                        "inserted text must equal typed text (no reorder/transform)"
+                    );
+                    assert!(
+                        !composer.contains(".svg") && !composer.contains('/'),
+                        "buffer must stay plain Unicode: {composer:?}"
+                    );
+                }
+                other => panic!("unexpected message: {other:?}"),
+            }
+        }
+
+        // A sequence of inserts preserves typing order exactly.
+        let mut composer = String::new();
+        for emoji in common_emojis() {
+            if let AppMessage::InsertEmoji(s) = insert_message(emoji) {
+                composer.push_str(&s);
+            }
+        }
+        let typed: String = common_emojis().iter().map(|e| e.unicode).collect();
+        assert_eq!(composer, typed);
+    }
+
     // ── Responsive geometry (BORU-TWEMOJI-11) ───────────────────────────
 
     /// The reference token width (336 px) shows the reference 8-column grid.
