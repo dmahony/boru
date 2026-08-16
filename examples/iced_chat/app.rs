@@ -2340,11 +2340,19 @@ pub(crate) enum CatalogueDownloadState {
     Cancelled,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum AttachmentAvailability {
+    Blob { ticket: String },
+    DirectOffer { owner: PublicKey, offer_id: FileOfferId },
+    Hybrid { owner: PublicKey, offer_id: FileOfferId, ticket: String },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DownloadAttachment {
     pub(crate) kind: TransferKind,
     pub(crate) name: String,
     pub(crate) ticket: String,
+    pub(crate) availability: AttachmentAvailability,
     pub(crate) transfer_id: Option<TransferId>,
     pub(crate) state: DownloadState,
     /// Display name (or short public key) of the sending peer.
@@ -2395,6 +2403,7 @@ impl std::hash::Hash for DownloadAttachment {
         self.kind.hash(state);
         self.name.hash(state);
         self.ticket.hash(state);
+        self.availability.hash(state);
         self.transfer_id.hash(state);
         self.state.hash(state);
         self.source_peer.hash(state);
@@ -2443,6 +2452,7 @@ impl DownloadAttachment {
         Self {
             kind,
             name: name.into(),
+            availability: AttachmentAvailability::Blob { ticket: ticket.clone() },
             ticket,
             transfer_id: None,
             state: DownloadState::Ready { total: None },
@@ -19243,16 +19253,21 @@ impl ChatCallbacks for IcedChat {
         offer_id: FileOfferId,
         name: String,
         size: u64,
-        _owner: PublicKey,
+        owner: PublicKey,
         sender_label: Option<String>,
     ) {
         self.set_pending_file(
-            name,
+            name.clone(),
             format!("direct-offer:{offer_id:?}"),
             size,
             None,
             sender_label,
         );
+        if let Some(index) = self.download_entry_index {
+            if let Some(download) = self.entries.get_mut(index).and_then(|entry| entry.download.as_mut()) {
+                download.availability = AttachmentAvailability::DirectOffer { owner, offer_id };
+            }
+        }
     }
 
     fn set_pending_folder(
