@@ -4914,6 +4914,9 @@ pub struct IcedChat {
     show_member_list: bool,
     /// Whether the emoji picker panel is currently visible.
     show_emoji_picker: bool,
+    /// Active emoji picker category (BORU-TWEMOJI-12). The grid shows
+    /// exactly this category's catalog entries.
+    emoji_category: crate::emoji::EmojiCategory,
     /// Whether the GIF picker panel is currently visible.
     show_gif_picker: bool,
     /// Search text for the GIF picker.
@@ -6449,6 +6452,10 @@ pub enum AppMessage {
     /// points: variation selectors, skin-tone modifiers, ZWJ sequences),
     /// never an asset key or SVG path. BORU-TWEMOJI-10.
     InsertEmoji(String),
+    /// Switch the emoji picker to a different content category
+    /// (BORU-TWEMOJI-12). The picker grid is rebuilt from the filtered
+    /// catalog, so no stale items survive the switch.
+    SelectEmojiCategory(crate::emoji::EmojiCategory),
     /// Toggle the GIF picker panel.
     ToggleGifPicker,
     /// Search text changed in the GIF picker.
@@ -8184,6 +8191,7 @@ impl IcedChat {
             chat_search_query: String::new(),
             show_member_list: false,
             show_emoji_picker: false,
+            emoji_category: crate::emoji::EmojiCategory::SmileysAndPeople,
             show_gif_picker: false,
             gif_search_text: String::new(),
             gif_results: Vec::new(),
@@ -10654,6 +10662,7 @@ impl IcedChat {
             AppMessage::ToggleVideoCardMenu(_) => "ToggleVideoCardMenu",
             AppMessage::ToggleEmojiPicker => "ToggleEmojiPicker",
             AppMessage::InsertEmoji(_) => "InsertEmoji",
+            AppMessage::SelectEmojiCategory(_) => "SelectEmojiCategory",
             AppMessage::ToggleGifPicker => "ToggleGifPicker",
             AppMessage::GifSearchChanged(_) => "GifSearchChanged",
             AppMessage::SendGif(_) => "SendGif",
@@ -17741,6 +17750,7 @@ impl IcedChat {
             | AppMessage::ToggleVideoCardMenu(_)
             | AppMessage::ToggleEmojiPicker
             | AppMessage::InsertEmoji(_)
+            | AppMessage::SelectEmojiCategory(_)
             | AppMessage::ToggleGifPicker
             | AppMessage::GifSearchChanged(_)
             | AppMessage::GifSearchDebounced(_)

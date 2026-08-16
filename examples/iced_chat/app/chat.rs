@@ -1106,8 +1106,12 @@ impl IcedChat {
     /// emoji/Twemoji concerns live in the dedicated emoji module. External
     /// behaviour is unchanged; the visual swap to SVG happens in
     /// BORU-TWEMOJI-10.
+    ///
+    /// BORU-TWEMOJI-12: the picker shows the active category's grid; the
+    /// category tab row lives inside the picker and emits
+    /// `SelectEmojiCategory` to switch.
     pub(crate) fn view_emoji_picker(&self) -> iced::Element<'_, AppMessage> {
-        crate::emoji::picker::view_emoji_picker(&self.theme())
+        crate::emoji::picker::view_emoji_picker(&self.theme(), self.emoji_category)
     }
 
     // ── GIF picker async helpers ─────────────────────────────────────────
@@ -6449,6 +6453,14 @@ impl IcedChat {
 
             AppMessage::ToggleEmojiPicker => {
                 self.show_emoji_picker = !self.show_emoji_picker;
+                iced::Task::none()
+            }
+
+            AppMessage::SelectEmojiCategory(category) => {
+                // BORU-TWEMOJI-12: remember the active category so the next
+                // picker view shows the same tab; the grid is rebuilt from
+                // the filtered catalog in the view, so no stale items.
+                self.emoji_category = category;
                 iced::Task::none()
             }
 

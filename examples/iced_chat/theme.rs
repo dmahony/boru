@@ -1346,14 +1346,17 @@ pub struct ChatTheme {
     /// BORU-TWEMOJI-10). BORU-TWEMOJI-11 made the live card responsive:
     /// this token is the baseline the picker prefers when the window has
     /// room, while the actual width adapts to the available space
-    /// (334–374 px, capped at ~400 px) and never exceeds it.
+    /// (334–374 px, capped at ~400 px) and never exceeds it. Since
+    /// BORU-TWEMOJI-12 the card is also at least wide enough for the
+    /// 8-category tab row (~302 px) when space permits.
     pub emoji_picker_width: f32,
-    /// Emoji picker scroll region height baseline (200 px — shows all
-    /// 5 grid rows of the 40-entry curated list at the reference 8-column
-    /// layout without scrolling). BORU-TWEMOJI-11 made the live region
-    /// responsive: this token is the minimum when the window is tall enough,
-    /// and the region grows with the grid content up to ~340 px (card
-    /// ≤ ~400 px) when space permits, or shrinks to fit short windows.
+    /// Emoji picker scroll region height baseline (200 px — a comfortable
+    /// floor for the active category's grid rows at the reference 8-column
+    /// layout). BORU-TWEMOJI-11 made the live region responsive and
+    /// BORU-TWEMOJI-12 made it category-aware: this token is the minimum
+    /// when the window is tall enough, and the region grows with the
+    /// category's grid content up to ~340 px (card ≤ ~400 px) when space
+    /// permits, or shrinks to fit short windows.
     pub emoji_picker_scroll_height: f32,
     /// GIF picker panel width (320 px).
     pub gif_picker_width: f32,
