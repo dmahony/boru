@@ -425,6 +425,10 @@ pub fn handle_net_event_for_topic(
                         }
                     }
                 }
+                Message::FileOffer { .. } => {
+                    // Direct file offers are handled by the direct-transfer
+                    // protocol; do not treat them as legacy blob shares.
+                }
                 Message::ImageShare { name, hash } => {
                     if from != cb.local_public() {
                         let fid = FriendId::from_public_key(from);

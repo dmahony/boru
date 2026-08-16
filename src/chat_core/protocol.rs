@@ -249,6 +249,65 @@ pub enum Message {
         #[serde(default)]
         signature: Vec<u8>,
     },
+    /// Announce a file that is available for direct download from the sender.
+    ///
+    /// This deliberately carries no local filesystem path. The sender's
+    /// authenticated identity and this opaque offer ID authorize downloads.
+    FileOffer {
+        /// Opaque identifier used to correlate this offer with later updates.
+        offer_id: FileOfferId,
+        /// Safe basename displayed to the recipient (never a filesystem path).
+        name: String,
+        /// File size in bytes.
+        size: u64,
+    },
+}
+
+/// Opaque identifier for a direct file offer.
+///
+/// IDs are generated from the operating system's cryptographically secure
+/// random source and contain no information about the offered file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FileOfferId([u8; 32]);
+
+impl FileOfferId {
+    /// Generate a fresh offer identifier using the operating system CSPRNG.
+    pub fn generate() -> Self {
+        let mut bytes = [0u8; 32];
+        getrandom::fill(&mut bytes).expect("OS entropy source failed");
+        Self(bytes)
+    }
+
+    /// Return the raw identifier bytes for protocol implementations.
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl Message {
+    /// Construct a file offer after validating that `name` is a basename.
+    ///
+    /// Both slash styles are rejected so a message created on one platform
+    /// cannot carry a path component when decoded on another platform.
+    pub fn file_offer(
+        offer_id: FileOfferId,
+        name: String,
+        size: u64,
+    ) -> std::result::Result<Self, &'static str> {
+        if name.is_empty()
+            || name == "."
+            || name == ".."
+            || name.contains('/')
+            || name.contains('\\')
+        {
+            return Err("file offer name must be a safe basename");
+        }
+        Ok(Self::FileOffer {
+            offer_id,
+            name,
+            size,
+        })
+    }
 }
 
 /// Deserialize a `u64`, defaulting to `0` when the wire buffer is exhausted.
@@ -954,6 +1013,49 @@ impl RoomInviteV2 {
             topic: TopicId::from_bytes(topic_bytes),
             discovery_secret: DiscoverySecret::from_bytes(secret_bytes),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_offer_id_is_random_and_serializable() {
+        let first = FileOfferId::generate();
+        let second = FileOfferId::generate();
+        assert_ne!(first, second);
+
+        let encoded = postcard::to_stdvec(&first).expect("serialize offer ID");
+        let decoded: FileOfferId = postcard::from_bytes(&encoded).expect("deserialize offer ID");
+        assert_eq!(first, decoded);
+        assert_eq!(first.as_bytes().len(), 32);
+    }
+
+    #[test]
+    fn file_offer_round_trips_without_a_path() {
+        let offer_id = FileOfferId::generate();
+        let message =
+            Message::file_offer(offer_id, "report.pdf".to_owned(), 42).expect("safe basename");
+        let encoded = postcard::to_stdvec(&message).expect("serialize file offer");
+        let decoded: Message = postcard::from_bytes(&encoded).expect("deserialize file offer");
+        assert!(matches!(
+            decoded,
+            Message::FileOffer {
+                offer_id: decoded_id,
+                name,
+                size: 42,
+            } if decoded_id == offer_id && name == "report.pdf"
+        ));
+    }
+
+    #[test]
+    fn file_offer_rejects_path_components() {
+        let offer_id = FileOfferId::generate();
+        for name in ["", ".", "..", "subdir/report.pdf", r"subdir\report.pdf"] {
+            assert!(Message::file_offer(offer_id, name.to_owned(), 1).is_err());
+        }
+        assert!(Message::file_offer(offer_id, "report.pdf".to_owned(), 1).is_ok());
     }
 }
 
