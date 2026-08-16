@@ -4423,6 +4423,12 @@ pub struct IcedChat {
     /// a source from the picker or when `SourceChanged` arrives.
     screen_share_selected_source: Option<CaptureSourceId>,
     #[cfg(feature = "screen-sharing")]
+    /// BORU-SSUI-04: the user's chosen quality preset (None = Auto /
+    /// path-derived auto preset). Presentation-only mirror of the
+    /// `ScreenShareSetPreset` dispatch; the host's effective preset is
+    /// authoritative and reported via `screen_share_host_metrics`.
+    screen_share_selected_preset: Option<QualityPreset>,
+    #[cfg(feature = "screen-sharing")]
     /// Who the local viewer is watching (short public key from the invite),
     /// shown while `screen_share_viewing` so the viewer always knows who is
     /// sharing (PDF Phase 13: "show who is sharing").
@@ -8561,6 +8567,8 @@ impl IcedChat {
             screen_share_sources: None,
             #[cfg(feature = "screen-sharing")]
             screen_share_selected_source: None,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_selected_preset: None,
             #[cfg(feature = "screen-sharing")]
             screen_share_viewing_peer: None,
             #[cfg(feature = "screen-sharing")]
@@ -15080,6 +15088,9 @@ impl IcedChat {
                 // restores the path-derived auto preset). The host driver
                 // applies the ceiling whether streaming already started or
                 // the viewer is still deciding.
+                // BORU-SSUI-04: mirror the user's choice so the segmented
+                // control shows exactly one selected segment (None = Auto).
+                self.screen_share_selected_preset = preset;
                 if let Some(tx) = &self.screen_share_host_cmd_tx {
                     let _ = tx.try_send(HostCommand::SetQualityPreset(preset));
                 }
@@ -23072,6 +23083,7 @@ impl IcedChat {
         self.screen_share_src_size = None;
         self.screen_share_sources = None;
         self.screen_share_selected_source = None;
+        self.screen_share_selected_preset = None;
         self.screen_share_notice_ticks = 0;
     }
 
@@ -27884,6 +27896,45 @@ mod tests {
         assert!(
             matches!(received, Ok(HostCommand::SwitchSource(CaptureSourceId(2)))),
             "the picker choice must reach the host driver, got {received:?}"
+        );
+    }
+
+    /// BORU-SSUI-04 (PDF Task 4): selecting a quality segment mirrors the
+    /// user's choice so exactly one segment shows selected, and forwards the
+    /// exact same HostCommand the old preset text buttons sent (None = Auto).
+    #[cfg(feature = "screen-sharing")]
+    #[test]
+    fn screen_share_set_preset_forwards_command_and_mirrors_selection() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(8);
+        app.screen_share_host_cmd_tx = Some(cmd_tx);
+
+        app.update(AppMessage::ScreenShareSetPreset(Some(
+            QualityPreset::LanHigh,
+        )));
+        assert_eq!(
+            app.screen_share_selected_preset,
+            Some(QualityPreset::LanHigh),
+            "the segmented control mirrors the user's choice"
+        );
+        let received = cmd_rx.try_recv();
+        assert!(
+            matches!(
+                received,
+                Ok(HostCommand::SetQualityPreset(Some(QualityPreset::LanHigh)))
+            ),
+            "LAN High must dispatch the same command as before, got {received:?}"
+        );
+
+        app.update(AppMessage::ScreenShareSetPreset(None));
+        assert_eq!(
+            app.screen_share_selected_preset, None,
+            "Auto (None) mirrors as the path-derived auto preset"
+        );
+        let received = cmd_rx.try_recv();
+        assert!(
+            matches!(received, Ok(HostCommand::SetQualityPreset(None))),
+            "Auto must dispatch the same command as before, got {received:?}"
         );
     }
 

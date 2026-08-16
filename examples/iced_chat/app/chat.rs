@@ -10,6 +10,21 @@
 
 use super::*;
 
+#[cfg(feature = "screen-sharing")]
+/// BORU-SSUI-04: one segment of the sender's quality segmented control.
+/// `preset` is the exact value dispatched on press (`None` = Auto /
+/// path-derived auto preset); `selected` marks the single visually
+/// active segment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct QualitySegmentSpec {
+    /// i18n label key (runtime source labels, never mockup text).
+    pub label_key: &'static str,
+    /// Preset dispatched via `ScreenShareSetPreset`.
+    pub preset: Option<QualityPreset>,
+    /// Whether this segment is the selected one.
+    pub selected: bool,
+}
+
 impl IcedChat {
     pub(crate) fn view_chat_panel(&self) -> iced::Element<'_, AppMessage> {
         use iced::{widget, Length};
@@ -603,42 +618,36 @@ impl IcedChat {
                     .into(),
                 );
             }
-            // BORU-SS-39: preset override buttons (None restores the
-            // path-derived auto preset). Visible in every active sharer
-            // state so the choice can be made before the viewer accepts.
-            let preset_buttons: Vec<iced::Element<'_, AppMessage>> = vec![
-                button(text(crate::i18n::t("screenshare.preset_lan_high")))
-                    .on_press(AppMessage::ScreenShareSetPreset(Some(
-                        QualityPreset::LanHigh,
-                    )))
-                    .padding([2, 6])
-                    .into(),
-                button(text(crate::i18n::t("screenshare.preset_balanced")))
-                    .on_press(AppMessage::ScreenShareSetPreset(Some(
-                        QualityPreset::Balanced,
-                    )))
-                    .padding([2, 6])
-                    .into(),
-                button(text(crate::i18n::t("screenshare.preset_relay")))
-                    .on_press(AppMessage::ScreenShareSetPreset(Some(
-                        QualityPreset::RelayConservative,
-                    )))
-                    .padding([2, 6])
-                    .into(),
-                button(text(crate::i18n::t("screenshare.preset_auto")))
-                    .on_press(AppMessage::ScreenShareSetPreset(None))
-                    .padding([2, 6])
-                    .into(),
-            ];
+            // BORU-SSUI-04: quality presets as ONE segmented control under a
+            // small "Quality" label (PDF Task 4). The four segments map to
+            // the exact same messages the old text buttons dispatched:
+            // LAN High → LanHigh, Balanced → Balanced, Relay →
+            // RelayConservative, Auto → None (path-derived auto preset).
+            // `screen_share_selected_preset` mirrors the user's last choice
+            // so exactly one segment shows the accent fill at a time; the
+            // host's effective preset remains authoritative (metrics above).
+            // No availability signal exists today, so every segment is
+            // enabled; the primitive renders disabled segments if a future
+            // signal appears (never hidden).
+            let selected_preset = self.screen_share_selected_preset;
+            let segments: Vec<crate::ui_components::SegmentedOption<AppMessage>> =
+                Self::quality_segment_specs(selected_preset)
+                    .into_iter()
+                    .map(|spec| crate::ui_components::SegmentedOption {
+                        label: crate::i18n::t(spec.label_key),
+                        selected: spec.selected,
+                        enabled: true,
+                        on_press: Some(AppMessage::ScreenShareSetPreset(spec.preset)),
+                    })
+                    .collect();
             items.push(
-                row![
+                column![
                     text(crate::i18n::t("screenshare.preset"))
                         .size(crate::fonts::TypeRole::SupportingText.size_px())
                         .color(Self::muted_color(self.dark_mode)),
-                    row(preset_buttons).spacing(SPACE_4),
+                    crate::ui_components::segmented_control(segments),
                 ]
                 .spacing(SPACE_6)
-                .align_y(iced::Alignment::Center)
                 .into(),
             );
 
@@ -977,6 +986,39 @@ impl IcedChat {
             Capability::Audio => "audio".to_string(),
             Capability::ViewScreen => "view".to_string(),
         }
+    }
+
+    #[cfg(feature = "screen-sharing")]
+    /// BORU-SSUI-04: map the four quality modes to segmented-control specs.
+    /// Exactly one spec is selected for any `selected` value (`None` =
+    /// Auto). The dispatch targets mirror the old text buttons exactly:
+    /// LAN High → LanHigh, Balanced → Balanced, Relay → RelayConservative,
+    /// Auto → None.
+    pub(crate) fn quality_segment_specs(
+        selected: Option<QualityPreset>,
+    ) -> [QualitySegmentSpec; 4] {
+        [
+            QualitySegmentSpec {
+                label_key: "screenshare.preset_lan_high",
+                preset: Some(QualityPreset::LanHigh),
+                selected: selected == Some(QualityPreset::LanHigh),
+            },
+            QualitySegmentSpec {
+                label_key: "screenshare.preset_balanced",
+                preset: Some(QualityPreset::Balanced),
+                selected: selected == Some(QualityPreset::Balanced),
+            },
+            QualitySegmentSpec {
+                label_key: "screenshare.preset_relay",
+                preset: Some(QualityPreset::RelayConservative),
+                selected: selected == Some(QualityPreset::RelayConservative),
+            },
+            QualitySegmentSpec {
+                label_key: "screenshare.preset_auto",
+                preset: None,
+                selected: selected.is_none(),
+            },
+        ]
     }
 
     #[cfg(feature = "screen-sharing")]
@@ -8357,6 +8399,65 @@ mod tests {
         for (i, a) in icons.iter().enumerate() {
             for b in &icons[i + 1..] {
                 assert_ne!(a, b);
+            }
+        }
+    }
+
+    /// BORU-SSUI-04 (PDF Task 4): the quality segmented control maps each
+    /// segment to the exact preset the old text buttons dispatched, and
+    /// exactly one segment is visually selected for any chosen preset
+    /// (None = Auto / path-derived).
+    #[test]
+    fn quality_segments_map_presets_and_select_exactly_one() {
+        use boru_core::screen_share::QualityPreset;
+        // (label key, dispatched preset, is_auto)
+        let expectations = [
+            (
+                "screenshare.preset_lan_high",
+                Some(QualityPreset::LanHigh),
+                false,
+            ),
+            (
+                "screenshare.preset_balanced",
+                Some(QualityPreset::Balanced),
+                false,
+            ),
+            (
+                "screenshare.preset_relay",
+                Some(QualityPreset::RelayConservative),
+                false,
+            ),
+            ("screenshare.preset_auto", None, true),
+        ];
+        for selected in [
+            None,
+            Some(QualityPreset::LanHigh),
+            Some(QualityPreset::Balanced),
+            Some(QualityPreset::RelayConservative),
+        ] {
+            let segments = IcedChat::quality_segment_specs(selected);
+            assert_eq!(
+                segments.len(),
+                expectations.len(),
+                "one segment per quality mode"
+            );
+            let selected_count = segments.iter().filter(|s| s.selected).count();
+            assert_eq!(
+                selected_count, 1,
+                "exactly one segment visually selected for {selected:?}"
+            );
+            for (spec, (label_key, preset, is_auto)) in segments.iter().zip(expectations.iter()) {
+                assert_eq!(&spec.label_key, label_key, "runtime source label key");
+                assert_eq!(&spec.preset, preset, "dispatch target for {label_key}");
+                assert_eq!(
+                    spec.selected,
+                    if *is_auto {
+                        selected.is_none()
+                    } else {
+                        selected == *preset
+                    },
+                    "selection state for {label_key}"
+                );
             }
         }
     }

@@ -808,7 +808,92 @@ pub fn badge_owned<'a, Message: 'a>(label: String, kind: BadgeKind) -> Element<'
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// 11. DIVIDER
+// 11. SEGMENTED CONTROL — single-choice segmented row
+// ═══════════════════════════════════════════════════════════════════════
+
+/// A single option for [`segmented_control`].
+pub struct SegmentedOption<Message> {
+    /// Segment label (caller-localized).
+    pub label: String,
+    /// Whether this segment is the active/selected one (accent fill).
+    pub selected: bool,
+    /// Whether this segment can be pressed. Disabled segments render
+    /// dimmed and never dispatch.
+    pub enabled: bool,
+    /// Message to dispatch on press. `None` renders the segment inert.
+    pub on_press: Option<Message>,
+}
+
+/// A single-choice segmented control: a row of connected segments where
+/// the selected one gets the accent fill and unselected segments a
+/// neutral surface (BORU-SSUI-04, shared sender/viewer primitive).
+///
+/// Extracted from the activity-log filter chips (files.rs) per the
+/// sender screen-share audit §3.5. Style values reuse `design_tokens`;
+/// BORU-SSUI-08 migrates screen-share-specific values into
+/// `screen_share.segmented.*` TOML tokens afterwards.
+pub fn segmented_control<'a, Message: Clone + 'a>(
+    options: Vec<SegmentedOption<Message>>,
+) -> Element<'a, Message> {
+    let mut row = Row::new().spacing(design_tokens::SPACE_4);
+    for opt in options {
+        let selected = opt.selected;
+        let enabled = opt.enabled;
+        let mut btn = button(crate::fonts::type_role_text(
+            TypeRole::ButtonLabel,
+            opt.label,
+        ))
+        .padding([design_tokens::SPACE_4, design_tokens::SPACE_10])
+        .style(move |t, status| {
+            let radius = design_tokens::RADIUS_MD.into();
+            if !enabled {
+                return button::Style {
+                    background: Some(Background::Color(design_tokens::surface(t))),
+                    text_color: design_tokens::text_muted(t),
+                    border: Border {
+                        radius,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+            }
+            if selected {
+                button::Style {
+                    background: Some(Background::Color(design_tokens::primary(t))),
+                    text_color: Color::WHITE,
+                    border: Border {
+                        radius,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }
+            } else {
+                let bg = match status {
+                    button::Status::Hovered => design_tokens::surface_hover(t),
+                    button::Status::Pressed => design_tokens::surface_pressed(t),
+                    _ => design_tokens::surface(t),
+                };
+                button::Style {
+                    background: Some(Background::Color(bg)),
+                    text_color: design_tokens::text_secondary(t),
+                    border: Border {
+                        radius,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }
+            }
+        });
+        if let Some(msg) = opt.on_press {
+            btn = btn.on_press(msg);
+        }
+        row = row.push(btn);
+    }
+    row.into()
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 12. DIVIDER
 // ═══════════════════════════════════════════════════════════════════════
 
 /// A horizontal divider line.
