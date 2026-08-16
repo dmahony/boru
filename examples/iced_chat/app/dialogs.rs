@@ -168,7 +168,7 @@ impl IcedChat {
     pub(crate) fn dialog_body_max_height(&self) -> f32 {
         self.boru_layout()
             .responsive
-            .dialog_body_max_height_for_width(self.window_width)
+            .dialog_body_max_height_for_size(self.window_width, self.window_height)
     }
 
     /// Wrap the base layout in an overlay showing the advanced connection details.

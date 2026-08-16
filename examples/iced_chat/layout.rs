@@ -1163,6 +1163,59 @@ impl ResponsiveLayout {
             ViewportTier::UltraWide => 520.0,
         }
     }
+
+    /// Maximum dialog body height for the current viewport. Short windows
+    /// reserve room for the title and footer; the body remains scrollable.
+    pub fn dialog_body_max_height_for_size(&self, width: f32, height: f32) -> f32 {
+        let width_cap = self.dialog_body_max_height_for_width(width);
+        match self.tier_for_height(height) {
+            HeightTier::Short => width_cap.min((height - 220.0).max(180.0)),
+            HeightTier::Normal | HeightTier::Tall => width_cap,
+        }
+    }
+
+    /// Structural vertical scale for non-essential whitespace. Typography is
+    /// deliberately unaffected so short windows stay readable.
+    pub fn vertical_spacing_scale(&self, height: f32) -> f32 {
+        match self.tier_for_height(height) {
+            HeightTier::Short => 0.7,
+            HeightTier::Normal | HeightTier::Tall => 1.0,
+        }
+    }
+}
+
+#[cfg(test)]
+mod responsive_height_tests {
+    use super::{HeightTier, ResponsiveLayout, ViewportTier};
+
+    #[test]
+    fn short_window_rules_cover_1024x720() {
+        let layout = ResponsiveLayout::default();
+
+        assert_eq!(layout.tiers_for_size(1024.0, 720.0).width, ViewportTier::Desktop);
+        assert_eq!(layout.tier_for_height(720.0), HeightTier::Short);
+        assert_eq!(layout.vertical_spacing_scale(720.0), 0.7);
+        assert_eq!(layout.dialog_body_max_height_for_size(1024.0, 720.0), 480.0);
+    }
+
+    #[test]
+    fn short_window_rules_cover_1280x720() {
+        let layout = ResponsiveLayout::default();
+
+        assert_eq!(layout.tiers_for_size(1280.0, 720.0).width, ViewportTier::Desktop);
+        assert_eq!(layout.tier_for_height(720.0), HeightTier::Short);
+        assert!(layout.dialog_body_max_height_for_size(1280.0, 720.0) <= 480.0);
+        assert!(layout.vertical_spacing_scale(720.0) < 1.0);
+    }
+
+    #[test]
+    fn normal_height_preserves_default_spacing_and_dialog_caps() {
+        let layout = ResponsiveLayout::default();
+
+        assert_eq!(layout.tier_for_height(800.0), HeightTier::Normal);
+        assert_eq!(layout.vertical_spacing_scale(800.0), 1.0);
+        assert_eq!(layout.dialog_body_max_height_for_size(1280.0, 800.0), 480.0);
+    }
 }
 
 impl Default for ResponsiveLayout {
