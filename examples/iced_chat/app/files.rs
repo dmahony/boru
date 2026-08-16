@@ -4588,6 +4588,8 @@ impl IcedChat {
                     let announced_size = metadata.len();
                     let source_path = std::path::PathBuf::from(&abs_path);
                     let source_path_string = abs_path.clone();
+                    let is_video = ChatEntry::is_video_file(&filename);
+                    let poster_cache_dir = self.data_dir.join("cache").join("video-posters");
                     return iced::Task::perform(
                         async move {
                             let message = crate::Message::file_offer(
@@ -4691,16 +4693,70 @@ impl IcedChat {
                                     let ticket = blob_ticket_string(endpoint_addr, blob_hash, format);
                                     let ready = crate::Message::FileOfferReady {
                                         offer_id,
-                                        ticket,
+                                        ticket: ticket.clone(),
                                         thumbnail_hash: None,
                                     };
                                     let encoded = SignedMessage::sign_and_encode(&secret_key, &ready)
                                         .map_err(|e| format!("failed to sign FileOfferReady: {e}"))?;
-                                    if let Some(sender) = sender {
+                                    if let Some(sender) = sender.as_ref() {
                                         sender
                                             .broadcast(encoded)
                                             .await
                                             .map_err(|e| format!("failed to broadcast FileOfferReady: {e}"))?;
+                                    }
+
+                                    // Poster work is intentionally sequenced after
+                                    // both FileOffer and FileOfferReady.  A slow
+                                    // ffmpeg probe must never hold up the initial
+                                    // announcement or the first downloadable
+                                    // ticket.  A second FileOfferReady is an
+                                    // idempotent metadata upgrade keyed by
+                                    // offer_id, so receivers can attach the
+                                    // poster whenever it becomes available.
+                                    if is_video {
+                                        let poster_path = source_path.clone();
+                                        let cache_dir = poster_cache_dir.clone();
+                                        let poster_bytes = tokio::task::spawn_blocking(move || {
+                                            video_poster::generate_with_content_hash(
+                                                &poster_path,
+                                                &cache_dir,
+                                                &blob_hash,
+                                            )
+                                            .ok()
+                                            .map(|poster| poster.bytes)
+                                        })
+                                        .await
+                                        .ok()
+                                        .flatten();
+                                        if let Some(bytes) = poster_bytes {
+                                            if let Some(thumbnail_hash) = blob_store
+                                                .blobs()
+                                                .add_bytes(bytes)
+                                                .await
+                                                .ok()
+                                                .map(|tag| MessageHash::from(*tag.hash.as_bytes()))
+                                            {
+                                                let upgraded = crate::Message::FileOfferReady {
+                                                    offer_id,
+                                                    ticket: ticket.clone(),
+                                                    thumbnail_hash: Some(thumbnail_hash),
+                                                };
+                                                let encoded = SignedMessage::sign_and_encode(
+                                                    &secret_key,
+                                                    &upgraded,
+                                                )
+                                                .map_err(|e| {
+                                                    format!("failed to sign poster upgrade: {e}")
+                                                })?;
+                                                if let Some(sender) = sender.as_ref() {
+                                                    sender.broadcast(encoded).await.map_err(|e| {
+                                                        format!(
+                                                            "failed to broadcast poster upgrade: {e}"
+                                                        )
+                                                    })?;
+                                                }
+                                            }
+                                        }
                                     }
                                     Ok::<(), String>(())
                                 }

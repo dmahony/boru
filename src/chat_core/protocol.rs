@@ -1090,6 +1090,48 @@ mod tests {
         ));
     }
 
+    /// Required Test 19: poster metadata is a post-announcement upgrade.
+    ///
+    /// The sender emits the offer and the first downloadable ticket before
+    /// any poster result exists.  Poster generation can therefore complete
+    /// later and publish an idempotent `FileOfferReady` upgrade keyed by the
+    /// same offer ID without delaying `FileOffer`.
+    #[test]
+    fn required_test_19_video_poster_does_not_delay_file_offer() {
+        let offer_id = FileOfferId::generate();
+        let initial =
+            Message::file_offer(offer_id, "clip.mp4".to_owned(), 123).expect("safe video basename");
+        let ready = Message::FileOfferReady {
+            offer_id,
+            ticket: "ticket-for-video".to_owned(),
+            thumbnail_hash: None,
+        };
+        let poster_upgrade = Message::FileOfferReady {
+            offer_id,
+            ticket: "ticket-for-video".to_owned(),
+            thumbnail_hash: Some([0xabu8; 32]),
+        };
+
+        let events = [initial, ready, poster_upgrade];
+        assert!(matches!(events[0], Message::FileOffer { offer_id: id, .. } if id == offer_id));
+        assert!(matches!(
+            events[1],
+            Message::FileOfferReady {
+                offer_id: id,
+                thumbnail_hash: None,
+                ..
+            } if id == offer_id
+        ));
+        assert!(matches!(
+            events[2],
+            Message::FileOfferReady {
+                offer_id: id,
+                thumbnail_hash: Some(_),
+                ..
+            } if id == offer_id
+        ));
+    }
+
     #[test]
     fn file_offer_ready_correlates_distinct_same_named_offers_by_id() {
         use std::collections::HashMap;
