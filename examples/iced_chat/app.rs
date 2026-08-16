@@ -21188,8 +21188,13 @@ impl IcedChat {
         .width(Length::Fill)
         .height(Length::Fill);
 
-        // Wrap in a row that includes the details panel when open.
-        let details_usable = self.window_width >= SIDEBAR_WIDTH + DETAILS_PANEL_WIDTH + 400.0;
+        // Resolve details-panel geometry from the live structural layout. The
+        // panel is optional: never let it consume the minimum conversation
+        // width on compact windows.
+        let chat_layout = self.boru_layout().chat.clone();
+        let details_width = chat_layout.details_panel_width;
+        let details_usable = self.window_width
+            >= sidebar_w + details_width + self.boru_layout().responsive.viewport_min_width;
         let base = if self.details_panel_open
             && matches!(self.screen, Screen::Chat { .. })
             && details_usable
@@ -21198,7 +21203,7 @@ impl IcedChat {
                 row![
                     content,
                     container(self.view_details_panel())
-                        .width(Length::Fixed(DETAILS_PANEL_WIDTH))
+                        .width(Length::Fixed(details_width))
                         .height(Length::Fill)
                         .style(move |t| {
                             iced::widget::container::Style {
