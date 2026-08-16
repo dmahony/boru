@@ -976,7 +976,7 @@ impl Default for SharedTableColumns {
 /// [`ResponsiveLayout`] (`narrow_max_width`, `ultra_wide_min_width`) so
 /// TOML can move them later; `tier_for_width` resolves a window width to
 /// one of these tiers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Deserialize, serde::Serialize)]
 pub enum ViewportTier {
     /// Narrow window (below `narrow_max_width`, default < 360 px).
     Narrow,
