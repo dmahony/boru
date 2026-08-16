@@ -341,45 +341,87 @@ impl IcedChat {
                     .height(Length::Fill)
                     .into()
             } else {
-                // ── Emoji picker overlay ──────────────────────────
+                // ── Emoji / GIF picker overlays ──────────────────────
+                // Anchored directly above the composer bar (the row holding
+                // the emoji/GIF trigger buttons). The overlay container MUST
+                // fill the whole chat panel (height: Fill): iced's Stack
+                // places every child at the top-left origin, so a
+                // shrink-height container just renders at the top of the
+                // chat window and `align_y(Bottom)` has no slack.
+                use iced::widget::Stack;
+
+                // Distance from the bottom of the chat panel to the top of
+                // the composer bar: inner bottom padding (SPACE_12) +
+                // status footer (~21) + spacer (SPACE_8) + composer bar
+                // (~46 = 36px send button + 8px row padding + 2px border).
+                const COMPOSER_OFFSET: f32 = SPACE_12 + 21.0 + SPACE_8 + 46.0;
+                const PICKER_GAP: f32 = SPACE_8;
+                // Max emoji picker height: card chrome (58) + search row
+                // (42) + category tab row (40) + max scroll region (340).
+                const EMOJI_PICKER_HEIGHT: f32 = 58.0 + 42.0 + 40.0 + 340.0;
+                // Max GIF picker height: header (~24) + search row (~28) +
+                // results scroll 300 + spacing 12 + padding 16 ≈ 380px.
+                const GIF_PICKER_HEIGHT: f32 = 380.0;
+
+                let picker_backdrop = |close: AppMessage| {
+                    widget::button(widget::Space::new())
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .on_press(close)
+                        .style(|_t, _s| iced::widget::button::Style {
+                            background: None,
+                            ..Default::default()
+                        })
+                };
+
                 if self.show_emoji_picker {
-                    use iced::widget::Stack;
-                    let picker = self.view_emoji_picker();
                     Stack::new()
                         .push(inner)
-                        .push(
+                        .push(picker_backdrop(AppMessage::ToggleEmojiPicker))
+                        .push(widget::responsive(move |size: iced::Size| {
+                            let picker = self.view_emoji_picker();
+                            let bottom = (COMPOSER_OFFSET + PICKER_GAP).min(
+                                (size.height - EMOJI_PICKER_HEIGHT - PICKER_GAP).max(PICKER_GAP),
+                            );
                             widget::container(picker)
                                 .width(Length::Fill)
+                                .height(Length::Fill)
                                 .padding(iced::Padding {
                                     top: 0.0,
                                     right: SPACE_16,
-                                    bottom: 48.0,
+                                    bottom,
                                     left: 0.0,
                                 })
                                 .align_x(iced::alignment::Horizontal::Right)
-                                .align_y(iced::alignment::Vertical::Bottom),
-                        )
+                                .align_y(iced::alignment::Vertical::Bottom)
+                                .into()
+                        }))
                         .width(Length::Fill)
                         .height(Length::Fill)
                         .into()
                 } else if self.show_gif_picker {
                     // ── GIF picker overlay ──────────────────────────
-                    use iced::widget::Stack;
-                    let picker = self.view_gif_picker();
                     Stack::new()
                         .push(inner)
-                        .push(
+                        .push(picker_backdrop(AppMessage::ToggleGifPicker))
+                        .push(widget::responsive(move |size: iced::Size| {
+                            let picker = self.view_gif_picker();
+                            let bottom = (COMPOSER_OFFSET + PICKER_GAP).min(
+                                (size.height - GIF_PICKER_HEIGHT - PICKER_GAP).max(PICKER_GAP),
+                            );
                             widget::container(picker)
                                 .width(Length::Fill)
+                                .height(Length::Fill)
                                 .padding(iced::Padding {
                                     top: 0.0,
                                     right: SPACE_16,
-                                    bottom: 48.0,
+                                    bottom,
                                     left: 0.0,
                                 })
                                 .align_x(iced::alignment::Horizontal::Right)
-                                .align_y(iced::alignment::Vertical::Bottom),
-                        )
+                                .align_y(iced::alignment::Vertical::Bottom)
+                                .into()
+                        }))
                         .width(Length::Fill)
                         .height(Length::Fill)
                         .into()

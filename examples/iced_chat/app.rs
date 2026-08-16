@@ -15316,6 +15316,12 @@ impl IcedChat {
                 if self.lightbox_image.is_some() {
                     return iced::Task::done(AppMessage::CloseImageLightbox);
                 }
+                // Emoji / GIF pickers close on Escape (same as any overlay).
+                if self.show_emoji_picker || self.show_gif_picker {
+                    self.show_emoji_picker = false;
+                    self.show_gif_picker = false;
+                    return iced::Task::none();
+                }
                 if self.show_create_room_dialog {
                     // Safe close: never dismiss a mid-submit dialog (the
                     // cancel handlers apply the same guard for backdrop
@@ -24588,6 +24594,31 @@ mod tests {
         assert!(
             !app.share_local_service_open,
             "Escape closes the share-local-service form"
+        );
+
+        drop(runtime);
+    }
+
+    #[test]
+    fn escape_closes_emoji_and_gif_pickers() {
+        let (runtime, mut app, _local, _peer) = build_join_request_test_app();
+
+        // Emoji picker closes on Escape.
+        app.show_emoji_picker = true;
+        let task = app.update(AppMessage::Shortcut(Shortcut::Escape));
+        drop(task);
+        assert!(
+            !app.show_emoji_picker,
+            "Escape closes the emoji picker"
+        );
+
+        // GIF picker closes on Escape.
+        app.show_gif_picker = true;
+        let task = app.update(AppMessage::Shortcut(Shortcut::Escape));
+        drop(task);
+        assert!(
+            !app.show_gif_picker,
+            "Escape closes the gif picker"
         );
 
         drop(runtime);
