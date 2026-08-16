@@ -160,6 +160,10 @@ pub mod control_plane;
 #[cfg(feature = "net")]
 pub mod discovery_service;
 
+/// In-memory sender-side registry for direct file offers.
+#[cfg(feature = "net")]
+pub mod file_offer;
+
 /// Per-room discovery secrets — cryptographically random 32-byte keys
 /// that isolate private rooms on the DHT.
 ///
