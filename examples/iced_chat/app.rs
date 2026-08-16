@@ -2358,6 +2358,9 @@ pub(crate) struct DownloadAttachment {
     pub(crate) name: String,
     pub(crate) ticket: String,
     pub(crate) availability: AttachmentAvailability,
+    /// Stable correlation key retained even when a ready event arrives before
+    /// its announcement and the attachment remains blob-only.
+    pub(crate) direct_offer_key: Option<(PublicKey, FileOfferId)>,
     pub(crate) transfer_id: Option<TransferId>,
     pub(crate) state: DownloadState,
     /// Display name (or short public key) of the sending peer.
@@ -2409,6 +2412,7 @@ impl std::hash::Hash for DownloadAttachment {
         self.name.hash(state);
         self.ticket.hash(state);
         self.availability.hash(state);
+        self.direct_offer_key.hash(state);
         self.transfer_id.hash(state);
         self.state.hash(state);
         self.source_peer.hash(state);
@@ -2458,6 +2462,7 @@ impl DownloadAttachment {
             kind,
             name: name.into(),
             availability: AttachmentAvailability::Blob { ticket: ticket.clone() },
+            direct_offer_key: None,
             ticket,
             transfer_id: None,
             state: DownloadState::Ready { total: None },
@@ -19317,16 +19322,82 @@ impl ChatCallbacks for IcedChat {
         owner: PublicKey,
         sender_label: Option<String>,
     ) {
-        self.set_pending_file(
-            name.clone(),
-            format!("direct-offer:{offer_id:?}"),
-            size,
+        if self.entries.iter().any(|entry| {
+            entry.download.as_ref().is_some_and(|download| {
+                download.direct_offer_key == Some((owner, offer_id))
+            })
+        }) {
+            return;
+        }
+        self.download_entry_index = Some(self.entries.len());
+        let mut entry = ChatEntry::system_download(
+            format!("File received: {name}"),
+            if classify_attachment(None, &name) == MediaKind::Video {
+                TransferKind::Video
+            } else {
+                TransferKind::File
+            },
+            name,
+            format!("direct-offer:{owner}:{offer_id:?}"),
+            sender_label.unwrap_or_default(),
             None,
+        );
+        if let Some(download) = entry.download.as_mut() {
+            download.state = DownloadState::Ready { total: Some(size) };
+            download.availability = AttachmentAvailability::DirectOffer { owner, offer_id };
+            download.direct_offer_key = Some((owner, offer_id));
+        }
+        self.entries_push(entry);
+    }
+
+    fn set_pending_direct_offer_ready(
+        &mut self,
+        offer_id: FileOfferId,
+        ticket: String,
+        thumbnail_hash: Option<MessageHash>,
+        owner: PublicKey,
+        sender_label: Option<String>,
+    ) {
+        if let Some(index) = self.entries.iter().position(|entry| {
+            entry.download.as_ref().is_some_and(|download| {
+                download.direct_offer_key == Some((owner, offer_id))
+            })
+        }) {
+            let mut queue_thumbnail = false;
+            if let Some(download) = self.entries[index].download.as_mut() {
+                download.ticket = ticket.clone();
+                download.expected_content_hash = content_hash_from_ticket(&ticket);
+                download.availability = AttachmentAvailability::Hybrid {
+                    owner,
+                    offer_id,
+                    ticket: ticket.clone(),
+                };
+                if thumbnail_hash.is_some() && download.thumbnail_hash != thumbnail_hash {
+                    download.thumbnail_hash = thumbnail_hash;
+                    queue_thumbnail = true;
+                }
+            }
+            if queue_thumbnail {
+                if let Some(hash) = thumbnail_hash {
+                    self.pending_thumbnail_fetch.push_back((index, hash, ticket));
+                }
+            }
+            return;
+        }
+
+        // A ready event can arrive after the announcement was dropped. Keep
+        // it as a normal blob card, but retain the key for ready-event replay
+        // idempotency after the card reaches a terminal state.
+        self.set_pending_file(
+            "Shared file".to_owned(),
+            ticket.clone(),
+            0,
+            thumbnail_hash,
             sender_label,
         );
         if let Some(index) = self.download_entry_index {
             if let Some(download) = self.entries.get_mut(index).and_then(|entry| entry.download.as_mut()) {
-                download.availability = AttachmentAvailability::DirectOffer { owner, offer_id };
+                download.direct_offer_key = Some((owner, offer_id));
             }
         }
     }

@@ -287,6 +287,19 @@ pub trait ChatCallbacks {
     ) {
     }
 
+    /// Upgrade a direct offer after the sender's blob ingest completes.
+    /// Implementations correlate this by authenticated owner and offer ID,
+    /// never by the filename.
+    fn set_pending_direct_offer_ready(
+        &mut self,
+        _offer_id: crate::chat_core::protocol::FileOfferId,
+        _ticket: String,
+        _thumbnail_hash: Option<MessageHash>,
+        _owner: PublicKey,
+        _sender_label: Option<String>,
+    ) {
+    }
+
     /// Record a pending whole-directory (HashSeq collection) download.
     ///
     /// `name` is the root folder name, `ticket` is a `BlobFormat::HashSeq`
