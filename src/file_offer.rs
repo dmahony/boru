@@ -106,6 +106,11 @@ impl FileOfferRegistry {
         self.offers.get(id)
     }
 
+    /// Return whether an offer has exceeded its configured lifetime.
+    pub fn is_expired(&self, offer: &FileOffer) -> bool {
+        offer.created_at.elapsed() > self.ttl
+    }
+
     /// Remove and return an offer by its opaque ID.
     pub fn remove(&mut self, id: &FileOfferId) -> Option<FileOffer> {
         self.offers.remove(id)

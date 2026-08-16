@@ -13,6 +13,7 @@ use iroh::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Semaphore;
 
 use crate::{chat_core::protocol::FileOfferId, file_offer::FileOfferRegistry};
 
@@ -21,6 +22,7 @@ pub const FILE_OFFER_ALPN: &[u8] = b"boru/file-offer/1";
 /// Current wire version for direct file offers.
 pub const FILE_OFFER_WIRE_VERSION: u16 = 1;
 const MAX_FRAME_SIZE: u32 = 64 * 1024;
+const MAX_CONCURRENT_TRANSFERS: usize = 32;
 
 /// Request sent by a receiver before the raw file stream begins.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,11 +53,33 @@ pub enum FileOfferError {
     UnsupportedVersion,
     /// No offer with this identifier is currently available.
     NotFound,
-    /// The request was malformed.
-    InvalidRequest,
-    /// The local file could not be opened or read.
-    InternalError,
+    /// The requesting authenticated peer is not authorized for this offer.
+    PermissionDenied,
+    /// The offer's TTL has elapsed.
+    Expired,
+    /// The source file no longer exists or cannot be opened.
+    SourceUnavailable,
+    /// The source file metadata no longer matches the announced offer.
+    SourceChanged,
+    /// The server has reached its transfer concurrency limit.
+    Busy,
 }
+
+impl std::fmt::Display for FileOfferError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::UnsupportedVersion => "unsupported_version",
+            Self::NotFound => "not_found",
+            Self::PermissionDenied => "permission_denied",
+            Self::Expired => "expired",
+            Self::SourceUnavailable => "source_unavailable",
+            Self::SourceChanged => "source_changed",
+            Self::Busy => "busy",
+        })
+    }
+}
+
+impl std::error::Error for FileOfferError {}
 
 /// Response frame. A successful header is followed by raw bytes on the same stream.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,20 +117,25 @@ impl FileOfferTransfer {
 #[derive(Debug, Clone)]
 pub struct FileOfferProtocolHandler {
     registry: Arc<Mutex<FileOfferRegistry>>,
+    transfers: Arc<Semaphore>,
 }
 
 impl FileOfferProtocolHandler {
     /// Create a handler serving entries from `registry`.
     pub fn new(registry: Arc<Mutex<FileOfferRegistry>>) -> Self {
-        Self { registry }
+        Self {
+            registry,
+            transfers: Arc::new(Semaphore::new(MAX_CONCURRENT_TRANSFERS)),
+        }
     }
 }
 
 impl ProtocolHandler for FileOfferProtocolHandler {
     async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
         let registry = self.registry.clone();
+        let transfers = self.transfers.clone();
         tokio::spawn(async move {
-            if let Err(error) = serve_connection(connection, registry).await {
+            if let Err(error) = serve_connection(connection, registry, transfers).await {
                 tracing::debug!("file offer transfer ended: {error}");
             }
         });
@@ -140,15 +169,20 @@ pub async fn open_file_offer(
         FileOfferResponse::Header(_) => {
             Err(anyhow::anyhow!("unsupported file offer response version"))
         }
-        FileOfferResponse::Error(error) => Err(anyhow::anyhow!("file offer rejected: {error:?}")),
+        FileOfferResponse::Error(error) => Err(anyhow::Error::new(error)),
     }
 }
 
 async fn serve_connection(
     connection: Connection,
     registry: Arc<Mutex<FileOfferRegistry>>,
+    transfers: Arc<Semaphore>,
 ) -> anyhow::Result<()> {
     let (mut writer, mut reader) = connection.accept_bi().await?;
+    let permit = match transfers.try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => return reject(&mut writer, FileOfferError::Busy).await,
+    };
     let request: FileOfferRequest = read_frame(&mut reader).await?;
 
     if request.version != FILE_OFFER_WIRE_VERSION {
@@ -161,33 +195,13 @@ async fn serve_connection(
         return Ok(());
     }
 
-    let offer = registry
-        .lock()
-        .map_err(|_| anyhow::anyhow!("file offer registry poisoned"))?
-        .get(&request.offer_id)
-        .cloned();
-    let Some(offer) = offer else {
-        write_frame(
-            &mut writer,
-            &FileOfferResponse::Error(FileOfferError::NotFound),
-        )
-        .await?;
-        writer.finish()?;
-        return Ok(());
+    let offer = match authorize_offer(connection.remote_id(), request.offer_id, &registry).await {
+        Ok(offer) => offer,
+        Err(error) => return reject(&mut writer, error).await,
     };
-
-    let file = match tokio::fs::File::open(offer.path()).await {
-        Ok(file) => file,
-        Err(_) => {
-            write_frame(
-                &mut writer,
-                &FileOfferResponse::Error(FileOfferError::InternalError),
-            )
-            .await?;
-            writer.finish()?;
-            return Ok(());
-        }
-    };
+    let file = tokio::fs::File::open(offer.path())
+        .await
+        .map_err(|_| anyhow::Error::new(FileOfferError::SourceUnavailable))?;
     write_frame(
         &mut writer,
         &FileOfferResponse::Header(FileOfferHeader {
@@ -199,6 +213,53 @@ async fn serve_connection(
     )
     .await?;
     tokio::io::copy(&mut file.take(offer.size), &mut writer).await?;
+    writer.finish()?;
+    drop(permit);
+    Ok(())
+}
+
+/// Authenticate and validate an offer immediately before serving it.
+pub async fn authorize_offer(
+    requester: iroh::PublicKey,
+    offer_id: FileOfferId,
+    registry: &Arc<Mutex<FileOfferRegistry>>,
+) -> Result<crate::file_offer::FileOffer, FileOfferError> {
+    let (offer, expired) = {
+        let registry = registry
+            .lock()
+            .map_err(|_| FileOfferError::SourceUnavailable)?;
+        let offer = registry
+            .get(&offer_id)
+            .cloned()
+            .ok_or(FileOfferError::NotFound)?;
+        (offer.clone(), registry.is_expired(&offer))
+    };
+    if offer.authorized_peer != requester {
+        return Err(FileOfferError::PermissionDenied);
+    }
+    if expired {
+        return Err(FileOfferError::Expired);
+    }
+    let metadata = tokio::fs::metadata(offer.path())
+        .await
+        .map_err(|_| FileOfferError::SourceUnavailable)?;
+    if !metadata.is_file() {
+        return Err(FileOfferError::SourceUnavailable);
+    }
+    if metadata.len() != offer.size {
+        return Err(FileOfferError::SourceChanged);
+    }
+    let modified_at = metadata
+        .modified()
+        .map_err(|_| FileOfferError::SourceUnavailable)?;
+    if modified_at != offer.modified_at {
+        return Err(FileOfferError::SourceChanged);
+    }
+    Ok(offer)
+}
+
+async fn reject(writer: &mut SendStream, error: FileOfferError) -> anyhow::Result<()> {
+    write_frame(writer, &FileOfferResponse::Error(error)).await?;
     writer.finish()?;
     Ok(())
 }
@@ -226,6 +287,25 @@ async fn read_frame<T: for<'de> Deserialize<'de>>(reader: &mut RecvStream) -> an
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
+
+    fn registry_with_offer(
+        registry: &mut FileOfferRegistry,
+        id: FileOfferId,
+        peer: iroh::PublicKey,
+        path: &std::path::Path,
+        size: u64,
+        modified_at: std::time::SystemTime,
+    ) {
+        registry.register(crate::file_offer::FileOffer::new(
+            id,
+            peer,
+            path,
+            "payload.bin".into(),
+            size,
+            modified_at,
+        ));
+    }
 
     #[test]
     fn request_round_trip() {
@@ -270,6 +350,114 @@ mod tests {
         assert_eq!(
             response,
             FileOfferResponse::Error(FileOfferError::UnsupportedVersion)
+        );
+    }
+
+    #[tokio::test]
+    async fn unauthorized_peer_cannot_request_an_offer() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("payload.bin");
+        std::fs::write(&path, b"payload").unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        let authorized = iroh::SecretKey::generate().public();
+        let stranger = iroh::SecretKey::generate().public();
+        let id = FileOfferId::generate();
+        let registry = Arc::new(Mutex::new(FileOfferRegistry::new()));
+        registry_with_offer(
+            &mut registry.lock().unwrap(),
+            id,
+            authorized,
+            &path,
+            metadata.len(),
+            metadata.modified().unwrap(),
+        );
+
+        assert_eq!(
+            authorize_offer(stranger, id, &registry).await.unwrap_err(),
+            FileOfferError::PermissionDenied
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_offer_is_not_found() {
+        let registry = Arc::new(Mutex::new(FileOfferRegistry::new()));
+        let peer = iroh::SecretKey::generate().public();
+        assert_eq!(
+            authorize_offer(peer, FileOfferId::generate(), &registry)
+                .await
+                .unwrap_err(),
+            FileOfferError::NotFound
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_offer_is_rejected() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("payload.bin");
+        std::fs::write(&path, b"payload").unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        let peer = iroh::SecretKey::generate().public();
+        let id = FileOfferId::generate();
+        let mut offers = FileOfferRegistry::with_ttl(std::time::Duration::ZERO);
+        registry_with_offer(
+            &mut offers,
+            id,
+            peer,
+            &path,
+            metadata.len(),
+            metadata.modified().unwrap(),
+        );
+        let registry = Arc::new(Mutex::new(offers));
+        assert_eq!(
+            authorize_offer(peer, id, &registry).await.unwrap_err(),
+            FileOfferError::Expired
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_source_is_unavailable() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("gone.bin");
+        let peer = iroh::SecretKey::generate().public();
+        let id = FileOfferId::generate();
+        let mut offers = FileOfferRegistry::new();
+        registry_with_offer(
+            &mut offers,
+            id,
+            peer,
+            &path,
+            7,
+            std::time::SystemTime::UNIX_EPOCH,
+        );
+        let registry = Arc::new(Mutex::new(offers));
+        assert_eq!(
+            authorize_offer(peer, id, &registry).await.unwrap_err(),
+            FileOfferError::SourceUnavailable
+        );
+    }
+
+    #[tokio::test]
+    async fn changed_source_is_rejected() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("changed.bin");
+        std::fs::write(&path, b"original").unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        let peer = iroh::SecretKey::generate().public();
+        let id = FileOfferId::generate();
+        let mut offers = FileOfferRegistry::new();
+        registry_with_offer(
+            &mut offers,
+            id,
+            peer,
+            &path,
+            metadata.len(),
+            metadata.modified().unwrap(),
+        );
+        std::fs::write(&path, b"changed-size").unwrap();
+        let registry = Arc::new(Mutex::new(offers));
+        assert_eq!(
+            authorize_offer(peer, id, &registry).await.unwrap_err(),
+            FileOfferError::SourceChanged
         );
     }
 }
