@@ -249,6 +249,77 @@ pub enum Message {
         #[serde(default)]
         signature: Vec<u8>,
     },
+    /// Announce a file that is available for direct download from the sender.
+    ///
+    /// This deliberately carries no local filesystem path. The sender's
+    /// authenticated identity and this opaque offer ID authorize downloads.
+    FileOffer {
+        /// Opaque identifier used to correlate this offer with later updates.
+        offer_id: FileOfferId,
+        /// Safe basename displayed to the recipient (never a filesystem path).
+        name: String,
+        /// File size in bytes.
+        size: u64,
+    },
+    /// Upgrade a previously announced file offer once blob ingestion completes.
+    ///
+    /// Receivers correlate this update with the original attachment by
+    /// `offer_id`; the filename is intentionally not repeated here.
+    FileOfferReady {
+        /// Opaque identifier of the previously announced file offer.
+        offer_id: FileOfferId,
+        /// BlobTicket serialized to string for the completed blob ingest.
+        ticket: String,
+        /// Optional video thumbnail blob hash.
+        thumbnail_hash: Option<MessageHash>,
+    },
+}
+
+/// Opaque identifier for a direct file offer.
+///
+/// IDs are generated from the operating system's cryptographically secure
+/// random source and contain no information about the offered file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FileOfferId([u8; 32]);
+
+impl FileOfferId {
+    /// Generate a fresh offer identifier using the operating system CSPRNG.
+    pub fn generate() -> Self {
+        let mut bytes = [0u8; 32];
+        getrandom::fill(&mut bytes).expect("OS entropy source failed");
+        Self(bytes)
+    }
+
+    /// Return the raw identifier bytes for protocol implementations.
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl Message {
+    /// Construct a file offer after validating that `name` is a basename.
+    ///
+    /// Both slash styles are rejected so a message created on one platform
+    /// cannot carry a path component when decoded on another platform.
+    pub fn file_offer(
+        offer_id: FileOfferId,
+        name: String,
+        size: u64,
+    ) -> std::result::Result<Self, &'static str> {
+        if name.is_empty()
+            || name == "."
+            || name == ".."
+            || name.contains('/')
+            || name.contains('\\')
+        {
+            return Err("file offer name must be a safe basename");
+        }
+        Ok(Self::FileOffer {
+            offer_id,
+            name,
+            size,
+        })
+    }
 }
 
 /// Deserialize a `u64`, defaulting to `0` when the wire buffer is exhausted.
@@ -957,3 +1028,135 @@ impl RoomInviteV2 {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_offer_id_is_random_and_serializable() {
+        let first = FileOfferId::generate();
+        let second = FileOfferId::generate();
+        assert_ne!(first, second);
+
+        let encoded = postcard::to_stdvec(&first).expect("serialize offer ID");
+        let decoded: FileOfferId = postcard::from_bytes(&encoded).expect("deserialize offer ID");
+        assert_eq!(first, decoded);
+        assert_eq!(first.as_bytes().len(), 32);
+    }
+
+    #[test]
+    fn file_offer_round_trips_without_a_path() {
+        let offer_id = FileOfferId::generate();
+        let message =
+            Message::file_offer(offer_id, "report.pdf".to_owned(), 42).expect("safe basename");
+        let encoded = postcard::to_stdvec(&message).expect("serialize file offer");
+        let decoded: Message = postcard::from_bytes(&encoded).expect("deserialize file offer");
+        assert!(matches!(
+            decoded,
+            Message::FileOffer {
+                offer_id: decoded_id,
+                name,
+                size: 42,
+            } if decoded_id == offer_id && name == "report.pdf"
+        ));
+    }
+
+    #[test]
+    fn file_offer_rejects_path_components() {
+        let offer_id = FileOfferId::generate();
+        for name in ["", ".", "..", "subdir/report.pdf", r"subdir\report.pdf"] {
+            assert!(Message::file_offer(offer_id, name.to_owned(), 1).is_err());
+        }
+        assert!(Message::file_offer(offer_id, "report.pdf".to_owned(), 1).is_ok());
+    }
+
+    #[test]
+    fn file_offer_ready_round_trips() {
+        let offer_id = FileOfferId::generate();
+        let message = Message::FileOfferReady {
+            offer_id,
+            ticket: "blob:iroh:ticket".to_owned(),
+            thumbnail_hash: Some([0xabu8; 32]),
+        };
+        let encoded = postcard::to_stdvec(&message).expect("serialize ready offer");
+        let decoded: Message = postcard::from_bytes(&encoded).expect("deserialize ready offer");
+        assert!(matches!(
+            decoded,
+            Message::FileOfferReady {
+                offer_id: decoded_id,
+                ticket,
+                thumbnail_hash: Some(hash),
+            } if decoded_id == offer_id && ticket == "blob:iroh:ticket" && hash == [0xabu8; 32]
+        ));
+    }
+
+    /// Required Test 19: poster metadata is a post-announcement upgrade.
+    ///
+    /// The sender emits the offer and the first downloadable ticket before
+    /// any poster result exists.  Poster generation can therefore complete
+    /// later and publish an idempotent `FileOfferReady` upgrade keyed by the
+    /// same offer ID without delaying `FileOffer`.
+    #[test]
+    fn required_test_19_video_poster_does_not_delay_file_offer() {
+        let offer_id = FileOfferId::generate();
+        let initial =
+            Message::file_offer(offer_id, "clip.mp4".to_owned(), 123).expect("safe video basename");
+        let ready = Message::FileOfferReady {
+            offer_id,
+            ticket: "ticket-for-video".to_owned(),
+            thumbnail_hash: None,
+        };
+        let poster_upgrade = Message::FileOfferReady {
+            offer_id,
+            ticket: "ticket-for-video".to_owned(),
+            thumbnail_hash: Some([0xabu8; 32]),
+        };
+
+        let events = [initial, ready, poster_upgrade];
+        assert!(matches!(events[0], Message::FileOffer { offer_id: id, .. } if id == offer_id));
+        assert!(matches!(
+            events[1],
+            Message::FileOfferReady {
+                offer_id: id,
+                thumbnail_hash: None,
+                ..
+            } if id == offer_id
+        ));
+        assert!(matches!(
+            events[2],
+            Message::FileOfferReady {
+                offer_id: id,
+                thumbnail_hash: Some(_),
+                ..
+            } if id == offer_id
+        ));
+    }
+
+    #[test]
+    fn file_offer_ready_correlates_distinct_same_named_offers_by_id() {
+        use std::collections::HashMap;
+
+        let first_id = FileOfferId::generate();
+        let second_id = FileOfferId::generate();
+        assert_ne!(first_id, second_id);
+
+        let mut attachments =
+            HashMap::from([(first_id, "same-name.txt"), (second_id, "same-name.txt")]);
+        let ready = Message::FileOfferReady {
+            offer_id: second_id,
+            ticket: "ticket-for-second".to_owned(),
+            thumbnail_hash: None,
+        };
+
+        if let Message::FileOfferReady {
+            offer_id, ticket, ..
+        } = ready
+        {
+            assert_eq!(attachments.remove(&offer_id), Some("same-name.txt"));
+            assert!(attachments.contains_key(&first_id));
+            assert_eq!(ticket, "ticket-for-second");
+        } else {
+            panic!("expected FileOfferReady");
+        }
+    }
+}

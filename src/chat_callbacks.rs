@@ -276,6 +276,17 @@ pub trait ChatCallbacks {
         sender_label: Option<String>,
     );
 
+    /// Surface a direct offer immediately, without starting a transfer.
+    fn set_pending_direct_offer(
+        &mut self,
+        _offer_id: crate::chat_core::protocol::FileOfferId,
+        _name: String,
+        _size: u64,
+        _owner: PublicKey,
+        _sender_label: Option<String>,
+    ) {
+    }
+
     /// Record a pending whole-directory (HashSeq collection) download.
     ///
     /// `name` is the root folder name, `ticket` is a `BlobFormat::HashSeq`

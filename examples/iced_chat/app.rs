@@ -89,6 +89,7 @@ use boru_core::chat_core::{
     handle_net_event_with_safety_for_topic, merge_bootstrap_peer_addrs, message_hash,
     seed_memory_lookup, MeshHealth, MessageHash, RoomInviteV2,
 };
+use boru_core::chat_core::protocol::FileOfferId;
 use boru_core::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
 use boru_core::call::manager::{CallEvent, CallHandle};
 use boru_core::call::history::{event_text as call_history_text, CallHistoryOutcome};
@@ -2174,6 +2175,17 @@ impl DownloadState {
     }
 }
 
+/// State used for the sender's attachment as soon as its direct offer is
+/// registered. The local blob cache is populated independently and must not
+/// make an already-downloadable offer look like an in-progress upload.
+fn direct_offer_sender_state(name: String, path: std::path::PathBuf, size: u64) -> DownloadState {
+    DownloadState::Shared {
+        name,
+        path,
+        size: (size > 0).then_some(size),
+    }
+}
+
 /// Whether the user-initiated Download/Retry action may (re)start a transfer
 /// for this download state (VIDCARD-20 functional matrix: "Retry works where
 /// supported", "Deleted local files show a useful state").
@@ -2328,11 +2340,19 @@ pub(crate) enum CatalogueDownloadState {
     Cancelled,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum AttachmentAvailability {
+    Blob { ticket: String },
+    DirectOffer { owner: PublicKey, offer_id: FileOfferId },
+    Hybrid { owner: PublicKey, offer_id: FileOfferId, ticket: String },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DownloadAttachment {
     pub(crate) kind: TransferKind,
     pub(crate) name: String,
     pub(crate) ticket: String,
+    pub(crate) availability: AttachmentAvailability,
     pub(crate) transfer_id: Option<TransferId>,
     pub(crate) state: DownloadState,
     /// Display name (or short public key) of the sending peer.
@@ -2383,6 +2403,7 @@ impl std::hash::Hash for DownloadAttachment {
         self.kind.hash(state);
         self.name.hash(state);
         self.ticket.hash(state);
+        self.availability.hash(state);
         self.transfer_id.hash(state);
         self.state.hash(state);
         self.source_peer.hash(state);
@@ -2431,6 +2452,7 @@ impl DownloadAttachment {
         Self {
             kind,
             name: name.into(),
+            availability: AttachmentAvailability::Blob { ticket: ticket.clone() },
             ticket,
             transfer_id: None,
             state: DownloadState::Ready { total: None },
@@ -3899,6 +3921,9 @@ pub struct IcedChat {
     /// the router stops accepting incoming gossip connections.
     _router: iroh::protocol::Router,
     blob_store: FsStore,
+    /// Sender-side direct file offers. Filesystem paths remain process-local;
+    /// only the opaque offer ID is announced over gossip.
+    pub(crate) file_offer_registry: Arc<StdMutex<boru_core::file_offer::FileOfferRegistry>>,
     endpoint: iroh::Endpoint,
     memory_lookup: MemoryLookup,
     local_label: String,
@@ -8291,6 +8316,9 @@ impl IcedChat {
             sender: None,
             sender_ready: false,
             blob_store,
+            file_offer_registry: Arc::new(StdMutex::new(
+                boru_core::file_offer::FileOfferRegistry::new(),
+            )),
             endpoint,
             memory_lookup,
             local_label,
@@ -19220,6 +19248,28 @@ impl ChatCallbacks for IcedChat {
         }
     }
 
+    fn set_pending_direct_offer(
+        &mut self,
+        offer_id: FileOfferId,
+        name: String,
+        size: u64,
+        owner: PublicKey,
+        sender_label: Option<String>,
+    ) {
+        self.set_pending_file(
+            name.clone(),
+            format!("direct-offer:{offer_id:?}"),
+            size,
+            None,
+            sender_label,
+        );
+        if let Some(index) = self.download_entry_index {
+            if let Some(download) = self.entries.get_mut(index).and_then(|entry| entry.download.as_mut()) {
+                download.availability = AttachmentAvailability::DirectOffer { owner, offer_id };
+            }
+        }
+    }
+
     fn set_pending_folder(
         &mut self,
         name: String,
@@ -23552,6 +23602,18 @@ fn format_file_size(bytes: u64) -> String {
 mod tests {
     use super::*;
     use boru_core::call::manager::{CallEndReason, CallError};
+
+    #[test]
+    fn direct_offer_sender_card_is_shared_not_uploading() {
+        let state = direct_offer_sender_state(
+            "notes.txt".to_string(),
+            std::path::PathBuf::from("/tmp/notes.txt"),
+            12,
+        );
+
+        assert!(matches!(state, DownloadState::Shared { .. }));
+        assert!(!matches!(state, DownloadState::Active { .. } | DownloadState::Ready { .. }));
+    }
     use boru_core::gif_provider::GifMediaSource;
 
     /// A closed dummy receiver for the dev-theme reload channel (BORU-UI-06).

@@ -4518,6 +4518,272 @@ impl IcedChat {
                 }
                 let filename = parts[0].to_string();
                 let abs_path = parts[1].to_string();
+                // Direct conversations announce an offer before any blob
+                // ingestion. Keep the path local and expose only safe
+                // basename, size, and the opaque offer ID on the wire.
+                if let Some(peer) = self.current_direct_peer() {
+                    let path = std::path::PathBuf::from(&abs_path);
+                    let safe_name = std::path::Path::new(&filename)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name == filename && name != "." && name != "..");
+                    let metadata = match std::fs::metadata(&path) {
+                        Ok(metadata) if metadata.is_file() && safe_name => metadata,
+                        Ok(_) => {
+                            self.toast_message = Some("Only regular files with a safe filename can be shared.".into());
+                            self.toast_counter = 160;
+                            return iced::Task::none();
+                        }
+                        Err(error) => {
+                            self.toast_message = Some(format!("Unable to inspect file: {error}"));
+                            self.toast_counter = 160;
+                            return iced::Task::none();
+                        }
+                    };
+                    let offer_id = boru_core::chat_core::protocol::FileOfferId::generate();
+                    let offer = boru_core::file_offer::FileOffer::new(
+                        offer_id,
+                        peer,
+                        path,
+                        filename.clone(),
+                        metadata.len(),
+                        metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                    );
+                    self.file_offer_registry.lock().unwrap().register(offer);
+
+                    let transfer_kind = if ChatEntry::is_video_file(&filename) {
+                        TransferKind::Video
+                    } else {
+                        TransferKind::File
+                    };
+                    let local_label = self.local_label.clone();
+                    self.download_entry_index = Some(self.entries.len());
+                    self.entries_push(ChatEntry::system_download(
+                        String::new(),
+                        transfer_kind,
+                        filename.clone(),
+                        String::new(),
+                        &local_label,
+                        None,
+                    ));
+                    if let Some(idx) = self.download_entry_index {
+                        if let Some(entry) = self.entries.get_mut(idx) {
+                            if let Some(download) = entry.download.as_mut() {
+                                download.state = direct_offer_sender_state(
+                                    filename.clone(),
+                                    std::path::PathBuf::from(&abs_path),
+                                    metadata.len(),
+                                );
+                            }
+                            entry.body = filename.clone();
+                        }
+                    }
+
+                    let sender = self.sender.clone();
+                    let secret_key = self.secret_key.clone();
+                    let blob_store = self.blob_store.clone();
+                    let storage = self.storage.clone();
+                    let endpoint_addr = self.endpoint.addr();
+                    let announced_name = filename.clone();
+                    let announced_size = metadata.len();
+                    let source_path = std::path::PathBuf::from(&abs_path);
+                    let source_path_string = abs_path.clone();
+                    let is_video = ChatEntry::is_video_file(&filename);
+                    let poster_cache_dir = self.data_dir.join("cache").join("video-posters");
+                    return iced::Task::perform(
+                        async move {
+                            let message = crate::Message::file_offer(
+                                offer_id,
+                                announced_name.clone(),
+                                announced_size,
+                            )
+                            .map_err(|error| error.to_string())?;
+                            let encoded = SignedMessage::sign_and_encode(&secret_key, &message)
+                                .map_err(|error| format!("Failed to sign file offer: {error}"))?;
+                            if let Some(sender) = sender.as_ref() {
+                                sender
+                                    .broadcast(encoded)
+                                    .await
+                                    .map_err(|error| format!("Failed to broadcast file offer: {error}"))?;
+                            }
+                            tracing::info!(
+                                event = boru_core::diagnostics::event_names::DIRECT_FILE_OFFER_ANNOUNCED,
+                                offer_id = ?offer_id,
+                                name = %announced_name,
+                                size = announced_size,
+                                "direct file offer announced"
+                            );
+                            // BORU-IFS-11 owns the ingest implementation. The
+                            // spawn point is deliberately after announcement.
+                            tracing::info!(
+                                event = boru_core::diagnostics::event_names::BACKGROUND_BLOB_INGEST_STARTED,
+                                offer_id = ?offer_id,
+                                name = %announced_name,
+                                "background blob ingest started"
+                            );
+                            let offer_name = announced_name.clone();
+                            let offer_size = announced_size;
+                            tokio::spawn(async move {
+                                let ingest = async {
+                                    // Reuse the content-addressed blob path used by
+                                    // legacy FileShare messages, but keep it entirely
+                                    // off the FileOffer announcement task.
+                                    let known_blob = match storage.as_ref() {
+                                        Some(stg) => {
+                                            let hash = stg
+                                                .file_object_hash_by_source_path(
+                                                    &source_path_string,
+                                                )
+                                                .ok()
+                                                .flatten()
+                                                .and_then(|hash_hex| {
+                                                    hash_hex.parse::<iroh_blobs::Hash>().ok()
+                                                });
+                                            match hash {
+                                                Some(hash)
+                                                    if blob_store
+                                                        .blobs()
+                                                        .has(hash)
+                                                        .await
+                                                        .ok()
+                                                        .unwrap_or(false) =>
+                                                {
+                                                    Some((hash, iroh_blobs::BlobFormat::Raw))
+                                                }
+                                                _ => None,
+                                            }
+                                        }
+                                        None => None,
+                                    };
+
+                                    let (blob_hash, format) = match known_blob {
+                                        Some(known) => known,
+                                        None => {
+                                            let file = tokio::fs::File::open(&source_path)
+                                                .await
+                                                .map_err(|e| format!("failed to open file: {e}"))?;
+                                            let stream = tokio_util::io::ReaderStream::new(file);
+                                            let import = blob_store
+                                                .blobs()
+                                                .add_stream(Box::pin(stream))
+                                                .await;
+                                            let mut add = import.stream().await;
+                                            let mut temp_tag = None;
+                                            while let Some(item) = add.next().await {
+                                                match item {
+                                                    iroh_blobs::api::blobs::AddProgressItem::Done(tt) => {
+                                                        temp_tag = Some(tt);
+                                                    }
+                                                    iroh_blobs::api::blobs::AddProgressItem::Error(e) => {
+                                                        return Err(format!("blob ingest failed: {e}"));
+                                                    }
+                                                    iroh_blobs::api::blobs::AddProgressItem::Size(_)
+                                                    | iroh_blobs::api::blobs::AddProgressItem::CopyProgress(_)
+                                                    | iroh_blobs::api::blobs::AddProgressItem::OutboardProgress(_)
+                                                    | iroh_blobs::api::blobs::AddProgressItem::CopyDone => {}
+                                                }
+                                            }
+                                            let tag = temp_tag.ok_or_else(|| {
+                                                "blob ingest ended without a completed tag".to_string()
+                                            })?;
+                                            (tag.hash(), tag.format())
+                                        }
+                                    };
+
+                                    let ticket = blob_ticket_string(endpoint_addr, blob_hash, format);
+                                    let ready = crate::Message::FileOfferReady {
+                                        offer_id,
+                                        ticket: ticket.clone(),
+                                        thumbnail_hash: None,
+                                    };
+                                    let encoded = SignedMessage::sign_and_encode(&secret_key, &ready)
+                                        .map_err(|e| format!("failed to sign FileOfferReady: {e}"))?;
+                                    if let Some(sender) = sender.as_ref() {
+                                        sender
+                                            .broadcast(encoded)
+                                            .await
+                                            .map_err(|e| format!("failed to broadcast FileOfferReady: {e}"))?;
+                                    }
+
+                                    // Poster work is intentionally sequenced after
+                                    // both FileOffer and FileOfferReady.  A slow
+                                    // ffmpeg probe must never hold up the initial
+                                    // announcement or the first downloadable
+                                    // ticket.  A second FileOfferReady is an
+                                    // idempotent metadata upgrade keyed by
+                                    // offer_id, so receivers can attach the
+                                    // poster whenever it becomes available.
+                                    if is_video {
+                                        let poster_path = source_path.clone();
+                                        let cache_dir = poster_cache_dir.clone();
+                                        let poster_bytes = tokio::task::spawn_blocking(move || {
+                                            video_poster::generate_with_content_hash(
+                                                &poster_path,
+                                                &cache_dir,
+                                                &blob_hash,
+                                            )
+                                            .ok()
+                                            .map(|poster| poster.bytes)
+                                        })
+                                        .await
+                                        .ok()
+                                        .flatten();
+                                        if let Some(bytes) = poster_bytes {
+                                            if let Some(thumbnail_hash) = blob_store
+                                                .blobs()
+                                                .add_bytes(bytes)
+                                                .await
+                                                .ok()
+                                                .map(|tag| MessageHash::from(*tag.hash.as_bytes()))
+                                            {
+                                                let upgraded = crate::Message::FileOfferReady {
+                                                    offer_id,
+                                                    ticket: ticket.clone(),
+                                                    thumbnail_hash: Some(thumbnail_hash),
+                                                };
+                                                let encoded = SignedMessage::sign_and_encode(
+                                                    &secret_key,
+                                                    &upgraded,
+                                                )
+                                                .map_err(|e| {
+                                                    format!("failed to sign poster upgrade: {e}")
+                                                })?;
+                                                if let Some(sender) = sender.as_ref() {
+                                                    sender.broadcast(encoded).await.map_err(|e| {
+                                                        format!(
+                                                            "failed to broadcast poster upgrade: {e}"
+                                                        )
+                                                    })?;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Ok::<(), String>(())
+                                }
+                                .await;
+
+                                match ingest {
+                                    Ok(()) => tracing::info!(
+                                        event = boru_core::diagnostics::event_names::BACKGROUND_BLOB_INGEST_COMPLETED,
+                                        offer_id = ?offer_id,
+                                        name = %offer_name,
+                                        size = offer_size,
+                                        "background blob ingest completed"
+                                    ),
+                                    Err(error) => tracing::error!(
+                                        event = boru_core::diagnostics::event_names::BACKGROUND_BLOB_INGEST_FAILED,
+                                        offer_id = ?offer_id,
+                                        name = %offer_name,
+                                        error = %error,
+                                        "background blob ingest failed; direct offer remains valid"
+                                    ),
+                                }
+                            });
+                            Ok::<(), String>(())
+                        },
+                        |_| AppMessage::Noop,
+                    );
+                }
                 // Show spinner immediately while the file is uploading.
                 let abs_path_buf = std::path::PathBuf::from(&abs_path);
                 let file_size = std::fs::metadata(&abs_path_buf)
