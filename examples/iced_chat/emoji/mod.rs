@@ -20,6 +20,8 @@
 //!                   segmentation of message text: BORU-TWEMOJI-16)
 //! - [`renderer`]     — SVG handles, caching and the rendering abstraction
 //!                   (full renderer/cache: BORU-TWEMOJI-08/09)
+//! - [`emoji_text`]   — mixed text + Twemoji message renderer
+//!                   (BORU-TWEMOJI-17)
 //! - [`picker`]       — the emoji picker panel (visual swap to SVG: BORU-TWEMOJI-10)
 //!
 //! # Small stable interfaces
@@ -32,6 +34,7 @@
 //! emoji::asset_manifest::{contains, lookup, TWEMOJI_ASSETS}
 //! emoji::parser::{MessageFragment, emoji_asset, split_fragments}
 //! emoji::renderer::{cached_svg_handle, EmojiAsset, EmojiAssetCache, EmojiRenderer, TwemojiRenderer}
+//! emoji::emoji_text::{emoji_text, EmojiTextArtwork, EmojiTextStyle, plan_emoji_text, EMOJI_TEXT_SCALE}
 //! emoji::picker::view_emoji_picker
 //! ```
 //!
@@ -47,6 +50,7 @@
 
 pub mod asset_manifest;
 pub mod catalog;
+pub mod emoji_text;
 pub mod parser;
 pub mod picker;
 pub mod recents;
@@ -54,6 +58,9 @@ pub mod renderer;
 
 pub use asset_manifest::{contains, TWEMOJI_ASSETS};
 pub use catalog::{common_emojis, Emoji, EmojiCategory};
+pub use emoji_text::{
+    emoji_text, plan_emoji_text, EmojiTextArtwork, EmojiTextStyle, EMOJI_TEXT_SCALE,
+};
 pub use parser::{emoji_asset, split_fragments, MessageFragment};
 pub use recents::{record_recent, sanitize_recents, RECENT_LIMIT};
 pub use renderer::{

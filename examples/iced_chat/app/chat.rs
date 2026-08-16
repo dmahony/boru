@@ -3691,40 +3691,48 @@ impl IcedChat {
                     }
                 };
 
-            // ── Clickable URL-aware body ──
+            // ── Clickable emoji-aware URL-aware body ──
             let segments = entry.parsed_segments.as_deref().unwrap_or(&[]);
+            // BORU-TWEMOJI-17: emoji inside the body render as inline
+            // Twemoji SVGs (text runs keep Boru's message typography). The
+            // stored/copied message stays the original Unicode string —
+            // this is presentation only.
+            let emoji_style = crate::emoji::emoji_text::EmojiTextStyle {
+                size: self.chat_text_size,
+                font: btheme.type_font(crate::fonts::TypeRole::ChatMessage),
+                line_height: iced::widget::text::LineHeight::Relative(
+                    btheme.type_line_height(crate::fonts::TypeRole::ChatMessage),
+                ),
+                wrapping: Wrapping::WordOrGlyph,
+                color: body_color,
+            };
+            let emoji_renderer = crate::emoji::renderer::TwemojiRenderer;
             let body_el: iced::Element<'_, AppMessage> = if segments.len() == 1
                 && matches!(&segments[0], link_preview::TextSegment::Text(_))
             {
-                // No URLs — simple text element. `WordOrGlyph` wraps at word
-                // boundaries and falls back to glyph-level breaking for
+                // No URLs — emoji-aware text element. `WordOrGlyph` wraps at
+                // word boundaries and falls back to glyph-level breaking for
                 // unbreakable words (public keys, pasted tokens, very long
                 // single words) so the bubble never overflows its width cap.
-                text(&entry.body)
-                    .size(self.chat_text_size)
-                    .font(btheme.type_font(crate::fonts::TypeRole::ChatMessage))
-                    .line_height(iced::widget::text::LineHeight::Relative(
-                        btheme.type_line_height(crate::fonts::TypeRole::ChatMessage),
-                    ))
-                    .wrapping(Wrapping::WordOrGlyph)
-                    .color(body_color)
-                    .into()
+                // Emoji-free messages take the fast path inside `emoji_text`
+                // and render exactly like the previous plain text element.
+                crate::emoji::emoji_text::emoji_text(
+                    &emoji_renderer,
+                    &entry.body,
+                    &emoji_style,
+                )
             } else {
-                // Mixed text and URLs — build a segmented row
+                // Mixed text and URLs — build a segmented row. Text segments
+                // get the same emoji treatment; URL segments stay clickable.
                 let mut row = Row::new().spacing(0);
                 for seg in segments {
                     match seg {
                         link_preview::TextSegment::Text(t) => {
-                            row = row.push(
-                                text(t)
-                                    .size(self.chat_text_size)
-                                    .font(btheme.type_font(crate::fonts::TypeRole::ChatMessage))
-                                    .line_height(iced::widget::text::LineHeight::Relative(
-                                        btheme.type_line_height(crate::fonts::TypeRole::ChatMessage),
-                                    ))
-                                    .wrapping(Wrapping::WordOrGlyph)
-                                    .color(body_color),
-                            );
+                            row = row.push(crate::emoji::emoji_text::emoji_text(
+                                &emoji_renderer,
+                                t,
+                                &emoji_style,
+                            ));
                         }
                         link_preview::TextSegment::Url(u) => {
                             let display = link_preview::truncate_url(&u, 80);
