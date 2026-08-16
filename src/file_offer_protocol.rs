@@ -400,6 +400,7 @@ async fn read_frame<T: for<'de> Deserialize<'de>>(reader: &mut RecvStream) -> an
 #[cfg(test)]
 mod tests {
     use super::*;
+    use n0_future::StreamExt;
     use tempfile::tempdir;
 
     fn registry_with_offer(
@@ -618,5 +619,36 @@ mod tests {
             authorize_offer(peer, id, &registry).await.unwrap_err(),
             FileOfferError::SourceChanged
         );
+    }
+
+    #[tokio::test]
+    async fn direct_read_and_blob_ingest_use_independent_source_handles() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("concurrent.bin");
+        let contents = vec![0x5a; 256 * 1024];
+        tokio::fs::write(&path, &contents).await.unwrap();
+
+        // These are intentionally separate opens, matching the direct sender
+        // and background ingest paths. Neither operation shares a cursor or
+        // takes an exclusive lock on the source file.
+        let direct_read = tokio::fs::read(&path);
+        let ingest = async {
+            let file = tokio::fs::File::open(&path).await.unwrap();
+            let stream = tokio_util::io::ReaderStream::new(file);
+            let blob_store: iroh_blobs::api::Store = iroh_blobs::store::mem::MemStore::new().into();
+            let import = blob_store.blobs().add_stream(Box::pin(stream)).await;
+            let mut progress = import.stream().await;
+            let mut tag = None;
+            while let Some(item) = progress.next().await {
+                if let iroh_blobs::api::blobs::AddProgressItem::Done(done) = item {
+                    tag = Some(done);
+                }
+            }
+            tag.expect("blob ingest completed")
+        };
+
+        let (direct_bytes, tag) = tokio::join!(direct_read, ingest);
+        assert_eq!(direct_bytes.unwrap(), contents);
+        assert_eq!(tag.hash(), iroh_blobs::Hash::from(blake3::hash(&contents)));
     }
 }
