@@ -4493,7 +4493,14 @@ impl IcedChat {
                 // File transfer to a direct peer requires a negotiated
                 // FILES capability; groups/public rooms are not gated.
                 if let Some(peer) = self.current_direct_peer() {
-                    if !self.feature_offered(&peer, boru_core::control_plane::features::FILES) {
+                    if self.capability_gate.is_some()
+                        && self
+                            .negotiated_feature_version(
+                                &peer,
+                                boru_core::control_plane::features::FILES,
+                            )
+                            .is_none()
+                    {
                         tracing::warn!(
                             peer = %peer,
                             feature = boru_core::control_plane::features::FILES,
@@ -4521,7 +4528,21 @@ impl IcedChat {
                 // Direct conversations announce an offer before any blob
                 // ingestion. Keep the path local and expose only safe
                 // basename, size, and the opaque offer ID on the wire.
-                if let Some(peer) = self.current_direct_peer() {
+                // FILES v2 is the direct FileOffer protocol. A v1 peer uses
+                // the legacy ingest-first FileShare path below.
+                let direct_offer_enabled = self.current_direct_peer().is_some_and(|peer| {
+                    self.capability_gate.is_none()
+                        || self
+                            .negotiated_feature_version(
+                                &peer,
+                                boru_core::control_plane::features::FILES,
+                            )
+                            == Some(2)
+                });
+                if let Some(peer) = self
+                    .current_direct_peer()
+                    .filter(|_| direct_offer_enabled)
+                {
                     let path = std::path::PathBuf::from(&abs_path);
                     let safe_name = std::path::Path::new(&filename)
                         .file_name()

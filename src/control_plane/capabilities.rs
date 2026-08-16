@@ -61,8 +61,10 @@ use std::str::FromStr;
 /// and add the id to [`KNOWN_CAPABILITIES`] with explicit
 /// [`CapabilitySemantics`].
 pub mod ids {
+    /// Legacy file transfer over the BlobTicket/FileShare path.
+    pub const FILES_V1: &str = "files-v1";
     /// File transfer over the private file-access path (blob transfer,
-    /// signed descriptors).
+    /// signed descriptors), including direct file offers.
     pub const FILES_V2: &str = "files-v2";
     /// The Boru secure-tunnel service (private tunnel enrolment and
     /// forwarding).
@@ -403,6 +405,11 @@ pub struct CapabilityDescriptor {
 /// they are simply not interpreted by this client.
 pub const KNOWN_CAPABILITIES: &[CapabilityDescriptor] = &[
     CapabilityDescriptor {
+        id: ids::FILES_V1,
+        semantics: CapabilitySemantics::EnabledLocally,
+        description: "Legacy file transfer over BlobTicket/FileShare.",
+    },
+    CapabilityDescriptor {
         id: ids::FILES_V2,
         semantics: CapabilitySemantics::EnabledLocally,
         description:
@@ -478,6 +485,7 @@ mod tests {
     #[test]
     fn test_known_ids_parse() {
         let cases = [
+            (ids::FILES_V1, features::FILES, 1u16),
             (ids::FILES_V2, features::FILES, 2u16),
             (ids::TUNNELS_V1, features::TUNNELS, 1),
             (ids::VOICE_V1, features::VOICE, 1),
@@ -640,6 +648,24 @@ mod tests {
         assert_eq!(compatible_version(&old, &new, features::VOICE), None);
     }
 
+    /// FILES v1 peers negotiate the legacy BlobTicket path, while peers that
+    /// share v2 may use direct FileOffer transfers.
+    #[test]
+    fn test_files_protocol_version_negotiation() {
+        let local = set(&[ids::FILES_V1, ids::FILES_V2]);
+        let legacy_peer = set(&[ids::FILES_V1]);
+        let direct_peer = set(&[ids::FILES_V1, ids::FILES_V2]);
+
+        assert_eq!(
+            compatible_version(&local, &legacy_peer, features::FILES),
+            Some(1)
+        );
+        assert_eq!(
+            compatible_version(&local, &direct_peer, features::FILES),
+            Some(2)
+        );
+    }
+
     /// Feature availability is NOT inferred from app version strings: the
     /// capability set is a standalone object; the app protocol version
     /// never implies or removes capabilities.
@@ -737,8 +763,12 @@ mod tests {
         assert!(local.has_feature(features::TUNNELS));
         // And removing an id shrinks the advertisement (the "materially
         // changed" path) without affecting the registry itself.
-        let shrunk =
-            CapabilitySet::from_wire(local.to_wire().into_iter().filter(|id| id != ids::FILES_V2));
+        let shrunk = CapabilitySet::from_wire(
+            local
+                .to_wire()
+                .into_iter()
+                .filter(|id| id != ids::FILES_V1 && id != ids::FILES_V2),
+        );
         assert!(!shrunk.has_feature(features::FILES));
         assert!(shrunk.has_feature(features::TUNNELS));
     }
