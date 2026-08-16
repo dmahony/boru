@@ -164,6 +164,10 @@ pub mod discovery_service;
 #[cfg(feature = "net")]
 pub mod file_offer;
 
+/// Dedicated versioned QUIC protocol for streaming announced direct file offers.
+#[cfg(feature = "net")]
+pub mod file_offer_protocol;
+
 /// Per-room discovery secrets — cryptographically random 32-byte keys
 /// that isolate private rooms on the DHT.
 ///
