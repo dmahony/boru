@@ -7915,6 +7915,14 @@ fn reveal_in_folder(path: &std::path::Path) -> std::io::Result<()> {
     }
 }
 
+impl Drop for IcedChat {
+    fn drop(&mut self) {
+        if let Ok(mut registry) = self.file_offer_registry.lock() {
+            registry.clear();
+        }
+    }
+}
+
 impl IcedChat {
     /// Detect OS reduced-motion preference.
     ///
@@ -16663,6 +16671,13 @@ impl IcedChat {
                     self.invalidate_prewarm(&[Screen::Discover]);
                 }
                 self.save_directory_store();
+                let pruned_file_offers = {
+                    let mut registry = self.file_offer_registry.lock().unwrap();
+                    registry.prune_stale()
+                };
+                if pruned_file_offers > 0 {
+                    tracing::debug!(count = pruned_file_offers, "pruned stale direct file offers");
+                }
                 self.refresh_missing_downloads();
                 // Re-broadcast an active short-code announcement so receivers
                 // that join the rendezvous topic late can still pick it up

@@ -15,9 +15,8 @@ use crate::chat_core::protocol::FileOfferId;
 
 /// Default lifetime of a sender-side offer before it is eligible for pruning.
 ///
-/// The registry is process-local, so this is intentionally long enough for a
-/// recipient to accept a file during normal use while bounding abandoned
-/// offers. The lifecycle policy can be refined independently in BORU-IFS-20.
+/// Offers are deliberately process-local. Twenty-four hours is long enough for
+/// normal direct-chat use while bounding abandoned source paths in memory.
 pub const DEFAULT_FILE_OFFER_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Local information needed to authorize and serve one direct file offer.
@@ -126,6 +125,23 @@ impl FileOfferRegistry {
         before - self.offers.len()
     }
 
+    /// Remove expired offers and offers whose local source is no longer a file.
+    /// The transfer handler still validates the source at request time.
+    pub fn prune_stale(&mut self) -> usize {
+        let ttl = self.ttl;
+        let now = Instant::now();
+        let before = self.offers.len();
+        self.offers.retain(|_, offer| {
+            now.duration_since(offer.created_at) <= ttl && offer.path().is_file()
+        });
+        before - self.offers.len()
+    }
+
+    /// Remove every offer when the owning application shuts down.
+    pub fn clear(&mut self) {
+        self.offers.clear();
+    }
+
     /// Return the number of currently registered offers.
     pub fn len(&self) -> usize {
         self.offers.len()
@@ -215,5 +231,41 @@ mod tests {
             registry.get(&second_id).unwrap().display_name,
             "same-name.txt"
         );
+    }
+
+    #[test]
+    fn prune_stale_removes_missing_sources_and_keeps_existing_sources() {
+        let peer = iroh::SecretKey::generate().public();
+        let temp = tempfile::tempdir().unwrap();
+        let existing_path = temp.path().join("existing.bin");
+        std::fs::write(&existing_path, b"content").unwrap();
+        let existing_id = FileOfferId::generate();
+        let missing_id = FileOfferId::generate();
+        let mut registry = FileOfferRegistry::new();
+        registry.register(FileOffer::new(
+            existing_id,
+            peer,
+            existing_path,
+            "existing.bin".to_owned(),
+            7,
+            SystemTime::now(),
+        ));
+        registry.register(offer(missing_id, peer, "missing.bin"));
+
+        assert_eq!(registry.prune_stale(), 1);
+        assert!(registry.get(&existing_id).is_some());
+        assert!(registry.get(&missing_id).is_none());
+    }
+
+    #[test]
+    fn clear_removes_all_offers_and_lookup_does_not_consume_them() {
+        let peer = iroh::SecretKey::generate().public();
+        let id = FileOfferId::generate();
+        let mut registry = FileOfferRegistry::new();
+        registry.register(offer(id, peer, "repeat.bin"));
+        assert!(registry.get(&id).is_some());
+        assert!(registry.get(&id).is_some());
+        registry.clear();
+        assert!(registry.is_empty());
     }
 }
