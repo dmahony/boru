@@ -4297,6 +4297,14 @@ pub struct IcedChat {
     /// remote control.
     screen_share_audio_active: bool,
     #[cfg(feature = "screen-sharing")]
+    /// BORU-SSUI-06: typed, user-safe reason from the last
+    /// `SessionEvent::AudioState` when system audio could not be shared
+    /// (e.g. no PipeWire runtime). `Some` disables the sender audio toggle
+    /// and surfaces the reason as tooltip/status text; `None` means the
+    /// toggle is usable. Presentation mirror of the authoritative
+    /// AudioState.error — never duplicated inside the control itself.
+    screen_share_audio_error: Option<String>,
+    #[cfg(feature = "screen-sharing")]
     /// Sender the host session task uses to emit session events (set by main.rs).
     pub screen_share_events_tx: Option<tokio::sync::mpsc::Sender<SessionEvent>>,
     #[cfg(feature = "screen-sharing")]
@@ -8497,6 +8505,8 @@ impl IcedChat {
             screen_share_audio_stop: None,
             #[cfg(feature = "screen-sharing")]
             screen_share_audio_active: false,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_audio_error: None,
             #[cfg(feature = "screen-sharing")]
             screen_share_events_tx: None,
             #[cfg(feature = "screen-sharing")]
@@ -22897,6 +22907,7 @@ impl IcedChat {
                     }
                     self.screen_share_audio_stop = None;
                     self.screen_share_audio_active = false;
+                    self.screen_share_audio_error = None;
                 }
                 if self.screen_share_host_state != ScreenShareHostState::Idle {
                     // Terminal notice: the share stopped (peer ended it or
@@ -22942,7 +22953,11 @@ impl IcedChat {
                 // carries a typed, user-safe reason when capture could not
                 // start (e.g. no PipeWire runtime); the session continues
                 // view-only and the toast tells the sharer why.
+                // BORU-SSUI-06: mirror the reason so the sender audio
+                // switch can be disabled with the same typed reason as a
+                // tooltip/status text (authoritative capability signal).
                 self.screen_share_audio_active = enabled;
+                self.screen_share_audio_error = error.clone();
                 if let Some(reason) = error {
                     let message = format!("System audio unavailable — {reason}");
                     tracing::warn!("{message}");
@@ -23073,6 +23088,7 @@ impl IcedChat {
         self.screen_share_clipboard_active = false;
         self.screen_share_audio_stop = None;
         self.screen_share_audio_active = false;
+        self.screen_share_audio_error = None;
         self.screen_share_last_pointer_sent = None;
         self.screen_share_last_pointer_pos = None;
         self.screen_share_modifiers = 0;

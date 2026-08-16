@@ -43,6 +43,27 @@ pub(crate) struct RemoteControlStatusSpec {
     pub active: bool,
 }
 
+#[cfg(feature = "screen-sharing")]
+/// BORU-SSUI-06: presentation mapping for the sender's audio toggle row.
+/// The switch OFF maps to the current no-audio state, switch ON maps to the
+/// current audio-sharing path; both dispatch the SAME `ScreenShareToggleAudio`
+/// message the old button used (capture/session path unchanged). The switch
+/// binds to the authoritative `screen_share_audio_active` mirror (set by
+/// `SessionEvent::AudioState`), and `enabled` goes false only when the host
+/// reported a typed unavailable error (audio cannot be shared) — the switch
+/// is then rendered disabled with the reason as tooltip/status text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AudioToggleSpec {
+    /// Speaker icon reflecting the audio state (Volume2 = on, VolumeX = off).
+    pub icon: Icon,
+    /// i18n label key for the "Audio" label.
+    pub label_key: &'static str,
+    /// Whether the switch can be toggled (false when audio cannot be shared).
+    pub enabled: bool,
+    /// Whether system audio is currently shared (switch ON).
+    pub active: bool,
+}
+
 impl IcedChat {
     pub(crate) fn view_chat_panel(&self) -> iced::Element<'_, AppMessage> {
         use iced::{widget, Length};
@@ -477,7 +498,7 @@ impl IcedChat {
     /// BORU-SSUI-08 token work migrates the card values into
     /// `screen_share.card.*` TOML tokens afterwards.
     pub(crate) fn view_screen_share_panel(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, column, container, responsive, row, text};
+        use iced::widget::{button, column, container, responsive, row, text, toggler, tooltip};
         use iced::Length;
         // BORU-UI-03: viewer box geometry comes from `ChatTheme::screen_share_*`
         // (640x360 capture aspect; the mouse-area Point maps 1:1 to normalized
@@ -793,20 +814,93 @@ impl IcedChat {
             }
             // System-audio sharing (BORU-SS-37): a SEPARATE optional
             // capability — the sharer toggles it explicitly (mirroring
-            // clipboard, PDF Task 9.3). The label reflects the current
-            // state; enabling grants Capability::Audio and starts capture,
-            // disabling stops it. A typed unavailable error (no PipeWire
-            // runtime) surfaces as a toast via SessionEvent::AudioState.
+            // clipboard, PDF Task 9.3). Enabling grants Capability::Audio
+            // and starts capture, disabling stops it.
+            // BORU-SSUI-06 (PDF Task 6): rendered as a real toggle row —
+            // speaker icon + "Audio" label + switch — instead of the old
+            // Audio On/Off label button. Switch OFF = no-audio state,
+            // switch ON = the current audio-sharing path; flipping it
+            // dispatches the SAME ScreenShareToggleAudio message the old
+            // button used, so capture/session behaviour is unchanged. The
+            // switch value binds to `screen_share_audio_active` (the
+            // authoritative mirror set by SessionEvent::AudioState). When
+            // the host reported a typed unavailable error (e.g. no
+            // PipeWire runtime), the switch is disabled and the reason
+            // shows as a short tooltip + status line — the existing audio
+            // capability detection (src/screen_share/audio.rs + the
+            // AudioState error) is reused, not reimplemented.
             if self.screen_share_host_state == ScreenShareHostState::Streaming {
-                items.push(
-                    button(text(if self.screen_share_audio_active {
-                        crate::i18n::t("screenshare.audio_on")
-                    } else {
-                        crate::i18n::t("screenshare.audio_off")
-                    }))
-                    .on_press(AppMessage::ScreenShareToggleAudio)
-                    .into(),
+                let unavailable = self.screen_share_audio_error.as_deref();
+                let spec = Self::audio_toggle_spec(
+                    self.screen_share_audio_active,
+                    unavailable.is_some(),
                 );
+                let icon_color: fn(&iced::Theme) -> iced::Color = if spec.active {
+                    crate::design_tokens::primary
+                } else {
+                    crate::design_tokens::text_secondary
+                };
+                let speaker = spec
+                    .icon
+                    .build()
+                    .size(IconSize::Sm)
+                    .color_fn(icon_color)
+                    .build();
+                // Keep the row neutral; only the switch/icon carry the
+                // active state (never blue-wash the whole control).
+                let label = text(crate::i18n::t(spec.label_key))
+                    .size(crate::fonts::TypeRole::SupportingText.size_px())
+                    .font(crate::fonts::TypeRole::SupportingText.font())
+                    .color(Self::muted_color(self.dark_mode));
+                // iced 0.14 `toggler`: omitting `.on_toggle` renders the
+                // switch inert/disabled (Status::Disabled) — exactly what
+                // we want when audio cannot be shared.
+                let mut switch = toggler(self.screen_share_audio_active)
+                    .style(crate::form_components::toggler_style);
+                if spec.enabled {
+                    switch = switch.on_toggle(|_| AppMessage::ScreenShareToggleAudio);
+                }
+                let audio_row = if let Some(reason) = unavailable {
+                    // Disabled capability: tooltip with the typed reason +
+                    // a short muted status line so the state stays obvious
+                    // without a hover.
+                    let tooltip_text = crate::fonts::type_role_text(
+                        crate::fonts::TypeRole::Metadata,
+                        crate::i18n::t_args(
+                            "screenshare.audio_unavailable",
+                            &[("reason", reason)],
+                        ),
+                    );
+                    row![
+                        tooltip::Tooltip::new(speaker, tooltip_text, tooltip::Position::Bottom),
+                        label,
+                        switch,
+                    ]
+                    .spacing(SPACE_8)
+                    .align_y(iced::Alignment::Center)
+                } else {
+                    row![speaker, label, switch]
+                        .spacing(SPACE_8)
+                        .align_y(iced::Alignment::Center)
+                };
+                if let Some(reason) = unavailable {
+                    items.push(
+                        column![
+                            audio_row,
+                            text(crate::i18n::t_args(
+                                "screenshare.audio_unavailable",
+                                &[("reason", reason)],
+                            ))
+                            .size(crate::fonts::TypeRole::SupportingText.size_px())
+                            .font(crate::fonts::TypeRole::SupportingText.font())
+                            .color(Self::muted_color(self.dark_mode)),
+                        ]
+                        .spacing(SPACE_4)
+                        .into(),
+                    );
+                } else {
+                    items.push(audio_row.into());
+                }
             }
             // PDF Phase 12: developer diagnostics overlay — only when the
             // dev-ui gate is on (`--dev-ui` / `BORU_DEV_UI=1` / dev-ui feature).
@@ -1111,6 +1205,24 @@ impl IcedChat {
                 label_key: "screenshare.remote_control_off",
                 active: false,
             }
+        }
+    }
+
+    #[cfg(feature = "screen-sharing")]
+    /// BORU-SSUI-06 (PDF Task 6): map the authoritative audio state to the
+    /// sender's audio toggle row presentation. The switch value is
+    /// `screen_share_audio_active` (mirror of `SessionEvent::AudioState`),
+    /// so OFF = no-audio, ON = audio-sharing path — flipping it dispatches
+    /// the SAME `ScreenShareToggleAudio` message the old label button used.
+    /// When `unavailable` is set (typed unavailable error, e.g. no PipeWire
+    /// runtime), the switch is disabled (`enabled = false`) and the reason
+    /// is surfaced as tooltip/status text instead of silently failing.
+    pub(crate) fn audio_toggle_spec(active: bool, unavailable: bool) -> AudioToggleSpec {
+        AudioToggleSpec {
+            icon: if active { Icon::Volume2 } else { Icon::VolumeX },
+            label_key: "screenshare.audio",
+            enabled: !unavailable,
+            active,
         }
     }
 
@@ -8584,5 +8696,54 @@ mod tests {
         assert_ne!(Icon::MousePointer, Icon::Monitor);
         assert_ne!(Icon::MousePointer, Icon::Window);
         assert_ne!(Icon::MousePointer, Icon::Desktop);
+    }
+
+    /// BORU-SSUI-06 (PDF Task 6): the audio toggle spec maps the
+    /// authoritative audio state to a speaker icon + "Audio" label, and
+    /// disables the switch when the host reported audio cannot be shared
+    /// (typed unavailable error — existing capability detection).
+    #[test]
+    fn audio_toggle_spec_maps_state_to_icon_and_enabled() {
+        // ON + available → speaker-on icon, switch enabled.
+        let on = IcedChat::audio_toggle_spec(true, false);
+        assert_eq!(on.icon, Icon::Volume2);
+        assert_eq!(on.label_key, "screenshare.audio");
+        assert!(on.active);
+        assert!(on.enabled);
+        // OFF + available → muted speaker icon, switch still enabled
+        // (turning it ON maps to the current audio-sharing path).
+        let off = IcedChat::audio_toggle_spec(false, false);
+        assert_eq!(off.icon, Icon::VolumeX);
+        assert!(!off.active);
+        assert!(off.enabled);
+        // Unavailable → switch disabled regardless of the mirror value;
+        // the label stays the same runtime "Audio" text.
+        let blocked = IcedChat::audio_toggle_spec(true, true);
+        assert_eq!(blocked.icon, Icon::Volume2);
+        assert!(!blocked.enabled);
+        assert_eq!(blocked.label_key, "screenshare.audio");
+        let blocked_off = IcedChat::audio_toggle_spec(false, true);
+        assert!(!blocked_off.enabled);
+        assert_eq!(blocked_off.icon, Icon::VolumeX);
+    }
+
+    /// BORU-SSUI-06: the speaker icons map to distinct lucide volume
+    /// assets (on = volume-2, off = volume-x) — never the same glyph for
+    /// two states.
+    #[test]
+    fn audio_speaker_icons_map_to_distinct_volume_assets() {
+        let on = String::from_utf8_lossy(Icon::Volume2.bytes());
+        let off = String::from_utf8_lossy(Icon::VolumeX.bytes());
+        assert!(on.starts_with("<svg"), "volume-2 SVG root");
+        assert!(off.starts_with("<svg"), "volume-x SVG root");
+        assert_ne!(on, off, "distinct speaker glyphs");
+        assert_ne!(Icon::Volume2, Icon::VolumeX);
+    }
+
+    /// BORU-SSUI-06: the "Audio" label key resolves to real runtime text
+    /// (never the raw key), so the toggle row shows a real label.
+    #[test]
+    fn audio_label_key_resolves_to_runtime_text() {
+        assert_eq!(crate::i18n::t("screenshare.audio"), "Audio");
     }
 }

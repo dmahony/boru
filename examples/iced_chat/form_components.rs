@@ -727,8 +727,9 @@ where
 }
 
 /// Style for a Boru toggle — primary green track + white knob when on, muted
-/// track when off.
-fn toggler_style(theme: &Theme, status: toggler::Status) -> toggler::Style {
+/// track when off. Shared by the sender screen-share audio switch
+/// (BORU-SSUI-06) so every toggle in the app looks identical.
+pub(crate) fn toggler_style(theme: &Theme, status: toggler::Status) -> toggler::Style {
     let is_toggled = match status {
         toggler::Status::Active { is_toggled }
         | toggler::Status::Hovered { is_toggled }
