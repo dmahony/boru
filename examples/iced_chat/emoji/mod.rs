@@ -31,7 +31,7 @@
 //! emoji::catalog::{Emoji, EmojiCategory, common_emojis}
 //! emoji::asset_manifest::{contains, lookup, TWEMOJI_ASSETS}
 //! emoji::parser::{MessageFragment, emoji_asset, split_fragments}
-//! emoji::renderer::{EmojiAsset, EmojiRenderer, TwemojiRenderer}
+//! emoji::renderer::{cached_svg_handle, EmojiAsset, EmojiAssetCache, EmojiRenderer, TwemojiRenderer}
 //! emoji::picker::view_emoji_picker
 //! ```
 //!
@@ -54,4 +54,6 @@ pub mod renderer;
 pub use asset_manifest::{contains, TWEMOJI_ASSETS};
 pub use catalog::{common_emojis, Emoji, EmojiCategory};
 pub use parser::{emoji_asset, split_fragments, MessageFragment};
-pub use renderer::{EmojiAsset, EmojiRenderer, TwemojiRenderer};
+pub use renderer::{
+    cached_svg_handle, EmojiAsset, EmojiAssetCache, EmojiRenderer, TwemojiRenderer,
+};
