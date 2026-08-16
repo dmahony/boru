@@ -12673,7 +12673,15 @@ impl IcedChat {
                     self.designer_history.begin(&self.active_layout);
                 }
                 if let DesignerMessage::UpdateDrag(point) = designer_message {
-                    self.update_home_drag(point);
+                    // The whole-card overlay reports pointer movement. Route
+                    // it to whichever gesture is active (a resize drag vs a
+                    // home reorder drag); with no gesture active this is a
+                    // plain hover and both handlers no-op.
+                    if self.designer.resize_operation.is_some() {
+                        self.update_resize(point);
+                    } else {
+                        self.update_home_drag(point);
+                    }
                     return iced::Task::none();
                 }
                 if let DesignerMessage::ReorderHome { index, delta } = designer_message {
@@ -12694,9 +12702,17 @@ impl IcedChat {
                     return iced::Task::none();
                 }
                 if matches!(designer_message, DesignerMessage::CommitDrag) {
-                    self.commit_home_drag();
-                    self.designer_history.commit(&self.active_layout);
-                    self.designer.update(DesignerMessage::CommitDrag);
+                    // The whole-card overlay reports the release. Commit the
+                    // active gesture: a resize drag commits the resize
+                    // transaction; otherwise commit the home reorder drag.
+                    if self.designer.resize_operation.is_some() {
+                        self.designer_history.commit(&self.active_layout);
+                        self.designer.update(DesignerMessage::CommitResize);
+                    } else {
+                        self.commit_home_drag();
+                        self.designer_history.commit(&self.active_layout);
+                        self.designer.update(DesignerMessage::CommitDrag);
+                    }
                     return iced::Task::none();
                 }
                 if matches!(designer_message, DesignerMessage::CancelDrag) {
@@ -19711,6 +19727,15 @@ impl IcedChat {
         let Some(operation) = self.designer.drag_operation.as_mut() else {
             return;
         };
+        // The whole-card overlay reports pointer positions relative to the
+        // card widget, and StartDrag passes Point::ORIGIN, so anchor the
+        // semantic origin at the first tracked move (the grab point). The
+        // raw pointer position itself stays transient.
+        if operation.origin == iced::Point::ORIGIN {
+            operation.origin = current;
+            operation.current = current;
+            return;
+        }
         operation.current = current;
         let Some(section) = operation.section else {
             return;
@@ -19792,6 +19817,17 @@ impl IcedChat {
         let Some(operation) = self.designer.resize_operation.as_ref() else {
             return;
         };
+        // Same anchoring as the drag gesture: StartResize passes
+        // Point::ORIGIN and the overlay reports card-relative positions, so
+        // the first tracked move establishes the grab anchor. Without this
+        // the first delta would jump by the whole card width.
+        if operation.origin == iced::Point::ORIGIN {
+            if let Some(op) = self.designer.resize_operation.as_mut() {
+                op.origin = current;
+                op.current = current;
+            }
+            return;
+        }
         let delta = current.x - operation.origin.x;
         let component = operation.component;
         let mut layout = self.active_layout.clone();

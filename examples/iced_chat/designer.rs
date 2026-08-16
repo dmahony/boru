@@ -125,10 +125,6 @@ pub(crate) fn overlay<'a>(
             component,
             origin: Point::ORIGIN,
         },
-    ))
-    .on_move(|point| crate::app::AppMessage::Designer(DesignerMessage::UpdateDrag(point)))
-    .on_release(crate::app::AppMessage::Designer(
-        DesignerMessage::CommitDrag,
     ));
     let resize_handle = mouse_area(
         container(text("↘").size(14.0).color(Color::WHITE))
@@ -146,9 +142,7 @@ pub(crate) fn overlay<'a>(
     .on_press(crate::app::AppMessage::Designer(DesignerMessage::StartResize {
         component,
         origin: Point::ORIGIN,
-    }))
-    .on_move(|point| crate::app::AppMessage::Designer(DesignerMessage::UpdateResize(point)))
-    .on_release(crate::app::AppMessage::Designer(DesignerMessage::CommitResize));
+    }));
     let resize_label = resize_value.map(|value| {
         container(text(format!("{value:.0}px")).size(11.0).color(Color::WHITE))
             .padding(Padding::from(3.0))
@@ -238,6 +232,10 @@ pub(crate) fn overlay<'a>(
         .on_exit(crate::app::AppMessage::Designer(DesignerMessage::Hover(
             None,
         )))
+        .on_move(|point| crate::app::AppMessage::Designer(DesignerMessage::UpdateDrag(point)))
+        .on_release(crate::app::AppMessage::Designer(
+            DesignerMessage::CommitDrag,
+        ))
         .on_press(crate::app::AppMessage::Designer(DesignerMessage::Select(
             Some(component),
         )))
