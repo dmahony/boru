@@ -1115,6 +1115,7 @@ impl IcedChat {
             &self.theme(),
             self.emoji_category,
             &self.emoji_search_query,
+            &self.recent_emojis,
         )
     }
 
@@ -6480,6 +6481,17 @@ impl IcedChat {
             AppMessage::InsertEmoji(emoji) => {
                 // Insert the emoji at the current cursor position
                 self.composer_text.push_str(&emoji);
+                // BORU-TWEMOJI-14: record the selection in the recently-used
+                // list (move-to-front, deduplicated, capped) and persist it
+                // through Boru's normal local settings (settings.json). Only
+                // the Unicode string is stored — never an asset key or SVG
+                // path — and the list is never transmitted on the wire.
+                let recents =
+                    crate::emoji::recents::record_recent(&self.recent_emojis, &emoji);
+                if recents != self.recent_emojis {
+                    self.recent_emojis = recents;
+                    self.save_settings();
+                }
                 iced::Task::none()
             }
 

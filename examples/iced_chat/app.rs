@@ -339,6 +339,11 @@ pub struct AppSettings {
     /// UI. Disabling it only hides the presentation — it never affects
     /// discovery or reconnection (PDF 2.3 guardrail).
     pub show_presence_indicator: bool,
+    /// Recently-used emoji as plain Unicode strings (BORU-TWEMOJI-14).
+    /// Local settings only — this list is never transmitted on the wire and
+    /// never stores asset keys, SVG paths or image bytes. The picker renders
+    /// each entry through the shared resolver/fallback pipeline.
+    pub recent_emojis: Vec<String>,
 }
 
 impl Default for AppSettings {
@@ -353,6 +358,7 @@ impl Default for AppSettings {
             home_menu_item_opacity: HOME_MENU_ITEM_OPACITY_DEFAULT,
             accent_color: None,
             show_presence_indicator: true,
+            recent_emojis: Vec::new(),
         }
     }
 }
@@ -4920,6 +4926,10 @@ pub struct IcedChat {
     /// Live emoji picker search query (BORU-TWEMOJI-13). Empty restores the
     /// category view; non-empty shows shared-catalog search results.
     emoji_search_query: String,
+    /// Recently-used emoji as plain Unicode strings (BORU-TWEMOJI-14).
+    /// Runtime copy of `AppSettings::recent_emojis`; updated on every
+    /// selection and persisted through Boru's normal settings system.
+    recent_emojis: Vec<String>,
     /// Whether the GIF picker panel is currently visible.
     show_gif_picker: bool,
     /// Search text for the GIF picker.
@@ -8200,6 +8210,10 @@ impl IcedChat {
             show_emoji_picker: false,
             emoji_category: crate::emoji::EmojiCategory::SmileysAndPeople,
             emoji_search_query: String::new(),
+            // BORU-TWEMOJI-14: restore the persisted recently-used list,
+            // sanitized so corrupt/unknown stored entries cannot break the
+            // picker (empty/whitespace entries are dropped).
+            recent_emojis: crate::emoji::recents::sanitize_recents(&app_settings.recent_emojis),
             show_gif_picker: false,
             gif_search_text: String::new(),
             gif_results: Vec::new(),
@@ -8859,7 +8873,6 @@ impl IcedChat {
     }
 
     /// Persist current dark_mode, sound_enabled, chat_text_size, and display_name to disk.
-    #[expect(dead_code)]
     fn save_settings(&self) {
         let settings = AppSettings {
             dark_mode: self.dark_mode,
@@ -8871,6 +8884,7 @@ impl IcedChat {
             home_menu_item_opacity: self.home_menu_item_opacity,
             accent_color: self.accent_color,
             show_presence_indicator: self.show_presence_indicator,
+            recent_emojis: self.recent_emojis.clone(),
         };
         settings.save(&self.data_dir);
     }
@@ -8888,6 +8902,7 @@ impl IcedChat {
         home_menu_item_opacity: f32,
         accent_color: Option<[u8; 3]>,
         show_presence_indicator: bool,
+        recent_emojis: Vec<String>,
     ) -> iced::Task<AppMessage> {
         let settings = AppSettings {
             dark_mode,
@@ -8899,6 +8914,7 @@ impl IcedChat {
             home_menu_item_opacity,
             accent_color,
             show_presence_indicator,
+            recent_emojis,
         };
         let data_dir = data_dir.to_path_buf();
         iced::Task::perform(
@@ -8986,6 +9002,7 @@ impl IcedChat {
             home_menu_item_opacity: self.home_menu_item_opacity,
             accent_color: self.accent_color,
             show_presence_indicator: self.show_presence_indicator,
+            recent_emojis: self.recent_emojis.clone(),
         };
         settings.save(&self.data_dir);
     }
@@ -24912,6 +24929,7 @@ mod tests {
             home_menu_item_opacity: HOME_MENU_ITEM_OPACITY_DEFAULT,
             accent_color: None,
             show_presence_indicator: true,
+            recent_emojis: Vec::new(),
         };
         let toggled = AppSettings {
             dark_mode: true,
@@ -24923,6 +24941,7 @@ mod tests {
             home_menu_item_opacity: HOME_MENU_ITEM_OPACITY_DEFAULT,
             accent_color: None,
             show_presence_indicator: true,
+            recent_emojis: original.recent_emojis.clone(),
         };
         toggled.save(&data_dir);
         let loaded = AppSettings::load(&data_dir);
@@ -24957,11 +24976,51 @@ mod tests {
             home_menu_item_opacity: 0.55,
             accent_color: None,
             show_presence_indicator: true,
+            recent_emojis: Vec::new(),
         };
         settings.save(&data_dir);
         let loaded = AppSettings::load(&data_dir);
         assert_eq!(loaded.home_menu_item_opacity, 0.55);
         assert_eq!(loaded.chat_text_size, 17.0);
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    /// Acceptance (BORU-TWEMOJI-14): recently-used emoji persist across app
+    /// restarts — a `settings.json` round-trip preserves the Unicode list
+    /// exactly, and the values are plain Unicode strings, never asset keys
+    /// or SVG paths.
+    #[test]
+    fn recent_emojis_round_trip_in_settings() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "boru-gui-recent-emojis-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        std::fs::create_dir_all(&data_dir).expect("test settings directory should be created");
+
+        let recents = vec!["❤️".to_string(), "😂".to_string(), "👍".to_string()];
+        let settings = AppSettings {
+            dark_mode: false,
+            sound_enabled: true,
+            chat_text_size: 17.0,
+            share_direct_addresses: false,
+            display_name: None,
+            home_background_image: None,
+            home_menu_item_opacity: HOME_MENU_ITEM_OPACITY_DEFAULT,
+            accent_color: None,
+            show_presence_indicator: true,
+            recent_emojis: recents.clone(),
+        };
+        settings.save(&data_dir);
+        let loaded = AppSettings::load(&data_dir);
+        assert_eq!(loaded.recent_emojis, recents);
+
+        // The stored values are plain Unicode strings — never asset keys,
+        // paths, or filenames.
+        for entry in &loaded.recent_emojis {
+            assert!(!entry.contains(".svg") && !entry.contains('/'));
+            assert!(!entry.trim().is_empty());
+        }
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 

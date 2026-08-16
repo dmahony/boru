@@ -326,6 +326,7 @@
   "emoji.category.symbols": "Symboles",
   "emoji.category.flags": "Drapeaux",
   "emoji.category.recent": "Récents",
+  "emoji.no_recents_yet": "Aucun émoji récent pour l'instant",
   "files.browse": "Parcourir les fichiers",
   "files.browse_short": "Parcourir",
   "files.completed": "Terminé",

@@ -43,6 +43,20 @@
 //! results are catalog entries, so they insert Unicode and render with the
 //! shared SVG renderer exactly like category cells.
 //!
+//! # Recently used (BORU-TWEMOJI-14)
+//!
+//! The tab row leads with a `Recent` tab ([`EmojiCategory::Recent`]).
+//! Selecting it shows the recently-used list — plain Unicode strings kept
+//! in Boru's normal local settings (`AppSettings::recent_emojis`, persisted
+//! as `settings.json`; see [`super::recents`]). Each selection moves the
+//! grapheme to the front of the list, deduplicated and capped at
+//! [`super::recents::RECENT_LIMIT`]. Recents are rendered through the SAME
+//! resolver/fallback pipeline as catalog cells ([`cell_artwork_unicode`]),
+//! so a stored grapheme with no bundled asset falls back to its original
+//! Unicode text and an empty/whitespace entry is skipped — corrupt or
+//! unknown stored entries can never break the picker. Recents are never
+//! transmitted on the wire: this list is local settings only.
+//!
 //! # Responsive layout (BORU-TWEMOJI-11)
 //!
 //! The card is wrapped in [`iced::widget::Responsive`] so the grid column
@@ -107,11 +121,15 @@ const SEARCH_ROW_CHROME: f32 = 34.0 + SPACE_8;
 /// inserts its Unicode into the composer).
 ///
 /// `active` selects the content category shown in the grid when no search
-/// query is active (BORU-TWEMOJI-12). `search_query` is the live search
-/// input (BORU-TWEMOJI-13): a non-empty trimmed query replaces the category
-/// grid with [`crate::emoji::catalog::search_emojis`] results (the same
-/// shared catalog, case-insensitive name+keyword match); an empty query
-/// restores the category view.
+/// query is active (BORU-TWEMOJI-12), or the `Recent` pseudo-category for
+/// the recently-used list (BORU-TWEMOJI-14). `search_query` is the live
+/// search input (BORU-TWEMOJI-13): a non-empty trimmed query replaces the
+/// category/recent grid with [`crate::emoji::catalog::search_emojis`]
+/// results (the same shared catalog, case-insensitive name+keyword match);
+/// an empty query restores the category/recent view. `recents` is the
+/// recently-used Unicode list persisted in Boru's local settings
+/// (BORU-TWEMOJI-14); it is shown when `Recent` is active and rendered
+/// through the same resolver/fallback pipeline as catalog entries.
 ///
 /// The card is wrapped in [`Responsive`] (with `Shrink` width/height) so the
 /// column count and scroll height adapt to the space the overlay actually
@@ -122,6 +140,7 @@ pub fn view_emoji_picker(
     theme: &iced::Theme,
     active: EmojiCategory,
     search_query: &str,
+    recents: &[String],
 ) -> iced::Element<'static, AppMessage> {
     let btheme = crate::theme::BoruTheme::for_theme(theme);
     // ChatTheme is Copy; captured by value so the Responsive closure is
@@ -129,8 +148,9 @@ pub fn view_emoji_picker(
     let chat = btheme.chat;
     let head_color = text_muted(theme);
     let muted_color = text_muted(theme);
-    // Owned copy so the Responsive closure is 'static.
+    // Owned copies so the Responsive closure is 'static.
     let search_query = search_query.to_string();
+    let recents: Vec<String> = recents.to_vec();
 
     Responsive::new(move |size: Size| {
         use iced::widget::column;
@@ -143,10 +163,10 @@ pub fn view_emoji_picker(
 
         let renderer = crate::emoji::renderer::TwemojiRenderer;
         // The grid is rebuilt from the filtered catalog on every frame, so a
-        // category switch (a new `active`) or a search query change
-        // immediately replaces the visible entries — stale items from the
-        // previous category/query cannot survive.
-        let entries = picker_entries(&search_query, active);
+        // category switch (a new `active`), a search query change, or a
+        // recents update immediately replaces the visible entries — stale
+        // items from the previous category/query cannot survive.
+        let entries = picker_entries(&search_query, active, &recents);
         let scroll_height = picker_scroll_height(
             columns,
             size.height,
@@ -164,21 +184,27 @@ pub fn view_emoji_picker(
         let mut grid = column![].spacing(SPACE_4);
         for chunk in entries.chunks(columns) {
             let mut r = iced::widget::row![].spacing(SPACE_4);
-            for emoji in chunk {
-                r = r.push(emoji_cell(&renderer, emoji));
+            for entry in chunk {
+                r = r.push(picker_cell(&renderer, *entry));
             }
             grid = grid.push(r);
         }
 
-        // Empty search results get a muted hint instead of a blank grid
-        // (BORU-TWEMOJI-20: never hide content — here there is nothing to
-        // hide, so tell the user why).
-        let grid = if searching && entries.is_empty() {
+        // Empty results get a muted hint instead of a blank grid: search
+        // that matches nothing (BORU-TWEMOJI-13) or an empty Recent list
+        // (BORU-TWEMOJI-14). BORU-TWEMOJI-20: never hide content — here
+        // there is nothing to hide, so tell the user why.
+        let hint_key = if searching {
+            "emoji.search_no_results"
+        } else {
+            "emoji.no_recents_yet"
+        };
+        let grid = if entries.is_empty() && (searching || active == EmojiCategory::Recent) {
             column![
                 grid,
                 crate::fonts::type_role_text(
                     crate::fonts::TypeRole::SupportingText,
-                    crate::i18n::t("emoji.search_no_results"),
+                    crate::i18n::t(hint_key),
                 )
                 .color(muted_color)
             ]
@@ -240,22 +266,48 @@ fn search_input(search_query: &str) -> iced::Element<'static, AppMessage> {
         .into()
 }
 
-/// The grid entries the picker shows for the current search query and
-/// category (BORU-TWEMOJI-13).
+/// A grid entry: either a static catalog record (category/search views) or
+/// a dynamic recently-used Unicode string (BORU-TWEMOJI-14).
+#[derive(Debug, Clone, Copy)]
+enum PickerEntry<'a> {
+    Catalog(&'static crate::emoji::catalog::Emoji),
+    Recent(&'a str),
+}
+
+/// The grid entries the picker shows for the current search query, category
+/// and recently-used list (BORU-TWEMOJI-13, recents BORU-TWEMOJI-14).
 ///
 /// A non-empty trimmed query returns search results from the shared catalog
 /// (spanning all categories); an empty query restores the active category's
-/// entries — exactly the "empty search restores the category/recent view"
-/// acceptance. Both paths filter the SAME catalog; search never maintains a
-/// separate dataset.
-fn picker_entries(
+/// entries — or the recently-used list when `Recent` is active — exactly the
+/// "empty search restores the category/recent view" acceptance. Search and
+/// category views filter the SAME catalog; search never maintains a separate
+/// dataset, and recents are plain Unicode strings rendered through the same
+/// resolver/fallback pipeline as catalog entries.
+fn picker_entries<'a>(
     search_query: &str,
     active: EmojiCategory,
-) -> Vec<&'static crate::emoji::catalog::Emoji> {
+    recents: &'a [String],
+) -> Vec<PickerEntry<'a>> {
     if search_query.trim().is_empty() {
-        crate::emoji::catalog::emojis_for_category(active).collect()
+        if active == EmojiCategory::Recent {
+            // Recents are already sanitized at load/record time; the
+            // view-level filter is a defensive skip of any empty/whitespace
+            // entry so a corrupt stored value can never render an empty cell.
+            return recents
+                .iter()
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| PickerEntry::Recent(s.as_str()))
+                .collect();
+        }
+        crate::emoji::catalog::emojis_for_category(active)
+            .map(PickerEntry::Catalog)
+            .collect()
     } else {
         crate::emoji::catalog::search_emojis(search_query)
+            .into_iter()
+            .map(PickerEntry::Catalog)
+            .collect()
     }
 }
 
@@ -282,14 +334,16 @@ fn picker_card_width(columns: usize, available_width: f32) -> f32 {
     natural.min(available_width)
 }
 
-/// Natural width of the 8-tab category row (BORU-TWEMOJI-12).
+/// Natural width of the category tab row (BORU-TWEMOJI-12; the Recent tab
+/// added in BORU-TWEMOJI-14 is included in the count).
 ///
-/// `8 * 32 + 7 * 4 = 284` px. The card is at least this wide plus chrome
-/// when space permits ([`picker_card_width_with_category_row`]), so all
-/// tabs are visible on a typical picker width.
+/// `9 * 32 + 8 * 4 = 320` px (Recent + 8 content tabs). The card is at least
+/// this wide plus chrome when space permits
+/// ([`picker_card_width_with_category_row`]), so all tabs are visible on a
+/// typical picker width.
 fn category_row_natural_width() -> f32 {
-    EmojiCategory::ALL.len() as f32 * CATEGORY_TAB_SIZE
-        + (EmojiCategory::ALL.len() as f32 - 1.0) * CATEGORY_TAB_GAP
+    let tabs = EmojiCategory::ALL.len() + 1; // Recent + content categories
+    tabs as f32 * CATEGORY_TAB_SIZE + (tabs as f32 - 1.0) * CATEGORY_TAB_GAP
 }
 
 /// Card width that also fits the category tab row (BORU-TWEMOJI-12).
@@ -332,9 +386,10 @@ fn picker_scroll_height(
     content_h.max(token).min(PICKER_MAX_SCROLL).min(fits)
 }
 
-/// The category tab row: one compact icon button per content category,
-/// scrollable horizontally when the card is too narrow to show all 8
-/// (BORU-TWEMOJI-12).
+/// The category tab row: the Recent pseudo-category tab first, then one
+/// compact icon button per content category, scrollable horizontally when
+/// the card is too narrow to show all 9 (BORU-TWEMOJI-12, recents
+/// BORU-TWEMOJI-14).
 ///
 /// The row's own width is its natural width ([`category_row_natural_width`])
 /// so the horizontal scrollable only kicks in when the card body is
@@ -347,7 +402,9 @@ fn category_tab_row(
     use iced::widget::{row, scrollable};
 
     let mut tabs = row![].spacing(CATEGORY_TAB_GAP).width(Length::Shrink);
-    for category in EmojiCategory::ALL {
+    let categories =
+        std::iter::once(EmojiCategory::Recent).chain(EmojiCategory::ALL.iter().copied());
+    for category in categories {
         tabs = tabs.push(category_tab(renderer, category, active));
     }
 
@@ -382,8 +439,9 @@ fn category_tab(
                     .into(),
                 CellArtwork::Text => text(icon.unicode).size(16.0).into(),
             },
-            // Extension point for BORU-TWEMOJI-14: a pseudo-category
-            // without artwork (Recent) falls back to a themed glyph.
+            // BORU-TWEMOJI-14: the Recent pseudo-category has no content
+            // category icon, so its tab falls back to a themed clock glyph
+            // ("recently used"). It is the only tab rendered this way.
             None => text("🕐").size(16.0).into(),
         };
 
@@ -450,15 +508,17 @@ enum CellArtwork {
     Text,
 }
 
-/// Resolve the artwork decision for a catalog emoji through the shared
-/// renderer/cache. Kept separate from the widget construction so the
-/// supported/fallback behaviour is unit-testable.
-fn cell_artwork(
+/// Resolve the artwork decision for a raw Unicode grapheme through the
+/// shared renderer/cache. Recents (BORU-TWEMOJI-14) are plain strings, so
+/// they use this entry point directly — the same resolver and fallback
+/// behavior as every other picker item. Kept separate from the widget
+/// construction so the supported/fallback behaviour is unit-testable.
+fn cell_artwork_unicode(
     renderer: &impl crate::emoji::renderer::EmojiRenderer,
-    emoji: &crate::emoji::catalog::Emoji,
+    unicode: &str,
 ) -> CellArtwork {
     match renderer
-        .resolve(emoji.unicode)
+        .resolve(unicode)
         .and_then(|a| renderer.svg_handle(&a))
     {
         Some(handle) => CellArtwork::Svg(handle),
@@ -466,11 +526,66 @@ fn cell_artwork(
     }
 }
 
+/// Resolve the artwork decision for a catalog emoji through the shared
+/// renderer/cache (delegates to [`cell_artwork_unicode`], the same pipeline
+/// recents use).
+fn cell_artwork(
+    renderer: &impl crate::emoji::renderer::EmojiRenderer,
+    emoji: &crate::emoji::catalog::Emoji,
+) -> CellArtwork {
+    cell_artwork_unicode(renderer, emoji.unicode)
+}
+
 /// Build the `InsertEmoji` message for a catalog emoji. Always carries the
 /// full Unicode grapheme string — never the asset key or an SVG path — so
 /// composer insertion and message content stay plain Unicode.
 fn insert_message(emoji: &crate::emoji::catalog::Emoji) -> AppMessage {
     AppMessage::InsertEmoji(emoji.unicode.to_string())
+}
+
+/// Dispatch a picker grid entry to its cell widget (BORU-TWEMOJI-14).
+fn picker_cell(
+    renderer: &impl crate::emoji::renderer::EmojiRenderer,
+    entry: PickerEntry<'_>,
+) -> iced::Element<'static, AppMessage> {
+    match entry {
+        PickerEntry::Catalog(emoji) => emoji_cell(renderer, emoji),
+        PickerEntry::Recent(unicode) => recent_cell(renderer, unicode),
+    }
+}
+
+/// One recently-used cell: a 36x36 button whose content is the 24px Twemoji
+/// SVG artwork when the shared renderer resolves the stored Unicode string,
+/// otherwise the original Unicode text (BORU-TWEMOJI-20 fallback — never
+/// suppress, and never an empty/broken cell). Selecting it inserts the same
+/// Unicode string (BORU-TWEMOJI-14).
+fn recent_cell(
+    renderer: &impl crate::emoji::renderer::EmojiRenderer,
+    unicode: &str,
+) -> iced::Element<'static, AppMessage> {
+    use iced::widget::{button, svg, text};
+    use iced::{ContentFit, Length};
+
+    let artwork: iced::Element<'static, AppMessage> = match cell_artwork_unicode(renderer, unicode)
+    {
+        CellArtwork::Svg(handle) => svg(handle)
+            .width(Length::Fixed(EMOJI_ART_SIZE))
+            .height(Length::Fixed(EMOJI_ART_SIZE))
+            .content_fit(ContentFit::Contain)
+            .into(),
+        // Owned String: the fallback text must outlive the caller's borrow
+        // of the recent list (the widget tree is 'static).
+        CellArtwork::Text => text(unicode.to_string()).size(20.0).into(),
+    };
+
+    button(artwork)
+        .on_press(AppMessage::InsertEmoji(unicode.to_string()))
+        .width(Length::Fixed(EMOJI_CELL_SIZE))
+        .height(Length::Fixed(EMOJI_CELL_SIZE))
+        // 6 px padding centres the 24 px artwork inside the 36 px hit area.
+        .padding(SPACE_6)
+        .style(emoji_cell_style)
+        .into()
 }
 
 /// One picker cell: a 36x36 button whose content is the 24px Twemoji SVG
@@ -770,18 +885,18 @@ mod tests {
         }
     }
 
-    /// The tab row's natural width fits inside a wide card (all 8 tabs
-    /// visible) and exceeds a narrow card's usable width (row scrolls
-    /// instead of clipping).
+    /// The tab row's natural width fits inside a wide card (all 9 tabs
+    /// visible: Recent + 8 content) and exceeds a narrow card's usable
+    /// width (row scrolls instead of clipping).
     #[test]
     fn category_row_fits_wide_and_scrolls_narrow() {
         assert_eq!(EmojiCategory::ALL.len(), 8);
-        assert_eq!(category_row_natural_width(), 8.0 * 32.0 + 7.0 * 4.0);
-        // Wide card (9 columns → 374 px): usable body width 356 ≥ 284.
+        assert_eq!(category_row_natural_width(), 9.0 * 32.0 + 8.0 * 4.0);
+        // Wide card (9 columns → 374 px): usable body width 356 ≥ 320.
         let wide = picker_card_width_with_category_row(9, 1920.0);
         assert_eq!(wide, 374.0);
         assert!(wide - PICKER_CHROME_X >= category_row_natural_width());
-        // Narrow card (60 px window → card 60 px): usable width 42 < 284,
+        // Narrow card (60 px window → card 60 px): usable width 42 < 320,
         // so the row must scroll.
         let narrow = picker_card_width_with_category_row(1, 60.0);
         assert_eq!(narrow, 60.0);
@@ -843,11 +958,11 @@ mod tests {
 
     /// Acceptance: empty search restores the category view — the picker's
     /// entry selection with an empty query is exactly the active category's
-    /// entries.
+    /// entries (or the recent list when `Recent` is active).
     #[test]
     fn empty_search_restores_category_view() {
         for category in EmojiCategory::ALL {
-            let via_picker = picker_entries("", category);
+            let via_picker = picker_entries("", category, &[]);
             let via_category: Vec<_> =
                 crate::emoji::catalog::emojis_for_category(category).collect();
             assert_eq!(
@@ -856,10 +971,13 @@ mod tests {
                 "empty query must restore {category:?} entries"
             );
             for (a, b) in via_picker.iter().zip(via_category.iter()) {
-                assert_eq!(a.unicode, b.unicode);
+                let PickerEntry::Catalog(catalog) = a else {
+                    panic!("category {category:?} must yield catalog entries");
+                };
+                assert_eq!(catalog.unicode, b.unicode);
             }
             // Whitespace-only is also "empty".
-            let ws = picker_entries("   ", category);
+            let ws = picker_entries("   ", category, &[]);
             assert_eq!(ws.len(), via_category.len());
         }
     }
@@ -869,8 +987,14 @@ mod tests {
     /// the whole catalog, not just the active category).
     #[test]
     fn search_query_replaces_category_grid_with_results() {
-        let results = picker_entries("laugh", EmojiCategory::Flags);
-        let unicodes: Vec<&str> = results.iter().map(|e| e.unicode).collect();
+        let results = picker_entries("laugh", EmojiCategory::Flags, &[]);
+        let unicodes: Vec<&str> = results
+            .iter()
+            .map(|e| match e {
+                PickerEntry::Catalog(c) => c.unicode,
+                PickerEntry::Recent(_) => panic!("search must not yield recents"),
+            })
+            .collect();
         assert!(unicodes.contains(&"😂"), "results: {unicodes:?}");
         assert!(unicodes.contains(&"🤣"), "results: {unicodes:?}");
         // Search results are NOT the active category's grid.
@@ -885,7 +1009,10 @@ mod tests {
     #[test]
     fn search_results_insert_unicode_and_render_svg() {
         let renderer = TwemojiRenderer;
-        for emoji in picker_entries("laugh", EmojiCategory::SmileysAndPeople) {
+        for entry in picker_entries("laugh", EmojiCategory::SmileysAndPeople, &[]) {
+            let PickerEntry::Catalog(emoji) = entry else {
+                panic!("search must yield catalog entries");
+            };
             // Unicode insertion, never an asset/path (same as category cells).
             match insert_message(emoji) {
                 AppMessage::InsertEmoji(s) => {
@@ -908,6 +1035,104 @@ mod tests {
     /// "no emoji found" hint instead of a stale grid.
     #[test]
     fn search_no_match_yields_empty_grid() {
-        assert!(picker_entries("zzzz-no-such-emoji", EmojiCategory::Objects).is_empty());
+        assert!(picker_entries("zzzz-no-such-emoji", EmojiCategory::Objects, &[]).is_empty());
+    }
+
+    // ── Recently used (BORU-TWEMOJI-14) ──────────────────────────
+
+    /// Acceptance: with `Recent` active and an empty query, the picker
+    /// shows the recently-used Unicode strings in order — exactly what was
+    /// recorded (never an asset key or path).
+    #[test]
+    fn recent_category_shows_recents_in_order() {
+        let recents = vec!["❤️".to_string(), "😂".to_string(), "👍".to_string()];
+        let entries = picker_entries("", EmojiCategory::Recent, &recents);
+        assert_eq!(entries.len(), 3);
+        for (entry, expected) in entries.iter().zip(recents.iter()) {
+            let PickerEntry::Recent(unicode) = entry else {
+                panic!("Recent must yield recent entries, got {entry:?}");
+            };
+            assert_eq!(unicode, expected);
+            // The value is the raw Unicode string — never an asset/path.
+            assert!(!unicode.contains(".svg") && !unicode.contains('/'));
+            assert_ne!(unicode, &"1f600".to_string());
+        }
+    }
+
+    /// Acceptance: an empty recent list yields an empty grid (the view
+    /// shows the muted "no recently used emoji yet" hint).
+    #[test]
+    fn empty_recents_yield_empty_grid() {
+        assert!(picker_entries("", EmojiCategory::Recent, &[]).is_empty());
+    }
+
+    /// Corrupt/unknown stored entries do not break the picker: empty and
+    /// whitespace-only strings are skipped at the view boundary, while
+    /// unknown-but-valid graphemes are kept (rendered via fallback).
+    #[test]
+    fn recent_entries_skip_corrupt_whitespace_only() {
+        let recents = vec![
+            "".to_string(),
+            "   ".to_string(),
+            "😀".to_string(),
+            "\t".to_string(),
+            "🫩".to_string(),
+        ];
+        let entries = picker_entries("", EmojiCategory::Recent, &recents);
+        let unicodes: Vec<&str> = entries
+            .iter()
+            .map(|e| match e {
+                PickerEntry::Recent(u) => *u,
+                PickerEntry::Catalog(_) => panic!("Recent must not yield catalog entries"),
+            })
+            .collect();
+        assert_eq!(unicodes, vec!["😀", "🫩"]);
+    }
+
+    /// Search overrides recents: a non-empty query replaces the recent
+    /// grid with catalog search results even when `Recent` is active.
+    #[test]
+    fn search_overrides_recents() {
+        let recents = vec!["😂".to_string(), "😀".to_string()];
+        let entries = picker_entries("laugh", EmojiCategory::Recent, &recents);
+        assert!(entries.iter().all(|e| matches!(e, PickerEntry::Catalog(_))));
+        let unicodes: Vec<&str> = entries
+            .iter()
+            .map(|e| match e {
+                PickerEntry::Catalog(c) => c.unicode,
+                PickerEntry::Recent(_) => unreachable!(),
+            })
+            .collect();
+        assert!(unicodes.contains(&"😂"));
+        assert!(unicodes.contains(&"🤣"));
+    }
+
+    /// Acceptance: a known recent grapheme renders as Twemoji SVG through
+    /// the shared renderer/cache — the same resolver as catalog cells.
+    #[test]
+    fn recent_known_grapheme_renders_svg() {
+        let renderer = TwemojiRenderer;
+        assert!(matches!(
+            cell_artwork_unicode(&renderer, "😀"),
+            CellArtwork::Svg(_)
+        ));
+        // Multi-codepoint grapheme (regional-indicator flag pair) resolves
+        // as one asset, not per-code-point.
+        assert!(matches!(
+            cell_artwork_unicode(&renderer, "🇬🇧"),
+            CellArtwork::Svg(_)
+        ));
+    }
+
+    /// Unsupported/newer recent graphemes fall back to their original
+    /// Unicode text — never an empty or broken cell (BORU-TWEMOJI-20).
+    #[test]
+    fn recent_unknown_grapheme_falls_back_to_text() {
+        let renderer = TwemojiRenderer;
+        // 🫩 face with bags under eyes — Unicode 16.0, not vendored.
+        assert!(matches!(
+            cell_artwork_unicode(&renderer, "🫩"),
+            CellArtwork::Text
+        ));
     }
 }
