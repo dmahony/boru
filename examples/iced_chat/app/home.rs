@@ -390,8 +390,8 @@ impl IcedChat {
     /// True when the home content width is narrow enough that card headers
     /// switch to the two-line compact layout (UI-HOME-15).
     pub(crate) fn home_compact_headers(&self) -> bool {
-        crate::design_tokens::home_content_width(self.window_width)
-            < crate::design_tokens::HOME_COMPACT_HEADER_CONTENT
+        self.active_layout.home_content_width(self.window_width)
+            < self.active_layout.responsive.home_compact_header_content
     }
 
     /// Build the Online Peers card subtree. Runs inside `iced::widget::lazy`,
@@ -1086,6 +1086,7 @@ impl IcedChat {
         // when the layout is replaced, so the closure re-reads the NEW
         // layout (mirror of how `theme_revision` + `btheme` interact).
         let home_layout = self.boru_layout().home.clone();
+        let sidebar_layout = self.boru_layout().sidebar.clone();
         // BORU-LAYOUT-04: the responsive tier (thresholds + per-tier home
         // column counts / padding) is captured the same way so the static
         // renderer can resolve the active breakpoint from the window width.
@@ -1102,6 +1103,7 @@ impl IcedChat {
                 dep,
                 btheme,
                 home_layout.clone(),
+                sidebar_layout.clone(),
                 responsive,
                 #[cfg(feature = "dev-ui")]
                 designer_enabled,
@@ -1203,6 +1205,7 @@ impl IcedChat {
         dep: &ChatListDependency,
         btheme: crate::theme::BoruTheme,
         layout: crate::layout::HomeLayout,
+        sidebar: crate::layout::SidebarLayout,
         responsive: crate::layout::ResponsiveLayout,
         #[cfg(feature = "dev-ui")] designer_enabled: bool,
         #[cfg(feature = "dev-ui")] designer_hovered: Option<crate::designer::ComponentId>,
@@ -1230,9 +1233,8 @@ impl IcedChat {
         // available *content* width (window minus sidebar, divider and page
         // padding), never the raw window width — the sidebar eats
         // 288–320 px and would otherwise starve the grid on narrow windows.
-        let content_width = crate::design_tokens::home_content_width(window_width);
-        let compact_header =
-            content_width < crate::design_tokens::HOME_COMPACT_HEADER_CONTENT;
+        let content_width = layout.content_width(window_width, &sidebar, &responsive);
+        let compact_header = content_width < responsive.home_compact_header_content;
 
         // ── BORU-LAYOUT-04: resolve the active viewport tier ──
         // The tier thresholds (narrow_max_width / ultra_wide_min_width) and

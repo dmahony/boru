@@ -90,6 +90,15 @@ impl Default for LayoutConfig {
     }
 }
 
+impl LayoutConfig {
+    /// Compute the dashboard content width after responsive chrome and
+    /// configured canvas padding have been accounted for.
+    pub fn home_content_width(&self, window_width: f32) -> f32 {
+        self.home
+            .content_width(window_width, &self.sidebar, &self.responsive)
+    }
+}
+
 // ── Home dashboard (PDF Task 3) ──────────────────────────────────────
 
 /// Stable identity of a home-dashboard section. Baseline order matches
@@ -159,6 +168,18 @@ impl Default for HomeLayout {
 }
 
 impl HomeLayout {
+    /// Compute usable dashboard width from the structural layout groups.
+    pub fn content_width(
+        &self,
+        window_width: f32,
+        sidebar: &SidebarLayout,
+        responsive: &ResponsiveLayout,
+    ) -> f32 {
+        let sidebar_width = sidebar.width_for_window(window_width, responsive);
+        let padding = responsive.home_padding_x_for_width(window_width);
+        (window_width - sidebar_width - 1.0 - 2.0 * padding).max(0.0)
+    }
+
     /// Sections that render on the home dashboard, in vertical order:
     /// [`HomeLayout::section_order`] with every [`HomeLayout::hidden_sections`]
     /// entry removed (BORU-LAYOUT-03: the view renders exactly this list).
