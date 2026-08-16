@@ -3893,6 +3893,9 @@ pub struct IcedChat {
     /// the router stops accepting incoming gossip connections.
     _router: iroh::protocol::Router,
     blob_store: FsStore,
+    /// Sender-side direct file offers. Filesystem paths remain process-local;
+    /// only the opaque offer ID is announced over gossip.
+    pub(crate) file_offer_registry: Arc<StdMutex<boru_core::file_offer::FileOfferRegistry>>,
     endpoint: iroh::Endpoint,
     memory_lookup: MemoryLookup,
     local_label: String,
@@ -8261,6 +8264,9 @@ impl IcedChat {
             sender: None,
             sender_ready: false,
             blob_store,
+            file_offer_registry: Arc::new(StdMutex::new(
+                boru_core::file_offer::FileOfferRegistry::new(),
+            )),
             endpoint,
             memory_lookup,
             local_label,

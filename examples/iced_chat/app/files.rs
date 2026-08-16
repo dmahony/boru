@@ -4518,6 +4518,90 @@ impl IcedChat {
                 }
                 let filename = parts[0].to_string();
                 let abs_path = parts[1].to_string();
+                // Direct conversations announce an offer before any blob
+                // ingestion. Keep the path local and expose only safe
+                // basename, size, and the opaque offer ID on the wire.
+                if let Some(peer) = self.current_direct_peer() {
+                    let path = std::path::PathBuf::from(&abs_path);
+                    let safe_name = std::path::Path::new(&filename)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name == filename && name != "." && name != "..");
+                    let metadata = match std::fs::metadata(&path) {
+                        Ok(metadata) if metadata.is_file() && safe_name => metadata,
+                        Ok(_) => {
+                            self.toast_message = Some("Only regular files with a safe filename can be shared.".into());
+                            self.toast_counter = 160;
+                            return iced::Task::none();
+                        }
+                        Err(error) => {
+                            self.toast_message = Some(format!("Unable to inspect file: {error}"));
+                            self.toast_counter = 160;
+                            return iced::Task::none();
+                        }
+                    };
+                    let offer_id = boru_core::chat_core::protocol::FileOfferId::generate();
+                    let offer = boru_core::file_offer::FileOffer::new(
+                        offer_id,
+                        peer,
+                        path,
+                        filename.clone(),
+                        metadata.len(),
+                        metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                    );
+                    self.file_offer_registry.lock().unwrap().register(offer);
+
+                    let transfer_kind = if ChatEntry::is_video_file(&filename) {
+                        TransferKind::Video
+                    } else {
+                        TransferKind::File
+                    };
+                    let local_label = self.local_label.clone();
+                    self.download_entry_index = Some(self.entries.len());
+                    self.entries_push(ChatEntry::system_download(
+                        String::new(),
+                        transfer_kind,
+                        filename.clone(),
+                        String::new(),
+                        &local_label,
+                        None,
+                    ));
+                    if let Some(idx) = self.download_entry_index {
+                        if let Some(entry) = self.entries.get_mut(idx) {
+                            entry.body = format!("Offering: {filename}");
+                        }
+                    }
+
+                    let sender = self.sender.clone();
+                    let secret_key = self.secret_key.clone();
+                    let announced_name = filename.clone();
+                    let announced_size = metadata.len();
+                    return iced::Task::perform(
+                        async move {
+                            let message = crate::Message::file_offer(
+                                offer_id,
+                                announced_name.clone(),
+                                announced_size,
+                            )
+                            .map_err(|error| error.to_string())?;
+                            let encoded = SignedMessage::sign_and_encode(&secret_key, &message)
+                                .map_err(|error| format!("Failed to sign file offer: {error}"))?;
+                            if let Some(sender) = sender {
+                                sender
+                                    .broadcast(encoded)
+                                    .await
+                                    .map_err(|error| format!("Failed to broadcast file offer: {error}"))?;
+                            }
+                            // BORU-IFS-11 owns the ingest implementation. The
+                            // spawn point is deliberately after announcement.
+                            tokio::spawn(async move {
+                                tracing::debug!(name = %announced_name, "direct file blob ingest pending (BORU-IFS-11)");
+                            });
+                            Ok::<(), String>(())
+                        },
+                        |_| AppMessage::Noop,
+                    );
+                }
                 // Show spinner immediately while the file is uploading.
                 let abs_path_buf = std::path::PathBuf::from(&abs_path);
                 let file_size = std::fs::metadata(&abs_path_buf)
