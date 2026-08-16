@@ -12,7 +12,10 @@
 //!   with the Unicode replacement character or stripped for single-line use.
 //! - Unicode directionality/format characters that can be used for
 //!   obfuscation or phishing are stripped:
-//!   - `U+200B`–`U+200F` (zero-width space, ZWNJ, ZWJ, LRM, RLM)
+//!   - `U+200B`–`U+200F` (zero-width space, ZWNJ, LRM, RLM) — **except
+//!     U+200D (ZWJ)**, which is preserved so ZWJ emoji sequences (family,
+//!     profession, gender) survive display and copy/paste as their original
+//!     Unicode (BORU-TWEMOJI-15 guardrail: presentation layer only)
 //!   - `U+2028`–`U+202F` (line/paragraph separator, LRO, RLO, PDF, LRE, RLE)
 //!   - `U+2060`–`U+2064` (word joiner, invisible operators)
 //!   - `U+FEFF` (BOM / zero-width no-break space)
@@ -84,7 +87,6 @@ fn is_stripped_unicode_format(c: char) -> bool {
         // Zero-width and invisible formatting
         '\u{200B}' // ZERO WIDTH SPACE
         | '\u{200C}' // ZERO WIDTH NON-JOINER
-        | '\u{200D}' // ZERO WIDTH JOINER
         | '\u{200E}' // LEFT-TO-RIGHT MARK
         | '\u{200F}' // RIGHT-TO-LEFT MARK
         // Line/paragraph break characters (not actual line feeds)
@@ -405,6 +407,32 @@ mod tests {
     fn test_preserves_emojis() {
         let result = sanitize_display_text("Hello 😀 🌍", 100);
         assert_eq!(result, "Hello 😀 🌍");
+    }
+
+    #[test]
+    fn test_preserves_zwj_family_emoji() {
+        // BORU-TWEMOJI-15: U+200D (ZWJ) must NOT be stripped from message
+        // display/copy text — a family emoji is one logical grapheme and the
+        // copy/paste path must yield the original Unicode string. Stripping
+        // the joiner would split 👨‍👩‍👧‍👦 into four separate emoji.
+        let family = "👨\u{200D}👩\u{200D}👧\u{200D}👦";
+        let result = sanitize_display_text(family, 100);
+        assert_eq!(result, family, "ZWJ family emoji must survive sanitization");
+        assert!(result.contains('\u{200D}'), "ZWJ must be preserved");
+        // Single-line (labels) too.
+        let single = sanitize_single_line(family);
+        assert_eq!(
+            single, family,
+            "ZWJ family emoji must survive single-line sanitization"
+        );
+    }
+
+    #[test]
+    fn test_strips_zero_width_non_joiner_but_keeps_zwj() {
+        // ZWNJ (U+200C) remains stripped (anti-obfuscation), ZWJ (U+200D)
+        // is preserved for emoji sequences.
+        let result = sanitize_display_text("a\u{200C}b\u{200D}c", 100);
+        assert_eq!(result, "ab\u{200D}c");
     }
 
     #[test]

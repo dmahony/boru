@@ -385,6 +385,14 @@ fn metadata_zmj_zwj_sequences_safe() {
         display.contains("👨"),
         "legitimate ZWJ emoji should pass through: {display:?}"
     );
+    // BORU-TWEMOJI-15: the full ZWJ family sequence (joiners included) must
+    // survive display sanitization, so copy/paste and the emoji renderer see
+    // the original Unicode rather than a ZWJ-stripped split sequence.
+    assert!(
+        display.contains('\u{200D}'),
+        "ZWJ joiner must be preserved in display text: {display:?}"
+    );
+    assert_eq!(display, payload, "family emoji must round-trip unchanged");
 }
 
 #[test]

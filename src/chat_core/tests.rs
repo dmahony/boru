@@ -503,6 +503,74 @@
         assert!(matches!(decoded, Message::Message { ref text } if text == "hello world"));
     }
 
+    // BORU-TWEMOJI-15 (PDF Task 15): preserve Unicode message semantics.
+    // The Twemoji migration is presentation-layer only: a message containing
+    // emoji must round-trip through serialization byte-for-byte unchanged,
+    // never replaced by asset IDs/SVG references, so old stored messages and
+    // non-Twemoji clients interoperate without migration.
+    #[test]
+    fn message_emoji_roundtrips_serialization_unchanged() {
+        let cases: Vec<(&str, &str)> = vec![
+            ("simple", "Hello 😀 world"),
+            ("skin_tone", "👍🏽"),                      // U+1F44D U+1F3FD
+            ("flag_pair", "🇦🇺"),                        // regional indicators
+            ("family_zwj", "👨‍👩‍👧‍👦"),                   // 4 emoji + 3 ZWJ
+            ("keycap", "1️⃣"),                            // digit + VS16 + keycap
+            ("heart_vs16", "❤️"),                        // heart + VS16
+            ("mixed", "Great job! 🎉✨ Well done 👏 👨‍👩‍👧‍👦"),
+            ("rtl_emoji", "مرحبا 👋 بالعالم 🚀"),
+        ];
+        let key = SecretKey::generate();
+        for (label, text) in cases {
+            let msg = Message::Message {
+                text: text.to_string(),
+            };
+            // 1. Plain postcard round-trip is byte-identical.
+            let bytes = postcard::to_stdvec(&msg).unwrap();
+            let decoded: Message = postcard::from_bytes(&bytes).unwrap();
+            match &decoded {
+                Message::Message { text: decoded_text } => {
+                    assert_eq!(
+                        decoded_text, text,
+                        "{label}: decoded text differs from original"
+                    );
+                }
+                other => panic!("{label}: expected Message::Message, got {other:?}"),
+            }
+            assert_eq!(
+                postcard::to_stdvec(&decoded).unwrap(),
+                bytes,
+                "{label}: re-serialized bytes differ"
+            );
+            // 2. Signed (wire) round-trip preserves the exact Unicode.
+            let encoded = SignedMessage::sign_and_encode(&key, &msg).unwrap();
+            let (pk, signed_decoded, sent_at) = SignedMessage::verify_and_decode(&encoded).unwrap();
+            assert_eq!(pk, key.public(), "{label}: wrong sender");
+            assert!(sent_at > 0, "{label}: sent_at unset");
+            match &signed_decoded {
+                Message::Message { text: decoded_text } => {
+                    assert_eq!(
+                        decoded_text, text,
+                        "{label}: signed round-trip changed text"
+                    );
+                }
+                other => panic!("{label}: expected Message::Message, got {other:?}"),
+            }
+            // 3. Content hash is stable — same message, same hash.
+            assert_eq!(
+                message_hash(&msg),
+                message_hash(&signed_decoded),
+                "{label}: message_hash changed after round-trip"
+            );
+            // 4. Wire bytes carry the literal Unicode, never an asset path.
+            let wire = postcard::to_stdvec(&signed_decoded).unwrap();
+            assert!(
+                !wire.windows(5).any(|w| w == b"assets" || w == b".svg"),
+                "{label}: wire bytes must not contain asset references"
+            );
+        }
+    }
+
     #[test]
     fn message_serialization_roundtrip_file_share() {
         let msg = Message::FileShare {
