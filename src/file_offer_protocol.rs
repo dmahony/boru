@@ -48,6 +48,19 @@ pub struct FileOfferHeader {
     pub size: u64,
 }
 
+/// Authenticated completion record written after the advertised file bytes.
+/// QUIC authenticates the stream to the peer, so this footer is integrity
+/// protected by the direct transfer connection rather than gossip metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileOfferCompletion {
+    /// Offer this completion belongs to.
+    pub offer_id: FileOfferId,
+    /// Number of bytes actually written to the stream.
+    pub bytes_sent: u64,
+    /// BLAKE3 digest of exactly those bytes.
+    pub blake3_hash: [u8; 32],
+}
+
 /// Explicit protocol failures returned before closing a transfer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FileOfferError {
@@ -83,10 +96,11 @@ impl std::fmt::Display for FileOfferError {
 
 impl std::error::Error for FileOfferError {}
 
-/// Response frame. A successful header is followed by raw bytes on the same stream.
+/// Response frame. A successful header is followed by raw bytes and a
+/// [`FileOfferCompletion`] on the same stream.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FileOfferResponse {
-    /// The transfer header; raw bytes follow immediately after this frame.
+    /// The transfer header; raw bytes and completion follow immediately after.
     Header(FileOfferHeader),
     /// The request was rejected and no raw bytes follow.
     Error(FileOfferError),
@@ -204,29 +218,51 @@ pub async fn download_file_offer(
         .take_file()
         .ok_or_else(|| anyhow::anyhow!("download destination handle is unavailable"))?;
     let mut output = tokio::fs::File::from_std(std_file);
+    let mut hasher = blake3::Hasher::new();
     let mut buffer = [0u8; 64 * 1024];
     let mut received = 0u64;
     while received < transfer.header.size {
         let remaining = (transfer.header.size - received) as usize;
         let read_len = remaining.min(buffer.len());
-        let count = transfer.read(&mut buffer[..read_len]).await?;
-        let Some(count) = count else {
-            anyhow::bail!(
-                "direct transfer ended early: received {received} of {} bytes",
-                transfer.header.size
-            );
-        };
+        let count = transfer
+            .read(&mut buffer[..read_len])
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("direct transfer ended before its advertised size"))?;
+        hasher.update(&buffer[..count]);
         output.write_all(&buffer[..count]).await?;
         received += count as u64;
     }
-    if transfer.read(&mut [0u8; 1]).await?.is_some() {
-        anyhow::bail!("direct transfer exceeded announced size");
-    }
+    let completion: FileOfferCompletion = read_frame(&mut transfer.reader).await?;
+    verify_completion(
+        &transfer.header,
+        offer_id,
+        received,
+        *hasher.finalize().as_bytes(),
+        &completion,
+    )?;
     output.flush().await?;
     destination.restore_file(output.into_std().await);
     destination
         .publish()
         .map_err(|error| anyhow::anyhow!(error.to_string()))
+}
+
+fn verify_completion(
+    header: &FileOfferHeader,
+    requested_offer_id: FileOfferId,
+    bytes_received: u64,
+    receiver_hash: [u8; 32],
+    completion: &FileOfferCompletion,
+) -> anyhow::Result<()> {
+    if completion.offer_id != header.offer_id
+        || completion.offer_id != requested_offer_id
+        || completion.bytes_sent != bytes_received
+        || bytes_received != header.size
+        || completion.blake3_hash != receiver_hash
+    {
+        anyhow::bail!("direct transfer completion verification failed");
+    }
+    Ok(())
 }
 
 async fn serve_connection(
@@ -268,7 +304,28 @@ async fn serve_connection(
         }),
     )
     .await?;
-    tokio::io::copy(&mut file.take(offer.size), &mut writer).await?;
+    let mut limited = file.take(offer.size);
+    let mut hasher = blake3::Hasher::new();
+    let mut bytes_sent = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let count = limited.read(&mut buffer).await?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+        writer.write_all(&buffer[..count]).await?;
+        bytes_sent += count as u64;
+    }
+    write_frame(
+        &mut writer,
+        &FileOfferCompletion {
+            offer_id: offer.id,
+            bytes_sent,
+            blake3_hash: *hasher.finalize().as_bytes(),
+        },
+    )
+    .await?;
     writer.finish()?;
     drop(permit);
     Ok(())
@@ -389,6 +446,52 @@ mod tests {
             postcard::from_bytes::<FileOfferHeader>(&bytes).unwrap(),
             header
         );
+    }
+
+    #[test]
+    fn required_test_12_completion_footer_verifies_count_and_hash() {
+        let offer_id = FileOfferId::generate();
+        let payload = b"streamed payload";
+        let header = FileOfferHeader {
+            version: FILE_OFFER_WIRE_VERSION,
+            offer_id,
+            name: "payload.bin".into(),
+            size: payload.len() as u64,
+        };
+        let completion = FileOfferCompletion {
+            offer_id,
+            bytes_sent: payload.len() as u64,
+            blake3_hash: *blake3::hash(payload).as_bytes(),
+        };
+        verify_completion(
+            &header,
+            offer_id,
+            payload.len() as u64,
+            completion.blake3_hash,
+            &completion,
+        )
+        .unwrap();
+
+        let mut bad_count = completion.clone();
+        bad_count.bytes_sent += 1;
+        assert!(verify_completion(
+            &header,
+            offer_id,
+            payload.len() as u64,
+            completion.blake3_hash,
+            &bad_count,
+        )
+        .is_err());
+        let mut bad_hash = completion.clone();
+        bad_hash.blake3_hash[0] ^= 1;
+        assert!(verify_completion(
+            &header,
+            offer_id,
+            payload.len() as u64,
+            completion.blake3_hash,
+            &bad_hash,
+        )
+        .is_err());
     }
 
     #[test]
