@@ -4915,8 +4915,11 @@ pub struct IcedChat {
     /// Whether the emoji picker panel is currently visible.
     show_emoji_picker: bool,
     /// Active emoji picker category (BORU-TWEMOJI-12). The grid shows
-    /// exactly this category's catalog entries.
+    /// exactly this category's catalog entries when no search is active.
     emoji_category: crate::emoji::EmojiCategory,
+    /// Live emoji picker search query (BORU-TWEMOJI-13). Empty restores the
+    /// category view; non-empty shows shared-catalog search results.
+    emoji_search_query: String,
     /// Whether the GIF picker panel is currently visible.
     show_gif_picker: bool,
     /// Search text for the GIF picker.
@@ -6456,6 +6459,10 @@ pub enum AppMessage {
     /// (BORU-TWEMOJI-12). The picker grid is rebuilt from the filtered
     /// catalog, so no stale items survive the switch.
     SelectEmojiCategory(crate::emoji::EmojiCategory),
+    /// Live emoji picker search query change (BORU-TWEMOJI-13). Every
+    /// keystroke updates the query; the picker view filters the shared
+    /// catalog immediately. An empty query restores the category view.
+    EmojiSearchChanged(String),
     /// Toggle the GIF picker panel.
     ToggleGifPicker,
     /// Search text changed in the GIF picker.
@@ -8192,6 +8199,7 @@ impl IcedChat {
             show_member_list: false,
             show_emoji_picker: false,
             emoji_category: crate::emoji::EmojiCategory::SmileysAndPeople,
+            emoji_search_query: String::new(),
             show_gif_picker: false,
             gif_search_text: String::new(),
             gif_results: Vec::new(),
@@ -10663,6 +10671,7 @@ impl IcedChat {
             AppMessage::ToggleEmojiPicker => "ToggleEmojiPicker",
             AppMessage::InsertEmoji(_) => "InsertEmoji",
             AppMessage::SelectEmojiCategory(_) => "SelectEmojiCategory",
+            AppMessage::EmojiSearchChanged(_) => "EmojiSearchChanged",
             AppMessage::ToggleGifPicker => "ToggleGifPicker",
             AppMessage::GifSearchChanged(_) => "GifSearchChanged",
             AppMessage::SendGif(_) => "SendGif",
@@ -17751,6 +17760,7 @@ impl IcedChat {
             | AppMessage::ToggleEmojiPicker
             | AppMessage::InsertEmoji(_)
             | AppMessage::SelectEmojiCategory(_)
+            | AppMessage::EmojiSearchChanged(_)
             | AppMessage::ToggleGifPicker
             | AppMessage::GifSearchChanged(_)
             | AppMessage::GifSearchDebounced(_)

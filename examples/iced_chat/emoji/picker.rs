@@ -31,6 +31,18 @@
 //! BORU-TWEMOJI-14); [`super::catalog::category_icon`] returns `None` for
 //! it, which is the extension point for a later recents tab.
 //!
+//! # Search (BORU-TWEMOJI-13)
+//!
+//! A search input sits above the tab row. Typing a query immediately
+//! replaces the category grid with results from [`super::catalog::search_emojis`]
+//! — the same shared catalog the category views filter, case-insensitive
+//! name + keyword matching, local-only (no network). Clearing the input
+//! restores the category/recent view. While a query is active the tab row
+//! hides (results span all categories), and a search that matches nothing
+//! shows a muted "no emoji found" hint instead of an empty grid. Search
+//! results are catalog entries, so they insert Unicode and render with the
+//! shared SVG renderer exactly like category cells.
+//!
 //! # Responsive layout (BORU-TWEMOJI-11)
 //!
 //! The card is wrapped in [`iced::widget::Responsive`] so the grid column
@@ -85,12 +97,21 @@ const CATEGORY_ICON_SIZE: f32 = 20.0;
 /// Vertical chrome the tab row adds to the card body: the 32 px row plus the
 /// 8 px body-column spacing below it.
 const CATEGORY_ROW_CHROME: f32 = CATEGORY_TAB_SIZE + SPACE_8;
+/// Vertical chrome the search input row adds to the card body: the input
+/// (~34 px with body-size text + 8 px vertical padding) plus the 8 px
+/// body-column spacing below it.
+const SEARCH_ROW_CHROME: f32 = 34.0 + SPACE_8;
 
-/// Render the emoji picker panel (a Card hosting the category tab row and
-/// the active category's emoji grid as SVG buttons; selecting an emoji
+/// Render the emoji picker panel (a Card hosting a search input, the
+/// category tab row, and the emoji grid as SVG buttons; selecting an emoji
 /// inserts its Unicode into the composer).
 ///
-/// `active` selects the content category shown in the grid (BORU-TWEMOJI-12).
+/// `active` selects the content category shown in the grid when no search
+/// query is active (BORU-TWEMOJI-12). `search_query` is the live search
+/// input (BORU-TWEMOJI-13): a non-empty trimmed query replaces the category
+/// grid with [`crate::emoji::catalog::search_emojis`] results (the same
+/// shared catalog, case-insensitive name+keyword match); an empty query
+/// restores the category view.
 ///
 /// The card is wrapped in [`Responsive`] (with `Shrink` width/height) so the
 /// column count and scroll height adapt to the space the overlay actually
@@ -100,30 +121,38 @@ const CATEGORY_ROW_CHROME: f32 = CATEGORY_TAB_SIZE + SPACE_8;
 pub fn view_emoji_picker(
     theme: &iced::Theme,
     active: EmojiCategory,
+    search_query: &str,
 ) -> iced::Element<'static, AppMessage> {
     let btheme = crate::theme::BoruTheme::for_theme(theme);
     // ChatTheme is Copy; captured by value so the Responsive closure is
     // 'static (no borrow of the caller's theme).
     let chat = btheme.chat;
     let head_color = text_muted(theme);
+    let muted_color = text_muted(theme);
+    // Owned copy so the Responsive closure is 'static.
+    let search_query = search_query.to_string();
 
     Responsive::new(move |size: Size| {
         use iced::widget::column;
 
         let columns = picker_columns(size.width);
         let card_width = picker_card_width_with_category_row(columns, size.width);
+        // Searching hides the tab row (results span all categories), so the
+        // category row chrome only applies when we're showing categories.
+        let searching = !search_query.trim().is_empty();
 
         let renderer = crate::emoji::renderer::TwemojiRenderer;
         // The grid is rebuilt from the filtered catalog on every frame, so a
-        // category switch (a new `active`) immediately replaces the visible
-        // entries — stale items from the previous category cannot survive.
-        let entries: Vec<&crate::emoji::catalog::Emoji> =
-            crate::emoji::catalog::emojis_for_category(active).collect();
+        // category switch (a new `active`) or a search query change
+        // immediately replaces the visible entries — stale items from the
+        // previous category/query cannot survive.
+        let entries = picker_entries(&search_query, active);
         let scroll_height = picker_scroll_height(
             columns,
             size.height,
             chat.emoji_picker_scroll_height,
             entries.len(),
+            searching,
         );
 
         let head = crate::fonts::type_role_text(
@@ -141,11 +170,33 @@ pub fn view_emoji_picker(
             grid = grid.push(r);
         }
 
+        // Empty search results get a muted hint instead of a blank grid
+        // (BORU-TWEMOJI-20: never hide content — here there is nothing to
+        // hide, so tell the user why).
+        let grid = if searching && entries.is_empty() {
+            column![
+                grid,
+                crate::fonts::type_role_text(
+                    crate::fonts::TypeRole::SupportingText,
+                    crate::i18n::t("emoji.search_no_results"),
+                )
+                .color(muted_color)
+            ]
+            .spacing(SPACE_8)
+        } else {
+            grid
+        };
+
         let scroll =
             crate::ui_components::gutter_scrollable(grid).height(Length::Fixed(scroll_height));
 
-        // Tab row stays fixed above the scrolling grid.
-        let body = column![category_tab_row(&renderer, active), scroll].spacing(SPACE_8);
+        // Search input stays fixed above the tab row / grid.
+        let search = search_input(&search_query);
+        let body = if searching {
+            column![search, scroll].spacing(SPACE_8)
+        } else {
+            column![search, category_tab_row(&renderer, active), scroll].spacing(SPACE_8)
+        };
 
         iced_aw::Card::new(head, body)
             .width(Length::Fixed(card_width))
@@ -173,6 +224,39 @@ pub fn view_emoji_picker(
     .width(Length::Shrink)
     .height(Length::Shrink)
     .into()
+}
+
+/// The picker search input: Boru's standard text-input styling with a
+/// localized placeholder; every keystroke emits `EmojiSearchChanged` so the
+/// result list updates immediately (BORU-TWEMOJI-13).
+fn search_input(search_query: &str) -> iced::Element<'static, AppMessage> {
+    use iced::widget::text_input;
+    text_input(&crate::i18n::t("emoji.search_placeholder"), search_query)
+        .on_input(AppMessage::EmojiSearchChanged)
+        .size(crate::fonts::TypeRole::Body.size_px())
+        .font(crate::fonts::TypeRole::Body.font())
+        .padding([SPACE_4, SPACE_6])
+        .style(crate::ui_components::text_input_style)
+        .into()
+}
+
+/// The grid entries the picker shows for the current search query and
+/// category (BORU-TWEMOJI-13).
+///
+/// A non-empty trimmed query returns search results from the shared catalog
+/// (spanning all categories); an empty query restores the active category's
+/// entries — exactly the "empty search restores the category/recent view"
+/// acceptance. Both paths filter the SAME catalog; search never maintains a
+/// separate dataset.
+fn picker_entries(
+    search_query: &str,
+    active: EmojiCategory,
+) -> Vec<&'static crate::emoji::catalog::Emoji> {
+    if search_query.trim().is_empty() {
+        crate::emoji::catalog::emojis_for_category(active).collect()
+    } else {
+        crate::emoji::catalog::search_emojis(search_query)
+    }
 }
 
 /// Number of grid columns that fit the available width without stretching
@@ -223,19 +307,28 @@ fn picker_card_width_with_category_row(columns: usize, available_width: f32) -> 
 
 /// Scroll-region height for the chosen column count, visible entry count
 /// and available height (BORU-TWEMOJI-11, category-aware since
-/// BORU-TWEMOJI-12).
+/// BORU-TWEMOJI-12, search-aware since BORU-TWEMOJI-13).
 ///
 /// The region is tall enough for the full grid content (all rows of the
-/// active category at this column count), at least the theme token's scroll
-/// height, never taller than [`PICKER_MAX_SCROLL`] (keeps the card ≤ ~400 px
-/// when space permits), and never taller than what actually fits the window
-/// (short windows shrink the region instead of clipping the card). The
-/// category tab row sits above the region, so `CATEGORY_ROW_CHROME` is
-/// subtracted from the available height.
-fn picker_scroll_height(columns: usize, available_height: f32, token: f32, entries: usize) -> f32 {
+/// active category — or all search results — at this column count), at
+/// least the theme token's scroll height, never taller than
+/// [`PICKER_MAX_SCROLL`] (keeps the card ≤ ~400 px when space permits), and
+/// never taller than what actually fits the window (short windows shrink the
+/// region instead of clipping the card). The search input row sits above the
+/// region, and the category tab row sits above it when categories are shown
+/// (`searching == false`), so both chromes are subtracted from the available
+/// height.
+fn picker_scroll_height(
+    columns: usize,
+    available_height: f32,
+    token: f32,
+    entries: usize,
+    searching: bool,
+) -> f32 {
     let rows = entries.div_ceil(columns);
     let content_h = rows as f32 * EMOJI_CELL_SIZE + (rows as f32 - 1.0) * EMOJI_CELL_GAP;
-    let fits = (available_height - PICKER_CHROME_Y - CATEGORY_ROW_CHROME).max(0.0);
+    let cat_chrome = if searching { 0.0 } else { CATEGORY_ROW_CHROME };
+    let fits = (available_height - PICKER_CHROME_Y - SEARCH_ROW_CHROME - cat_chrome).max(0.0);
     content_h.max(token).min(PICKER_MAX_SCROLL).min(fits)
 }
 
@@ -592,26 +685,48 @@ mod tests {
 
     /// Scroll height: grows with the active category's grid content up to
     /// the cap, respects the token as a floor, and never exceeds what fits
-    /// the window (after the category tab row chrome).
+    /// the window (after the search input and category tab row chrome).
     #[test]
     fn scroll_height_grows_with_content_and_respects_window() {
         // 9 columns → Smileys (23 entries) → 3 rows → 116 px content;
         // token floor 200.
-        assert_eq!(picker_scroll_height(9, 800.0, 200.0, 23), 200.0);
+        assert_eq!(picker_scroll_height(9, 800.0, 200.0, 23, false), 200.0);
         // 4 columns → all 61 entries → 16 rows → 636 px content, capped at
         // 340 (card ≤ ~400).
-        assert_eq!(picker_scroll_height(4, 800.0, 200.0, 61), 340.0);
-        // Short window: shrink to fit, never clip (tab row chrome included).
-        let fits = picker_scroll_height(9, 240.0, 200.0, 23);
-        assert!(fits <= 240.0 - PICKER_CHROME_Y - CATEGORY_ROW_CHROME);
+        assert_eq!(picker_scroll_height(4, 800.0, 200.0, 61, false), 340.0);
+        // Short window: shrink to fit, never clip (search + tab chrome
+        // included).
+        let fits = picker_scroll_height(9, 240.0, 200.0, 23, false);
+        assert!(fits <= 240.0 - PICKER_CHROME_Y - SEARCH_ROW_CHROME - CATEGORY_ROW_CHROME);
         // Token floor applies when the window is tall enough.
-        assert_eq!(picker_scroll_height(9, 1000.0, 200.0, 23), 200.0);
+        assert_eq!(picker_scroll_height(9, 1000.0, 200.0, 23, false), 200.0);
+    }
+
+    /// Search mode hides the category tab row, so the scroll region can use
+    /// the tab-row chrome as extra height (search chrome always applies).
+    #[test]
+    fn search_mode_reclaims_category_row_chrome() {
+        // Same entries, same window: searching frees the tab row's 40 px.
+        let category = picker_scroll_height(9, 300.0, 200.0, 23, false);
+        let searching = picker_scroll_height(9, 300.0, 200.0, 23, true);
+        assert!(searching >= category);
+        assert!(
+            searching <= 300.0 - PICKER_CHROME_Y - SEARCH_ROW_CHROME,
+            "search mode still respects the window after search chrome"
+        );
     }
 
     /// Invariant sweep: for any plausible available size the card width is
-    /// within the available width and the card height (chrome + tab row +
-    /// scroll) within the available height — nothing clips at any window
-    /// size, narrow or wide.
+    /// within the available width and the card height (chrome + search row +
+    /// tab row + scroll) within the available height — nothing clips at any
+    /// window size, narrow or wide, in category or search mode.
+    ///
+    /// The height sweep starts at 180 px: the card has a fixed vertical
+    /// chrome of `PICKER_CHROME_Y + SEARCH_ROW_CHROME + CATEGORY_ROW_CHROME`
+    /// (58 + 42 + 40 = 140 px) in category mode, so no card can physically
+    /// fit a window shorter than that; below the chrome the scroll region
+    /// collapses to 0 and the card necessarily overflows the window (the
+    /// overlay can never be smaller than its fixed chrome).
     #[test]
     fn responsive_invariants_hold_across_window_sizes() {
         let all = crate::emoji::catalog::common_emojis().len();
@@ -621,14 +736,19 @@ mod tests {
             assert!(card <= width as f32, "width overflow at {width}");
             assert!(columns >= 1 && columns <= EMOJI_MAX_COLUMNS);
         }
-        for height in (120..=1200).step_by(60) {
+        for height in (180..=1200).step_by(60) {
             for columns in 1..=EMOJI_MAX_COLUMNS {
-                let scroll = picker_scroll_height(columns, height as f32, 200.0, all);
-                assert!(
-                    scroll + PICKER_CHROME_Y + CATEGORY_ROW_CHROME <= height as f32 + 0.001,
-                    "height overflow at {height} cols {columns}: {scroll}"
-                );
-                assert!(scroll <= PICKER_MAX_SCROLL + 0.001);
+                for searching in [false, true] {
+                    let cat_chrome = if searching { 0.0 } else { CATEGORY_ROW_CHROME };
+                    let scroll =
+                        picker_scroll_height(columns, height as f32, 200.0, all, searching);
+                    assert!(
+                        scroll + PICKER_CHROME_Y + SEARCH_ROW_CHROME + cat_chrome
+                            <= height as f32 + 0.001,
+                        "height overflow at {height} cols {columns} searching {searching}: {scroll}"
+                    );
+                    assert!(scroll <= PICKER_MAX_SCROLL + 0.001);
+                }
             }
         }
     }
@@ -717,5 +837,77 @@ mod tests {
             .flat_map(|c| crate::emoji::catalog::emojis_for_category(*c))
             .collect();
         assert_eq!(union.len(), all.len());
+    }
+
+    // ── Search (BORU-TWEMOJI-13) ──────────────────────────────────
+
+    /// Acceptance: empty search restores the category view — the picker's
+    /// entry selection with an empty query is exactly the active category's
+    /// entries.
+    #[test]
+    fn empty_search_restores_category_view() {
+        for category in EmojiCategory::ALL {
+            let via_picker = picker_entries("", category);
+            let via_category: Vec<_> =
+                crate::emoji::catalog::emojis_for_category(category).collect();
+            assert_eq!(
+                via_picker.len(),
+                via_category.len(),
+                "empty query must restore {category:?} entries"
+            );
+            for (a, b) in via_picker.iter().zip(via_category.iter()) {
+                assert_eq!(a.unicode, b.unicode);
+            }
+            // Whitespace-only is also "empty".
+            let ws = picker_entries("   ", category);
+            assert_eq!(ws.len(), via_category.len());
+        }
+    }
+
+    /// Acceptance: a query such as "laugh" replaces the category grid with
+    /// relevant laughing entries from across all categories (search spans
+    /// the whole catalog, not just the active category).
+    #[test]
+    fn search_query_replaces_category_grid_with_results() {
+        let results = picker_entries("laugh", EmojiCategory::Flags);
+        let unicodes: Vec<&str> = results.iter().map(|e| e.unicode).collect();
+        assert!(unicodes.contains(&"😂"), "results: {unicodes:?}");
+        assert!(unicodes.contains(&"🤣"), "results: {unicodes:?}");
+        // Search results are NOT the active category's grid.
+        let flags: Vec<_> =
+            crate::emoji::catalog::emojis_for_category(EmojiCategory::Flags).collect();
+        assert_ne!(results.len(), flags.len());
+    }
+
+    /// Acceptance: search results still insert Unicode and render with the
+    /// shared SVG renderer — a search result is a catalog entry, so the same
+    /// `emoji_cell`/`insert_message` path applies.
+    #[test]
+    fn search_results_insert_unicode_and_render_svg() {
+        let renderer = TwemojiRenderer;
+        for emoji in picker_entries("laugh", EmojiCategory::SmileysAndPeople) {
+            // Unicode insertion, never an asset/path (same as category cells).
+            match insert_message(emoji) {
+                AppMessage::InsertEmoji(s) => {
+                    assert_eq!(s, emoji.unicode);
+                    assert_ne!(s, emoji.asset);
+                    assert!(!s.contains(".svg") && !s.contains('/'));
+                }
+                other => panic!("unexpected message: {other:?}"),
+            }
+            // Renders as Twemoji SVG through the shared renderer/cache.
+            assert!(
+                matches!(cell_artwork(&renderer, emoji), CellArtwork::Svg(_)),
+                "search result {} must render as SVG",
+                emoji.unicode
+            );
+        }
+    }
+
+    /// A query with no matches yields no entries — the view shows the muted
+    /// "no emoji found" hint instead of a stale grid.
+    #[test]
+    fn search_no_match_yields_empty_grid() {
+        assert!(picker_entries("zzzz-no-such-emoji", EmojiCategory::Objects).is_empty());
     }
 }

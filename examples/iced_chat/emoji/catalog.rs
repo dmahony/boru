@@ -86,8 +86,9 @@ pub struct Emoji {
     pub name: &'static str,
     /// Picker category.
     pub category: EmojiCategory,
-    /// Search keywords (populated from the Twemoji manifest in
-    /// BORU-TWEMOJI-13; the curated entries below keep `&[]` until then).
+    /// Search keywords (indexed case-insensitively by BORU-TWEMOJI-13's
+    /// [`search_emojis`]; curated per entry so a user can find an emoji by
+    /// a common word that is not part of its display name).
     pub keywords: &'static [&'static str],
     /// Twemoji asset key, presentation metadata only. Bare normalized
     /// identifier (lowercase hex, `-`-joined for sequences), matching the
@@ -110,280 +111,280 @@ pub const COMMON_EMOJIS: &[Emoji] = &[
         unicode: "😀",
         name: "grinning face",
         category: EmojiCategory::SmileysAndPeople,
-        keywords: &[],
+        keywords: &["grin", "happy", "smile", "face", "laugh"],
         asset: "1f600",
     },
     Emoji {
         unicode: "😂",
         name: "face with tears of joy",
         category: EmojiCategory::SmileysAndPeople,
-        keywords: &[],
+        keywords: &["laugh", "joy", "tears", "happy", "funny"],
         asset: "1f602",
     },
     Emoji {
         unicode: "🤣",
         name: "rolling on the floor laughing",
         category: EmojiCategory::SmileysAndPeople,
-        keywords: &[],
+        keywords: &["laugh", "rofl", "funny", "floor"],
         asset: "1f923",
     },
     Emoji {
         unicode: "😊",
         name: "smiling face with smiling eyes",
         category: EmojiCategory::SmileysAndPeople,
-        keywords: &[],
+        keywords: &["smile", "happy", "blush", "eyes"],
         asset: "1f60a",
     },
     Emoji {
         unicode: "😍",
         name: "smiling face with heart-eyes",
         category: EmojiCategory::SmileysAndPeople,
-        keywords: &[],
+        keywords: &["love", "heart", "eyes", "adore"],
         asset: "1f60d",
     },
     Emoji {
         unicode: "🥰",
         name: "smiling face with hearts",
         category: EmojiCategory::SmileysAndPeople,
-        keywords: &[],
+        keywords: &["love", "hearts", "adore", "affection"],
         asset: "1f970",
     },
     Emoji {
         unicode: "😘",
         name: "face blowing a kiss",
         category: EmojiCategory::SmileysAndPeople,
-        keywords: &[],
+        keywords: &["kiss", "love", "blow"],
         asset: "1f618",
     },
     Emoji {
         unicode: "😜",
         name: "winking face with tongue",
         category: EmojiCategory::SmileysAndPeople,
-        keywords: &[],
+        keywords: &["wink", "tongue", "silly", "joke"],
         asset: "1f61c",
     },
     Emoji {
         unicode: "🤔",
         name: "thinking face",
         category: EmojiCategory::SmileysAndPeople,
-        keywords: &[],
+        keywords: &["think", "thinking", "ponder", "hmm"],
         asset: "1f914",
     },
     Emoji {
         unicode: "🙄",
         name: "face with rolling eyes",
         category: EmojiCategory::SmileysAndPeople,
-        keywords: &[],
+        keywords: &["roll", "eyes", "annoyed", "sarcasm"],
         asset: "1f644",
     },
     Emoji {
         unicode: "😢",
         name: "crying face",
         category: EmojiCategory::SmileysAndPeople,
-        keywords: &[],
+        keywords: &["cry", "sad", "tears"],
         asset: "1f622",
     },
     Emoji {
         unicode: "😭",
         name: "loudly crying face",
         category: EmojiCategory::SmileysAndPeople,
-        keywords: &[],
+        keywords: &["cry", "sobbing", "tears", "sad"],
         asset: "1f62d",
     },
     Emoji {
         unicode: "😤",
         name: "face with steam from nose",
         category: EmojiCategory::SmileysAndPeople,
-        keywords: &[],
+        keywords: &["steam", "angry", "frustrated", "huff"],
         asset: "1f624",
     },
     Emoji {
         unicode: "😡",
         name: "pouting face",
         category: EmojiCategory::SmileysAndPeople,
-        keywords: &[],
+        keywords: &["angry", "pout", "mad"],
         asset: "1f621",
     },
     Emoji {
         unicode: "🥺",
         name: "pleading face",
         category: EmojiCategory::SmileysAndPeople,
-        keywords: &[],
+        keywords: &["plead", "beg", "puppy", "eyes", "sad"],
         asset: "1f97a",
     },
     Emoji {
         unicode: "😎",
         name: "smiling face with sunglasses",
         category: EmojiCategory::SmileysAndPeople,
-        keywords: &[],
+        keywords: &["sunglasses", "cool", "smile"],
         asset: "1f60e",
     },
     Emoji {
         unicode: "🤩",
         name: "star-struck",
         category: EmojiCategory::SmileysAndPeople,
-        keywords: &[],
+        keywords: &["star", "excited", "amazed", "wow"],
         asset: "1f929",
     },
     Emoji {
         unicode: "👍",
         name: "thumbs up",
         category: EmojiCategory::SmileysAndPeople,
-        keywords: &[],
+        keywords: &["thumb", "up", "like", "approve", "yes", "ok"],
         asset: "1f44d",
     },
     Emoji {
         unicode: "👎",
         name: "thumbs down",
         category: EmojiCategory::SmileysAndPeople,
-        keywords: &[],
+        keywords: &["thumb", "down", "dislike", "no"],
         asset: "1f44e",
     },
     Emoji {
         unicode: "👏",
         name: "clapping hands",
         category: EmojiCategory::SmileysAndPeople,
-        keywords: &[],
+        keywords: &["clap", "applause", "congratulate", "praise"],
         asset: "1f44f",
     },
     Emoji {
         unicode: "🙌",
         name: "raising hands",
         category: EmojiCategory::SmileysAndPeople,
-        keywords: &[],
+        keywords: &["raise", "celebrate", "hooray", "praise"],
         asset: "1f64c",
     },
     Emoji {
         unicode: "💪",
         name: "flexed biceps",
         category: EmojiCategory::SmileysAndPeople,
-        keywords: &[],
+        keywords: &["biceps", "flex", "muscle", "strong", "workout"],
         asset: "1f4aa",
     },
     Emoji {
         unicode: "🤝",
         name: "handshake",
         category: EmojiCategory::SmileysAndPeople,
-        keywords: &[],
+        keywords: &["handshake", "agreement", "deal", "hello"],
         asset: "1f91d",
     },
     Emoji {
         unicode: "❤️",
         name: "red heart",
         category: EmojiCategory::Symbols,
-        keywords: &[],
+        keywords: &["heart", "love", "red"],
         asset: "2764",
     },
     Emoji {
         unicode: "🔥",
         name: "fire",
         category: EmojiCategory::TravelAndPlaces,
-        keywords: &[],
+        keywords: &["fire", "hot", "burn", "lit"],
         asset: "1f525",
     },
     Emoji {
         unicode: "⭐",
         name: "star",
         category: EmojiCategory::TravelAndPlaces,
-        keywords: &[],
+        keywords: &["star", "rating", "favorite"],
         asset: "2b50",
     },
     Emoji {
         unicode: "🎉",
         name: "party popper",
         category: EmojiCategory::Activities,
-        keywords: &[],
+        keywords: &["party", "celebrate", "confetti", "tada"],
         asset: "1f389",
     },
     Emoji {
         unicode: "✨",
         name: "sparkles",
         category: EmojiCategory::Activities,
-        keywords: &[],
+        keywords: &["sparkle", "shiny", "magic", "glitter"],
         asset: "2728",
     },
     Emoji {
         unicode: "💯",
         name: "hundred points",
         category: EmojiCategory::Symbols,
-        keywords: &[],
+        keywords: &["100", "hundred", "perfect", "score", "full marks"],
         asset: "1f4af",
     },
     Emoji {
         unicode: "✅",
         name: "check mark button",
         category: EmojiCategory::Symbols,
-        keywords: &[],
+        keywords: &["check", "mark", "yes", "done", "approve"],
         asset: "2705",
     },
     Emoji {
         unicode: "❌",
         name: "cross mark",
         category: EmojiCategory::Symbols,
-        keywords: &[],
+        keywords: &["cross", "x", "no", "wrong", "cancel"],
         asset: "274c",
     },
     Emoji {
         unicode: "⚠️",
         name: "warning",
         category: EmojiCategory::Symbols,
-        keywords: &[],
+        keywords: &["warning", "caution", "alert"],
         asset: "26a0",
     },
     Emoji {
         unicode: "💡",
         name: "light bulb",
         category: EmojiCategory::Objects,
-        keywords: &[],
+        keywords: &["light", "bulb", "idea", "lamp"],
         asset: "1f4a1",
     },
     Emoji {
         unicode: "📌",
         name: "pushpin",
         category: EmojiCategory::Objects,
-        keywords: &[],
+        keywords: &["pushpin", "pin", "location", "mark"],
         asset: "1f4cc",
     },
     Emoji {
         unicode: "🎵",
         name: "musical note",
         category: EmojiCategory::Activities,
-        keywords: &[],
+        keywords: &["music", "note", "song", "melody"],
         asset: "1f3b5",
     },
     Emoji {
         unicode: "🌈",
         name: "rainbow",
         category: EmojiCategory::TravelAndPlaces,
-        keywords: &[],
+        keywords: &["rainbow", "color", "pride", "sky"],
         asset: "1f308",
     },
     Emoji {
         unicode: "🍕",
         name: "pizza",
         category: EmojiCategory::FoodAndDrink,
-        keywords: &[],
+        keywords: &["pizza", "food", "slice", "italian"],
         asset: "1f355",
     },
     Emoji {
         unicode: "☕",
         name: "hot beverage",
         category: EmojiCategory::FoodAndDrink,
-        keywords: &[],
+        keywords: &["coffee", "tea", "hot", "drink", "cafe"],
         asset: "2615",
     },
     Emoji {
         unicode: "🕐",
         name: "one o'clock",
         category: EmojiCategory::TravelAndPlaces,
-        keywords: &[],
+        keywords: &["clock", "time", "one", "o'clock"],
         asset: "1f550",
     },
     Emoji {
         unicode: "💤",
         name: "zzz",
         category: EmojiCategory::Symbols,
-        keywords: &[],
+        keywords: &["zzz", "sleep", "sleeping", "tired"],
         asset: "1f4a4",
     },
     // ── Animals & Nature (BORU-TWEMOJI-12) ────────────────────────
@@ -391,42 +392,42 @@ pub const COMMON_EMOJIS: &[Emoji] = &[
         unicode: "🐶",
         name: "dog face",
         category: EmojiCategory::AnimalsAndNature,
-        keywords: &[],
+        keywords: &["dog", "puppy", "pet", "face"],
         asset: "1f436",
     },
     Emoji {
         unicode: "🐱",
         name: "cat face",
         category: EmojiCategory::AnimalsAndNature,
-        keywords: &[],
+        keywords: &["cat", "kitten", "pet", "face"],
         asset: "1f431",
     },
     Emoji {
         unicode: "🐼",
         name: "panda",
         category: EmojiCategory::AnimalsAndNature,
-        keywords: &[],
+        keywords: &["panda", "bear", "animal"],
         asset: "1f43c",
     },
     Emoji {
         unicode: "🐦",
         name: "bird",
         category: EmojiCategory::AnimalsAndNature,
-        keywords: &[],
+        keywords: &["bird", "animal", "flying"],
         asset: "1f426",
     },
     Emoji {
         unicode: "🌸",
         name: "cherry blossom",
         category: EmojiCategory::AnimalsAndNature,
-        keywords: &[],
+        keywords: &["cherry", "blossom", "flower", "spring", "sakura"],
         asset: "1f338",
     },
     Emoji {
         unicode: "🌳",
         name: "deciduous tree",
         category: EmojiCategory::AnimalsAndNature,
-        keywords: &[],
+        keywords: &["tree", "deciduous", "plant", "nature"],
         asset: "1f333",
     },
     // ── Food & Drink (BORU-TWEMOJI-12) ────────────────────────────
@@ -434,21 +435,21 @@ pub const COMMON_EMOJIS: &[Emoji] = &[
         unicode: "🍔",
         name: "hamburger",
         category: EmojiCategory::FoodAndDrink,
-        keywords: &[],
+        keywords: &["hamburger", "burger", "food", "fast food"],
         asset: "1f354",
     },
     Emoji {
         unicode: "🍦",
         name: "soft ice cream",
         category: EmojiCategory::FoodAndDrink,
-        keywords: &[],
+        keywords: &["ice cream", "soft", "dessert", "sweet", "cone"],
         asset: "1f366",
     },
     Emoji {
         unicode: "🍺",
         name: "beer mug",
         category: EmojiCategory::FoodAndDrink,
-        keywords: &[],
+        keywords: &["beer", "mug", "drink", "alcohol"],
         asset: "1f37a",
     },
     // ── Activities (BORU-TWEMOJI-12) ──────────────────────────────
@@ -456,21 +457,21 @@ pub const COMMON_EMOJIS: &[Emoji] = &[
         unicode: "⚽",
         name: "soccer ball",
         category: EmojiCategory::Activities,
-        keywords: &[],
+        keywords: &["soccer", "football", "ball", "sport"],
         asset: "26bd",
     },
     Emoji {
         unicode: "🎮",
         name: "video game",
         category: EmojiCategory::Activities,
-        keywords: &[],
+        keywords: &["video", "game", "controller", "gaming", "play"],
         asset: "1f3ae",
     },
     Emoji {
         unicode: "🎬",
         name: "clapper board",
         category: EmojiCategory::Activities,
-        keywords: &[],
+        keywords: &["clapper", "movie", "film", "cinema", "action"],
         asset: "1f3ac",
     },
     // ── Travel & Places (BORU-TWEMOJI-12) ──────────────────────────
@@ -478,14 +479,14 @@ pub const COMMON_EMOJIS: &[Emoji] = &[
         unicode: "✈️",
         name: "airplane",
         category: EmojiCategory::TravelAndPlaces,
-        keywords: &[],
+        keywords: &["airplane", "plane", "flight", "travel", "fly"],
         asset: "2708",
     },
     Emoji {
         unicode: "🚀",
         name: "rocket",
         category: EmojiCategory::TravelAndPlaces,
-        keywords: &[],
+        keywords: &["rocket", "space", "launch", "fast"],
         asset: "1f680",
     },
     // ── Objects (BORU-TWEMOJI-12) ─────────────────────────────────
@@ -493,21 +494,21 @@ pub const COMMON_EMOJIS: &[Emoji] = &[
         unicode: "💎",
         name: "gem stone",
         category: EmojiCategory::Objects,
-        keywords: &[],
+        keywords: &["gem", "diamond", "jewel", "stone", "precious"],
         asset: "1f48e",
     },
     Emoji {
         unicode: "📱",
         name: "mobile phone",
         category: EmojiCategory::Objects,
-        keywords: &[],
+        keywords: &["mobile", "phone", "cell", "smartphone"],
         asset: "1f4f1",
     },
     Emoji {
         unicode: "🔑",
         name: "key",
         category: EmojiCategory::Objects,
-        keywords: &[],
+        keywords: &["key", "lock", "password", "unlock"],
         asset: "1f511",
     },
     // ── Flags (BORU-TWEMOJI-12) ───────────────────────────────────
@@ -515,28 +516,28 @@ pub const COMMON_EMOJIS: &[Emoji] = &[
         unicode: "🇬🇧",
         name: "flag: United Kingdom",
         category: EmojiCategory::Flags,
-        keywords: &[],
+        keywords: &["flag", "uk", "britain", "england", "union jack"],
         asset: "1f1ec-1f1e7",
     },
     Emoji {
         unicode: "🇫🇷",
         name: "flag: France",
         category: EmojiCategory::Flags,
-        keywords: &[],
+        keywords: &["flag", "france", "french"],
         asset: "1f1eb-1f1f7",
     },
     Emoji {
         unicode: "🇯🇵",
         name: "flag: Japan",
         category: EmojiCategory::Flags,
-        keywords: &[],
+        keywords: &["flag", "japan", "japanese"],
         asset: "1f1ef-1f1f5",
     },
     Emoji {
         unicode: "🇩🇪",
         name: "flag: Germany",
         category: EmojiCategory::Flags,
-        keywords: &[],
+        keywords: &["flag", "germany", "german"],
         asset: "1f1e9-1f1ea",
     },
 ];
@@ -556,6 +557,31 @@ pub fn common_emojis() -> &'static [Emoji] {
 /// BORU-TWEMOJI-14).
 pub fn emojis_for_category(category: EmojiCategory) -> impl Iterator<Item = &'static Emoji> {
     COMMON_EMOJIS.iter().filter(move |e| e.category == category)
+}
+
+/// Emoji matching a case-insensitive search query (BORU-TWEMOJI-13).
+///
+/// Filters the SAME shared catalog the category views use
+/// ([`COMMON_EMOJIS`]) — search never maintains a separate dataset. An
+/// entry matches when the trimmed, lowercased query is a substring of the
+/// entry's display name or any of its keywords ([`Emoji::name`],
+/// [`Emoji::keywords`]).
+///
+/// An empty (or whitespace-only) query returns no results; the picker
+/// treats that as "restore the category/recent view" rather than an empty
+/// search page.
+pub fn search_emojis(query: &str) -> Vec<&'static Emoji> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return Vec::new();
+    }
+    COMMON_EMOJIS
+        .iter()
+        .filter(|e| {
+            e.name.to_lowercase().contains(&q)
+                || e.keywords.iter().any(|k| k.to_lowercase().contains(&q))
+        })
+        .collect()
 }
 
 /// Representative Twemoji artwork for each content category's tab
@@ -1008,5 +1034,88 @@ mod tests {
                 file
             );
         }
+    }
+
+    // ── Task 13: search support ────────────────────────────────────
+
+    /// Acceptance: a query such as "laugh" returns relevant laughing emoji
+    /// entries — both name matches (rolling on the floor laughing) and
+    /// keyword matches (face with tears of joy carries keyword "laugh").
+    #[test]
+    fn search_laugh_returns_laughing_emoji() {
+        let results = search_emojis("laugh");
+        let unicodes: Vec<&str> = results.iter().map(|e| e.unicode).collect();
+        assert!(
+            unicodes.contains(&"😂"),
+            "face with tears of joy must match via keyword: {unicodes:?}"
+        );
+        assert!(
+            unicodes.contains(&"🤣"),
+            "rolling on the floor laughing must match via name: {unicodes:?}"
+        );
+        // Every result is actually relevant: name or keyword contains laugh.
+        for e in &results {
+            assert!(
+                e.name.contains("laugh") || e.keywords.iter().any(|k| k.contains("laugh")),
+                "{} matched but is not laugh-related",
+                e.unicode
+            );
+        }
+    }
+
+    /// Acceptance: search input is normalized to case-insensitive matching.
+    #[test]
+    fn search_is_case_insensitive() {
+        let lower = search_emojis("laugh");
+        let upper = search_emojis("LAUGH");
+        let mixed = search_emojis("LaUgH");
+        assert_eq!(lower.len(), upper.len());
+        assert_eq!(lower.len(), mixed.len());
+        let ids: Vec<&str> = lower.iter().map(|e| e.unicode).collect();
+        for result in &upper {
+            assert!(ids.contains(&result.unicode));
+        }
+        for result in &mixed {
+            assert!(ids.contains(&result.unicode));
+        }
+    }
+
+    /// Acceptance: an empty (or whitespace-only) query returns no results —
+    /// the picker restores the category/recent view instead of showing an
+    /// empty search page.
+    #[test]
+    fn search_empty_query_returns_nothing() {
+        assert!(search_emojis("").is_empty());
+        assert!(search_emojis("   ").is_empty());
+    }
+
+    /// Acceptance: search filters the SAME shared catalog used by category
+    /// views — no separate search dataset exists. Every result is a catalog
+    /// entry, and results never include entries from outside the catalog.
+    #[test]
+    fn search_filters_the_shared_catalog_only() {
+        let catalog: std::collections::HashSet<&str> =
+            common_emojis().iter().map(|e| e.unicode).collect();
+        for result in search_emojis("face") {
+            assert!(
+                catalog.contains(result.unicode),
+                "search returned non-catalog entry {}",
+                result.unicode
+            );
+        }
+        // A term that matches no common emoji yields nothing (the search
+        // index is exactly the catalog, not an independent dataset).
+        assert!(search_emojis("zzzz-not-in-catalog").is_empty());
+    }
+
+    /// Keywords let a user find an emoji by a common word that is NOT part
+    /// of the display name (e.g. "rofl" → rolling on the floor laughing).
+    #[test]
+    fn search_matches_keywords_not_just_names() {
+        let results = search_emojis("rofl");
+        assert!(
+            results.iter().any(|e| e.unicode == "🤣"),
+            "keyword match failed: {results:?}"
+        );
     }
 }

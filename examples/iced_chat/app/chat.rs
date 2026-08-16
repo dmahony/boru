@@ -1111,7 +1111,11 @@ impl IcedChat {
     /// category tab row lives inside the picker and emits
     /// `SelectEmojiCategory` to switch.
     pub(crate) fn view_emoji_picker(&self) -> iced::Element<'_, AppMessage> {
-        crate::emoji::picker::view_emoji_picker(&self.theme(), self.emoji_category)
+        crate::emoji::picker::view_emoji_picker(
+            &self.theme(),
+            self.emoji_category,
+            &self.emoji_search_query,
+        )
     }
 
     // ── GIF picker async helpers ─────────────────────────────────────────
@@ -6461,6 +6465,15 @@ impl IcedChat {
                 // picker view shows the same tab; the grid is rebuilt from
                 // the filtered catalog in the view, so no stale items.
                 self.emoji_category = category;
+                iced::Task::none()
+            }
+
+            AppMessage::EmojiSearchChanged(query) => {
+                // BORU-TWEMOJI-13: remember the live query; the picker view
+                // filters the shared catalog on every frame, so the result
+                // list updates immediately as the query changes and an
+                // empty query restores the category view.
+                self.emoji_search_query = query;
                 iced::Task::none()
             }
 

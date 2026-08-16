@@ -349,6 +349,8 @@
   "download_manager.paused": "Paused",
   "download_manager.title": "Download Manager",
   "emoji.title": "Emojis",
+  "emoji.search_placeholder": "Search emoji…",
+  "emoji.search_no_results": "No emoji found",
   "emoji.category.smileys_people": "Smileys & People",
   "emoji.category.animals_nature": "Animals & Nature",
   "emoji.category.food_drink": "Food & Drink",
