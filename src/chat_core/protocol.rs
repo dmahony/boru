@@ -261,6 +261,18 @@ pub enum Message {
         /// File size in bytes.
         size: u64,
     },
+    /// Upgrade a previously announced file offer once blob ingestion completes.
+    ///
+    /// Receivers correlate this update with the original attachment by
+    /// `offer_id`; the filename is intentionally not repeated here.
+    FileOfferReady {
+        /// Opaque identifier of the previously announced file offer.
+        offer_id: FileOfferId,
+        /// BlobTicket serialized to string for the completed blob ingest.
+        ticket: String,
+        /// Optional video thumbnail blob hash.
+        thumbnail_hash: Option<MessageHash>,
+    },
 }
 
 /// Opaque identifier for a direct file offer.
@@ -1057,5 +1069,52 @@ mod tests {
         }
         assert!(Message::file_offer(offer_id, "report.pdf".to_owned(), 1).is_ok());
     }
-}
 
+    #[test]
+    fn file_offer_ready_round_trips() {
+        let offer_id = FileOfferId::generate();
+        let message = Message::FileOfferReady {
+            offer_id,
+            ticket: "blob:iroh:ticket".to_owned(),
+            thumbnail_hash: Some([0xabu8; 32]),
+        };
+        let encoded = postcard::to_stdvec(&message).expect("serialize ready offer");
+        let decoded: Message = postcard::from_bytes(&encoded).expect("deserialize ready offer");
+        assert!(matches!(
+            decoded,
+            Message::FileOfferReady {
+                offer_id: decoded_id,
+                ticket,
+                thumbnail_hash: Some(hash),
+            } if decoded_id == offer_id && ticket == "blob:iroh:ticket" && hash == [0xabu8; 32]
+        ));
+    }
+
+    #[test]
+    fn file_offer_ready_correlates_distinct_same_named_offers_by_id() {
+        use std::collections::HashMap;
+
+        let first_id = FileOfferId::generate();
+        let second_id = FileOfferId::generate();
+        assert_ne!(first_id, second_id);
+
+        let mut attachments =
+            HashMap::from([(first_id, "same-name.txt"), (second_id, "same-name.txt")]);
+        let ready = Message::FileOfferReady {
+            offer_id: second_id,
+            ticket: "ticket-for-second".to_owned(),
+            thumbnail_hash: None,
+        };
+
+        if let Message::FileOfferReady {
+            offer_id, ticket, ..
+        } = ready
+        {
+            assert_eq!(attachments.remove(&offer_id), Some("same-name.txt"));
+            assert!(attachments.contains_key(&first_id));
+            assert_eq!(ticket, "ticket-for-second");
+        } else {
+            panic!("expected FileOfferReady");
+        }
+    }
+}

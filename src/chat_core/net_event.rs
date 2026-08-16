@@ -429,6 +429,11 @@ pub fn handle_net_event_for_topic(
                     // Direct file offers are handled by the direct-transfer
                     // protocol; do not treat them as legacy blob shares.
                 }
+                Message::FileOfferReady { .. } => {
+                    // Direct file-offer upgrades are handled by the
+                    // direct-transfer protocol; keep them out of the legacy
+                    // blob-share UI until that handler is wired.
+                }
                 Message::ImageShare { name, hash } => {
                     if from != cb.local_public() {
                         let fid = FriendId::from_public_key(from);
