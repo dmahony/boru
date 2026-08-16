@@ -685,6 +685,80 @@ config_group! {
     }
 }
 
+// ── Screen-share sender UI (mirrors ScreenShareTheme) ────────────────
+
+config_group! {
+    /// Screen-share parent card overrides (`BoruTheme::screen_share.card`), px.
+    ScreenShareCardConfig {
+        padding: f32,
+        radius: f32,
+        border_width: f32,
+        spacing: f32,
+    }
+}
+
+config_group! {
+    /// Screen-share source-card overrides (`BoruTheme::screen_share.source_card`), px.
+    ScreenShareSourceCardConfig {
+        width: f32,
+        radius: f32,
+        padding_x: f32,
+        padding_y: f32,
+        icon_size: f32,
+        check_icon_size: f32,
+        selected_border_width: f32,
+        title_max_chars: f32,
+        row_spacing: f32,
+    }
+}
+
+config_group! {
+    /// Screen-share segmented-control overrides (`BoruTheme::screen_share.segmented`), px.
+    ScreenShareSegmentedConfig {
+        radius: f32,
+        spacing: f32,
+        padding_x: f32,
+        padding_y: f32,
+    }
+}
+
+config_group! {
+    /// Screen-share audio-toggle row overrides (`BoruTheme::screen_share.toggle`), px.
+    ScreenShareToggleConfig {
+        row_spacing: f32,
+        icon_size: f32,
+    }
+}
+
+config_group! {
+    /// Screen-share neutral action-row overrides (`BoruTheme::screen_share.action`), px.
+    ScreenShareActionConfig {
+        row_spacing: f32,
+    }
+}
+
+config_group! {
+    /// Screen-share destructive button overrides (`BoruTheme::screen_share.destructive`), px.
+    ScreenShareDestructiveConfig {
+        padding_x: f32,
+        padding_y: f32,
+        radius: f32,
+        icon_gap: f32,
+    }
+}
+
+config_group! {
+    /// Screen-share sender UI overrides (`BoruTheme::screen_share`), px.
+    ScreenShareConfig {
+        card: ScreenShareCardConfig,
+        source_card: ScreenShareSourceCardConfig,
+        segmented: ScreenShareSegmentedConfig,
+        toggle: ScreenShareToggleConfig,
+        action: ScreenShareActionConfig,
+        destructive: ScreenShareDestructiveConfig,
+    }
+}
+
 // ── Root config ───────────────────────────────────────────────────────
 
 /// Root of the `boru-ui.toml` dev theme override file.
@@ -714,6 +788,7 @@ pub struct UiThemeConfig {
     pub dialogs: Option<DialogConfig>,
     pub calls: Option<CallConfig>,
     pub controls: Option<ControlConfig>,
+    pub screen_share: Option<ScreenShareConfig>,
 }
 
 // ── Load path ─────────────────────────────────────────────────────────
@@ -1085,6 +1160,16 @@ avatar_size = 96.0
 
 [controls]
 header_height = 52.0
+
+[screen_share.card]
+padding = 16.0
+
+[screen_share.source_card]
+width = 192.0
+
+[screen_share.destructive]
+icon_gap = 8.0
+
 "##;
 
     #[test]
@@ -1148,6 +1233,29 @@ header_height = 52.0
         assert_eq!(
             cfg.controls.expect("controls present").header_height,
             Some(52.0)
+        );
+        // BORU-SSUI-08: screen-share group parses from `[screen_share.*]`.
+        let screen_share = cfg.screen_share.expect("screen_share group present");
+        assert_eq!(
+            screen_share
+                .card
+                .expect("screen_share.card present")
+                .padding,
+            Some(16.0)
+        );
+        assert_eq!(
+            screen_share
+                .source_card
+                .expect("screen_share.source_card present")
+                .width,
+            Some(192.0)
+        );
+        assert_eq!(
+            screen_share
+                .destructive
+                .expect("screen_share.destructive present")
+                .icon_gap,
+            Some(8.0)
         );
     }
 

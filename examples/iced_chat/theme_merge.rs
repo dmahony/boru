@@ -33,15 +33,19 @@ use iced::Color;
 use crate::theme::{
     AttachmentTheme, AvatarTokens, BorderTokens, BoruTheme, CallTheme, ChatTheme, ColorTokens,
     ControlTokens, DialogTheme, FileTableColumns, HomeTheme, IconTokens, ListTokens, MotionTokens,
-    RadiusTokens, ResponsiveTokens, RoomTheme, SharedTableColumns, SidebarPadding, SidebarTheme,
+    RadiusTokens, ResponsiveTokens, RoomTheme, ScreenShareActionTheme, ScreenShareCardTheme,
+    ScreenShareDestructiveTheme, ScreenShareSegmentedTheme, ScreenShareSourceCardTheme,
+    ScreenShareTheme, ScreenShareToggleTheme, SharedTableColumns, SidebarPadding, SidebarTheme,
     SpacingTokens, TunnelTheme, TypographyTokens, VideoTokens,
 };
 use crate::theme_config::{
     AttachmentConfig, AvatarConfig, BorderConfig, CallConfig, ChatConfig, ColorConfig, ColorValue,
     ControlConfig, DialogConfig, FileTableColumnsConfig, HomeConfig, IconConfig, ListConfig,
-    MotionConfig, RadiusConfig, ResponsiveConfig, RoomConfig, SharedTableColumnsConfig,
-    SidebarConfig, SidebarPaddingConfig, SpacingConfig, TunnelConfig, TypographyConfig,
-    UiThemeConfig, VideoConfig,
+    MotionConfig, RadiusConfig, ResponsiveConfig, RoomConfig, ScreenShareActionConfig,
+    ScreenShareCardConfig, ScreenShareConfig, ScreenShareDestructiveConfig,
+    ScreenShareSegmentedConfig, ScreenShareSourceCardConfig, ScreenShareToggleConfig,
+    SharedTableColumnsConfig, SidebarConfig, SidebarPaddingConfig, SpacingConfig, TunnelConfig,
+    TypographyConfig, UiThemeConfig, VideoConfig,
 };
 
 // ── Validation bounds ─────────────────────────────────────────────────
@@ -664,6 +668,117 @@ merge_group! {
     }
 }
 
+// ── Screen-share sender UI (BORU-SSUI-08) ─────────────────────────────
+//
+// Mirrors `ScreenShareTheme` 1:1. Every group is flat geometry, so the
+// `merge_group!` macro applies; the nested `[screen_share]` group is
+// composed by hand (same pattern as `sidebar` / `attachments`).
+
+merge_group! {
+    merge_screen_share_card, ScreenShareCardTheme, ScreenShareCardConfig, "screen_share.card", {
+        padding: clamp_size0,
+        radius: clamp_size0,
+        border_width: clamp_size0,
+        spacing: clamp_size0,
+    }
+}
+
+merge_group! {
+    merge_screen_share_source_card, ScreenShareSourceCardTheme, ScreenShareSourceCardConfig, "screen_share.source_card", {
+        width: clamp_size0,
+        radius: clamp_size0,
+        padding_x: clamp_size0,
+        padding_y: clamp_size0,
+        icon_size: clamp_size0,
+        check_icon_size: clamp_size0,
+        selected_border_width: clamp_size0,
+        title_max_chars: clamp_size0,
+        row_spacing: clamp_size0,
+    }
+}
+
+merge_group! {
+    merge_screen_share_segmented, ScreenShareSegmentedTheme, ScreenShareSegmentedConfig, "screen_share.segmented", {
+        radius: clamp_size0,
+        spacing: clamp_size0,
+        padding_x: clamp_size0,
+        padding_y: clamp_size0,
+    }
+}
+
+merge_group! {
+    merge_screen_share_toggle, ScreenShareToggleTheme, ScreenShareToggleConfig, "screen_share.toggle", {
+        row_spacing: clamp_size0,
+        icon_size: clamp_size0,
+    }
+}
+
+merge_group! {
+    merge_screen_share_action, ScreenShareActionTheme, ScreenShareActionConfig, "screen_share.action", {
+        row_spacing: clamp_size0,
+    }
+}
+
+merge_group! {
+    merge_screen_share_destructive, ScreenShareDestructiveTheme, ScreenShareDestructiveConfig, "screen_share.destructive", {
+        padding_x: clamp_size0,
+        padding_y: clamp_size0,
+        radius: clamp_size0,
+        icon_gap: clamp_size0,
+    }
+}
+
+fn merge_screen_share_theme(
+    base: &ScreenShareTheme,
+    cfg: &ScreenShareConfig,
+    warnings: &mut Vec<String>,
+) -> ScreenShareTheme {
+    ScreenShareTheme {
+        card: merge_screen_share_card(
+            &base.card,
+            cfg.card
+                .as_ref()
+                .unwrap_or(&ScreenShareCardConfig::default()),
+            warnings,
+        ),
+        source_card: merge_screen_share_source_card(
+            &base.source_card,
+            cfg.source_card
+                .as_ref()
+                .unwrap_or(&ScreenShareSourceCardConfig::default()),
+            warnings,
+        ),
+        segmented: merge_screen_share_segmented(
+            &base.segmented,
+            cfg.segmented
+                .as_ref()
+                .unwrap_or(&ScreenShareSegmentedConfig::default()),
+            warnings,
+        ),
+        toggle: merge_screen_share_toggle(
+            &base.toggle,
+            cfg.toggle
+                .as_ref()
+                .unwrap_or(&ScreenShareToggleConfig::default()),
+            warnings,
+        ),
+        action: merge_screen_share_action(
+            &base.action,
+            cfg.action
+                .as_ref()
+                .unwrap_or(&ScreenShareActionConfig::default()),
+            warnings,
+        ),
+        destructive: merge_screen_share_destructive(
+            &base.destructive,
+            cfg.destructive
+                .as_ref()
+                .unwrap_or(&ScreenShareDestructiveConfig::default()),
+            warnings,
+        ),
+    }
+}
+
 // ── Groups with nested config tables ──────────────────────────────────
 //
 // `sidebar` nests `sidebar.padding`; `attachments` nests `file_table`,
@@ -913,6 +1028,13 @@ pub fn merge_ui_theme(base: &BoruTheme, cfg: &UiThemeConfig) -> (BoruTheme, Vec<
             cfg.controls.as_ref().unwrap_or(&ControlConfig::default()),
             &mut warnings,
         ),
+        screen_share: merge_screen_share_theme(
+            &base.screen_share,
+            cfg.screen_share
+                .as_ref()
+                .unwrap_or(&ScreenShareConfig::default()),
+            &mut warnings,
+        ),
     };
     (merged, warnings)
 }
@@ -1011,6 +1133,26 @@ avatar_size = 100.0
 
 [controls]
 header_height = 56.0
+
+[screen_share.card]
+padding = 18.0
+
+[screen_share.source_card]
+width = 200.0
+title_max_chars = 24.0
+
+[screen_share.segmented]
+radius = 12.0
+
+[screen_share.toggle]
+row_spacing = 10.0
+
+[screen_share.action]
+row_spacing = 10.0
+
+[screen_share.destructive]
+radius = 12.0
+
 "##,
         );
         assert!(warnings.is_empty(), "expected no warnings, got {warnings:?}");
@@ -1043,6 +1185,14 @@ header_height = 56.0
         assert_eq!(merged.dialogs.avatar_size, 80.0);
         assert_eq!(merged.calls.avatar_size, 100.0);
         assert_eq!(merged.controls.header_height, 56.0);
+        // BORU-SSUI-08: screen-share tokens merge from `[screen_share.*]`.
+        assert_eq!(merged.screen_share.card.padding, 18.0);
+        assert_eq!(merged.screen_share.source_card.width, 200.0);
+        assert_eq!(merged.screen_share.source_card.title_max_chars, 24.0);
+        assert_eq!(merged.screen_share.segmented.radius, 12.0);
+        assert_eq!(merged.screen_share.toggle.row_spacing, 10.0);
+        assert_eq!(merged.screen_share.action.row_spacing, 10.0);
+        assert_eq!(merged.screen_share.destructive.radius, 12.0);
     }
 
     #[test]
@@ -1146,6 +1296,51 @@ sidebar_fade_frames = 100000
         );
         assert_eq!(merged.motion.sidebar_fade_frames, MAX_FRAMES);
         assert_eq!(warnings.len(), 1);
+    }
+
+    /// BORU-SSUI-08: screen-share tokens merge from `[screen_share.*]`
+    /// through the same clamp/fallback machinery as the other groups.
+    #[test]
+    fn screen_share_tokens_merge_and_clamp() {
+        let (merged, warnings) = merge_toml(
+            r#"
+[screen_share.card]
+padding = 24.0
+radius = -5.0
+
+[screen_share.source_card]
+width = 300.0
+
+[screen_share.destructive]
+icon_gap = 99999.0
+"#,
+        );
+        assert_eq!(merged.screen_share.card.padding, 24.0);
+        // Negative radius clamps to 0 (clamp_size0), warning emitted.
+        assert_eq!(merged.screen_share.card.radius, 0.0);
+        assert_eq!(merged.screen_share.source_card.width, 300.0);
+        // Absurd icon gap clamps to MAX_SIZE_PX.
+        assert_eq!(merged.screen_share.destructive.icon_gap, MAX_SIZE_PX);
+        assert_eq!(warnings.len(), 2);
+        assert!(
+            warnings[0].contains("screen_share.card.radius"),
+            "{}",
+            warnings[0]
+        );
+        assert!(
+            warnings[1].contains("screen_share.destructive.icon_gap"),
+            "{}",
+            warnings[1]
+        );
+        // Unset fields keep the shared defaults.
+        assert_eq!(
+            merged.screen_share.card.spacing,
+            BoruTheme::default().screen_share.card.spacing
+        );
+        assert_eq!(
+            merged.screen_share.source_card.radius,
+            BoruTheme::default().screen_share.source_card.radius
+        );
     }
 
     #[test]

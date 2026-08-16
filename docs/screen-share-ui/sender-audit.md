@@ -206,6 +206,23 @@ possible so the card matches the rest of Boru; do not scatter per-widget magic
 numbers. Light/dark must stay token-driven (never bake white backgrounds / fixed
 dark text).
 
+**Status (BORU-SSUI-08): DONE.** `ScreenShareTheme` (theme.rs) with
+`card` / `source_card` / `segmented` / `toggle` / `action` / `destructive`
+sub-groups, `ScreenShareConfig` (theme_config.rs), and
+`merge_screen_share_theme` (theme_merge.rs) now exist and are wired into
+`BoruTheme` / `UiThemeConfig` / `merge_ui_theme`, so `boru-ui.toml` hot-reloads
+the sender card geometry through the same system as the rest of the redesigned
+UI (`boru-ui.example.toml` documents every key). The sender widgets in
+`chat.rs` consume the tokens (`screen_share.card.*` shell + rhythm,
+`source_card.*` cards, `segmented.*` quality control, `toggle.*` audio row,
+`action.*` / `destructive.*` action row); the shared primitives
+`ui_components::segmented_control` and
+`form_components::destructive_button_icon` take caller-supplied style structs
+(`SegmentedControlStyle` / `DestructiveButtonStyle`) so TOML overrides reach
+them. Colours remain mode-aware `design_tokens` calls (no baked-in white
+backgrounds / fixed dark text). `IconSize::from_px` maps the TOML px icon-size
+tokens to the nearest bundled icon class.
+
 ---
 
 ## 5. Appendix — exact current sender control rendering (baseline)

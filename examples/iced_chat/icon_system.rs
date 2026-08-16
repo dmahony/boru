@@ -285,6 +285,31 @@ impl IconSize {
             IconSize::Xl => 28.0,
         }
     }
+
+    /// Map a raw px size to the nearest standard icon size class.
+    ///
+    /// BORU-SSUI-08: `screen_share.*` TOML tokens store icon sizes as plain
+    /// px values (human-editable); the widget layer maps them back to the
+    /// nearest bundled sprite size so custom values degrade gracefully.
+    pub fn from_px(px: f32) -> Self {
+        let sizes = [
+            (IconSize::Xs, IconSize::Xs.px()),
+            (IconSize::Sm, IconSize::Sm.px()),
+            (IconSize::Md, IconSize::Md.px()),
+            (IconSize::Lg, IconSize::Lg.px()),
+            (IconSize::Xl, IconSize::Xl.px()),
+        ];
+        let mut best = IconSize::Md;
+        let mut best_dist = f32::MAX;
+        for (size, size_px) in sizes {
+            let dist = (size_px - px).abs();
+            if dist < best_dist {
+                best_dist = dist;
+                best = size;
+            }
+        }
+        best
+    }
 }
 
 impl Default for IconSize {
@@ -542,6 +567,23 @@ mod tests {
         assert!(IconSize::Sm.px() < IconSize::Md.px());
         assert!(IconSize::Md.px() < IconSize::Lg.px());
         assert!(IconSize::Lg.px() < IconSize::Xl.px());
+    }
+
+    /// BORU-SSUI-08: `from_px` maps a raw px value to the nearest bundled
+    /// icon-size class (used by the `screen_share.*` TOML icon-size tokens).
+    #[test]
+    fn from_px_round_trips_exact_classes_and_picks_nearest() {
+        assert_eq!(IconSize::from_px(16.0), IconSize::Xs);
+        assert_eq!(IconSize::from_px(18.0), IconSize::Sm);
+        assert_eq!(IconSize::from_px(20.0), IconSize::Md);
+        assert_eq!(IconSize::from_px(24.0), IconSize::Lg);
+        assert_eq!(IconSize::from_px(28.0), IconSize::Xl);
+        // Nearest-class fallback for custom px values; exact ties pick the
+        // smaller class (Xs first in iteration order).
+        assert_eq!(IconSize::from_px(19.0), IconSize::Sm);
+        assert_eq!(IconSize::from_px(17.0), IconSize::Xs);
+        assert_eq!(IconSize::from_px(100.0), IconSize::Xl);
+        assert_eq!(IconSize::from_px(1.0), IconSize::Xs);
     }
 
     #[test]

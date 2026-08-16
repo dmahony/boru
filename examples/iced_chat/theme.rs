@@ -1681,6 +1681,159 @@ impl Default for ControlTokens {
     }
 }
 
+// ── Screen-share sender UI theme (BORU-SSUI-08) ──────────────────────
+//
+// Semantic style tokens for the sender screen-share control card
+// (`screen_share.card.*`, `source_card.*`, `segmented.*`, `toggle.*`,
+// `action.*`, `destructive.*`). Geometry defaults reuse the shared Boru
+// spacing / radius values from `design_tokens`; colours stay mode-aware
+// and are resolved at style time through `design_tokens` (never baked as
+// white backgrounds or fixed dark text). The group mirrors the PDF Task 8
+// suggested categories so `boru-ui.toml` can restyle the sender controls
+// through the same TOML/hot-reload system as the rest of the UI.
+
+/// `screen_share.card.*` — the parent screen-share control card shell.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenShareCardTheme {
+    /// Inner padding of the card shell (16 px — `SPACE_16`).
+    pub padding: f32,
+    /// Card corner radius (12 px — `RADIUS_LG`).
+    pub radius: f32,
+    /// Card border width (1 px — `BORDER_WIDTH`).
+    pub border_width: f32,
+    /// Vertical rhythm between the card's control rows (8 px — `SPACE_8`).
+    pub spacing: f32,
+}
+
+/// `screen_share.source_card.*` — the screen/window source selector cards.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenShareSourceCardTheme {
+    /// Fixed width of one source card (192 px).
+    pub width: f32,
+    /// Source-card corner radius (10 px — `RADIUS_MD`).
+    pub radius: f32,
+    /// Horizontal padding inside a source card (10 px — `SPACE_10`).
+    pub padding_x: f32,
+    /// Vertical padding inside a source card (8 px — `SPACE_8`).
+    pub padding_y: f32,
+    /// Source-kind icon size (20 px — `IconSize::Md`).
+    pub icon_size: f32,
+    /// Selected-check icon size (18 px — `IconSize::Sm`).
+    pub check_icon_size: f32,
+    /// Selected source accent border width (2 px).
+    pub selected_border_width: f32,
+    /// Title char budget before ellipsis (20 chars).
+    pub title_max_chars: f32,
+    /// Horizontal gap between cards in the scrollable source row (8 px — `SPACE_8`).
+    pub row_spacing: f32,
+}
+
+/// `screen_share.segmented.*` — the quality segmented control.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenShareSegmentedTheme {
+    /// Segment corner radius (10 px — `RADIUS_MD`).
+    pub radius: f32,
+    /// Gap between segments (4 px — `SPACE_4`).
+    pub spacing: f32,
+    /// Horizontal padding inside a segment (10 px — `SPACE_10`).
+    pub padding_x: f32,
+    /// Vertical padding inside a segment (4 px — `SPACE_4`).
+    pub padding_y: f32,
+}
+
+/// `screen_share.toggle.*` — the audio toggle row geometry.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenShareToggleTheme {
+    /// Gap between the toggle row's icon / label / switch (8 px — `SPACE_8`).
+    pub row_spacing: f32,
+    /// Speaker icon size (18 px — `IconSize::Sm`).
+    pub icon_size: f32,
+}
+
+/// `screen_share.action.*` — the neutral action row (Share Again / Dismiss).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenShareActionTheme {
+    /// Gap between actions in the row (8 px — `SPACE_8`).
+    pub row_spacing: f32,
+}
+
+/// `screen_share.destructive.*` — the destructive Stop Sharing button.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenShareDestructiveTheme {
+    /// Horizontal padding inside the destructive button (16 px — `SPACE_16`).
+    pub padding_x: f32,
+    /// Vertical padding inside the destructive button (8 px — `SPACE_8`).
+    pub padding_y: f32,
+    /// Destructive button corner radius (10 px — `RADIUS_MD`).
+    pub radius: f32,
+    /// Gap between the stop icon and the label (8 px — `SPACE_8`).
+    pub icon_gap: f32,
+}
+
+/// `screen_share.*` — semantic style tokens for the sender screen-share UI.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenShareTheme {
+    /// Parent control card shell.
+    pub card: ScreenShareCardTheme,
+    /// Screen/window source selector cards.
+    pub source_card: ScreenShareSourceCardTheme,
+    /// Quality segmented control.
+    pub segmented: ScreenShareSegmentedTheme,
+    /// Audio toggle row.
+    pub toggle: ScreenShareToggleTheme,
+    /// Neutral action row.
+    pub action: ScreenShareActionTheme,
+    /// Destructive Stop Sharing button.
+    pub destructive: ScreenShareDestructiveTheme,
+}
+
+impl Default for ScreenShareTheme {
+    fn default() -> Self {
+        use crate::design_tokens::{
+            BORDER_WIDTH, RADIUS_LG, RADIUS_MD, SPACE_10, SPACE_16, SPACE_4, SPACE_8,
+        };
+        use crate::icon_system::IconSize;
+        Self {
+            card: ScreenShareCardTheme {
+                padding: SPACE_16,
+                radius: RADIUS_LG,
+                border_width: BORDER_WIDTH,
+                spacing: SPACE_8,
+            },
+            source_card: ScreenShareSourceCardTheme {
+                width: 192.0,
+                radius: RADIUS_MD,
+                padding_x: SPACE_10,
+                padding_y: SPACE_8,
+                icon_size: IconSize::Md.px(),
+                check_icon_size: IconSize::Sm.px(),
+                selected_border_width: 2.0,
+                title_max_chars: 20.0,
+                row_spacing: SPACE_8,
+            },
+            segmented: ScreenShareSegmentedTheme {
+                radius: RADIUS_MD,
+                spacing: SPACE_4,
+                padding_x: SPACE_10,
+                padding_y: SPACE_4,
+            },
+            toggle: ScreenShareToggleTheme {
+                row_spacing: SPACE_8,
+                icon_size: IconSize::Sm.px(),
+            },
+            action: ScreenShareActionTheme {
+                row_spacing: SPACE_8,
+            },
+            destructive: ScreenShareDestructiveTheme {
+                padding_x: SPACE_16,
+                padding_y: SPACE_8,
+                radius: RADIUS_MD,
+                icon_gap: SPACE_8,
+            },
+        }
+    }
+}
+
 // ── BoruTheme — the typed theme root ──────────────────────────────────
 
 /// Central typed theme for Boru's visual properties (PDF Task 2).
@@ -1729,6 +1882,8 @@ pub struct BoruTheme {
     pub calls: CallTheme,
     /// Settings / generic controls.
     pub controls: ControlTokens,
+    /// Screen-share sender UI (BORU-SSUI-08).
+    pub screen_share: ScreenShareTheme,
 }
 
 impl BoruTheme {
@@ -1812,6 +1967,7 @@ impl Default for BoruTheme {
             dialogs: DialogTheme::default(),
             calls: CallTheme::default(),
             controls: ControlTokens::default(),
+            screen_share: ScreenShareTheme::default(),
         }
     }
 }
@@ -2413,6 +2569,52 @@ mod tests {
         assert_eq!(
             BoruTheme::dark().colors.chat_search_backdrop,
             iced::Color::from_rgba(0.0, 0.0, 0.0, 0.35)
+        );
+    }
+
+    /// BORU-SSUI-08: the screen-share sender UI geometry defaults reuse the
+    /// shared Boru spacing / radius / icon-size values so the feature stays
+    /// visually consistent with the rest of the app (PDF Task 8: "Prefer
+    /// spacing/radius values already used elsewhere in Boru"). Colours are
+    /// mode-aware and resolved at style time through `design_tokens` — this
+    /// group intentionally holds no fixed light/dark colours (never bake in
+    /// white backgrounds or fixed dark text).
+    #[test]
+    fn screen_share_geometry_matches_design_tokens() {
+        let s = ScreenShareTheme::default();
+        assert_eq!(s.card.padding, design_tokens::SPACE_16);
+        assert_eq!(s.card.radius, design_tokens::RADIUS_LG);
+        assert_eq!(s.card.border_width, design_tokens::BORDER_WIDTH);
+        assert_eq!(s.card.spacing, design_tokens::SPACE_8);
+        assert_eq!(s.source_card.radius, design_tokens::RADIUS_MD);
+        assert_eq!(s.source_card.padding_x, design_tokens::SPACE_10);
+        assert_eq!(s.source_card.padding_y, design_tokens::SPACE_8);
+        assert_eq!(s.source_card.icon_size, IconSize::Md.px());
+        assert_eq!(s.source_card.check_icon_size, IconSize::Sm.px());
+        assert_eq!(s.source_card.selected_border_width, 2.0);
+        assert_eq!(s.source_card.row_spacing, design_tokens::SPACE_8);
+        assert_eq!(s.segmented.radius, design_tokens::RADIUS_MD);
+        assert_eq!(s.segmented.spacing, design_tokens::SPACE_4);
+        assert_eq!(s.segmented.padding_x, design_tokens::SPACE_10);
+        assert_eq!(s.segmented.padding_y, design_tokens::SPACE_4);
+        assert_eq!(s.toggle.row_spacing, design_tokens::SPACE_8);
+        assert_eq!(s.toggle.icon_size, IconSize::Sm.px());
+        assert_eq!(s.action.row_spacing, design_tokens::SPACE_8);
+        assert_eq!(s.destructive.padding_x, design_tokens::SPACE_16);
+        assert_eq!(s.destructive.padding_y, design_tokens::SPACE_8);
+        assert_eq!(s.destructive.radius, design_tokens::RADIUS_MD);
+        assert_eq!(s.destructive.icon_gap, design_tokens::SPACE_8);
+    }
+
+    /// BORU-SSUI-08: the screen-share geometry is mode-independent (same in
+    /// light and dark), exactly like the other geometry groups — only the
+    /// mode-aware colour tokens change with the theme.
+    #[test]
+    fn screen_share_geometry_is_mode_independent() {
+        assert_eq!(
+            BoruTheme::light().screen_share,
+            BoruTheme::dark().screen_share,
+            "geometry must not depend on the colour mode"
         );
     }
 }

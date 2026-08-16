@@ -1260,6 +1260,35 @@ pub fn destructive_button<'a>(
     }
 }
 
+/// Geometry for a destructive button with a leading icon (BORU-SSUI-08).
+///
+/// The sender's "Stop Sharing" action passes values from
+/// `BoruTheme::screen_share.destructive` (TOML `[screen_share.destructive]`)
+/// so the same hot-reload path as the rest of the redesigned UI restyles
+/// the destructive action; `Default` mirrors the shared design tokens.
+#[derive(Debug, Clone, Copy)]
+pub struct DestructiveButtonStyle {
+    /// Horizontal padding inside the button (16 px — `SPACE_16`).
+    pub padding_x: f32,
+    /// Vertical padding inside the button (8 px — `SPACE_8`).
+    pub padding_y: f32,
+    /// Button corner radius (10 px — `RADIUS_MD`).
+    pub radius: f32,
+    /// Gap between the icon and the label (8 px — `SPACE_8`).
+    pub icon_gap: f32,
+}
+
+impl Default for DestructiveButtonStyle {
+    fn default() -> Self {
+        Self {
+            padding_x: design_tokens::SPACE_16,
+            padding_y: design_tokens::SPACE_8,
+            radius: design_tokens::RADIUS_MD,
+            icon_gap: design_tokens::SPACE_8,
+        }
+    }
+}
+
 /// A filled destructive button with a leading icon (danger background,
 /// white icon + white label).
 ///
@@ -1270,11 +1299,14 @@ pub fn destructive_button<'a>(
 /// (`destructive_button`), so the PDF's "reserve solid alarming red fill
 /// for hover/pressed or if that matches Boru destructive-action
 /// conventions" clause is satisfied by the shared primitive.
+/// BORU-SSUI-08: geometry (padding / radius / icon gap) comes from the
+/// caller-supplied [`DestructiveButtonStyle`].
 pub fn destructive_button_icon(
     icon: Icon,
     label: impl Into<String>,
     on_press: Option<AppMessage>,
     disabled: bool,
+    style: DestructiveButtonStyle,
 ) -> Element<'static, AppMessage> {
     let row = Row::new()
         .push(
@@ -1285,7 +1317,7 @@ pub fn destructive_button_icon(
         )
         .push(
             Space::new()
-                .width(Length::Fixed(design_tokens::SPACE_8))
+                .width(Length::Fixed(style.icon_gap))
                 .height(Length::Shrink),
         )
         .push(
@@ -1297,8 +1329,12 @@ pub fn destructive_button_icon(
         .align_y(Alignment::Center);
 
     let btn = button(row)
-        .padding([design_tokens::SPACE_8, design_tokens::SPACE_16])
-        .style(button_destructive_style);
+        .padding([style.padding_y, style.padding_x])
+        .style(move |t, status| {
+            let mut s = button_destructive_style(t, status);
+            s.border.radius = style.radius.into();
+            s
+        });
 
     if disabled {
         btn.into()
@@ -1502,10 +1538,16 @@ mod tests {
             "Stop Sharing",
             Some(AppMessage::Noop),
             false,
+            DestructiveButtonStyle::default(),
         );
         let _ = el;
-        let el: Element<'static, AppMessage> =
-            destructive_button_icon(Icon::Stop, "Stop Sharing", None, true);
+        let el: Element<'static, AppMessage> = destructive_button_icon(
+            Icon::Stop,
+            "Stop Sharing",
+            None,
+            true,
+            DestructiveButtonStyle::default(),
+        );
         let _ = el;
     }
 }

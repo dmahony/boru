@@ -590,12 +590,15 @@ impl IcedChat {
                             self.view_source_card(source, is_selected)
                         })
                         .collect();
+                    // BORU-SSUI-08: the horizontal gap between source cards
+                    // comes from `screen_share.source_card.row_spacing`.
+                    let source_row_spacing = self.boru_theme().screen_share.source_card.row_spacing;
                     items.push(
                         column![
                             text(crate::i18n::t("screenshare.source"))
                                 .size(crate::fonts::TypeRole::SupportingText.size_px())
                                 .color(Self::muted_color(self.dark_mode)),
-                            iced::widget::scrollable(row(cards).spacing(SPACE_8))
+                            iced::widget::scrollable(row(cards).spacing(source_row_spacing))
                                 .direction(iced::widget::scrollable::Direction::Horizontal(
                                     iced::widget::scrollable::Scrollbar::default().spacing(SPACE_4),
                                 ))
@@ -719,12 +722,23 @@ impl IcedChat {
                         on_press: Some(AppMessage::ScreenShareSetPreset(spec.preset)),
                     })
                     .collect();
+            // BORU-SSUI-08: the segmented-control geometry comes from the
+            // `screen_share.segmented.*` TOML tokens (hot-reloadable).
+            let segmented_theme = self.boru_theme().screen_share.segmented;
             items.push(
                 column![
                     text(crate::i18n::t("screenshare.preset"))
                         .size(crate::fonts::TypeRole::SupportingText.size_px())
                         .color(Self::muted_color(self.dark_mode)),
-                    crate::ui_components::segmented_control(segments),
+                    crate::ui_components::segmented_control(
+                        segments,
+                        crate::ui_components::SegmentedControlStyle {
+                            radius: segmented_theme.radius,
+                            spacing: segmented_theme.spacing,
+                            padding_x: segmented_theme.padding_x,
+                            padding_y: segmented_theme.padding_y,
+                        },
+                    ),
                 ]
                 .spacing(SPACE_6)
                 .into(),
@@ -835,6 +849,10 @@ impl IcedChat {
                     self.screen_share_audio_active,
                     unavailable.is_some(),
                 );
+                // BORU-SSUI-08: the audio toggle row geometry (icon size,
+                // icon/label/switch gap) comes from `screen_share.toggle.*`
+                // TOML tokens (hot-reloadable).
+                let toggle_theme = self.boru_theme().screen_share.toggle;
                 let icon_color: fn(&iced::Theme) -> iced::Color = if spec.active {
                     crate::design_tokens::primary
                 } else {
@@ -843,7 +861,7 @@ impl IcedChat {
                 let speaker = spec
                     .icon
                     .build()
-                    .size(IconSize::Sm)
+                    .size(IconSize::from_px(toggle_theme.icon_size))
                     .color_fn(icon_color)
                     .build();
                 // Keep the row neutral; only the switch/icon carry the
@@ -876,11 +894,11 @@ impl IcedChat {
                         label,
                         switch,
                     ]
-                    .spacing(SPACE_8)
+                    .spacing(toggle_theme.row_spacing)
                     .align_y(iced::Alignment::Center)
                 } else {
                     row![speaker, label, switch]
-                        .spacing(SPACE_8)
+                        .spacing(toggle_theme.row_spacing)
                         .align_y(iced::Alignment::Center)
                 };
                 if let Some(reason) = unavailable {
@@ -972,6 +990,11 @@ impl IcedChat {
                     // the PDF's "reserve solid alarming red fill for
                     // hover/pressed or if that matches Boru destructive-action
                     // conventions" clause is satisfied.
+                    // BORU-SSUI-08: the destructive button geometry and the
+                    // action-row gap come from `screen_share.destructive.*`
+                    // / `screen_share.action.*` TOML tokens (hot-reloadable).
+                    let action_theme = self.boru_theme().screen_share.action;
+                    let destructive_theme = self.boru_theme().screen_share.destructive;
                     items.push(
                         row![
                             iced::widget::Space::new().width(Length::Fill),
@@ -980,16 +1003,24 @@ impl IcedChat {
                                 crate::i18n::t("screenshare.stop_sharing"),
                                 Some(AppMessage::StopScreenShare),
                                 false,
+                                crate::form_components::DestructiveButtonStyle {
+                                    padding_x: destructive_theme.padding_x,
+                                    padding_y: destructive_theme.padding_y,
+                                    radius: destructive_theme.radius,
+                                    icon_gap: destructive_theme.icon_gap,
+                                },
                             ),
                         ]
-                        .spacing(SPACE_8)
+                        .spacing(action_theme.row_spacing)
                         .align_y(iced::Alignment::Center)
                         .into(),
                     );
                 }
             }
             // BORU-SSUI-02: consistent vertical rhythm inside the card shell.
-            column(items).spacing(SPACE_8)
+            // BORU-SSUI-08: the rhythm comes from `screen_share.card.spacing`.
+            let card_spacing = self.boru_theme().screen_share.card.spacing;
+            column(items).spacing(card_spacing)
         } else if self.screen_share_viewing {
             // Who is sharing (PDF Phase 13): the viewer always sees the
             // sharer's identity above the surface, plus whether remote
@@ -1166,17 +1197,21 @@ impl IcedChat {
         // BORU-SSUI-02: ONE card shell below the conversation header for all
         // sender sharing controls. Subtle surface distinct from the chat
         // canvas, thin neutral border, medium-large radius and a restrained
-        // shadow — the shared Boru card language (design_tokens). BORU-SSUI-08
-        // migrates these values into `screen_share.card.*` TOML tokens.
+        // shadow — the shared Boru card language (design_tokens).
+        // BORU-SSUI-08: geometry (padding / radius / border width) comes
+        // from `screen_share.card.*` TOML tokens; colours stay mode-aware
+        // via `design_tokens` (surface_secondary / border_muted / shadow_card)
+        // so light/dark never bake in fixed values.
+        let card_theme = self.boru_theme().screen_share.card;
         container(body)
-            .padding(SPACE_16)
+            .padding(card_theme.padding)
             .width(Length::Fill)
-            .style(|t| iced::widget::container::Style {
+            .style(move |t| iced::widget::container::Style {
                 background: Some(iced::Background::Color(bg_surface_secondary(t))),
                 border: iced::Border {
                     color: border_muted(t),
-                    width: crate::design_tokens::BORDER_WIDTH,
-                    radius: crate::design_tokens::RADIUS_LG.into(),
+                    width: card_theme.border_width,
+                    radius: card_theme.radius.into(),
                 },
                 shadow: crate::design_tokens::shadow_card(t),
                 ..Default::default()
@@ -1308,6 +1343,10 @@ impl IcedChat {
     /// and hover/pressed feedback. Clicking dispatches the SAME
     /// `ScreenShareSelectSource(source.id)` message the text buttons used,
     /// so capture switching behaviour is unchanged.
+    /// BORU-SSUI-08: geometry (width / padding / radii / icon sizes /
+    /// title budget / selected border) comes from `screen_share.source_card.*`
+    /// TOML tokens (hot-reloadable); colours stay mode-aware via
+    /// `design_tokens`.
     fn view_source_card(
         &self,
         source: &CaptureSource,
@@ -1316,13 +1355,7 @@ impl IcedChat {
         use iced::widget::{button, column, container, row, text, Space};
         use iced::Length;
 
-        const SOURCE_CARD_WIDTH: f32 = 192.0;
-        // Title char budget keeps a single card from blowing up on a very
-        // long window title; the remainder is shown as a Unicode ellipsis
-        // (the repo's `truncate_with_ellipsis` helper). `Wrapping::None` +
-        // a clip container guarantee the line never wraps and grows the
-        // card (same single-line pattern as sidebar rows).
-        const TITLE_MAX_CHARS: usize = 20;
+        let source_card_theme = self.boru_theme().screen_share.source_card;
 
         let dark_mode = self.dark_mode;
         let theme = self.theme();
@@ -1335,11 +1368,14 @@ impl IcedChat {
         };
         let icon = kind_icon
             .build()
-            .size(IconSize::Md)
+            .size(IconSize::from_px(source_card_theme.icon_size))
             .color_fn(icon_color)
             .build();
 
-        let title = crate::presentation::truncate_with_ellipsis(&source.title, TITLE_MAX_CHARS);
+        let title = crate::presentation::truncate_with_ellipsis(
+            &source.title,
+            source_card_theme.title_max_chars as usize,
+        );
         let dims = format!("{} × {}", source.width, source.height);
 
         let title_color = if selected {
@@ -1380,7 +1416,7 @@ impl IcedChat {
         if selected {
             let check = Icon::Check
                 .build()
-                .size(IconSize::Sm)
+                .size(IconSize::from_px(source_card_theme.check_icon_size))
                 .color_fn(crate::design_tokens::primary)
                 .build();
             card_row = card_row.push(check);
@@ -1389,19 +1425,21 @@ impl IcedChat {
             // whether or not they are selected.
             card_row = card_row.push(
                 Space::new()
-                    .width(Length::Fixed(IconSize::Sm.px()))
-                    .height(Length::Fixed(IconSize::Sm.px())),
+                    .width(Length::Fixed(source_card_theme.check_icon_size))
+                    .height(Length::Fixed(source_card_theme.check_icon_size)),
             );
         }
 
         let body = container(card_row)
-            .padding([SPACE_8, SPACE_10])
-            .width(Length::Fixed(SOURCE_CARD_WIDTH));
+            .padding([source_card_theme.padding_y, source_card_theme.padding_x])
+            .width(Length::Fixed(source_card_theme.width));
 
         button(body)
             .on_press(AppMessage::ScreenShareSelectSource(source.id))
             .padding(0)
-            .style(move |t, status| Self::source_card_button_style(t, status, selected))
+            .style(move |t, status| {
+                Self::source_card_button_style(t, status, selected, source_card_theme)
+            })
             .into()
     }
 
@@ -1413,10 +1451,13 @@ impl IcedChat {
     /// background, subtle `border_muted` border, and hover/pressed
     /// feedback via `surface_hover` / `surface_pressed` with an accent
     /// border on hover — the same interaction language as the rest of Boru.
+    /// BORU-SSUI-08: geometry (radius / selected border width) comes from
+    /// `screen_share.source_card.*` TOML tokens; colours stay mode-aware.
     fn source_card_button_style(
         theme: &iced::Theme,
         status: iced::widget::button::Status,
         selected: bool,
+        source_card_theme: crate::theme::ScreenShareSourceCardTheme,
     ) -> iced::widget::button::Style {
         let bg = if selected {
             crate::design_tokens::primary_soft(theme)
@@ -1449,11 +1490,11 @@ impl IcedChat {
             border: iced::Border {
                 color: border_color,
                 width: if selected {
-                    2.0
+                    source_card_theme.selected_border_width
                 } else {
                     crate::design_tokens::BORDER_WIDTH
                 },
-                radius: crate::design_tokens::RADIUS_MD.into(),
+                radius: source_card_theme.radius.into(),
             },
             shadow: match status {
                 iced::widget::button::Status::Hovered => crate::design_tokens::shadow_card(theme),

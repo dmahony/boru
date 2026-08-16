@@ -824,18 +824,49 @@ pub struct SegmentedOption<Message> {
     pub on_press: Option<Message>,
 }
 
+/// Geometry for a single-choice segmented control (BORU-SSUI-08).
+///
+/// The screen-share quality control passes values from
+/// `BoruTheme::screen_share.segmented` (TOML `[screen_share.segmented]`)
+/// so the same hot-reload path as the rest of the redesigned UI restyles
+/// the segments; `Default` mirrors the shared design tokens.
+#[derive(Debug, Clone, Copy)]
+pub struct SegmentedControlStyle {
+    /// Segment corner radius (10 px — `RADIUS_MD`).
+    pub radius: f32,
+    /// Gap between segments (4 px — `SPACE_4`).
+    pub spacing: f32,
+    /// Horizontal padding inside a segment (10 px — `SPACE_10`).
+    pub padding_x: f32,
+    /// Vertical padding inside a segment (4 px — `SPACE_4`).
+    pub padding_y: f32,
+}
+
+impl Default for SegmentedControlStyle {
+    fn default() -> Self {
+        Self {
+            radius: design_tokens::RADIUS_MD,
+            spacing: design_tokens::SPACE_4,
+            padding_x: design_tokens::SPACE_10,
+            padding_y: design_tokens::SPACE_4,
+        }
+    }
+}
+
 /// A single-choice segmented control: a row of connected segments where
 /// the selected one gets the accent fill and unselected segments a
 /// neutral surface (BORU-SSUI-04, shared sender/viewer primitive).
 ///
 /// Extracted from the activity-log filter chips (files.rs) per the
-/// sender screen-share audit §3.5. Style values reuse `design_tokens`;
-/// BORU-SSUI-08 migrates screen-share-specific values into
-/// `screen_share.segmented.*` TOML tokens afterwards.
+/// sender screen-share audit §3.5. Style values reuse `design_tokens`
+/// via the caller-supplied [`SegmentedControlStyle`]; the sender quality
+/// control passes `BoruTheme::screen_share.segmented` so BORU-SSUI-08
+/// TOML tokens drive the geometry.
 pub fn segmented_control<'a, Message: Clone + 'a>(
     options: Vec<SegmentedOption<Message>>,
+    style: SegmentedControlStyle,
 ) -> Element<'a, Message> {
-    let mut row = Row::new().spacing(design_tokens::SPACE_4);
+    let mut row = Row::new().spacing(style.spacing);
     for opt in options {
         let selected = opt.selected;
         let enabled = opt.enabled;
@@ -843,9 +874,9 @@ pub fn segmented_control<'a, Message: Clone + 'a>(
             TypeRole::ButtonLabel,
             opt.label,
         ))
-        .padding([design_tokens::SPACE_4, design_tokens::SPACE_10])
+        .padding([style.padding_y, style.padding_x])
         .style(move |t, status| {
-            let radius = design_tokens::RADIUS_MD.into();
+            let radius = style.radius.into();
             if !enabled {
                 return button::Style {
                     background: Some(Background::Color(design_tokens::surface(t))),

@@ -392,3 +392,47 @@
 # slider_width = 160.0
 # color_picker_radius = 8.0
 # color_picker_bar_radius = 4.0
+
+# ── Screen-share sender UI (BoruTheme.screen_share) — px ──────────────
+# BORU-SSUI-08: semantic style tokens for the sender screen-share control
+# card. Geometry defaults reuse the shared Boru spacing/radius values
+# (SPACE_* / RADIUS_*); colours stay mode-aware and are resolved at style
+# time through design_tokens (never baked as white backgrounds or fixed
+# dark text). Editing any of these keys while Boru is running restyles the
+# sender controls on the next hot-reload (same system as the rest of the
+# redesigned UI).
+# [screen_share.card]
+# padding = 16.0          # card inner padding (SPACE_16)
+# radius = 12.0           # card corner radius (RADIUS_LG)
+# border_width = 1.0      # card border width (BORDER_WIDTH)
+# spacing = 8.0           # vertical rhythm between control rows (SPACE_8)
+#
+# [screen_share.source_card]
+# width = 192.0           # fixed width of one source card
+# radius = 10.0           # source-card corner radius (RADIUS_MD)
+# padding_x = 10.0        # horizontal padding inside a source card (SPACE_10)
+# padding_y = 8.0         # vertical padding inside a source card (SPACE_8)
+# icon_size = 20.0        # source-kind icon size (IconSize::Md)
+# check_icon_size = 18.0  # selected-check icon size (IconSize::Sm)
+# selected_border_width = 2.0  # selected source accent border width
+# title_max_chars = 20.0  # title char budget before ellipsis
+# row_spacing = 8.0       # gap between cards in the scrollable row (SPACE_8)
+#
+# [screen_share.segmented]
+# radius = 10.0           # segment corner radius (RADIUS_MD)
+# spacing = 4.0           # gap between segments (SPACE_4)
+# padding_x = 10.0        # horizontal padding inside a segment (SPACE_10)
+# padding_y = 4.0         # vertical padding inside a segment (SPACE_4)
+#
+# [screen_share.toggle]
+# row_spacing = 8.0       # gap between icon / label / switch (SPACE_8)
+# icon_size = 18.0        # speaker icon size (IconSize::Sm)
+#
+# [screen_share.action]
+# row_spacing = 8.0       # gap between actions in the neutral row (SPACE_8)
+#
+# [screen_share.destructive]
+# padding_x = 16.0        # horizontal padding inside Stop Sharing (SPACE_16)
+# padding_y = 8.0         # vertical padding inside Stop Sharing (SPACE_8)
+# radius = 10.0           # destructive button corner radius (RADIUS_MD)
+# icon_gap = 8.0          # gap between the stop icon and label (SPACE_8)
