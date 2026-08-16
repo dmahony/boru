@@ -797,6 +797,49 @@ fn merge_responsive(
             ),
             None => base.home_padding_x,
         },
+        dialog_body_max_height: match &cfg.dialog_body_max_height {
+            Some(c) => merge_by_tier(
+                "responsive.dialog_body_max_height",
+                base.dialog_body_max_height,
+                c,
+                clamp_size_pos,
+                warnings,
+            ),
+            None => base.dialog_body_max_height,
+        },
+        short_window_body_reserve: cfg.short_window_body_reserve.map_or(
+            base.short_window_body_reserve,
+            |v| {
+                clamp_size_pos(
+                    "responsive.short_window_body_reserve",
+                    v,
+                    base.short_window_body_reserve,
+                    warnings,
+                )
+            },
+        ),
+        short_window_body_min_height: cfg.short_window_body_min_height.map_or(
+            base.short_window_body_min_height,
+            |v| {
+                clamp_size_pos(
+                    "responsive.short_window_body_min_height",
+                    v,
+                    base.short_window_body_min_height,
+                    warnings,
+                )
+            },
+        ),
+        short_window_spacing_scale: cfg.short_window_spacing_scale.map_or(
+            base.short_window_spacing_scale,
+            |v| {
+                clamp_fraction(
+                    "responsive.short_window_spacing_scale",
+                    v,
+                    base.short_window_spacing_scale,
+                    warnings,
+                )
+            },
+        ),
     }
 }
 
@@ -1379,7 +1422,11 @@ columns = 0
 "#,
         );
         assert_eq!(
-            merged.screens.get("settings").expect("settings screen").columns,
+            merged
+                .screens
+                .get("settings")
+                .expect("settings screen")
+                .columns,
             1,
             "zero columns falls back to the screen default (ScreenLayout::default)"
         );
@@ -1392,7 +1439,11 @@ columns = 999
 "#,
         );
         assert_eq!(
-            merged.screens.get("settings").expect("settings screen").columns,
+            merged
+                .screens
+                .get("settings")
+                .expect("settings screen")
+                .columns,
             MAX_COLUMNS
         );
         assert_eq!(warnings.len(), 1);
