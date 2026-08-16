@@ -4,6 +4,7 @@
 //! the header is accepted, the remainder of the bidirectional QUIC stream is
 //! the raw file byte stream; file contents never travel through gossip.
 
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use iroh::{
@@ -15,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Semaphore;
 
+use crate::safe_destination::{reserve_download_destination, OverwritePolicy, Reservation};
 use crate::{chat_core::protocol::FileOfferId, file_offer::FileOfferRegistry};
 
 /// ALPN for direct file offers.
@@ -171,6 +173,60 @@ pub async fn open_file_offer(
         }
         FileOfferResponse::Error(error) => Err(anyhow::Error::new(error)),
     }
+}
+
+/// Download an announced file offer into Boru's managed downloads directory.
+///
+/// The destination is reserved before any bytes are written. The reservation
+/// owns the output file and removes it on every error path; publication happens
+/// only after the stream contains exactly the number of bytes advertised by
+/// the authenticated header. This gives direct transfers the same traversal,
+/// symlink, collision, and partial-file guarantees as BlobTicket downloads.
+pub async fn download_file_offer(
+    endpoint: &Endpoint,
+    addr: EndpointAddr,
+    offer_id: FileOfferId,
+    download_dir: &Path,
+) -> anyhow::Result<PathBuf> {
+    let mut transfer = open_file_offer(endpoint, addr, offer_id).await?;
+    let fallback = format!("{offer_id:?}");
+    let mut destination = match reserve_download_destination(
+        download_dir,
+        &transfer.header.name,
+        &fallback,
+        OverwritePolicy::KeepBoth,
+    )? {
+        Reservation::Use(destination) => destination,
+        Reservation::Skip => anyhow::bail!("download destination already exists"),
+    };
+
+    let std_file = destination
+        .take_file()
+        .ok_or_else(|| anyhow::anyhow!("download destination handle is unavailable"))?;
+    let mut output = tokio::fs::File::from_std(std_file);
+    let mut buffer = [0u8; 64 * 1024];
+    let mut received = 0u64;
+    while received < transfer.header.size {
+        let remaining = (transfer.header.size - received) as usize;
+        let read_len = remaining.min(buffer.len());
+        let count = transfer.read(&mut buffer[..read_len]).await?;
+        let Some(count) = count else {
+            anyhow::bail!(
+                "direct transfer ended early: received {received} of {} bytes",
+                transfer.header.size
+            );
+        };
+        output.write_all(&buffer[..count]).await?;
+        received += count as u64;
+    }
+    if transfer.read(&mut [0u8; 1]).await?.is_some() {
+        anyhow::bail!("direct transfer exceeded announced size");
+    }
+    output.flush().await?;
+    destination.restore_file(output.into_std().await);
+    destination
+        .publish()
+        .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
 
 async fn serve_connection(
