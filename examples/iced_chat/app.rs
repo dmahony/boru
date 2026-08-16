@@ -38359,6 +38359,9 @@ fn vr_create_tunnel_picker_port_validation() {
         // name. The card must show the muted "Sharing your screen with
         // <peer>" title at top-left, a subtle surface/border/radius/shadow,
         // and stay compact (content height only).
+        // Gated on `screen-sharing` (opt-in feature): the sender-panel fields
+        // do not exist without it, so the module must not force the feature.
+        #[cfg(feature = "screen-sharing")]
         fn seed_sender_share_session(app: &mut IcedChat, topic: TopicId, peer: &PublicKey) {
             use boru_core::screen_share::{
                 CaptureSource, CaptureSourceId, CaptureSourceKind, PathKind, QualityPreset,
@@ -38417,6 +38420,7 @@ fn vr_create_tunnel_picker_port_validation() {
             app.sender_ready = true;
         }
 
+        #[cfg(feature = "screen-sharing")]
         #[test]
         fn capture_screen_share_sender_card_light() {
             load_fonts();
@@ -38428,6 +38432,7 @@ fn vr_create_tunnel_picker_port_validation() {
             render_element(&mut element, "screen_share_sender_card_light", 1200, 800, false);
         }
 
+        #[cfg(feature = "screen-sharing")]
         #[test]
         fn capture_screen_share_sender_card_dark() {
             load_fonts();
