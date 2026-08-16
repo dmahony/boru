@@ -4607,7 +4607,7 @@ impl IcedChat {
                                     .map_err(|error| format!("Failed to broadcast file offer: {error}"))?;
                             }
                             tracing::info!(
-                                event = boru_core::diagnostics::event_names::DIRECT_FILE_OFFER_ANNOUNCED,
+                                event = boru_core::diagnostics::event_names::FILE_OFFER_ANNOUNCED,
                                 offer_id = ?offer_id,
                                 name = %announced_name,
                                 size = announced_size,
@@ -4764,14 +4764,14 @@ impl IcedChat {
 
                                 match ingest {
                                     Ok(()) => tracing::info!(
-                                        event = boru_core::diagnostics::event_names::BACKGROUND_BLOB_INGEST_COMPLETED,
+                                        event = boru_core::diagnostics::event_names::FILE_OFFER_CACHED,
                                         offer_id = ?offer_id,
                                         name = %offer_name,
                                         size = offer_size,
                                         "background blob ingest completed"
                                     ),
                                     Err(error) => tracing::error!(
-                                        event = boru_core::diagnostics::event_names::BACKGROUND_BLOB_INGEST_FAILED,
+                                        event = boru_core::diagnostics::event_names::FILE_OFFER_CACHE_FAILED,
                                         offer_id = ?offer_id,
                                         name = %offer_name,
                                         error = %error,
@@ -4781,7 +4781,10 @@ impl IcedChat {
                             });
                             Ok::<(), String>(())
                         },
-                        |_| AppMessage::Noop,
+                        move |result| match result {
+                            Ok(()) => AppMessage::FileOfferAnnounced { offer_id },
+                            Err(error) => AppMessage::FileOfferCacheFailed { offer_id, error },
+                        },
                     );
                 }
                 // Show spinner immediately while the file is uploading.
@@ -6981,6 +6984,36 @@ impl IcedChat {
                 self.pending_file_upload = None;
                 tracing::error!(error = %error, "FileUploadFailed");
                 self.push_system(format!("File upload failed: {error}"));
+                iced::Task::none()
+            }
+            AppMessage::FileOfferAnnounced { offer_id } => {
+                tracing::info!(?offer_id, "FileOfferAnnounced");
+                // The direct offer is usable independently of cache
+                // preparation. This event must not touch download state.
+                iced::Task::none()
+            }
+            AppMessage::FileOfferCached {
+                offer_id,
+                ticket,
+                content_hash,
+                thumbnail,
+            } => {
+                tracing::info!(
+                    ?offer_id,
+                    has_ticket = !ticket.is_empty(),
+                    %content_hash,
+                    has_thumbnail = thumbnail.is_some(),
+                    "FileOfferCached"
+                );
+                // Cache completion is an upgrade, not a download completion.
+                iced::Task::none()
+            }
+            AppMessage::FileOfferCacheFailed { offer_id, error } => {
+                tracing::warn!(
+                    ?offer_id,
+                    %error,
+                    "FileOfferCacheFailed; direct offer remains available"
+                );
                 iced::Task::none()
             }
             AppMessage::FileDownloaded {

@@ -6758,6 +6758,22 @@ pub enum AppMessage {
     ImageUploadFailed(String),
     /// File upload/sharing failed after the user selected it.
     FileUploadFailed(String),
+    /// The direct file offer was broadcast before background blob ingest.
+    FileOfferAnnounced {
+        offer_id: boru_core::chat_core::protocol::FileOfferId,
+    },
+    /// Background blob ingest completed for an already announced offer.
+    FileOfferCached {
+        offer_id: boru_core::chat_core::protocol::FileOfferId,
+        ticket: String,
+        content_hash: String,
+        thumbnail: Option<Vec<u8>>,
+    },
+    /// Background blob ingest failed; the direct offer may remain usable.
+    FileOfferCacheFailed {
+        offer_id: boru_core::chat_core::protocol::FileOfferId,
+        error: String,
+    },
     FileDownloaded {
         name: String,
         ticket: String,
@@ -10657,6 +10673,9 @@ impl IcedChat {
             AppMessage::BackgroundSubscribed(..) => "BackgroundSubscribed",
             AppMessage::ImageUploadFailed(_) => "ImageUploadFailed",
             AppMessage::FileUploadFailed(_) => "FileUploadFailed",
+            AppMessage::FileOfferAnnounced { .. } => "FileOfferAnnounced",
+            AppMessage::FileOfferCached { .. } => "FileOfferCached",
+            AppMessage::FileOfferCacheFailed { .. } => "FileOfferCacheFailed",
             AppMessage::FileDownloaded { .. } => "FileDownloaded",
             AppMessage::ThumbnailFetched { .. } => "ThumbnailFetched",
             AppMessage::ExecuteImageSend(_) => "ExecuteImageSend",
@@ -15591,6 +15610,9 @@ impl IcedChat {
             | AppMessage::ImageHydrated { .. }
             | AppMessage::ImageUploadFailed(_)
             | AppMessage::FileUploadFailed(_)
+            | AppMessage::FileOfferAnnounced { .. }
+            | AppMessage::FileOfferCached { .. }
+            | AppMessage::FileOfferCacheFailed { .. }
             | AppMessage::FileDownloaded { .. }
             | AppMessage::ThumbnailFetched { .. } => self.update_files(message),
             AppMessage::ErrorMsg(msg) => {
