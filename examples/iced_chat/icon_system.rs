@@ -43,6 +43,9 @@ const SVG_ARROW_LEFT: &[u8] = include_bytes!("../../assets/icons/lucide/arrow-le
 const SVG_CHECK: &[u8] = include_bytes!("../../assets/icons/lucide/check.svg");
 const SVG_PLAY: &[u8] = include_bytes!("../../assets/icons/lucide/play.svg");
 const SVG_PAUSE: &[u8] = include_bytes!("../../assets/icons/lucide/pause.svg");
+// Stop / terminate capture glyph (filled square, lucide-style) — used by
+// the sender's destructive "Stop Sharing" action (BORU-SSUI-07).
+const SVG_STOP: &[u8] = include_bytes!("../../assets/icons/lucide/square-fill.svg");
 const SVG_VOLUME_1: &[u8] = include_bytes!("../../assets/icons/lucide/volume-1.svg");
 const SVG_VOLUME_2: &[u8] = include_bytes!("../../assets/icons/lucide/volume-2.svg");
 const SVG_VOLUME_X: &[u8] = include_bytes!("../../assets/icons/lucide/volume-x.svg");
@@ -144,6 +147,9 @@ pub enum Icon {
     MousePointer,
     Play,
     Pause,
+    /// Stop / terminate an active capture session (filled square) — used by
+    /// the sender's destructive "Stop Sharing" action (BORU-SSUI-07).
+    Stop,
     Volume1,
     Volume2,
     VolumeX,
@@ -220,6 +226,7 @@ impl Icon {
             Icon::MousePointer => SVG_MOUSE_POINTER,
             Icon::Play => SVG_PLAY,
             Icon::Pause => SVG_PAUSE,
+            Icon::Stop => SVG_STOP,
             Icon::Volume1 => SVG_VOLUME_1,
             Icon::Volume2 => SVG_VOLUME_2,
             Icon::VolumeX => SVG_VOLUME_X,
@@ -501,6 +508,8 @@ mod tests {
             Icon::Desktop,
             Icon::Panel,
             Icon::Play,
+            Icon::Pause,
+            Icon::Stop,
             Icon::Online,
             Icon::Offline,
             Icon::Retry,

@@ -28,6 +28,7 @@
 //! | Selection summary       | `selection_summary(…)`        | "N participant(s) selected"        |
 //! | Dialog footer           | `DialogFooter::new(…)`        | Cancel + primary action row        |
 //! | Destructive button      | `destructive_button(…)`       | danger-filled action               |
+//! | Destructive icon button | `destructive_button_icon(…)`  | danger-filled action with icon     |
 //!
 //! Buttons: reuse `ui_components::primary_button` / `secondary_button` /
 //! `ghost_icon_button` directly — those are the canonical Boru buttons and are
@@ -66,6 +67,7 @@ use iced::{Alignment, Background, Border, Color, Element, Length, Theme};
 use crate::app::AppMessage;
 use crate::design_tokens;
 use crate::fonts::TypeRole;
+use crate::icon_system::{Icon, IconSize};
 use crate::ui_components;
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1258,6 +1260,61 @@ pub fn destructive_button<'a>(
     }
 }
 
+/// A filled destructive button with a leading icon (danger background,
+/// white icon + white label).
+///
+/// BORU-SSUI-07 (PDF Task 7): the sender's "Stop Sharing" action uses
+/// this so the destructive action carries a red/white stop glyph. The
+/// solid red fill matches both the approved mockup (solid red stop
+/// button) and Boru's existing destructive-action convention
+/// (`destructive_button`), so the PDF's "reserve solid alarming red fill
+/// for hover/pressed or if that matches Boru destructive-action
+/// conventions" clause is satisfied by the shared primitive.
+pub fn destructive_button_icon(
+    icon: Icon,
+    label: impl Into<String>,
+    on_press: Option<AppMessage>,
+    disabled: bool,
+) -> Element<'static, AppMessage> {
+    let row = Row::new()
+        .push(
+            icon.build()
+                .size(IconSize::Sm)
+                .color_fn(white_color)
+                .build(),
+        )
+        .push(
+            Space::new()
+                .width(Length::Fixed(design_tokens::SPACE_8))
+                .height(Length::Shrink),
+        )
+        .push(
+            text(label.into())
+                .font(TypeRole::ButtonLabel.font())
+                .size(TypeRole::ButtonLabel.size_px())
+                .color(Color::WHITE),
+        )
+        .align_y(Alignment::Center);
+
+    let btn = button(row)
+        .padding([design_tokens::SPACE_8, design_tokens::SPACE_16])
+        .style(button_destructive_style);
+
+    if disabled {
+        btn.into()
+    } else if let Some(msg) = on_press {
+        btn.on_press(msg).into()
+    } else {
+        btn.into()
+    }
+}
+
+/// Icon color for filled buttons (white glyph on the solid accent/danger
+/// fill). Mirrors `ui_components::white_color`.
+fn white_color(_theme: &Theme) -> Color {
+    Color::WHITE
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════════════════════════════════
@@ -1432,6 +1489,23 @@ mod tests {
         let _ = el;
         let el: Element<'static, AppMessage> =
             destructive_button("Remove", None, true);
+        let _ = el;
+    }
+
+    /// BORU-SSUI-07 (PDF Task 7): the icon-bearing destructive action
+    /// (sender "Stop Sharing") builds in enabled + disabled states with
+    /// the same danger fill as the plain destructive button.
+    #[test]
+    fn destructive_button_icon_builds() {
+        let el: Element<'static, AppMessage> = destructive_button_icon(
+            Icon::Stop,
+            "Stop Sharing",
+            Some(AppMessage::Noop),
+            false,
+        );
+        let _ = el;
+        let el: Element<'static, AppMessage> =
+            destructive_button_icon(Icon::Stop, "Stop Sharing", None, true);
         let _ = el;
     }
 }

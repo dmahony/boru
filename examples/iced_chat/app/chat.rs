@@ -920,7 +920,7 @@ impl IcedChat {
             // active (requesting → error). Terminal notices offer retry and
             // dismissal instead.
             match &self.screen_share_host_state {
-                ScreenShareHostState::Stopped | ScreenShareHostState::Error(_) => {
+                s if !Self::stop_action_visible(s) => {
                     let peer_key = conversation
                         .and_then(|entry| PublicKey::from_str(&entry.peer_id).ok());
                     let mut actions: Vec<iced::Element<'_, AppMessage>> = Vec::new();
@@ -939,10 +939,52 @@ impl IcedChat {
                     items.push(row(actions).spacing(SPACE_8).into());
                 }
                 _ => {
+                    // BORU-SSUI-07 (PDF Task 7): bottom action row.
+                    //
+                    // "Pause Preview" is intentionally OMITTED (the PDF
+                    // explicitly allows omitting it "until that behavior is
+                    // safely available"): the sender has NO local preview
+                    // surface — `screen_share_frame_handle` is populated only
+                    // by the VIEWER decode worker (`ScreenShareFrameReceived`),
+                    // never by the host capture path — and
+                    // `ScreenShareHostState::Paused` is an automatic SESSION
+                    // pause entered when the capture source disappears
+                    // (monitor unplug), which pauses the remote stream by
+                    // design. Binding a button to that state would pause the
+                    // remote stream by accident, which the PDF forbids. A
+                    // local-only preview pause would need a host-side preview
+                    // surface + a capture-side freeze that does not touch the
+                    // encode/transport path; there is no such mechanism today,
+                    // so the button is omitted rather than inventing one.
+                    // BORU-SSUI-08 token work may revisit when a local preview
+                    // exists.
+                    //
+                    // "Stop Sharing" is the ONLY destructive-looking action in
+                    // the panel and sits on the far right of the action row
+                    // (fill spacer keeps it right-aligned). It dispatches the
+                    // SAME `AppMessage::StopScreenShare` the old text button
+                    // used — the cleanup path (stop capture, release
+                    // resources, EndSession, reset UI, Stopped state) is
+                    // unchanged. The red/destructive treatment (solid danger
+                    // fill + white stop icon + white label) matches both the
+                    // approved mockup and Boru's existing destructive-action
+                    // convention (`form_components::destructive_button`), so
+                    // the PDF's "reserve solid alarming red fill for
+                    // hover/pressed or if that matches Boru destructive-action
+                    // conventions" clause is satisfied.
                     items.push(
-                        button(text(crate::i18n::t("screenshare.stop_sharing")))
-                            .on_press(AppMessage::StopScreenShare)
-                            .into(),
+                        row![
+                            iced::widget::Space::new().width(Length::Fill),
+                            crate::form_components::destructive_button_icon(
+                                Icon::Stop,
+                                crate::i18n::t("screenshare.stop_sharing"),
+                                Some(AppMessage::StopScreenShare),
+                                false,
+                            ),
+                        ]
+                        .spacing(SPACE_8)
+                        .align_y(iced::Alignment::Center)
+                        .into(),
                     );
                 }
             }
@@ -1224,6 +1266,20 @@ impl IcedChat {
             enabled: !unavailable,
             active,
         }
+    }
+
+    #[cfg(feature = "screen-sharing")]
+    /// BORU-SSUI-07 (PDF Task 7): whether the sender's destructive
+    /// "Stop Sharing" action row is shown for a host state. It is shown
+    /// for every active state (requesting → reconnecting); the terminal
+    /// states (Stopped / Error) instead show Share Again + Dismiss.
+    /// This keeps the action-row branching testable and the destructive
+    /// action reachable in exactly the same states as before.
+    pub(crate) fn stop_action_visible(state: &ScreenShareHostState) -> bool {
+        !matches!(
+            state,
+            ScreenShareHostState::Stopped | ScreenShareHostState::Error(_)
+        )
     }
 
     #[cfg(feature = "screen-sharing")]
@@ -8745,5 +8801,52 @@ mod tests {
     #[test]
     fn audio_label_key_resolves_to_runtime_text() {
         assert_eq!(crate::i18n::t("screenshare.audio"), "Audio");
+    }
+
+    /// BORU-SSUI-07 (PDF Task 7): the destructive Stop Sharing action row
+    /// is visible in every active host state (requesting → reconnecting)
+    /// and hidden only in the terminal states (Stopped / Error) that
+    /// instead offer Share Again + Dismiss. This preserves the old
+    /// button's reachability exactly — no state loses Stop Sharing.
+    #[test]
+    fn stop_action_visible_for_all_active_states() {
+        for state in [
+            ScreenShareHostState::Requesting,
+            ScreenShareHostState::Inviting,
+            ScreenShareHostState::Streaming,
+            ScreenShareHostState::Paused,
+            ScreenShareHostState::Reconnecting,
+        ] {
+            assert!(
+                IcedChat::stop_action_visible(&state),
+                "Stop Sharing must be reachable in {state:?}"
+            );
+        }
+        assert!(!IcedChat::stop_action_visible(&ScreenShareHostState::Stopped));
+        assert!(!IcedChat::stop_action_visible(&ScreenShareHostState::Error(
+            "boom".into()
+        )));
+    }
+
+    /// BORU-SSUI-07: the stop icon maps to a dedicated filled-square stop
+    /// asset, distinct from the pause glyph — the destructive action never
+    /// reuses a play/pause control icon.
+    #[test]
+    fn stop_icon_maps_to_distinct_filled_square_asset() {
+        let stop = String::from_utf8_lossy(Icon::Stop.bytes());
+        assert!(stop.starts_with("<svg"), "stop SVG root");
+        // The filled-square stop glyph (square-fill.svg) carries a rect.
+        assert!(stop.contains("rect"), "stop glyph is a square");
+        let pause = String::from_utf8_lossy(Icon::Pause.bytes());
+        assert_ne!(stop, pause, "stop and pause must be distinct glyphs");
+        assert_ne!(Icon::Stop, Icon::Pause);
+    }
+
+    /// BORU-SSUI-07: the "Stop Sharing" label key resolves to real runtime
+    /// text (never the raw key), so the destructive button shows a real
+    /// label from the shared locale.
+    #[test]
+    fn stop_sharing_label_key_resolves_to_runtime_text() {
+        assert_eq!(crate::i18n::t("screenshare.stop_sharing"), "Stop Sharing");
     }
 }
