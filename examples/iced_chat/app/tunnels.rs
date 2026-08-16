@@ -25,10 +25,6 @@ impl IcedChat {
         // dialog body is intentionally section-stacked in the narrow tier;
         // the same tier also keeps its footer reachable by reducing the
         // scroll viewport rather than allowing a dense two-column form.
-        let responsive_tier = self
-            .boru_layout()
-            .responsive
-            .tier_for_width(self.window_width);
 
         // Tunnel Details — the service name the friend sees.
         let mut name_field = TextInput::new(
@@ -146,15 +142,9 @@ impl IcedChat {
             .primary_enabled(port_valid && !share_submitting)
             .on_close(AppMessage::CancelShareLocalService)
             .on_backdrop(AppMessage::CancelShareLocalService)
-            // TUN-UI: cap the body so the footer (Cancel / Create Tunnel)
-            // stays on screen when the Local Services suggestion list grows
-            // the dialog past the window height. Same value as the Create
-            // Group Chat dialog.
-            .scroll_body(if responsive_tier == crate::layout::ViewportTier::Narrow {
-                420.0
-            } else {
-                520.0
-            })
+            // Keep the footer reachable when the local-service list grows;
+            // the shared responsive helper owns the tier-specific budget.
+            .scroll_body(self.dialog_body_max_height())
             .build(&theme);
 
         iced::widget::stack![base, overlay].into()

@@ -163,6 +163,14 @@ impl IcedChat {
         preferred.min((self.window_width - 48.0).max(320.0))
     }
 
+    /// Shared scroll viewport for modal bodies. Keeping the footer outside
+    /// this viewport makes primary actions reachable when a form grows.
+    pub(crate) fn dialog_body_max_height(&self) -> f32 {
+        self.boru_layout()
+            .responsive
+            .dialog_body_max_height_for_width(self.window_width)
+    }
+
     /// Wrap the base layout in an overlay showing the advanced connection details.
     pub(crate) fn view_connection_details_dialog<'a>(
         &'a self,
@@ -391,6 +399,7 @@ impl IcedChat {
             )
             .primary_enabled(name_valid && !submitting)
             .on_backdrop(AppMessage::CancelCreateRoom)
+            .scroll_body(self.dialog_body_max_height())
             .build(&theme);
 
         iced::widget::stack![base, overlay].into()
@@ -496,6 +505,7 @@ impl IcedChat {
             )
             .primary_enabled(name_valid)
             .on_backdrop(AppMessage::CancelRoomSettings)
+            .scroll_body(self.dialog_body_max_height())
             .build(&theme);
 
         iced::widget::stack![base, overlay].into()
@@ -637,7 +647,7 @@ impl IcedChat {
             .primary_enabled(group_name_valid && !group_submitting)
             .on_close(AppMessage::HideCreateGroupDialog)
             .on_backdrop(AppMessage::HideCreateGroupDialog)
-            .scroll_body(520.0)
+            .scroll_body(self.dialog_body_max_height())
             .build(&theme);
 
         iced::widget::stack![base, overlay].into()
@@ -716,6 +726,7 @@ impl IcedChat {
             )
             .on_close(AppMessage::CloseReceiveTicketDialog)
             .on_backdrop(AppMessage::CloseReceiveTicketDialog)
+            .scroll_body(self.dialog_body_max_height())
             .build(&theme);
 
         iced::widget::stack![base, overlay].into()
@@ -788,6 +799,7 @@ impl IcedChat {
             .primary("Done", AppMessage::CloseShortCodeDialog)
             .on_close(AppMessage::CloseShortCodeDialog)
             .on_backdrop(AppMessage::CloseShortCodeDialog)
+            .scroll_body(self.dialog_body_max_height())
             .build(&theme);
 
         iced::widget::stack![base, overlay].into()
@@ -843,6 +855,7 @@ impl IcedChat {
             .primary_enabled(!self.redeem_code_busy && !self.redeem_code_input.trim().is_empty())
             .on_close(AppMessage::CloseRedeemCodeDialog)
             .on_backdrop(AppMessage::CloseRedeemCodeDialog)
+            .scroll_body(self.dialog_body_max_height())
             .build(&theme);
 
         iced::widget::stack![base, overlay].into()
@@ -909,6 +922,7 @@ impl IcedChat {
             .secondary("Cancel", AppMessage::CancelCreateTunnel)
             .on_close(AppMessage::CancelCreateTunnel)
             .on_backdrop(AppMessage::CancelCreateTunnel)
+            .scroll_body(self.dialog_body_max_height())
             .build(&theme);
 
         iced::widget::stack![base, overlay].into()
@@ -951,6 +965,7 @@ impl IcedChat {
             .push_body(body)
             .secondary("Cancel", AppMessage::HideInviteMemberDialog)
             .primary("Send Invite", AppMessage::ConfirmInviteMember)
+            .scroll_body(self.dialog_body_max_height())
             .build(&theme);
 
         iced::widget::stack![base, overlay].into()
