@@ -1239,6 +1239,80 @@ mod responsive_height_tests {
     use super::{HeightTier, ResponsiveLayout, ViewportTier};
 
     #[test]
+    fn width_tier_boundaries_are_explicit_and_configured() {
+        let layout = ResponsiveLayout::default();
+
+        // The lower bound is exclusive: exactly 360 px is the first desktop
+        // width. The ultra-wide bound is inclusive so a 1440 px maximized
+        // window cannot fall through into the desktop tier.
+        assert_eq!(layout.tier_for_width(359.99), ViewportTier::Narrow);
+        assert_eq!(layout.tier_for_width(360.0), ViewportTier::Desktop);
+        assert_eq!(layout.tier_for_width(1439.99), ViewportTier::Desktop);
+        assert_eq!(layout.tier_for_width(1440.0), ViewportTier::UltraWide);
+
+        // Breakpoints are layout data, not a second set of view literals.
+        let custom = ResponsiveLayout {
+            narrow_max_width: 480.0,
+            ultra_wide_min_width: 1600.0,
+            ..layout
+        };
+        assert_eq!(custom.tier_for_width(479.99), ViewportTier::Narrow);
+        assert_eq!(custom.tier_for_width(480.0), ViewportTier::Desktop);
+        assert_eq!(custom.tier_for_width(1599.99), ViewportTier::Desktop);
+        assert_eq!(custom.tier_for_width(1600.0), ViewportTier::UltraWide);
+    }
+
+    #[test]
+    fn per_tier_values_follow_the_resolved_width_tier() {
+        let layout = ResponsiveLayout::default();
+
+        assert_eq!(layout.home_columns_for_width(359.99), 1);
+        assert_eq!(layout.home_columns_for_width(360.0), 2);
+        assert_eq!(layout.home_columns_for_width(1440.0), 2);
+        assert_eq!(layout.home_padding_x_for_width(359.99), 28.0);
+        assert_eq!(layout.home_padding_x_for_width(1440.0), 32.0);
+        assert_eq!(layout.dialog_body_max_height_for_width(1440.0), 520.0);
+    }
+
+    #[test]
+    fn home_content_width_accounts_for_sidebar_padding_and_divider() {
+        let layout = super::LayoutConfig::default();
+
+        // These values pin the current baseline, including the one-pixel
+        // divider and the responsive padding tier.
+        assert_eq!(layout.home_content_width(1024.0), 679.0);
+        assert_eq!(layout.home_content_width(1280.0), 919.0);
+        assert_eq!(layout.home_content_width(1440.0), 1071.0);
+        assert_eq!(layout.home_content_width(3840.0), 3471.0);
+        assert_eq!(layout.home_content_width(0.0), 0.0);
+    }
+
+    #[test]
+    fn sidebar_width_is_clamped_at_supported_viewport_extremes() {
+        let sidebar = super::SidebarLayout::default();
+        let responsive = ResponsiveLayout::default();
+
+        assert_eq!(
+            sidebar.width_for_window(0.0, &responsive),
+            sidebar.width_min
+        );
+        assert_eq!(
+            sidebar.width_for_window(responsive.viewport_min_width, &responsive),
+            sidebar.width_min
+        );
+        assert_eq!(
+            sidebar.width_for_window(responsive.viewport_ref_width, &responsive),
+            sidebar.width
+        );
+        assert_eq!(
+            sidebar.width_for_window(f32::INFINITY, &responsive),
+            sidebar.width
+        );
+        assert!(sidebar.width_min <= sidebar.width);
+        assert!(sidebar.width <= sidebar.width_max);
+    }
+
+    #[test]
     fn short_window_rules_cover_1024x720() {
         let layout = ResponsiveLayout::default();
 
