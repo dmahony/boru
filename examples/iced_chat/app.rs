@@ -38351,6 +38351,93 @@ fn vr_create_tunnel_picker_port_validation() {
             let mut element = app.view();
             render_element(&mut element, "settings_light", 1200, 800, false);
         }
+
+        // ── BORU-SSUI-02: sender screen-share control card shell ─────────
+        // Renders the real sender branch of `view_screen_share_panel` (the
+        // card below the conversation header) with an active streaming
+        // session, enumerated sources, quality metrics and the runtime peer
+        // name. The card must show the muted "Sharing your screen with
+        // <peer>" title at top-left, a subtle surface/border/radius/shadow,
+        // and stay compact (content height only).
+        fn seed_sender_share_session(app: &mut IcedChat, topic: TopicId, peer: &PublicKey) {
+            use boru_core::screen_share::{
+                CaptureSource, CaptureSourceId, CaptureSourceKind, PathKind, QualityPreset,
+                ScreenShareSessionMetrics, ScreenShareStats, ScreenShareStatsSnapshot,
+            };
+            app.screen = Screen::Chat { topic };
+            app.topic = topic;
+            app.screen_share_host_state = ScreenShareHostState::Streaming;
+            app.screen_share_sources = Some(vec![
+                CaptureSource {
+                    id: CaptureSourceId(1),
+                    kind: CaptureSourceKind::Desktop,
+                    title: "Entire desktop".to_string(),
+                    width: 1920,
+                    height: 1080,
+                    geometry: None,
+                },
+                CaptureSource {
+                    id: CaptureSourceId(2),
+                    kind: CaptureSourceKind::Window,
+                    title: "xfort-gorai".to_string(),
+                    width: 1280,
+                    height: 800,
+                    geometry: None,
+                },
+            ]);
+            app.screen_share_selected_source = Some(CaptureSourceId(1));
+            let mut stats = ScreenShareStats::new();
+            let snapshot: ScreenShareStatsSnapshot = stats.snapshot();
+            app.screen_share_host_metrics = Some(ScreenShareSessionMetrics {
+                codec: "h264".to_string(),
+                width: 1920,
+                height: 1080,
+                fps: 30,
+                bitrate_bps: 4_000_000,
+                backend: "test-pattern".to_string(),
+                path_kind: PathKind::Direct,
+                preset: QualityPreset::LanHigh,
+                adaptive_level: 0,
+                snapshot,
+            });
+            app.screen_share_audio_active = false;
+            app.screen_share_control_active = false;
+            app.screen_share_dev_overlay = false;
+            app.names.insert(*peer, "Alice".to_string());
+            // conversation_store entry so `view_screen_share_panel` resolves
+            // the real display name for the "Sharing your screen with {name}"
+            // title (never mockup text).
+            let entry = ConversationEntry::new(topic, peer.to_string(), "Alice");
+            app.conversation_store.upsert(entry);
+            app.sender = Some(boru_core::api::GossipSender::new(
+                irpc::channel::mpsc::Sender::from(tokio::sync::mpsc::channel::<
+                    boru_core::api::Command,
+                >(8).0),
+            ));
+            app.sender_ready = true;
+        }
+
+        #[test]
+        fn capture_screen_share_sender_card_light() {
+            load_fonts();
+            let peer = SecretKey::generate().public();
+            let (_rt, mut app) = seed_app("6c0f88fe9f", &peer, false);
+            let topic = TopicId::from_bytes([7u8; 32]);
+            seed_sender_share_session(&mut app, topic, &peer);
+            let mut element = app.view();
+            render_element(&mut element, "screen_share_sender_card_light", 1200, 800, false);
+        }
+
+        #[test]
+        fn capture_screen_share_sender_card_dark() {
+            load_fonts();
+            let peer = SecretKey::generate().public();
+            let (_rt, mut app) = seed_app("6c0f88fe9f", &peer, true);
+            let topic = TopicId::from_bytes([7u8; 32]);
+            seed_sender_share_session(&mut app, topic, &peer);
+            let mut element = app.view();
+            render_element(&mut element, "screen_share_sender_card_dark", 1200, 800, true);
+        }
     }
 fn vr_create_tunnel_friend_profile_base_is_fill_sized() {
     // Regression guard for the "Create Tunnel screen cannot enter a port"
