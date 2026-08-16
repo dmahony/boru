@@ -6,12 +6,99 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use iroh::{Endpoint, PublicKey};
+use iroh::{Endpoint, EndpointAddr, PublicKey};
 use n0_error::Result;
 use n0_future::StreamExt;
 
 use crate::chat_callbacks::{TransferId, TransferKind, TransferProgress};
 use crate::public_room_safety::PublicRoomSafety;
+
+/// Download an announced file offer into a reserved destination while
+/// emitting the same progress lifecycle used by blob downloads.
+#[allow(clippy::too_many_arguments)]
+pub async fn download_file_offer_to_file(
+    endpoint: &Endpoint,
+    owner: PublicKey,
+    offer_id: crate::chat_core::protocol::FileOfferId,
+    name: String,
+    kind: TransferKind,
+    destination: &mut crate::safe_destination::ReservedDestination,
+    on_progress: impl FnMut(TransferProgress) + Send + 'static,
+) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let id = TransferId::next();
+    let shared_cb: TransferProgressCallback = Arc::new(Mutex::new(Some(Box::new(on_progress))));
+    let emit = |event: TransferProgress| {
+        if let Ok(mut guard) = shared_cb.lock() {
+            if let Some(callback) = guard.as_mut() {
+                callback(event);
+            }
+        }
+    };
+    emit(TransferProgress::Started { id, kind, name: name.clone(), total: None });
+    let cancel_guard = CancelGuard::new(id, kind, name.clone(), shared_cb.clone());
+    let mut transfer = match crate::file_offer_protocol::open_file_offer(
+        endpoint, EndpointAddr::new(owner), offer_id,
+    ).await {
+        Ok(transfer) => transfer,
+        Err(error) => {
+            cancel_guard.disarm();
+            emit(TransferProgress::Failed { id, name, error: error.to_string() });
+            return Err(n0_error::anyerr!("direct file offer failed: {error}"));
+        }
+    };
+    if transfer.header.offer_id != offer_id || transfer.header.name != name {
+        cancel_guard.disarm();
+        emit(TransferProgress::Failed { id, name, error: "direct transfer header does not match the requested offer".into() });
+        return Err(n0_error::anyerr!("direct transfer header mismatch"));
+    }
+    let expected_size = transfer.header.size;
+    let std_file = match destination.take_file() {
+        Some(file) => file,
+        None => {
+            cancel_guard.disarm();
+            emit(TransferProgress::Failed { id, name, error: "reserved destination already consumed".into() });
+            return Err(n0_error::anyerr!("reserved destination already consumed"));
+        }
+    };
+    let mut file = tokio::fs::File::from_std(std_file);
+    let mut hasher = blake3::Hasher::new();
+    let result: Result<()> = async {
+        let mut buffer = vec![0u8; 256 * 1024];
+        let mut received = 0u64;
+        while received < expected_size {
+            let read_len = (expected_size - received).min(buffer.len() as u64) as usize;
+            let count = transfer.read(&mut buffer[..read_len]).await
+                .map_err(|error| n0_error::anyerr!("direct transfer read failed: {error}"))?
+                .ok_or_else(|| n0_error::anyerr!("direct transfer ended before advertised size"))?;
+            if count == 0 {
+                return Err(n0_error::anyerr!("direct transfer ended before advertised size"));
+            }
+            file.write_all(&buffer[..count]).await
+                .map_err(|error| n0_error::anyerr!("write download destination: {error}"))?;
+            hasher.update(&buffer[..count]);
+            received += count as u64;
+            emit(TransferProgress::Progress { id, kind, name: name.clone(), bytes: received, total: Some(expected_size) });
+        }
+        file.sync_all().await
+            .map_err(|error| n0_error::anyerr!("sync download destination: {error}"))?;
+        destination.restore_file(file.into_std().await);
+        let _content_hash = hasher.finalize();
+        Ok(())
+    }.await;
+    match result {
+        Ok(()) => {
+            cancel_guard.disarm();
+            emit(TransferProgress::Completed { id, kind, name });
+            Ok(())
+        }
+        Err(error) => {
+            cancel_guard.disarm();
+            emit(TransferProgress::Failed { id, name, error: error.to_string() });
+            Err(error)
+        }
+    }
+}
 
 /// Shared progress callback used by blob download functions with progress tracking.
 pub(crate) type TransferProgressCallback =

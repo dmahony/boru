@@ -5498,6 +5498,7 @@ impl IcedChat {
                 let endpoint = self.endpoint.clone();
                 let neighbors = self.neighbors.clone();
                 let _safety = self.public_room_safety.clone();
+                let availability = dl.availability.clone();
                 let ticket_str = dl.ticket.clone();
                 let name = dl.name.clone();
                 let kind = dl.kind;
@@ -5512,11 +5513,17 @@ impl IcedChat {
                 let progress_queue = self.download_progress_queue.clone();
                 iced::Task::perform(
                     async move {
-                        let ticket: iroh_blobs::ticket::BlobTicket = ticket_str
-                            .parse()
-                            .map_err(|e| format!("Invalid ticket: {e}"))?;
-                        let (addr, hash, _format) = ticket.into_parts();
-                        let node_id = addr.id;
+                        let (node_id, hash, _format) = match &availability {
+                            AttachmentAvailability::DirectOffer { owner, .. } => (*owner, None, None),
+                            AttachmentAvailability::Blob { .. }
+                            | AttachmentAvailability::Hybrid { .. } => {
+                                let ticket: iroh_blobs::ticket::BlobTicket = ticket_str
+                                    .parse()
+                                    .map_err(|e| format!("Invalid ticket: {e}"))?;
+                                let (addr, hash, format) = ticket.into_parts();
+                                (addr.id, Some(hash), Some(format))
+                            }
+                        };
                         let candidates = download_candidates(node_id, &neighbors);
 
                         let dl_dir = data_dir.join("downloads");
@@ -5528,7 +5535,7 @@ impl IcedChat {
                             let save_dir = boru_core::collection_transfer::download_collection_to_dir(
                                 &blob_store,
                                 &endpoint,
-                                hash,
+                                hash.expect("folder availability has a content hash"),
                                 candidates,
                                 &name,
                                 &dl_dir,
@@ -5554,27 +5561,39 @@ impl IcedChat {
                                     return Ok::<_, String>((name.clone(), dl_dir.join(&name), true));
                                 }
                             };
-                        download_blob_to_file(
-                            &blob_store,
-                            &endpoint,
-                            hash,
-                            candidates,
-                            name.clone(),
-                            kind,
-                            &mut destination,
-                            expected_hash.as_deref(),
-                            {
-                                let queue = progress_queue.clone();
-                                move |ev| {
-                                    if let Ok(mut q) = queue.lock() {
-                                        q.push_back(ev);
+                        if let AttachmentAvailability::DirectOffer { owner, offer_id } = availability {
+                            boru_core::chat_core::downloads::download_file_offer_to_file(
+                                &endpoint, owner, offer_id, name.clone(), kind, &mut destination,
+                                {
+                                    let queue = progress_queue.clone();
+                                    move |ev| {
+                                        if let Ok(mut q) = queue.lock() { q.push_back(ev); }
                                     }
-                                }
-                            },
-                            None,
-                        )
-                        .await
-                        .map_err(|e| format!("Download failed: {e}"))?;
+                                },
+                            )
+                            .await
+                            .map_err(|e| format!("Direct download failed: {e}"))?;
+                        } else {
+                            download_blob_to_file(
+                                &blob_store,
+                                &endpoint,
+                                hash.expect("blob availability has a content hash"),
+                                candidates,
+                                name.clone(),
+                                kind,
+                                &mut destination,
+                                expected_hash.as_deref(),
+                                {
+                                    let queue = progress_queue.clone();
+                                    move |ev| {
+                                        if let Ok(mut q) = queue.lock() { q.push_back(ev); }
+                                    }
+                                },
+                                None,
+                            )
+                            .await
+                            .map_err(|e| format!("Download failed: {e}"))?;
+                        }
                         let save_path = destination
                             .publish()
                             .map_err(|e| format!("Publish failed: {e}"))?;
