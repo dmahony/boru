@@ -38387,6 +38387,23 @@ fn vr_create_tunnel_picker_port_validation() {
                     height: 800,
                     geometry: None,
                 },
+                CaptureSource {
+                    id: CaptureSourceId(3),
+                    kind: CaptureSourceKind::Monitor,
+                    title: "DP-1: Dell U2720Q".to_string(),
+                    width: 2560,
+                    height: 1440,
+                    geometry: None,
+                },
+                // Long window title — the card must ellipsize it (BORU-SSUI-03).
+                CaptureSource {
+                    id: CaptureSourceId(4),
+                    kind: CaptureSourceKind::Window,
+                    title: "This is a very long application window title that should be ellipsized by the source card".to_string(),
+                    width: 1920,
+                    height: 1080,
+                    geometry: None,
+                },
             ]);
             app.screen_share_selected_source = Some(CaptureSourceId(1));
             let mut stats = ScreenShareStats::new();

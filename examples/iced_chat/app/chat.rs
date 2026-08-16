@@ -516,37 +516,38 @@ impl IcedChat {
             }
 
             // ── Monitor/source selection (PDF Phase 13) ───────────────
-            // The enumerated monitor list is shown in every active state so
+            // The enumerated source list is shown in every active state so
             // the sharer can pick the initial source before the viewer
-            // accepts and switch it any time afterwards. The chosen entry is
-            // highlighted; picking one sends HostCommand::SwitchSource.
+            // accepts and switch it any time afterwards. The chosen entry
+            // is highlighted; picking one sends HostCommand::SwitchSource.
+            // BORU-SSUI-03: sources render as selectable CARDS (kind icon +
+            // ellipsized title + dimensions + selected state) instead of
+            // the old blue text buttons, in a horizontally scrollable row
+            // so more sources than fit never wrap into a wall of buttons.
+            // The message dispatched is unchanged — `ScreenShareSelectSource`
+            // — so capture switching behaviour is preserved exactly.
             if let Some(sources) = &self.screen_share_sources {
                 if !sources.is_empty() {
                     let selected = self.screen_share_selected_source;
-                    let source_row: Vec<iced::Element<'_, AppMessage>> = sources
+                    let cards: Vec<iced::Element<'_, AppMessage>> = sources
                         .iter()
                         .map(|source| {
                             let is_selected = selected == Some(source.id);
-                            let label = if is_selected {
-                                format!("✓ {}", source.picker_label())
-                            } else {
-                                source.picker_label()
-                            };
-                            button(text(label).size(crate::fonts::TypeRole::SupportingText.size_px()))
-                                .on_press(AppMessage::ScreenShareSelectSource(source.id))
-                                .padding([2, 6])
-                                .into()
+                            self.view_source_card(source, is_selected)
                         })
                         .collect();
                     items.push(
-                        row![
+                        column![
                             text(crate::i18n::t("screenshare.source"))
                                 .size(crate::fonts::TypeRole::SupportingText.size_px())
                                 .color(Self::muted_color(self.dark_mode)),
-                            row(source_row).spacing(SPACE_4),
+                            iced::widget::scrollable(row(cards).spacing(SPACE_8))
+                                .direction(iced::widget::scrollable::Direction::Horizontal(
+                                    iced::widget::scrollable::Scrollbar::default().spacing(SPACE_4),
+                                ))
+                                .width(Length::Fill),
                         ]
                         .spacing(SPACE_6)
-                        .align_y(iced::Alignment::Center)
                         .into(),
                     );
                 }
@@ -975,6 +976,187 @@ impl IcedChat {
             // BORU-SS-37: system audio is a separate optional capability.
             Capability::Audio => "audio".to_string(),
             Capability::ViewScreen => "view".to_string(),
+        }
+    }
+
+    #[cfg(feature = "screen-sharing")]
+    /// BORU-SSUI-03: map a capture-source kind to a distinct source-picker
+    /// icon. `CaptureSourceKind` today emits Monitor/Window/Desktop; there
+    /// is no Panel/special-surface kind yet, so `Icon::Panel` stays
+    /// reserved (documented gap — see icon_system.rs).
+    fn source_kind_icon(kind: boru_core::screen_share::CaptureSourceKind) -> Icon {
+        use boru_core::screen_share::CaptureSourceKind;
+        match kind {
+            CaptureSourceKind::Monitor => Icon::Monitor,
+            CaptureSourceKind::Window => Icon::Window,
+            CaptureSourceKind::Desktop => Icon::Desktop,
+        }
+    }
+
+    #[cfg(feature = "screen-sharing")]
+    /// BORU-SSUI-03: one selectable source card for the screen-share
+    /// source picker.
+    ///
+    /// Replaces the old blue text buttons. Each card carries a source-type
+    /// icon, the ellipsized runtime source/window title, and the native
+    /// dimensions on a second line. The selected card gets an accent
+    /// border + soft accent background + a check glyph (never colour
+    /// alone); unselected cards use a neutral surface with a subtle border
+    /// and hover/pressed feedback. Clicking dispatches the SAME
+    /// `ScreenShareSelectSource(source.id)` message the text buttons used,
+    /// so capture switching behaviour is unchanged.
+    fn view_source_card(
+        &self,
+        source: &CaptureSource,
+        selected: bool,
+    ) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{button, column, container, row, text, Space};
+        use iced::Length;
+
+        const SOURCE_CARD_WIDTH: f32 = 192.0;
+        // Title char budget keeps a single card from blowing up on a very
+        // long window title; the remainder is shown as a Unicode ellipsis
+        // (the repo's `truncate_with_ellipsis` helper). `Wrapping::None` +
+        // a clip container guarantee the line never wraps and grows the
+        // card (same single-line pattern as sidebar rows).
+        const TITLE_MAX_CHARS: usize = 20;
+
+        let dark_mode = self.dark_mode;
+        let theme = self.theme();
+
+        let kind_icon = Self::source_kind_icon(source.kind);
+        let icon_color = if selected {
+            crate::design_tokens::primary
+        } else {
+            crate::design_tokens::text_secondary
+        };
+        let icon = kind_icon
+            .build()
+            .size(IconSize::Md)
+            .color_fn(icon_color)
+            .build();
+
+        let title = crate::presentation::truncate_with_ellipsis(&source.title, TITLE_MAX_CHARS);
+        let dims = format!("{} × {}", source.width, source.height);
+
+        let title_color = if selected {
+            crate::design_tokens::text_primary(&theme)
+        } else {
+            crate::design_tokens::text_secondary(&theme)
+        };
+
+        let mut card_row = row![
+            icon,
+            column![
+                container(
+                    text(title)
+                        .size(crate::fonts::TypeRole::SupportingText.size_px())
+                        .font(crate::fonts::TypeRole::SupportingText.font())
+                        .color(title_color)
+                        .wrapping(iced::widget::text::Wrapping::None)
+                        .width(Length::Fill),
+                )
+                .width(Length::Fill)
+                .clip(true),
+                text(dims)
+                    .size(crate::fonts::TypeRole::Metadata.size_px())
+                    .font(crate::fonts::TypeRole::Metadata.font())
+                    .color(Self::muted_color(dark_mode))
+                    .wrapping(iced::widget::text::Wrapping::None)
+                    .width(Length::Fill),
+            ]
+            .spacing(SPACE_2)
+            .width(Length::Fill),
+        ]
+        .spacing(SPACE_8)
+        .align_y(iced::Alignment::Center);
+
+        // Clear selection indicator — a check glyph on the right edge. It is
+        // NOT colour-alone: the accent border + soft background + check are
+        // all present, so the state reads even for colour-blind users.
+        if selected {
+            let check = Icon::Check
+                .build()
+                .size(IconSize::Sm)
+                .color_fn(crate::design_tokens::primary)
+                .build();
+            card_row = card_row.push(check);
+        } else {
+            // Reserve the same right-edge slot so cards keep an even width
+            // whether or not they are selected.
+            card_row = card_row.push(
+                Space::new()
+                    .width(Length::Fixed(IconSize::Sm.px()))
+                    .height(Length::Fixed(IconSize::Sm.px())),
+            );
+        }
+
+        let body = container(card_row)
+            .padding([SPACE_8, SPACE_10])
+            .width(Length::Fixed(SOURCE_CARD_WIDTH));
+
+        button(body)
+            .on_press(AppMessage::ScreenShareSelectSource(source.id))
+            .padding(0)
+            .style(move |t, status| Self::source_card_button_style(t, status, selected))
+            .into()
+    }
+
+    #[cfg(feature = "screen-sharing")]
+    /// BORU-SSUI-03: button style for a source card.
+    ///
+    /// Selected: accent border + `primary_soft` background (plus the check
+    /// glyph drawn in the content). Unselected: neutral `surface`
+    /// background, subtle `border_muted` border, and hover/pressed
+    /// feedback via `surface_hover` / `surface_pressed` with an accent
+    /// border on hover — the same interaction language as the rest of Boru.
+    fn source_card_button_style(
+        theme: &iced::Theme,
+        status: iced::widget::button::Status,
+        selected: bool,
+    ) -> iced::widget::button::Style {
+        let bg = if selected {
+            crate::design_tokens::primary_soft(theme)
+        } else {
+            match status {
+                iced::widget::button::Status::Hovered => crate::design_tokens::surface_hover(theme),
+                iced::widget::button::Status::Pressed => {
+                    crate::design_tokens::surface_pressed(theme)
+                }
+                _ => crate::design_tokens::surface(theme),
+            }
+        };
+        let border_color = if selected {
+            crate::design_tokens::primary(theme)
+        } else {
+            match status {
+                iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed => {
+                    crate::design_tokens::primary(theme)
+                }
+                _ => crate::design_tokens::border_muted(theme),
+            }
+        };
+        iced::widget::button::Style {
+            background: Some(iced::Background::Color(bg)),
+            text_color: if selected {
+                crate::design_tokens::primary(theme)
+            } else {
+                crate::design_tokens::text_primary(theme)
+            },
+            border: iced::Border {
+                color: border_color,
+                width: if selected {
+                    2.0
+                } else {
+                    crate::design_tokens::BORDER_WIDTH
+                },
+                radius: crate::design_tokens::RADIUS_MD.into(),
+            },
+            shadow: match status {
+                iced::widget::button::Status::Hovered => crate::design_tokens::shadow_card(theme),
+                _ => iced::Shadow::default(),
+            },
+            ..Default::default()
         }
     }
 
@@ -8147,6 +8329,35 @@ impl IcedChat {
             // update() only dispatches the chat variants here; other
             // variants can never reach this method (defensive catch-all).
             _ => iced::Task::none(),
+        }
+    }
+}
+
+#[cfg(all(test, feature = "screen-sharing"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_kind_icon_maps_every_capture_kind_to_distinct_icon() {
+        use boru_core::screen_share::CaptureSourceKind;
+        let kinds = [
+            (CaptureSourceKind::Monitor, Icon::Monitor),
+            (CaptureSourceKind::Window, Icon::Window),
+            (CaptureSourceKind::Desktop, Icon::Desktop),
+        ];
+        for (kind, expected) in kinds {
+            assert_eq!(IcedChat::source_kind_icon(kind), expected);
+        }
+        // Distinct icons for distinct kinds (acceptance: different icons
+        // for monitor/desktop/window).
+        let icons: Vec<Icon> = kinds
+            .iter()
+            .map(|(k, _)| IcedChat::source_kind_icon(*k))
+            .collect();
+        for (i, a) in icons.iter().enumerate() {
+            for b in &icons[i + 1..] {
+                assert_ne!(a, b);
+            }
         }
     }
 }
