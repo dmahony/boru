@@ -339,6 +339,11 @@ pub struct AppSettings {
     /// UI. Disabling it only hides the presentation — it never affects
     /// discovery or reconnection (PDF 2.3 guardrail).
     pub show_presence_indicator: bool,
+    /// Recently-used emoji as plain Unicode strings (BORU-TWEMOJI-14).
+    /// Local settings only — this list is never transmitted on the wire and
+    /// never stores asset keys, SVG paths or image bytes. The picker renders
+    /// each entry through the shared resolver/fallback pipeline.
+    pub recent_emojis: Vec<String>,
 }
 
 impl Default for AppSettings {
@@ -353,6 +358,7 @@ impl Default for AppSettings {
             home_menu_item_opacity: HOME_MENU_ITEM_OPACITY_DEFAULT,
             accent_color: None,
             show_presence_indicator: true,
+            recent_emojis: Vec::new(),
         }
     }
 }
@@ -4928,6 +4934,16 @@ pub struct IcedChat {
     show_member_list: bool,
     /// Whether the emoji picker panel is currently visible.
     show_emoji_picker: bool,
+    /// Active emoji picker category (BORU-TWEMOJI-12). The grid shows
+    /// exactly this category's catalog entries when no search is active.
+    emoji_category: crate::emoji::EmojiCategory,
+    /// Live emoji picker search query (BORU-TWEMOJI-13). Empty restores the
+    /// category view; non-empty shows shared-catalog search results.
+    emoji_search_query: String,
+    /// Recently-used emoji as plain Unicode strings (BORU-TWEMOJI-14).
+    /// Runtime copy of `AppSettings::recent_emojis`; updated on every
+    /// selection and persisted through Boru's normal settings system.
+    recent_emojis: Vec<String>,
     /// Whether the GIF picker panel is currently visible.
     show_gif_picker: bool,
     /// Search text for the GIF picker.
@@ -6463,6 +6479,14 @@ pub enum AppMessage {
     /// points: variation selectors, skin-tone modifiers, ZWJ sequences),
     /// never an asset key or SVG path. BORU-TWEMOJI-10.
     InsertEmoji(String),
+    /// Switch the emoji picker to a different content category
+    /// (BORU-TWEMOJI-12). The picker grid is rebuilt from the filtered
+    /// catalog, so no stale items survive the switch.
+    SelectEmojiCategory(crate::emoji::EmojiCategory),
+    /// Live emoji picker search query change (BORU-TWEMOJI-13). Every
+    /// keystroke updates the query; the picker view filters the shared
+    /// catalog immediately. An empty query restores the category view.
+    EmojiSearchChanged(String),
     /// Toggle the GIF picker panel.
     ToggleGifPicker,
     /// Search text changed in the GIF picker.
@@ -8198,6 +8222,12 @@ impl IcedChat {
             chat_search_query: String::new(),
             show_member_list: false,
             show_emoji_picker: false,
+            emoji_category: crate::emoji::EmojiCategory::SmileysAndPeople,
+            emoji_search_query: String::new(),
+            // BORU-TWEMOJI-14: restore the persisted recently-used list,
+            // sanitized so corrupt/unknown stored entries cannot break the
+            // picker (empty/whitespace entries are dropped).
+            recent_emojis: crate::emoji::recents::sanitize_recents(&app_settings.recent_emojis),
             show_gif_picker: false,
             gif_search_text: String::new(),
             gif_results: Vec::new(),
@@ -8860,7 +8890,6 @@ impl IcedChat {
     }
 
     /// Persist current dark_mode, sound_enabled, chat_text_size, and display_name to disk.
-    #[expect(dead_code)]
     fn save_settings(&self) {
         let settings = AppSettings {
             dark_mode: self.dark_mode,
@@ -8872,6 +8901,7 @@ impl IcedChat {
             home_menu_item_opacity: self.home_menu_item_opacity,
             accent_color: self.accent_color,
             show_presence_indicator: self.show_presence_indicator,
+            recent_emojis: self.recent_emojis.clone(),
         };
         settings.save(&self.data_dir);
     }
@@ -8889,6 +8919,7 @@ impl IcedChat {
         home_menu_item_opacity: f32,
         accent_color: Option<[u8; 3]>,
         show_presence_indicator: bool,
+        recent_emojis: Vec<String>,
     ) -> iced::Task<AppMessage> {
         let settings = AppSettings {
             dark_mode,
@@ -8900,6 +8931,7 @@ impl IcedChat {
             home_menu_item_opacity,
             accent_color,
             show_presence_indicator,
+            recent_emojis,
         };
         let data_dir = data_dir.to_path_buf();
         iced::Task::perform(
@@ -8987,6 +9019,7 @@ impl IcedChat {
             home_menu_item_opacity: self.home_menu_item_opacity,
             accent_color: self.accent_color,
             show_presence_indicator: self.show_presence_indicator,
+            recent_emojis: self.recent_emojis.clone(),
         };
         settings.save(&self.data_dir);
     }
@@ -10671,6 +10704,8 @@ impl IcedChat {
             AppMessage::ToggleVideoCardMenu(_) => "ToggleVideoCardMenu",
             AppMessage::ToggleEmojiPicker => "ToggleEmojiPicker",
             AppMessage::InsertEmoji(_) => "InsertEmoji",
+            AppMessage::SelectEmojiCategory(_) => "SelectEmojiCategory",
+            AppMessage::EmojiSearchChanged(_) => "EmojiSearchChanged",
             AppMessage::ToggleGifPicker => "ToggleGifPicker",
             AppMessage::GifSearchChanged(_) => "GifSearchChanged",
             AppMessage::SendGif(_) => "SendGif",
@@ -17758,6 +17793,8 @@ impl IcedChat {
             | AppMessage::ToggleVideoCardMenu(_)
             | AppMessage::ToggleEmojiPicker
             | AppMessage::InsertEmoji(_)
+            | AppMessage::SelectEmojiCategory(_)
+            | AppMessage::EmojiSearchChanged(_)
             | AppMessage::ToggleGifPicker
             | AppMessage::GifSearchChanged(_)
             | AppMessage::GifSearchDebounced(_)
@@ -24921,6 +24958,7 @@ mod tests {
             home_menu_item_opacity: HOME_MENU_ITEM_OPACITY_DEFAULT,
             accent_color: None,
             show_presence_indicator: true,
+            recent_emojis: Vec::new(),
         };
         let toggled = AppSettings {
             dark_mode: true,
@@ -24932,6 +24970,7 @@ mod tests {
             home_menu_item_opacity: HOME_MENU_ITEM_OPACITY_DEFAULT,
             accent_color: None,
             show_presence_indicator: true,
+            recent_emojis: original.recent_emojis.clone(),
         };
         toggled.save(&data_dir);
         let loaded = AppSettings::load(&data_dir);
@@ -24966,11 +25005,51 @@ mod tests {
             home_menu_item_opacity: 0.55,
             accent_color: None,
             show_presence_indicator: true,
+            recent_emojis: Vec::new(),
         };
         settings.save(&data_dir);
         let loaded = AppSettings::load(&data_dir);
         assert_eq!(loaded.home_menu_item_opacity, 0.55);
         assert_eq!(loaded.chat_text_size, 17.0);
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    /// Acceptance (BORU-TWEMOJI-14): recently-used emoji persist across app
+    /// restarts — a `settings.json` round-trip preserves the Unicode list
+    /// exactly, and the values are plain Unicode strings, never asset keys
+    /// or SVG paths.
+    #[test]
+    fn recent_emojis_round_trip_in_settings() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "boru-gui-recent-emojis-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        std::fs::create_dir_all(&data_dir).expect("test settings directory should be created");
+
+        let recents = vec!["❤️".to_string(), "😂".to_string(), "👍".to_string()];
+        let settings = AppSettings {
+            dark_mode: false,
+            sound_enabled: true,
+            chat_text_size: 17.0,
+            share_direct_addresses: false,
+            display_name: None,
+            home_background_image: None,
+            home_menu_item_opacity: HOME_MENU_ITEM_OPACITY_DEFAULT,
+            accent_color: None,
+            show_presence_indicator: true,
+            recent_emojis: recents.clone(),
+        };
+        settings.save(&data_dir);
+        let loaded = AppSettings::load(&data_dir);
+        assert_eq!(loaded.recent_emojis, recents);
+
+        // The stored values are plain Unicode strings — never asset keys,
+        // paths, or filenames.
+        for entry in &loaded.recent_emojis {
+            assert!(!entry.contains(".svg") && !entry.contains('/'));
+            assert!(!entry.trim().is_empty());
+        }
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 

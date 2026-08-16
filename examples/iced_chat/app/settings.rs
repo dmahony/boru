@@ -1525,6 +1525,7 @@ impl IcedChat {
                     home_menu_item_opacity: self.home_menu_item_opacity,
                     accent_color: self.accent_color,
                     show_presence_indicator: self.show_presence_indicator,
+                    recent_emojis: self.recent_emojis.clone(),
                 };
                 let data_dir = self.data_dir.clone();
                 let _progress_queue = self.download_progress_queue.clone();
@@ -1562,6 +1563,7 @@ impl IcedChat {
                     home_menu_item_opacity: self.home_menu_item_opacity,
                     accent_color: self.accent_color,
                     show_presence_indicator: self.show_presence_indicator,
+                    recent_emojis: self.recent_emojis.clone(),
                 };
                 let data_dir = self.data_dir.clone();
                 iced::Task::perform(
@@ -1593,6 +1595,7 @@ impl IcedChat {
                     home_menu_item_opacity: self.home_menu_item_opacity,
                     accent_color: self.accent_color,
                     show_presence_indicator: self.show_presence_indicator,
+                    recent_emojis: self.recent_emojis.clone(),
                 };
                 let data_dir = self.data_dir.clone();
                 iced::Task::perform(
@@ -1616,6 +1619,7 @@ impl IcedChat {
                     home_menu_item_opacity: self.home_menu_item_opacity,
                     accent_color: self.accent_color,
                     show_presence_indicator: self.show_presence_indicator,
+                    recent_emojis: self.recent_emojis.clone(),
                 };
                 let data_dir = self.data_dir.clone();
                 let _progress_queue = self.download_progress_queue.clone();
@@ -1639,6 +1643,7 @@ impl IcedChat {
                     home_menu_item_opacity: self.home_menu_item_opacity,
                     accent_color: self.accent_color,
                     show_presence_indicator: self.show_presence_indicator,
+                    recent_emojis: self.recent_emojis.clone(),
                 };
                 let data_dir = self.data_dir.clone();
                 let _progress_queue = self.download_progress_queue.clone();
@@ -1669,6 +1674,7 @@ impl IcedChat {
                     home_menu_item_opacity: self.home_menu_item_opacity,
                     accent_color: self.accent_color,
                     show_presence_indicator: self.show_presence_indicator,
+                    recent_emojis: self.recent_emojis.clone(),
                 };
                 let data_dir = self.data_dir.clone();
                 let _progress_queue = self.download_progress_queue.clone();
@@ -1692,6 +1698,7 @@ impl IcedChat {
                     home_menu_item_opacity: self.home_menu_item_opacity,
                     accent_color: self.accent_color,
                     show_presence_indicator: self.show_presence_indicator,
+                    recent_emojis: self.recent_emojis.clone(),
                 };
                 let data_dir = self.data_dir.clone();
                 iced::Task::perform(
@@ -1818,6 +1825,7 @@ impl IcedChat {
                             home_menu_item_opacity: self.home_menu_item_opacity,
                             accent_color: self.accent_color,
                             show_presence_indicator: self.show_presence_indicator,
+                            recent_emojis: self.recent_emojis.clone(),
                         };
                         iced::Task::perform(
                             async move {
@@ -1878,6 +1886,7 @@ impl IcedChat {
                     self.home_menu_item_opacity,
                     self.accent_color,
                     self.show_presence_indicator,
+                    self.recent_emojis.clone(),
                 )
             }
 
@@ -1895,6 +1904,7 @@ impl IcedChat {
                     home_menu_item_opacity: self.home_menu_item_opacity,
                     accent_color: self.accent_color,
                     show_presence_indicator: self.show_presence_indicator,
+                    recent_emojis: self.recent_emojis.clone(),
                 };
                 let data_dir = self.data_dir.clone();
                 iced::Task::perform(

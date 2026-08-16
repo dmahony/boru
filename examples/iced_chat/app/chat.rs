@@ -1106,8 +1106,17 @@ impl IcedChat {
     /// emoji/Twemoji concerns live in the dedicated emoji module. External
     /// behaviour is unchanged; the visual swap to SVG happens in
     /// BORU-TWEMOJI-10.
+    ///
+    /// BORU-TWEMOJI-12: the picker shows the active category's grid; the
+    /// category tab row lives inside the picker and emits
+    /// `SelectEmojiCategory` to switch.
     pub(crate) fn view_emoji_picker(&self) -> iced::Element<'_, AppMessage> {
-        crate::emoji::picker::view_emoji_picker(&self.theme())
+        crate::emoji::picker::view_emoji_picker(
+            &self.theme(),
+            self.emoji_category,
+            &self.emoji_search_query,
+            &self.recent_emojis,
+        )
     }
 
     // ── GIF picker async helpers ─────────────────────────────────────────
@@ -6452,9 +6461,37 @@ impl IcedChat {
                 iced::Task::none()
             }
 
+            AppMessage::SelectEmojiCategory(category) => {
+                // BORU-TWEMOJI-12: remember the active category so the next
+                // picker view shows the same tab; the grid is rebuilt from
+                // the filtered catalog in the view, so no stale items.
+                self.emoji_category = category;
+                iced::Task::none()
+            }
+
+            AppMessage::EmojiSearchChanged(query) => {
+                // BORU-TWEMOJI-13: remember the live query; the picker view
+                // filters the shared catalog on every frame, so the result
+                // list updates immediately as the query changes and an
+                // empty query restores the category view.
+                self.emoji_search_query = query;
+                iced::Task::none()
+            }
+
             AppMessage::InsertEmoji(emoji) => {
                 // Insert the emoji at the current cursor position
                 self.composer_text.push_str(&emoji);
+                // BORU-TWEMOJI-14: record the selection in the recently-used
+                // list (move-to-front, deduplicated, capped) and persist it
+                // through Boru's normal local settings (settings.json). Only
+                // the Unicode string is stored — never an asset key or SVG
+                // path — and the list is never transmitted on the wire.
+                let recents =
+                    crate::emoji::recents::record_recent(&self.recent_emojis, &emoji);
+                if recents != self.recent_emojis {
+                    self.recent_emojis = recents;
+                    self.save_settings();
+                }
                 iced::Task::none()
             }
 

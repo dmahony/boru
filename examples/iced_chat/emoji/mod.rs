@@ -49,11 +49,13 @@ pub mod asset_manifest;
 pub mod catalog;
 pub mod parser;
 pub mod picker;
+pub mod recents;
 pub mod renderer;
 
 pub use asset_manifest::{contains, TWEMOJI_ASSETS};
 pub use catalog::{common_emojis, Emoji, EmojiCategory};
 pub use parser::{emoji_asset, split_fragments, MessageFragment};
+pub use recents::{record_recent, sanitize_recents, RECENT_LIMIT};
 pub use renderer::{
     cached_svg_handle, EmojiAsset, EmojiAssetCache, EmojiRenderer, TwemojiRenderer,
 };
