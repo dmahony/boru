@@ -472,6 +472,49 @@ impl std::fmt::Display for ErrorCategory {
 
 /// Stable event name strings for transfer lifecycle events.
 pub mod event_names {
+    /// The user selected a local file for a direct offer.
+    pub const FILE_SELECTED: &str = "file_selected";
+    /// The sender registered the local-only offer metadata.
+    pub const OFFER_REGISTERED: &str = "offer_registered";
+    /// The offer announcement was broadcast over gossip.
+    pub const OFFER_BROADCAST: &str = "offer_broadcast";
+    /// A receiver accepted an offer announcement.
+    pub const OFFER_RECEIVED: &str = "offer_received";
+    /// A receiver requested the raw direct download stream.
+    pub const DIRECT_DOWNLOAD_REQUESTED: &str = "direct_download_requested";
+    /// The sender wrote the first raw byte to the direct stream.
+    pub const FIRST_BYTE_SENT: &str = "first_byte_sent";
+    /// The receiver read the first raw byte from the direct stream.
+    pub const FIRST_BYTE_RECEIVED: &str = "first_byte_received";
+    /// Background blob ingestion started after the offer announcement.
+    pub const BLOB_INGEST_STARTED: &str = "blob_ingest_started";
+    /// Background blob ingestion completed.
+    pub const BLOB_INGEST_COMPLETED: &str = "blob_ingest_completed";
+    /// The BlobTicket upgrade was announced.
+    pub const BLOB_TICKET_ANNOUNCED: &str = "blob_ticket_announced";
+
+    /// The latency-critical sender path, in expected order.
+    pub const OFFER_LATENCY_SEQUENCE: [&str; 3] = [
+        FILE_SELECTED,
+        OFFER_REGISTERED,
+        OFFER_BROADCAST,
+    ];
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn direct_offer_latency_sequence_is_registration_before_broadcast() {
+            assert_eq!(
+                OFFER_LATENCY_SEQUENCE,
+                ["file_selected", "offer_registered", "offer_broadcast"]
+            );
+            assert_ne!(OFFER_BROADCAST, BLOB_INGEST_COMPLETED);
+            assert_ne!(OFFER_BROADCAST, BLOB_TICKET_ANNOUNCED);
+        }
+    }
+
     /// A direct file offer was announced before local blob ingestion.
     pub const DIRECT_FILE_OFFER_ANNOUNCED: &str = "direct_file_offer_announced";
     /// Background local blob ingestion started after the direct offer.

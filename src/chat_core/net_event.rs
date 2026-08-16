@@ -433,6 +433,14 @@ pub fn handle_net_event_for_topic(
                     if from != cb.local_public()
                         && (cb.is_friend(&from) || cb.accepts_group_peer(topic, &from))
                     {
+                        tracing::info!(
+                            target: "boru::file_offer",
+                            event = crate::diagnostics::event_names::OFFER_RECEIVED,
+                            offer_id = ?offer_id,
+                            bytes = size,
+                            peer = %from,
+                            "direct file offer received"
+                        );
                         let fid = FriendId::from_public_key(from);
                         cb.friend_mark_online(fid);
                         let sender_label = cb.resolve_name(&from);

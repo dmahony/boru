@@ -120,7 +120,19 @@ impl FileOfferTransfer {
         &mut self,
         buf: &mut [u8],
     ) -> Result<Option<usize>, iroh::endpoint::ReadError> {
-        self.reader.read(buf).await
+        let result = self.reader.read(buf).await;
+        if let Ok(Some(bytes)) = &result {
+            if *bytes > 0 {
+                tracing::info!(
+                    target: "boru::file_offer",
+                    event = crate::diagnostics::event_names::FIRST_BYTE_RECEIVED,
+                    offer_id = ?self.header.offer_id,
+                    bytes = *bytes,
+                    "first direct file byte received"
+                );
+            }
+        }
+        result
     }
 
     /// Consume the transfer and return its raw QUIC receive stream.
@@ -165,6 +177,12 @@ pub async fn open_file_offer(
     addr: EndpointAddr,
     offer_id: FileOfferId,
 ) -> anyhow::Result<FileOfferTransfer> {
+    tracing::info!(
+        target: "boru::file_offer",
+        event = crate::diagnostics::event_names::DIRECT_DOWNLOAD_REQUESTED,
+        offer_id = ?offer_id,
+        "direct file download requested"
+    );
     let connection = endpoint.connect(addr, FILE_OFFER_ALPN).await?;
     let (mut writer, mut reader) = connection.open_bi().await?;
     write_frame(
@@ -276,6 +294,12 @@ async fn serve_connection(
         Err(_) => return reject(&mut writer, FileOfferError::Busy).await,
     };
     let request: FileOfferRequest = read_frame(&mut reader).await?;
+    tracing::info!(
+        target: "boru::file_offer",
+        event = crate::diagnostics::event_names::DIRECT_DOWNLOAD_REQUESTED,
+        offer_id = ?request.offer_id,
+        "direct file request received by sender"
+    );
 
     if request.version != FILE_OFFER_WIRE_VERSION {
         write_frame(
@@ -319,6 +343,13 @@ async fn serve_connection(
         }),
     )
     .await?;
+    tracing::info!(
+        target: "boru::file_offer",
+        event = crate::diagnostics::event_names::FIRST_BYTE_SENT,
+        offer_id = ?offer.id,
+        bytes = offer.size,
+        "first direct file byte ready to send"
+    );
     let (bytes_sent, blake3_hash) =
         stream_exact(&mut file.take(offer.size), &mut writer, offer.size).await?;
     write_frame(

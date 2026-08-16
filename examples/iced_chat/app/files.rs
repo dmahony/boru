@@ -4578,7 +4578,19 @@ impl IcedChat {
                         metadata.len(),
                         modified_at,
                     );
+                    tracing::info!(
+                        event = boru_core::diagnostics::event_names::FILE_SELECTED,
+                        offer_id = ?offer_id,
+                        size = metadata.len(),
+                        "direct file selected"
+                    );
                     self.file_offer_registry.lock().unwrap().register(offer);
+                    tracing::info!(
+                        event = boru_core::diagnostics::event_names::OFFER_REGISTERED,
+                        offer_id = ?offer_id,
+                        size = metadata.len(),
+                        "direct file offer registered"
+                    );
 
                     let transfer_kind = if ChatEntry::is_video_file(&filename) {
                         TransferKind::Video
@@ -4636,16 +4648,16 @@ impl IcedChat {
                                     .map_err(|error| format!("Failed to broadcast file offer: {error}"))?;
                             }
                             tracing::info!(
-                                event = boru_core::diagnostics::event_names::FILE_OFFER_ANNOUNCED,
+                                event = boru_core::diagnostics::event_names::OFFER_BROADCAST,
                                 offer_id = ?offer_id,
                                 name = %announced_name,
                                 size = announced_size,
-                                "direct file offer announced"
+                                "direct file offer broadcast"
                             );
                             // BORU-IFS-11 owns the ingest implementation. The
                             // spawn point is deliberately after announcement.
                             tracing::info!(
-                                event = boru_core::diagnostics::event_names::BACKGROUND_BLOB_INGEST_STARTED,
+                                event = boru_core::diagnostics::event_names::BLOB_INGEST_STARTED,
                                 offer_id = ?offer_id,
                                 name = %announced_name,
                                 "background blob ingest started"
@@ -4719,6 +4731,13 @@ impl IcedChat {
                                         }
                                     };
 
+                                    tracing::info!(
+                                        event = boru_core::diagnostics::event_names::BLOB_INGEST_COMPLETED,
+                                        offer_id = ?offer_id,
+                                        bytes = offer_size,
+                                        "background blob ingest completed"
+                                    );
+
                                     let ticket = blob_ticket_string(endpoint_addr, blob_hash, format);
                                     let ready = crate::Message::FileOfferReady {
                                         offer_id,
@@ -4733,6 +4752,12 @@ impl IcedChat {
                                             .await
                                             .map_err(|e| format!("failed to broadcast FileOfferReady: {e}"))?;
                                     }
+                                    tracing::info!(
+                                        event = boru_core::diagnostics::event_names::BLOB_TICKET_ANNOUNCED,
+                                        offer_id = ?offer_id,
+                                        bytes = offer_size,
+                                        "blob ticket upgrade broadcast"
+                                    );
 
                                     // Poster work is intentionally sequenced after
                                     // both FileOffer and FileOfferReady.  A slow
