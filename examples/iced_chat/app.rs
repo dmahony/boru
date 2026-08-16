@@ -21111,18 +21111,12 @@ impl IcedChat {
         #[cfg(feature = "dev-ui")]
         let main_panel = self.inspect_region(self.component_id_for_screen(), main_panel);
 
-        // Responsive sidebar width – clamps to 288–320 px based on window width.
-        // BORU-UI-09: read from the LIVE active theme so the Inspector's
-        // "Sidebar → Width" slider changes the shell immediately; defaults
-        // reproduce `sidebar_width_for` exactly (304 px target, 288 min).
-        let btheme = self.boru_theme();
-        let sidebar_w = {
-            let fraction = (self.window_width - crate::design_tokens::VIEWPORT_MIN_WIDTH)
-                / (crate::design_tokens::VIEWPORT_REF_WIDTH - crate::design_tokens::VIEWPORT_MIN_WIDTH);
-            let clamped_fraction = fraction.clamp(0.0, 1.0);
-            btheme.sidebar.width_min
-                + (btheme.sidebar.width - btheme.sidebar.width_min) * clamped_fraction
-        };
+        // Resolve the shell width from the live structural layout so TOML
+        // overrides remain effective after a watcher reload.
+        let layout = self.boru_layout();
+        let sidebar_w = layout
+            .sidebar
+            .width_for_window(self.window_width, &layout.responsive);
 
         let content = row![
             container(sidebar)

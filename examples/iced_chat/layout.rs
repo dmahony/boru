@@ -436,6 +436,27 @@ impl Default for SidebarLayout {
     }
 }
 
+/// Responsive presentation of the persistent sidebar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidebarMode {
+    Full,
+    Compact,
+}
+
+impl SidebarLayout {
+    /// Resolve the sidebar mode from the canonical responsive model.
+    pub fn mode_for_width(&self, width: f32, responsive: &ResponsiveLayout) -> SidebarMode {
+        if width <= responsive.viewport_min_width { SidebarMode::Compact } else { SidebarMode::Full }
+    }
+
+    /// Resolve the shell width from the live layout model.
+    pub fn width_for_window(&self, width: f32, responsive: &ResponsiveLayout) -> f32 {
+        let span = (responsive.viewport_ref_width - responsive.viewport_min_width).max(1.0);
+        let fraction = ((width - responsive.viewport_min_width) / span).clamp(0.0, 1.0);
+        (self.width_min + (self.width - self.width_min) * fraction).clamp(self.width_min, self.width_max)
+    }
+}
+
 /// Sidebar padding regions, decomposed from the `iced::Padding` literals in
 /// `app/sidebar.rs` (values are `SPACE_*` tokens, see `theme.rs::SidebarPadding`).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1553,6 +1574,17 @@ mod tests {
     use crate::design_tokens;
     use crate::status_card;
     use crate::theme::BoruTheme;
+
+    #[test]
+    fn sidebar_resolves_compact_mode_and_model_widths() {
+        let sidebar = SidebarLayout::default();
+        let responsive = ResponsiveLayout::default();
+        assert_eq!(sidebar.mode_for_width(responsive.viewport_min_width, &responsive), SidebarMode::Compact);
+        assert_eq!(sidebar.mode_for_width(responsive.viewport_ref_width, &responsive), SidebarMode::Full);
+        assert_eq!(sidebar.width_for_window(responsive.viewport_min_width, &responsive), sidebar.width_min);
+        assert_eq!(sidebar.width_for_window(responsive.viewport_ref_width, &responsive), sidebar.width);
+        assert_eq!(sidebar.width_for_window(responsive.viewport_xl_width, &responsive), sidebar.width);
+    }
 
     // ── Default = current appearance ──────────────────────────────────
 
