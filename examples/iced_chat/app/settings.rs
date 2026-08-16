@@ -65,6 +65,9 @@ pub(crate) struct SettingsDependency {
     /// BORU-UI-07: bumps whenever the live theme is replaced so iced::lazy
     /// cannot retain a subtree built with the previous theme.
     pub(crate) theme_revision: u64,
+    pub(crate) layout_revision: u64,
+    pub(crate) responsive_mode: crate::layout::ViewportTier,
+    pub(crate) max_content_width_bits: u32,
     pub(crate) cached_key: SettingsCachedKey,
     pub(crate) identity_key: ProfileIdentityCacheKey,
     pub(crate) shared_files: Vec<(String, String)>,
@@ -358,6 +361,25 @@ impl IcedChat {
         SettingsDependency {
             dark_mode: self.dark_mode,
             theme_revision: self.theme_revision,
+            layout_revision: self.layout_revision,
+            responsive_mode: {
+                let layout = self.boru_layout();
+                let sidebar_width = layout
+                    .sidebar
+                    .width_for_window(self.window_width, &layout.responsive);
+                let available_width = (self.window_width - sidebar_width - 1.0).max(0.0);
+                if available_width <= layout.responsive.viewport_min_width {
+                    crate::layout::ViewportTier::Narrow
+                } else {
+                    layout.responsive.tier_for_width(available_width)
+                }
+            },
+            max_content_width_bits: self
+                .boru_layout()
+                .screens
+                .get("settings")
+                .map(|screen| screen.max_content_width.to_bits())
+                .unwrap_or(680.0_f32.to_bits()),
             cached_key,
             identity_key,
             shared_files,
@@ -393,6 +415,13 @@ impl IcedChat {
         use iced::{Alignment, Length};
 
         let theme = Self::theme_from_dark(dep.dark_mode);
+        let body_padding = if dep.responsive_mode == crate::layout::ViewportTier::Narrow {
+            SPACE_12
+        } else if dep.responsive_mode == crate::layout::ViewportTier::UltraWide {
+            crate::design_tokens::SPACE_32
+        } else {
+            SPACE_24
+        };
 
         // ── Header row ──────────────────────────────────────────────
         let back_btn = button(crate::fonts::type_role_text(
@@ -702,10 +731,10 @@ impl IcedChat {
             Space::new().height(Length::Fixed(SPACE_24)),
         ]
         .spacing(SPACE_6)
-        .padding(SPACE_24)
+        .padding(body_padding)
         .align_x(Alignment::Start)
         .width(Length::Fill)
-        .max_width(680.0);
+        .max_width(f32::from_bits(dep.max_content_width_bits));
 
         let scrollable = crate::ui_components::gutter_scrollable(container(body).width(Length::Fill).center_x(Length::Fill))
             .width(Length::Fill)

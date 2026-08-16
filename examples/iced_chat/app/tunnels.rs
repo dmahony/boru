@@ -21,6 +21,14 @@ impl IcedChat {
         };
 
         let theme = Self::theme_from_dark(self.dark_mode);
+        // Resolve the shared responsive tier once for this dialog.  The
+        // dialog body is intentionally section-stacked in the narrow tier;
+        // the same tier also keeps its footer reachable by reducing the
+        // scroll viewport rather than allowing a dense two-column form.
+        let responsive_tier = self
+            .boru_layout()
+            .responsive
+            .tier_for_width(self.window_width);
 
         // Tunnel Details — the service name the friend sees.
         let mut name_field = TextInput::new(
@@ -142,7 +150,11 @@ impl IcedChat {
             // stays on screen when the Local Services suggestion list grows
             // the dialog past the window height. Same value as the Create
             // Group Chat dialog.
-            .scroll_body(520.0)
+            .scroll_body(if responsive_tier == crate::layout::ViewportTier::Narrow {
+                420.0
+            } else {
+                520.0
+            })
             .build(&theme);
 
         iced::widget::stack![base, overlay].into()

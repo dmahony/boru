@@ -952,6 +952,25 @@ impl IcedChat {
         DiscoverDependency {
             dark_mode: self.dark_mode,
             theme_revision: self.theme_revision,
+            layout_revision: self.layout_revision,
+            responsive_mode: {
+                let layout = self.boru_layout();
+                let sidebar_width = layout
+                    .sidebar
+                    .width_for_window(self.window_width, &layout.responsive);
+                let available_width = (self.window_width - sidebar_width - 1.0).max(0.0);
+                if available_width <= layout.responsive.viewport_min_width {
+                    crate::layout::ViewportTier::Narrow
+                } else {
+                    layout.responsive.tier_for_width(available_width)
+                }
+            },
+            max_content_width_bits: self
+                .boru_layout()
+                .screens
+                .get("discover")
+                .map(|screen| screen.max_content_width.to_bits())
+                .unwrap_or(crate::design_tokens::CONTENT_MAX_WIDTH.to_bits()),
             rooms,
             search_query: self.discover_search_query.clone(),
             filter_compatible: self.discover_filter_compatible,
@@ -1069,6 +1088,7 @@ impl IcedChat {
         container(body)
             .width(Length::Fill)
             .height(Length::Fill)
+            .max_width(f32::from_bits(dep.max_content_width_bits))
             .style(container_primary)
             .into()
     }
@@ -1144,25 +1164,49 @@ impl IcedChat {
             .spacing(SPACE_4)
             .align_y(Alignment::Center);
 
-        // Filter chips.
-        let filter_row = Row::new()
-            .push(chip(
-                "Compatible".to_string(),
-                dep.filter_compatible,
-                AppMessage::DiscoverFilterToggled(DiscoverFilter::Compatible),
-            ))
-            .push(chip(
-                "Not joined".to_string(),
-                dep.filter_not_joined,
-                AppMessage::DiscoverFilterToggled(DiscoverFilter::NotJoined),
-            ))
-            .push(chip(
-                "Recently seen".to_string(),
-                dep.filter_recently_seen,
-                AppMessage::DiscoverFilterToggled(DiscoverFilter::RecentlySeen),
-            ))
-            .spacing(SPACE_4)
-            .align_y(Alignment::Center);
+        let narrow = dep.responsive_mode == crate::layout::ViewportTier::Narrow;
+        // Filter actions stack in the narrow tier instead of forcing a dense
+        // horizontal strip through the available content width.
+        let filter_row: iced::Element<'static, AppMessage> = if narrow {
+            Column::new()
+                .push(chip(
+                    "Compatible".to_string(),
+                    dep.filter_compatible,
+                    AppMessage::DiscoverFilterToggled(DiscoverFilter::Compatible),
+                ))
+                .push(chip(
+                    "Not joined".to_string(),
+                    dep.filter_not_joined,
+                    AppMessage::DiscoverFilterToggled(DiscoverFilter::NotJoined),
+                ))
+                .push(chip(
+                    "Recently seen".to_string(),
+                    dep.filter_recently_seen,
+                    AppMessage::DiscoverFilterToggled(DiscoverFilter::RecentlySeen),
+                ))
+                .spacing(SPACE_4)
+                .into()
+        } else {
+            Row::new()
+                .push(chip(
+                    "Compatible".to_string(),
+                    dep.filter_compatible,
+                    AppMessage::DiscoverFilterToggled(DiscoverFilter::Compatible),
+                ))
+                .push(chip(
+                    "Not joined".to_string(),
+                    dep.filter_not_joined,
+                    AppMessage::DiscoverFilterToggled(DiscoverFilter::NotJoined),
+                ))
+                .push(chip(
+                    "Recently seen".to_string(),
+                    dep.filter_recently_seen,
+                    AppMessage::DiscoverFilterToggled(DiscoverFilter::RecentlySeen),
+                ))
+                .spacing(SPACE_4)
+                .align_y(Alignment::Center)
+                .into()
+        };
 
         let mut controls = Column::new().spacing(SPACE_6).padding(iced::Padding {
             top: 0.0,

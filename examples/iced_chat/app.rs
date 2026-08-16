@@ -5330,6 +5330,10 @@ pub(crate) struct DiscoverDependency {
     /// BORU-UI-07: bumps whenever the live theme is replaced so iced::lazy
     /// cannot retain a subtree built with the previous theme.
     pub(crate) theme_revision: u64,
+    /// Structural layout state used by the screen's narrow/desktop variants.
+    pub(crate) layout_revision: u64,
+    pub(crate) responsive_mode: crate::layout::ViewportTier,
+    pub(crate) max_content_width_bits: u32,
     /// Filtered + sorted rows (already limited to what passes the query,
     /// filters, selected tags, and sort order).
     pub(crate) rooms: Vec<DiscoverRoomRow>,
@@ -34201,6 +34205,9 @@ mod tests {
         let dep = DiscoverDependency {
             dark_mode: false,
             theme_revision: 0,
+            layout_revision: 0,
+            responsive_mode: crate::layout::ViewportTier::Desktop,
+            max_content_width_bits: crate::design_tokens::CONTENT_MAX_WIDTH.to_bits(),
             rooms: vec![row],
             search_query: String::new(),
             filter_compatible: false,
