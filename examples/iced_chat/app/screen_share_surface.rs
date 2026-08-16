@@ -411,6 +411,9 @@ pub(crate) fn view_screen_share_view_controls<'a>(
         .padding([2, 6]),
     ]
     .spacing(SPACE_6)
+    // Keep every view-mode action reachable in narrow panes instead of
+    // allowing a fixed row to overflow and clip its trailing controls.
+    .wrap()
     .into()
 }
 

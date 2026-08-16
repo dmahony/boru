@@ -168,13 +168,20 @@ impl IcedChat {
                 },
                 ..Default::default()
             });
+        // Wrapping keeps the action bar reachable when the call surface is
+        // hosted in a reduced-width content pane.  At the normal desktop
+        // width this is a single row, so the default appearance is unchanged.
+        let controls = row![mute, camera, switch_camera, hang_up]
+            .spacing(SPACE_12)
+            .align_y(iced::Alignment::Center)
+            .wrap();
         container(column![
             container(remote_main).width(Length::Fill).height(Length::Fill),
             stage,
             text(name).size(typography.call_name_active),
             text(duration).size(typography.call_duration),
             text(status).size(typography.call_status),
-            row![mute, camera, switch_camera, hang_up].spacing(SPACE_12)
+            controls
         ].spacing(SPACE_12).align_x(Alignment::Center))
             .width(Length::Fill).height(Length::Fill)
             .padding(SPACE_16).into()
