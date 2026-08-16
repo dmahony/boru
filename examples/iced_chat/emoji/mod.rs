@@ -12,12 +12,14 @@
 //!
 //! # Module map
 //!
-//! - [`catalog`]   — emoji metadata and categories (catalog model: BORU-TWEMOJI-05)
-//! - [`parser`]    — Unicode grapheme/emoji detection and asset-key resolution
+//! - [`catalog`]       — emoji metadata and categories (catalog model: BORU-TWEMOJI-05)
+//! - [`asset_manifest`] — generated index of vendored Twemoji asset keys and
+//!                   the lookup surface (BORU-TWEMOJI-06)
+//! - [`parser`]       — Unicode grapheme/emoji detection and asset-key resolution
 //!                   (full resolver: BORU-TWEMOJI-07)
-//! - [`renderer`]  — SVG handles, caching and the rendering abstraction
+//! - [`renderer`]     — SVG handles, caching and the rendering abstraction
 //!                   (full renderer/cache: BORU-TWEMOJI-08/09)
-//! - [`picker`]    — the emoji picker panel (visual swap to SVG: BORU-TWEMOJI-10)
+//! - [`picker`]       — the emoji picker panel (visual swap to SVG: BORU-TWEMOJI-10)
 //!
 //! # Small stable interfaces
 //!
@@ -26,6 +28,7 @@
 //!
 //! ```text
 //! emoji::catalog::{Emoji, EmojiCategory, common_emojis}
+//! emoji::asset_manifest::{contains, TWEMOJI_ASSETS}
 //! emoji::parser::{MessageFragment, emoji_asset, split_fragments}
 //! emoji::renderer::{EmojiAsset, EmojiRenderer, TwemojiRenderer}
 //! emoji::picker::view_emoji_picker
@@ -41,11 +44,13 @@
 
 #![allow(dead_code, unused_imports)]
 
+pub mod asset_manifest;
 pub mod catalog;
 pub mod parser;
 pub mod picker;
 pub mod renderer;
 
+pub use asset_manifest::{contains, TWEMOJI_ASSETS};
 pub use catalog::{common_emojis, Emoji, EmojiCategory};
 pub use parser::{emoji_asset, split_fragments, MessageFragment};
 pub use renderer::{EmojiAsset, EmojiRenderer, TwemojiRenderer};
