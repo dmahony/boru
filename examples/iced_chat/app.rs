@@ -89,6 +89,7 @@ use boru_core::chat_core::{
     handle_net_event_with_safety_for_topic, merge_bootstrap_peer_addrs, message_hash,
     seed_memory_lookup, MeshHealth, MessageHash, RoomInviteV2,
 };
+use boru_core::chat_core::protocol::FileOfferId;
 use boru_core::chat_history::{ChatHistoryStore, DeliveryState, HistoryEntry};
 use boru_core::call::manager::{CallEvent, CallHandle};
 use boru_core::call::history::{event_text as call_history_text, CallHistoryOutcome};
@@ -19235,6 +19236,23 @@ impl ChatCallbacks for IcedChat {
             self.pending_thumbnail_fetch
                 .push_back((entry_index, hash, ticket.clone()));
         }
+    }
+
+    fn set_pending_direct_offer(
+        &mut self,
+        offer_id: FileOfferId,
+        name: String,
+        size: u64,
+        _owner: PublicKey,
+        sender_label: Option<String>,
+    ) {
+        self.set_pending_file(
+            name,
+            format!("direct-offer:{offer_id:?}"),
+            size,
+            None,
+            sender_label,
+        );
     }
 
     fn set_pending_folder(

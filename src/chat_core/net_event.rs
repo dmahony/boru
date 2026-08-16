@@ -425,9 +425,15 @@ pub fn handle_net_event_for_topic(
                         }
                     }
                 }
-                Message::FileOffer { .. } => {
-                    // Direct file offers are handled by the direct-transfer
-                    // protocol; do not treat them as legacy blob shares.
+                Message::FileOffer { offer_id, name, size } => {
+                    if from != cb.local_public()
+                        && (cb.is_friend(&from) || cb.accepts_group_peer(topic, &from))
+                    {
+                        let fid = FriendId::from_public_key(from);
+                        cb.friend_mark_online(fid);
+                        let sender_label = cb.resolve_name(&from);
+                        cb.set_pending_direct_offer(offer_id, name, size, from, Some(sender_label));
+                    }
                 }
                 Message::FileOfferReady { .. } => {
                     // Direct file-offer upgrades are handled by the
