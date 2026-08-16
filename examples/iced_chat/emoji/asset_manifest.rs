@@ -21,14 +21,29 @@
 
 include!("manifest_data.rs");
 
-/// Returns `true` when `key` is a vendored Twemoji asset key.
+/// Returns the vendored asset key when `key` matches a manifest entry.
 ///
 /// `key` must be a bare normalized identifier (`"1f600"`, `"1f1fa-1f1f8"`),
-/// not a filename, path or extension. The manifest is sorted (the generator
-/// sorts; [`manifest_is_sorted_and_deterministic`] enforces it), so lookup is
-/// a binary search — no allocation, no runtime parsing.
+/// not a filename, path or extension. This is the resolver-facing surface
+/// (BORU-TWEMOJI-07): the returned `&'static str` is the canonical manifest
+/// entry, so callers build an [`crate::emoji::renderer::EmojiAsset`] without
+/// re-copying or re-parsing the key. The manifest is sorted (the generator
+/// sorts; [`manifest_is_sorted_and_deterministic`] enforces it), so lookup
+/// is a binary search — no allocation, no runtime parsing.
+pub fn lookup(key: &str) -> Option<&'static str> {
+    TWEMOJI_ASSETS
+        .binary_search(&key)
+        .ok()
+        .map(|i| TWEMOJI_ASSETS[i])
+}
+
+/// Returns `true` when `key` is a vendored Twemoji asset key.
+///
+/// Thin wrapper over [`lookup`] for callers that only need the boolean.
+/// `key` must be a bare normalized identifier (`"1f600"`,
+/// `"1f1fa-1f1f8"`), not a filename, path or extension.
 pub fn contains(key: &str) -> bool {
-    TWEMOJI_ASSETS.binary_search(&key).is_ok()
+    lookup(key).is_some()
 }
 
 #[cfg(test)]
@@ -132,6 +147,24 @@ mod tests {
         assert!(!contains("1F600"), "uppercase is not a normalized key");
         assert!(!contains("1f600-"), "trailing dash");
         assert!(!contains("-1f600"), "leading dash");
+    }
+
+    /// The resolver-facing surface returns the canonical static key so the
+    /// resolver never re-copies or re-parses a key it validated.
+    #[test]
+    fn lookup_returns_static_manifest_keys() {
+        assert_eq!(lookup("1f600"), Some("1f600"));
+        assert_eq!(lookup("1f1fa-1f1f8"), Some("1f1fa-1f1f8"));
+        assert_eq!(lookup("1f469-200d-1f4bb"), Some("1f469-200d-1f4bb"));
+        assert_eq!(
+            lookup("1f3c3-1f3fb-200d-2640-fe0f"),
+            Some("1f3c3-1f3fb-200d-2640-fe0f")
+        );
+        // Unknown / malformed keys resolve to nothing.
+        assert_eq!(lookup("zzz"), None);
+        assert_eq!(lookup(""), None);
+        assert_eq!(lookup("1f600.svg"), None);
+        assert_eq!(lookup("1F600"), None);
     }
 
     /// The manifest and the catalog model agree: every curated representative

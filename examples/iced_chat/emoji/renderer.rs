@@ -48,15 +48,16 @@ pub trait EmojiRenderer {
 
 /// Twemoji-backed renderer using the vendored SVG set.
 ///
-/// Skeleton implementation: resolves through the curated catalog
-/// (`catalog::common_emojis`). BORU-TWEMOJI-07/08 replace the resolution and
-/// add real SVG handle production.
+/// Resolution delegates to the single central resolver
+/// [`crate::emoji::parser::emoji_asset`] (BORU-TWEMOJI-07), so the emoji
+/// module has exactly one source of Unicode→key conversion. BORU-TWEMOJI-08
+/// fills in SVG handle production behind this trait.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TwemojiRenderer;
 
 impl EmojiRenderer for TwemojiRenderer {
     fn resolve(&self, grapheme: &str) -> Option<EmojiAsset> {
-        super::parser::catalog_lookup(grapheme).map(|e| EmojiAsset::from_key(e.asset))
+        super::parser::emoji_asset(grapheme)
     }
 }
 
@@ -76,10 +77,31 @@ mod tests {
     }
 
     #[test]
+    fn twemoji_renderer_resolves_multicodepoint_graphemes() {
+        let r = TwemojiRenderer;
+        // Flag pair, skin tone, and a ZWJ sequence — one grapheme each.
+        assert_eq!(
+            r.resolve("\u{1f1fa}\u{1f1f8}").map(|a| a.key),
+            Some("1f1fa-1f1f8")
+        );
+        assert_eq!(
+            r.resolve("\u{1f44d}\u{1f3fd}").map(|a| a.key),
+            Some("1f44d-1f3fd")
+        );
+        assert_eq!(
+            r.resolve("\u{1f469}\u{200d}\u{1f4bb}").map(|a| a.key),
+            Some("1f469-200d-1f4bb")
+        );
+        // VS16 is stripped for hearts (vendored as "2764").
+        assert_eq!(r.resolve("\u{2764}\u{fe0f}").map(|a| a.key), Some("2764"));
+    }
+
+    #[test]
     fn twemoji_renderer_falls_back_to_none_for_unknown() {
         let r = TwemojiRenderer;
         assert_eq!(r.resolve("plain text"), None);
-        assert_eq!(r.resolve("🦤"), None);
+        // 🫩 face with bags under eyes — Unicode 16.0, not vendored.
+        assert_eq!(r.resolve("🫩"), None);
     }
 
     #[test]

@@ -15,8 +15,9 @@
 //! - [`catalog`]       — emoji metadata and categories (catalog model: BORU-TWEMOJI-05)
 //! - [`asset_manifest`] — generated index of vendored Twemoji asset keys and
 //!                   the lookup surface (BORU-TWEMOJI-06)
-//! - [`parser`]       — Unicode grapheme/emoji detection and asset-key resolution
-//!                   (full resolver: BORU-TWEMOJI-07)
+//! - [`parser`]       — Unicode grapheme/emoji detection and asset-key
+//!                   resolution (resolver: BORU-TWEMOJI-07; grapheme
+//!                   segmentation of message text: BORU-TWEMOJI-16)
 //! - [`renderer`]     — SVG handles, caching and the rendering abstraction
 //!                   (full renderer/cache: BORU-TWEMOJI-08/09)
 //! - [`picker`]       — the emoji picker panel (visual swap to SVG: BORU-TWEMOJI-10)
@@ -28,7 +29,7 @@
 //!
 //! ```text
 //! emoji::catalog::{Emoji, EmojiCategory, common_emojis}
-//! emoji::asset_manifest::{contains, TWEMOJI_ASSETS}
+//! emoji::asset_manifest::{contains, lookup, TWEMOJI_ASSETS}
 //! emoji::parser::{MessageFragment, emoji_asset, split_fragments}
 //! emoji::renderer::{EmojiAsset, EmojiRenderer, TwemojiRenderer}
 //! emoji::picker::view_emoji_picker
