@@ -20,6 +20,7 @@ mod design_tokens;
 mod download_progress_view;
 mod downloaded_view_model;
 mod downloading_view_model;
+mod emoji;
 mod file_category;
 mod file_type_icon;
 mod file_type_resolver;

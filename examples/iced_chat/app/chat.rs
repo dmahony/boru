@@ -1096,61 +1096,13 @@ impl IcedChat {
     /// close button via `on_close`) and the body (scrollable grid), matching
     /// the previous layout exactly: 280px wide, `bg_surface` background,
     /// 1px `border_muted` border, 8px corner radius.
+    ///
+    /// BORU-TWEMOJI-04: implementation moved to `crate::emoji::picker` so all
+    /// emoji/Twemoji concerns live in the dedicated emoji module. External
+    /// behaviour is unchanged; the visual swap to SVG happens in
+    /// BORU-TWEMOJI-10.
     pub(crate) fn view_emoji_picker(&self) -> iced::Element<'_, AppMessage> {
-        use iced::widget::{button, column, row, text};
-
-        let theme = self.theme();
-        const EMOJIS: &[&str] = &[
-            "😀", "😂", "🤣", "😊", "😍", "🥰", "😘", "😜", "🤔", "🙄", "😢", "😭", "😤", "😡",
-            "🥺", "😎", "🤩", "👍", "👎", "👏", "🙌", "💪", "🤝", "❤️", "🔥", "⭐", "🎉", "✨",
-            "💯", "✅", "❌", "⚠️", "💡", "📌", "🎵", "🌈", "🍕", "☕", "🕐", "💤",
-        ];
-
-        let head = crate::fonts::type_role_text(crate::fonts::TypeRole::CardTitle, crate::i18n::t("emoji.title"))
-            .color(text_muted(&theme));
-
-        let mut grid = column![].spacing(SPACE_2);
-        for chunk in EMOJIS.chunks(8) {
-            let mut r = row![].spacing(SPACE_2);
-            for &emoji in chunk {
-                let c = emoji.chars().next().unwrap();
-                r = r.push(
-                    button(text(emoji).size(20.0))
-                        .on_press(AppMessage::InsertEmoji(c))
-                        .padding([SPACE_2, SPACE_4])
-                        .style(|_t, _s| iced::widget::button::Style::default()),
-                );
-            }
-            grid = grid.push(r);
-        }
-
-        let scroll = crate::ui_components::gutter_scrollable(grid).height(iced::Length::Fixed(
-            crate::theme::BoruTheme::for_theme(&theme).chat.emoji_picker_scroll_height,
-        ));
-
-        let chat_theme = crate::theme::BoruTheme::for_theme(&theme).chat;
-        iced_aw::Card::new(head, scroll)
-            .width(chat_theme.emoji_picker_width)
-            .padding_head(iced::Padding::new(SPACE_8))
-            .padding_body(iced::Padding::new(SPACE_8))
-            .on_close(AppMessage::ToggleEmojiPicker)
-            .style(move |t, _status| {
-                let b = crate::theme::BoruTheme::for_theme(t);
-                iced_aw::style::card::Style {
-                    background: iced::Background::Color(bg_surface(t)),
-                    border_radius: b.radii.sm,
-                    border_width: b.borders.hairline,
-                    border_color: border_muted(t),
-                    head_background: iced::Background::Color(bg_surface(t)),
-                    head_text_color: text_muted(t),
-                    body_background: iced::Background::Color(iced::Color::TRANSPARENT),
-                    body_text_color: text_muted(t),
-                    foot_background: iced::Background::Color(iced::Color::TRANSPARENT),
-                    foot_text_color: text_muted(t),
-                    close_color: text_muted(t),
-                }
-            })
-            .into()
+        crate::emoji::picker::view_emoji_picker(&self.theme())
     }
 
     // ── GIF picker async helpers ─────────────────────────────────────────
