@@ -283,6 +283,16 @@ narrow = 28.0
 desktop = 28.0
 ultra_wide = 32.0
 
+# Height-aware dialog and short-window layout values (RESP-09). The
+# per-tier caps apply to the scrollable dialog body; the footer remains
+# reachable. These are structural values, not theme settings.
+# Per-tier maximum scrollable dialog body height.
+dialog_body_max_height = { narrow = 360.0, desktop = 480.0, ultra_wide = 520.0 }
+# Short-window chrome reserve, minimum body height and whitespace scale.
+short_window_body_reserve = 220.0
+short_window_body_min_height = 180.0
+short_window_spacing_scale = 0.7
+
 # ── Future screens (extension point) ──────────────────────────────────
 # Per-screen layout for future screens, keyed by a stable screen id.
 # # [screens.settings]
