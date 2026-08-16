@@ -435,13 +435,20 @@ impl IcedChat {
     #[cfg(feature = "screen-sharing")]
     /// Conversation-local screen-share controls. Playback pauses when the
     /// viewer navigates away; no media is retained in the background.
+    ///
+    /// BORU-SSUI (sender screen-share UI redesign): the sharer controls live
+    /// inside ONE card shell below the conversation header. This is a
+    /// presentation/interaction redesign — capture, session, network and
+    /// permission behavior must not change here (see docs/screen-share-ui/
+    /// sender-audit.md). Style values reuse the shared design tokens; the
+    /// BORU-SSUI-08 token work migrates the card values into
+    /// `screen_share.card.*` TOML tokens afterwards.
     pub(crate) fn view_screen_share_panel(&self) -> iced::Element<'_, AppMessage> {
         use iced::widget::{button, column, container, responsive, row, text};
         use iced::Length;
         // BORU-UI-03: viewer box geometry comes from `ChatTheme::screen_share_*`
         // (640x360 capture aspect; the mouse-area Point maps 1:1 to normalized
         // coordinates only while the box matches the capture aspect).
-        let btheme = crate::theme::BoruTheme::default();
         let body = if let Some((inviter, _)) = &self.screen_share_invite {
             column![
                 text(format!("{inviter} wants to share their screen")),
@@ -484,7 +491,19 @@ impl IcedChat {
                 ScreenShareHostState::Error(_) => crate::i18n::t("screenshare.error"),
                 ScreenShareHostState::Idle => unreachable!(),
             };
-            let mut items: Vec<iced::Element<'_, AppMessage>> = vec![text(state_text).into()];
+            // BORU-SSUI-02: the card title sits at the top-left of the card
+            // shell. `state_text` is the runtime status line — for the active
+            // streaming state it resolves to `screenshare.sharing_with`
+            // ("Sharing your screen with {name}"), so the peer name is the
+            // real conversation display name, never mockup text. Muted
+            // supporting-text size matches the approved mockup hierarchy.
+            let mut items: Vec<iced::Element<'_, AppMessage>> = vec![
+                text(state_text)
+                    .size(crate::fonts::TypeRole::SupportingText.size_px())
+                    .font(crate::fonts::TypeRole::SupportingText.font())
+                    .color(Self::muted_color(self.dark_mode))
+                    .into(),
+            ];
 
             // Error reason (user-safe; never logs media data).
             if let ScreenShareHostState::Error(reason) = &self.screen_share_host_state {
@@ -750,7 +769,8 @@ impl IcedChat {
                     );
                 }
             }
-            column(items).spacing(SPACE_6)
+            // BORU-SSUI-02: consistent vertical rhythm inside the card shell.
+            column(items).spacing(SPACE_8)
         } else if self.screen_share_viewing {
             // Who is sharing (PDF Phase 13): the viewer always sees the
             // sharer's identity above the surface, plus whether remote
@@ -924,12 +944,22 @@ impl IcedChat {
         } else {
             return iced::widget::Space::new().height(Length::Fixed(0.0)).into();
         };
+        // BORU-SSUI-02: ONE card shell below the conversation header for all
+        // sender sharing controls. Subtle surface distinct from the chat
+        // canvas, thin neutral border, medium-large radius and a restrained
+        // shadow — the shared Boru card language (design_tokens). BORU-SSUI-08
+        // migrates these values into `screen_share.card.*` TOML tokens.
         container(body)
-            .padding(SPACE_8)
+            .padding(SPACE_16)
             .width(Length::Fill)
             .style(|t| iced::widget::container::Style {
                 background: Some(iced::Background::Color(bg_surface_secondary(t))),
-                border: iced::Border { color: border_muted(t), width: 1.0, radius: SPACE_8.into() },
+                border: iced::Border {
+                    color: border_muted(t),
+                    width: crate::design_tokens::BORDER_WIDTH,
+                    radius: crate::design_tokens::RADIUS_LG.into(),
+                },
+                shadow: crate::design_tokens::shadow_card(t),
                 ..Default::default()
             })
             .into()
