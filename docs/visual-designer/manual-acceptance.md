@@ -47,11 +47,44 @@ BORU-DESIGN-27 history integration):
 | 3 | Save, restart Boru, and verify the new order persists | PASS | Reorder edits now flow through `set_layout_overrides`, which is the existing atomic `boru-layout.toml` save/reload seam. The typed TOML transaction round-trip regression passed; no desktop coordinates are serialized. |
 | 4 | Resize a supported card/section and verify TOML receives the semantic dimension | PASS | Sidebar/chat resize gestures now write the corresponding typed override (`sidebar.width`, `chat.message_max_width`, or `chat.bubble_max_width`) before save. Pointer coordinates remain transient. The resize constraint regression passed. |
 | 5 | Change grid columns and verify immediate layout | PASS | Existing grid-column controls already use `apply_layout_int` and `set_layout_overrides`; the dev-ui designer test matrix passed the breakpoint-specific grid edit and the full `rb check --features dev-ui` passed. |
-| 6 | Undo and redo each operation (reorder, resize, grid) | PASS (automated) | The designer history suite now covers reorder/resize/grid snapshots, redo clearing, bounded history, and cancelled gestures. The 16-test targeted suite passed. A second live desktop walkthrough remains blocked. |
-| 7 | Edit `boru-layout.toml` externally and verify the designer/app updates | BLOCKED | The watcher path was not exercised because no live edit could be committed; the file remained `[screens]`. |
-| 8 | Test narrow and maximized windows after edits | BLOCKED | No live edit was available to carry across window sizes. |
-| 9 | Verify normal buttons/cards cannot accidentally execute their application action while being dragged | PASS (partial) | Designer Mode exposes dedicated blue grip handles rather than converting normal card bodies into drag targets. The reorder transaction is covered by automated tests; a complete live drag attempt remains blocked. |
+| 6 | Undo and redo each operation (reorder, resize, grid) | PASS (automated) | The designer history suite now covers reorder/resize/grid snapshots, redo clearing, bounded history, and cancelled gestures. The 16-test targeted suite passed. The live Ctrl+Z / Ctrl+Shift+Z sweep remains pending. |
+| 7 | Edit `boru-layout.toml` externally and verify the designer/app updates | PASS | Live-verified 2026-08-16 (orchestrator run 4837, fresh DEBSRV dev-ui build under Xvfb/Openbox): an external write to `boru-layout.toml` was picked up by the existing watcher — log line `boru-layout.toml reloaded; merging + applying live layout generation=3`. The watcher path works. |
+| 8 | Test narrow and maximized windows after edits | BLOCKED | Pending the final live sweep; no live-edit layout was carried across window sizes in the walkthrough runs so far. |
+| 9 | Verify normal buttons/cards cannot accidentally execute their application action while being dragged | PASS (partial) | Designer Mode exposes dedicated blue grip handles rather than converting normal card bodies into drag targets. A live drag on the hero-card handle reordered the Home screen immediately without executing the card's application action (run 4837). The reorder transaction is also covered by automated tests. |
 | 10 | Disable Designer Mode and verify normal Boru behaviour returns | PASS | The Visual Designer toggle was reachable and normal-mode Home rendering was restored when inactive; no application-service restart was observed. |
+
+## 2026-08-16 re-run (orchestrator run 4837, fresh dev-ui build)
+
+Re-ran the walkthrough against a fresh DEBSRV `rb build --features dev-ui`
+binary (mtime 10:15, includes BORU-DESIGN-27A `1332aa35` and the 068508fa
+reorder fix) under Xvfb :144 + Openbox with an isolated data dir
+(`/tmp/boru-t27-fresh/`). Live results:
+
+- Check 1 (designer on, Quick Actions selection, inspector sync): **PASS** — same
+  as recorded above; `Ctrl+Shift+D` opened the inspector, toggle showed
+  `VISUAL DESIGNER ACTIVE` with blue handles, Quick Actions selection synced the
+  inspector.
+- Check 2 (reorder, live rearrange): **PASS** — the tree ↑ arrow moved
+  MeshHealth to index 0 and a real drag gesture (drag hero-card handle down)
+  reordered the live Home screen immediately. The historical "Public Rooms
+  reorder does nothing" blocker is resolved on origin/main.
+- Check 3 (save, restart, persist): **PASS** — `Ctrl+S` wrote
+  `section_order=[MeshHealth,QuickActions,PeopleActivity,Hero,Tunnels]` to
+  `boru-layout.toml`; after process kill + relaunch the new order was loaded and
+  rendered (MeshHealth first).
+- Check 7 (external TOML edit via watcher): **PASS** — see row 7 above.
+- Check 4 (resize → semantic TOML dimension): **PENDING** — the orange resize
+  handle was located (~window 373..381, 124..144) but the drag + TOML assertion
+  was not finished before the iteration budget ran out.
+- Checks 5 (grid columns), 6 (live undo/redo sweep), 8 (narrow/maximized),
+  10 (disable designer → normal): **PENDING** — not live-verified in this run.
+
+Build/test evidence for this run: `rb check --features dev-ui` PASS,
+`rb test --features dev-ui --bin boru -- designer` 16 passed / 0 failed,
+`rb build --features dev-ui` PASS. The gesture-routing fix that makes
+whole-card overlay drags/resizes work is committed on the task branch
+(`fix(BORU-DESIGN-27): route overlay move/release to active gesture; anchor drag
+origin`, verified by the same check + 16-test suite).
 
 ## Previously observed gap (resolved by executor)
 
