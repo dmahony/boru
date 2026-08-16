@@ -513,14 +513,18 @@ enum CellArtwork {
 /// they use this entry point directly — the same resolver and fallback
 /// behavior as every other picker item. Kept separate from the widget
 /// construction so the supported/fallback behaviour is unit-testable.
+///
+/// BORU-TWEMOJI-20: the decision is the shared
+/// [`EmojiRenderer::artwork`] rule — SVG when the grapheme resolves to a
+/// vendored asset whose SVG loads, original Unicode text otherwise. The
+/// picker, message renderer and any future emoji surface all use this one
+/// rule, so an unsupported emoji is never hidden, dropped or replaced with
+/// an empty widget.
 fn cell_artwork_unicode(
     renderer: &impl crate::emoji::renderer::EmojiRenderer,
     unicode: &str,
 ) -> CellArtwork {
-    match renderer
-        .resolve(unicode)
-        .and_then(|a| renderer.svg_handle(&a))
-    {
+    match renderer.artwork(unicode) {
         Some(handle) => CellArtwork::Svg(handle),
         None => CellArtwork::Text,
     }
@@ -1177,5 +1181,77 @@ mod tests {
             cell_artwork_unicode(&renderer, "🫩"),
             CellArtwork::Text
         ));
+    }
+
+    // ── Uniform fallback parity (BORU-TWEMOJI-20) ────────────────────
+
+    /// A stub renderer that resolves like the real one but can never
+    /// produce an SVG handle — forces the missing-SVG fallback
+    /// deterministically, mirroring `emoji_text`'s NoHandleRenderer.
+    struct NoHandleRenderer;
+
+    impl crate::emoji::renderer::EmojiRenderer for NoHandleRenderer {
+        fn resolve(&self, grapheme: &str) -> Option<crate::emoji::renderer::EmojiAsset> {
+            crate::emoji::parser::emoji_asset(grapheme)
+        }
+
+        fn svg_handle(
+            &self,
+            _asset: &crate::emoji::renderer::EmojiAsset,
+        ) -> Option<iced::widget::svg::Handle> {
+            None
+        }
+    }
+
+    /// BORU-TWEMOJI-20 acceptance: the picker and the message renderer make
+    /// the SAME fallback decision for the same grapheme — SVG when the
+    /// asset resolves AND its SVG loads, original Unicode text otherwise.
+    /// This parity is what "keep fallback behavior identical in the picker,
+    /// message renderer and any future emoji surfaces" means.
+    #[test]
+    fn picker_and_message_renderer_agree_on_fallback() {
+        use crate::emoji::emoji_text::{plan_emoji_text, EmojiTextArtwork};
+
+        let real = TwemojiRenderer;
+        // Supported graphemes: BOTH surfaces render SVG.
+        for unicode in ["😀", "🍕", "🇺🇸", "👍🏻", "❤️"] {
+            assert!(
+                matches!(cell_artwork_unicode(&real, unicode), CellArtwork::Svg(_)),
+                "picker must render {unicode} as SVG"
+            );
+            let plan = plan_emoji_text(&real, unicode);
+            assert!(
+                plan.iter()
+                    .any(|item| matches!(item, EmojiTextArtwork::Svg { .. })),
+                "message renderer must render {unicode} as SVG"
+            );
+        }
+
+        // Unsupported/newer graphemes: BOTH surfaces fall back to the
+        // original Unicode text (never hidden, dropped, or an empty widget).
+        for unicode in ["🫩", "\u{10FFFF}"] {
+            assert!(
+                matches!(cell_artwork_unicode(&real, unicode), CellArtwork::Text),
+                "picker must fall back for {unicode}"
+            );
+            let plan = plan_emoji_text(&real, unicode);
+            assert_eq!(
+                plan,
+                vec![EmojiTextArtwork::Text(unicode)],
+                "message renderer must fall back to original text for {unicode}"
+            );
+        }
+
+        // Missing SVG file: BOTH surfaces fall back even though the
+        // grapheme resolves (the shared `artwork` rule degrades to text).
+        let stub = NoHandleRenderer;
+        assert!(matches!(
+            cell_artwork_unicode(&stub, "😀"),
+            CellArtwork::Text
+        ));
+        assert_eq!(
+            plan_emoji_text(&stub, "😀"),
+            vec![EmojiTextArtwork::Text("😀")]
+        );
     }
 }

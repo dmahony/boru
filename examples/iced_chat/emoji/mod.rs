@@ -35,6 +35,9 @@
 //! emoji::asset_manifest::{contains, lookup, TWEMOJI_ASSETS}
 //! emoji::parser::{MessageFragment, emoji_asset, split_fragments}
 //! emoji::renderer::{cached_svg_handle, EmojiAsset, EmojiAssetCache, EmojiRenderer, TwemojiRenderer}
+//!   — `EmojiRenderer::artwork` is the single shared fallback decision
+//!   (SVG when resolved+loaded, original Unicode text otherwise;
+//!   BORU-TWEMOJI-20), used by the picker and available to any surface.
 //! emoji::emoji_text::{emoji_text, EmojiTextArtwork, EmojiTextStyle, plan_emoji_text, EMOJI_TEXT_SCALE}
 //! emoji::picker::view_emoji_picker
 //! ```

@@ -135,6 +135,14 @@ pub enum EmojiTextArtwork<'a> {
 /// vendored file) degrades to its original Unicode text — never to an
 /// empty widget and never to a broken image (BORU-TWEMOJI-20).
 ///
+/// The fallback decision is the shared [`EmojiRenderer::artwork`] rule:
+/// SVG when the grapheme resolves to a vendored asset whose SVG loads,
+/// original Unicode text otherwise — identical to the picker
+/// (BORU-TWEMOJI-10) and any future emoji surface. This function already
+/// holds the resolved asset from [`split_fragments`], so it calls
+/// [`EmojiRenderer::svg_handle`] directly instead of re-resolving through
+/// `artwork`; the rule it applies is the same.
+///
 /// [`Text`]: EmojiTextArtwork::Text
 pub fn plan_emoji_text<'a>(
     renderer: &impl EmojiRenderer,
@@ -596,6 +604,32 @@ mod tests {
         // grapheme, not a broken/empty image.
         let plan = plan_emoji_text(&r, "hi 😀 bye");
         assert_eq!(plan, vec![EmojiTextArtwork::Text("hi 😀 bye")]);
+    }
+
+    /// BORU-TWEMOJI-20 acceptance: fallback does NOT alter the stored or
+    /// copied message text. When every emoji in a message must fall back
+    /// (missing/unreadable SVG), the plan still reproduces the input
+    /// byte-for-byte — the original Unicode, including multi-codepoint
+    /// graphemes, is never replaced by an asset key, path, or empty run.
+    #[test]
+    fn fallback_plan_roundtrips_original_text_when_all_emoji_missing() {
+        let r = NoHandleRenderer;
+        let input = "hello 😀 world 🇺🇸 👍🏻 \u{1f469}\u{200d}\u{1f4bb} 🫩 bye";
+        let plan = plan_emoji_text(&r, input);
+        let joined: String = plan
+            .iter()
+            .map(|item| match item {
+                EmojiTextArtwork::Text(t) => *t,
+                EmojiTextArtwork::Svg { unicode, .. } => *unicode,
+            })
+            .collect();
+        assert_eq!(joined, input, "fallback must preserve original text");
+        // Every piece is a text run — nothing renders as a broken image.
+        assert!(
+            plan.iter()
+                .all(|item| matches!(item, EmojiTextArtwork::Text(_))),
+            "all-emissing renderer must produce only text runs: {plan:?}"
+        );
     }
 
     #[test]

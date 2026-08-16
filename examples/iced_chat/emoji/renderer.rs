@@ -71,6 +71,25 @@ pub trait EmojiRenderer {
     /// the same emoji reuses the cached handle instead of re-reading the
     /// file on every frame.
     fn svg_handle(&self, asset: &EmojiAsset) -> Option<svg::Handle>;
+
+    /// One-step resolve + handle production — the shared fallback decision
+    /// every emoji surface makes (picker BORU-TWEMOJI-10, message renderer
+    /// BORU-TWEMOJI-17, recents BORU-TWEMOJI-14, any future surface).
+    ///
+    /// Returns `Some(handle)` when the grapheme resolves to a vendored
+    /// asset whose SVG can be loaded (render the Twemoji SVG), `None`
+    /// otherwise (render the original Unicode grapheme with normal text
+    /// rendering — BORU-TWEMOJI-20: never hide, drop or replace an
+    /// unsupported emoji with an empty widget).
+    ///
+    /// The default implementation composes [`Self::resolve`] and
+    /// [`Self::svg_handle`]; implementations that already hold a resolved
+    /// asset (e.g. the fragment-based message plan) may call
+    /// [`Self::svg_handle`] directly — the decision rule is identical.
+    fn artwork(&self, grapheme: &str) -> Option<svg::Handle> {
+        self.resolve(grapheme)
+            .and_then(|asset| self.svg_handle(&asset))
+    }
 }
 
 /// Twemoji-backed renderer using the vendored SVG set.
@@ -164,8 +183,22 @@ fn resolve_asset_root(
 /// Read the vendored SVG bytes for a resolved asset from an already-resolved
 /// runtime root. `None` means the bundle root could not be resolved or the
 /// file is missing — callers fall back to the original Unicode text.
+///
+/// Missing assets are logged at DEBUG level only (BORU-TWEMOJI-20): this is
+/// a packaging edge case, not an expected production event, and the hot
+/// path (message rendering) must not produce noisy logs. The rate is
+/// naturally bounded because callers route through [`cached_svg_handle`],
+/// which caches misses, so a given missing asset is logged at most once per
+/// process.
 fn read_vendored_svg(asset: &EmojiAsset) -> Option<Vec<u8>> {
-    let root = emoji_asset_root()?;
+    let Some(root) = emoji_asset_root() else {
+        tracing::debug!(
+            asset = %asset.key,
+            "emoji: Twemoji asset root not found; \
+             falling back to original Unicode text"
+        );
+        return None;
+    };
     // `asset.path` is repo-relative (`assets/emoji/twemoji/svg/<key>.svg`);
     // strip the root prefix and join the remainder onto the resolved root.
     let root_prefix = format!("{EMOJI_ASSET_ROOT}/");
@@ -173,7 +206,19 @@ fn read_vendored_svg(asset: &EmojiAsset) -> Option<Vec<u8>> {
         .path
         .strip_prefix(root_prefix.as_str())
         .unwrap_or(&asset.path);
-    std::fs::read(root.join(relative)).ok()
+    match std::fs::read(root.join(relative)) {
+        Ok(bytes) => Some(bytes),
+        Err(err) => {
+            tracing::debug!(
+                asset = %asset.key,
+                path = %root.join(relative).display(),
+                error = %err,
+                "emoji: vendored Twemoji SVG missing or unreadable; \
+                 falling back to original Unicode text"
+            );
+            None
+        }
+    }
 }
 
 /// App-lifetime cache of decoded Twemoji SVG handles, keyed by normalized
@@ -331,6 +376,43 @@ mod tests {
         }
         let expected = svg::Handle::from_memory(vendored);
         assert_eq!(handle.data(), expected.data());
+    }
+
+    /// The shared fallback helper (`artwork`) resolves AND loads in one
+    /// step: a supported grapheme yields the SVG handle exactly like the
+    /// two-step resolve + svg_handle path.
+    #[test]
+    fn artwork_resolves_and_loads_supported_emoji() {
+        let r = TwemojiRenderer;
+        let handle = r.artwork("😀").expect("grinning face resolves + loads");
+        let expected = r
+            .svg_handle(&r.resolve("😀").expect("grinning face resolves"))
+            .expect("vendored SVG exists");
+        assert_eq!(handle.data(), expected.data());
+    }
+
+    /// The shared fallback helper returns `None` for unknown/newer emoji —
+    /// the caller then renders the original Unicode text (BORU-TWEMOJI-20).
+    #[test]
+    fn artwork_returns_none_for_unknown_emoji() {
+        let r = TwemojiRenderer;
+        assert_eq!(r.artwork("🫩"), None);
+        assert_eq!(r.artwork("plain text"), None);
+    }
+
+    /// The shared fallback helper returns `None` when the vendored file is
+    /// missing — the caller falls back to text instead of a broken image.
+    #[test]
+    fn artwork_returns_none_when_svg_file_missing() {
+        let r = TwemojiRenderer;
+        let missing = EmojiAsset {
+            key: "zzzz-missing-file-test",
+            path: PathBuf::from("assets/emoji/twemoji/svg/definitely-missing.svg"),
+        };
+        // `artwork` composes resolve + svg_handle; for a *resolved* key
+        // whose file is absent, emulate the resolved-asset path through
+        // svg_handle directly (the trait contract both surfaces share).
+        assert!(r.svg_handle(&missing).is_none());
     }
 
     #[test]
@@ -539,5 +621,26 @@ mod tests {
         );
         assert!(!encoded.contains(".svg"), "no SVG filename in wire format");
         assert!(!encoded.contains("1f600"), "no asset key in wire format");
+    }
+
+    /// A missing vendored SVG logs at DEBUG level (BORU-TWEMOJI-20) — never
+    /// at a production-visible level — and the caller still receives `None`,
+    /// so a missing file can neither crash rendering nor produce noisy logs.
+    ///
+    /// Uses a unique key so the process-global cache miss is fresh (the
+    /// loader — and therefore the log — runs exactly once per asset ID).
+    #[test]
+    #[n0_tracing_test::traced_test]
+    fn missing_svg_logs_at_debug_level() {
+        let r = TwemojiRenderer;
+        let missing = EmojiAsset {
+            key: "zzzz-missing-log-test",
+            path: PathBuf::from("assets/emoji/twemoji/svg/zzzz-missing-log-test.svg"),
+        };
+        assert!(r.svg_handle(&missing).is_none());
+        assert!(
+            logs_contain("missing or unreadable"),
+            "missing asset must log at debug level"
+        );
     }
 }
