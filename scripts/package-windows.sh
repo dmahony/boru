@@ -27,6 +27,8 @@
 # OUTPUT:
 #   dist-windows/boru.exe
 #   dist-windows/assets/third_party/papirus/...
+#   dist-windows/assets/emoji/twemoji/...   (emoji SVGs + licence texts)
+#   dist-windows/THIRD_PARTY_NOTICES.md
 #   boru-windows-x86_64.zip                 # exe + assets tree, like release.yaml
 #
 # Cross-compile prerequisites (Debian/Ubuntu):
@@ -106,16 +108,32 @@ mkdir -p "$DIST/assets/third_party"
 cp "$EXE" "$DIST/boru.exe"
 cp -r "$ROOT/assets/third_party/papirus" "$DIST/assets/third_party/papirus"
 
-# Sanity: the bundle the loader probes must exist next to the exe.
+# Twemoji emoji assets + licence texts (BORU-TWEMOJI-23): the emoji renderer
+# probes <exe_dir>/assets/emoji/twemoji at runtime, and the package must
+# carry the CC-BY 4.0 / MIT notices alongside the artwork.
+mkdir -p "$DIST/assets/emoji"
+cp -r "$ROOT/assets/emoji/twemoji" "$DIST/assets/emoji/twemoji"
+cp "$ROOT/THIRD_PARTY_NOTICES.md" "$DIST/THIRD_PARTY_NOTICES.md"
+
+# Sanity: the bundles the loaders probe must exist next to the exe.
 PROBE="$DIST/assets/third_party/papirus/32/application-x-generic.svg"
 if [ ! -f "$PROBE" ]; then
     echo "ERROR: packaged bundle missing probe file $PROBE" >&2
     exit 1
 fi
+PROBE="$DIST/assets/emoji/twemoji/svg/1f600.svg"
+if [ ! -f "$PROBE" ]; then
+    echo "ERROR: packaged twemoji bundle missing probe file $PROBE" >&2
+    exit 1
+fi
+if [ ! -f "$DIST/THIRD_PARTY_NOTICES.md" ]; then
+    echo "ERROR: packaged bundle missing THIRD_PARTY_NOTICES.md" >&2
+    exit 1
+fi
 
 ZIP="$ROOT/boru-windows-x86_64.zip"
 rm -f "$ZIP"
-( cd "$DIST" && zip -1 -r "$ZIP" boru.exe assets/ >/dev/null )
+( cd "$DIST" && zip -1 -r "$ZIP" boru.exe assets/ THIRD_PARTY_NOTICES.md >/dev/null )
 
 echo "── Verify ──"
 file "$DIST/boru.exe"

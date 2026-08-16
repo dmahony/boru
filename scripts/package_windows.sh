@@ -6,8 +6,10 @@
 #
 #   boru.exe
 #   assets/third_party/papirus/          (icons — required by the runtime loader)
+#   assets/emoji/twemoji/                (emoji SVGs + licence texts — required by the runtime loader)
 #   gstreamer/1.0/msvc_x86_64/           (reviewed GStreamer runtime subset)
 #   THIRD_PARTY_NOTICES/gstreamer/       (exact versions + license texts)
+#   THIRD_PARTY_NOTICES.md               (full third-party notice manifest)
 #   <toolchain runtime DLLs>             (mingw/llvm-mingw or VC++ redist)
 #
 # Policy source: docs/video-runtime-packaging.md.  Only the reviewed
@@ -57,13 +59,23 @@ mkdir -p "$STAGE"
 
 # ── 1. boru.exe ─────────────────────────────────────────────────────────
 cp "$EXE" "$STAGE/boru.exe"
-echo "[1/6] staged boru.exe ($(stat -c%s "$STAGE/boru.exe") bytes)"
+echo "[1/7] staged boru.exe ($(stat -c%s "$STAGE/boru.exe") bytes)"
 
 # ── 2. Papirus icon assets (PAPIRUS-17, exe-relative loader) ────────────
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 mkdir -p "$STAGE/assets/third_party"
 cp -r "$REPO_ROOT/assets/third_party/papirus" "$STAGE/assets/third_party/papirus"
-echo "[2/6] staged papirus icons"
+echo "[2/7] staged papirus icons"
+
+# ── 2b. Twemoji emoji assets (BORU-TWEMOJI-23, exe-relative loader) ─────
+# The emoji renderer probes <exe_dir>/assets/emoji/twemoji/svg/<key>.svg at
+# runtime (examples/iced_chat/emoji/renderer.rs).  Ship the whole vendored
+# bundle — SVG artwork plus the verbatim upstream licence texts and the
+# ATTRIBUTION.md that records the pinned revision (v15.1.0) — so a release
+# artifact always carries the required third-party notices with the artwork.
+mkdir -p "$STAGE/assets/emoji"
+cp -r "$REPO_ROOT/assets/emoji/twemoji" "$STAGE/assets/emoji/twemoji"
+echo "[2b/7] staged twemoji assets ($(find "$STAGE/assets/emoji/twemoji/svg" -name '*.svg' | wc -l) svgs + licence texts)"
 
 # ── 3. GStreamer runtime subset ─────────────────────────────────────────
 # Runtime DLLs (dependency closure) and curated plugin allowlist.  The
@@ -106,9 +118,9 @@ if [[ -f "$BIN_MANIFEST" && -f "$PLUGIN_MANIFEST" ]]; then
     cp "$GST_BIN/gst-inspect-1.0.exe" "$GST_DEST/bin/gst-inspect-1.0.exe"
     cp "$GST_BIN/gst-launch-1.0.exe"   "$GST_DEST/bin/gst-launch-1.0.exe"
     cp "$GST_LIBEXEC/gst-plugin-scanner.exe" "$GST_DEST/libexec/gstreamer-1.0/gst-plugin-scanner.exe"
-    echo "[3/6] staged GStreamer runtime ($(find "$GST_DEST" -name '*.dll' | wc -l) dlls, $(find "$GST_DEST" -name '*.exe' | wc -l) tools)"
+    echo "[3/7] staged GStreamer runtime ($(find "$GST_DEST" -name '*.dll' | wc -l) dlls, $(find "$GST_DEST" -name '*.exe' | wc -l) tools)"
 else
-    echo "[3/6] SKIP: no runtime manifests found ($BIN_MANIFEST / $PLUGIN_MANIFEST)" >&2
+    echo "[3/7] SKIP: no runtime manifests found ($BIN_MANIFEST / $PLUGIN_MANIFEST)" >&2
 fi
 
 # ── 4. THIRD_PARTY_NOTICES/gstreamer/ ───────────────────────────────────
@@ -116,9 +128,15 @@ NOTICES_SRC="$REPO_ROOT/assets/third_party/gstreamer-notices"
 if [[ -d "$NOTICES_SRC" ]]; then
     mkdir -p "$STAGE/THIRD_PARTY_NOTICES/gstreamer"
     cp -r "$NOTICES_SRC/." "$STAGE/THIRD_PARTY_NOTICES/gstreamer/"
-    echo "[4/6] staged third-party notices"
+    echo "[4/7] staged third-party notices"
 else
-    echo "[4/6] SKIP: no notices dir at $NOTICES_SRC" >&2
+    echo "[4/7] SKIP: no notices dir at $NOTICES_SRC" >&2
+fi
+
+# Top-level notice manifest (BORU-TWEMOJI-23) — full inventory of every
+# bundled/modified third-party component, incl. the Twemoji artwork entry.
+if [[ -f "$REPO_ROOT/THIRD_PARTY_NOTICES.md" ]]; then
+    cp "$REPO_ROOT/THIRD_PARTY_NOTICES.md" "$STAGE/THIRD_PARTY_NOTICES.md"
 fi
 
 # ── 5. Toolchain runtime DLLs ───────────────────────────────────────────
@@ -178,7 +196,7 @@ case "$TARGET" in
         echo "  WARN: unknown target '$TARGET'; skipping toolchain DLL step" >&2
         ;;
 esac
-echo "[5/6] staged toolchain runtime DLLs"
+echo "[5/7] staged toolchain runtime DLLs"
 
 # ── 6. Zip + checksums ──────────────────────────────────────────────────
 cd "$STAGE"
@@ -197,7 +215,7 @@ fi
 
 cd "$OUT_DIR"
 sha256sum "$ARTIFACT_BASE.zip" > "$ARTIFACT_BASE.zip.sha256"
-echo "[6/6] wrote $OUT_DIR/$ARTIFACT_BASE.zip"
+echo "[6/7] wrote $OUT_DIR/$ARTIFACT_BASE.zip"
 echo
 echo "=== package layout ==="
 ( cd "$STAGE" && find . -type f | sort )

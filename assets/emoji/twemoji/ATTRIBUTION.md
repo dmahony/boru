@@ -48,6 +48,22 @@ None. The vendored SVG files and licence texts are byte-for-byte copies of
 the pinned upstream revision. No build-time or runtime network access is
 involved in producing or loading these assets.
 
+## Verification record (BORU-TWEMOJI-23, 2026-08-17)
+
+On 2026-08-17 the vendored licence texts were re-verified byte-for-byte
+against the pinned upstream tag `v15.1.0` (GitHub API confirms the tag points
+at commit `7407fa31c51be5ab45626b8ab5554d50cc8073f6`):
+
+| File | SHA-256 (vendored == upstream `v15.1.0`) |
+|---|---|
+| `LICENSE` | `5076b7ec0f98f95aa87a3103bebdcd3852acd88d61fbd99307b8d953024acb67` |
+| `LICENSE-GRAPHICS` | `8ae9438818c26e4873b91d8c6ad620526c011e27e125677f13031eda903f007c` |
+
+The release packaging (`scripts/package_windows.sh`, `scripts/package-windows.sh`,
+`.github/workflows/release.yaml`) ships this whole directory — SVGs plus
+`LICENSE`, `LICENSE-GRAPHICS` and `ATTRIBUTION.md` — inside every release
+artifact, so the required Twemoji notices travel with the artwork.
+
 ## Size note
 
 The vendored set is 3,838 files / ~18 MB unpacked (~3.3 MB gzip-compressed).

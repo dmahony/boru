@@ -57,3 +57,19 @@ networking details. The File Sharing dashboard is documented in
 [`docs/fs-25-release-note.md`](docs/fs-25-release-note.md). External GIF search
 (KLIPY provider, configuration, privacy, adding another provider) is documented
 in [`docs/gif-search.md`](docs/gif-search.md).
+
+## Third-party assets and licensing
+
+Boru's own source is dual-licensed **MIT OR Apache-2.0** (see
+[`LICENSE-MIT`](LICENSE-MIT) and [`LICENSE-APACHE`](LICENSE-APACHE)). The full
+inventory of third-party components Boru builds on or bundles — including the
+patched upstream crates, bundled fonts, Papirus icons, the GStreamer runtime
+for Windows packaging, and the Twemoji emoji graphics — is recorded in
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+
+**Emoji artwork:** Boru renders emoji using the **Twemoji** asset set, which is
+vendored (not downloaded at runtime) under `assets/emoji/twemoji/`. The
+Twemoji graphics are licensed under **CC-BY 4.0** (the upstream code under
+MIT); they are the work of the Twemoji project and are **not** owned by Boru.
+See [`assets/emoji/twemoji/ATTRIBUTION.md`](assets/emoji/twemoji/ATTRIBUTION.md)
+for the pinned upstream revision and the verbatim licence texts.

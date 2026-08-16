@@ -109,8 +109,15 @@ jobs:
             cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" dist/
             mkdir -p dist/assets/third_party
             cp -r assets/third_party/papirus dist/assets/third_party/papirus
+            # Twemoji emoji assets + notices (BORU-TWEMOJI-23): the runtime
+            # loader probes <exe_dir>/assets/emoji/twemoji, and the release
+            # artifact must carry the CC-BY 4.0 / MIT licence texts alongside
+            # the artwork (assets/emoji/twemoji/ATTRIBUTION.md).
+            mkdir -p dist/assets/emoji
+            cp -r assets/emoji/twemoji dist/assets/emoji/twemoji
+            cp THIRD_PARTY_NOTICES.md dist/
             cd dist
-            tar -czf "../${{ matrix.artifact }}.tar.gz" "${{ matrix.binary }}" assets/
+            tar -czf "../${{ matrix.artifact }}.tar.gz" "${{ matrix.binary }}" assets/ THIRD_PARTY_NOTICES.md
           fi
 
       - name: Upload artifact
