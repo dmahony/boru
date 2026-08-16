@@ -254,6 +254,10 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 rusqlite = { version = "0.39", features = ["bundled"] }
 criterion = "0.5"
 iced_tiny_skia = "0.14"
+# Same resvg 0.45 line iced's `svg` feature already activates via
+# iced_tiny_skia; used only by tests/svg_render_proof.rs to rasterize a
+# vendored Twemoji SVG headlessly at multiple sizes (BORU-TWEMOJI-03).
+resvg = { version = "0.45", default-features = false }
 
 [[bench]]
 name = "phase23"
@@ -392,6 +396,12 @@ required-features = ["net"]
 [[example]]
 name = "catalogue_browser"
 required-features = ["net"]
+
+# BORU-TWEMOJI-03 render proof: shows a vendored Twemoji SVG at multiple
+# sizes (16/32/64/128 px). Companion to tests/svg_render_proof.rs.
+[[example]]
+name = "svg_render_proof"
+required-features = ["gui"]
 
 [[test]]
 name = "three_peer_mesh"

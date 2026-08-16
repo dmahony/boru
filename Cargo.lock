@@ -1026,7 +1026,7 @@ dependencies = [
 
 [[package]]
 name = "boru-core"
-version = "0.204.1"
+version = "0.204.2"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1089,6 +1089,7 @@ dependencies = [
  "rayon",
  "regex",
  "reqwest 0.12.28",
+ "resvg",
  "rfd",
  "rtrb",
  "rubato",
