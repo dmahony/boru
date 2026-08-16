@@ -25,6 +25,24 @@ pub(crate) struct QualitySegmentSpec {
     pub selected: bool,
 }
 
+#[cfg(feature = "screen-sharing")]
+/// BORU-SSUI-05: presentation mapping for the sender's remote-control
+/// status area. The permission model is consent-gated — remote control
+/// is granted only by the sender in response to an explicit viewer
+/// request (the consent prompt) and can be revoked while active; there
+/// is no direct sender-side toggle. So this maps the authoritative
+/// `screen_share_control_active` mirror to a STATE-ONLY display label
+/// (ON/OFF) with an input/control icon. The explicit enable/disable
+/// actions (grant/deny consent, revoke) stay separate and keep their
+/// existing dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RemoteControlStatusSpec {
+    /// i18n label key for the status text ("Remote control: ON/OFF").
+    pub label_key: &'static str,
+    /// Whether remote control is currently granted (ON).
+    pub active: bool,
+}
+
 impl IcedChat {
     pub(crate) fn view_chat_panel(&self) -> iced::Element<'_, AppMessage> {
         use iced::{widget, Length};
@@ -568,18 +586,58 @@ impl IcedChat {
                 }
             }
 
-            // Remote-control indicator (PDF Phase 13: "show ... whether
-            // remote control is enabled"). Explicit consent is separate —
-            // control is never granted automatically (PDF Task 9.1).
+            // BORU-SSUI-05 (PDF Task 5): dedicated compact status area
+            // for remote control — labeled "Remote control: OFF/ON" with
+            // an input/control icon (mouse pointer). The current
+            // permission model is consent-gated: the sender cannot
+            // toggle remote control ON directly, so this is a STATE-ONLY
+            // display with no invented toggle. The explicit enable /
+            // disable actions (grant/deny consent prompt, revoke) are
+            // preserved below with the same compact control language as
+            // the rest of the panel. The label + dot bind to
+            // `screen_share_control_active`, which is kept live by
+            // `SessionEvent::ControlChanged` → `apply_screen_share_event`,
+            // so the status updates without reopening the view.
             if self.screen_share_host_state == ScreenShareHostState::Streaming {
+                let spec = Self::remote_control_status_spec(self.screen_share_control_active);
+                let theme = self.theme();
+                let icon_color: fn(&iced::Theme) -> iced::Color = if spec.active {
+                    crate::design_tokens::primary
+                } else {
+                    crate::design_tokens::text_secondary
+                };
+                let text_color = if spec.active {
+                    crate::design_tokens::text_primary(&theme)
+                } else {
+                    Self::muted_color(self.dark_mode)
+                };
+                let status_icon = Icon::MousePointer
+                    .build()
+                    .size(IconSize::Sm)
+                    .color_fn(icon_color)
+                    .build();
+                let dot = if spec.active {
+                    crate::ui_components::status_dot(
+                        crate::ui_components::StatusDotKind::Online,
+                        8.0,
+                    )
+                } else {
+                    crate::ui_components::status_dot(
+                        crate::ui_components::StatusDotKind::Offline,
+                        8.0,
+                    )
+                };
                 items.push(
-                    text(if self.screen_share_control_active {
-                        crate::i18n::t("screenshare.remote_control_on")
-                    } else {
-                        crate::i18n::t("screenshare.remote_control_off")
-                    })
-                    .size(crate::fonts::TypeRole::SupportingText.size_px())
-                    .color(Self::muted_color(self.dark_mode))
+                    row![
+                        status_icon,
+                        text(crate::i18n::t(spec.label_key))
+                            .size(crate::fonts::TypeRole::SupportingText.size_px())
+                            .font(crate::fonts::TypeRole::SupportingText.font())
+                            .color(text_color),
+                        dot,
+                    ]
+                    .spacing(SPACE_6)
+                    .align_y(iced::Alignment::Center)
                     .into(),
                 );
             }
@@ -651,14 +709,23 @@ impl IcedChat {
                 .into(),
             );
 
-            // Explicit consent prompt: the host picks the granted capabilities.
+            // Explicit consent prompt: the host picks the granted
+            // capabilities. BORU-SSUI-05: these are the sender's explicit
+            // ENABLE action — preserved but rendered with the same compact
+            // control language as the rest of the panel (padding([2, 6]),
+            // matching the viewer toolbar buttons).
             if let Some((_, viewer, capabilities)) = &self.screen_share_control_request {
                 let caps = capabilities
                     .iter()
                     .map(Self::capability_label)
                     .collect::<Vec<_>>()
                     .join(", ");
-                items.push(text(format!("{viewer} requests: {caps}")).into());
+                items.push(
+                    text(format!("{viewer} requests: {caps}"))
+                        .size(crate::fonts::TypeRole::SupportingText.size_px())
+                        .color(Self::muted_color(self.dark_mode))
+                        .into(),
+                );
                 let wants_pointer = capabilities
                     .iter()
                     .any(|c| matches!(c, Capability::ControlPointer | Capability::ControlKeyboard));
@@ -670,6 +737,7 @@ impl IcedChat {
                             .on_press(AppMessage::ScreenShareGrantControl(vec![
                                 Capability::ControlPointer,
                             ]))
+                            .padding([2, 6])
                             .into(),
                     );
                     grant_buttons.push(
@@ -678,6 +746,7 @@ impl IcedChat {
                                 Capability::ControlPointer,
                                 Capability::ControlKeyboard,
                             ]))
+                            .padding([2, 6])
                             .into(),
                     );
                 }
@@ -690,24 +759,27 @@ impl IcedChat {
                             .on_press(AppMessage::ScreenShareGrantControl(vec![
                                 Capability::Clipboard,
                             ]))
+                            .padding([2, 6])
                             .into(),
                     );
                 }
                 grant_buttons.push(
                     button(text(crate::i18n::t("common.deny")))
                         .on_press(AppMessage::ScreenShareDenyControl)
+                        .padding([2, 6])
                         .into(),
                 );
                 items.push(row(grant_buttons).spacing(SPACE_8).into());
             }
+            // BORU-SSUI-05: explicit DISABLE action (revoke) + the separate
+            // clipboard capability — preserved, compact. The verbose
+            // "Remote control active" line is superseded by the status row
+            // above (icon + ON label + dot).
             if self.screen_share_control_active {
-                items.push(
-                    text(crate::i18n::t("screenshare.remote_control_active"))
-                        .into(),
-                );
                 items.push(
                     button(text(crate::i18n::t("screenshare.revoke_control")))
                         .on_press(AppMessage::ScreenShareRevokeControl)
+                        .padding([2, 6])
                         .into(),
                 );
             }
@@ -715,6 +787,7 @@ impl IcedChat {
                 items.push(
                     button(text(crate::i18n::t("screenshare.send_clipboard")))
                         .on_press(AppMessage::ScreenShareHostSendClipboard)
+                        .padding([2, 6])
                         .into(),
                 );
             }
@@ -1019,6 +1092,26 @@ impl IcedChat {
                 selected: selected.is_none(),
             },
         ]
+    }
+
+    #[cfg(feature = "screen-sharing")]
+    /// BORU-SSUI-05: map the authoritative remote-control state to the
+    /// status-area presentation. State-only by design — the current
+    /// permission model has no direct sender-side toggle (control is
+    /// granted via explicit consent and revoked explicitly), so this
+    /// only supplies the runtime label ("Remote control: ON/OFF").
+    pub(crate) fn remote_control_status_spec(active: bool) -> RemoteControlStatusSpec {
+        if active {
+            RemoteControlStatusSpec {
+                label_key: "screenshare.remote_control_on",
+                active: true,
+            }
+        } else {
+            RemoteControlStatusSpec {
+                label_key: "screenshare.remote_control_off",
+                active: false,
+            }
+        }
     }
 
     #[cfg(feature = "screen-sharing")]
@@ -8460,5 +8553,36 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// BORU-SSUI-05 (PDF Task 5): the remote-control status area maps the
+    /// authoritative control state to a STATE-ONLY label — the permission
+    /// model has no direct sender-side toggle, so the spec never invents
+    /// one, and the runtime label keys are the existing i18n ON/OFF keys.
+    #[test]
+    fn remote_control_status_spec_maps_state_to_label() {
+        let on = IcedChat::remote_control_status_spec(true);
+        assert_eq!(on.label_key, "screenshare.remote_control_on");
+        assert!(on.active);
+        let off = IcedChat::remote_control_status_spec(false);
+        assert_eq!(off.label_key, "screenshare.remote_control_off");
+        assert!(!off.active);
+        // Labels must resolve to real runtime text (never empty keys).
+        assert_eq!(crate::i18n::t(on.label_key), "Remote control: ON");
+        assert_eq!(crate::i18n::t(off.label_key), "Remote control: OFF");
+    }
+
+    /// BORU-SSUI-05: the new input/control icon maps to the mouse-pointer
+    /// asset (distinct from the source-picker icons used by Task 3).
+    #[test]
+    fn mouse_pointer_icon_maps_to_control_asset() {
+        let bytes = Icon::MousePointer.bytes();
+        let svg = String::from_utf8_lossy(bytes);
+        // The lucide mouse-pointer-2 path (distinctive "l6 6.5" pointer body).
+        assert!(svg.contains("16 6.5"), "mouse-pointer-2 path data");
+        assert!(svg.starts_with("<svg"), "SVG root element");
+        assert_ne!(Icon::MousePointer, Icon::Monitor);
+        assert_ne!(Icon::MousePointer, Icon::Window);
+        assert_ne!(Icon::MousePointer, Icon::Desktop);
     }
 }
