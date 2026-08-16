@@ -4423,6 +4423,12 @@ pub struct IcedChat {
     /// a source from the picker or when `SourceChanged` arrives.
     screen_share_selected_source: Option<CaptureSourceId>,
     #[cfg(feature = "screen-sharing")]
+    /// BORU-SSUI-04: the user's chosen quality preset (None = Auto /
+    /// path-derived auto preset). Presentation-only mirror of the
+    /// `ScreenShareSetPreset` dispatch; the host's effective preset is
+    /// authoritative and reported via `screen_share_host_metrics`.
+    screen_share_selected_preset: Option<QualityPreset>,
+    #[cfg(feature = "screen-sharing")]
     /// Who the local viewer is watching (short public key from the invite),
     /// shown while `screen_share_viewing` so the viewer always knows who is
     /// sharing (PDF Phase 13: "show who is sharing").
@@ -8561,6 +8567,8 @@ impl IcedChat {
             screen_share_sources: None,
             #[cfg(feature = "screen-sharing")]
             screen_share_selected_source: None,
+            #[cfg(feature = "screen-sharing")]
+            screen_share_selected_preset: None,
             #[cfg(feature = "screen-sharing")]
             screen_share_viewing_peer: None,
             #[cfg(feature = "screen-sharing")]
@@ -15080,6 +15088,9 @@ impl IcedChat {
                 // restores the path-derived auto preset). The host driver
                 // applies the ceiling whether streaming already started or
                 // the viewer is still deciding.
+                // BORU-SSUI-04: mirror the user's choice so the segmented
+                // control shows exactly one selected segment (None = Auto).
+                self.screen_share_selected_preset = preset;
                 if let Some(tx) = &self.screen_share_host_cmd_tx {
                     let _ = tx.try_send(HostCommand::SetQualityPreset(preset));
                 }
@@ -23072,6 +23083,7 @@ impl IcedChat {
         self.screen_share_src_size = None;
         self.screen_share_sources = None;
         self.screen_share_selected_source = None;
+        self.screen_share_selected_preset = None;
         self.screen_share_notice_ticks = 0;
     }
 
@@ -27884,6 +27896,45 @@ mod tests {
         assert!(
             matches!(received, Ok(HostCommand::SwitchSource(CaptureSourceId(2)))),
             "the picker choice must reach the host driver, got {received:?}"
+        );
+    }
+
+    /// BORU-SSUI-04 (PDF Task 4): selecting a quality segment mirrors the
+    /// user's choice so exactly one segment shows selected, and forwards the
+    /// exact same HostCommand the old preset text buttons sent (None = Auto).
+    #[cfg(feature = "screen-sharing")]
+    #[test]
+    fn screen_share_set_preset_forwards_command_and_mirrors_selection() {
+        let (_runtime, mut app, _local, _peer) = build_join_request_test_app();
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel(8);
+        app.screen_share_host_cmd_tx = Some(cmd_tx);
+
+        app.update(AppMessage::ScreenShareSetPreset(Some(
+            QualityPreset::LanHigh,
+        )));
+        assert_eq!(
+            app.screen_share_selected_preset,
+            Some(QualityPreset::LanHigh),
+            "the segmented control mirrors the user's choice"
+        );
+        let received = cmd_rx.try_recv();
+        assert!(
+            matches!(
+                received,
+                Ok(HostCommand::SetQualityPreset(Some(QualityPreset::LanHigh)))
+            ),
+            "LAN High must dispatch the same command as before, got {received:?}"
+        );
+
+        app.update(AppMessage::ScreenShareSetPreset(None));
+        assert_eq!(
+            app.screen_share_selected_preset, None,
+            "Auto (None) mirrors as the path-derived auto preset"
+        );
+        let received = cmd_rx.try_recv();
+        assert!(
+            matches!(received, Ok(HostCommand::SetQualityPreset(None))),
+            "Auto must dispatch the same command as before, got {received:?}"
         );
     }
 
@@ -38350,6 +38401,115 @@ fn vr_create_tunnel_picker_port_validation() {
             seed_friends(&mut app, false);
             let mut element = app.view();
             render_element(&mut element, "settings_light", 1200, 800, false);
+        }
+
+        // ── BORU-SSUI-02: sender screen-share control card shell ─────────
+        // Renders the real sender branch of `view_screen_share_panel` (the
+        // card below the conversation header) with an active streaming
+        // session, enumerated sources, quality metrics and the runtime peer
+        // name. The card must show the muted "Sharing your screen with
+        // <peer>" title at top-left, a subtle surface/border/radius/shadow,
+        // and stay compact (content height only).
+        // Gated on `screen-sharing` (opt-in feature): the sender-panel fields
+        // do not exist without it, so the module must not force the feature.
+        #[cfg(feature = "screen-sharing")]
+        fn seed_sender_share_session(app: &mut IcedChat, topic: TopicId, peer: &PublicKey) {
+            use boru_core::screen_share::{
+                CaptureSource, CaptureSourceId, CaptureSourceKind, PathKind, QualityPreset,
+                ScreenShareSessionMetrics, ScreenShareStats, ScreenShareStatsSnapshot,
+            };
+            app.screen = Screen::Chat { topic };
+            app.topic = topic;
+            app.screen_share_host_state = ScreenShareHostState::Streaming;
+            app.screen_share_sources = Some(vec![
+                CaptureSource {
+                    id: CaptureSourceId(1),
+                    kind: CaptureSourceKind::Desktop,
+                    title: "Entire desktop".to_string(),
+                    width: 1920,
+                    height: 1080,
+                    geometry: None,
+                },
+                CaptureSource {
+                    id: CaptureSourceId(2),
+                    kind: CaptureSourceKind::Window,
+                    title: "xfort-gorai".to_string(),
+                    width: 1280,
+                    height: 800,
+                    geometry: None,
+                },
+                CaptureSource {
+                    id: CaptureSourceId(3),
+                    kind: CaptureSourceKind::Monitor,
+                    title: "DP-1: Dell U2720Q".to_string(),
+                    width: 2560,
+                    height: 1440,
+                    geometry: None,
+                },
+                // Long window title — the card must ellipsize it (BORU-SSUI-03).
+                CaptureSource {
+                    id: CaptureSourceId(4),
+                    kind: CaptureSourceKind::Window,
+                    title: "This is a very long application window title that should be ellipsized by the source card".to_string(),
+                    width: 1920,
+                    height: 1080,
+                    geometry: None,
+                },
+            ]);
+            app.screen_share_selected_source = Some(CaptureSourceId(1));
+            let mut stats = ScreenShareStats::new();
+            let snapshot: ScreenShareStatsSnapshot = stats.snapshot();
+            app.screen_share_host_metrics = Some(ScreenShareSessionMetrics {
+                codec: "h264".to_string(),
+                width: 1920,
+                height: 1080,
+                fps: 30,
+                bitrate_bps: 4_000_000,
+                backend: "test-pattern".to_string(),
+                path_kind: PathKind::Direct,
+                preset: QualityPreset::LanHigh,
+                adaptive_level: 0,
+                snapshot,
+            });
+            app.screen_share_audio_active = false;
+            app.screen_share_control_active = false;
+            app.screen_share_dev_overlay = false;
+            app.names.insert(*peer, "Alice".to_string());
+            // conversation_store entry so `view_screen_share_panel` resolves
+            // the real display name for the "Sharing your screen with {name}"
+            // title (never mockup text).
+            let entry = ConversationEntry::new(topic, peer.to_string(), "Alice");
+            app.conversation_store.upsert(entry);
+            app.sender = Some(boru_core::api::GossipSender::new(
+                irpc::channel::mpsc::Sender::from(tokio::sync::mpsc::channel::<
+                    boru_core::api::Command,
+                >(8).0),
+            ));
+            app.sender_ready = true;
+        }
+
+        #[cfg(feature = "screen-sharing")]
+        #[test]
+        fn capture_screen_share_sender_card_light() {
+            load_fonts();
+            let peer = SecretKey::generate().public();
+            let (_rt, mut app) = seed_app("6c0f88fe9f", &peer, false);
+            let topic = TopicId::from_bytes([7u8; 32]);
+            seed_sender_share_session(&mut app, topic, &peer);
+            let mut element = app.view();
+            render_element(&mut element, "screen_share_sender_card_light", 1200, 800, false);
+        }
+
+        #[cfg(feature = "screen-sharing")]
+        #[test]
+        fn capture_screen_share_sender_card_dark() {
+            load_fonts();
+            let peer = SecretKey::generate().public();
+            let (_rt, mut app) = seed_app("6c0f88fe9f", &peer, true);
+            let topic = TopicId::from_bytes([7u8; 32]);
+            seed_sender_share_session(&mut app, topic, &peer);
+            let mut element = app.view();
+            render_element(&mut element, "screen_share_sender_card_dark", 1200, 800, true);
         }
     }
 fn vr_create_tunnel_friend_profile_base_is_fill_sized() {

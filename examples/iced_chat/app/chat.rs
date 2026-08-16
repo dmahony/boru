@@ -10,6 +10,39 @@
 
 use super::*;
 
+#[cfg(feature = "screen-sharing")]
+/// BORU-SSUI-04: one segment of the sender's quality segmented control.
+/// `preset` is the exact value dispatched on press (`None` = Auto /
+/// path-derived auto preset); `selected` marks the single visually
+/// active segment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct QualitySegmentSpec {
+    /// i18n label key (runtime source labels, never mockup text).
+    pub label_key: &'static str,
+    /// Preset dispatched via `ScreenShareSetPreset`.
+    pub preset: Option<QualityPreset>,
+    /// Whether this segment is the selected one.
+    pub selected: bool,
+}
+
+#[cfg(feature = "screen-sharing")]
+/// BORU-SSUI-05: presentation mapping for the sender's remote-control
+/// status area. The permission model is consent-gated — remote control
+/// is granted only by the sender in response to an explicit viewer
+/// request (the consent prompt) and can be revoked while active; there
+/// is no direct sender-side toggle. So this maps the authoritative
+/// `screen_share_control_active` mirror to a STATE-ONLY display label
+/// (ON/OFF) with an input/control icon. The explicit enable/disable
+/// actions (grant/deny consent, revoke) stay separate and keep their
+/// existing dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RemoteControlStatusSpec {
+    /// i18n label key for the status text ("Remote control: ON/OFF").
+    pub label_key: &'static str,
+    /// Whether remote control is currently granted (ON).
+    pub active: bool,
+}
+
 impl IcedChat {
     pub(crate) fn view_chat_panel(&self) -> iced::Element<'_, AppMessage> {
         use iced::{widget, Length};
@@ -435,13 +468,20 @@ impl IcedChat {
     #[cfg(feature = "screen-sharing")]
     /// Conversation-local screen-share controls. Playback pauses when the
     /// viewer navigates away; no media is retained in the background.
+    ///
+    /// BORU-SSUI (sender screen-share UI redesign): the sharer controls live
+    /// inside ONE card shell below the conversation header. This is a
+    /// presentation/interaction redesign — capture, session, network and
+    /// permission behavior must not change here (see docs/screen-share-ui/
+    /// sender-audit.md). Style values reuse the shared design tokens; the
+    /// BORU-SSUI-08 token work migrates the card values into
+    /// `screen_share.card.*` TOML tokens afterwards.
     pub(crate) fn view_screen_share_panel(&self) -> iced::Element<'_, AppMessage> {
         use iced::widget::{button, column, container, responsive, row, text};
         use iced::Length;
         // BORU-UI-03: viewer box geometry comes from `ChatTheme::screen_share_*`
         // (640x360 capture aspect; the mouse-area Point maps 1:1 to normalized
         // coordinates only while the box matches the capture aspect).
-        let btheme = crate::theme::BoruTheme::default();
         let body = if let Some((inviter, _)) = &self.screen_share_invite {
             column![
                 text(format!("{inviter} wants to share their screen")),
@@ -484,7 +524,19 @@ impl IcedChat {
                 ScreenShareHostState::Error(_) => crate::i18n::t("screenshare.error"),
                 ScreenShareHostState::Idle => unreachable!(),
             };
-            let mut items: Vec<iced::Element<'_, AppMessage>> = vec![text(state_text).into()];
+            // BORU-SSUI-02: the card title sits at the top-left of the card
+            // shell. `state_text` is the runtime status line — for the active
+            // streaming state it resolves to `screenshare.sharing_with`
+            // ("Sharing your screen with {name}"), so the peer name is the
+            // real conversation display name, never mockup text. Muted
+            // supporting-text size matches the approved mockup hierarchy.
+            let mut items: Vec<iced::Element<'_, AppMessage>> = vec![
+                text(state_text)
+                    .size(crate::fonts::TypeRole::SupportingText.size_px())
+                    .font(crate::fonts::TypeRole::SupportingText.font())
+                    .color(Self::muted_color(self.dark_mode))
+                    .into(),
+            ];
 
             // Error reason (user-safe; never logs media data).
             if let ScreenShareHostState::Error(reason) = &self.screen_share_host_state {
@@ -497,54 +549,95 @@ impl IcedChat {
             }
 
             // ── Monitor/source selection (PDF Phase 13) ───────────────
-            // The enumerated monitor list is shown in every active state so
+            // The enumerated source list is shown in every active state so
             // the sharer can pick the initial source before the viewer
-            // accepts and switch it any time afterwards. The chosen entry is
-            // highlighted; picking one sends HostCommand::SwitchSource.
+            // accepts and switch it any time afterwards. The chosen entry
+            // is highlighted; picking one sends HostCommand::SwitchSource.
+            // BORU-SSUI-03: sources render as selectable CARDS (kind icon +
+            // ellipsized title + dimensions + selected state) instead of
+            // the old blue text buttons, in a horizontally scrollable row
+            // so more sources than fit never wrap into a wall of buttons.
+            // The message dispatched is unchanged — `ScreenShareSelectSource`
+            // — so capture switching behaviour is preserved exactly.
             if let Some(sources) = &self.screen_share_sources {
                 if !sources.is_empty() {
                     let selected = self.screen_share_selected_source;
-                    let source_row: Vec<iced::Element<'_, AppMessage>> = sources
+                    let cards: Vec<iced::Element<'_, AppMessage>> = sources
                         .iter()
                         .map(|source| {
                             let is_selected = selected == Some(source.id);
-                            let label = if is_selected {
-                                format!("✓ {}", source.picker_label())
-                            } else {
-                                source.picker_label()
-                            };
-                            button(text(label).size(crate::fonts::TypeRole::SupportingText.size_px()))
-                                .on_press(AppMessage::ScreenShareSelectSource(source.id))
-                                .padding([2, 6])
-                                .into()
+                            self.view_source_card(source, is_selected)
                         })
                         .collect();
                     items.push(
-                        row![
+                        column![
                             text(crate::i18n::t("screenshare.source"))
                                 .size(crate::fonts::TypeRole::SupportingText.size_px())
                                 .color(Self::muted_color(self.dark_mode)),
-                            row(source_row).spacing(SPACE_4),
+                            iced::widget::scrollable(row(cards).spacing(SPACE_8))
+                                .direction(iced::widget::scrollable::Direction::Horizontal(
+                                    iced::widget::scrollable::Scrollbar::default().spacing(SPACE_4),
+                                ))
+                                .width(Length::Fill),
                         ]
                         .spacing(SPACE_6)
-                        .align_y(iced::Alignment::Center)
                         .into(),
                     );
                 }
             }
 
-            // Remote-control indicator (PDF Phase 13: "show ... whether
-            // remote control is enabled"). Explicit consent is separate —
-            // control is never granted automatically (PDF Task 9.1).
+            // BORU-SSUI-05 (PDF Task 5): dedicated compact status area
+            // for remote control — labeled "Remote control: OFF/ON" with
+            // an input/control icon (mouse pointer). The current
+            // permission model is consent-gated: the sender cannot
+            // toggle remote control ON directly, so this is a STATE-ONLY
+            // display with no invented toggle. The explicit enable /
+            // disable actions (grant/deny consent prompt, revoke) are
+            // preserved below with the same compact control language as
+            // the rest of the panel. The label + dot bind to
+            // `screen_share_control_active`, which is kept live by
+            // `SessionEvent::ControlChanged` → `apply_screen_share_event`,
+            // so the status updates without reopening the view.
             if self.screen_share_host_state == ScreenShareHostState::Streaming {
+                let spec = Self::remote_control_status_spec(self.screen_share_control_active);
+                let theme = self.theme();
+                let icon_color: fn(&iced::Theme) -> iced::Color = if spec.active {
+                    crate::design_tokens::primary
+                } else {
+                    crate::design_tokens::text_secondary
+                };
+                let text_color = if spec.active {
+                    crate::design_tokens::text_primary(&theme)
+                } else {
+                    Self::muted_color(self.dark_mode)
+                };
+                let status_icon = Icon::MousePointer
+                    .build()
+                    .size(IconSize::Sm)
+                    .color_fn(icon_color)
+                    .build();
+                let dot = if spec.active {
+                    crate::ui_components::status_dot(
+                        crate::ui_components::StatusDotKind::Online,
+                        8.0,
+                    )
+                } else {
+                    crate::ui_components::status_dot(
+                        crate::ui_components::StatusDotKind::Offline,
+                        8.0,
+                    )
+                };
                 items.push(
-                    text(if self.screen_share_control_active {
-                        crate::i18n::t("screenshare.remote_control_on")
-                    } else {
-                        crate::i18n::t("screenshare.remote_control_off")
-                    })
-                    .size(crate::fonts::TypeRole::SupportingText.size_px())
-                    .color(Self::muted_color(self.dark_mode))
+                    row![
+                        status_icon,
+                        text(crate::i18n::t(spec.label_key))
+                            .size(crate::fonts::TypeRole::SupportingText.size_px())
+                            .font(crate::fonts::TypeRole::SupportingText.font())
+                            .color(text_color),
+                        dot,
+                    ]
+                    .spacing(SPACE_6)
+                    .align_y(iced::Alignment::Center)
                     .into(),
                 );
             }
@@ -583,53 +676,56 @@ impl IcedChat {
                     .into(),
                 );
             }
-            // BORU-SS-39: preset override buttons (None restores the
-            // path-derived auto preset). Visible in every active sharer
-            // state so the choice can be made before the viewer accepts.
-            let preset_buttons: Vec<iced::Element<'_, AppMessage>> = vec![
-                button(text(crate::i18n::t("screenshare.preset_lan_high")))
-                    .on_press(AppMessage::ScreenShareSetPreset(Some(
-                        QualityPreset::LanHigh,
-                    )))
-                    .padding([2, 6])
-                    .into(),
-                button(text(crate::i18n::t("screenshare.preset_balanced")))
-                    .on_press(AppMessage::ScreenShareSetPreset(Some(
-                        QualityPreset::Balanced,
-                    )))
-                    .padding([2, 6])
-                    .into(),
-                button(text(crate::i18n::t("screenshare.preset_relay")))
-                    .on_press(AppMessage::ScreenShareSetPreset(Some(
-                        QualityPreset::RelayConservative,
-                    )))
-                    .padding([2, 6])
-                    .into(),
-                button(text(crate::i18n::t("screenshare.preset_auto")))
-                    .on_press(AppMessage::ScreenShareSetPreset(None))
-                    .padding([2, 6])
-                    .into(),
-            ];
+            // BORU-SSUI-04: quality presets as ONE segmented control under a
+            // small "Quality" label (PDF Task 4). The four segments map to
+            // the exact same messages the old text buttons dispatched:
+            // LAN High → LanHigh, Balanced → Balanced, Relay →
+            // RelayConservative, Auto → None (path-derived auto preset).
+            // `screen_share_selected_preset` mirrors the user's last choice
+            // so exactly one segment shows the accent fill at a time; the
+            // host's effective preset remains authoritative (metrics above).
+            // No availability signal exists today, so every segment is
+            // enabled; the primitive renders disabled segments if a future
+            // signal appears (never hidden).
+            let selected_preset = self.screen_share_selected_preset;
+            let segments: Vec<crate::ui_components::SegmentedOption<AppMessage>> =
+                Self::quality_segment_specs(selected_preset)
+                    .into_iter()
+                    .map(|spec| crate::ui_components::SegmentedOption {
+                        label: crate::i18n::t(spec.label_key),
+                        selected: spec.selected,
+                        enabled: true,
+                        on_press: Some(AppMessage::ScreenShareSetPreset(spec.preset)),
+                    })
+                    .collect();
             items.push(
-                row![
+                column![
                     text(crate::i18n::t("screenshare.preset"))
                         .size(crate::fonts::TypeRole::SupportingText.size_px())
                         .color(Self::muted_color(self.dark_mode)),
-                    row(preset_buttons).spacing(SPACE_4),
+                    crate::ui_components::segmented_control(segments),
                 ]
                 .spacing(SPACE_6)
-                .align_y(iced::Alignment::Center)
                 .into(),
             );
 
-            // Explicit consent prompt: the host picks the granted capabilities.
+            // Explicit consent prompt: the host picks the granted
+            // capabilities. BORU-SSUI-05: these are the sender's explicit
+            // ENABLE action — preserved but rendered with the same compact
+            // control language as the rest of the panel (padding([2, 6]),
+            // matching the viewer toolbar buttons).
             if let Some((_, viewer, capabilities)) = &self.screen_share_control_request {
                 let caps = capabilities
                     .iter()
                     .map(Self::capability_label)
                     .collect::<Vec<_>>()
                     .join(", ");
-                items.push(text(format!("{viewer} requests: {caps}")).into());
+                items.push(
+                    text(format!("{viewer} requests: {caps}"))
+                        .size(crate::fonts::TypeRole::SupportingText.size_px())
+                        .color(Self::muted_color(self.dark_mode))
+                        .into(),
+                );
                 let wants_pointer = capabilities
                     .iter()
                     .any(|c| matches!(c, Capability::ControlPointer | Capability::ControlKeyboard));
@@ -641,6 +737,7 @@ impl IcedChat {
                             .on_press(AppMessage::ScreenShareGrantControl(vec![
                                 Capability::ControlPointer,
                             ]))
+                            .padding([2, 6])
                             .into(),
                     );
                     grant_buttons.push(
@@ -649,6 +746,7 @@ impl IcedChat {
                                 Capability::ControlPointer,
                                 Capability::ControlKeyboard,
                             ]))
+                            .padding([2, 6])
                             .into(),
                     );
                 }
@@ -661,24 +759,27 @@ impl IcedChat {
                             .on_press(AppMessage::ScreenShareGrantControl(vec![
                                 Capability::Clipboard,
                             ]))
+                            .padding([2, 6])
                             .into(),
                     );
                 }
                 grant_buttons.push(
                     button(text(crate::i18n::t("common.deny")))
                         .on_press(AppMessage::ScreenShareDenyControl)
+                        .padding([2, 6])
                         .into(),
                 );
                 items.push(row(grant_buttons).spacing(SPACE_8).into());
             }
+            // BORU-SSUI-05: explicit DISABLE action (revoke) + the separate
+            // clipboard capability — preserved, compact. The verbose
+            // "Remote control active" line is superseded by the status row
+            // above (icon + ON label + dot).
             if self.screen_share_control_active {
-                items.push(
-                    text(crate::i18n::t("screenshare.remote_control_active"))
-                        .into(),
-                );
                 items.push(
                     button(text(crate::i18n::t("screenshare.revoke_control")))
                         .on_press(AppMessage::ScreenShareRevokeControl)
+                        .padding([2, 6])
                         .into(),
                 );
             }
@@ -686,6 +787,7 @@ impl IcedChat {
                 items.push(
                     button(text(crate::i18n::t("screenshare.send_clipboard")))
                         .on_press(AppMessage::ScreenShareHostSendClipboard)
+                        .padding([2, 6])
                         .into(),
                 );
             }
@@ -750,7 +852,8 @@ impl IcedChat {
                     );
                 }
             }
-            column(items).spacing(SPACE_6)
+            // BORU-SSUI-02: consistent vertical rhythm inside the card shell.
+            column(items).spacing(SPACE_8)
         } else if self.screen_share_viewing {
             // Who is sharing (PDF Phase 13): the viewer always sees the
             // sharer's identity above the surface, plus whether remote
@@ -924,12 +1027,22 @@ impl IcedChat {
         } else {
             return iced::widget::Space::new().height(Length::Fixed(0.0)).into();
         };
+        // BORU-SSUI-02: ONE card shell below the conversation header for all
+        // sender sharing controls. Subtle surface distinct from the chat
+        // canvas, thin neutral border, medium-large radius and a restrained
+        // shadow — the shared Boru card language (design_tokens). BORU-SSUI-08
+        // migrates these values into `screen_share.card.*` TOML tokens.
         container(body)
-            .padding(SPACE_8)
+            .padding(SPACE_16)
             .width(Length::Fill)
             .style(|t| iced::widget::container::Style {
                 background: Some(iced::Background::Color(bg_surface_secondary(t))),
-                border: iced::Border { color: border_muted(t), width: 1.0, radius: SPACE_8.into() },
+                border: iced::Border {
+                    color: border_muted(t),
+                    width: crate::design_tokens::BORDER_WIDTH,
+                    radius: crate::design_tokens::RADIUS_LG.into(),
+                },
+                shadow: crate::design_tokens::shadow_card(t),
                 ..Default::default()
             })
             .into()
@@ -945,6 +1058,240 @@ impl IcedChat {
             // BORU-SS-37: system audio is a separate optional capability.
             Capability::Audio => "audio".to_string(),
             Capability::ViewScreen => "view".to_string(),
+        }
+    }
+
+    #[cfg(feature = "screen-sharing")]
+    /// BORU-SSUI-04: map the four quality modes to segmented-control specs.
+    /// Exactly one spec is selected for any `selected` value (`None` =
+    /// Auto). The dispatch targets mirror the old text buttons exactly:
+    /// LAN High → LanHigh, Balanced → Balanced, Relay → RelayConservative,
+    /// Auto → None.
+    pub(crate) fn quality_segment_specs(
+        selected: Option<QualityPreset>,
+    ) -> [QualitySegmentSpec; 4] {
+        [
+            QualitySegmentSpec {
+                label_key: "screenshare.preset_lan_high",
+                preset: Some(QualityPreset::LanHigh),
+                selected: selected == Some(QualityPreset::LanHigh),
+            },
+            QualitySegmentSpec {
+                label_key: "screenshare.preset_balanced",
+                preset: Some(QualityPreset::Balanced),
+                selected: selected == Some(QualityPreset::Balanced),
+            },
+            QualitySegmentSpec {
+                label_key: "screenshare.preset_relay",
+                preset: Some(QualityPreset::RelayConservative),
+                selected: selected == Some(QualityPreset::RelayConservative),
+            },
+            QualitySegmentSpec {
+                label_key: "screenshare.preset_auto",
+                preset: None,
+                selected: selected.is_none(),
+            },
+        ]
+    }
+
+    #[cfg(feature = "screen-sharing")]
+    /// BORU-SSUI-05: map the authoritative remote-control state to the
+    /// status-area presentation. State-only by design — the current
+    /// permission model has no direct sender-side toggle (control is
+    /// granted via explicit consent and revoked explicitly), so this
+    /// only supplies the runtime label ("Remote control: ON/OFF").
+    pub(crate) fn remote_control_status_spec(active: bool) -> RemoteControlStatusSpec {
+        if active {
+            RemoteControlStatusSpec {
+                label_key: "screenshare.remote_control_on",
+                active: true,
+            }
+        } else {
+            RemoteControlStatusSpec {
+                label_key: "screenshare.remote_control_off",
+                active: false,
+            }
+        }
+    }
+
+    #[cfg(feature = "screen-sharing")]
+    /// BORU-SSUI-03: map a capture-source kind to a distinct source-picker
+    /// icon. `CaptureSourceKind` today emits Monitor/Window/Desktop; there
+    /// is no Panel/special-surface kind yet, so `Icon::Panel` stays
+    /// reserved (documented gap — see icon_system.rs).
+    fn source_kind_icon(kind: boru_core::screen_share::CaptureSourceKind) -> Icon {
+        use boru_core::screen_share::CaptureSourceKind;
+        match kind {
+            CaptureSourceKind::Monitor => Icon::Monitor,
+            CaptureSourceKind::Window => Icon::Window,
+            CaptureSourceKind::Desktop => Icon::Desktop,
+        }
+    }
+
+    #[cfg(feature = "screen-sharing")]
+    /// BORU-SSUI-03: one selectable source card for the screen-share
+    /// source picker.
+    ///
+    /// Replaces the old blue text buttons. Each card carries a source-type
+    /// icon, the ellipsized runtime source/window title, and the native
+    /// dimensions on a second line. The selected card gets an accent
+    /// border + soft accent background + a check glyph (never colour
+    /// alone); unselected cards use a neutral surface with a subtle border
+    /// and hover/pressed feedback. Clicking dispatches the SAME
+    /// `ScreenShareSelectSource(source.id)` message the text buttons used,
+    /// so capture switching behaviour is unchanged.
+    fn view_source_card(
+        &self,
+        source: &CaptureSource,
+        selected: bool,
+    ) -> iced::Element<'_, AppMessage> {
+        use iced::widget::{button, column, container, row, text, Space};
+        use iced::Length;
+
+        const SOURCE_CARD_WIDTH: f32 = 192.0;
+        // Title char budget keeps a single card from blowing up on a very
+        // long window title; the remainder is shown as a Unicode ellipsis
+        // (the repo's `truncate_with_ellipsis` helper). `Wrapping::None` +
+        // a clip container guarantee the line never wraps and grows the
+        // card (same single-line pattern as sidebar rows).
+        const TITLE_MAX_CHARS: usize = 20;
+
+        let dark_mode = self.dark_mode;
+        let theme = self.theme();
+
+        let kind_icon = Self::source_kind_icon(source.kind);
+        let icon_color = if selected {
+            crate::design_tokens::primary
+        } else {
+            crate::design_tokens::text_secondary
+        };
+        let icon = kind_icon
+            .build()
+            .size(IconSize::Md)
+            .color_fn(icon_color)
+            .build();
+
+        let title = crate::presentation::truncate_with_ellipsis(&source.title, TITLE_MAX_CHARS);
+        let dims = format!("{} × {}", source.width, source.height);
+
+        let title_color = if selected {
+            crate::design_tokens::text_primary(&theme)
+        } else {
+            crate::design_tokens::text_secondary(&theme)
+        };
+
+        let mut card_row = row![
+            icon,
+            column![
+                container(
+                    text(title)
+                        .size(crate::fonts::TypeRole::SupportingText.size_px())
+                        .font(crate::fonts::TypeRole::SupportingText.font())
+                        .color(title_color)
+                        .wrapping(iced::widget::text::Wrapping::None)
+                        .width(Length::Fill),
+                )
+                .width(Length::Fill)
+                .clip(true),
+                text(dims)
+                    .size(crate::fonts::TypeRole::Metadata.size_px())
+                    .font(crate::fonts::TypeRole::Metadata.font())
+                    .color(Self::muted_color(dark_mode))
+                    .wrapping(iced::widget::text::Wrapping::None)
+                    .width(Length::Fill),
+            ]
+            .spacing(SPACE_2)
+            .width(Length::Fill),
+        ]
+        .spacing(SPACE_8)
+        .align_y(iced::Alignment::Center);
+
+        // Clear selection indicator — a check glyph on the right edge. It is
+        // NOT colour-alone: the accent border + soft background + check are
+        // all present, so the state reads even for colour-blind users.
+        if selected {
+            let check = Icon::Check
+                .build()
+                .size(IconSize::Sm)
+                .color_fn(crate::design_tokens::primary)
+                .build();
+            card_row = card_row.push(check);
+        } else {
+            // Reserve the same right-edge slot so cards keep an even width
+            // whether or not they are selected.
+            card_row = card_row.push(
+                Space::new()
+                    .width(Length::Fixed(IconSize::Sm.px()))
+                    .height(Length::Fixed(IconSize::Sm.px())),
+            );
+        }
+
+        let body = container(card_row)
+            .padding([SPACE_8, SPACE_10])
+            .width(Length::Fixed(SOURCE_CARD_WIDTH));
+
+        button(body)
+            .on_press(AppMessage::ScreenShareSelectSource(source.id))
+            .padding(0)
+            .style(move |t, status| Self::source_card_button_style(t, status, selected))
+            .into()
+    }
+
+    #[cfg(feature = "screen-sharing")]
+    /// BORU-SSUI-03: button style for a source card.
+    ///
+    /// Selected: accent border + `primary_soft` background (plus the check
+    /// glyph drawn in the content). Unselected: neutral `surface`
+    /// background, subtle `border_muted` border, and hover/pressed
+    /// feedback via `surface_hover` / `surface_pressed` with an accent
+    /// border on hover — the same interaction language as the rest of Boru.
+    fn source_card_button_style(
+        theme: &iced::Theme,
+        status: iced::widget::button::Status,
+        selected: bool,
+    ) -> iced::widget::button::Style {
+        let bg = if selected {
+            crate::design_tokens::primary_soft(theme)
+        } else {
+            match status {
+                iced::widget::button::Status::Hovered => crate::design_tokens::surface_hover(theme),
+                iced::widget::button::Status::Pressed => {
+                    crate::design_tokens::surface_pressed(theme)
+                }
+                _ => crate::design_tokens::surface(theme),
+            }
+        };
+        let border_color = if selected {
+            crate::design_tokens::primary(theme)
+        } else {
+            match status {
+                iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed => {
+                    crate::design_tokens::primary(theme)
+                }
+                _ => crate::design_tokens::border_muted(theme),
+            }
+        };
+        iced::widget::button::Style {
+            background: Some(iced::Background::Color(bg)),
+            text_color: if selected {
+                crate::design_tokens::primary(theme)
+            } else {
+                crate::design_tokens::text_primary(theme)
+            },
+            border: iced::Border {
+                color: border_color,
+                width: if selected {
+                    2.0
+                } else {
+                    crate::design_tokens::BORDER_WIDTH
+                },
+                radius: crate::design_tokens::RADIUS_MD.into(),
+            },
+            shadow: match status {
+                iced::widget::button::Status::Hovered => crate::design_tokens::shadow_card(theme),
+                _ => iced::Shadow::default(),
+            },
+            ..Default::default()
         }
     }
 
@@ -8118,5 +8465,124 @@ impl IcedChat {
             // variants can never reach this method (defensive catch-all).
             _ => iced::Task::none(),
         }
+    }
+}
+
+#[cfg(all(test, feature = "screen-sharing"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_kind_icon_maps_every_capture_kind_to_distinct_icon() {
+        use boru_core::screen_share::CaptureSourceKind;
+        let kinds = [
+            (CaptureSourceKind::Monitor, Icon::Monitor),
+            (CaptureSourceKind::Window, Icon::Window),
+            (CaptureSourceKind::Desktop, Icon::Desktop),
+        ];
+        for (kind, expected) in kinds {
+            assert_eq!(IcedChat::source_kind_icon(kind), expected);
+        }
+        // Distinct icons for distinct kinds (acceptance: different icons
+        // for monitor/desktop/window).
+        let icons: Vec<Icon> = kinds
+            .iter()
+            .map(|(k, _)| IcedChat::source_kind_icon(*k))
+            .collect();
+        for (i, a) in icons.iter().enumerate() {
+            for b in &icons[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+    }
+
+    /// BORU-SSUI-04 (PDF Task 4): the quality segmented control maps each
+    /// segment to the exact preset the old text buttons dispatched, and
+    /// exactly one segment is visually selected for any chosen preset
+    /// (None = Auto / path-derived).
+    #[test]
+    fn quality_segments_map_presets_and_select_exactly_one() {
+        use boru_core::screen_share::QualityPreset;
+        // (label key, dispatched preset, is_auto)
+        let expectations = [
+            (
+                "screenshare.preset_lan_high",
+                Some(QualityPreset::LanHigh),
+                false,
+            ),
+            (
+                "screenshare.preset_balanced",
+                Some(QualityPreset::Balanced),
+                false,
+            ),
+            (
+                "screenshare.preset_relay",
+                Some(QualityPreset::RelayConservative),
+                false,
+            ),
+            ("screenshare.preset_auto", None, true),
+        ];
+        for selected in [
+            None,
+            Some(QualityPreset::LanHigh),
+            Some(QualityPreset::Balanced),
+            Some(QualityPreset::RelayConservative),
+        ] {
+            let segments = IcedChat::quality_segment_specs(selected);
+            assert_eq!(
+                segments.len(),
+                expectations.len(),
+                "one segment per quality mode"
+            );
+            let selected_count = segments.iter().filter(|s| s.selected).count();
+            assert_eq!(
+                selected_count, 1,
+                "exactly one segment visually selected for {selected:?}"
+            );
+            for (spec, (label_key, preset, is_auto)) in segments.iter().zip(expectations.iter()) {
+                assert_eq!(&spec.label_key, label_key, "runtime source label key");
+                assert_eq!(&spec.preset, preset, "dispatch target for {label_key}");
+                assert_eq!(
+                    spec.selected,
+                    if *is_auto {
+                        selected.is_none()
+                    } else {
+                        selected == *preset
+                    },
+                    "selection state for {label_key}"
+                );
+            }
+        }
+    }
+
+    /// BORU-SSUI-05 (PDF Task 5): the remote-control status area maps the
+    /// authoritative control state to a STATE-ONLY label — the permission
+    /// model has no direct sender-side toggle, so the spec never invents
+    /// one, and the runtime label keys are the existing i18n ON/OFF keys.
+    #[test]
+    fn remote_control_status_spec_maps_state_to_label() {
+        let on = IcedChat::remote_control_status_spec(true);
+        assert_eq!(on.label_key, "screenshare.remote_control_on");
+        assert!(on.active);
+        let off = IcedChat::remote_control_status_spec(false);
+        assert_eq!(off.label_key, "screenshare.remote_control_off");
+        assert!(!off.active);
+        // Labels must resolve to real runtime text (never empty keys).
+        assert_eq!(crate::i18n::t(on.label_key), "Remote control: ON");
+        assert_eq!(crate::i18n::t(off.label_key), "Remote control: OFF");
+    }
+
+    /// BORU-SSUI-05: the new input/control icon maps to the mouse-pointer
+    /// asset (distinct from the source-picker icons used by Task 3).
+    #[test]
+    fn mouse_pointer_icon_maps_to_control_asset() {
+        let bytes = Icon::MousePointer.bytes();
+        let svg = String::from_utf8_lossy(bytes);
+        // The lucide mouse-pointer-2 path (distinctive "l6 6.5" pointer body).
+        assert!(svg.contains("16 6.5"), "mouse-pointer-2 path data");
+        assert!(svg.starts_with("<svg"), "SVG root element");
+        assert_ne!(Icon::MousePointer, Icon::Monitor);
+        assert_ne!(Icon::MousePointer, Icon::Window);
+        assert_ne!(Icon::MousePointer, Icon::Desktop);
     }
 }

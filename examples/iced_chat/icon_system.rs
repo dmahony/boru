@@ -65,6 +65,13 @@ const SVG_FILM: &[u8] = include_bytes!("../../assets/icons/lucide/film.svg");
 const SVG_PHONE: &[u8] = include_bytes!("../../assets/icons/lucide/phone.svg");
 const SVG_VIDEO_CAMERA: &[u8] = include_bytes!("../../assets/icons/lucide/video-camera.svg");
 const SVG_MONITOR: &[u8] = include_bytes!("../../assets/icons/lucide/monitor.svg");
+const SVG_APP_WINDOW: &[u8] = include_bytes!("../../assets/icons/lucide/app-window.svg");
+const SVG_RECTANGLE_HORIZONTAL: &[u8] =
+    include_bytes!("../../assets/icons/lucide/rectangle-horizontal.svg");
+const SVG_PANELS_TOP_LEFT: &[u8] = include_bytes!("../../assets/icons/lucide/panels-top-left.svg");
+// Input/control icon (lucide `mouse-pointer-2`) — used by the sender
+// remote-control status area (BORU-SSUI-05).
+const SVG_MOUSE_POINTER: &[u8] = include_bytes!("../../assets/icons/lucide/mouse-pointer-2.svg");
 // Re-export the app-level constants for the Lucide icons that were already
 // embedded there.  We keep them in app.rs so app-level code that already
 // references ICON_CHAT etc. doesn't break, but the Icon enum uses them
@@ -121,6 +128,20 @@ pub enum Icon {
     /// Share a screen with a direct peer (monitor/screen glyph, distinct
     /// from the video-camera used for video calls).
     Monitor,
+    /// A single application window (lucide `app-window`) — used by the
+    /// screen-share source picker for `CaptureSourceKind::Window`.
+    Window,
+    /// The whole virtual desktop (lucide `rectangle-horizontal`) — used by
+    /// the screen-share source picker for `CaptureSourceKind::Desktop`.
+    Desktop,
+    /// A panel / special surface (lucide `panels-top-left`) — reserved for
+    /// future `CaptureSourceKind` panel surfaces; no such kind is emitted
+    /// today, so nothing maps to it yet (documented gap, BORU-SSUI-03).
+    Panel,
+    /// A mouse-pointer / input glyph (lucide `mouse-pointer-2`) — used by
+    /// the sender remote-control status area (BORU-SSUI-05) to signal
+    /// remote input control, separate from the source picker icons.
+    MousePointer,
     Play,
     Pause,
     Volume1,
@@ -193,6 +214,10 @@ impl Icon {
             Icon::Video => SVG_FILM,
             Icon::VideoCamera => SVG_VIDEO_CAMERA,
             Icon::Monitor => SVG_MONITOR,
+            Icon::Window => SVG_APP_WINDOW,
+            Icon::Desktop => SVG_RECTANGLE_HORIZONTAL,
+            Icon::Panel => SVG_PANELS_TOP_LEFT,
+            Icon::MousePointer => SVG_MOUSE_POINTER,
             Icon::Play => SVG_PLAY,
             Icon::Pause => SVG_PAUSE,
             Icon::Volume1 => SVG_VOLUME_1,
@@ -472,6 +497,9 @@ mod tests {
             Icon::Video,
             Icon::VideoCamera,
             Icon::Monitor,
+            Icon::Window,
+            Icon::Desktop,
+            Icon::Panel,
             Icon::Play,
             Icon::Online,
             Icon::Offline,
