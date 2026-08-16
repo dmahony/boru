@@ -46,12 +46,12 @@ BORU-DESIGN-27 history integration):
 | 2 | Drag Public Rooms above Quick Actions and verify the live Home screen rearranges | PASS | The reorder path now updates the authoritative `LayoutOverrides.home.section_order` instead of only the transient merged layout. The live Home renderer consumes the same semantic order, so the update invalidates the lazy Home tree immediately. `rb test --features dev-ui --bin boru -- designer` passed the reorder regression. |
 | 3 | Save, restart Boru, and verify the new order persists | PASS | Reorder edits now flow through `set_layout_overrides`, which is the existing atomic `boru-layout.toml` save/reload seam. The typed TOML transaction round-trip regression passed; no desktop coordinates are serialized. |
 | 4 | Resize a supported card/section and verify TOML receives the semantic dimension | PASS | Sidebar/chat resize gestures now write the corresponding typed override (`sidebar.width`, `chat.message_max_width`, or `chat.bubble_max_width`) before save. Pointer coordinates remain transient. The resize constraint regression passed. |
-| 5 | Change grid columns and verify immediate layout | PASS | Existing grid-column controls already use `apply_layout_int` and `set_layout_overrides`; the dev-ui designer test matrix passed the breakpoint-specific grid edit and the full `rb check --features dev-ui` passed. |
-| 6 | Undo and redo each operation (reorder, resize, grid) | PASS (automated) | The designer history suite now covers reorder/resize/grid snapshots, redo clearing, bounded history, and cancelled gestures. The 16-test targeted suite passed. The live Ctrl+Z / Ctrl+Shift+Z sweep remains pending. |
+| 5 | Change grid columns and verify immediate layout | PASS | Live-verified 2026-08-16 (user, VM54/VM55 deployed dev-ui build): select Quick Actions, click the Desktop preview-width button (Medium tier matches the 1024px window), then the `+` grid button reflowed the card immediately and Ctrl+S persisted `quick_actions.columns_mid` into `boru-layout.toml`. The dev-ui designer test matrix also passed the breakpoint-specific grid edit. |
+| 6 | Undo and redo each operation (reorder, resize, grid) | PASS | Live-verified 2026-08-16 (user, VM54/VM55): Ctrl+Z reverted a reorder live and Ctrl+Shift+Z re-applied it; the same round-trip worked for resize and grid-column changes. The designer history suite also covers reorder/resize/grid snapshots, redo clearing, bounded history, and cancelled gestures (16-test targeted suite). |
 | 7 | Edit `boru-layout.toml` externally and verify the designer/app updates | PASS | Live-verified 2026-08-16 (orchestrator run 4837, fresh DEBSRV dev-ui build under Xvfb/Openbox): an external write to `boru-layout.toml` was picked up by the existing watcher — log line `boru-layout.toml reloaded; merging + applying live layout generation=3`. The watcher path works. |
-| 8 | Test narrow and maximized windows after edits | BLOCKED | Pending the final live sweep; no live-edit layout was carried across window sizes in the walkthrough runs so far. |
-| 9 | Verify normal buttons/cards cannot accidentally execute their application action while being dragged | PASS (partial) | Designer Mode exposes dedicated blue grip handles rather than converting normal card bodies into drag targets. A live drag on the hero-card handle reordered the Home screen immediately without executing the card's application action (run 4837). The reorder transaction is also covered by automated tests. |
-| 10 | Disable Designer Mode and verify normal Boru behaviour returns | PASS | The Visual Designer toggle was reachable and normal-mode Home rendering was restored when inactive; no application-service restart was observed. |
+| 8 | Test narrow and maximized windows after edits | PASS | Live-verified 2026-08-16 (user, VM54/VM55): with edits applied, the window resized to narrow (~640px) kept a valid layout (cards re-flowed gracefully, no overlap/clipping), and maximized stayed valid at the wide end. |
+| 9 | Verify normal buttons/cards cannot accidentally execute their application action while being dragged | PASS | Live-verified 2026-08-16 (user, VM54/VM55): dragging a card by its blue grip handle moved the card without opening its application action (no room opened, no download started, no navigation). Designer Mode exposes dedicated blue grip handles rather than converting normal card bodies into drag targets; the reorder transaction is also covered by automated tests. |
+| 10 | Disable Designer Mode and verify normal Boru behaviour returns | PASS | Live-verified 2026-08-16 (user, VM54/VM55): toggling the Visual Designer switch off removed the `VISUAL DESIGNER ACTIVE` banner and all blue handles/overlays, and Boru behaved exactly like the normal app (cards clickable, normal actions); no application-service restart was observed while toggling. |
 
 ## 2026-08-16 re-run (orchestrator run 4837, fresh dev-ui build)
 
@@ -85,6 +85,28 @@ Build/test evidence for this run: `rb check --features dev-ui` PASS,
 whole-card overlay drags/resizes work is committed on the task branch
 (`fix(BORU-DESIGN-27): route overlay move/release to active gesture; anchor drag
 origin`, verified by the same check + 16-test suite).
+
+## 2026-08-16 user VM verification (final sweep — ALL CHECKS PASS)
+
+The remaining checks (5, 6, 8, 9, 10) were verified live by the user on the
+deployed dev-ui build (VM54 `172.16.0.54` / VM55 `172.16.0.55`, binary sha256
+`4106d3884733e815bd15ae651cc8f9551e2b7420ac810ea1757b4757cfaec885`, built from
+the rebased task branch tip `8ad0ea15` on origin/main `34499756` with
+`--features gui,video-playback,terminal,screen-sharing,dev-ui`):
+
+- Check 5 (grid columns): **PASS** — Desktop preview-width button first, then
+  `+` reflowed the Quick Actions card and Ctrl+S persisted `columns_mid`.
+- Check 6 (live undo/redo): **PASS** — Ctrl+Z / Ctrl+Shift+Z round-trip on
+  reorder, resize, and grid-column changes.
+- Check 8 (narrow + maximized after edits): **PASS** — the final gate; layout
+  stayed valid at ~640px and maximized.
+- Check 9 (drag does not trigger card action): **PASS** — blue grip handle
+  drag moved the card without firing its application action.
+- Check 10 (disable designer restores normal behaviour): **PASS** — banner and
+  overlays removed, normal app behaviour returned, no service restart.
+
+All 10 PDF T27 acceptance checks are now PASS. The manual acceptance
+walkthrough is complete.
 
 ## Previously observed gap (resolved by executor)
 
