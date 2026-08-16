@@ -66,6 +66,7 @@ pub(crate) struct ChatListDependency {
     #[cfg(feature = "dev-ui")]
     pub(crate) designer_selected: Option<crate::designer::ComponentId>,
     pub(crate) window_width_bits: u32,
+    pub(crate) window_height_bits: u32,
     pub(crate) mesh_health: MeshHealthSnapshot,
     pub(crate) main_screen_reconnect_frame: u32,
     pub(crate) local_label: String,
@@ -1160,6 +1161,7 @@ impl IcedChat {
             theme_revision: self.theme_revision,
             layout_revision: self.layout_revision,
             window_width_bits: (preview_width * 100.0) as u32,
+            window_height_bits: (self.window_height * 100.0) as u32,
             mesh_health: MeshHealthSnapshot::from(&self.mesh_health),
             main_screen_reconnect_frame: self.main_screen_reconnect_frame as u32,
             local_label: self.local_label.clone(),
@@ -1222,6 +1224,7 @@ impl IcedChat {
         );
 
         let window_width = dep.window_width_bits as f32 / 100.0;
+        let window_height = dep.window_height_bits as f32 / 100.0;
         let theme = Self::theme_from_dark(dep.dark_mode);
         // UI-HOME-15: all home breakpoints are based on the dashboard's
         // available *content* width (window minus sidebar, divider and page
@@ -1238,6 +1241,7 @@ impl IcedChat {
         // vocabulary: Narrow < 360 px, Desktop 360–1439 px, UltraWide ≥
         // 1440 px — and reproduce the pre-responsive layout exactly.
         let viewport_tier = responsive.tier_for_width(window_width);
+        let vertical_scale = responsive.vertical_spacing_scale(window_height);
         let grid_columns = responsive.home_columns.for_tier(viewport_tier);
 
         // ── BORU-LAYOUT-03: section order / visibility from the model ──
@@ -1706,7 +1710,7 @@ impl IcedChat {
         );
         section_elements.insert(crate::layout::HomeSection::Tunnels, tunnels_card.into());
 
-        let card_gap = layout.gaps.card_gap; // 20 px vertical card gap (plan: 20–24 px)
+        let card_gap = layout.gaps.card_gap * vertical_scale;
         let mut column_from_sections = |list: &[crate::layout::HomeSection]| {
             let mut col = Column::new().spacing(0).width(Length::Fill);
             for (i, section) in list.iter().enumerate() {
@@ -1838,6 +1842,8 @@ impl IcedChat {
         // values as `home.padding.horizontal_large` / `horizontal_default`,
         // so the default appearance is unchanged.
         let h_padding = responsive.home_padding_x.for_tier(viewport_tier);
+        let top_padding = layout.padding.top * vertical_scale;
+        let bottom_padding = layout.padding.bottom * vertical_scale;
 
         // POLISH-05: page header → dashboard gap bumped from SPACE_28 to
         // ~40 px — roughly 12 px more breathing room between the
@@ -1871,19 +1877,19 @@ impl IcedChat {
         #[cfg(feature = "dev-ui")]
         let col = Column::new()
             .push(page_header)
-            .push(Space::new().height(Length::Fixed(layout.gaps.header_dashboard_gap)))
+            .push(Space::new().height(Length::Fixed(layout.gaps.header_dashboard_gap * vertical_scale)))
             .push(drag_ghost)
             .push(main_content)
-            .push(Space::new().height(Length::Fixed(layout.gaps.footer_gap)))
+            .push(Space::new().height(Length::Fixed(layout.gaps.footer_gap * vertical_scale)))
             .push(footer)
             .spacing(0)
             .width(Length::Fill);
         #[cfg(not(feature = "dev-ui"))]
         let col = Column::new()
             .push(page_header)
-            .push(Space::new().height(Length::Fixed(layout.gaps.header_dashboard_gap)))
+            .push(Space::new().height(Length::Fixed(layout.gaps.header_dashboard_gap * vertical_scale)))
             .push(main_content)
-            .push(Space::new().height(Length::Fixed(layout.gaps.footer_gap)))
+            .push(Space::new().height(Length::Fixed(layout.gaps.footer_gap * vertical_scale)))
             .push(footer)
             .spacing(0)
             .width(Length::Fill);
@@ -1901,8 +1907,7 @@ impl IcedChat {
         let canvas = container(
             container(col)
                 .padding(
-                    iced::Padding::from([layout.padding.top, h_padding])
-                        .bottom(layout.padding.bottom),
+                    iced::Padding::from([top_padding, h_padding]).bottom(bottom_padding),
                 )
                 .width(Length::Fill)
                 .max_width(layout.max_content_width)

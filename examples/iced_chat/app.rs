@@ -4877,6 +4877,8 @@ pub struct IcedChat {
     /// Current window width, updated by resize events.
     /// Used for responsive layout decisions (breakpoint at 640px).
     window_width: f32,
+    /// Current window height, updated by resize events for height-aware layout.
+    window_height: f32,
     /// Timestamp when the splash screen first appeared (used for minimum-display timing).
     #[expect(dead_code)]
     pub splash_start_time: std::time::Instant,
@@ -6377,9 +6379,9 @@ pub enum AppMessage {
     /// Update the local display name (nickname).
     SetNickname(String),
 
-    /// Window was resized — carries the new width in pixels.
-    /// Used for responsive layout decisions (breakpoint at 640px).
-    WindowResized(f32),
+    /// Window was resized — carries the new logical width and height.
+    /// Both dimensions feed the canonical responsive layout model.
+    WindowResized { width: f32, height: f32 },
 
     /// Internal no-op for async task completions that should not change UI state.
     Noop,
@@ -8721,6 +8723,7 @@ impl IcedChat {
             recent_activity: VecDeque::with_capacity(50),
             activity_tick: 0,
             window_width: 1200.0,
+            window_height: 800.0,
             link_preview_cache: Arc::new(StdMutex::new(link_preview::LinkPreviewCache::new())),
             link_preview_fetch_index: None,
 
@@ -10617,7 +10620,7 @@ impl IcedChat {
             AppMessage::AccentColorCancelled => "AccentColorCancelled",
             AppMessage::SetNickname(_) => "SetNickname",
 
-            AppMessage::WindowResized(_) => "WindowResized",
+            AppMessage::WindowResized { .. } => "WindowResized",
 
             AppMessage::Noop => "Noop",
             #[cfg(feature = "dev-ui")]
@@ -17604,9 +17607,10 @@ impl IcedChat {
             | AppMessage::DashboardDownloadingRefresh => self.update_files(message),
             AppMessage::CatalogueFetchFailed(_)
             | AppMessage::CatalogueErrorDismissed => self.update_discover(message),
-            AppMessage::WindowResized(width) => {
+            AppMessage::WindowResized { width, height } => {
                 let old_mode = ResponsiveMode::of(self.window_width);
                 self.window_width = width;
+                self.window_height = height;
                 // Window width is not part of the dependency snapshots (except
                 // FileSharing's own band), so a pre-warmed tree built at
                 // another responsive band is stale once the window crosses a
@@ -23011,8 +23015,10 @@ impl IcedChat {
             // only builds screens while the user has been idle for 2+ seconds.
             iced::time::every(std::time::Duration::from_millis(500))
                 .map(|_| AppMessage::IdleTick),
-            iced::window::resize_events()
-                .map(|(_id, size)| AppMessage::WindowResized(size.width as f32)),
+            iced::window::resize_events().map(|(_id, size)| AppMessage::WindowResized {
+                width: size.width as f32,
+                height: size.height as f32,
+            }),
             // Window file drag/drop + IME composition state.  iced 0.14 maps
             // winit `HoveredFile`/`DroppedFile`/`HoveredFileCancelled` and
             // IME events into `window::Event` / `input_method::Event` which
