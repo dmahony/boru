@@ -197,7 +197,14 @@ impl IcedChat {
 
         let theme = self.theme();
         let btheme = self.boru_theme();
-        let inset = btheme.sidebar.inset; // 24 px
+        let sidebar_layout = self.boru_layout().sidebar.clone();
+        let compact = matches!(
+            sidebar_layout.mode_for_width(self.window_width, &self.boru_layout().responsive),
+            crate::layout::SidebarMode::Compact
+        );
+        let spacing_scale = if compact { 0.8 } else { 1.0 };
+        let inset = sidebar_layout.inset * spacing_scale;
+        let padding = sidebar_layout.padding;
 
         // ═══════════════════════════════════════════════════════════════
         // 1. BRAND ROW — Raleway ExtraBold "BORU" + settings
@@ -291,7 +298,7 @@ impl IcedChat {
 
         let mut sections = Column::new()
             .padding(iced::Padding {
-                top: btheme.sidebar.padding.section_top,
+                top: padding.section_top * spacing_scale,
                 right: 0.0,
                 bottom: 0.0,
                 left: 0.0,
@@ -486,16 +493,16 @@ impl IcedChat {
         Column::new()
             // Pinned: brand row
             .push(container(brand_row).padding(iced::Padding {
-                top: btheme.sidebar.padding.brand_top,
+                top: padding.brand_top * spacing_scale,
                 right: inset,
-                bottom: btheme.sidebar.padding.brand_bottom,
+                bottom: padding.brand_bottom * spacing_scale,
                 left: inset,
             }))
             // Pinned: identity row
             .push(container(identity_row).padding(iced::Padding {
-                top: btheme.sidebar.padding.identity_top,
+                top: padding.identity_top * spacing_scale,
                 right: inset,
-                bottom: btheme.sidebar.padding.identity_bottom,
+                bottom: padding.identity_bottom * spacing_scale,
                 left: inset,
             }))
             // Pinned: subtle divider
@@ -518,9 +525,9 @@ impl IcedChat {
                             snap: false,
                         }))
                         .push(container(utility_row).padding(iced::Padding {
-                            top: btheme.sidebar.padding.utility_top,
+                            top: padding.utility_top * spacing_scale,
                             right: inset,
-                            bottom: btheme.sidebar.padding.utility_bottom,
+                            bottom: padding.utility_bottom * spacing_scale,
                             left: inset,
                         })),
                 )
