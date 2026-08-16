@@ -4488,6 +4488,24 @@ impl IcedChat {
                     );
                     return iced::Task::none();
                 }
+                // BORU-IFS-02: keep the direct-chat instant-offer boundary
+                // explicit while the legacy ingest/ticket implementation
+                // remains the behavior for every conversation. BORU-IFS-09
+                // will replace only the DirectOffer branch; groups and public
+                // rooms must continue through the BlobTicket path unchanged.
+                let file_send_path = self
+                    .conversation_store
+                    .find(&self.topic)
+                    .map(|entry| entry.kind.file_send_path())
+                    .unwrap_or(boru_core::conversations::FileSendPath::BlobTicket);
+                match file_send_path {
+                    boru_core::conversations::FileSendPath::DirectOffer => {
+                        tracing::debug!(topic = %self.topic, "direct file offer send boundary selected")
+                    }
+                    boru_core::conversations::FileSendPath::BlobTicket => {
+                        tracing::debug!(topic = %self.topic, "legacy BlobTicket file send path selected")
+                    }
+                }
                 // BORU-CP-12 (PDF Task 4.3): a new client must not attempt
                 // an unsupported operation against an old/unknown client.
                 // File transfer to a direct peer requires a negotiated

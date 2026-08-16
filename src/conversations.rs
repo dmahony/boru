@@ -70,6 +70,29 @@ pub enum ConversationKind {
     Group,
 }
 
+/// Selects the attachment-send protocol for a conversation.
+///
+/// Direct conversations are the V1 boundary for the instant file-offer
+/// protocol. Groups (including public rooms) deliberately retain the
+/// ingest-first BlobTicket/FileShare path until direct transfers are proven.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileSendPath {
+    /// Announce a lightweight offer, then serve the file directly.
+    DirectOffer,
+    /// Ingest into the blob store before announcing a BlobTicket.
+    BlobTicket,
+}
+
+impl ConversationKind {
+    /// Return the attachment-send path associated with this conversation kind.
+    pub const fn file_send_path(&self) -> FileSendPath {
+        match self {
+            Self::Direct => FileSendPath::DirectOffer,
+            Self::Group => FileSendPath::BlobTicket,
+        }
+    }
+}
+
 // ── Network event tagged by topic ───────────────────────────────────────
 
 /// A [`crate::chat_core::NetEvent`] tagged with the [`TopicId`] of the
@@ -843,6 +866,18 @@ mod tests {
     fn conversation_kind_group_is_preserved() {
         let entry = ConversationEntry::new_group(make_topic(0xBB), "Room");
         assert_eq!(entry.kind, ConversationKind::Group);
+    }
+
+    #[test]
+    fn file_send_path_keeps_direct_and_group_protocols_separate() {
+        assert_eq!(
+            ConversationKind::Direct.file_send_path(),
+            FileSendPath::DirectOffer
+        );
+        assert_eq!(
+            ConversationKind::Group.file_send_path(),
+            FileSendPath::BlobTicket
+        );
     }
 
     #[test]
