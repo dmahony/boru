@@ -1150,6 +1150,19 @@ impl ResponsiveLayout {
     pub fn home_padding_x_for_width(&self, width: f32) -> f32 {
         self.home_padding_x.for_tier(self.tier_for_width(width))
     }
+
+    /// Maximum body height for modal dialogs at a given window width.
+    ///
+    /// Keeping this in the responsive layout model gives every dialog the
+    /// same safe viewport budget. The footer remains outside the scrollable
+    /// body, so long forms cannot push their primary action below the window.
+    pub fn dialog_body_max_height_for_width(&self, width: f32) -> f32 {
+        match self.tier_for_width(width) {
+            ViewportTier::Narrow => 360.0,
+            ViewportTier::Desktop => 480.0,
+            ViewportTier::UltraWide => 520.0,
+        }
+    }
 }
 
 impl Default for ResponsiveLayout {
@@ -2072,6 +2085,14 @@ mod tests {
         // UltraWide: at/above ultra_wide_min_width (1440).
         assert_eq!(r.tier_for_width(1440.0), ViewportTier::UltraWide);
         assert_eq!(r.tier_for_width(1920.0), ViewportTier::UltraWide);
+    }
+
+    #[test]
+    fn responsive_dialog_body_height_uses_shared_tiers() {
+        let r = ResponsiveLayout::default();
+        assert_eq!(r.dialog_body_max_height_for_width(320.0), 360.0);
+        assert_eq!(r.dialog_body_max_height_for_width(1024.0), 480.0);
+        assert_eq!(r.dialog_body_max_height_for_width(1920.0), 520.0);
     }
 
     #[test]
