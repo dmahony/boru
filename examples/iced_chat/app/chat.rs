@@ -734,11 +734,15 @@ impl IcedChat {
                 .into(),
             );
             // Dedicated scalable surface (PDF Task 8.2). The surface fills
-            // the panel width; its height is capped so the chat log stays
-            // usable (fullscreen raises the cap). Fit/100%/zoom/pan are
+            // the panel width; its height follows the structural layout
+            // model so the chat log remains usable. Fit/100%/zoom/pan are
             // handled by the surface geometry; remote-control input maps
             // through the same geometry so it stays correct under zoom.
-            let cap = if self.screen_share_fullscreen { 480.0 } else { 240.0 };
+            // The layout model owns the reference media size.  Keep the
+            // inline surface at that aspect-ratio-friendly size and let the
+            // fullscreen overlay use its available height; this avoids a
+            // small fixed cap leaving dead space on maximized windows.
+            let cap = self.boru_layout().chat.screen_share.height;
             let video: iced::Element<'_, AppMessage> =
                 if let (Some(handle), Some((w, h))) =
                     (&self.screen_share_frame_handle, self.screen_share_src_size)
@@ -871,6 +875,7 @@ impl IcedChat {
                 ]
                 .spacing(SPACE_8)
                 .align_y(iced::Alignment::Center)
+                .wrap()
                 .into(),
             );
             column(viewer_column).spacing(SPACE_6)
