@@ -12,7 +12,7 @@
 //!
 //! # Module map
 //!
-//! - [`catalog`]   — emoji metadata and categories (full model: BORU-TWEMOJI-05)
+//! - [`catalog`]   — emoji metadata and categories (catalog model: BORU-TWEMOJI-05)
 //! - [`parser`]    — Unicode grapheme/emoji detection and asset-key resolution
 //!                   (full resolver: BORU-TWEMOJI-07)
 //! - [`renderer`]  — SVG handles, caching and the rendering abstraction

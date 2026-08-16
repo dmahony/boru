@@ -1,11 +1,13 @@
-//! Emoji metadata and categories (BORU-TWEMOJI-04 skeleton).
+//! Emoji metadata and categories (BORU-TWEMOJI-05 catalog model).
 //!
 //! This module owns the *metadata* side of emoji: the Unicode value that goes
 //! into messages, the display name, the picker category, and the presentation
-//! asset key. The full catalog model (generated from the vendored Twemoji set)
-//! lands in BORU-TWEMOJI-05; today this provides the same curated list the
-//! picker historically hard-coded, plus the category enum the picker will use
-//! for navigation (BORU-TWEMOJI-12).
+//! asset key. The model is defined here (BORU-TWEMOJI-05); full population of
+//! every vendored Twemoji entry is driven by the generated manifest in
+//! BORU-TWEMOJI-06. Today the curated list the picker historically hard-coded
+//! lives here, plus a representative multi-codepoint fixture proving the
+//! model handles flags, skin-tone modifiers, variation selectors and ZWJ
+//! sequences (used by resolver/renderer tests in BORU-TWEMOJI-07+).
 //!
 //! Guardrail: `unicode` is the only value that ever enters a chat message.
 //! `asset` is presentation metadata only — never transmitted, never stored as
@@ -13,6 +15,11 @@
 
 /// Picker categories (PDF Task 12: Smileys & People, Animals & Nature,
 /// Food & Drink, Activities, Travel & Places, Objects, Symbols, Flags).
+///
+/// `Recent` is a placeholder pseudo-category for the recently-used section
+/// (PDF Task 14). It is intentionally excluded from [`EmojiCategory::ALL`]
+/// because it is not a content category of catalog entries — recent entries
+/// are dynamic user history stored as plain Unicode strings in settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EmojiCategory {
     SmileysAndPeople,
@@ -23,10 +30,14 @@ pub enum EmojiCategory {
     Objects,
     Symbols,
     Flags,
+    /// Recently-used section placeholder (PDF Task 14); not a catalog-entry
+    /// category, so it is absent from [`EmojiCategory::ALL`].
+    Recent,
 }
 
 impl EmojiCategory {
-    /// All categories in picker display order.
+    /// All content categories in picker display order (Task 12 navigation;
+    /// `Recent` is handled separately by the picker, see [`EmojiCategory`]).
     pub const ALL: [EmojiCategory; 8] = [
         EmojiCategory::SmileysAndPeople,
         EmojiCategory::AnimalsAndNature,
@@ -49,6 +60,7 @@ impl EmojiCategory {
             EmojiCategory::Objects => "emoji.category.objects",
             EmojiCategory::Symbols => "emoji.category.symbols",
             EmojiCategory::Flags => "emoji.category.flags",
+            EmojiCategory::Recent => "emoji.category.recent",
         }
     }
 }
@@ -59,19 +71,28 @@ impl EmojiCategory {
 /// carry on the wire. `asset` is a presentation-only Twemoji asset key
 /// (e.g. `"1f600"`) used by [`crate::emoji::renderer`] to find the bundled
 /// SVG; it is never part of a chat message.
+///
+/// The record is fully static: every field is `&'static` data with no runtime
+/// parsing, so building an entry (or scanning the catalog) costs nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Emoji {
-    /// The Unicode string sent/stored in chat (may be multi-codepoint:
-    /// variation selectors, ZWJ sequences, flags, skin tones).
+    /// The Unicode string sent/stored in chat. May contain multiple code
+    /// points: variation selectors (U+FE0F), skin-tone modifiers (U+1F3FB..
+    /// U+1F3FF), regional-indicator flag pairs, ZWJ sequences (U+200D) and
+    /// tag sequences. It is a `&str`, never a single `char` — one Rust `char`
+    /// is NOT one visual emoji.
     pub unicode: &'static str,
-    /// Display name (English; localized search keywords arrive in
-    /// BORU-TWEMOJI-05/13).
+    /// Display name (English; indexed for search in BORU-TWEMOJI-13).
     pub name: &'static str,
     /// Picker category.
     pub category: EmojiCategory,
-    /// Search keywords (empty in the skeleton; filled by BORU-TWEMOJI-05/13).
+    /// Search keywords (populated from the Twemoji manifest in
+    /// BORU-TWEMOJI-13; the curated entries below keep `&[]` until then).
     pub keywords: &'static [&'static str],
-    /// Twemoji asset key, presentation metadata only.
+    /// Twemoji asset key, presentation metadata only. Bare normalized
+    /// identifier (lowercase hex, `-`-joined for sequences), matching the
+    /// vendored `assets/emoji/twemoji/svg/<key>.svg` filenames. Never an
+    /// SVG path, URL or message payload.
     pub asset: &'static str,
 }
 
@@ -369,6 +390,64 @@ pub fn common_emojis() -> &'static [Emoji] {
     COMMON_EMOJIS
 }
 
+/// Representative multi-codepoint emoji proving the model's expressiveness.
+///
+/// Not shown in the picker grid (BORU-TWEMOJI-10 keeps the picker list
+/// glyph-safe until the grapheme-safe insertion fix lands in BORU-TWEMOJI-07);
+/// these entries exist as fixtures for the catalog/resolver/renderer tests
+/// and as the shape template the manifest-driven population (BORU-TWEMOJI-06)
+/// will fill. Every asset key below matches a vendored
+/// `assets/emoji/twemoji/svg/<key>.svg` file.
+pub const REPRESENTATIVE_EMOJIS: &[Emoji] = &[
+    Emoji {
+        unicode: "🦊",
+        name: "fox",
+        category: EmojiCategory::AnimalsAndNature,
+        keywords: &["animal", "fox"],
+        asset: "1f98a",
+    },
+    Emoji {
+        unicode: "❤️", // U+2764 U+FE0F — variation selector
+        name: "red heart",
+        category: EmojiCategory::Symbols,
+        keywords: &["love", "heart"],
+        asset: "2764",
+    },
+    Emoji {
+        unicode: "🇺🇸", // U+1F1FA U+1F1F8 — regional-indicator flag pair
+        name: "flag: United States",
+        category: EmojiCategory::Flags,
+        keywords: &["flag", "us", "america"],
+        asset: "1f1fa-1f1f8",
+    },
+    Emoji {
+        unicode: "👍🏽", // U+1F44D U+1F3FD — skin-tone modifier
+        name: "thumbs up: medium skin tone",
+        category: EmojiCategory::SmileysAndPeople,
+        keywords: &["thumb", "up", "skin tone"],
+        asset: "1f44d-1f3fd",
+    },
+    Emoji {
+        unicode: "👩‍💻", // U+1F469 ZWJ U+1F4BB — ZWJ sequence
+        name: "woman technologist",
+        category: EmojiCategory::SmileysAndPeople,
+        keywords: &["woman", "coder", "developer", "tech"],
+        asset: "1f469-200d-1f4bb",
+    },
+    Emoji {
+        unicode: "👨‍👩‍👧‍👦", // 4-codepoint ZWJ family sequence
+        name: "family: man, woman, girl, boy",
+        category: EmojiCategory::SmileysAndPeople,
+        keywords: &["family", "man", "woman", "girl", "boy"],
+        asset: "1f468-200d-1f469-200d-1f467-200d-1f466",
+    },
+];
+
+/// Every catalog entry: the picker list plus the representative fixtures.
+pub fn all_emoji() -> impl Iterator<Item = &'static Emoji> {
+    COMMON_EMOJIS.iter().chain(REPRESENTATIVE_EMOJIS.iter())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,5 +478,161 @@ mod tests {
             EmojiCategory::SmileysAndPeople.label_key(),
             "emoji.category.smileys_people"
         );
+    }
+
+    /// Acceptance: selecting an emoji yields its Unicode string, never an SVG
+    /// path. The asset key must stay presentation metadata: bare identifier,
+    /// no path separators, no extension, never equal to the inserted Unicode.
+    #[test]
+    fn insert_value_is_unicode_never_asset_or_path() {
+        for e in all_emoji() {
+            assert!(!e.unicode.is_empty(), "empty unicode for {:?}", e.name);
+            assert!(!e.asset.is_empty(), "empty asset for {}", e.unicode);
+
+            // The value the picker inserts / the message carries:
+            let insert_value = e.unicode;
+            assert_ne!(
+                insert_value, e.asset,
+                "{} must insert Unicode, not asset",
+                e.unicode
+            );
+
+            // Asset keys are bare normalized identifiers, never paths.
+            assert!(
+                !e.asset.contains('/') && !e.asset.contains('\\'),
+                "asset must not be a path: {}",
+                e.asset
+            );
+            assert!(
+                !e.asset.ends_with(".svg") && !e.asset.contains('.'),
+                "asset must not carry a file extension: {}",
+                e.asset
+            );
+            assert!(
+                e.asset.chars().all(|c| c.is_ascii_hexdigit() || c == '-'),
+                "asset must be lowercase hex + '-' separators: {}",
+                e.asset
+            );
+        }
+    }
+
+    /// Acceptance: the catalog can represent a single code point.
+    #[test]
+    fn catalog_represents_single_codepoints() {
+        let single: Vec<_> = REPRESENTATIVE_EMOJIS
+            .iter()
+            .filter(|e| e.unicode.chars().count() == 1)
+            .collect();
+        assert!(
+            !single.is_empty(),
+            "need at least one single-codepoint fixture"
+        );
+        assert_eq!(single[0].unicode.chars().count(), 1);
+        assert_eq!(single[0].unicode, "🦊");
+    }
+
+    /// Acceptance: the catalog can represent flags (regional-indicator pair).
+    #[test]
+    fn catalog_represents_flags() {
+        let us = REPRESENTATIVE_EMOJIS
+            .iter()
+            .find(|e| e.asset == "1f1fa-1f1f8")
+            .expect("US flag fixture");
+        let chars: Vec<char> = us.unicode.chars().collect();
+        assert_eq!(chars.len(), 2, "flag is a regional-indicator pair");
+        assert!(
+            chars
+                .iter()
+                .all(|c| ('\u{1F1E6}'..='\u{1F1FF}').contains(c)),
+            "flag chars are regional indicators"
+        );
+        assert_eq!(us.category, EmojiCategory::Flags);
+    }
+
+    /// Acceptance: the catalog can represent skin-tone variants
+    /// (U+1F3FB..U+1F3FF modifier appended to a base emoji).
+    #[test]
+    fn catalog_represents_skin_tone_variants() {
+        let thumb = REPRESENTATIVE_EMOJIS
+            .iter()
+            .find(|e| e.asset == "1f44d-1f3fd")
+            .expect("skin-tone fixture");
+        assert!(
+            thumb
+                .unicode
+                .chars()
+                .any(|c| ('\u{1F3FB}'..='\u{1F3FF}').contains(&c)),
+            "skin-tone modifier present in {}",
+            thumb.unicode
+        );
+        assert!(thumb.unicode.chars().count() > 1);
+    }
+
+    /// Acceptance: the catalog can represent ZWJ sequences (U+200D joining
+    /// multiple code points into one visual emoji).
+    #[test]
+    fn catalog_represents_zwj_sequences() {
+        let zwj: Vec<_> = REPRESENTATIVE_EMOJIS
+            .iter()
+            .filter(|e| e.unicode.contains('\u{200D}'))
+            .collect();
+        assert_eq!(zwj.len(), 2, "two ZWJ fixtures");
+        let family = REPRESENTATIVE_EMOJIS
+            .iter()
+            .find(|e| e.asset == "1f468-200d-1f469-200d-1f467-200d-1f466")
+            .expect("family fixture");
+        assert_eq!(family.unicode.chars().count(), 7, "4 emoji + 3 ZWJ");
+        assert!(zwj.iter().all(|e| e.unicode.chars().count() > 1));
+    }
+
+    /// Acceptance: the catalog can represent variation-selector forms
+    /// (U+FE0F) — already used by the picker list (❤️, ⚠️).
+    #[test]
+    fn catalog_represents_variation_selectors() {
+        let with_vs16: Vec<_> = all_emoji()
+            .filter(|e| e.unicode.contains('\u{FE0F}'))
+            .collect();
+        assert!(
+            !with_vs16.is_empty(),
+            "need at least one VS16 entry (red heart, warning)"
+        );
+        for e in with_vs16 {
+            assert!(e.unicode.chars().count() > 1, "VS16 adds a code point");
+        }
+    }
+
+    /// Task 12/14: Recent is a reserved pseudo-category with a stable label
+    /// key, but is not a content category of catalog entries.
+    #[test]
+    fn recent_category_is_a_reserved_placeholder() {
+        assert_eq!(EmojiCategory::Recent.label_key(), "emoji.category.recent");
+        assert!(
+            !EmojiCategory::ALL.contains(&EmojiCategory::Recent),
+            "Recent must not be a catalog-entry category"
+        );
+        assert!(all_emoji().all(|e| e.category != EmojiCategory::Recent));
+    }
+
+    /// Every representative fixture's asset key exists in the vendored set
+    /// (guards against typos; manifest validation is BORU-TWEMOJI-06).
+    #[test]
+    fn representative_asset_keys_match_vendored_files() {
+        let vendored: std::collections::HashSet<String> = std::fs::read_dir(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/emoji/twemoji/svg"
+        ))
+        .expect("vendored twemoji dir")
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+        for e in REPRESENTATIVE_EMOJIS {
+            let file = format!("{}.svg", e.asset);
+            assert!(
+                vendored.contains(&file),
+                "asset {} has no vendored {}",
+                e.asset,
+                file
+            );
+        }
     }
 }
