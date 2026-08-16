@@ -54,6 +54,14 @@ pub mod message;
 pub mod privacy;
 pub mod reconnect;
 
+/// Domain-separation tag for control-plane envelope signatures (BORU-CP-17).
+///
+/// A control-plane envelope's Ed25519 signature covers canonical bytes
+/// framed with this tag (see [`crate::protocol_signing`]), so a signature
+/// over a control-plane envelope can never be replayed as a signature over
+/// another Boru protocol object family.
+pub const CONTROL_PLANE_SIGNING_DOMAIN: &str = "boru/control-plane";
+
 #[cfg(feature = "net")]
 pub mod reconcile;
 

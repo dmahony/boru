@@ -45,7 +45,7 @@ The project provides a Rust library (`boru_core`) and a GUI application (`exampl
 │  ┌──────────────────────────────────────────────────┐    │
 │  │                 Storage Layer                     │    │
 │  │  • SQLite `Storage` (boru.db) — core store,       │    │
-│  │    schema v19 (see `CURRENT_SCHEMA_VERSION` in    │    │
+│  │    schema v20 (see `CURRENT_SCHEMA_VERSION` in    │    │
 │  │    `src/storage.rs`).                             │    │
 │  │  • SQLite `MessageStore` (message_store.db) —     │    │
 │  │    live chat-history `messages` table.            │    │
@@ -202,7 +202,7 @@ and operator guidance.
 
 ### Storage Layer
 
-SQLite is the authoritative store. `boru.db` (schema v19, tracked by
+SQLite is the authoritative store. `boru.db` (schema v20, tracked by
 `CURRENT_SCHEMA_VERSION` in `src/storage.rs`) holds durable core state;
 `message_store.db` holds live chat-message history. Legacy JSON stores are
 read-only migration inputs: their `save()` methods are deprecated no-ops.

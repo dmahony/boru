@@ -67,7 +67,7 @@
 //! malformed frames, and discard the frame. Deduplicate announcements by
 //! `(sender_node_id, sequence)` via [`ControlEnvelope::dedup_key`].
 
-use iroh_base::PublicKey;
+use iroh_base::{PublicKey, SecretKey};
 use serde::{Deserialize, Serialize};
 
 /// Magic prefix distinguishing control-plane envelopes from everything else
@@ -348,6 +348,20 @@ pub struct ControlEnvelope {
     pub timestamp_secs: u64,
     /// The typed payload for [`Self::message_type`].
     pub payload: ControlPayload,
+    /// Ed25519 signature over the canonical envelope bytes (BORU-CP-17 /
+    /// PDF Task 4.3 fix): proves the envelope was authored by
+    /// `sender_node_id` regardless of which gossip peer relayed it. This is
+    /// what lets a receiver attribute a relayed control envelope — the
+    /// gossip transport only authenticates `delivered_from` (the immediate
+    /// forwarder), which on a multi-node mesh is NOT the original author.
+    ///
+    /// `None` = legacy unsigned envelope (accepted only from the
+    /// authenticated direct delivery source).
+    pub signature: Option<[u8; 64]>,
+    /// True iff `signature` was verified against `sender_node_id` over the
+    /// canonical bytes at decode time. Only meaningful when `signature` is
+    /// `Some`.
+    pub signature_valid: bool,
 }
 
 impl ControlEnvelope {
@@ -368,6 +382,8 @@ impl ControlEnvelope {
             sequence,
             timestamp_secs,
             payload,
+            signature: None,
+            signature_valid: false,
         }
     }
 
@@ -497,14 +513,55 @@ impl ControlEnvelope {
         (self.sender_node_id, self.sequence)
     }
 
+    /// Sign this envelope with the node's Ed25519 key (BORU-CP-17).
+    ///
+    /// The signature covers the canonical bytes
+    /// (`boru/control-plane`, protocol version) of every security-relevant
+    /// field: message type, sender identity, sequence, timestamp, and the
+    /// exact payload section bytes. After signing, [`encode`](Self::encode)
+    /// appends the 64-byte signature to the wire frame; a receiver verifies
+    /// it against `sender_node_id` so a relayed envelope can be attributed
+    /// to its true author even though the gossip transport only
+    /// authenticates the immediate forwarder.
+    pub fn sign(&mut self, sk: &SecretKey) {
+        let payload = self.payload_bytes();
+        let canonical = crate::protocol_signing::canonical_signed_bytes(
+            crate::control_plane::CONTROL_PLANE_SIGNING_DOMAIN,
+            self.protocol_version as u16,
+            &(
+                self.message_type.to_u8(),
+                *self.sender_node_id.as_bytes(),
+                self.sequence,
+                self.timestamp_secs,
+                &payload[..],
+            ),
+        )
+        .expect("control-plane canonical bytes are infallible");
+        let sig = sk.sign(&canonical);
+        self.signature = Some(sig.to_bytes());
+        self.signature_valid = true;
+    }
+
+    /// The exact payload section bytes as they appear on the wire (and as
+    /// they are covered by [`sign`](Self::sign)).
+    fn payload_bytes(&self) -> Vec<u8> {
+        postcard::to_stdvec(&self.payload).expect("control payload encoding is infallible")
+    }
+
     /// Serialise this envelope to its compact wire form.
     ///
     /// Cannot fail for in-memory envelopes: payload encoding is infallible
     /// for the supported types and the payload length is bounded by
     /// [`MAX_CONTROL_PAYLOAD_LEN`].
+    ///
+    /// Layout: `magic(2) | protocol_version(1) | WireHeader | payload | [signature(64)]`
+    /// where the trailing signature is present iff [`sign`](Self::sign) ran.
+    /// Old receivers ignore trailing bytes beyond the payload section
+    /// (documented forward-compatibility), so signed frames still decode on
+    /// peers that predate BORU-CP-17 — they simply cannot verify the
+    /// author and fall back to the direct-delivery attribution rule.
     pub fn encode(&self) -> Vec<u8> {
-        let payload =
-            postcard::to_stdvec(&self.payload).expect("control payload encoding is infallible");
+        let payload = self.payload_bytes();
         debug_assert!(
             payload.len() <= MAX_CONTROL_PAYLOAD_LEN as usize,
             "payload exceeds MAX_CONTROL_PAYLOAD_LEN"
@@ -516,13 +573,16 @@ impl ControlEnvelope {
             timestamp_secs: self.timestamp_secs,
             payload_len: payload.len() as u32,
         };
-        let mut out = Vec::with_capacity(3 + 40 + payload.len());
+        let mut out = Vec::with_capacity(3 + 40 + payload.len() + 64);
         out.extend_from_slice(&CONTROL_PLANE_MAGIC);
         out.push(self.protocol_version); // fixed offset bytes[2]
         out.extend_from_slice(
             &postcard::to_stdvec(&header).expect("header encoding is infallible"),
         );
         out.extend_from_slice(&payload);
+        if let Some(sig) = &self.signature {
+            out.extend_from_slice(sig);
+        }
         out
     }
 
@@ -574,8 +634,18 @@ impl ControlEnvelope {
         let payload_bytes = rest
             .get(..header.payload_len as usize)
             .ok_or(ControlPlaneError::Truncated)?;
-        // Trailing bytes beyond payload_len (future envelope extensions)
-        // are intentionally ignored (forward compatibility).
+        // Trailing bytes beyond payload_len: exactly 64 bytes = the
+        // BORU-CP-17 envelope signature (appended by a new sender);
+        // anything else is a future envelope extension and is intentionally
+        // ignored (forward compatibility).
+        let trailing = &rest[header.payload_len as usize..];
+        let signature = match trailing.len() {
+            64 => Some(
+                <[u8; 64]>::try_from(trailing)
+                    .expect("64-byte slice is a [u8; 64]"),
+            ),
+            _ => None,
+        };
 
         let Some(message_type) = ControlMessageType::from_u8(header.message_type) else {
             // Unknown (future) message type: header parsed, payload skipped.
@@ -605,6 +675,31 @@ impl ControlEnvelope {
             });
         }
 
+        // BORU-CP-17: verify the trailing signature against the claimed
+        // sender over the canonical bytes. An envelope that carries a
+        // signature that does NOT verify is a spoofing attempt — it claims
+        // to be `sender_node_id` without possessing that key — so it is
+        // flagged as invalid (the guard rejects it), never silently
+        // accepted.
+        let signature_valid = match &signature {
+            Some(sig) => {
+                let canonical = crate::protocol_signing::canonical_signed_bytes(
+                    crate::control_plane::CONTROL_PLANE_SIGNING_DOMAIN,
+                    protocol_version as u16,
+                    &(
+                        message_type.to_u8(),
+                        *sender_node_id.as_bytes(),
+                        header.sequence,
+                        header.timestamp_secs,
+                        &payload_bytes[..],
+                    ),
+                )
+                .expect("control-plane canonical bytes are infallible");
+                crate::protocol_signing::verify(&sender_node_id, sig, &canonical)
+            }
+            None => false,
+        };
+
         Ok(ControlPlaneDecode::Message(ControlEnvelope {
             protocol_version,
             message_type,
@@ -612,6 +707,8 @@ impl ControlEnvelope {
             sequence: header.sequence,
             timestamp_secs: header.timestamp_secs,
             payload,
+            signature,
+            signature_valid,
         }))
     }
 }
@@ -836,6 +933,109 @@ mod tests {
                 }
                 other => panic!("expected Message, got {other:?}"),
             }
+        }
+    }
+
+    // ── BORU-CP-17 envelope signatures ────────────────────────────────
+
+    /// A signed envelope round-trips and the receiver can cryptographically
+    /// attribute it to `sender_node_id` (relayed-delivery fix).
+    #[test]
+    fn signed_envelope_roundtrips_with_valid_signature() {
+        let sk = iroh_base::SecretKey::generate();
+        let node = sk.public();
+        let mut envelope = ControlEnvelope::capabilities(
+            node,
+            9,
+            1_700_000_000,
+            vec!["files-v2".into()],
+        );
+        assert!(envelope.signature.is_none());
+        envelope.sign(&sk);
+        assert!(envelope.signature.is_some());
+
+        let bytes = envelope.encode();
+        match ControlEnvelope::decode(&bytes).expect("signed envelope decodes") {
+            ControlPlaneDecode::Message(decoded) => {
+                assert_eq!(decoded, envelope);
+                assert!(decoded.signature.is_some(), "signature survives transport");
+                assert!(decoded.signature_valid, "signature must verify");
+            }
+            other => panic!("expected Message, got {other:?}"),
+        }
+    }
+
+    /// Tampering with any signed field must invalidate the signature — a
+    /// relayed/spoofed envelope claiming a sender it cannot prove.
+    #[test]
+    fn tampered_signed_envelope_fails_verification() {
+        let sk = iroh_base::SecretKey::generate();
+        let node = sk.public();
+        let mut envelope = ControlEnvelope::capabilities(
+            node,
+            9,
+            1_700_000_000,
+            vec!["files-v2".into()],
+        );
+        envelope.sign(&sk);
+
+        let mut bytes = envelope.encode();
+        // Flip a byte INSIDE the payload's string content (keeps postcard
+        // parsing valid — the string length prefix is untouched) so the
+        // frame decodes but the signature no longer verifies.
+        let payload_start = 3
+            + postcard::to_stdvec(&WireHeader {
+                message_type: envelope.message_type.to_u8(),
+                sender_node_id: *node.as_bytes(),
+                sequence: envelope.sequence,
+                timestamp_secs: envelope.timestamp_secs,
+                payload_len: bytes.len() as u32,
+            })
+            .unwrap()
+            .len();
+        // payload layout: variant tag(1) | len(1) | "files-v2"(8); flip a
+        // content byte (index 3 = 'l') to 'm' — stays valid UTF-8 so the
+        // frame decodes, but the signature no longer verifies.
+        bytes[payload_start + 3] ^= 0x01;
+
+        match ControlEnvelope::decode(&bytes).expect("frame still parses") {
+            ControlPlaneDecode::Message(decoded) => {
+                assert!(
+                    decoded.signature.is_some(),
+                    "signature bytes survive transport"
+                );
+                assert!(
+                    !decoded.signature_valid,
+                    "tampered payload must fail signature verification"
+                );
+            }
+            other => panic!("expected Message, got {other:?}"),
+        }
+    }
+
+    /// A signature made by a DIFFERENT key must not verify against the
+    /// claimed sender (spoofing with an unrelated key).
+    #[test]
+    fn signature_from_wrong_key_fails_verification() {
+        let real_sk = iroh_base::SecretKey::generate();
+        let real_node = real_sk.public();
+        let attacker_sk = iroh_base::SecretKey::generate();
+
+        // Attacker builds an envelope claiming to be `real_node` but signs
+        // with their own key.
+        let mut envelope = ControlEnvelope::presence(real_node, 1, 1_700_000_000, None);
+        envelope.sign(&attacker_sk);
+        let bytes = envelope.encode();
+
+        match ControlEnvelope::decode(&bytes).expect("frame parses") {
+            ControlPlaneDecode::Message(decoded) => {
+                assert_eq!(decoded.sender_node_id, real_node);
+                assert!(
+                    !decoded.signature_valid,
+                    "signature from wrong key must not verify"
+                );
+            }
+            other => panic!("expected Message, got {other:?}"),
         }
     }
 

@@ -24,7 +24,7 @@ permissions: `0o700` for the directory, `0o600` for the database file.
 
 ```
 <data_dir>/
-├── boru.db               # SQLite authoritative store (V19 schema)
+├── boru.db               # SQLite authoritative store (V20 schema)
 ├── chat_history.json      # Legacy JSON — reads only (writes deprecated)
 ├── outbox.json            # Legacy JSON — reads only (writes deprecated)
 ├── conversations.json     # Legacy JSON — reads only (writes deprecated)
@@ -313,7 +313,7 @@ rows and the descriptor itself has an enforced expiry.
 - Each migration runs in its own transaction.
 - **Forward-only** — no downgrade path.
 - **Future-schema guard** — opening a database with a version higher than
-  `CURRENT_SCHEMA_VERSION` (currently 19) returns a clear error:
+  `CURRENT_SCHEMA_VERSION` (currently 20) returns a clear error:
   ```
   Database has schema version <N>, but this application only supports up to
   version <MAX>. The database was created by a newer version. Upgrade the
@@ -323,7 +323,7 @@ rows and the descriptor itself has an enforced expiry.
   `open()` re-runs only the unapplied migrations (already-applied versions
   are skipped via `schema_version`).
 - **Current schema version** is defined in `src/storage.rs` as
-  `CURRENT_SCHEMA_VERSION: u32 = 19`. A doc-consistency test
+  `CURRENT_SCHEMA_VERSION: u32 = 20`. A doc-consistency test
   (`docs_reference_current_schema_version` in `src/storage.rs`) fails when
   this constant changes and the architecture docs are not updated, so the
   documented schema version cannot drift silently.

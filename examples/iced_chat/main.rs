@@ -1304,6 +1304,7 @@ fn main() -> Result<()> {
             ),
             Vec::new(),
             local_public,
+            secret_key.clone(),
         )
         .await
         {

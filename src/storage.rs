@@ -6576,7 +6576,7 @@ mod tests {
         );
 
         // Top-level architecture doc must name the schema version.
-        let arch = read_repo_doc("ARCHITECTURE.md");
+        let arch = read_repo_doc("docs/ARCHITECTURE.md");
         assert!(
             arch.contains(&format!("schema v{n}")) || arch.contains(&format!("V{n} schema")),
             "ARCHITECTURE.md does not mention schema v{n} — update the storage section"

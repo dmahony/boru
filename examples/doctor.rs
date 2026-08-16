@@ -766,7 +766,7 @@ async fn run_health_async(args: HealthArgs) -> anyhow::Result<()> {
     };
     let memory = MemoryLookup::new();
     let endpoint = Endpoint::builder(presets::Minimal)
-        .secret_key(secret_key)
+        .secret_key(secret_key.clone())
         .address_lookup(memory)
         .relay_mode(relay_mode)
         .bind()
@@ -795,6 +795,7 @@ async fn run_health_async(args: HealthArgs) -> anyhow::Result<()> {
             discovery_topic(PublicNetwork::Mainnet),
             bootstrap,
             local_public,
+            secret_key,
         )
         .await?
         .with_endpoint(endpoint.clone()),

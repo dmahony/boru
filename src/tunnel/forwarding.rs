@@ -573,7 +573,7 @@ mod tests {
         // owner's receive direction mid-test.
         let _remote_client_send = remote_client_send;
         let cancellation = CancellationToken::new();
-        let mut forwarding = tokio::spawn(forward_bidirectional(
+        let forwarding = tokio::spawn(forward_bidirectional(
             local_server,
             remote_server_send,
             remote_server_recv,
@@ -594,12 +594,15 @@ mod tests {
             assert_eq!(echoed, payload);
             sleep(Duration::from_millis(40)).await;
         }
-        assert!(
-            timeout(Duration::from_millis(50), &mut forwarding)
-                .await
-                .is_err(),
-            "one-direction traffic must keep the tunnel alive"
-        );
+        // Prove liveness with another round trip rather than racing the task
+        // handle against a deadline. A deadline longer than the 100 ms idle
+        // quantum would observe the expected idle shutdown, while a shorter
+        // one is sensitive to scheduler contention.
+        let payload = 6u32.to_be_bytes();
+        local_client.write_all(&payload).await?;
+        let mut echoed = [0u8; 4];
+        remote_client_recv.read_exact(&mut echoed).await?;
+        assert_eq!(echoed, payload);
 
         cancellation.cancel();
         let end = timeout(Duration::from_secs(2), forwarding)

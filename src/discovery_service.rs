@@ -864,6 +864,11 @@ impl AnnounceHandle {
 struct ControlAnnounceHandle {
     sender: GossipSender,
     local_node: PublicKey,
+    /// BORU-CP-17: the node's Ed25519 secret key, used to sign every
+    /// outbound control envelope so receivers can attribute relayed
+    /// envelopes to this node cryptographically. `None` (tests) keeps the
+    /// legacy unsigned envelope format.
+    local_secret: Option<iroh_base::SecretKey>,
     sequence: Arc<AtomicU64>,
     throttle: Arc<AnnounceThrottle>,
     /// Separate throttle for CAPABILITIES announcements (BORU-CP-11). The
@@ -890,10 +895,15 @@ struct ControlAnnounceHandle {
 }
 
 impl ControlAnnounceHandle {
-    fn new(sender: GossipSender, local_node: PublicKey) -> Self {
+    fn new(
+        sender: GossipSender,
+        local_node: PublicKey,
+        local_secret: Option<iroh_base::SecretKey>,
+    ) -> Self {
         Self {
             sender,
             local_node,
+            local_secret,
             // BORU-DIR-23: seed the sequence counter with wall-clock
             // seconds (monotonic per identity across restarts). The
             // original random seed made a restarted advertiser's fresh
@@ -943,6 +953,16 @@ impl ControlAnnounceHandle {
         self.extensions_throttle.set_min_interval(min_interval);
     }
 
+    /// BORU-CP-17: sign `envelope` with the node's secret key when one is
+    /// available. Without a key (tests) the envelope is returned unchanged
+    /// (legacy unsigned format).
+    fn signed(&self, mut envelope: ControlEnvelope) -> ControlEnvelope {
+        if let Some(sk) = &self.local_secret {
+            envelope.sign(sk);
+        }
+        envelope
+    }
+
     /// Throttled announce of an arbitrary control-plane envelope.
     ///
     /// The sequence is allocated ONLY when the announcement passes the
@@ -957,7 +977,7 @@ impl ControlAnnounceHandle {
             return Ok(AnnounceOutcome::Throttled);
         }
         let sequence = self.next_sequence();
-        let bytes = build(sequence).encode();
+        let bytes = self.signed(build(sequence)).encode();
         self.sender
             .broadcast(Bytes::from(bytes))
             .await
@@ -1031,9 +1051,14 @@ impl ControlAnnounceHandle {
             return Ok(AnnounceOutcome::Throttled);
         }
         let sequence = self.next_sequence();
-        let bytes =
-            ControlEnvelope::capabilities(self.local_node, sequence, unix_now_secs(), wire.clone())
-                .encode();
+        let bytes = self
+            .signed(ControlEnvelope::capabilities(
+                self.local_node,
+                sequence,
+                unix_now_secs(),
+                wire.clone(),
+            ))
+            .encode();
         self.sender
             .broadcast(Bytes::from(bytes))
             .await
@@ -1083,13 +1108,14 @@ impl ControlAnnounceHandle {
             return Ok(AnnounceOutcome::Throttled);
         }
         let sequence = self.next_sequence();
-        let bytes = ControlEnvelope::extensions(
-            self.local_node,
-            sequence,
-            unix_now_secs(),
-            payload.clone(),
-        )
-        .encode();
+        let bytes = self
+            .signed(ControlEnvelope::extensions(
+                self.local_node,
+                sequence,
+                unix_now_secs(),
+                payload.clone(),
+            ))
+            .encode();
         self.sender
             .broadcast(Bytes::from(bytes))
             .await
@@ -1134,13 +1160,14 @@ impl ControlAnnounceHandle {
             return Ok(AnnounceOutcome::Throttled);
         }
         let sequence = self.next_sequence();
-        let bytes = ControlEnvelope::public_room_advertisement(
-            self.local_node,
-            sequence,
-            unix_now_secs(),
-            advert,
-        )
-        .encode();
+        let bytes = self
+            .signed(ControlEnvelope::public_room_advertisement(
+                self.local_node,
+                sequence,
+                unix_now_secs(),
+                advert,
+            ))
+            .encode();
         self.sender
             .broadcast(Bytes::from(bytes))
             .await
@@ -1173,13 +1200,14 @@ impl ControlAnnounceHandle {
             return Ok(AnnounceOutcome::Throttled);
         }
         let sequence = self.next_sequence();
-        let bytes = ControlEnvelope::public_room_withdrawal(
-            self.local_node,
-            sequence,
-            unix_now_secs(),
-            withdrawal,
-        )
-        .encode();
+        let bytes = self
+            .signed(ControlEnvelope::public_room_withdrawal(
+                self.local_node,
+                sequence,
+                unix_now_secs(),
+                withdrawal,
+            ))
+            .encode();
         self.sender
             .broadcast(Bytes::from(bytes))
             .await
@@ -1973,10 +2001,19 @@ impl DiscoveryService {
         topic: TopicId,
         bootstrap: Vec<PublicKey>,
         local_node: PublicKey,
+        local_secret: iroh_base::SecretKey,
     ) -> Result<Self, ApiError> {
         let subscription = gossip.subscribe(topic, bootstrap).await?;
         let (sender, receiver) = subscription.split();
-        let service = Self::from_subscription(topic, sender, receiver, local_node);
+        let service = Self::from_subscription_with_counters(
+            topic,
+            sender,
+            receiver,
+            local_node,
+            Some(local_secret),
+            DIAGNOSTIC_COUNTERS.clone(),
+            DIRECTORY_COUNTERS.clone(),
+        );
         match service.announce_hello().await {
             Ok(AnnounceOutcome::Announced) => {
                 info!(topic = %topic, "discovery hello announced on join");
@@ -2080,8 +2117,9 @@ impl DiscoveryService {
         topic: TopicId,
         bootstrap: Vec<PublicKey>,
         local_node: PublicKey,
+        local_secret: iroh_base::SecretKey,
     ) -> Result<Self, ApiError> {
-        Self::join(gossip, topic, bootstrap, local_node).await
+        Self::join(gossip, topic, bootstrap, local_node, local_secret).await
     }
 
     /// Stop the discovery service: cancel the drain and connectivity tasks
@@ -2114,6 +2152,7 @@ impl DiscoveryService {
             sender,
             receiver,
             local_node,
+            None,
             DIAGNOSTIC_COUNTERS.clone(),
             DIRECTORY_COUNTERS.clone(),
         )
@@ -2125,11 +2164,18 @@ impl DiscoveryService {
     /// which shares the global [`DIAGNOSTIC_COUNTERS`] and
     /// [`DIRECTORY_COUNTERS`]; tests inject isolated instances so counter
     /// assertions never race with other tests or live app traffic.
+    ///
+    /// `local_secret` (BORU-CP-17): the node's Ed25519 secret key. When
+    /// present, every control-plane envelope this service announces is
+    /// signed so receivers can attribute relayed envelopes to this node.
+    /// `None` keeps the legacy unsigned envelope format (tests / callers
+    /// without a key).
     fn from_subscription_with_counters(
         topic: TopicId,
         sender: GossipSender,
         receiver: GossipReceiver,
         local_node: PublicKey,
+        local_secret: Option<iroh_base::SecretKey>,
         counters: DiagnosticCounters,
         directory_counters: DirectoryCounters,
     ) -> Self {
@@ -2169,7 +2215,7 @@ impl DiscoveryService {
             room_directory,
         };
         let announce = AnnounceHandle::new(sender.clone(), local_node);
-        let control_announce = ControlAnnounceHandle::new(sender, local_node);
+        let control_announce = ControlAnnounceHandle::new(sender, local_node, local_secret);
         let cancel = CancellationToken::new();
         let task_core = core.clone();
         let task_announce = announce.clone();
@@ -2797,7 +2843,7 @@ impl DiscoveryService {
         &self,
         envelope: ControlEnvelope,
     ) -> Result<(), DiscoveryServiceError> {
-        let bytes = envelope.encode();
+        let bytes = self.control_announce.signed(envelope).encode();
         self.announce
             .sender
             .broadcast(Bytes::from(bytes))
@@ -4166,6 +4212,7 @@ mod tests {
             sender,
             receiver,
             local_node,
+            None,
             counters,
             DirectoryCounters::new(),
         )
@@ -4188,6 +4235,7 @@ mod tests {
             sender,
             receiver,
             local_node,
+            None,
             DiagnosticCounters::new(),
             directory_counters,
         )

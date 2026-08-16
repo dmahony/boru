@@ -27,12 +27,17 @@
 //!    active presence ([`expire_stale`](PeerControlStateStore::expire_stale)).
 //!    The store is bounded: at most [`MAX_CONTROL_PEERS`] peers, evicting
 //!    stale-then-oldest entries when full.
-//! 5. **Attribution** — where Boru has authenticated identity material
-//!    (the gossip transport authenticates `delivered_from` as the real
-//!    sender of a frame), [`ControlPlaneGuard::admit`] verifies the
-//!    envelope's claimed `sender_node_id` equals the authenticated delivery
-//!    source before trusting capability or presence state. A frame that
-//!    claims a different identity is dropped as a spoof.
+//! 5. **Attribution** — [`ControlPlaneGuard::admit`] verifies the
+//!    envelope's claimed `sender_node_id` is authentic before trusting
+//!    capability or presence state. A BORU-CP-17 Ed25519 signature that
+//!    verifies against the claimed sender is cryptographic attribution and
+//!    is accepted regardless of which gossip peer relayed the frame (the
+//!    gossip transport only authenticates `delivered_from`, the immediate
+//!    forwarder — on a multi-node mesh that is NOT the original author).
+//!    Legacy unsigned envelopes are only trusted when the authenticated
+//!    delivery source IS the claimed sender (direct delivery). A frame
+//!    that claims a different identity, or carries a signature that fails
+//!    verification, is dropped as a spoof.
 //!
 //! # No authorisation by presence
 //!
@@ -760,8 +765,10 @@ impl PeerControlStateStore {
 /// Why the control-plane guard rejected a frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuardRejectReason {
-    /// The envelope's claimed `sender_node_id` differs from the
-    /// authenticated gossip delivery source — a spoofing attempt.
+    /// The envelope's claimed `sender_node_id` could not be authenticated:
+    /// the envelope is unsigned and arrived from a different gossip
+    /// delivery source (relayed), or it carries a signature that failed
+    /// verification — a spoofing attempt.
     SpoofedSender,
     /// The authenticated sender exceeded the per-sender frame rate limit.
     RateLimited,
@@ -861,10 +868,28 @@ impl ControlPlaneGuard {
             return GuardVerdict::Reject(GuardRejectReason::RateLimited);
         }
 
-        // 2. Attribution: the claimed sender must be the authenticated
-        //    delivery source.
-        if envelope.sender_node_id != delivered_from {
-            return GuardVerdict::Reject(GuardRejectReason::SpoofedSender);
+        // 2. Attribution: the envelope's claimed sender must be
+        //    authenticated. A BORU-CP-17 signature that verified against
+        //    `sender_node_id` at decode time is cryptographic proof of
+        //    authorship — the envelope is attributed to the claimed sender
+        //    regardless of which gossip peer relayed it (`delivered_from`
+        //    on a multi-node mesh is the immediate forwarder, NOT the
+        //    original author). A signature that is present but did NOT
+        //    verify is a spoofing attempt (claims to be `sender_node_id`
+        //    without possessing that key) and is rejected. A legacy
+        //    unsigned envelope is only accepted when the authenticated
+        //    gossip delivery source IS the claimed sender (direct
+        //    delivery).
+        match (&envelope.signature, envelope.signature_valid) {
+            (Some(_), true) => {}
+            (Some(_), false) => {
+                return GuardVerdict::Reject(GuardRejectReason::SpoofedSender);
+            }
+            (None, _) => {
+                if envelope.sender_node_id != delivered_from {
+                    return GuardVerdict::Reject(GuardRejectReason::SpoofedSender);
+                }
+            }
         }
 
         // 3. Minimal-content whitelist + bounds.
@@ -921,7 +946,7 @@ impl ControlPlaneGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::control_plane::message::{ControlEnvelope, CONTROL_PLANE_PROTOCOL_VERSION};
+    use crate::control_plane::message::{ControlEnvelope, ControlPlaneDecode, CONTROL_PLANE_PROTOCOL_VERSION};
     use std::collections::BTreeSet;
 
     fn key(byte: u8) -> PublicKey {
@@ -1683,6 +1708,59 @@ mod tests {
             guard.admit(&env, actual, now),
             GuardVerdict::Reject(GuardRejectReason::SpoofedSender),
             "an envelope claiming a different identity must be dropped"
+        );
+        assert_eq!(guard.presence_count(), 0);
+    }
+
+    /// BORU-CP-17: a SIGNED envelope is accepted even when the
+    /// authenticated delivery source is a relay (NOT the claimed sender) —
+    /// the signature cryptographically attributes it to the author.
+    #[test]
+    fn guard_accepts_signed_envelope_delivered_via_relay() {
+        let mut guard = ControlPlaneGuard::new();
+        let sk = iroh_base::SecretKey::generate();
+        let author = sk.public();
+        let relay = key(0x0D); // authenticated delivery source ≠ author
+        let now = Instant::now();
+        let mut env = capabilities(author, 1, vec!["files-v2".into()]);
+        env.sign(&sk);
+        assert!(env.signature_valid, "locally signed envelope is valid");
+        assert_eq!(
+            guard.admit(&env, relay, now),
+            GuardVerdict::Accept,
+            "a relayed but correctly signed envelope must be attributed to the author"
+        );
+        assert_eq!(guard.presence_count(), 1);
+        assert!(guard.presence().contains(&author));
+    }
+
+    /// BORU-CP-17: a relayed envelope whose signature FAILED verification
+    /// is rejected — the claimed author did not sign it.
+    #[test]
+    fn guard_rejects_signed_envelope_with_invalid_signature() {
+        let mut guard = ControlPlaneGuard::new();
+        let author = key(0x0E);
+        let relay = key(0x0F);
+        let now = Instant::now();
+        // Attacker claims to be `author` but signs with their own key; the
+        // DECODED envelope carries the signature bytes with
+        // `signature_valid == false` (verification happens at decode time).
+        let mut env = capabilities(author, 1, vec!["files-v2".into()]);
+        env.sign(&iroh_base::SecretKey::generate());
+        let bytes = env.encode();
+        let ControlPlaneDecode::Message(decoded) =
+            ControlEnvelope::decode(&bytes).expect("frame parses")
+        else {
+            panic!("expected Message");
+        };
+        assert!(
+            !decoded.signature_valid,
+            "signature from a wrong key is invalid"
+        );
+        assert_eq!(
+            guard.admit(&decoded, relay, now),
+            GuardVerdict::Reject(GuardRejectReason::SpoofedSender),
+            "an envelope with a failed signature must be dropped even if relayed"
         );
         assert_eq!(guard.presence_count(), 0);
     }
