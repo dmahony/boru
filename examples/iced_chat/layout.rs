@@ -436,6 +436,27 @@ impl Default for SidebarLayout {
     }
 }
 
+/// Responsive presentation of the persistent sidebar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidebarMode {
+    Full,
+    Compact,
+}
+
+impl SidebarLayout {
+    /// Resolve the sidebar mode from the canonical responsive model.
+    pub fn mode_for_width(&self, width: f32, responsive: &ResponsiveLayout) -> SidebarMode {
+        if width <= responsive.viewport_min_width { SidebarMode::Compact } else { SidebarMode::Full }
+    }
+
+    /// Resolve the shell width from the live layout model.
+    pub fn width_for_window(&self, width: f32, responsive: &ResponsiveLayout) -> f32 {
+        let span = (responsive.viewport_ref_width - responsive.viewport_min_width).max(1.0);
+        let fraction = ((width - responsive.viewport_min_width) / span).clamp(0.0, 1.0);
+        (self.width_min + (self.width - self.width_min) * fraction).clamp(self.width_min, self.width_max)
+    }
+}
+
 /// Sidebar padding regions, decomposed from the `iced::Padding` literals in
 /// `app/sidebar.rs` (values are `SPACE_*` tokens, see `theme.rs::SidebarPadding`).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -967,6 +988,29 @@ pub enum ViewportTier {
     UltraWide,
 }
 
+/// Viewport height tier used for height-sensitive structural layout choices.
+///
+/// The thresholds reuse the existing responsive height values: below the
+/// reference height is short, the reference-to-large range is normal, and
+/// large (900 px by default) and above is tall.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
+pub enum HeightTier {
+    /// A short window where vertical whitespace should be conservative.
+    Short,
+    /// The reference desktop height range.
+    #[default]
+    Normal,
+    /// A tall window with room for expanded structural layout.
+    Tall,
+}
+
+/// Canonical width and height classification for a viewport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ViewportTiers {
+    pub width: ViewportTier,
+    pub height: HeightTier,
+}
+
 /// A value that varies per viewport tier.
 ///
 /// BORU-LAYOUT-04: per-breakpoint column counts, padding and gaps are
@@ -1071,6 +1115,27 @@ impl ResponsiveLayout {
             ViewportTier::UltraWide
         } else {
             ViewportTier::Desktop
+        }
+    }
+
+    /// Resolve the active height tier for a window height (px), reusing the
+    /// existing reference and large viewport heights.
+    pub fn tier_for_height(&self, height: f32) -> HeightTier {
+        if height < self.viewport_ref_height {
+            HeightTier::Short
+        } else if height >= self.viewport_lg_height {
+            HeightTier::Tall
+        } else {
+            HeightTier::Normal
+        }
+    }
+
+    /// Resolve both viewport dimensions through the canonical responsive API.
+    /// Screens should use this instead of comparing against breakpoint values.
+    pub fn tiers_for_size(&self, width: f32, height: f32) -> ViewportTiers {
+        ViewportTiers {
+            width: self.tier_for_width(width),
+            height: self.tier_for_height(height),
         }
     }
 
@@ -1553,6 +1618,17 @@ mod tests {
     use crate::design_tokens;
     use crate::status_card;
     use crate::theme::BoruTheme;
+
+    #[test]
+    fn sidebar_resolves_compact_mode_and_model_widths() {
+        let sidebar = SidebarLayout::default();
+        let responsive = ResponsiveLayout::default();
+        assert_eq!(sidebar.mode_for_width(responsive.viewport_min_width, &responsive), SidebarMode::Compact);
+        assert_eq!(sidebar.mode_for_width(responsive.viewport_ref_width, &responsive), SidebarMode::Full);
+        assert_eq!(sidebar.width_for_window(responsive.viewport_min_width, &responsive), sidebar.width_min);
+        assert_eq!(sidebar.width_for_window(responsive.viewport_ref_width, &responsive), sidebar.width);
+        assert_eq!(sidebar.width_for_window(responsive.viewport_xl_width, &responsive), sidebar.width);
+    }
 
     // ── Default = current appearance ──────────────────────────────────
 
@@ -2247,6 +2323,58 @@ mod tests {
         assert!(
             root.screens.get("files").is_none(),
             "missing screen key falls back"
+        );
+    }
+
+    #[test]
+    fn responsive_tier_boundaries_are_stable() {
+        let responsive = ResponsiveLayout::default();
+
+        assert_eq!(
+            responsive.tier_for_width(responsive.narrow_max_width - 0.01),
+            ViewportTier::Narrow
+        );
+        assert_eq!(
+            responsive.tier_for_width(responsive.narrow_max_width),
+            ViewportTier::Desktop
+        );
+        assert_eq!(
+            responsive.tier_for_width(responsive.ultra_wide_min_width - 0.01),
+            ViewportTier::Desktop
+        );
+        assert_eq!(
+            responsive.tier_for_width(responsive.ultra_wide_min_width),
+            ViewportTier::UltraWide
+        );
+    }
+
+    #[test]
+    fn responsive_height_tier_boundaries_are_stable() {
+        let responsive = ResponsiveLayout::default();
+
+        assert_eq!(
+            responsive.tier_for_height(responsive.viewport_ref_height - 0.01),
+            HeightTier::Short
+        );
+        assert_eq!(
+            responsive.tier_for_height(responsive.viewport_ref_height),
+            HeightTier::Normal
+        );
+        assert_eq!(
+            responsive.tier_for_height(responsive.viewport_lg_height - 0.01),
+            HeightTier::Normal
+        );
+        assert_eq!(
+            responsive.tier_for_height(responsive.viewport_lg_height),
+            HeightTier::Tall
+        );
+
+        assert_eq!(
+            responsive.tiers_for_size(1440.0, 720.0),
+            ViewportTiers {
+                width: ViewportTier::UltraWide,
+                height: HeightTier::Short,
+            }
         );
     }
 }

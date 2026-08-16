@@ -104,9 +104,16 @@ impl IcedChat {
         {
             content = content.push(self.view_screen_share_panel());
         }
+        let timeline_max_width = self.boru_layout().responsive.content_max_width;
         let chat_log = widget::responsive(|size: iced::Size| {
             self.view_chat_log(size.width, size.height).into()
         });
+        // Keep the conversation readable on ultra-wide screens while allowing
+        // the timeline to use all available space below the configured cap.
+        let chat_log = widget::container(chat_log)
+            .width(Length::Fill)
+            .max_width(timeline_max_width)
+            .center_x(Length::Fill);
         #[cfg(feature = "dev-ui")]
         let chat_log = crate::designer::overlay(
             crate::designer::ComponentId::ChatMessageList,
@@ -3474,7 +3481,12 @@ impl IcedChat {
         // whichever is smaller (plan §4).  Supplied by the responsive wrapper
         // in `view_chat_panel` so bubbles never exceed the conversation
         // column and long content wraps instead of overflowing.
-        let bubble_max_w = crate::presentation::chat_bubble_max_width(timeline_width);
+        let chat_layout = self.boru_layout().chat.clone();
+        let bubble_max_w = crate::presentation::chat_bubble_max_width_with(
+            timeline_width,
+            chat_layout.bubble_max_width,
+            chat_layout.bubble_width_ratio,
+        );
 
         let (first_idx, last_idx, top_space_h, bottom_h) =
             lc.window(self.scroll_offset, viewport_height);
@@ -3876,7 +3888,9 @@ impl IcedChat {
                     preview_children.push(
                         iced::widget::image(handle)
                             .width(Length::Fill)
-                            .height(Length::Fixed(180.0))
+                            .height(Length::Fixed(
+                                self.boru_layout().chat.image_preview_max_height.min(180.0),
+                            ))
                             .content_fit(iced::ContentFit::Cover)
                             .into(),
                     );
@@ -4502,9 +4516,9 @@ impl IcedChat {
         // ── Composer row ──
         //  attach | text input (fill) | gif | emoji | send
         let composer_bar = row![attach_btn, folder_btn, input, gif_btn, emoji_btn, send_btn]
-            .spacing(SPACE_6)
+            .spacing(self.boru_layout().chat.composer.spacing)
             .align_y(Alignment::Center)
-            .padding(Padding::new(SPACE_4));
+            .padding(Padding::new(self.boru_layout().chat.composer.padding));
 
         // ── Elevated rounded composer container ──
         //  16 px radius surface with a 1 px border and a very subtle shadow

@@ -21147,18 +21147,12 @@ impl IcedChat {
         #[cfg(feature = "dev-ui")]
         let main_panel = self.inspect_region(self.component_id_for_screen(), main_panel);
 
-        // Responsive sidebar width – clamps to 288–320 px based on window width.
-        // BORU-UI-09: read from the LIVE active theme so the Inspector's
-        // "Sidebar → Width" slider changes the shell immediately; defaults
-        // reproduce `sidebar_width_for` exactly (304 px target, 288 min).
-        let btheme = self.boru_theme();
-        let sidebar_w = {
-            let fraction = (self.window_width - crate::design_tokens::VIEWPORT_MIN_WIDTH)
-                / (crate::design_tokens::VIEWPORT_REF_WIDTH - crate::design_tokens::VIEWPORT_MIN_WIDTH);
-            let clamped_fraction = fraction.clamp(0.0, 1.0);
-            btheme.sidebar.width_min
-                + (btheme.sidebar.width - btheme.sidebar.width_min) * clamped_fraction
-        };
+        // Resolve the shell width from the live structural layout so TOML
+        // overrides remain effective after a watcher reload.
+        let layout = self.boru_layout();
+        let sidebar_w = layout
+            .sidebar
+            .width_for_window(self.window_width, &layout.responsive);
 
         let content = row![
             container(sidebar)
@@ -21194,8 +21188,13 @@ impl IcedChat {
         .width(Length::Fill)
         .height(Length::Fill);
 
-        // Wrap in a row that includes the details panel when open.
-        let details_usable = self.window_width >= SIDEBAR_WIDTH + DETAILS_PANEL_WIDTH + 400.0;
+        // Resolve details-panel geometry from the live structural layout. The
+        // panel is optional: never let it consume the minimum conversation
+        // width on compact windows.
+        let chat_layout = self.boru_layout().chat.clone();
+        let details_width = chat_layout.details_panel_width;
+        let details_usable = self.window_width
+            >= sidebar_w + details_width + self.boru_layout().responsive.viewport_min_width;
         let base = if self.details_panel_open
             && matches!(self.screen, Screen::Chat { .. })
             && details_usable
@@ -21204,7 +21203,7 @@ impl IcedChat {
                 row![
                     content,
                     container(self.view_details_panel())
-                        .width(Length::Fixed(DETAILS_PANEL_WIDTH))
+                        .width(Length::Fixed(details_width))
                         .height(Length::Fill)
                         .style(move |t| {
                             iced::widget::container::Style {

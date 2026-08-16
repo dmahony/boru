@@ -25,11 +25,23 @@ pub(crate) const MESSAGE_GROUP_WINDOW_MS: i64 = 5 * 60 * 1000;
 /// A non-positive timeline width (pre-layout frame) falls back to the 560 px
 /// cap so bubbles never collapse to zero on the first frame.
 pub(crate) fn chat_bubble_max_width(timeline_width: f32) -> f32 {
+    chat_bubble_max_width_with(
+        timeline_width,
+        crate::design_tokens::CHAT_BUBBLE_MAX_WIDTH,
+        crate::design_tokens::CHAT_BUBBLE_WIDTH_RATIO,
+    )
+}
+
+/// Effective bubble width using the live structural chat layout.
+pub(crate) fn chat_bubble_max_width_with(
+    timeline_width: f32,
+    max_width: f32,
+    width_ratio: f32,
+) -> f32 {
     if timeline_width <= 0.0 {
-        return crate::design_tokens::CHAT_BUBBLE_MAX_WIDTH;
+        return max_width;
     }
-    crate::design_tokens::CHAT_BUBBLE_MAX_WIDTH
-        .min(timeline_width * crate::design_tokens::CHAT_BUBBLE_WIDTH_RATIO)
+    max_width.min(timeline_width * width_ratio)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
