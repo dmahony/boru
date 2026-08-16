@@ -480,6 +480,12 @@ pub mod event_names {
     pub const BACKGROUND_BLOB_INGEST_COMPLETED: &str = "background_blob_ingest_completed";
     /// Background local blob ingestion failed without invalidating the offer.
     pub const BACKGROUND_BLOB_INGEST_FAILED: &str = "background_blob_ingest_failed";
+    /// Application lifecycle event: a direct file offer was announced.
+    pub const FILE_OFFER_ANNOUNCED: &str = "file_offer_announced";
+    /// Application lifecycle event: an announced offer was cached.
+    pub const FILE_OFFER_CACHED: &str = "file_offer_cached";
+    /// Application lifecycle event: caching failed without invalidating the offer.
+    pub const FILE_OFFER_CACHE_FAILED: &str = "file_offer_cache_failed";
     /// Durable download work was accepted before networking was scheduled.
     pub const DOWNLOAD_QUEUED: &str = "download_queued";
     /// A fresh access/permission request was sent.
