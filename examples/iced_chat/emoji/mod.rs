@@ -21,7 +21,8 @@
 //! - [`renderer`]     — SVG handles, caching and the rendering abstraction
 //!                   (full renderer/cache: BORU-TWEMOJI-08/09)
 //! - [`emoji_text`]   — mixed text + Twemoji message renderer
-//!                   (BORU-TWEMOJI-17)
+//!                   (BORU-TWEMOJI-17; inline wrapping + baseline
+//!                   hardening: BORU-TWEMOJI-18)
 //! - [`picker`]       — the emoji picker panel (visual swap to SVG: BORU-TWEMOJI-10)
 //!
 //! # Small stable interfaces

@@ -1,9 +1,31 @@
-//! Mixed text + Twemoji message rendering (BORU-TWEMOJI-17).
+//! Mixed text + Twemoji message rendering (BORU-TWEMOJI-17, hardened for
+//! wrapping + baseline in BORU-TWEMOJI-18).
 //!
 //! [`emoji_text`] renders a chat message body as normal Boru text with
 //! inline Twemoji SVGs, using the shared grapheme parser
 //! (BORU-TWEMOJI-16), the shared resolver (BORU-TWEMOJI-07) and the
 //! shared renderer/SVG cache (BORU-TWEMOJI-08/09).
+//!
+//! # Inline layout (BORU-TWEMOJI-18)
+//!
+//! The message is rendered as ONE cosmic-text paragraph with spans — the
+//! same layout engine the plain `text()` widget uses — so wrapping,
+//! line height and baseline behave exactly like ordinary chat text:
+//!
+//! - Text runs become text spans carrying Boru's message typography.
+//! - Each resolved emoji becomes an *invisible placeholder span* whose
+//!   advance width equals the emoji box size (`EMOJI_TEXT_SCALE` × text
+//!   size) but whose font metrics stay at 1.0× — measured empirically so
+//!   emoji never inflate a line's height (no blank lines) and never shift
+//!   the line baseline (no vertical jitter).
+//! - After layout, [`Paragraph::span_bounds`] reports exactly where each
+//!   placeholder landed (after wrapping), and the Twemoji SVG is drawn
+//!   into that rectangle, centered on the line box.
+//!
+//! The placeholder is `EM SPACE + WORD JOINER + FOUR-PER-EM SPACE`
+//! (`\u{2003}\u{2060}\u{2005}`): 1em + 0em + 0.25em = 1.25em of advance at
+//! 1.0× metrics. The word joiner keeps the two spaces unbreakable so the
+//! emoji box never splits across lines.
 //!
 //! Guardrails:
 //! - **Presentation only.** The input `&str` is never modified. The
@@ -14,17 +36,27 @@
 //!   their text run (parser behaviour), and an emoji whose SVG handle
 //!   cannot be produced falls back to its original Unicode text
 //!   (BORU-TWEMOJI-20). Nothing is ever replaced by an empty widget.
-//! - **Order and gaps.** Fragments render in input order with zero
-//!   inter-fragment spacing, so mixed text/emoji keeps its order and
-//!   multiple adjacent emoji have no unwanted gaps or forced line breaks.
-//!
-//! Line wrapping and baseline alignment *polish* are BORU-TWEMOJI-18;
-//! this component deliberately keeps the fragment-row approach simple
-//! (mirroring the URL-segment row pattern already used in chat bubbles).
+//! - **Order and gaps.** Spans are built in input order with zero extra
+//!   spacing, so mixed text/emoji keeps its order and multiple adjacent
+//!   emoji have no unwanted gaps or forced line breaks.
 
+use std::marker::PhantomData;
+
+use iced::advanced::layout;
+use iced::advanced::renderer;
+use iced::advanced::text::{
+    self, Alignment, Difference, LineHeight, Paragraph as _, Shaping, Span, Text as TextDef,
+    Wrapping,
+};
+use iced::advanced::widget::tree::{self, Tree};
+use iced::advanced::widget::Operation;
+use iced::advanced::widget::Widget;
+use iced::advanced::{Clipboard, Layout, Shell};
 use iced::widget::svg;
-use iced::widget::Row;
-use iced::{Alignment, Color, ContentFit, Element, Font, Length};
+use iced::{Color, Element, Font, Length, Pixels, Point, Rectangle, Size, Theme};
+
+// Brings `draw_svg` (svg::Renderer) into scope for the custom widget.
+use iced::advanced::svg::Renderer as _SvgRenderer;
 
 use super::parser::{split_fragments, MessageFragment};
 use super::renderer::EmojiRenderer;
@@ -33,10 +65,27 @@ use super::renderer::EmojiRenderer;
 ///
 /// Twemoji SVGs use a 36x36 viewBox whose glyph fills most of the square,
 /// so a ~1.25x scale makes the emoji read at roughly the cap height of the
-/// surrounding text. Exact baseline/line-height alignment is
-/// BORU-TWEMOJI-18; this scale keeps the artwork visually in family until
-/// then.
+/// surrounding text. This is also the *advance width* reserved by the
+/// invisible placeholder span inside the message paragraph, so the emoji
+/// box occupies exactly `EMOJI_TEXT_SCALE` × text size of horizontal space
+/// on the text baseline without inflating the line box.
 pub const EMOJI_TEXT_SCALE: f32 = 1.25;
+
+/// Invisible placeholder text for one emoji inside the message paragraph.
+///
+/// Measured with the app's message font (Figtree 15px):
+/// - EM SPACE (`\u{2003}`)      = 1.00em advance
+/// - WORD JOINER (`\u{2060}`)   = 0.00em advance (prevents a line break
+///   between the two space glyphs, so the box stays atomic)
+/// - FOUR-PER-EM SPACE (`\u{2005}`) = 0.25em advance
+///
+/// Total: exactly `EMOJI_TEXT_SCALE` × text size. Because the span keeps
+/// the message font size (1.0×), cosmic-text computes line height and
+/// baseline identically to a plain text run — an emoji never stretches a
+/// line (no blank lines) and never shifts the baseline (no jitter).
+/// A transparent color hides the space glyphs; only the reserved advance
+/// remains for the SVG drawn over [`Paragraph::span_bounds`].
+const EMOJI_PLACEHOLDER: &str = "\u{2003}\u{2060}\u{2005}";
 
 /// Typography applied to the text runs of an [`emoji_text`] render.
 ///
@@ -50,9 +99,9 @@ pub struct EmojiTextStyle {
     /// Message font (Boru's `TypeRole::ChatMessage` font).
     pub font: Font,
     /// Line height (Boru's `TypeRole::ChatMessage` line height).
-    pub line_height: iced::widget::text::LineHeight,
+    pub line_height: LineHeight,
     /// Word/glyph wrapping mode (Boru uses `WordOrGlyph`).
-    pub wrapping: iced::widget::text::Wrapping,
+    pub wrapping: Wrapping,
     /// Text color (local/remote/system body color from the theme).
     pub color: Color,
 }
@@ -150,17 +199,18 @@ fn styled_text<'a, Message: 'a + Clone>(
 
 /// Render a message body as normal Boru text plus inline Twemoji SVGs.
 ///
-/// - Plain text runs use the caller's message typography (via
-///   [`EmojiTextStyle`]), exactly like the bubble's existing `text()`
-///   element.
-/// - Resolved emoji render as square Twemoji SVGs sized relative to the
-///   text size ([`EMOJI_TEXT_SCALE`]).
-/// - The input string is borrowed, never copied or rewritten; the message
-///   data (and therefore copy/selection/message actions) remains the
-///   original full Unicode string.
+/// - Emoji-free messages take the fast path: a single plain `text()`
+///   element with the message typography, byte-for-byte the pre-Twemoji
+///   render.
+/// - Mixed messages render through [`EmojiText`], a custom widget that
+///   lays out the whole message as one span-based paragraph (cosmic-text
+///   handles wrapping/baseline/line-height exactly like plain chat text)
+///   and draws each Twemoji SVG into the placeholder box where the emoji
+///   landed after wrapping.
 ///
-/// The returned element is a wrapping row of text/SVG children with zero
-/// spacing, mirroring the URL-segment row already used in chat bubbles.
+/// The input string is borrowed, never copied or rewritten; the message
+/// data (and therefore copy/selection/message actions) remains the
+/// original full Unicode string.
 pub fn emoji_text<'a, Message: 'a + Clone>(
     renderer: &impl EmojiRenderer,
     input: &'a str,
@@ -169,29 +219,275 @@ pub fn emoji_text<'a, Message: 'a + Clone>(
     let plan = plan_emoji_text(renderer, input);
 
     // Fast path: no emoji at all — render exactly like the bubble's plain
-    // `text()` element today (no row wrapper, identical typography).
+    // `text()` element today (no widget wrapper, identical typography).
     if let [EmojiTextArtwork::Text(content)] = plan.as_slice() {
         return styled_text(content, style);
     }
 
-    let emoji_size = style.size * EMOJI_TEXT_SCALE;
-    let mut row = Row::new().spacing(0).align_y(Alignment::Center);
-    for item in plan {
-        match item {
-            EmojiTextArtwork::Text(content) => {
-                row = row.push(styled_text(content, style));
+    EmojiText {
+        plan,
+        style: *style,
+        input,
+        _message: PhantomData,
+    }
+    .into()
+}
+
+/// Cached paragraph state for [`EmojiText`], mirroring iced's own `Rich`
+/// text widget: the built cosmic-text paragraph plus a fingerprint of the
+/// content it was built from, so scrolling a long conversation reuses the
+/// shaped paragraph instead of re-shaping on every frame.
+#[derive(Default)]
+struct State {
+    paragraph: <iced::Renderer as iced::advanced::text::Renderer>::Paragraph,
+    /// Concatenated span text the paragraph was built from (text runs plus
+    /// placeholder glyphs). Content change → full re-shape.
+    content_key: Option<String>,
+}
+
+/// A custom widget that renders one chat message body as inline text +
+/// Twemoji SVG, wrapping and baselines handled by a single cosmic-text
+/// paragraph (BORU-TWEMOJI-18).
+pub struct EmojiText<'a, Message> {
+    plan: Vec<EmojiTextArtwork<'a>>,
+    style: EmojiTextStyle,
+    input: &'a str,
+    _message: PhantomData<Message>,
+}
+
+impl<'a, Message> EmojiText<'a, Message> {
+    /// Build the span list for the whole message: text runs with the
+    /// message typography, emoji as invisible fixed-advance placeholders.
+    fn spans(&self) -> Vec<Span<'a, (), Font>> {
+        self.plan
+            .iter()
+            .map(|item| match item {
+                EmojiTextArtwork::Text(content) => Span::new(*content)
+                    .size(self.style.size)
+                    .font(self.style.font)
+                    .color(self.style.color),
+                EmojiTextArtwork::Svg { .. } => Span::new(EMOJI_PLACEHOLDER)
+                    .size(self.style.size)
+                    .font(self.style.font)
+                    .color(Color::TRANSPARENT),
+            })
+            .collect()
+    }
+
+    /// The text content of the spans, as a fingerprint for the paragraph
+    /// cache. Text runs contribute their Unicode; emoji contribute a
+    /// marker so any change in which emoji are present re-shapes.
+    fn content_key(&self) -> String {
+        let mut key = String::with_capacity(self.input.len() + self.plan.len());
+        for item in &self.plan {
+            match item {
+                EmojiTextArtwork::Text(content) => key.push_str(content),
+                EmojiTextArtwork::Svg { unicode, .. } => {
+                    // Marker + the grapheme itself: a different emoji at
+                    // the same position is a different content.
+                    key.push('\u{fffc}');
+                    key.push_str(unicode);
+                }
             }
-            EmojiTextArtwork::Svg { handle, .. } => {
-                row = row.push(
-                    svg(handle)
-                        .width(Length::Fixed(emoji_size))
-                        .height(Length::Fixed(emoji_size))
-                        .content_fit(ContentFit::Contain),
+        }
+        key
+    }
+
+    /// Build (or reuse) the paragraph for the current spans, returning its
+    /// minimum bounds as the widget's layout node.
+    fn paragraph_node(
+        &self,
+        state: &mut State,
+        renderer: &iced::Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        layout::sized(limits, Length::Shrink, Length::Shrink, |limits| {
+            let bounds = limits.max();
+            let spans = self.spans();
+
+            #[derive(Clone, Copy)]
+            struct Format {
+                bounds: Size,
+                size: Pixels,
+                line_height: LineHeight,
+                font: Font,
+                wrapping: Wrapping,
+            }
+            let format = Format {
+                bounds,
+                size: Pixels(self.style.size),
+                line_height: self.style.line_height,
+                font: self.style.font,
+                wrapping: self.style.wrapping,
+            };
+
+            let build_paragraph = || {
+                <iced::Renderer as iced::advanced::text::Renderer>::Paragraph::with_spans(TextDef {
+                    content: spans.as_slice(),
+                    bounds: format.bounds,
+                    size: format.size,
+                    line_height: format.line_height,
+                    font: format.font,
+                    align_x: Alignment::Left,
+                    align_y: iced::alignment::Vertical::Top,
+                    shaping: Shaping::Advanced,
+                    wrapping: format.wrapping,
+                })
+            };
+
+            let key = self.content_key();
+            match &state.content_key {
+                Some(prev) if *prev == key => {
+                    // Same content: only re-shape when the format changed.
+                    match state.paragraph.compare(TextDef {
+                        content: (),
+                        bounds: format.bounds,
+                        size: format.size,
+                        line_height: format.line_height,
+                        font: format.font,
+                        align_x: Alignment::Left,
+                        align_y: iced::alignment::Vertical::Top,
+                        shaping: Shaping::Advanced,
+                        wrapping: format.wrapping,
+                    }) {
+                        Difference::None => {}
+                        Difference::Bounds => {
+                            state.paragraph.resize(bounds);
+                        }
+                        Difference::Shape => {
+                            state.paragraph = build_paragraph();
+                        }
+                    }
+                }
+                _ => {
+                    state.paragraph = build_paragraph();
+                    state.content_key = Some(key);
+                }
+            }
+
+            state.paragraph.min_bounds()
+        })
+    }
+}
+
+impl<'a, Message> From<EmojiText<'a, Message>> for Element<'a, Message, Theme, iced::Renderer>
+where
+    Message: 'a + Clone,
+{
+    fn from(widget: EmojiText<'a, Message>) -> Self {
+        Element::new(widget)
+    }
+}
+
+impl<'a, Message> Widget<Message, Theme, iced::Renderer> for EmojiText<'a, Message>
+where
+    Message: 'a + Clone,
+{
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::of::<State>()
+    }
+
+    fn state(&self) -> tree::State {
+        tree::State::new(State::default())
+    }
+
+    fn size(&self) -> Size<Length> {
+        Size {
+            width: Length::Shrink,
+            height: Length::Shrink,
+        }
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut Tree,
+        renderer: &iced::Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        let state = tree.state.downcast_mut::<State>();
+        self.paragraph_node(state, renderer, limits)
+    }
+
+    fn draw(
+        &self,
+        tree: &Tree,
+        renderer: &mut iced::Renderer,
+        _theme: &Theme,
+        defaults: &renderer::Style,
+        layout: Layout<'_>,
+        _cursor: iced::advanced::mouse::Cursor,
+        viewport: &Rectangle,
+    ) {
+        if !layout.bounds().intersects(viewport) {
+            return;
+        }
+
+        let state = tree.state.downcast_ref::<State>();
+
+        // 1. Draw the whole paragraph (text runs + invisible emoji
+        //    placeholders) with the message typography.
+        iced::advanced::widget::text::draw(
+            renderer,
+            defaults,
+            layout.bounds(),
+            &state.paragraph,
+            iced::advanced::widget::text::Style {
+                color: Some(self.style.color),
+            },
+            viewport,
+        );
+
+        // 2. Draw each Twemoji SVG into the rectangle its placeholder
+        //    span occupied after wrapping.
+        let translation = layout.position() - Point::ORIGIN;
+        let emoji_size = self.style.size * EMOJI_TEXT_SCALE;
+
+        for (span_index, item) in self.plan.iter().enumerate() {
+            let EmojiTextArtwork::Svg { handle, .. } = item else {
+                continue;
+            };
+
+            for rect in state.paragraph.span_bounds(span_index) {
+                let rect = rect + translation;
+                // The span rect is (advance ≈ emoji_size) × (line height).
+                // Fit the square SVG inside it, centered on the line box —
+                // the emoji then sits on the text baseline like a glyph.
+                let size = emoji_size.min(rect.width).min(rect.height);
+                let bounds = Rectangle::new(
+                    Point::new(rect.center_x() - size / 2.0, rect.center_y() - size / 2.0),
+                    Size::new(size, size),
+                );
+                renderer.draw_svg(
+                    iced::advanced::svg::Svg::new(handle.clone()),
+                    bounds,
+                    *viewport,
                 );
             }
         }
     }
-    row.wrap().into()
+
+    fn operate(
+        &mut self,
+        _tree: &mut Tree,
+        layout: Layout<'_>,
+        _renderer: &iced::Renderer,
+        operation: &mut dyn Operation,
+    ) {
+        // Keep the original full Unicode string reachable for copy,
+        // selection and accessibility (guardrail: presentation only).
+        operation.text(None, layout.bounds(), self.input);
+    }
+
+    fn mouse_interaction(
+        &self,
+        _tree: &Tree,
+        _layout: Layout<'_>,
+        _cursor: iced::advanced::mouse::Cursor,
+        _viewport: &Rectangle,
+        _renderer: &iced::Renderer,
+    ) -> iced::advanced::mouse::Interaction {
+        iced::advanced::mouse::Interaction::None
+    }
 }
 
 #[cfg(test)]
@@ -217,8 +513,8 @@ mod tests {
         EmojiTextStyle {
             size: 15.0,
             font: Font::DEFAULT,
-            line_height: iced::widget::text::LineHeight::Relative(1.45),
-            wrapping: iced::widget::text::Wrapping::WordOrGlyph,
+            line_height: LineHeight::Relative(1.45),
+            wrapping: Wrapping::WordOrGlyph,
             color: Color::BLACK,
         }
     }
@@ -305,8 +601,199 @@ mod tests {
     #[test]
     fn emoji_scale_is_sane_relative_to_text() {
         // 1.25x of a 15px message keeps the artwork in family with the
-        // text; exact alignment polish is BORU-TWEMOJI-18.
+        // text; the placeholder reserves exactly this advance.
         assert!((EMOJI_TEXT_SCALE - 1.25).abs() < f32::EPSILON);
         assert!(15.0 * EMOJI_TEXT_SCALE > 15.0);
+    }
+
+    #[test]
+    fn placeholder_advance_reserves_exactly_one_em_quarter_more() {
+        // The placeholder is EM SPACE (1em) + WORD JOINER (0em) +
+        // FOUR-PER-EM SPACE (0.25em): at 1.0x metrics this is exactly
+        // 1.25 × the text size — the same as EMOJI_TEXT_SCALE. Measured
+        // with the paragraph engine to catch font metric regressions.
+        let spans = vec![Span::<(), Font>::new(EMOJI_PLACEHOLDER)
+            .size(Pixels(15.0))
+            .font(Font::DEFAULT)];
+        let para =
+            <iced::Renderer as iced::advanced::text::Renderer>::Paragraph::with_spans(TextDef {
+                content: &spans,
+                bounds: Size::new(400.0, f32::INFINITY),
+                size: Pixels(15.0),
+                line_height: LineHeight::Relative(1.45),
+                font: Font::DEFAULT,
+                align_x: Alignment::Left,
+                align_y: iced::alignment::Vertical::Top,
+                shaping: Shaping::Advanced,
+                wrapping: Wrapping::WordOrGlyph,
+            });
+        let bounds = para.span_bounds(0);
+        assert_eq!(bounds.len(), 1, "placeholder must stay on one line");
+        let width = bounds[0].width;
+        assert!(
+            (width - 15.0 * EMOJI_TEXT_SCALE).abs() < 0.5,
+            "placeholder advance {width} should be ~{} (1.25 × 15)",
+            15.0 * EMOJI_TEXT_SCALE
+        );
+        // And critically: line height must be the same as a plain text run
+        // (1.45 × 15 = 21.75), so an emoji never inflates the line.
+        assert!(
+            (para.min_bounds().height - 21.75).abs() < 0.5,
+            "placeholder line height {} should be ~21.75 (no blank lines)",
+            para.min_bounds().height
+        );
+    }
+
+    #[test]
+    fn placeholder_line_metrics_match_plain_text() {
+        // A message with an emoji placeholder must produce the same line
+        // height AND the same baseline positions as the same text without
+        // the placeholder — otherwise emoji lines would sit higher/lower
+        // than their neighbours (vertical jitter).
+        let text_para = || {
+            let spans = vec![Span::<(), Font>::new("hello world wraps here ok")];
+            <iced::Renderer as iced::advanced::text::Renderer>::Paragraph::with_spans(TextDef {
+                content: &spans,
+                bounds: Size::new(80.0, f32::INFINITY),
+                size: Pixels(15.0),
+                line_height: LineHeight::Relative(1.45),
+                font: Font::DEFAULT,
+                align_x: Alignment::Left,
+                align_y: iced::alignment::Vertical::Top,
+                shaping: Shaping::Advanced,
+                wrapping: Wrapping::WordOrGlyph,
+            })
+        };
+        let emoji_para = || {
+            let spans = vec![
+                Span::<(), Font>::new("hello world wraps here "),
+                Span::<(), Font>::new(EMOJI_PLACEHOLDER).color(Color::TRANSPARENT),
+                Span::<(), Font>::new(" ok"),
+            ];
+            <iced::Renderer as iced::advanced::text::Renderer>::Paragraph::with_spans(TextDef {
+                content: &spans,
+                bounds: Size::new(80.0, f32::INFINITY),
+                size: Pixels(15.0),
+                line_height: LineHeight::Relative(1.45),
+                font: Font::DEFAULT,
+                align_x: Alignment::Left,
+                align_y: iced::alignment::Vertical::Top,
+                shaping: Shaping::Advanced,
+                wrapping: Wrapping::WordOrGlyph,
+            })
+        };
+
+        let plain = text_para();
+        let emoji = emoji_para();
+
+        assert_eq!(
+            plain.min_bounds().height,
+            emoji.min_bounds().height,
+            "emoji placeholder must not inflate total height"
+        );
+
+        // Compare baseline positions line by line: line_y of every layout
+        // run must match (same line_top + same centering offsets).
+        let plain_runs: Vec<_> = plain.buffer().layout_runs().map(|r| r.line_y).collect();
+        let emoji_runs: Vec<_> = emoji.buffer().layout_runs().map(|r| r.line_y).collect();
+        assert_eq!(
+            plain_runs.len(),
+            emoji_runs.len(),
+            "wrapping must produce the same number of lines"
+        );
+        for (i, (p, e)) in plain_runs.iter().zip(emoji_runs.iter()).enumerate() {
+            assert!(
+                (p - e).abs() < 0.01,
+                "baseline on line {i} differs: plain {p} vs emoji {e}"
+            );
+        }
+    }
+
+    /// Build a span paragraph for `content` wrapped at `width`, returning
+    /// the paragraph plus per-span bounds (for emoji placeholders).
+    fn paragraph_with_spans(spans: Vec<Span<'_, (), Font>>, width: f32) -> Paragraph {
+        <iced::Renderer as iced::advanced::text::Renderer>::Paragraph::with_spans(TextDef {
+            content: &spans,
+            bounds: Size::new(width, f32::INFINITY),
+            size: Pixels(15.0),
+            line_height: LineHeight::Relative(1.45),
+            font: Font::DEFAULT,
+            align_x: Alignment::Left,
+            align_y: iced::alignment::Vertical::Top,
+            shaping: Shaping::Advanced,
+            wrapping: Wrapping::WordOrGlyph,
+        })
+    }
+
+    type Paragraph = <iced::Renderer as iced::advanced::text::Renderer>::Paragraph;
+
+    #[test]
+    fn long_mixed_message_wraps_naturally_at_narrow_width() {
+        // A long message with emoji near wrap boundaries: the whole thing
+        // must flow as ONE paragraph, so text and emoji share lines and
+        // wrap at word boundaries exactly like a plain message.
+        let message = "the quick brown fox 😀 jumps over the lazy dog 🍕 and \
+                       keeps running through the forest 🌲 until the sun \
+                       sets behind the mountain 🏔️ and the stars come out ⭐";
+        let spans = vec![Span::<(), Font>::new(message)];
+        let plain = paragraph_with_spans(spans, 130.0);
+        let plain_lines = plain.buffer().layout_runs().count();
+
+        // Same text with three emoji as placeholder spans.
+        let emoji_spans = vec![
+            Span::<(), Font>::new("the quick brown fox "),
+            Span::<(), Font>::new(EMOJI_PLACEHOLDER).color(Color::TRANSPARENT),
+            Span::<(), Font>::new(" jumps over the lazy dog "),
+            Span::<(), Font>::new(EMOJI_PLACEHOLDER).color(Color::TRANSPARENT),
+            Span::<(), Font>::new(" and keeps running through the forest "),
+            Span::<(), Font>::new(EMOJI_PLACEHOLDER).color(Color::TRANSPARENT),
+            Span::<(), Font>::new(
+                " until the sun sets behind the mountain and \
+                                   the stars come out",
+            ),
+        ];
+        let emoji = paragraph_with_spans(emoji_spans, 130.0);
+        let emoji_lines = emoji.buffer().layout_runs().count();
+
+        // Natural wrapping: both produce a comparable number of lines (the
+        // emoji add width, so the emoji version may have one more line —
+        // never a huge inflation like one line per emoji).
+        assert!(
+            (emoji_lines as i64 - plain_lines as i64).abs() <= 1,
+            "emoji must not force every emoji onto its own row: \
+             plain {plain_lines} lines vs emoji {emoji_lines} lines"
+        );
+
+        // No blank lines: total height is the line count × the exact same
+        // line height as plain text.
+        let line_height = 21.75; // 1.45 × 15
+        assert!(
+            (emoji.min_bounds().height - emoji_lines as f32 * line_height).abs() < 1.0,
+            "emoji paragraph height {} should be {emoji_lines} lines × {line_height} \
+             (no blank lines)",
+            emoji.min_bounds().height
+        );
+    }
+
+    #[test]
+    fn every_emoji_placeholder_lands_on_one_line() {
+        // After wrapping, each placeholder span must report exactly one
+        // rectangle: the emoji box is atomic and never splits across lines.
+        let spans = vec![
+            Span::<(), Font>::new("aaa "),
+            Span::<(), Font>::new(EMOJI_PLACEHOLDER).color(Color::TRANSPARENT),
+            Span::<(), Font>::new(" bbb "),
+            Span::<(), Font>::new(EMOJI_PLACEHOLDER).color(Color::TRANSPARENT),
+            Span::<(), Font>::new(" ccc"),
+        ];
+        let para = paragraph_with_spans(spans, 60.0);
+        for i in 0..2 {
+            let bounds = para.span_bounds(i * 2 + 1);
+            assert_eq!(
+                bounds.len(),
+                1,
+                "emoji placeholder {i} must stay on a single line, got {bounds:?}"
+            );
+        }
     }
 }
