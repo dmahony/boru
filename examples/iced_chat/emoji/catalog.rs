@@ -543,6 +543,11 @@ pub const COMMON_EMOJIS: &[Emoji] = &[
 ];
 
 /// All curated common emojis (picker default list).
+///
+/// Test-only helper (BORU-TWEMOJI-24): production surfaces filter the same
+/// catalog through [`emojis_for_category`] / [`search_emojis`], so the
+/// whole-list accessor is compiled only in test builds.
+#[cfg(test)]
 pub fn common_emojis() -> &'static [Emoji] {
     COMMON_EMOJIS
 }
@@ -687,12 +692,14 @@ const CATEGORY_ICONS: &[(EmojiCategory, Emoji)] = &[
 
 /// Representative multi-codepoint emoji proving the model's expressiveness.
 ///
-/// Not shown in the picker grid (BORU-TWEMOJI-10 keeps the picker list
-/// glyph-safe until the grapheme-safe insertion fix lands in BORU-TWEMOJI-07);
-/// these entries exist as fixtures for the catalog/resolver/renderer tests
-/// and as the shape template the manifest-driven population (BORU-TWEMOJI-06)
-/// will fill. Every asset key below matches a vendored
+/// Not shown in the picker grid; these entries exist as fixtures for the
+/// catalog/resolver/renderer tests. Every asset key below matches a vendored
 /// `assets/emoji/twemoji/svg/<key>.svg` file.
+///
+/// Test-only fixtures (BORU-TWEMOJI-24): production picker surfaces use the
+/// [`COMMON_EMOJIS`] catalog only, so this list is compiled only in test
+/// builds.
+#[cfg(test)]
 pub const REPRESENTATIVE_EMOJIS: &[Emoji] = &[
     Emoji {
         unicode: "🦊",
@@ -739,6 +746,11 @@ pub const REPRESENTATIVE_EMOJIS: &[Emoji] = &[
 ];
 
 /// Every catalog entry: the picker list plus the representative fixtures.
+///
+/// Test-only helper (BORU-TWEMOJI-24): production picker surfaces filter
+/// [`COMMON_EMOJIS`] directly, so this combined iterator is compiled only in
+/// test builds.
+#[cfg(test)]
 pub fn all_emoji() -> impl Iterator<Item = &'static Emoji> {
     COMMON_EMOJIS.iter().chain(REPRESENTATIVE_EMOJIS.iter())
 }

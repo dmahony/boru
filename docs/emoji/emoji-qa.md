@@ -134,6 +134,36 @@ The picker anchoring fix is pure iced layout (no platform-specific
 code), so the fix itself is expected to hold cross-platform; the sweep is
 a visual confirmation task.
 
+## BORU-TWEMOJI-24 post-removal manual run (Linux dev host)
+
+After the old picker path was removed (BORU-TWEMOJI-24, t_9a5c9aa5) the
+original broken/missing-glyph scenario was re-checked on the Linux dev
+host with the freshly built binary (debsrv build synced back). Procedure:
+launched under Xvfb (1280×800) with `--mcp --enable-gui-test-actions`,
+created a room, sent a mixed complex-emoji message
+(`twemoji check 😀 🇮🇪 👨👩👧👦 👍🏽 🫠`) through the real composer,
+opened the emoji picker via the composer's emoji button (xdotool click
+at the button, located by zoomed-crop probe), and screenshotted.
+
+Pixel-probe results (saturation analysis — tofu boxes are dark and
+desaturated, Twemoji SVG cells are coloured):
+
+| Surface | Coloured pixels | Distinct hues | Verdict |
+|---|---|---|---|
+| Picker grid (y≈300..680 band) | 923 | 67 | coloured Twemoji SVGs, no tofu |
+| Message bubble (mixed ZWJ/flag/skin-tone message) | 571 | 39 | coloured Twemoji SVGs, no tofu |
+
+The picker opened anchored above the composer with the category tabs and
+grid; the message rendered the ZWJ family, Ireland flag and skin-tone
+thumbs-up in colour on the text baseline. No missing-glyph boxes were
+present in either surface. Combined with the BORU-TWEMOJI-22 sweep, the
+original tofu scenario is no longer reproducible on Linux.
+
+Windows: still no Windows machine available; the T22 recommendation
+(cross-build with `gui,terminal,voice-calls,video-calls`, verify 100–200%
+DPI, picker anchoring, no clipping) remains the standing manual QA for a
+Windows host.
+
 ## Files
 
 - `examples/iced_chat/app.rs` — Escape-close for emoji/GIF pickers +

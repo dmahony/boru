@@ -27,7 +27,7 @@
 //!
 //! # Small stable interfaces
 //!
-//! The rest of Boru consumes emoji through these narrow re-exports. Nothing
+//! The rest of Boru consumes emoji through these module paths. Nothing
 //! outside this module knows a Twemoji SVG filename or asset key.
 //!
 //! ```text
@@ -42,15 +42,21 @@
 //! emoji::picker::view_emoji_picker
 //! ```
 //!
+//! Only [`EmojiCategory`] is additionally re-exported at `emoji::` (the
+//! `AppMessage` enum and the chat panel reference it); every other item is
+//! reached through the module paths above.
+//!
 //! # Dead-code note
 //!
 //! This is a bin crate (`[[bin]] boru`), so `pub` items that no code path
-//! touches yet still trigger `dead_code`/`unused_imports`. The re-exports
-//! below are the stable interface later BORU-TWEMOJI tasks consume (catalog
-//! model T5, manifest T6, resolver T7, renderer/cache T8/09, categories T12,
-//! search T13, message rendering T16/17), so they are intentionally allowed.
-
-#![allow(dead_code, unused_imports)]
+//! touches still trigger `dead_code`/`unused_imports`. BORU-TWEMOJI-24 removed
+//! the chain-scaffolding blanket `#![allow(dead_code, unused_imports)]` and
+//! the unused `pub use` re-exports; production consumers reach items through
+//! the module paths above, and the remaining test-only helpers
+//! (`asset_manifest::contains`, `catalog::{common_emojis, all_emoji,
+//! REPRESENTATIVE_EMOJIS}`, `renderer::EmojiAssetCache::{len, is_empty}`) are
+//! gated `#[cfg(test)]`. If a future task adds a new emoji surface, extend the
+//! narrow re-export here instead of re-adding `#![allow(...)]`.
 
 pub mod asset_manifest;
 pub mod catalog;
@@ -60,13 +66,8 @@ pub mod picker;
 pub mod recents;
 pub mod renderer;
 
-pub use asset_manifest::{contains, TWEMOJI_ASSETS};
-pub use catalog::{common_emojis, Emoji, EmojiCategory};
-pub use emoji_text::{
-    emoji_text, plan_emoji_text, EmojiTextArtwork, EmojiTextStyle, EMOJI_TEXT_SCALE,
-};
-pub use parser::{emoji_asset, split_fragments, MessageFragment};
-pub use recents::{record_recent, sanitize_recents, RECENT_LIMIT};
-pub use renderer::{
-    cached_svg_handle, EmojiAsset, EmojiAssetCache, EmojiRenderer, TwemojiRenderer,
-};
+// Narrow re-exports consumed outside the module. Consumers reach the other
+// items through their module paths (`crate::emoji::picker::view_emoji_picker`,
+// `crate::emoji::renderer::TwemojiRenderer`, `crate::emoji::recents::*`, …) —
+// see the module map above.
+pub use catalog::EmojiCategory;

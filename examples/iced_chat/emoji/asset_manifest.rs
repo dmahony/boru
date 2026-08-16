@@ -42,6 +42,10 @@ pub fn lookup(key: &str) -> Option<&'static str> {
 /// Thin wrapper over [`lookup`] for callers that only need the boolean.
 /// `key` must be a bare normalized identifier (`"1f600"`,
 /// `"1f1fa-1f1f8"`), not a filename, path or extension.
+///
+/// Test-only helper (BORU-TWEMOJI-24): production resolution goes through
+/// [`lookup`] directly, so this wrapper is compiled only in test builds.
+#[cfg(test)]
 pub fn contains(key: &str) -> bool {
     lookup(key).is_some()
 }

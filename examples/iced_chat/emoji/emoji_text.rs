@@ -45,13 +45,12 @@ use std::marker::PhantomData;
 use iced::advanced::layout;
 use iced::advanced::renderer;
 use iced::advanced::text::{
-    self, Alignment, Difference, LineHeight, Paragraph as _, Shaping, Span, Text as TextDef,
-    Wrapping,
+    Alignment, Difference, LineHeight, Paragraph as _, Shaping, Span, Text as TextDef, Wrapping,
 };
 use iced::advanced::widget::tree::{self, Tree};
 use iced::advanced::widget::Operation;
 use iced::advanced::widget::Widget;
-use iced::advanced::{Clipboard, Layout, Shell};
+use iced::advanced::Layout;
 use iced::widget::svg;
 use iced::{Color, Element, Font, Length, Pixels, Point, Rectangle, Size, Theme};
 

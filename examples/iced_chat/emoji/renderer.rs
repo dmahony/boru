@@ -253,11 +253,16 @@ impl EmojiAssetCache {
 
     /// Number of distinct asset IDs currently in the cache (hits and
     /// recorded misses).
+    ///
+    /// Test-only (BORU-TWEMOJI-24): production code only inserts and reads
+    /// cache entries; the size queries are compiled only in test builds.
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.handles.lock().unwrap().len()
     }
 
     /// True when no asset ID has been resolved yet.
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
