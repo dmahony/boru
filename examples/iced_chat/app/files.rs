@@ -83,13 +83,15 @@ pub(crate) enum FileSharingResponsiveMode {
 }
 
 impl FileSharingResponsiveMode {
-    fn from_width(width: f32) -> Self {
-        use crate::design_tokens::{VIEWPORT_LG_WIDTH, VIEWPORT_MIN_WIDTH, VIEWPORT_REF_WIDTH};
-        if width <= VIEWPORT_MIN_WIDTH {
+    fn from_width(width: f32, responsive: &crate::layout::ResponsiveLayout) -> Self {
+        // Resolve the screen band from the live layout model rather than
+        // duplicating viewport literals here. `width` is the usable main-panel
+        // width, after the persistent sidebar has been accounted for.
+        if width <= responsive.viewport_min_width {
             Self::Compact
-        } else if width < VIEWPORT_REF_WIDTH {
+        } else if width < responsive.viewport_ref_width {
             Self::Medium
-        } else if width < VIEWPORT_LG_WIDTH {
+        } else if width < responsive.viewport_lg_width {
             Self::Reference
         } else {
             Self::Large
@@ -4034,7 +4036,14 @@ impl IcedChat {
         FileSharingDependency {
             dark_mode: self.dark_mode,
             theme_revision: self.theme_revision,
-            responsive_mode: FileSharingResponsiveMode::from_width(self.window_width),
+            responsive_mode: {
+                let layout = self.boru_layout();
+                let sidebar_width = layout
+                    .sidebar
+                    .width_for_window(self.window_width, &layout.responsive);
+                let available_width = (self.window_width - sidebar_width - 1.0).max(0.0);
+                FileSharingResponsiveMode::from_width(available_width, &layout.responsive)
+            },
             dashboard_search_input: self.dashboard_search_input.clone(),
             dashboard_active_tab: self.dashboard_active_tab,
             dashboard_connectivity_dismissed: self.dashboard_connectivity_dismissed,
@@ -4247,9 +4256,7 @@ impl IcedChat {
         .padding([SPACE_6, SPACE_16])
         .style(BUTTON_OUTLINE);
 
-        let header_actions = Row::new()
-            .push(search_row)
-            .push(Space::new().width(Length::Fixed(SPACE_16)))
+        let action_buttons = Row::new()
             .push(receive_ticket_btn)
             .push(Space::new().width(Length::Fixed(SPACE_8)))
             .push(receive_short_code_btn)
@@ -4259,11 +4266,32 @@ impl IcedChat {
             .push(open_downloads_btn)
             .align_y(Alignment::Center);
 
-        let header = Row::new()
-            .push(page_title)
-            .push(header_actions)
-            .align_y(Alignment::Center)
-            .spacing(SPACE_16);
+        // At the minimum supported window the sidebar leaves less than a
+        // desktop header's worth of horizontal space. Stack the title,
+        // search field, and actions instead of allowing action labels to be
+        // clipped. The desktop branch preserves the existing one-line layout.
+        let header: iced::Element<'_, AppMessage> = if is_compact {
+            Column::new()
+                .push(page_title)
+                .push(Space::new().height(Length::Fixed(SPACE_8)))
+                .push(search_row)
+                .push(Space::new().height(Length::Fixed(SPACE_8)))
+                .push(action_buttons)
+                .spacing(0)
+                .width(Length::Fill)
+                .into()
+        } else {
+            Row::new()
+                .push(page_title)
+                .push(Space::new().width(Length::Fixed(SPACE_16)))
+                .push(search_row)
+                .push(Space::new().width(Length::Fixed(SPACE_16)))
+                .push(action_buttons)
+                .align_y(Alignment::Center)
+                .spacing(SPACE_16)
+                .width(Length::Fill)
+                .into()
+        };
 
         // ── Tab bar ──
         let active_tab = dep.dashboard_active_tab;
