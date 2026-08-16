@@ -13,7 +13,7 @@ use iroh::{
     Endpoint, EndpointAddr,
 };
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::Semaphore;
 
 use crate::safe_destination::{reserve_download_destination, OverwritePolicy, Reservation};
@@ -294,6 +294,21 @@ async fn serve_connection(
     let file = tokio::fs::File::open(offer.path())
         .await
         .map_err(|_| anyhow::Error::new(FileOfferError::SourceUnavailable))?;
+    let file_metadata = file
+        .metadata()
+        .await
+        .map_err(|_| anyhow::Error::new(FileOfferError::SourceUnavailable))?;
+    if !file_metadata.is_file() {
+        return reject(&mut writer, FileOfferError::SourceUnavailable).await;
+    }
+    if file_metadata.len() != offer.size
+        || file_metadata
+            .modified()
+            .map_err(|_| anyhow::Error::new(FileOfferError::SourceUnavailable))?
+            != offer.modified_at
+    {
+        return reject(&mut writer, FileOfferError::SourceChanged).await;
+    }
     write_frame(
         &mut writer,
         &FileOfferResponse::Header(FileOfferHeader {
@@ -304,31 +319,48 @@ async fn serve_connection(
         }),
     )
     .await?;
-    let mut limited = file.take(offer.size);
-    let mut hasher = blake3::Hasher::new();
-    let mut bytes_sent = 0u64;
-    let mut buffer = [0u8; 64 * 1024];
-    loop {
-        let count = limited.read(&mut buffer).await?;
-        if count == 0 {
-            break;
-        }
-        hasher.update(&buffer[..count]);
-        writer.write_all(&buffer[..count]).await?;
-        bytes_sent += count as u64;
-    }
+    let (bytes_sent, blake3_hash) =
+        stream_exact(&mut file.take(offer.size), &mut writer, offer.size).await?;
     write_frame(
         &mut writer,
         &FileOfferCompletion {
             offer_id: offer.id,
             bytes_sent,
-            blake3_hash: *hasher.finalize().as_bytes(),
+            blake3_hash,
         },
     )
     .await?;
     writer.finish()?;
     drop(permit);
     Ok(())
+}
+
+/// Copy exactly `expected` bytes while hashing what was actually transmitted.
+/// A short read is an error, so callers must not write a completion footer when
+/// this returns an error.
+async fn stream_exact<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    expected: u64,
+) -> anyhow::Result<(u64, [u8; 32])>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let mut hasher = blake3::Hasher::new();
+    let mut bytes_sent = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    while bytes_sent < expected {
+        let read_len = (expected - bytes_sent).min(buffer.len() as u64) as usize;
+        let count = reader.read(&mut buffer[..read_len]).await?;
+        if count == 0 {
+            anyhow::bail!("source ended early: sent {bytes_sent} of {expected} bytes");
+        }
+        hasher.update(&buffer[..count]);
+        writer.write_all(&buffer[..count]).await?;
+        bytes_sent += count as u64;
+    }
+    Ok((bytes_sent, *hasher.finalize().as_bytes()))
 }
 
 /// Authenticate and validate an offer immediately before serving it.
@@ -619,6 +651,28 @@ mod tests {
             authorize_offer(peer, id, &registry).await.unwrap_err(),
             FileOfferError::SourceChanged
         );
+    }
+
+    #[tokio::test]
+    async fn required_test_11_early_eof_fails_without_completion() {
+        let mut source = std::io::Cursor::new(b"short".to_vec());
+        let mut sink = tokio::io::sink();
+        let error = stream_exact(&mut source, &mut sink, 10)
+            .await
+            .expect_err("short source must abort before a completion footer");
+        assert!(error.to_string().contains("source ended early"));
+    }
+
+    #[tokio::test]
+    async fn exact_stream_hashes_only_transmitted_bytes() {
+        let payload = b"complete payload";
+        let mut source = std::io::Cursor::new(payload.to_vec());
+        let mut sink = tokio::io::sink();
+        let (bytes_sent, hash) = stream_exact(&mut source, &mut sink, payload.len() as u64)
+            .await
+            .unwrap();
+        assert_eq!(bytes_sent, payload.len() as u64);
+        assert_eq!(hash, *blake3::hash(payload).as_bytes());
     }
 
     #[tokio::test]

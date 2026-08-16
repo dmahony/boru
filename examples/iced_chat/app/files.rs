@@ -4541,13 +4541,21 @@ impl IcedChat {
                         }
                     };
                     let offer_id = boru_core::chat_core::protocol::FileOfferId::generate();
+                    let modified_at = match metadata.modified() {
+                        Ok(modified_at) => modified_at,
+                        Err(error) => {
+                            self.toast_message = Some(format!("Unable to inspect file timestamp: {error}"));
+                            self.toast_counter = 160;
+                            return iced::Task::none();
+                        }
+                    };
                     let offer = boru_core::file_offer::FileOffer::new(
                         offer_id,
                         peer,
                         path,
                         filename.clone(),
                         metadata.len(),
-                        metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                        modified_at,
                     );
                     self.file_offer_registry.lock().unwrap().register(offer);
 
