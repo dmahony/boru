@@ -95,7 +95,9 @@ impl Default for LayoutConfig {
 /// Stable identity of a home-dashboard section. Baseline order matches
 /// `app/home.rs` `view_chat_list_content`: left column Hero → MeshHealth →
 /// QuickActions, right rail PeopleActivity → Tunnels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
 pub enum HomeSection {
     /// Large connection status card (`status_card.rs`).
     Hero,
@@ -382,7 +384,9 @@ impl Default for HomeCardSizing {
 /// PUBLIC ROOMS, REQUESTS). The collapsed-state array index in the sidebar
 /// today is: Chats 0, Groups 1, Friends 2, Discover 3, Requests 4,
 /// PublicRooms 5.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
 pub enum SidebarSection {
     Chats,
     Groups,
@@ -446,14 +450,19 @@ pub enum SidebarMode {
 impl SidebarLayout {
     /// Resolve the sidebar mode from the canonical responsive model.
     pub fn mode_for_width(&self, width: f32, responsive: &ResponsiveLayout) -> SidebarMode {
-        if width <= responsive.viewport_min_width { SidebarMode::Compact } else { SidebarMode::Full }
+        if width <= responsive.viewport_min_width {
+            SidebarMode::Compact
+        } else {
+            SidebarMode::Full
+        }
     }
 
     /// Resolve the shell width from the live layout model.
     pub fn width_for_window(&self, width: f32, responsive: &ResponsiveLayout) -> f32 {
         let span = (responsive.viewport_ref_width - responsive.viewport_min_width).max(1.0);
         let fraction = ((width - responsive.viewport_min_width) / span).clamp(0.0, 1.0);
-        (self.width_min + (self.width - self.width_min) * fraction).clamp(self.width_min, self.width_max)
+        (self.width_min + (self.width - self.width_min) * fraction)
+            .clamp(self.width_min, self.width_max)
     }
 }
 
@@ -668,7 +677,9 @@ impl Default for ComposerLayout {
 
 /// A composer button slot. The text input is implicit and fixed between the
 /// leading and trailing button groups.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
 pub enum ComposerButton {
     /// File attach button.
     Attach,
@@ -804,7 +815,9 @@ impl Default for ComponentLayout {
 }
 
 /// Thumbnail position relative to the card's text content.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Deserialize, serde::Serialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Deserialize, serde::Serialize,
+)]
 pub enum ThumbnailPosition {
     /// Thumbnail to the left of the text (baseline media cards).
     #[default]
@@ -820,7 +833,9 @@ pub enum ThumbnailPosition {
 }
 
 /// Horizontal alignment of metadata rows inside a card.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Deserialize, serde::Serialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Deserialize, serde::Serialize,
+)]
 pub enum MetadataAlignment {
     /// Aligned to the start (left in LTR; baseline).
     #[default]
@@ -832,7 +847,9 @@ pub enum MetadataAlignment {
 }
 
 /// Placement of action buttons relative to card content.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Deserialize, serde::Serialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Deserialize, serde::Serialize,
+)]
 pub enum ButtonPlacement {
     /// Buttons below the content (baseline).
     #[default]
@@ -844,7 +861,9 @@ pub enum ButtonPlacement {
 }
 
 /// Overall card orientation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Deserialize, serde::Serialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Deserialize, serde::Serialize,
+)]
 pub enum CardOrientation {
     /// Content flows horizontally — media left, text right (baseline
     /// video/download cards).
@@ -976,7 +995,9 @@ impl Default for SharedTableColumns {
 /// [`ResponsiveLayout`] (`narrow_max_width`, `ultra_wide_min_width`) so
 /// TOML can move them later; `tier_for_width` resolves a window width to
 /// one of these tiers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Deserialize, serde::Serialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Deserialize, serde::Serialize,
+)]
 pub enum ViewportTier {
     /// Narrow window (below `narrow_max_width`, default < 360 px).
     Narrow,
@@ -1099,6 +1120,15 @@ pub struct ResponsiveLayout {
     /// / `horizontal_default`; the per-tier table supersedes those two
     /// slots for the live canvas (BORU-LAYOUT-04).
     pub home_padding_x: ByTier<f32>,
+    /// Maximum scrollable dialog body height per width tier. The dialog
+    /// footer remains outside this scroll region.
+    pub dialog_body_max_height: ByTier<f32>,
+    /// Vertical space reserved for dialog chrome in short windows.
+    pub short_window_body_reserve: f32,
+    /// Minimum scrollable dialog body height in short windows.
+    pub short_window_body_min_height: f32,
+    /// Scale applied to non-essential vertical spacing in short windows.
+    pub short_window_spacing_scale: f32,
 }
 
 impl ResponsiveLayout {
@@ -1157,11 +1187,8 @@ impl ResponsiveLayout {
     /// same safe viewport budget. The footer remains outside the scrollable
     /// body, so long forms cannot push their primary action below the window.
     pub fn dialog_body_max_height_for_width(&self, width: f32) -> f32 {
-        match self.tier_for_width(width) {
-            ViewportTier::Narrow => 360.0,
-            ViewportTier::Desktop => 480.0,
-            ViewportTier::UltraWide => 520.0,
-        }
+        self.dialog_body_max_height
+            .for_tier(self.tier_for_width(width))
     }
 
     /// Maximum dialog body height for the current viewport. Short windows
@@ -1169,7 +1196,9 @@ impl ResponsiveLayout {
     pub fn dialog_body_max_height_for_size(&self, width: f32, height: f32) -> f32 {
         let width_cap = self.dialog_body_max_height_for_width(width);
         match self.tier_for_height(height) {
-            HeightTier::Short => width_cap.min((height - 220.0).max(180.0)),
+            HeightTier::Short => width_cap.min(
+                (height - self.short_window_body_reserve).max(self.short_window_body_min_height),
+            ),
             HeightTier::Normal | HeightTier::Tall => width_cap,
         }
     }
@@ -1178,7 +1207,7 @@ impl ResponsiveLayout {
     /// deliberately unaffected so short windows stay readable.
     pub fn vertical_spacing_scale(&self, height: f32) -> f32 {
         match self.tier_for_height(height) {
-            HeightTier::Short => 0.7,
+            HeightTier::Short => self.short_window_spacing_scale,
             HeightTier::Normal | HeightTier::Tall => 1.0,
         }
     }
@@ -1192,7 +1221,10 @@ mod responsive_height_tests {
     fn short_window_rules_cover_1024x720() {
         let layout = ResponsiveLayout::default();
 
-        assert_eq!(layout.tiers_for_size(1024.0, 720.0).width, ViewportTier::Desktop);
+        assert_eq!(
+            layout.tiers_for_size(1024.0, 720.0).width,
+            ViewportTier::Desktop
+        );
         assert_eq!(layout.tier_for_height(720.0), HeightTier::Short);
         assert_eq!(layout.vertical_spacing_scale(720.0), 0.7);
         assert_eq!(layout.dialog_body_max_height_for_size(1024.0, 720.0), 480.0);
@@ -1202,7 +1234,10 @@ mod responsive_height_tests {
     fn short_window_rules_cover_1280x720() {
         let layout = ResponsiveLayout::default();
 
-        assert_eq!(layout.tiers_for_size(1280.0, 720.0).width, ViewportTier::Desktop);
+        assert_eq!(
+            layout.tiers_for_size(1280.0, 720.0).width,
+            ViewportTier::Desktop
+        );
         assert_eq!(layout.tier_for_height(720.0), HeightTier::Short);
         assert!(layout.dialog_body_max_height_for_size(1280.0, 720.0) <= 480.0);
         assert!(layout.vertical_spacing_scale(720.0) < 1.0);
@@ -1245,6 +1280,14 @@ impl Default for ResponsiveLayout {
                 desktop: crate::design_tokens::SPACE_28,
                 ultra_wide: crate::design_tokens::SPACE_32,
             },
+            dialog_body_max_height: ByTier {
+                narrow: 360.0,
+                desktop: 480.0,
+                ultra_wide: 520.0,
+            },
+            short_window_body_reserve: 220.0,
+            short_window_body_min_height: 180.0,
+            short_window_spacing_scale: 0.7,
         }
     }
 }
@@ -1658,6 +1701,10 @@ layout_override_group! {
         ultra_wide_min_width: f32,
         home_columns: ByTierOverrides<usize>,
         home_padding_x: ByTierOverrides<f32>,
+        dialog_body_max_height: ByTierOverrides<f32>,
+        short_window_body_reserve: f32,
+        short_window_body_min_height: f32,
+        short_window_spacing_scale: f32,
     }
 }
 
@@ -1689,11 +1736,26 @@ mod tests {
     fn sidebar_resolves_compact_mode_and_model_widths() {
         let sidebar = SidebarLayout::default();
         let responsive = ResponsiveLayout::default();
-        assert_eq!(sidebar.mode_for_width(responsive.viewport_min_width, &responsive), SidebarMode::Compact);
-        assert_eq!(sidebar.mode_for_width(responsive.viewport_ref_width, &responsive), SidebarMode::Full);
-        assert_eq!(sidebar.width_for_window(responsive.viewport_min_width, &responsive), sidebar.width_min);
-        assert_eq!(sidebar.width_for_window(responsive.viewport_ref_width, &responsive), sidebar.width);
-        assert_eq!(sidebar.width_for_window(responsive.viewport_xl_width, &responsive), sidebar.width);
+        assert_eq!(
+            sidebar.mode_for_width(responsive.viewport_min_width, &responsive),
+            SidebarMode::Compact
+        );
+        assert_eq!(
+            sidebar.mode_for_width(responsive.viewport_ref_width, &responsive),
+            SidebarMode::Full
+        );
+        assert_eq!(
+            sidebar.width_for_window(responsive.viewport_min_width, &responsive),
+            sidebar.width_min
+        );
+        assert_eq!(
+            sidebar.width_for_window(responsive.viewport_ref_width, &responsive),
+            sidebar.width
+        );
+        assert_eq!(
+            sidebar.width_for_window(responsive.viewport_xl_width, &responsive),
+            sidebar.width
+        );
     }
 
     // ── Default = current appearance ──────────────────────────────────
