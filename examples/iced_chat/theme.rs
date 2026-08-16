@@ -1341,9 +1341,11 @@ pub struct ChatTheme {
     pub spinner_size: f32,
     /// Right-click context menu column width (180 px).
     pub context_menu_width: f32,
-    /// Emoji picker card width (280 px).
+    /// Emoji picker card width (336 px — fits an 8-column grid of 36 px
+    /// cells with 4 px spacing plus body padding; BORU-TWEMOJI-10).
     pub emoji_picker_width: f32,
-    /// Emoji picker scroll height (160 px).
+    /// Emoji picker scroll height (200 px — shows all 5 grid rows of the
+    /// 40-entry curated list without scrolling).
     pub emoji_picker_scroll_height: f32,
     /// GIF picker panel width (320 px).
     pub gif_picker_width: f32,
@@ -1374,8 +1376,8 @@ impl Default for ChatTheme {
         Self {
             spinner_size: 40.0,
             context_menu_width: 180.0,
-            emoji_picker_width: 280.0,
-            emoji_picker_scroll_height: 160.0,
+            emoji_picker_width: 336.0,
+            emoji_picker_scroll_height: 200.0,
             gif_picker_width: 320.0,
             gif_picker_scroll_height: 300.0,
             gif_thumbnail_width: 150.0,
@@ -2283,8 +2285,8 @@ mod tests {
         // Chat (audit §3.3)
         assert_eq!(theme.chat.spinner_size, 40.0);
         assert_eq!(theme.chat.context_menu_width, 180.0);
-        assert_eq!(theme.chat.emoji_picker_width, 280.0);
-        assert_eq!(theme.chat.emoji_picker_scroll_height, 160.0);
+        assert_eq!(theme.chat.emoji_picker_width, 336.0);
+        assert_eq!(theme.chat.emoji_picker_scroll_height, 200.0);
         assert_eq!(theme.chat.gif_picker_width, 320.0);
         assert_eq!(theme.chat.gif_picker_scroll_height, 300.0);
         assert_eq!(theme.chat.gif_thumbnail_width, 150.0);

@@ -294,8 +294,8 @@
 # [chat]
 # spinner_size = 40.0
 # context_menu_width = 180.0
-# emoji_picker_width = 280.0
-# emoji_picker_scroll_height = 160.0
+# emoji_picker_width = 336.0
+# emoji_picker_scroll_height = 200.0
 # gif_picker_width = 320.0
 # gif_picker_scroll_height = 300.0
 # gif_thumbnail_width = 150.0

@@ -169,8 +169,8 @@ context_menu_width = 180.0
 details_panel_width = 280.0
 
 [chat.emoji_picker]
-width = 280.0
-scroll_height = 160.0
+width = 336.0
+scroll_height = 200.0
 
 [chat.gif_picker]
 width = 320.0

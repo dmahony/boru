@@ -587,8 +587,8 @@ pub struct PickerLayout {
 impl Default for PickerLayout {
     fn default() -> Self {
         Self {
-            width: 280.0,
-            scroll_height: 160.0,
+            width: 336.0,
+            scroll_height: 200.0,
         }
     }
 }

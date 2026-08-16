@@ -6443,8 +6443,12 @@ pub enum AppMessage {
     ToggleVideoCardMenu(usize),
     /// Toggle the emoji picker panel visibility.
     ToggleEmojiPicker,
-    /// Insert an emoji character into the composer.
-    InsertEmoji(char),
+    /// Insert an emoji into the composer.
+    ///
+    /// Carries the full Unicode grapheme string (possibly multiple code
+    /// points: variation selectors, skin-tone modifiers, ZWJ sequences),
+    /// never an asset key or SVG path. BORU-TWEMOJI-10.
+    InsertEmoji(String),
     /// Toggle the GIF picker panel.
     ToggleGifPicker,
     /// Search text changed in the GIF picker.

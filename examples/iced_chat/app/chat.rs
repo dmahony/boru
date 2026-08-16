@@ -6452,9 +6452,9 @@ impl IcedChat {
                 iced::Task::none()
             }
 
-            AppMessage::InsertEmoji(ch) => {
+            AppMessage::InsertEmoji(emoji) => {
                 // Insert the emoji at the current cursor position
-                self.composer_text.push(ch);
+                self.composer_text.push_str(&emoji);
                 iced::Task::none()
             }
 
