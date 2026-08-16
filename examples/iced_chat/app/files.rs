@@ -4581,8 +4581,13 @@ impl IcedChat {
 
                     let sender = self.sender.clone();
                     let secret_key = self.secret_key.clone();
+                    let blob_store = self.blob_store.clone();
+                    let storage = self.storage.clone();
+                    let endpoint_addr = self.endpoint.addr();
                     let announced_name = filename.clone();
                     let announced_size = metadata.len();
+                    let source_path = std::path::PathBuf::from(&abs_path);
+                    let source_path_string = abs_path.clone();
                     return iced::Task::perform(
                         async move {
                             let message = crate::Message::file_offer(
@@ -4593,7 +4598,7 @@ impl IcedChat {
                             .map_err(|error| error.to_string())?;
                             let encoded = SignedMessage::sign_and_encode(&secret_key, &message)
                                 .map_err(|error| format!("Failed to sign file offer: {error}"))?;
-                            if let Some(sender) = sender {
+                            if let Some(sender) = sender.as_ref() {
                                 sender
                                     .broadcast(encoded)
                                     .await
@@ -4614,13 +4619,109 @@ impl IcedChat {
                                 name = %announced_name,
                                 "background blob ingest started"
                             );
+                            let offer_name = announced_name.clone();
+                            let offer_size = announced_size;
                             tokio::spawn(async move {
-                                tracing::info!(
-                                    event = boru_core::diagnostics::event_names::BACKGROUND_BLOB_INGEST_COMPLETED,
-                                    offer_id = ?offer_id,
-                                    name = %announced_name,
-                                    "background blob ingest completed"
-                                );
+                                let ingest = async {
+                                    // Reuse the content-addressed blob path used by
+                                    // legacy FileShare messages, but keep it entirely
+                                    // off the FileOffer announcement task.
+                                    let known_blob = match storage.as_ref() {
+                                        Some(stg) => {
+                                            let hash = stg
+                                                .file_object_hash_by_source_path(
+                                                    &source_path_string,
+                                                )
+                                                .ok()
+                                                .flatten()
+                                                .and_then(|hash_hex| {
+                                                    hash_hex.parse::<iroh_blobs::Hash>().ok()
+                                                });
+                                            match hash {
+                                                Some(hash)
+                                                    if blob_store
+                                                        .blobs()
+                                                        .has(hash)
+                                                        .await
+                                                        .ok()
+                                                        .unwrap_or(false) =>
+                                                {
+                                                    Some((hash, iroh_blobs::BlobFormat::Raw))
+                                                }
+                                                _ => None,
+                                            }
+                                        }
+                                        None => None,
+                                    };
+
+                                    let (blob_hash, format) = match known_blob {
+                                        Some(known) => known,
+                                        None => {
+                                            let file = tokio::fs::File::open(&source_path)
+                                                .await
+                                                .map_err(|e| format!("failed to open file: {e}"))?;
+                                            let stream = tokio_util::io::ReaderStream::new(file);
+                                            let import = blob_store
+                                                .blobs()
+                                                .add_stream(Box::pin(stream))
+                                                .await;
+                                            let mut add = import.stream().await;
+                                            let mut temp_tag = None;
+                                            while let Some(item) = add.next().await {
+                                                match item {
+                                                    iroh_blobs::api::blobs::AddProgressItem::Done(tt) => {
+                                                        temp_tag = Some(tt);
+                                                    }
+                                                    iroh_blobs::api::blobs::AddProgressItem::Error(e) => {
+                                                        return Err(format!("blob ingest failed: {e}"));
+                                                    }
+                                                    iroh_blobs::api::blobs::AddProgressItem::Size(_)
+                                                    | iroh_blobs::api::blobs::AddProgressItem::CopyProgress(_)
+                                                    | iroh_blobs::api::blobs::AddProgressItem::OutboardProgress(_)
+                                                    | iroh_blobs::api::blobs::AddProgressItem::CopyDone => {}
+                                                }
+                                            }
+                                            let tag = temp_tag.ok_or_else(|| {
+                                                "blob ingest ended without a completed tag".to_string()
+                                            })?;
+                                            (tag.hash(), tag.format())
+                                        }
+                                    };
+
+                                    let ticket = blob_ticket_string(endpoint_addr, blob_hash, format);
+                                    let ready = crate::Message::FileOfferReady {
+                                        offer_id,
+                                        ticket,
+                                        thumbnail_hash: None,
+                                    };
+                                    let encoded = SignedMessage::sign_and_encode(&secret_key, &ready)
+                                        .map_err(|e| format!("failed to sign FileOfferReady: {e}"))?;
+                                    if let Some(sender) = sender {
+                                        sender
+                                            .broadcast(encoded)
+                                            .await
+                                            .map_err(|e| format!("failed to broadcast FileOfferReady: {e}"))?;
+                                    }
+                                    Ok::<(), String>(())
+                                }
+                                .await;
+
+                                match ingest {
+                                    Ok(()) => tracing::info!(
+                                        event = boru_core::diagnostics::event_names::BACKGROUND_BLOB_INGEST_COMPLETED,
+                                        offer_id = ?offer_id,
+                                        name = %offer_name,
+                                        size = offer_size,
+                                        "background blob ingest completed"
+                                    ),
+                                    Err(error) => tracing::error!(
+                                        event = boru_core::diagnostics::event_names::BACKGROUND_BLOB_INGEST_FAILED,
+                                        offer_id = ?offer_id,
+                                        name = %offer_name,
+                                        error = %error,
+                                        "background blob ingest failed; direct offer remains valid"
+                                    ),
+                                }
                             });
                             Ok::<(), String>(())
                         },

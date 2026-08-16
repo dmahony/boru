@@ -478,6 +478,8 @@ pub mod event_names {
     pub const BACKGROUND_BLOB_INGEST_STARTED: &str = "background_blob_ingest_started";
     /// Background local blob ingestion completed.
     pub const BACKGROUND_BLOB_INGEST_COMPLETED: &str = "background_blob_ingest_completed";
+    /// Background local blob ingestion failed without invalidating the offer.
+    pub const BACKGROUND_BLOB_INGEST_FAILED: &str = "background_blob_ingest_failed";
     /// Durable download work was accepted before networking was scheduled.
     pub const DOWNLOAD_QUEUED: &str = "download_queued";
     /// A fresh access/permission request was sent.
